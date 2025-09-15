@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Diamond IDE - Welcome</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: #0a0e13;
+            color: #e6edf3;
+            overflow-x: hidden;
+            min-height: 100vh;
+        }
+
+        /* Animated Background */
+        .background {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            background: radial-gradient(ellipse at top, rgba(88, 166, 255, 0.05) 0%, transparent 50%),
+                        radial-gradient(ellipse at bottom, rgba(163, 108, 255, 0.03) 0%, transparent 50%);
+        }
+
+        .particles {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .particle {
+            position: absolute;
+            width: 2px;
+            height: 2px;
+            background: rgba(88, 166, 255, 0.6);
+            border-radius: 50%;
+            animation: float 20s infinite linear;
+        }
+
+        @keyframes float {
+            0% {
+                transform: translateY(100vh) translateX(0px);
+                opacity: 0;
+            }
+            10% {
+                opacity: 1;
+            }
+            90% {
+                opacity: 1;
+            }
+            100% {
+                transform: translateY(-100px) translateX(100px);
+                opacity: 0;
+            }
+        }
+
+        /* Main Container */
+        .container {
+            display: flex;
+            min-height: 100vh;
+            position: relative;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 320px;
+            background: rgba(13, 17, 23, 0.8);
+            backdrop-filter: blur(20px);
+            border-right: 1px solid rgba(48, 54, 61, 0.5);
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+        }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            margin-bottom: 32px;
+        }
+
+        .logo {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, #58a6ff 0%, #a371f7 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            margin-right: 12px;
+            box-shadow: 0 8px 32px rgba(88, 166, 255, 0.3);
+        }
+
+        .logo-text {
+            font-size: 24px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #58a6ff 0%, #a371f7 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .nav-section {
+            flex: 1;
+        }
+
+        .nav-title {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: #7d8590;
+            margin-bottom: 16px;
+            letter-spacing: 0.5px;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            padding: 12px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 4px;
+            transition: all 0.2s ease;
+            border: 1px solid transparent;
+        }
+
+        .nav-item:hover {
+            background: rgba(88, 166, 255, 0.1);
+            border-color: rgba(88, 166, 255, 0.3);
+            transform: translateX(4px);
+        }
+
+        .nav-item.active {
+            background: rgba(88, 166, 255, 0.15);
+            border-color: rgba(88, 166, 255, 0.5);
+            color: #58a6ff;
+        }
+
+        .nav-icon {
+            margin-right: 12px;
+            font-size: 18px;
+            width: 20px;
+        }
+
+        .recent-section {
+            margin-top: 24px;
+        }
+
+        .recent-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-bottom: 2px;
+            transition: all 0.2s ease;
+        }
+
+        .recent-item:hover {
+            background: rgba(139, 148, 158, 0.1);
+        }
+
+        .recent-icon {
+            margin-right: 8px;
+            font-size: 14px;
+            color: #7d8590;
+        }
+
+        .recent-text {
+            font-size: 13px;
+            color: #c9d1d9;
+        }
+
+        .recent-path {
+            font-size: 11px;
+            color: #7d8590;
+            margin-top: 2px;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 48px;
+            position: relative;
+        }
+
+        .welcome-header {
+            text-align: center;
+            margin-bottom: 48px;
+        }
+
+        .welcome-title {
+            font-size: 48px;
+            font-weight: 800;
+            margin-bottom: 16px;
+            background: linear-gradient(135deg, #e6edf3 0%, #58a6ff 50%, #a371f7 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.5px;
+        }
+
+        .welcome-subtitle {
+            font-size: 18px;
+            color: #8b949e;
+            max-width: 500px;
+            line-height: 1.5;
+        }
+
+        /* Action Cards */
+        .actions-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+            max-width: 900px;
+            width: 100%;
+        }
+
+        .action-card {
+            background: rgba(21, 32, 43, 0.6);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(48, 54, 61, 0.8);
+            border-radius: 16px;
+            padding: 32px 24px;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .action-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, rgba(88, 166, 255, 0.5), transparent);
+            transform: translateX(-100%);
+            transition: transform 0.6s ease;
+        }
+
+        .action-card:hover::before {
+            transform: translateX(100%);
+        }
+
+        .action-card:hover {
+            transform: translateY(-8px);
+            border-color: rgba(88, 166, 255, 0.6);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3),
+                        0 0 0 1px rgba(88, 166, 255, 0.1);
+        }
+
+        .card-icon {
+            width: 64px;
+            height: 64px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            margin-bottom: 20px;
+            position: relative;
+        }
+
+        .card-new .card-icon {
+            background: linear-gradient(135deg, #56d364 0%, #2ea043 100%);
+            box-shadow: 0 8px 24px rgba(86, 211, 100, 0.3);
+        }
+
+        .card-open .card-icon {
+            background: linear-gradient(135deg, #58a6ff 0%, #0969da 100%);
+            box-shadow: 0 8px 24px rgba(88, 166, 255, 0.3);
+        }
+
+        .card-clone .card-icon {
+            background: linear-gradient(135deg, #a371f7 0%, #8250df 100%);
+            box-shadow: 0 8px 24px rgba(163, 113, 247, 0.3);
+        }
+
+        .card-import .card-icon {
+            background: linear-gradient(135deg, #fb8500 0%, #f77f00 100%);
+            box-shadow: 0 8px 24px rgba(251, 133, 0, 0.3);
+        }
+
+        .card-title {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #e6edf3;
+        }
+
+        .card-description {
+            font-size: 14px;
+            color: #8b949e;
+            line-height: 1.5;
+            margin-bottom: 16px;
+        }
+
+        .card-shortcut {
+            font-size: 12px;
+            color: #7d8590;
+            background: rgba(110, 118, 129, 0.1);
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+
+        /* Quick Stats */
+        .quick-stats {
+            position: absolute;
+            bottom: 24px;
+            right: 24px;
+            display: flex;
+            gap: 16px;
+        }
+
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: #7d8590;
+        }
+
+        .stat-icon {
+            width: 16px;
+            height: 16px;
+            background: rgba(88, 166, 255, 0.2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container {
+                flex-direction: column;
+            }
+            
+            .sidebar {
+                width: 100%;
+                padding: 16px;
+            }
+            
+            .main-content {
+                padding: 24px 16px;
+            }
+            
+            .welcome-title {
+                font-size: 32px;
+            }
+            
+            .actions-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Modal */
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(8px);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: rgba(13, 17, 23, 0.95);
+            border: 1px solid rgba(48, 54, 61, 0.8);
+            border-radius: 16px;
+            padding: 32px;
+            max-width: 500px;
+            width: 90%;
+            position: relative;
+        }
+
+        .modal-title {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: #e6edf3;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        .input-label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #c9d1d9;
+        }
+
+        .input-field {
+            width: 100%;
+            padding: 12px 16px;
+            background: rgba(21, 32, 43, 0.8);
+            border: 1px solid rgba(48, 54, 61, 0.8);
+            border-radius: 8px;
+            color: #e6edf3;
+            font-size: 14px;
+            transition: all 0.2s ease;
+        }
+
+        .input-field:focus {
+            outline: none;
+            border-color: #58a6ff;
+            box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.1);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #58a6ff 0%, #0969da 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 16px rgba(88, 166, 255, 0.3);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: #8b949e;
+            border: 1px solid rgba(48, 54, 61, 0.8);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(139, 148, 158, 0.1);
+            color: #c9d1d9;
+        }
+
+        .close-modal {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            background: none;
+            border: none;
+            color: #7d8590;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 4px;
+        }
+
+        .close-modal:hover {
+            background: rgba(248, 81, 73, 0.1);
+            color: #f85149;
+        }
+    </style>
+</head>
+<body>
+    <div class="background">
+        <div class="particles"></div>
+    </div>
+
+    <div class="container">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="logo-section">
+                <div class="logo">💎</div>
+                <div class="logo-text">Diamond</div>
+            </div>
+
+            <div class="nav-section">
+                <div class="nav-title">Start</div>
+                <div class="nav-item active" data-action="new">
+                    <span class="nav-icon">📄</span>
+                    <span>New Project</span>
+                </div>
+                <div class="nav-item" data-action="open">
+                    <span class="nav-icon">📁</span>
+                    <span>Open Folder</span>
+                </div>
+                <div class="nav-item" data-action="clone">
+                    <span class="nav-icon">🔗</span>
+                    <span>Clone Repository</span>
+                </div>
+                <div class="nav-item" data-action="import">
+                    <span class="nav-icon">📦</span>
+                    <span>Import Project</span>
+                </div>
+            </div>
+
+            <div class="recent-section">
+                <div class="nav-title">Recent</div>
+                <div class="recent-item">
+                    <span class="recent-icon">📁</span>
+                    <div>
+                        <div class="recent-text">Discord Bot API</div>
+                        <div class="recent-path">~/Projects/discord-bot</div>
+                    </div>
+                </div>
+                <div class="recent-item">
+                    <span class="recent-icon">📁</span>
+                    <div>
+                        <div class="recent-text">React Dashboard</div>
+                        <div class="recent-path">~/Projects/dashboard</div>
+                    </div>
+                </div>
+                <div class="recent-item">
+                    <span class="recent-icon">📁</span>
+                    <div>
+                        <div class="recent-text">ML Pipeline</div>
+                        <div class="recent-path">~/Projects/ml-pipeline</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <div class="welcome-header">
+                <h1 class="welcome-title">Welcome to Diamond</h1>
+                <p class="welcome-subtitle">
+                    The ultimate development environment designed for modern developers. 
+                    Start building something amazing today.
+                </p>
+            </div>
+
+            <div class="actions-grid">
+                <div class="action-card card-new" data-action="new">
+                    <div class="card-icon">🚀</div>
+                    <h3 class="card-title">New Project</h3>
+                    <p class="card-description">Create a new project from scratch with templates and boilerplates.</p>
+                    <span class="card-shortcut">Ctrl+Shift+N</span>
+                </div>
+
+                <div class="action-card card-open" data-action="open">
+                    <div class="card-icon">📁</div>
+                    <h3 class="card-title">Open Folder</h3>
+                    <p class="card-description">Open an existing project folder and start coding immediately.</p>
+                    <span class="card-shortcut">Ctrl+K Ctrl+O</span>
+                </div>
+
+                <div class="action-card card-clone" data-action="clone">
+                    <div class="card-icon">🔗</div>
+                    <h3 class="card-title">Clone Repository</h3>
+                    <p class="card-description">Clone a Git repository from GitHub, GitLab, or any Git server.</p>
+                    <span class="card-shortcut">Ctrl+Shift+P</span>
+                </div>
+
+                <div class="action-card card-import" data-action="import">
+                    <div class="card-icon">📦</div>
+                    <h3 class="card-title">Import Project</h3>
+                    <p class="card-description">Import existing projects and configure them automatically.</p>
+                    <span class="card-shortcut">Ctrl+Shift+I</span>
+                </div>
+            </div>
+
+            <div class="quick-stats">
+                <div class="stat-item">
+                    <div class="stat-icon">🔥</div>
+                    <span>12 Projects</span>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-icon">⚡</div>
+                    <span>Fast Launch</span>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-icon">🎯</div>
+                    <span>Smart Tools</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div class="modal" id="newProjectModal">
+        <div class="modal-content">
+            <button class="close-modal">&times;</button>
+            <h2 class="modal-title">Create New Project</h2>
+            <div class="input-group">
+                <label class="input-label">Project Name</label>
+                <input type="text" class="input-field" placeholder="my-awesome-project">
+            </div>
+            <div class="input-group">
+                <label class="input-label">Template</label>
+                <select class="input-field">
+                    <option>React TypeScript</option>
+                    <option>Node.js Express</option>
+                    <option>Python FastAPI</option>
+                    <option>Vue.js</option>
+                    <option>Empty Project</option>
+                </select>
+            </div>
+            <div class="input-group">
+                <label class="input-label">Location</label>
+                <input type="text" class="input-field" placeholder="~/Projects">
+            </div>
+            <div class="button-group">
+                <button class="btn btn-secondary">Cancel</button>
+                <button class="btn btn-primary">Create Project</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="cloneModal">
+        <div class="modal-content">
+            <button class="close-modal">&times;</button>
+            <h2 class="modal-title">Clone Repository</h2>
+            <div class="input-group">
+                <label class="input-label">Repository URL</label>
+                <input type="text" class="input-field" placeholder="https://github.com/user/repo.git">
+            </div>
+            <div class="input-group">
+                <label class="input-label">Local Path</label>
+                <input type="text" class="input-field" placeholder="~/Projects/repo">
+            </div>
+            <div class="input-group">
+                <label class="input-label">Branch (optional)</label>
+                <input type="text" class="input-field" placeholder="main">
+            </div>
+            <div class="button-group">
+                <button class="btn btn-secondary">Cancel</button>
+                <button class="btn btn-primary">Clone Repository</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Particles animation
+        function createParticles() {
+            const particles = document.querySelector('.particles');
+            const particleCount = 50;
+
+            for (let i = 0; i < particleCount; i++) {
+                const particle = document.createElement('div');
+                particle.classList.add('particle');
+                particle.style.left = Math.random() * 100 + '%';
+                particle.style.animationDelay = Math.random() * 20 + 's';
+                particle.style.animationDuration = (Math.random() * 10 + 15) + 's';
+                particles.appendChild(particle);
+            }
+        }
+
+        // Initialize particles
+        createParticles();
+
+        // Navigation interactions
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', function() {
+                document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+                this.classList.add('active');
+            });
+        });
+
+        // Action card interactions
+        document.querySelectorAll('.action-card, .nav-item').forEach(card => {
+            card.addEventListener('click', function() {
+                const action = this.dataset.action;
+                
+                if (action === 'new') {
+                    document.getElementById('newProjectModal').classList.add('active');
+                } else if (action === 'clone') {
+                    document.getElementById('cloneModal').classList.add('active');
+                } else if (action === 'open') {
+                    // Simulate file picker
+                    alert('Opening file picker...');
+                } else if (action === 'import') {
+                    alert('Import project functionality...');
+                }
+            });
+        });
+
+        // Modal interactions
+        document.querySelectorAll('.close-modal, .btn-secondary').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.modal').forEach(modal => {
+                    modal.classList.remove('active');
+                });
+            });
+        });
+
+        // Close modal on backdrop click
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.addEventListener('click', function(e) {
+                if (e.target === this) {
+                    this.classList.remove('active');
+                }
+            });
+        });
+
+        // Recent project interactions
+        document.querySelectorAll('.recent-item').forEach(item => {
+            item.addEventListener('click', function() {
+                const projectName = this.querySelector('.recent-text').textContent;
+                alert(`Opening ${projectName}...`);
+            });
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey && e.shiftKey && e.key === 'N') {
+                e.preventDefault();
+                document.getElementById('newProjectModal').classList.add('active');
+            }
+        });
+
+        // Enhanced card hover effects
+        document.querySelectorAll('.action-card').forEach(card => {
+            card.addEventListener('mouseenter', function() {
+                this.style.transform = 'translateY(-8px) scale(1.02)';
+            });
+            
+            card.addEventListener('mouseleave', function() {
+                this.style.transform = 'translateY(0) scale(1)';
+            });
+        });
+    </script>
+</body>
+</html>
