@@ -1,4 +1,5 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
+import { shallow } from 'zustand/shallow';
 import { useEditorRepository } from '../stores/editorStore';
 
 // Hook para arquivos abertos - só re-renderiza quando openFiles muda
@@ -16,23 +17,6 @@ export function useCursorPositions() {
   return useEditorRepository(state => state.cursorPositions);
 }
 
-// Hook para ações do editor - memoizado para evitar re-renders desnecessários
-export function useEditorActions() {
-  return useEditorRepository(
-    state => ({
-      openFile: state.openFile,
-      closeFile: state.closeFile,
-      setActiveFile: state.setActiveFile,
-      updateFileContent: state.updateFileContent,
-      setCursorPosition: state.setCursorPosition,
-      updateEditorState: state.updateEditorState,
-      undo: state.undo,
-      redo: state.redo,
-      saveFile: state.saveFile,
-      saveAllFiles: state.saveAllFiles,
-    })
-  );
-}
 
 // Hook para stacks de undo/redo - só re-renderiza quando essas stacks mudam
 export function useUndoRedoStacks() {
@@ -40,28 +24,49 @@ export function useUndoRedoStacks() {
     state => ({
       undoStack: state.undoStack,
       redoStack: state.redoStack,
-    })
+    }),
+    shallow
   );
 }
 
-// Hook para estado de um arquivo específico
-export function useFileState(path: string) {
+// Hook para estado de um arquivo específico - retorna valores primitivos separados
+export function useFileContent(path: string) {
   return useEditorRepository(
-    useCallback(
-      (state) => {
-        const file = state.openFiles.find(f => f.path === path);
-        if (!file) return null;
-        
-        return {
-          content: file.content,
-          language: file.language,
-          isDirty: file.isDirty,
-          cursorPosition: file.cursorPosition,
-          isActive: state.activeFile === path
-        };
-      },
-      [path]
-    )
+    state => state.openFiles.find(f => f.path === path)?.content ?? ''
+  );
+}
+
+export function useFileLanguage(path: string) {
+  return useEditorRepository(
+    state => state.openFiles.find(f => f.path === path)?.language ?? 'plaintext'
+  );
+}
+
+export function useFileIsDirty(path: string) {
+  return useEditorRepository(
+    state => state.openFiles.find(f => f.path === path)?.isDirty ?? false
+  );
+}
+
+// Valor estável padrão para cursor position
+const DEFAULT_CURSOR_POSITION = { line: 1, column: 1 };
+
+export function useFileCursorPosition(path: string) {
+  return useEditorRepository(
+    state => state.openFiles.find(f => f.path === path)?.cursorPosition ?? DEFAULT_CURSOR_POSITION,
+    shallow
+  );
+}
+
+export function useFileIsActive(path: string) {
+  return useEditorRepository(
+    state => state.activeFile === path
+  );
+}
+
+export function useFileExists(path: string) {
+  return useEditorRepository(
+    state => state.openFiles.some(f => f.path === path)
   );
 }
 
@@ -69,28 +74,35 @@ export function useFileState(path: string) {
 export function useCodeEditorState() {
   const openFiles = useOpenFiles();
   const activeFile = useActiveFile();
-  const actions = useEditorActions();
   
-  // Callbacks memoizados para evitar re-renders em componentes filhos
+  // Seletores individuais para ações
+  const openFile = useEditorRepository(state => state.openFile);
+  const closeFile = useEditorRepository(state => state.closeFile);
+  const setActiveFile = useEditorRepository(state => state.setActiveFile);
+  const updateFileContent = useEditorRepository(state => state.updateFileContent);
+  const saveFile = useEditorRepository(state => state.saveFile);
+  const saveAllFiles = useEditorRepository(state => state.saveAllFiles);
+  
+  // Callbacks simples sem over-optimization
   const handleFileSelect = useCallback((path: string) => {
-    actions.openFile(path);
-  }, [actions]);
+    openFile(path);
+  }, [openFile]);
   
   const handleCloseFile = useCallback((path: string, e?: React.MouseEvent) => {
     if (e) {
       e.stopPropagation();
     }
-    actions.closeFile(path);
-  }, [actions]);
+    closeFile(path);
+  }, [closeFile]);
   
   const handleSetActiveFile = useCallback((path: string | null) => {
-    actions.setActiveFile(path);
-  }, [actions]);
+    setActiveFile(path);
+  }, [setActiveFile]);
   
-  // Dados derivados memoizados
-  const hasOpenFiles = useMemo(() => openFiles.length > 0, [openFiles.length]);
-  const dirtyFiles = useMemo(() => openFiles.filter(f => f.isDirty), [openFiles]);
-  const hasDirtyFiles = useMemo(() => dirtyFiles.length > 0, [dirtyFiles.length]);
+  // Dados simples sem over-memoization
+  const hasOpenFiles = openFiles.length > 0;
+  const dirtyFiles = openFiles.filter(f => f.isDirty);
+  const hasDirtyFiles = dirtyFiles.length > 0;
   
   return {
     // Estados
@@ -100,43 +112,64 @@ export function useCodeEditorState() {
     dirtyFiles,
     hasDirtyFiles,
     
-    // Actions otimizadas
+    // Actions
     handleFileSelect,
     handleCloseFile,
     handleSetActiveFile,
-    updateFileContent: actions.updateFileContent,
-    saveFile: actions.saveFile,
-    saveAllFiles: actions.saveAllFiles,
+    updateFileContent,
+    saveFile,
+    saveAllFiles,
   };
 }
 
 // Hook específico para o Monaco Editor
 export function useMonacoEditorState(path: string) {
-  const fileState = useFileState(path);
-  const actions = useEditorActions();
+  // Usar hooks primitivos para evitar loops infinitos
+  const content = useFileContent(path);
+  const language = useFileLanguage(path);
+  const isDirty = useFileIsDirty(path);
+  const cursorPosition = useFileCursorPosition(path);
+  const isActive = useFileIsActive(path);
+  const exists = useFileExists(path);
+  
+  // Seletores individuais de ações
+  const updateFileContent = useEditorRepository(state => state.updateFileContent);
+  const setCursorPosition = useEditorRepository(state => state.setCursorPosition);
+  const saveFile = useEditorRepository(state => state.saveFile);
+  const undo = useEditorRepository(state => state.undo);
+  const redo = useEditorRepository(state => state.redo);
   
   const handleContentChange = useCallback((content: string) => {
-    actions.updateFileContent(path, content);
-  }, [actions, path]);
+    updateFileContent(path, content);
+  }, [updateFileContent, path]);
   
   const handleCursorChange = useCallback((line: number, column: number) => {
-    actions.setCursorPosition(path, line, column);
-  }, [actions, path]);
+    setCursorPosition(path, line, column);
+  }, [setCursorPosition, path]);
   
   const handleSave = useCallback(async () => {
-    await actions.saveFile(path);
-  }, [actions, path]);
+    await saveFile(path);
+  }, [saveFile, path]);
   
   const handleUndo = useCallback(() => {
-    actions.undo(path);
-  }, [actions, path]);
+    undo(path);
+  }, [undo, path]);
   
   const handleRedo = useCallback(() => {
-    actions.redo(path);
-  }, [actions, path]);
+    redo(path);
+  }, [redo, path]);
   
+  // Retornar objeto com valores primitivos estáveis
   return {
-    fileState,
+    // File state
+    content,
+    language,
+    isDirty,
+    cursorPosition,
+    isActive,
+    exists,
+    
+    // Actions
     handleContentChange,
     handleCursorChange,
     handleSave,

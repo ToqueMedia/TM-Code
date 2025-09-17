@@ -32,8 +32,13 @@ class FileWatcherService {
       this.cleanupFunctions.set(path, cleanup);
       return cleanup;
     } catch (error) {
-      console.error(`Failed to watch directory ${path}:`, error);
-      throw error;
+      console.warn(`Failed to watch directory ${path}:`, error);
+      // Don't throw the error, just warn and return a no-op cleanup
+      const noOpCleanup = () => {
+        console.log(`No-op cleanup for directory: ${path}`);
+      };
+      this.cleanupFunctions.set(path, noOpCleanup);
+      return noOpCleanup;
     }
   }
 

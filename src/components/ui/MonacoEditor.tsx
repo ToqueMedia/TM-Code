@@ -48,7 +48,12 @@ interface MonacoEditorProps {
 
 const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChange }) => {
   const {
-    fileState,
+    content,
+    language,
+    isDirty,
+    cursorPosition,
+    isActive,
+    exists,
     handleContentChange,
     handleCursorChange,
     handleSave,
@@ -133,8 +138,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       try {
         await handleSave();
         // Update LSP service with new content
-        if (fileState?.content) {
-          await lspServiceRef.updateFileContent(path, fileState.content);
+        if (content) {
+          await lspServiceRef.updateFileContent(path, content);
         }
       } catch (error) {
         console.error('Failed to save file:', error);
@@ -155,7 +160,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       cursorDisposable?.dispose();
       blurDisposable?.dispose();
     };
-  }, [handleCursorChange, onCursorPositionChange, handleUndo, handleRedo, handleSave, fileState, lspServiceRef, path]);
+  }, [handleCursorChange, onCursorPositionChange, handleUndo, handleRedo, handleSave, content, lspServiceRef, path]);
   
   const handleEditorChange = useCallback((value: string | undefined) => {
     if (value !== undefined) {
@@ -173,26 +178,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     }
   }, [path]);
   
-  // Early return must come after all hooks
-  if (!fileState) {
-    return (
-      <div style={{ 
-        display: 'flex', 
-        alignItems: 'center', 
-        justifyContent: 'center', 
-        height: '100%', 
-        color: '#8b949e',
-        fontSize: '14px'
-      }}>
-        File not found
-      </div>
-    );
-  }
-  
-  // Get the language for this file - Memoizado
-  const language = useMemo(() => getLanguage(path), [getLanguage, path]);
-  
   // Monaco editor options - Memoizado para evitar re-criação
+  // MUST be declared BEFORE any early returns to respect React hooks rules
   const editorOptions = useMemo(() => ({
     automaticLayout: true,
     minimap: { 
@@ -284,11 +271,27 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     stickyTabStops: true
   }), []);
   
+  // Early return MUST come after all hooks
+  if (!exists) {
+    return (
+      <div style={{ 
+        display: 'flex', 
+        alignItems: 'center', 
+        justifyContent: 'center', 
+        height: '100%', 
+        color: '#8b949e',
+        fontSize: '14px'
+      }}>
+        File not found
+      </div>
+    );
+  }
+  
   return (
     <Editor
       height="100%"
       language={language}
-      value={fileState.content}
+      value={content}
       onChange={handleEditorChange}
       onMount={handleEditorDidMount}
       theme="vs-dark"

@@ -18,7 +18,11 @@ export class ProjectFileWatcher {
       this.unwatch = await this.fileWatcher.watch(projectPath, this.handleFileEvent.bind(this));
       console.log(`Started watching project: ${projectPath}`);
     } catch (error: unknown) {
-      console.error('Failed to start file watching:', error);
+      console.warn('Failed to start file watching (falling back to no-watch mode):', error);
+      // Set a no-op unwatch function so stopWatching() doesn't break
+      this.unwatch = () => {
+        console.log('No-op unwatch called');
+      };
     }
   }
 
