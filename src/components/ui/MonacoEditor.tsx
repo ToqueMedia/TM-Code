@@ -172,7 +172,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       showFolders: true,
       showTypeParameters: true,
       showUsers: true,
-      showIssues: true
+      showIssues: true,
+      localityBonus: true
     },
     quickSuggestions: {
       other: 'on' as const,
@@ -223,7 +224,22 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     snippetSuggestions: 'top' as const,
     lineHeight: 22,
     mouseWheelZoom: true,
-    stickyTabStops: true
+    stickyTabStops: true,
+    semanticHighlighting: {
+      enabled: 'configuredByTheme' as const
+    },
+    bracketPairColorization: {
+      enabled: true,
+      independentColorPoolPerBracketType: true
+    },
+    matchBrackets: 'always' as const,
+    guides: {
+      bracketPairs: 'active' as const,
+      bracketPairsHorizontal: 'active' as const,
+      highlightActiveBracketPair: true,
+      indentation: true,
+      highlightActiveIndentation: true
+    }
   }), []);
   
   // Early return MUST come after all hooks

@@ -22,21 +22,27 @@ import {
   FiChevronRight,
   FiChevronDown,
   FiCopy,
-  FiPlus
+  FiFolder
 } from 'react-icons/fi';
 
-// Import more professional icons from react-icons
+// Import professional file type icons
 import { 
-  FaFolder, 
-  FaFolderOpen, 
-  FaFile, 
-  FaFileCode, 
+  SiJavascript,
+  SiTypescript,
+  SiReact,
+  SiHtml5,
+  SiCss3,
+  SiJson,
+  SiMarkdown,
+  SiPython,
+  SiDocker,
+  SiNpm
+} from 'react-icons/si';
+import { 
   FaFileImage, 
   FaFilePdf, 
-  FaFileAlt, 
   FaFileArchive,
-  FaFileAudio,
-  FaFileVideo
+  FaFile
 } from 'react-icons/fa';
 import { useFileTreeRepository } from '../../stores/fileTreeStore';
 import type { FileTreeNode } from '../../types/fileTree';
@@ -62,125 +68,81 @@ interface TreeNodeProps {
   setAlert: (alert: AlertState) => void;
 }
 
-// File icon component with better styling
+// File icon component with better icons
 const FileIcon: React.FC<{ 
   type: 'file' | 'directory'; 
   extension?: string; 
+  fileName?: string;
   isSelected?: boolean;
-  isExpanded?: boolean;
-}> = ({ type, extension, isSelected, isExpanded }) => {
-  // File icon based on extension
-  const getFileIcon = () => {
+}> = ({ type, extension, fileName, isSelected }) => {
+  
+  const getFileIconAndColor = () => {
     if (type === 'directory') {
-      return isExpanded ? FaFolderOpen : FaFolder;
+      return {
+        icon: FiFolder,
+        color: isSelected ? 'white' : '#58a6ff'
+      };
     }
     
     const ext = extension?.toLowerCase();
+    const name = fileName?.toLowerCase();
+    
+    // Special files based on name
+    if (name === 'package.json') {
+      return { icon: SiNpm, color: isSelected ? 'white' : '#cb3837' };
+    }
+    if (name === 'dockerfile') {
+      return { icon: SiDocker, color: isSelected ? 'white' : '#2496ed' };
+    }
+    
+    // Extension based icons with better colors
     switch (ext) {
       case 'js':
+        return { icon: SiJavascript, color: isSelected ? 'white' : '#f7df1e' };
       case 'jsx':
-        return FaFileCode;
+        return { icon: SiReact, color: isSelected ? 'white' : '#61dafb' };
       case 'ts':
+        return { icon: SiTypescript, color: isSelected ? 'white' : '#3178c6' };
       case 'tsx':
-        return FaFileCode;
+        return { icon: SiReact, color: isSelected ? 'white' : '#61dafb' };
       case 'css':
-        return FaFileCode;
+        return { icon: SiCss3, color: isSelected ? 'white' : '#1572b6' };
       case 'html':
-        return FaFileCode;
+        return { icon: SiHtml5, color: isSelected ? 'white' : '#e34f26' };
       case 'json':
-        return FaFileCode;
+        return { icon: SiJson, color: isSelected ? 'white' : '#ffff00' };
       case 'md':
-        return FaFileAlt;
+        return { icon: SiMarkdown, color: isSelected ? 'white' : '#0066cc' };
+      case 'py':
+        return { icon: SiPython, color: isSelected ? 'white' : '#3776ab' };
       case 'png':
       case 'jpg':
       case 'jpeg':
       case 'gif':
       case 'svg':
       case 'webp':
-        return FaFileImage;
+        return { icon: FaFileImage, color: isSelected ? 'white' : '#2ea043' };
       case 'pdf':
-        return FaFilePdf;
+        return { icon: FaFilePdf, color: isSelected ? 'white' : '#dc2626' };
       case 'zip':
       case 'rar':
       case 'tar':
       case 'gz':
-        return FaFileArchive;
-      case 'mp3':
-      case 'wav':
-      case 'ogg':
-        return FaFileAudio;
-      case 'mp4':
-      case 'avi':
-      case 'mov':
-        return FaFileVideo;
+        return { icon: FaFileArchive, color: isSelected ? 'white' : '#d97706' };
       default:
-        return FaFile;
+        return { icon: FaFile, color: isSelected ? 'white' : '#8b949e' };
     }
   };
   
-  const IconComponent = getFileIcon();
-  
-  // Determine color based on file type and selection state
-  let color = '#8b949e';
-  if (isSelected) {
-    color = '#ffffff';
-  } else if (type === 'directory') {
-    color = '#58a6ff';
-  } else {
-    const ext = extension?.toLowerCase();
-    switch (ext) {
-      case 'js':
-      case 'jsx':
-        color = '#f77f00';
-        break;
-      case 'ts':
-      case 'tsx':
-        color = '#58a6ff';
-        break;
-      case 'css':
-        color = '#2ea043';
-        break;
-      case 'html':
-        color = '#e04e4e';
-        break;
-      case 'json':
-        color = '#f1fa8c';
-        break;
-      case 'md':
-        color = '#58a6ff';
-        break;
-      case 'png':
-      case 'jpg':
-      case 'jpeg':
-      case 'gif':
-      case 'svg':
-      case 'webp':
-        color = '#65a30d';
-        break;
-      case 'pdf':
-        color = '#dc2626';
-        break;
-      case 'zip':
-      case 'rar':
-      case 'tar':
-      case 'gz':
-        color = '#d97706';
-        break;
-      default:
-        color = '#8b949e';
-    }
-  }
+  const { icon: IconComponent, color } = getFileIconAndColor();
   
   return (
-    <Box 
-      display="flex" 
-      alignItems="center" 
-      justifyContent="center"
-      width="16px"
-      height="16px"
-    >
-      <Icon as={IconComponent} color={color} />
-    </Box>
+    <Icon 
+      as={IconComponent} 
+      color={color} 
+      fontSize="16px"
+      mr={2}
+    />
   );
 };
 
@@ -336,35 +298,45 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   return (
     <Box>
       <HStack
-        py={1}
-        pl={level * 12}
-        bg={isSelected ? 'blue.500' : 'transparent'}
-        color={isSelected ? 'white' : '#c9d1d9'}
-        _hover={{ bg: isSelected ? 'blue.600' : 'rgba(255, 255, 255, 0.05)' }}
+        py={0}
+        pl={level * 8 + 4}
+        pr={2}
+        bg={isSelected ? 'rgba(9, 71, 113, 0.31)' : 'transparent'}
+        color={isSelected ? '#ffffff' : '#cccccc'}
+        _hover={{ bg: isSelected ? 'rgba(9, 71, 113, 0.31)' : 'rgba(255, 255, 255, 0.04)' }}
         cursor="pointer"
         onClick={handleSelect}
-        borderRadius="sm"
+        borderRadius={0}
         position="relative"
-        gap={2}
-        height="24px"
+        gap={0}
+        minHeight="22px"
+        alignItems="center"
+        minW="max-content"
+        w="100%"
       >
         {node.type === 'directory' ? (
           <Icon 
             as={isExpanded ? FiChevronDown : FiChevronRight} 
             onClick={handleToggle}
             cursor="pointer"
-            fontSize="14px"
-            color={isSelected ? 'white' : '#8b949e'}
+            fontSize="10px"
+            color={isSelected ? '#ffffff' : '#cccccc'}
+            width="16px"
+            height="16px"
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            mr={1}
           />
         ) : (
-          <Box width="14px" />
+          <Box width="17px" />
         )}
         
         <FileIcon 
           type={node.type} 
           extension={node.extension} 
+          fileName={node.name}
           isSelected={isSelected}
-          isExpanded={isExpanded}
         />
         
         {isRenaming ? (
@@ -376,8 +348,8 @@ const TreeNode: React.FC<TreeNodeProps> = ({
             onBlur={confirmRename}
             size="xs"
             variant="flushed"
-            color={isSelected ? 'white' : '#e6edf3'}
-            bg={isSelected ? 'blue.500' : 'transparent'}
+            color={isSelected ? 'white' : '#cccccc'}
+            bg={isSelected ? '#37415A' : 'transparent'}
             flex={1}
             px={1}
             py={0}
@@ -386,10 +358,13 @@ const TreeNode: React.FC<TreeNodeProps> = ({
           />
         ) : (
           <Text 
-            fontSize="sm" 
+            fontSize="13px" 
             flex={1} 
             lineClamp={1}
-            color={isSelected ? 'white' : '#c9d1d9'}
+            color={isSelected ? '#ffffff' : '#cccccc'}
+            fontWeight="400"
+            fontFamily="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif"
+            letterSpacing="0.02em"
           >
             {node.name}
           </Text>
@@ -495,81 +470,145 @@ const TreeNode: React.FC<TreeNodeProps> = ({
       
       {/* Create Modal */}
       <Dialog.Root open={isCreating} onOpenChange={() => setIsCreating(false)}>
-        <Dialog.Backdrop bg="rgba(0, 0, 0, 0.8)" />
+        <Dialog.Backdrop bg="blackAlpha.800" />
         <Dialog.Positioner>
-          <Dialog.Content bg="#161b22" borderColor="#30363d" color="#c9d1d9">
-            <Dialog.Header>
-              <Dialog.Title>Create New {createType === 'file' ? 'File' : 'Folder'}</Dialog.Title>
+          <Dialog.Content 
+            bg="bg.panel" 
+            borderColor="border" 
+            color="fg"
+            shadow="xl"
+            borderRadius="lg"
+            maxW="400px"
+          >
+            <Dialog.Header pb={3}>
+              <Dialog.Title fontSize="lg" fontWeight="600">
+                Create New {createType === 'file' ? 'File' : 'Folder'}
+              </Dialog.Title>
             </Dialog.Header>
-            <Dialog.Body>
+            <Dialog.Body py={4}>
               <Input
                 ref={createInputRef}
                 placeholder={createType === 'file' ? 'filename.txt' : 'folder-name'}
                 value={createName}
                 onChange={(e) => setCreateName(e.target.value)}
                 onKeyDown={(e) => handleKeyDown(e, confirmCreate)}
-                size="sm"
-                bg="#0d1117"
-                borderColor="#30363d"
-                color="#c9d1d9"
-                _focus={{ borderColor: '#58a6ff', boxShadow: '0 0 0 3px rgba(88, 166, 255, 0.1)' }}
+                size="md"
+                bg="bg"
+                borderColor="border"
+                color="fg"
+                _focus={{ 
+                  borderColor: 'blue.emphasized', 
+                  boxShadow: '0 0 0 1px var(--chakra-colors-blue-emphasized)'
+                }}
               />
             </Dialog.Body>
-            <Dialog.Footer>
-              <Button variant="outline" size="sm" onClick={() => setIsCreating(false)} borderColor="#30363d" color="#c9d1d9" _hover={{ bg: 'rgba(255, 255, 255, 0.1)' }}>
+            <Dialog.Footer pt={4}>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={() => setIsCreating(false)} 
+                borderColor="border" 
+                color="fg.muted" 
+                _hover={{ bg: 'bg.muted', color: 'fg' }}
+              >
                 Cancel
               </Button>
-              <Button colorPalette="blue" size="sm" onClick={confirmCreate} ml={3} bg="#58a6ff" color="#0d1117" _hover={{ bg: '#58a6ff', transform: 'translateY(-2px)' }}>
+              <Button 
+                colorPalette="blue" 
+                size="sm" 
+                onClick={confirmCreate} 
+                ml={3}
+                bg="blue.solid" 
+                color="blue.contrast" 
+                _hover={{ bg: 'blue.emphasized' }}
+              >
                 Create
               </Button>
             </Dialog.Footer>
-            <Dialog.CloseTrigger color="#8b949e" _hover={{ color: '#f85149' }} />
+            <Dialog.CloseTrigger 
+              color="fg.muted" 
+              _hover={{ color: 'red.solid' }}
+            />
           </Dialog.Content>
         </Dialog.Positioner>
       </Dialog.Root>
       
       {/* Copy Modal */}
       <Dialog.Root open={isCopying} onOpenChange={() => setIsCopying(false)}>
-        <Dialog.Backdrop bg="rgba(0, 0, 0, 0.8)" />
+        <Dialog.Backdrop bg="blackAlpha.800" />
         <Dialog.Positioner>
-          <Dialog.Content bg="#161b22" borderColor="#30363d" color="#c9d1d9">
-            <Dialog.Header>
-              <Dialog.Title>Copy {node.name}</Dialog.Title>
+          <Dialog.Content 
+            bg="bg.panel" 
+            borderColor="border" 
+            color="fg"
+            shadow="xl"
+            borderRadius="lg"
+            maxW="400px"
+          >
+            <Dialog.Header pb={3}>
+              <Dialog.Title fontSize="lg" fontWeight="600">
+                Copy {node.name}
+              </Dialog.Title>
             </Dialog.Header>
-            <Dialog.Body>
+            <Dialog.Body py={4}>
               <Input
                 ref={copyInputRef}
                 placeholder="Enter new name"
                 value={copyDestination}
                 onChange={(e) => setCopyDestination(e.target.value)}
                 onKeyDown={(e) => handleKeyDown(e, confirmCopy)}
-                size="sm"
-                bg="#0d1117"
-                borderColor="#30363d"
-                color="#c9d1d9"
-                _focus={{ borderColor: '#58a6ff', boxShadow: '0 0 0 3px rgba(88, 166, 255, 0.1)' }}
+                size="md"
+                bg="bg"
+                borderColor="border"
+                color="fg"
+                _focus={{ 
+                  borderColor: 'blue.emphasized', 
+                  boxShadow: '0 0 0 1px var(--chakra-colors-blue-emphasized)'
+                }}
               />
             </Dialog.Body>
-            <Dialog.Footer>
-              <Button variant="outline" size="sm" onClick={() => setIsCopying(false)} borderColor="#30363d" color="#c9d1d9" _hover={{ bg: 'rgba(255, 255, 255, 0.1)' }}>
+            <Dialog.Footer pt={4}>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={() => setIsCopying(false)} 
+                borderColor="border" 
+                color="fg.muted" 
+                _hover={{ bg: 'bg.muted', color: 'fg' }}
+              >
                 Cancel
               </Button>
-              <Button colorPalette="blue" size="sm" onClick={confirmCopy} ml={3} bg="#58a6ff" color="#0d1117" _hover={{ bg: '#58a6ff', transform: 'translateY(-2px)' }}>
+              <Button 
+                colorPalette="blue" 
+                size="sm" 
+                onClick={confirmCopy} 
+                ml={3}
+                bg="blue.solid" 
+                color="blue.contrast" 
+                _hover={{ bg: 'blue.emphasized' }}
+              >
                 Copy
               </Button>
             </Dialog.Footer>
-            <Dialog.CloseTrigger color="#8b949e" _hover={{ color: '#f85149' }} />
+            <Dialog.CloseTrigger 
+              color="fg.muted" 
+              _hover={{ color: 'red.solid' }}
+            />
           </Dialog.Content>
         </Dialog.Positioner>
       </Dialog.Root>
       
       {node.type === 'directory' && isExpanded && node.children && (
-        <VStack align="stretch" gap={0} mt={0}>
+        <VStack 
+          align="stretch" 
+          gap={0} 
+          mt={1}
+        >
           {node.children.map((child) => (
             <TreeNode
               key={child.path}
               node={child}
-              level={level + 1}
+              level={level + 0.5}
               onFileSelect={onFileSelect}
               setAlert={setAlert}
             />
@@ -632,7 +671,7 @@ const FileTree: React.FC<FileTreeProps> = ({
   
   if (loading) {
     return (
-      <Box p={3} bg="#0d1117" color="#c9d1d9">
+      <Box p={3} bg="#252526" color="#cccccc">
         <Text fontSize="sm" color="#8b949e">Loading file tree...</Text>
       </Box>
     );
@@ -640,7 +679,7 @@ const FileTree: React.FC<FileTreeProps> = ({
   
   if (error) {
     return (
-      <Box p={3} bg="#0d1117" color="#c9d1d9">
+      <Box p={3} bg="#252526" color="#cccccc">
         <Text fontSize="sm" color="#f85149">Error: {error}</Text>
         <Button 
           mt={2} 
@@ -648,7 +687,7 @@ const FileTree: React.FC<FileTreeProps> = ({
           variant="outline"
           onClick={handleRefresh}
           borderColor="#30363d"
-          color="#c9d1d9"
+          color="#cccccc"
           _hover={{ bg: 'rgba(255, 255, 255, 0.1)' }}
         >
           <HStack gap={2}>
@@ -662,7 +701,7 @@ const FileTree: React.FC<FileTreeProps> = ({
   
   if (!root) {
     return (
-      <Box p={3} bg="#0d1117" color="#c9d1d9">
+      <Box p={3} bg="#252526" color="#cccccc">
         <Text fontSize="sm" color="#8b949e">No file tree available</Text>
         <Button 
           mt={2} 
@@ -670,7 +709,7 @@ const FileTree: React.FC<FileTreeProps> = ({
           variant="outline"
           onClick={handleRefresh}
           borderColor="#30363d"
-          color="#c9d1d9"
+          color="#cccccc"
           _hover={{ bg: 'rgba(255, 255, 255, 0.1)' }}
         >
           <HStack gap={2}>
@@ -683,9 +722,23 @@ const FileTree: React.FC<FileTreeProps> = ({
   }
   
   return (
-    <VStack align="stretch" gap={0} p={2} bg="#0d1117" color="#c9d1d9">
+    <Box
+      className="vscode-sidebar"
+      bg="#252526" 
+      color="#cccccc"
+      height="100%"
+      overflow="hidden"
+    >
       {alert.show && (
-        <Alert.Root status={alert.status} mb={2} size="sm" bg={alert.status === 'success' ? 'rgba(46, 160, 67, 0.1)' : 'rgba(248, 81, 73, 0.1)'} borderColor={alert.status === 'success' ? 'rgba(46, 160, 67, 0.4)' : 'rgba(248, 81, 73, 0.4)'}>
+        <Alert.Root 
+          status={alert.status} 
+          mb={2} 
+          size="sm" 
+          bg={alert.status === 'success' ? 'rgba(46, 160, 67, 0.1)' : 'rgba(248, 81, 73, 0.1)'} 
+          borderColor={alert.status === 'success' ? 'rgba(46, 160, 67, 0.4)' : 'rgba(248, 81, 73, 0.4)'}
+          mx={2}
+          mt={2}
+        >
           <Alert.Indicator />
           <Alert.Content>
             <Alert.Title>{alert.title}</Alert.Title>
@@ -693,53 +746,22 @@ const FileTree: React.FC<FileTreeProps> = ({
           </Alert.Content>
         </Alert.Root>
       )}
-      <HStack justify="space-between" mb={2} px={1}>
-        <Text fontWeight="semibold" fontSize="sm" color="#c9d1d9">
-          Explorer
-        </Text>
-        <HStack gap={1}>
-          <Button
-              aria-label="New"
-              size="xs"
-              variant="ghost"
-              onClick={() => {
-                // Default to creating a new file in the root
-                const createNewFile = async () => {
-                  const success = await useFileTreeRepository.getState().createFileOrDirectory(root.path, 'new-file.txt', false);
-                  if (success) {
-                    setAlert({ show: true, title: 'Success', description: 'Created new file', status: 'success' });
-                  } else {
-                    setAlert({ show: true, title: 'Error', description: 'Failed to create file', status: 'error' });
-                  }
-                };
-                createNewFile();
-              }}
-              title="New file/folder"
-              color="#8b949e"
-              _hover={{ bg: 'rgba(255, 255, 255, 0.1)' }}
-            >
-              <FiPlus size={14} />
-            </Button>
-          <Button
-              aria-label="Refresh"
-              size="xs"
-              variant="ghost"
-              onClick={handleRefresh}
-              title="Refresh"
-              color="#8b949e"
-              _hover={{ bg: 'rgba(255, 255, 255, 0.1)' }}
-            >
-              <FiRefreshCw size={14} />
-            </Button>
-        </HStack>
-      </HStack>
-      <TreeNode
-        node={root}
-        level={0}
-        onFileSelect={onFileSelect}
-        setAlert={setAlert}
-      />
-    </VStack>
+      
+      <Box 
+        flex={1} 
+        overflowY="auto" 
+        overflowX="auto"
+        pt={1}
+        minW="100%"
+      >
+        <TreeNode
+          node={root}
+          level={0}
+          onFileSelect={onFileSelect}
+          setAlert={setAlert}
+        />
+      </Box>
+    </Box>
   );
 };
 
