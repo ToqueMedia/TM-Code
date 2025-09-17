@@ -10,13 +10,18 @@
     "tauri": "tauri",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:implementation": "./test-implementation.sh",
-    "test:components": "echo \"Testing UI components implementation\" && npm run build"
+    "test:components": "echo \"Testing UI components implementation\" && npm run build",
+    "benchmark": "tsx src/testing/benchmarkCLI.ts",
+    "benchmark:watch": "tsx watch src/testing/benchmarkCLI.ts",
+    "test:performance": "npm run benchmark",
+    "test:regression": "npm run benchmark -- --regression"
   },
   "dependencies": {
     "@chakra-ui/react": "^3.27.0",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
     "@monaco-editor/react": "^4.7.0",
+    "@tanstack/react-query": "^5.89.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "@tauri-apps/plugin-fs": "^2.4.2",

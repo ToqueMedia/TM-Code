@@ -1,5 +1,4 @@
-import { useCallback, useMemo, useRef } from 'react';
-import { shallow } from 'zustand/shallow';
+import { useCallback } from 'react';
 import { useEditorRepository } from '../stores/editorStore';
 
 // Hook para arquivos abertos - só re-renderiza quando openFiles muda
@@ -20,13 +19,9 @@ export function useCursorPositions() {
 
 // Hook para stacks de undo/redo - só re-renderiza quando essas stacks mudam
 export function useUndoRedoStacks() {
-  return useEditorRepository(
-    state => ({
-      undoStack: state.undoStack,
-      redoStack: state.redoStack,
-    }),
-    shallow
-  );
+  const undoStack = useEditorRepository(state => state.undoStack);
+  const redoStack = useEditorRepository(state => state.redoStack);
+  return { undoStack, redoStack };
 }
 
 // Hook para estado de um arquivo específico - retorna valores primitivos separados
@@ -53,8 +48,7 @@ const DEFAULT_CURSOR_POSITION = { line: 1, column: 1 };
 
 export function useFileCursorPosition(path: string) {
   return useEditorRepository(
-    state => state.openFiles.find(f => f.path === path)?.cursorPosition ?? DEFAULT_CURSOR_POSITION,
-    shallow
+    state => state.openFiles.find(f => f.path === path)?.cursorPosition ?? DEFAULT_CURSOR_POSITION
   );
 }
 

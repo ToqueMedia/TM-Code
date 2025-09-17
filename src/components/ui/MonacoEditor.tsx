@@ -50,9 +50,6 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   const {
     content,
     language,
-    isDirty,
-    cursorPosition,
-    isActive,
     exists,
     handleContentChange,
     handleCursorChange,
@@ -64,48 +61,6 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const lspServiceRef = useMemo(() => TypeScriptLspService.getInstance(), []);
   
-  // Determine language based on file extension - Memoizado
-  const getLanguage = useCallback((filePath: string): string => {
-    const extension = filePath.split('.').pop()?.toLowerCase() || '';
-    switch (extension) {
-      case 'js':
-      case 'jsx':
-        return 'javascript';
-      case 'ts':
-      case 'tsx':
-        return 'typescript';
-      case 'json':
-        return 'json';
-      case 'html':
-        return 'html';
-      case 'css':
-        return 'css';
-      case 'scss':
-        return 'scss';
-      case 'md':
-        return 'markdown';
-      case 'py':
-        return 'python';
-      case 'java':
-        return 'java';
-      case 'cpp':
-      case 'cc':
-      case 'cxx':
-        return 'cpp';
-      case 'c':
-        return 'c';
-      case 'rs':
-        return 'rust';
-      case 'go':
-        return 'go';
-      case 'php':
-        return 'php';
-      case 'sql':
-        return 'sql';
-      default:
-        return 'plaintext';
-    }
-  }, []);
   
   const handleEditorDidMount = useCallback((editor: editor.IStandaloneCodeEditor) => {
     editorRef.current = editor;
