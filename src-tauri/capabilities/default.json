@@ -5,6 +5,30 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "dialog:default",
+    "opener:default",
+    "fs:default",
+    "fs:allow-watch",
+    "fs:allow-read-file",
+    "fs:allow-write-file",
+    "fs:allow-read-dir",
+    "fs:allow-mkdir",
+    "fs:allow-remove",
+    "fs:allow-rename",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$HOME/**/*",
+        "$APPDATA/**/*",
+        "$DOCUMENTS/**/*",
+        "$DOWNLOAD/**/*",
+        "$DESKTOP/**/*",
+        "$MUSIC/**/*",
+        "$PICTURES/**/*",
+        "$VIDEOS/**/*",
+        "$PUBLIC/**/*",
+        "$TEMP/**/*"
+      ]
+    }
   ]
 }

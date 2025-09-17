@@ -6,7 +6,8 @@ console.log('Project store imported successfully');
 
 // In a real test, we would use Jest or similar testing framework
 export const testZustandStore = () => {
-  // This would normally be tested with actual unit tests
-  console.log('Zustand store test placeholder');
+  // Access the store to verify it's working
+  const state = useProjectStore.getState();
+  console.log('Zustand store test placeholder', state);
   return true;
 };

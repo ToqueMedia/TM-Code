@@ -1,13 +1,16 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
-use tauri::ipc::InvokeError;
 use uuid::Uuid;
+use flate2::{Compression, write::ZlibEncoder};
+use flate2::read::ZlibDecoder;
+use std::io::{Read, Write};
 
 // Data Structures
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectInfo {
     pub id: String,
     pub name: String,
@@ -19,6 +22,7 @@ pub struct ProjectInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RecentProject {
     pub id: String,
     pub name: String,
@@ -27,7 +31,9 @@ pub struct RecentProject {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectState {
+    pub version: String,
     pub open_files: Vec<String>,
     pub active_file: Option<String>,
     pub cursor_positions: HashMap<String, (u32, u32)>, // line, column
@@ -36,6 +42,7 @@ pub struct ProjectState {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct WindowState {
     pub width: u32,
     pub height: u32,
@@ -50,6 +57,9 @@ pub enum ProjectTemplate {
     React,
     Node,
     TypeScript,
+    Vue,
+    Python,
+    Rust,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -59,28 +69,44 @@ pub struct GlobalSettings {
     pub editor_settings: HashMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ValidationResult {
+    pub valid: bool,
+    pub error: Option<String>,
+}
+
 // Error handling
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, serde::Serialize)]
 pub enum ProjectError {
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
     #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(String),
     #[error("Project not found: {0}")]
     NotFound(String),
     #[error("Invalid project path: {0}")]
     InvalidPath(String),
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
+    #[error("Insufficient disk space: {0}")]
+    InsufficientDiskSpace(String),
+    #[error("System folder: {0}")]
+    SystemFolder(String),
 }
 
-impl From<ProjectError> for InvokeError {
-    fn from(error: ProjectError) -> Self {
-        InvokeError::from(error.to_string())
+impl From<std::io::Error> for ProjectError {
+    fn from(err: std::io::Error) -> Self {
+        ProjectError::Io(err.to_string())
     }
 }
 
-type Result<T> = std::result::Result<T, ProjectError>;
+impl From<serde_json::Error> for ProjectError {
+    fn from(err: serde_json::Error) -> Self {
+        ProjectError::Json(err.to_string())
+    }
+}
+
+pub type Result<T, E = ProjectError> = std::result::Result<T, E>;
 
 // Helper functions
 fn get_config_dir() -> PathBuf {
@@ -100,12 +126,153 @@ fn get_project_meta_path(project_id: &str) -> PathBuf {
     get_projects_dir().join(project_id).join("meta.json")
 }
 
+fn get_project_permissions_path(project_id: &str) -> PathBuf {
+    get_projects_dir().join(project_id).join("permissions.json")
+}
+
 fn now_iso() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs();
     format!("{}", now)
+}
+
+// Validation Commands
+#[tauri::command]
+pub fn validate_project_path(path: String) -> Result<ValidationResult> {
+    let project_path = Path::new(&path);
+    
+    // Validate path exists and is accessible
+    if !project_path.exists() {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some(format!("Path does not exist: {}", path)),
+        });
+    }
+    
+    if !project_path.is_dir() {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some(format!("Path is not a directory: {}", path)),
+        });
+    }
+    
+    // Check for system folders
+    if is_system_folder(project_path) {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some("Cannot open system folders".to_string()),
+        });
+    }
+    
+    // Check for required files (package.json or .git)
+    let has_package_json = project_path.join("package.json").exists();
+    let has_git = project_path.join(".git").exists();
+    
+    if !has_package_json && !has_git {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some("Project must have package.json or .git directory".to_string()),
+        });
+    }
+    
+    // Check permissions
+    let metadata = fs::metadata(&project_path)?;
+    if metadata.permissions().readonly() {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some("No write permissions for this directory".to_string()),
+        });
+    }
+    
+    Ok(ValidationResult {
+        valid: true,
+        error: None,
+    })
+}
+
+#[tauri::command]
+pub fn validate_project_name(name: String) -> Result<ValidationResult> {
+    if name.trim().is_empty() {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some("Project name is required".to_string()),
+        });
+    }
+    
+    // Check for invalid characters (npm naming rules)
+    if !is_valid_npm_name(&name) {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some("Project name can only contain lowercase letters, numbers, hyphens, and underscores. Must start with a letter.".to_string()),
+        });
+    }
+    
+    // Check length
+    if name.len() > 214 {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some("Project name is too long (max 214 characters)".to_string()),
+        });
+    }
+    
+    Ok(ValidationResult {
+        valid: true,
+        error: None,
+    })
+}
+
+#[tauri::command]
+pub fn validate_project_location(location: String) -> Result<ValidationResult> {
+    let location_path = Path::new(&location);
+    
+    // Validate path exists and is accessible
+    if !location_path.exists() {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some(format!("Location does not exist: {}", location)),
+        });
+    }
+    
+    if !location_path.is_dir() {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some(format!("Location is not a directory: {}", location)),
+        });
+    }
+    
+    // Check for system folders
+    if is_system_folder(location_path) {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some("Cannot create projects in system folders".to_string()),
+        });
+    }
+    
+    // Check permissions
+    let metadata = fs::metadata(&location_path)?;
+    if metadata.permissions().readonly() {
+        return Ok(ValidationResult {
+            valid: false,
+            error: Some("No write permissions for this location".to_string()),
+        });
+    }
+    
+    // Check disk space (at least 100MB free)
+    // if let Some(available_space) = get_available_disk_space(location_path) {
+    //     if available_space < 100 * 1024 * 1024 {
+    //         return Ok(ValidationResult {
+    //             valid: false,
+    //             error: Some("Insufficient disk space (minimum 100MB required)".to_string()),
+    //         });
+    //     }
+    // }
+    
+    Ok(ValidationResult {
+        valid: true,
+        error: None,
+    })
 }
 
 // Project Commands
@@ -122,6 +289,11 @@ pub fn open_project(path: String) -> Result<ProjectInfo> {
         return Err(ProjectError::InvalidPath(format!("Path is not a directory: {}", path)));
     }
     
+    // Check for system folders
+    if is_system_folder(project_path) {
+        return Err(ProjectError::SystemFolder("Cannot open system folders".to_string()));
+    }
+    
     // Check for required files (package.json or .git)
     let has_package_json = project_path.join("package.json").exists();
     let has_git = project_path.join(".git").exists();
@@ -132,7 +304,7 @@ pub fn open_project(path: String) -> Result<ProjectInfo> {
     
     // Check permissions
     let metadata = fs::metadata(&project_path)?;
-    if !metadata.permissions().readonly() {
+    if metadata.permissions().readonly() {
         // Try to create a temporary file to test write permissions
         let test_path = project_path.join(".toquemedia_test");
         if let Err(_) = fs::File::create(&test_path) {
@@ -200,6 +372,18 @@ pub fn create_project(path: String, template: ProjectTemplate) -> Result<Project
     if project_path.exists() {
         return Err(ProjectError::InvalidPath(format!("Project directory already exists: {}", path)));
     }
+    
+    // Check for system folders
+    if is_system_folder(parent_path) {
+        return Err(ProjectError::SystemFolder("Cannot create projects in system folders".to_string()));
+    }
+    
+    // Check disk space (at least 100MB free)
+    // if let Some(available_space) = get_available_disk_space(parent_path) {
+    //     if available_space < 100 * 1024 * 1024 {
+    //         return Err(ProjectError::InsufficientDiskSpace("Insufficient disk space (minimum 100MB required)".to_string()));
+    //     }
+    // }
     
     // Create project directory
     fs::create_dir_all(&project_path)?;
@@ -360,6 +544,202 @@ export default App;",
                 "console.log('Hello, TypeScript!');",
             )?;
         }
+        ProjectTemplate::Vue => {
+            // Create Vue.js project structure
+            fs::create_dir_all(project_path.join("src"))?;
+            fs::create_dir_all(project_path.join("src/components"))?;
+            
+            let package_json = serde_json::json!({
+                "name": project_path.file_name().and_then(|n| n.to_str()).unwrap_or("vue-project"),
+                "version": "1.0.0",
+                "description": "",
+                "main": "src/main.js",
+                "scripts": {
+                    "dev": "vite",
+                    "build": "vite build",
+                    "preview": "vite preview"
+                },
+                "dependencies": {
+                    "vue": "^3.3.0"
+                },
+                "devDependencies": {
+                    "@vitejs/plugin-vue": "^4.0.0",
+                    "vite": "^4.0.0"
+                }
+            });
+            fs::write(
+                project_path.join("package.json"),
+                serde_json::to_string_pretty(&package_json)?,
+            )?;
+            
+            fs::write(
+                project_path.join("index.html"),
+                "<!DOCTYPE html>
+<html lang=\"en\">
+  <head>
+    <meta charset=\"UTF-8\">
+    <link rel=\"icon\" href=\"/favicon.ico\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+    <title>Vue.js App</title>
+  </head>
+  <body>
+    <div id=\"app\"></div>
+    <script type=\"module\" src=\"/src/main.js\"></script>
+  </body>
+</html>",
+            )?;
+            
+            fs::write(
+                project_path.join("vite.config.js"),
+                "import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+// https://vitejs.dev/config/
+export default defineConfig({
+  plugins: [vue()],
+})",
+            )?;
+            
+            fs::write(
+                project_path.join("src/main.js"),
+                "import { createApp } from 'vue'
+import App from './App.vue'
+
+createApp(App).mount('#app')",
+            )?;
+            
+            fs::write(
+                project_path.join("src/App.vue"),
+                "<template>
+  <div id=\"app\">
+    <h1>Hello, Vue.js!</h1>
+  </div>
+</template>
+
+<script>
+export default {
+  name: 'App'
+}
+</script>
+
+<style>
+#app {
+  font-family: Avenir, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-align: center;
+  color: #2c3e50;
+  margin-top: 60px;
+}
+</style>",
+            )?;
+        }
+        ProjectTemplate::Python => {
+            // Create Python project structure
+            fs::create_dir_all(project_path.join("src"))?;
+            
+            // Create basic Python project files
+            fs::write(
+                project_path.join("requirements.txt"),
+                "",
+            )?;
+            
+            fs::write(
+                project_path.join("setup.py"),
+                "from setuptools import setup, find_packages
+
+setup(
+    name=\"python-project\",
+    version=\"0.1.0\",
+    packages=find_packages(where=\"src\"),
+    package_dir={\"\": \"src\"},
+    install_requires=[],
+    author=\"Your Name\",
+    author_email=\"your.email@example.com\",
+    description=\"A Python project\",
+)",
+            )?;
+            
+            fs::write(
+                project_path.join("src/__init__.py"),
+                "",
+            )?;
+            
+            fs::write(
+                project_path.join("src/main.py"),
+                "def main():
+    print(\"Hello, Python!\")
+
+if __name__ == \"__main__\":
+    main()",
+            )?;
+            
+            // Create README
+            fs::write(
+                project_path.join("README.md"),
+                "# Python Project
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+## Run
+
+```bash
+python src/main.py
+```",
+            )?;
+        }
+        ProjectTemplate::Rust => {
+            // Create Rust project structure using cargo
+            let project_name = project_path.file_name().and_then(|n| n.to_str()).unwrap_or("rust-project");
+            
+            // Create Cargo.toml
+            let cargo_toml = format!("[package]
+name = \"{}\"
+version = \"0.1.0\"
+edition = \"2021\"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]", project_name);
+            
+            fs::write(
+                project_path.join("Cargo.toml"),
+                cargo_toml,
+            )?;
+            
+            fs::create_dir_all(project_path.join("src"))?;
+            
+            fs::write(
+                project_path.join("src/main.rs"),
+                "fn main() {
+    println!(\"Hello, Rust!\");
+}",
+            )?;
+            
+            // Create README
+            fs::write(
+                project_path.join("README.md"),
+                format!("# {}
+
+Welcome to your Rust project!
+
+## Build
+
+```bash
+cargo build
+```
+
+## Run
+
+```bash
+cargo run
+```", project_name),
+            )?;
+        }
     }
     
     // Create project info
@@ -374,6 +754,9 @@ export default App;",
         ProjectTemplate::React => "react".to_string(),
         ProjectTemplate::Node => "node".to_string(),
         ProjectTemplate::TypeScript => "typescript".to_string(),
+        ProjectTemplate::Vue => "vue".to_string(),
+        ProjectTemplate::Python => "python".to_string(),
+        ProjectTemplate::Rust => "rust".to_string(),
         ProjectTemplate::Blank => "generic".to_string(),
     };
     
@@ -445,6 +828,7 @@ pub fn save_project_state(project_id: String, state: ProjectState) -> Result<()>
         "last_opened": project_info.last_opened,
         "created_at": project_info.created_at,
         "metadata": {
+            "version": "1.0.0",
             "open_files": state.open_files,
             "active_file": state.active_file,
             "cursor_positions": state.cursor_positions,
@@ -458,7 +842,11 @@ pub fn save_project_state(project_id: String, state: ProjectState) -> Result<()>
         fs::create_dir_all(parent)?;
     }
     
-    fs::write(&meta_path, serde_json::to_string_pretty(&updated_meta)?)?;
+    // Compress the metadata before saving
+    let json_string = serde_json::to_string(&updated_meta)?;
+    let compressed_data = compress_data(json_string.as_bytes())?;
+    
+    fs::write(&meta_path, compressed_data)?;
     
     // Update recent projects
     update_recent_projects(&project_info)?;
@@ -474,10 +862,17 @@ pub fn load_project_state(project_id: String) -> Result<ProjectState> {
         return Err(ProjectError::NotFound(format!("Project metadata not found for ID: {}", project_id)));
     }
     
-    let meta_content = fs::read_to_string(&meta_path)?;
-    let project_info: ProjectInfo = serde_json::from_str(&meta_content)?;
+    // Read and decompress the metadata
+    let compressed_data = fs::read(&meta_path)?;
+    let json_string = decompress_data(&compressed_data)?;
+    let project_info: ProjectInfo = serde_json::from_str(&json_string)?;
     
     // Extract state from metadata
+    let version = project_info.metadata.get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0.0")
+        .to_string();
+    
     let open_files = project_info.metadata.get("open_files")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -532,6 +927,7 @@ pub fn load_project_state(project_id: String) -> Result<ProjectState> {
         });
     
     Ok(ProjectState {
+        version,
         open_files,
         active_file,
         cursor_positions,
@@ -647,4 +1043,105 @@ fn update_recent_projects(project_info: &ProjectInfo) -> Result<()> {
     fs::write(&settings_path, settings_content)?;
     
     Ok(())
+}
+
+fn is_system_folder(path: &Path) -> bool {
+    // Check for common system folders
+    if let Some(path_str) = path.to_str() {
+        let system_paths = [
+            "/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/etc",
+            "/proc", "/sys", "/dev", "/run", "/tmp", "/var", "/boot", "/root",
+            "C:\\\\Windows", "C:\\\\Program Files", "C:\\\\Program Files (x86)",
+            "C:\\\\ProgramData", "C:\\\\Recovery", "C:\\\\System Volume Information"
+        ];
+        
+        for sys_path in &system_paths {
+            if path_str.starts_with(sys_path) {
+                return true;
+            }
+        }
+    }
+    
+    false
+}
+
+fn is_valid_npm_name(name: &str) -> bool {
+    // npm naming rules:
+    // - Must be lowercase
+    // - Can contain letters, numbers, hyphens, and underscores
+    // - Must start with a letter
+    // - Max 214 characters
+    if name.is_empty() || name.len() > 214 {
+        return false;
+    }
+    
+    let first_char = name.chars().next().unwrap();
+    if !first_char.is_ascii_lowercase() {
+        return false;
+    }
+    
+    name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+fn decompress_data(compressed_data: &[u8]) -> Result<String> {
+    let mut decoder = ZlibDecoder::new(compressed_data);
+    let mut decompressed_data = String::new();
+    decoder.read_to_string(&mut decompressed_data)?;
+    Ok(decompressed_data)
+}
+
+fn compress_data(data: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data)?;
+    let compressed_data = encoder.finish()?;
+    Ok(compressed_data)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProjectStatus {
+    pub exists: bool,
+    pub permissions_changed: bool,
+    pub last_modified: Option<u64>,
+}
+
+#[tauri::command]
+pub fn check_project_status(path: String) -> Result<ProjectStatus> {
+    let project_path = Path::new(&path);
+    
+    // Check if project still exists
+    let exists = project_path.exists() && project_path.is_dir();
+    
+    // Get last modified time if it exists
+    let last_modified = if exists {
+        if let Ok(metadata) = fs::metadata(&project_path) {
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+                    Some(duration.as_secs())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    
+    // Check for permission changes
+    let permissions_changed = if exists {
+        // In a real implementation, we would compare current permissions with stored ones
+        // For now, we'll just return false
+        false
+    } else {
+        false
+    };
+    
+    Ok(ProjectStatus {
+        exists,
+        permissions_changed,
+        last_modified,
+    })
 }

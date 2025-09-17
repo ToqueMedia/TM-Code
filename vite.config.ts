@@ -30,4 +30,20 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  
+  // Configuration for Monaco Editor workers
+  worker: {
+    format: 'es',
+    plugins: [tsconfigPaths()],
+  },
+  
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          monaco: ['monaco-editor'],
+        }
+      }
+    }
+  }
 }));

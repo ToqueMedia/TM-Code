@@ -1,5 +1,4 @@
-// src/components/WelcomeScreen.tsx
-import React from 'react'
+import React, { useEffect } from 'react'
 import {
   Box,
   Button,
@@ -11,47 +10,116 @@ import {
   Dialog,
   Portal,
   Input,
-  Select,
+  NativeSelect,
   VStack,
   HStack,
   Icon,
 } from '@chakra-ui/react'
-import { createListCollection } from '@chakra-ui/react'
+import { useProjectStore } from '../stores/projectStore'
 
 interface WelcomeScreenProps {
-  onOpenProject: () => void
+  onOpenProject: (path?: string) => void
   onCreateProject: (projectData: any) => void
 }
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreateProject: _onCreateProject }) => {
   const newProjectDialog = useDialog()
   const cloneDialog = useDialog()
+  const { recentProjects, loadRecentProjects } = useProjectStore()
   
-  const recentProjects = [
-    { name: 'Discord Bot API', path: '~/Projects/discord-bot' },
-    { name: 'React Dashboard', path: '~/Projects/dashboard' },
-    { name: 'ML Pipeline', path: '~/Projects/ml-pipeline' },
-  ]
+  // Load recent projects when component mounts
+  useEffect(() => {
+    loadRecentProjects()
+  }, [loadRecentProjects])
 
   const handleCreateProject = () => {
     // In a real implementation, this would gather form data and call onCreateProject
     newProjectDialog.setOpen(false)
   }
 
-  const handleCloneProject = () => {
+  const handleOpenFolder = async () => {
+    try {
+      // Import and use the Tauri dialog plugin
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Select project directory'
+      });
+      if (selected) {
+        // Directly open the selected project
+        onOpenProject(selected as string);
+      }
+    } catch (error: unknown) {
+      console.error('Failed to open directory dialog:', error);
+    }
+  };
+
+  /* const handleOpenFolder = async () => {
+    try {
+      // Debug logging
+      console.log('handleOpenFolder called');
+      // @ts-ignore
+      console.log('Tauri context:', typeof window !== 'undefined' && window.__TAURI__ ? 'Yes' : 'No');
+      
+      // Check if we're in a Tauri context
+      // @ts-ignore
+      const isTauri = typeof window !== 'undefined' && window.__TAURI__;
+      if (!isTauri) {
+        console.log('Not in Tauri context, showing appropriate message');
+        // Show a more informative message
+        const result = confirm(
+          'Directory selection is only available in the desktop app.\n\n' +
+          'You can:\n' +
+          '1. Download and install the desktop app\n' +
+          '2. Enter a project path manually\n\n' +
+          'Would you like to enter a project path manually?'
+        );
+        
+        if (result) {
+          const path = prompt('Enter the full path to your project:');
+          if (path) {
+            onOpenProject(path);
+          }
+        }
+        return;
+      }
+      
+      console.log('Calling openDirectoryDialog...');
+      const selectedPath = await openDirectoryDialog();
+      console.log('openDirectoryDialog returned:', selectedPath);
+      
+      if (selectedPath) {
+        console.log('Selected path:', selectedPath);
+        // Open the selected project directly
+        onOpenProject(selectedPath);
+      }
+    } catch (error: unknown) {
+      console.error('Failed to open directory dialog:', error);
+      // In a real implementation, you might want to show an error message to the user
+      if (error instanceof Error) {
+        console.error('Error message:', error.message);
+        alert(error.message || 'Failed to open directory dialog. Please try again.');
+      } else {
+        console.error('Unknown error:', error);
+        alert('Failed to open directory dialog. Please try again.');
+      }
+    }
+  } */
+
+    const handleCloneProject = () => {
     // In a real implementation, this would gather form data and clone the repository
     cloneDialog.setOpen(false)
   }
 
-  const templateCollection = createListCollection({
-    items: [
-      { label: 'React TypeScript', value: 'react-ts' },
-      { label: 'Node.js Express', value: 'node-express' },
-      { label: 'Python FastAPI', value: 'python-fastapi' },
-      { label: 'Vue.js', value: 'vue' },
-      { label: 'Empty Project', value: 'empty' },
-    ],
-  })
+  const templates = [
+    { label: 'React TypeScript', value: 'react-ts' },
+    { label: 'Node.js Express', value: 'node-express' },
+    { label: 'Python FastAPI', value: 'python-fastapi' },
+    { label: 'Vue.js', value: 'vue' },
+    { label: 'Rust', value: 'rust' },
+    { label: 'Empty Project', value: 'empty' },
+  ]
 
   return (
     <Flex 
@@ -147,7 +215,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
               borderColor: 'rgba(88, 166, 255, 0.3)',
               transform: 'translateX(4px)',
             }}
-            onClick={onOpenProject}
+            onClick={handleOpenFolder}
           >
             <Icon as={() => <span>📁</span>} mr={3} fontSize="18px" width="20px" />
             Open Folder
@@ -203,18 +271,23 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
           
           {recentProjects.map((project, index) => (
             <Box
-              key={index}
+              key={project.id || index}
               p={2}
               borderRadius="6px"
               cursor="pointer"
               _hover={{
                 bg: 'rgba(139, 148, 158, 0.1)',
               }}
-              onClick={() => console.log(`Opening ${project.name}`)}
+              onClick={() => {
+                // Open the selected project directly without dialog
+                if (project.path) {
+                  onOpenProject(project.path)
+                }
+              }}
             >
               <HStack>
                 <Icon as={() => <span>📁</span>} mr={2} fontSize="14px" color="#7d8590" />
-                <VStack gap={0}>
+                <VStack gap={0} alignItems="flex-start">
                   <Text fontSize="13px" color="#c9d1d9">{project.name}</Text>
                   <Text fontSize="11px" color="#7d8590">{project.path}</Text>
                 </VStack>
@@ -261,7 +334,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
           maxW="900px"
           w="100%"
         >
-          <Box
+                    <Box
             bg="rgba(21, 32, 43, 0.6)"
             backdropFilter="blur(20px)"
             border="1px solid rgba(48, 54, 61, 0.8)"
@@ -276,7 +349,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
               boxShadow: '0 20px 40px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(88, 166, 255, 0.1)',
             }}
             transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
-            onClick={() => newProjectDialog.setOpen(true)}
+            onClick={handleOpenFolder}
           >
             <Box
               position="absolute"
@@ -330,7 +403,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
               boxShadow: '0 20px 40px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(88, 166, 255, 0.1)',
             }}
             transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
-            onClick={onOpenProject}
+            onClick={handleOpenFolder}
           >
             <Box
               position="absolute"
@@ -384,7 +457,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
               boxShadow: '0 20px 40px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(88, 166, 255, 0.1)',
             }}
             transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
-            onClick={() => cloneDialog.setOpen(true)}
+            onClick={handleOpenFolder}
           >
             <Box
               position="absolute"
@@ -554,38 +627,16 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
                   
                   <Box>
                     <Text fontSize="14px" color="#c9d1d9" mb={2}>Template</Text>
-                    <Select.Root collection={templateCollection} size="sm">
-                      <Select.HiddenSelect />
-                      <Select.Control>
-                        <Select.Trigger 
-                          bg="rgba(21, 32, 43, 0.8)"
-                          border="1px solid rgba(48, 54, 61, 0.8)"
-                          borderRadius="8px"
-                          color="#e6edf3"
-                          _focus={{
-                            borderColor: '#58a6ff',
-                            boxShadow: '0 0 0 3px rgba(88, 166, 255, 0.1)',
-                          }}
-                        >
-                          <Select.ValueText placeholder="Select template" />
-                        </Select.Trigger>
-                        <Select.IndicatorGroup>
-                          <Select.Indicator />
-                        </Select.IndicatorGroup>
-                      </Select.Control>
-                      <Portal>
-                        <Select.Positioner>
-                          <Select.Content>
-                            {templateCollection.items.map((item) => (
-                              <Select.Item item={item} key={item.value}>
-                                {item.label}
-                                <Select.ItemIndicator />
-                              </Select.Item>
-                            ))}
-                          </Select.Content>
-                        </Select.Positioner>
-                      </Portal>
-                    </Select.Root>
+                    <NativeSelect.Root size="sm">
+                      <NativeSelect.Field placeholder="Select template">
+                        {templates.map((template) => (
+                          <option key={template.value} value={template.value}>
+                            {template.label}
+                          </option>
+                        ))}
+                      </NativeSelect.Field>
+                      <NativeSelect.Indicator />
+                    </NativeSelect.Root>
                   </Box>
                   
                   <Box>

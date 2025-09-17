@@ -16,6 +16,7 @@ export interface RecentProject {
 }
 
 export interface ProjectState {
+  version: string;
   openFiles: string[];
   activeFile: string | null;
   cursorPositions: Record<string, [number, number]>; // line, column
@@ -36,6 +37,9 @@ export enum ProjectTemplate {
   React = "react",
   Node = "node",
   TypeScript = "typescript",
+  Vue = "vue",
+  Python = "python",
+  Rust = "rust",
 }
 
 export interface GlobalSettings {

@@ -56,6 +56,7 @@ export class EditorManager {
 
   getProjectState(): ProjectState {
     return {
+      version: "1.0.0",
       openFiles: Array.from(this.editorStates.keys()),
       activeFile: null, // This would be managed separately
       cursorPositions: {}, // This would be managed separately
