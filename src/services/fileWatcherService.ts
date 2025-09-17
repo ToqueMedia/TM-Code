@@ -1,14 +1,7 @@
-import type { FileTreeNode } from '../types/fileTree';
 import { FileWatcher } from '../utils/fileWatcher';
-
-interface FileTreeUpdateCallback {
-  (updatedNode: FileTreeNode): void;
-}
-
 class FileWatcherService {
   private static instance: FileWatcherService;
   private fileWatcher: FileWatcher;
-  private fileTreeUpdateCallback: FileTreeUpdateCallback | null = null;
   private cleanupFunctions: Map<string, () => void> = new Map();
 
   private constructor() {
@@ -22,9 +15,6 @@ class FileWatcherService {
     return FileWatcherService.instance;
   }
 
-  setFileTreeUpdateCallback(callback: (updatedNode: FileTreeNode) => void) {
-    this.fileTreeUpdateCallback = callback;
-  }
 
   async watchDirectory(path: string) {
     try {

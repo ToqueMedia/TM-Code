@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { FileTreeService } from '../services/fileTreeService';
+import { FileTreeIndexer } from '../utils/fileTreeIndex';
 import type { FileTreeNode, FileTreeFilter } from '../types/fileTree';
 
 interface FileTreeState {
@@ -25,6 +26,36 @@ interface FileTreeActions {
   updateNode: (path: string, updatedNode: Partial<FileTreeNode>) => void;
 }
 
+// FileTree indexer instance para operações O(1)
+const fileTreeIndexer = FileTreeIndexer.getInstance();
+
+// Helper function para reconstruir árvore baseada no índice
+function rebuildTreeFromIndex(rootPath: string, originalRoot: FileTreeNode): FileTreeNode | null {
+  try {
+    const index = fileTreeIndexer.getIndex(rootPath);
+    if (!index) return null;
+    
+    const rootNode = fileTreeIndexer.getNode(rootPath, rootPath);
+    if (!rootNode) return null;
+    
+    // Função recursiva para reconstruir a árvore
+    function buildNodeWithChildren(node: FileTreeNode): FileTreeNode {
+      const children = fileTreeIndexer.getChildren(rootPath, node.path);
+      if (children.length === 0) {
+        return { ...node, children: undefined };
+      }
+      
+      const rebuiltChildren = children.map(child => buildNodeWithChildren(child));
+      return { ...node, children: rebuiltChildren };
+    }
+    
+    return buildNodeWithChildren(rootNode);
+  } catch (error) {
+    console.error('Failed to rebuild tree from index:', error);
+    return originalRoot; // Fallback para árvore original
+  }
+}
+
 export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((set, get) => ({
   root: null,
   loading: false,
@@ -38,6 +69,10 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
       // Default to showing hidden files to ensure all files are visible
       const filterWithDefaults = filter || { showHidden: true };
       const root = await FileTreeService.buildFileTree(rootPath, filterWithDefaults);
+      
+      // Constrói índice para operações rápidas O(1)
+      fileTreeIndexer.buildIndex(root);
+      
       set({ root, loading: false });
     } catch (error) {
       set({ error: (error as Error).message, loading: false });
@@ -158,21 +193,29 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
     }
   },
   
-  // Real-time update methods
+  // Real-time update methods - Otimizado com indexer O(1)
   addNode: (parentPath: string, node: FileTreeNode) => {
     set(state => {
       if (!state.root) return state;
       
-      // Function to recursively add node to the tree
+      // Usa o indexer para operação O(1) se possível
+      const success = fileTreeIndexer.addNode(state.root.path, parentPath, node);
+      if (success) {
+        // Se o indexer conseguiu adicionar, reconstrói a árvore baseada no índice
+        const newRoot = rebuildTreeFromIndex(state.root.path, state.root);
+        if (newRoot) {
+          return { root: newRoot };
+        }
+      }
+      
+      // Fallback para método anterior se indexer falhar
       const addNodeToTree = (currentNode: FileTreeNode): FileTreeNode => {
         if (currentNode.path === parentPath && currentNode.type === 'directory') {
-          // Found the parent directory, add the new node
           const updatedNode = {
             ...currentNode,
             children: [...(currentNode.children || []), node]
           };
           
-          // Sort children (directories first, then alphabetically)
           updatedNode.children?.sort((a, b) => {
             if (a.type === 'directory' && b.type === 'file') return -1;
             if (a.type === 'file' && b.type === 'directory') return 1;
@@ -181,7 +224,6 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
           
           return updatedNode;
         } else if (currentNode.type === 'directory' && currentNode.children) {
-          // Recursively search in children
           const updatedChildren = currentNode.children.map(child => addNodeToTree(child));
           return {
             ...currentNode,
@@ -192,6 +234,12 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
       };
       
       const newRoot = addNodeToTree(state.root);
+      
+      // Reconstrói o índice após mudança
+      if (newRoot !== state.root) {
+        fileTreeIndexer.rebuildIndex(state.root.path, newRoot);
+      }
+      
       return { root: newRoot };
     });
   },
@@ -200,13 +248,21 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
     set(state => {
       if (!state.root) return state;
       
-      // Function to recursively remove node from the tree
+      // Usa o indexer para operação O(k) otimizada onde k = descendentes
+      const success = fileTreeIndexer.removeNode(state.root.path, path);
+      if (success) {
+        // Se o indexer conseguiu remover, reconstrói a árvore baseada no índice
+        const newRoot = rebuildTreeFromIndex(state.root.path, state.root);
+        if (newRoot) {
+          return { root: newRoot };
+        }
+      }
+      
+      // Fallback para método anterior se indexer falhar
       const removeNodeFromTree = (currentNode: FileTreeNode): FileTreeNode | null => {
         if (currentNode.path === path) {
-          // Found the node to remove
           return null;
         } else if (currentNode.type === 'directory' && currentNode.children) {
-          // Recursively search in children
           const updatedChildren = currentNode.children
             .map(child => removeNodeFromTree(child))
             .filter(child => child !== null) as FileTreeNode[];
@@ -220,7 +276,14 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
       };
       
       const newRoot = removeNodeFromTree(state.root);
-      return { root: newRoot || state.root };
+      const finalRoot = newRoot || state.root;
+      
+      // Reconstrói o índice após mudança
+      if (finalRoot !== state.root) {
+        fileTreeIndexer.rebuildIndex(state.root.path, finalRoot);
+      }
+      
+      return { root: finalRoot };
     });
   },
   
@@ -228,16 +291,24 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
     set(state => {
       if (!state.root) return state;
       
-      // Function to recursively update node in the tree
+      // Usa o indexer para operação O(1) otimizada
+      const success = fileTreeIndexer.updateNode(state.root.path, path, updatedNode);
+      if (success) {
+        // Se o indexer conseguiu atualizar, reconstrói a árvore baseada no índice
+        const newRoot = rebuildTreeFromIndex(state.root.path, state.root);
+        if (newRoot) {
+          return { root: newRoot };
+        }
+      }
+      
+      // Fallback para método anterior se indexer falhar
       const updateNodeInTree = (currentNode: FileTreeNode): FileTreeNode => {
         if (currentNode.path === path) {
-          // Found the node to update
           return {
             ...currentNode,
             ...updatedNode
           };
         } else if (currentNode.type === 'directory' && currentNode.children) {
-          // Recursively search in children
           const updatedChildren = currentNode.children.map(child => updateNodeInTree(child));
           return {
             ...currentNode,
@@ -248,6 +319,12 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
       };
       
       const newRoot = updateNodeInTree(state.root);
+      
+      // Reconstrói o índice após mudança
+      if (newRoot !== state.root) {
+        fileTreeIndexer.rebuildIndex(state.root.path, newRoot);
+      }
+      
       return { root: newRoot };
     });
   }

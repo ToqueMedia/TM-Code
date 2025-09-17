@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import { FileService } from '../services/fileService';
 import { EditorManager } from '../utils/editorManager';
 import UnsavedChangesService from '../services/unsavedChangesService';
+import { AutoSaveQueue } from '../utils/autoSaveQueue';
 
 interface EditorFile {
   path: string;
@@ -78,6 +79,7 @@ const getLanguageFromExtension = (filePath: string): string => {
 };
 
 const unsavedChangesService = UnsavedChangesService.getInstance();
+const autoSaveQueue = AutoSaveQueue.getInstance();
 
 export const useEditorRepository = create<EditorState & EditorActions>()(
   persist(
@@ -151,6 +153,12 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           if (fileIndex === -1) return state;
           
           const oldContent = state.openFiles[fileIndex].content;
+          
+          // Se o conteúdo não mudou, não faz nada
+          if (oldContent === content) {
+            return state;
+          }
+          
           const updatedFiles = [...state.openFiles];
           updatedFiles[fileIndex] = {
             ...updatedFiles[fileIndex],
@@ -158,12 +166,17 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             isDirty: true
           };
           
-          // Update undo/redo stacks
+          // Update undo/redo stacks - com limite para evitar memory leaks
           const undoStack = { ...state.undoStack };
           if (!undoStack[path]) {
             undoStack[path] = [];
           }
           undoStack[path].push(oldContent);
+          
+          // Limita o stack de undo a 50 itens
+          if (undoStack[path].length > 50) {
+            undoStack[path] = undoStack[path].slice(-50);
+          }
           
           // Clear redo stack when making new changes
           const redoStack = { ...state.redoStack };
@@ -171,6 +184,9 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           
           // Mark file as dirty
           unsavedChangesService.markFileAsDirty(path);
+          
+          // Adiciona à queue de auto-save (apenas se realmente mudou)
+          autoSaveQueue.addToQueue(path, content);
           
           return { 
             openFiles: updatedFiles,
@@ -295,6 +311,9 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         }
         
         try {
+          // Remove da queue de auto-save já que estamos salvando manualmente
+          autoSaveQueue.removeFromQueue(path);
+          
           await FileService.writeFile(path, file.content);
           
           // Update file state to mark as not dirty
@@ -328,10 +347,22 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         }
         
         try {
-          // Save all dirty files
-          await Promise.all(
-            dirtyFiles.map(file => FileService.writeFile(file.path, file.content))
-          );
+          // Remove arquivos da queue de auto-save
+          dirtyFiles.forEach(file => autoSaveQueue.removeFromQueue(file.path));
+          
+          // Save all dirty files em batches de 5 para evitar sobrecarga
+          const batchSize = 5;
+          for (let i = 0; i < dirtyFiles.length; i += batchSize) {
+            const batch = dirtyFiles.slice(i, i + batchSize);
+            await Promise.all(
+              batch.map(file => FileService.writeFile(file.path, file.content))
+            );
+            
+            // Pequena pausa entre batches
+            if (i + batchSize < dirtyFiles.length) {
+              await new Promise(resolve => setTimeout(resolve, 50));
+            }
+          }
           
           // Update file states to mark as not dirty
           set(state => {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, memo, useCallback, useMemo } from 'react';
 import { 
   Flex, 
   Text, 
@@ -27,16 +27,18 @@ import {
   FiAlertCircle,
   FiRefreshCw
 } from 'react-icons/fi';
-import { useProjectStore, autoSaveProjectState } from '../stores/projectStore';
+import { autoSaveProjectState, useProjectStore } from '../stores/projectStore';
 import { useEditorRepository } from '../stores/editorStore';
+import { useCurrentProject } from '../hooks/useProjectState';
+import { useCodeEditorState } from '../hooks/useEditorState';
 import FileTree from './ui/FileTree';
 import MonacoEditor from './ui/MonacoEditor';
 import TypeScriptLspService from '../services/typescriptLspService';
 import RecoveryService from '../services/recoveryService';
 import WindowService from '../services/windowService';
 
-// Status bar item component
-const StatusBarItem: React.FC<{ children: React.ReactNode; tooltip?: string }> = ({ 
+// Status bar item component - Memoizado para evitar re-renders
+const StatusBarItem = memo<{ children: React.ReactNode; tooltip?: string }>(({ 
   children, 
   tooltip 
 }) => (
@@ -55,17 +57,27 @@ const StatusBarItem: React.FC<{ children: React.ReactNode; tooltip?: string }> =
   >
     {children}
   </Box>
-);
+));
 
-// Tab component for editor files
-const EditorTab: React.FC<{
+StatusBarItem.displayName = 'StatusBarItem';
+
+// Tab component for editor files - Memoizado com comparação customizada
+interface EditorTabProps {
   path: string;
   name: string;
   isDirty: boolean;
   isActive: boolean;
   onClick: () => void;
   onClose: (e: React.MouseEvent) => void;
-}> = ({ path, name, isDirty, isActive, onClick, onClose }) => (
+}
+
+const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick, onClose }) => {
+  const handleClose = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onClose(e);
+  }, [onClose]);
+
+  return (
   <Flex
     alignItems="center"
     px={3}
@@ -100,7 +112,7 @@ const EditorTab: React.FC<{
       {isDirty && <FiCircle size={8} color="#58a6ff" />}
       <IconButton
         aria-label={`Close ${name}`}
-        onClick={onClose}
+        onClick={handleClose}
         variant="ghost"
         color="text.secondary"
         size="xs"
@@ -111,14 +123,27 @@ const EditorTab: React.FC<{
       </IconButton>
     </HStack>
   </Flex>
-);
+  );
+}, (prevProps, nextProps) => {
+  // Custom comparison para evitar re-renders desnecessários
+  return (
+    prevProps.path === nextProps.path &&
+    prevProps.name === nextProps.name &&
+    prevProps.isDirty === nextProps.isDirty &&
+    prevProps.isActive === nextProps.isActive
+  );
+});
 
-// Terminal tab component
-const TerminalTab: React.FC<{
+EditorTab.displayName = 'EditorTab';
+
+// Terminal tab component - Memoizado
+interface TerminalTabProps {
   name: string;
   isActive: boolean;
   onClick: () => void;
-}> = ({ name, isActive, onClick }) => (
+}
+
+const TerminalTab = memo<TerminalTabProps>(({ name, isActive, onClick }) => (
   <Flex
     alignItems="center"
     px={3}
@@ -144,57 +169,104 @@ const TerminalTab: React.FC<{
       </Text>
     </HStack>
   </Flex>
-);
+));
+
+TerminalTab.displayName = 'TerminalTab';
 
 export function CodeEditor() {
-  const { currentProject, closeProject } = useProjectStore();
-  const { openFiles, activeFile, closeFile, setActiveFile } = useEditorRepository();
-  const lspServiceRef = TypeScriptLspService.getInstance();
-  const recoveryServiceRef = RecoveryService.getInstance();
-  const windowServiceRef = WindowService.getInstance();
+  const currentProject = useCurrentProject();
+  const { 
+    openFiles, 
+    activeFile, 
+    handleFileSelect, 
+    handleCloseFile, 
+    handleSetActiveFile 
+  } = useCodeEditorState();
   
+  // Singletons com ref para evitar re-criações
+  const lspServiceRef = useMemo(() => TypeScriptLspService.getInstance(), []);
+  const recoveryServiceRef = useMemo(() => RecoveryService.getInstance(), []);
+  const windowServiceRef = useMemo(() => WindowService.getInstance(), []);
+  
+  // Ação de fechar projeto memoizada
+  const closeProject = useCallback(() => {
+    // Usar action direta do store para evitar dependência desnecessária
+    const { closeProject } = useProjectStore.getState();
+    closeProject();
+  }, []);
+  
+  // Estados locais da UI
   const [activeTerminalTab, setActiveTerminalTab] = useState('terminal');
   const [isFileTreeExpanded, setIsFileTreeExpanded] = useState(true);
   const [isTerminalExpanded, setIsTerminalExpanded] = useState(true);
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
   
+  // Refs para elementos DOM
   const fileTreeRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
+  
+  // Handlers memoizados
+  const handleCursorPositionChange = useCallback((line: number, column: number) => {
+    setCursorPosition({ line, column });
+  }, []);
+  
+  const toggleFileTree = useCallback(() => {
+    setIsFileTreeExpanded(prev => !prev);
+  }, []);
+  
+  const toggleTerminal = useCallback(() => {
+    setIsTerminalExpanded(prev => !prev);
+  }, []);
+  
+  const handleTerminalTabClick = useCallback((tab: string) => {
+    setActiveTerminalTab(tab);
+  }, []);
 
   // Initialize services when project is opened
   useEffect(() => {
-    if (currentProject) {
-      // Initialize LSP service for the project
-      lspServiceRef.initialize(currentProject.path).catch(console.error);
-      
-      // Start recovery monitoring
-      recoveryServiceRef.startRecoveryMonitoring();
-      
-      // Initialize window service
-      windowServiceRef.initialize().catch(console.error);
-      
-      // Set up window state change listener
-      const handleWindowStateChange = (event: CustomEvent) => {
-        useProjectStore.getState().setWindowState(event.detail);
-      };
-      
-      window.addEventListener('windowStateChange', handleWindowStateChange as EventListener);
-      
-      return () => {
-        window.removeEventListener('windowStateChange', handleWindowStateChange as EventListener);
-      };
-    } else {
-      // Reset LSP service when project is closed
+    if (!currentProject) {
+      // Reset services when project is closed
       lspServiceRef.reset();
-      
-      // Stop recovery monitoring
       recoveryServiceRef.stopRecoveryMonitoring();
-      
-      // Reset window service
       windowServiceRef.reset();
+      return;
     }
-  }, [currentProject]);
+
+    // Use AbortController for better cleanup
+    const abortController = new AbortController();
+    const { signal } = abortController;
+
+    // Initialize services
+    const initializeServices = async () => {
+      try {
+        await lspServiceRef.initialize(currentProject.path);
+        recoveryServiceRef.startRecoveryMonitoring();
+        await windowServiceRef.initialize();
+      } catch (error) {
+        console.error('Failed to initialize services:', error);
+      }
+    };
+
+    initializeServices();
+
+    // Set up window state change listener with abort signal
+    const handleWindowStateChange = (event: CustomEvent) => {
+      if (!signal.aborted) {
+        useProjectStore.getState().setWindowState(event.detail);
+      }
+    };
+
+    window.addEventListener('windowStateChange', handleWindowStateChange as EventListener, { signal });
+
+    // Cleanup function
+    return () => {
+      abortController.abort();
+      lspServiceRef.reset();
+      recoveryServiceRef.stopRecoveryMonitoring();
+      windowServiceRef.reset();
+    };
+  }, [currentProject, lspServiceRef, recoveryServiceRef, windowServiceRef]);
 
   // Save project state periodically with debouncing
   useEffect(() => {
@@ -206,13 +278,13 @@ export function CodeEditor() {
       autoSaveProjectState();
     });
 
-    return () => {
-      unsubscribe();
-    };
+    return unsubscribe;
   }, [currentProject]);
 
   // Handle window close event
   useEffect(() => {
+    const abortController = new AbortController();
+    
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       // Cancel the event to prompt the user
       e.preventDefault();
@@ -220,24 +292,14 @@ export function CodeEditor() {
       return ''; // Required for other browsers
     };
 
-    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('beforeunload', handleBeforeUnload, { 
+      signal: abortController.signal 
+    });
+    
     return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
+      abortController.abort();
     };
   }, []);
-
-  const handleFileSelect = (path: string) => {
-    useEditorRepository.getState().openFile(path);
-  };
-
-  const handleCloseFile = (path: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    closeFile(path);
-  };
-
-  const handleCursorPositionChange = (line: number, column: number) => {
-    setCursorPosition({ line, column });
-  };
 
   if (!currentProject) {
     return null;
@@ -332,13 +394,13 @@ export function CodeEditor() {
               <Menu.Content>
                 <Menu.Item 
                   value="toggle-sidebar" 
-                  onClick={() => setIsFileTreeExpanded(!isFileTreeExpanded)}
+                  onClick={toggleFileTree}
                 >
                   Toggle Sidebar
                 </Menu.Item>
                 <Menu.Item 
                   value="toggle-terminal" 
-                  onClick={() => setIsTerminalExpanded(!isTerminalExpanded)}
+                  onClick={toggleTerminal}
                 >
                   Toggle Terminal
                 </Menu.Item>
@@ -460,7 +522,7 @@ export function CodeEditor() {
                     variant="ghost"
                     color="text.secondary"
                     size="xs"
-                    onClick={() => setIsFileTreeExpanded(false)}
+                    onClick={toggleFileTree}
                   >
                     <FiX size={14} />
                   </IconButton>
@@ -507,7 +569,7 @@ export function CodeEditor() {
                 name={file.path.split('/').pop() || 'Untitled'}
                 isDirty={file.isDirty}
                 isActive={activeFile === file.path}
-                onClick={() => setActiveFile(file.path)}
+                onClick={() => handleSetActiveFile(file.path)}
                 onClose={(e) => handleCloseFile(file.path, e)}
               />
             ))}
@@ -581,17 +643,17 @@ export function CodeEditor() {
             <TerminalTab
               name="Terminal"
               isActive={activeTerminalTab === 'terminal'}
-              onClick={() => setActiveTerminalTab('terminal')}
+              onClick={() => handleTerminalTabClick('terminal')}
             />
             <TerminalTab
               name="Output"
               isActive={activeTerminalTab === 'output'}
-              onClick={() => setActiveTerminalTab('output')}
+              onClick={() => handleTerminalTabClick('output')}
             />
             <TerminalTab
               name="Debug Console"
               isActive={activeTerminalTab === 'debug'}
-              onClick={() => setActiveTerminalTab('debug')}
+              onClick={() => handleTerminalTabClick('debug')}
             />
           </Flex>
           

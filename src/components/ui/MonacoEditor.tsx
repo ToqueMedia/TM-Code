@@ -1,9 +1,8 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useMemo, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
-import { useEditorRepository } from '../../stores/editorStore';
+import { useMonacoEditorState } from '../../hooks/useEditorState';
 import type { editor } from 'monaco-editor';
 import { KeyCode, KeyMod } from 'monaco-editor';
-import { FileService } from '../../services/fileService';
 import TypeScriptLspService from '../../services/typescriptLspService';
 
 // Configure TypeScript language service
@@ -48,14 +47,20 @@ interface MonacoEditorProps {
 }
 
 const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChange }) => {
-  const { openFiles, updateFileContent, setCursorPosition, undo, redo, updateEditorState } = useEditorRepository();
+  const {
+    fileState,
+    handleContentChange,
+    handleCursorChange,
+    handleSave,
+    handleUndo,
+    handleRedo,
+  } = useMonacoEditorState(path);
+  
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
-  const lspServiceRef = useRef(TypeScriptLspService.getInstance());
+  const lspServiceRef = useMemo(() => TypeScriptLspService.getInstance(), []);
   
-  const file = openFiles.find(f => f.path === path);
-  
-  // Determine language based on file extension
-  const getLanguage = (filePath: string): string => {
+  // Determine language based on file extension - Memoizado
+  const getLanguage = useCallback((filePath: string): string => {
     const extension = filePath.split('.').pop()?.toLowerCase() || '';
     switch (extension) {
       case 'js':
@@ -95,75 +100,71 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       default:
         return 'plaintext';
     }
-  };
+  }, []);
   
-  const handleEditorDidMount = (editor: editor.IStandaloneCodeEditor) => {
+  const handleEditorDidMount = useCallback((editor: editor.IStandaloneCodeEditor) => {
     editorRef.current = editor;
     
     // Set up cursor position tracking
-    editor.onDidChangeCursorPosition((e) => {
+    const cursorDisposable = editor.onDidChangeCursorPosition((e: editor.ICursorPositionChangedEvent) => {
       const position = e.position;
-      setCursorPosition(path, position.lineNumber, position.column);
+      handleCursorChange(position.lineNumber, position.column);
       if (onCursorPositionChange) {
         onCursorPositionChange(position.lineNumber, position.column);
       }
-      
-      // Save cursor position to editor state
-      updateEditorState(path, {
-        cursorPosition: { line: position.lineNumber, column: position.column }
-      });
     });
     
     // Set up keyboard shortcuts for undo/redo
     editor.addCommand(KeyMod.CtrlCmd | KeyCode.KeyZ, () => {
-      undo(path);
+      handleUndo();
     });
     
     editor.addCommand(KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyZ, () => {
-      redo(path);
+      handleRedo();
     });
     
     // On Windows/Linux, Ctrl+Y is redo
     editor.addCommand(KeyMod.CtrlCmd | KeyCode.KeyY, () => {
-      redo(path);
+      handleRedo();
     });
     
     // Save file with Ctrl+S
     editor.addCommand(KeyMod.CtrlCmd | KeyCode.KeyS, async () => {
       try {
-        // Get the current file content from the editor state, not from the closure
-        const currentFile = openFiles.find(f => f.path === path);
-        if (currentFile) {
-          await FileService.writeFile(path, currentFile.content);
-          // Update file state to mark as not dirty
-          updateEditorState(path, { isDirty: false });
-          
-          // Update LSP service with new content
-          await lspServiceRef.current.updateFileContent(path, currentFile.content);
+        await handleSave();
+        // Update LSP service with new content
+        if (fileState?.content) {
+          await lspServiceRef.updateFileContent(path, fileState.content);
         }
       } catch (error) {
         console.error('Failed to save file:', error);
       }
     });
     
-    // Trigger auto-formatting on save
-    editor.onDidBlurEditorText(async () => {
+    // Trigger auto-formatting on blur
+    const blurDisposable = editor.onDidBlurEditorText(async () => {
       try {
         await editor.getAction('editor.action.formatDocument')?.run();
       } catch (error) {
         console.error('Failed to format document:', error);
       }
     });
-  };
+    
+    // Store disposables for cleanup
+    return () => {
+      cursorDisposable?.dispose();
+      blurDisposable?.dispose();
+    };
+  }, [handleCursorChange, onCursorPositionChange, handleUndo, handleRedo, handleSave, fileState, lspServiceRef, path]);
   
-  const handleEditorChange = (value: string | undefined) => {
+  const handleEditorChange = useCallback((value: string | undefined) => {
     if (value !== undefined) {
-      updateFileContent(path, value);
+      handleContentChange(value);
       
       // Update LSP service with new content
-      lspServiceRef.current.updateFileContent(path, value);
+      lspServiceRef.updateFileContent(path, value);
     }
-  };
+  }, [handleContentChange, lspServiceRef, path]);
   
   // Focus the editor when it becomes active
   useEffect(() => {
@@ -173,7 +174,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   }, [path]);
   
   // Early return must come after all hooks
-  if (!file) {
+  if (!fileState) {
     return (
       <div style={{ 
         display: 'flex', 
@@ -188,107 +189,110 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     );
   }
   
-  // Get the language for this file
-  const language = getLanguage(path);
+  // Get the language for this file - Memoizado
+  const language = useMemo(() => getLanguage(path), [getLanguage, path]);
+  
+  // Monaco editor options - Memoizado para evitar re-criação
+  const editorOptions = useMemo(() => ({
+    automaticLayout: true,
+    minimap: { 
+      enabled: true,
+      showSlider: 'always' as const,
+      renderCharacters: false
+    },
+    scrollBeyondLastLine: false,
+    fontSize: 14,
+    tabSize: 2,
+    insertSpaces: true,
+    wordWrap: 'on' as const,
+    smoothScrolling: true,
+    cursorBlinking: 'smooth' as const,
+    fontLigatures: true,
+    suggest: {
+      showKeywords: true,
+      showSnippets: true,
+      showClasses: true,
+      showInterfaces: true,
+      showFunctions: true,
+      showVariables: true,
+      showProperties: true,
+      showEvents: true,
+      showOperators: true,
+      showUnits: true,
+      showValues: true,
+      showConstants: true,
+      showEnums: true,
+      showEnumMembers: true,
+      showWords: true,
+      showColors: true,
+      showFiles: true,
+      showReferences: true,
+      showFolders: true,
+      showTypeParameters: true,
+      showUsers: true,
+      showIssues: true
+    },
+    quickSuggestions: {
+      other: 'on' as const,
+      comments: 'off' as const,
+      strings: 'off' as const
+    },
+    formatOnType: true,
+    formatOnPaste: true,
+    autoIndent: 'full' as const,
+    detectIndentation: true,
+    renderWhitespace: 'boundary' as const,
+    renderControlCharacters: false,
+    renderLineHighlight: 'all' as const,
+    scrollbar: {
+      vertical: 'auto' as const,
+      horizontal: 'auto' as const,
+      verticalScrollbarSize: 10,
+      horizontalScrollbarSize: 10
+    },
+    find: {
+      addExtraSpaceOnTop: false,
+      autoFindInSelection: 'never' as const,
+      seedSearchStringFromSelection: 'never' as const
+    },
+    suggestOnTriggerCharacters: true,
+    acceptSuggestionOnCommitCharacter: true,
+    acceptSuggestionOnEnter: 'on' as const,
+    accessibilitySupport: 'auto' as const,
+    codeLens: true,
+    colorDecorators: true,
+    copyWithSyntaxHighlighting: true,
+    hover: {
+      enabled: true,
+      delay: 300,
+      sticky: true
+    },
+    links: true,
+    multiCursorModifier: 'alt' as const,
+    multiCursorPaste: 'spread' as const,
+    occurrencesHighlight: 'singleFile' as const,
+    overviewRulerBorder: true,
+    selectionHighlight: true,
+    showFoldingControls: 'mouseover' as const,
+    folding: true,
+    foldingHighlight: true,
+    foldingStrategy: 'auto' as const,
+    showUnused: true,
+    snippetSuggestions: 'top' as const,
+    lineHeight: 22,
+    mouseWheelZoom: true,
+    stickyTabStops: true
+  }), []);
   
   return (
     <Editor
       height="100%"
       language={language}
-      value={file.content}
+      value={fileState.content}
       onChange={handleEditorChange}
       onMount={handleEditorDidMount}
       theme="vs-dark"
-      options={{
-        automaticLayout: true,
-        minimap: { 
-          enabled: true,
-          showSlider: 'always',
-          renderCharacters: false
-        },
-        scrollBeyondLastLine: false,
-        fontSize: 14,
-        tabSize: 2,
-        insertSpaces: true,
-        wordWrap: 'on',
-        smoothScrolling: true,
-        cursorBlinking: 'smooth',
-        fontLigatures: true,
-        suggest: {
-          showKeywords: true,
-          showSnippets: true,
-          showClasses: true,
-          showInterfaces: true,
-          showFunctions: true,
-          showVariables: true,
-          showProperties: true,
-          showEvents: true,
-          showOperators: true,
-          showUnits: true,
-          showValues: true,
-          showConstants: true,
-          showEnums: true,
-          showEnumMembers: true,
-          showWords: true,
-          showColors: true,
-          showFiles: true,
-          showReferences: true,
-          showFolders: true,
-          showTypeParameters: true,
-          showUsers: true,
-          showIssues: true
-        },
-        quickSuggestions: {
-          other: 'on',
-          comments: 'off',
-          strings: 'off'
-        },
-        formatOnType: true,
-        formatOnPaste: true,
-        autoIndent: 'full',
-        detectIndentation: true,
-        renderWhitespace: 'boundary',
-        renderControlCharacters: false,
-        renderLineHighlight: 'all',
-        scrollbar: {
-          vertical: 'auto',
-          horizontal: 'auto',
-          verticalScrollbarSize: 10,
-          horizontalScrollbarSize: 10
-        },
-        find: {
-          addExtraSpaceOnTop: false,
-          autoFindInSelection: 'never',
-          seedSearchStringFromSelection: 'never'
-        },
-        suggestOnTriggerCharacters: true,
-        acceptSuggestionOnCommitCharacter: true,
-        acceptSuggestionOnEnter: 'on',
-        accessibilitySupport: 'auto',
-        codeLens: true,
-        colorDecorators: true,
-        copyWithSyntaxHighlighting: true,
-        hover: {
-          enabled: true,
-          delay: 300,
-          sticky: true
-        },
-        links: true,
-        multiCursorModifier: 'alt',
-        multiCursorPaste: 'spread',
-        occurrencesHighlight: 'singleFile',
-        overviewRulerBorder: true,
-        selectionHighlight: true,
-        showFoldingControls: 'mouseover',
-        folding: true,
-        foldingHighlight: true,
-        foldingStrategy: 'auto',
-        showUnused: true,
-        snippetSuggestions: 'top',
-        lineHeight: 22,
-        mouseWheelZoom: true,
-        stickyTabStops: true
-      }}
+      options={editorOptions}
     />
   );
 };

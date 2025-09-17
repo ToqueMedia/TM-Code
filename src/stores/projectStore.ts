@@ -40,9 +40,10 @@ interface ProjectStore {
   setError: (error: string | null) => void;
 }
 
-// Debounce function for auto-saving
-let saveTimeout: number | null = null;
-const DEBOUNCE_DELAY = 1000; // 1 second
+import { AutoSaveQueue } from '../utils/autoSaveQueue';
+
+// Auto-save queue instance
+const autoSaveQueue = AutoSaveQueue.getInstance();
 
 // File watcher instance
 const fileWatcher = new ProjectFileWatcher();
@@ -391,18 +392,46 @@ export const useProjectStore = create<ProjectStore>()(
   )
 );
 
-// Auto-save function with debouncing
-export const autoSaveProjectState = () => {
-  // Clear any existing timeout
-  if (saveTimeout) {
-    clearTimeout(saveTimeout);
+// Auto-save function with queue optimization
+export function autoSaveProjectState(): void {
+  const { currentProject } = useProjectStore.getState();
+  if (!currentProject) {
+    return;
   }
+
+  // Serialize project state to JSON for saving
+  const projectState = {
+    version: "1.0.0",
+    openFiles: useProjectStore.getState().openFiles,
+    activeFile: useProjectStore.getState().activeFile,
+    cursorPositions: useProjectStore.getState().cursorPositions,
+    windowState: useProjectStore.getState().windowState,
+    timestamp: Date.now()
+  };
+
+  const content = JSON.stringify(projectState, null, 2);
+  const statePath = `${currentProject.path}/.toquemedia/project-state.json`;
   
-  // Set a new timeout
-  saveTimeout = window.setTimeout(() => {
-    const { currentProject } = useProjectStore.getState();
-    if (currentProject) {
-      useProjectStore.getState().saveProjectState().catch(console.error);
-    }
-  }, DEBOUNCE_DELAY);
-};
+  // Adiciona à queue para salvamento otimizado
+  autoSaveQueue.addToQueue(statePath, content);
+}
+
+// Força o salvamento imediato de todos os arquivos pendentes
+export async function flushAutoSave(): Promise<void> {
+  await autoSaveQueue.flushAll();
+}
+
+// Força o salvamento de um arquivo específico
+export async function flushAutoSaveFile(path: string): Promise<void> {
+  await autoSaveQueue.flushFile(path);
+}
+
+// Retorna estatísticas da queue de auto-save
+export function getAutoSaveStats(): {
+  queueSize: number;
+  isProcessing: boolean;
+  oldestFile?: string;
+  newestFile?: string;
+} {
+  return autoSaveQueue.getStats();
+}
