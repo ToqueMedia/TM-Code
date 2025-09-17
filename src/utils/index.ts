@@ -1,4 +1,4 @@
-export { MockFileWatcher } from './fileWatcher';
+export { FileWatcher as MockFileWatcher } from './fileWatcher';
 export { UnsavedChangesManager } from './unsavedChangesManager';
 export { WindowStateManager } from './windowStateManager';
 export { ProjectValidator } from './projectValidator';

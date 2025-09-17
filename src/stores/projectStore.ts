@@ -4,6 +4,12 @@ import { ProjectInfo, RecentProject, ProjectState, WindowState } from '../types/
 import { invoke } from '@tauri-apps/api/core';
 import { UnsavedChangesManager } from '../utils/unsavedChangesManager';
 import { EditorManager } from '../utils/editorManager';
+import { ProjectStatusMonitor } from '../utils/projectStatusMonitor';
+import { ProjectFileWatcher } from '../utils/projectFileWatcher';
+import { WindowTitleManager } from '../utils/windowTitleManager';
+import { useEditorRepository } from './editorStore';
+import RecoveryService from '../services/recoveryService';
+import WindowService from '../services/windowService';
 
 interface ProjectStore {
   currentProject: ProjectInfo | null;
@@ -29,9 +35,27 @@ interface ProjectStore {
   saveProjectState: () => Promise<void>;
   loadProjectState: (projectId: string) => Promise<void>;
   setWindowState: (state: WindowState) => void;
+  updateWindowState: () => Promise<void>;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
 }
+
+import { AutoSaveQueue } from '../utils/autoSaveQueue';
+
+// Auto-save queue instance
+const autoSaveQueue = AutoSaveQueue.getInstance();
+
+// File watcher instance
+const fileWatcher = new ProjectFileWatcher();
+
+// Window title manager instance
+const windowTitleManager = WindowTitleManager.getInstance();
+
+// Recovery service instance
+const recoveryService = RecoveryService.getInstance();
+
+// Window service instance
+const windowService = WindowService.getInstance();
 
 export const useProjectStore = create<ProjectStore>()(
   persist(
@@ -61,6 +85,23 @@ export const useProjectStore = create<ProjectStore>()(
             loading: false
           });
           
+          // Check for recovery state before loading project state
+          const hasRecovery = await recoveryService.hasRecoveryState(projectInfo.id);
+          if (hasRecovery) {
+            console.warn(`Recovery state found for project ${projectInfo.id}. Consider recovering before loading.`);
+            // In a real implementation, you might want to prompt the user
+          }
+          
+          // Start monitoring project status
+          const monitor = ProjectStatusMonitor.getInstance();
+          monitor.startMonitoring();
+          
+          // Start watching project files
+          fileWatcher.startWatching(path);
+          
+          // Start managing window title
+          windowTitleManager.startManaging();
+          
           // Load project state if exists
           try {
             await get().loadProjectState(projectInfo.id);
@@ -84,6 +125,16 @@ export const useProjectStore = create<ProjectStore>()(
             currentProject: projectInfo,
             loading: false
           });
+          
+          // Start monitoring project status
+          const monitor = ProjectStatusMonitor.getInstance();
+          monitor.startMonitoring();
+          
+          // Start watching project files
+          fileWatcher.startWatching(path);
+          
+          // Start managing window title
+          windowTitleManager.startManaging();
         } catch (error: any) {
           set({ 
             loading: false, 
@@ -115,6 +166,19 @@ export const useProjectStore = create<ProjectStore>()(
         if (currentProject) {
           get().saveProjectState().catch(console.error);
         }
+        
+        // Stop monitoring
+        const monitor = ProjectStatusMonitor.getInstance();
+        monitor.stopMonitoring();
+        
+        // Stop file watching
+        fileWatcher.stopWatching();
+        
+        // Stop managing window title
+        windowTitleManager.stopManaging();
+        
+        // Stop recovery monitoring
+        recoveryService.stopRecoveryMonitoring();
         
         set({ 
           currentProject: null,
@@ -198,30 +262,52 @@ export const useProjectStore = create<ProjectStore>()(
             }
           });
           
-          // Get editor states from editor manager
+          // Get editor states from editor manager and editor repository
           const editorManager = EditorManager.getInstance();
+          const editorRepository = useEditorRepository.getState();
           const editorStates: Record<string, any> = {};
+          
           for (const filePath of openFiles) {
-            const editorState = editorManager.getEditorState(filePath);
-            if (editorState) {
-              editorStates[filePath] = editorState;
-            }
+            // Get state from editor manager (UI state)
+            const managerState = editorManager.getEditorState(filePath);
+            
+            // Get state from editor repository (content, cursor, undo/redo)
+            const repoState = editorRepository.getEditorState(filePath);
+            
+            // Combine both states
+            editorStates[filePath] = {
+              ...managerState,
+              ...repoState
+            };
           }
           
-          const state: ProjectState = {
+          const projectState: ProjectState = {
+            version: "1.0.0",
             openFiles,
             activeFile,
-            cursorPositions: {}, // We would populate this with actual cursor positions
+            cursorPositions: editorRepository.cursorPositions,
             editorStates,
             windowState
           };
           
+          // Save window state
+          await windowService.saveWindowState();
+          
+          // Save recovery state first
+          await recoveryService.saveRecoveryState(currentProject.id, projectState);
+          
+          // Then save the main project state
           await invoke('save_project_state', { 
             projectId: currentProject.id, 
-            state 
+            state: projectState
           });
+          
+          // Clear recovery state after successful save
+          await recoveryService.clearRecoveryState(currentProject.id);
         } catch (error) {
           console.error('Failed to save project state:', error);
+          // Don't clear recovery state if save failed
+          throw error;
         }
       },
       
@@ -236,11 +322,37 @@ export const useProjectStore = create<ProjectStore>()(
             loading: false
           });
           
-          // Load editor states into editor manager
+          // Restore window state
+          await windowService.restoreWindowState(state.windowState);
+          
+          // Load editor states into editor manager and editor repository
           const editorManager = EditorManager.getInstance();
+          const editorRepository = useEditorRepository.getState();
+          
           Object.entries(state.editorStates).forEach(([filePath, editorState]) => {
+            // Load state into editor manager (UI state)
             editorManager.updateEditorState(filePath, editorState);
+            
+            // Load state into editor repository (content, cursor, undo/redo)
+            if (editorState.cursorPosition) {
+              editorRepository.updateEditorState(filePath, {
+                cursorPosition: editorState.cursorPosition
+              });
+            }
           });
+          
+          // Load cursor positions
+          if (state.cursorPositions) {
+            Object.entries(state.cursorPositions).forEach(([filePath, position]) => {
+              editorRepository.setCursorPosition(filePath, position[0], position[1]);
+            });
+          }
+          
+          // Handle version upgrades if needed
+          if (state.version !== "1.0.0") {
+            console.warn(`Project state version mismatch. Expected: 1.0.0, Actual: ${state.version}`);
+            // In a real implementation, you would handle version upgrades here
+          }
         } catch (error: any) {
           set({ 
             loading: false, 
@@ -251,6 +363,15 @@ export const useProjectStore = create<ProjectStore>()(
       
       setWindowState: (state: WindowState) => {
         set({ windowState: state });
+      },
+      
+      updateWindowState: async () => {
+        try {
+          const windowState = await windowService.getCurrentWindowState();
+          set({ windowState });
+        } catch (error) {
+          console.error('Failed to update window state:', error);
+        }
       },
       
       setLoading: (loading: boolean) => {
@@ -270,3 +391,47 @@ export const useProjectStore = create<ProjectStore>()(
     }
   )
 );
+
+// Auto-save function with queue optimization
+export function autoSaveProjectState(): void {
+  const { currentProject } = useProjectStore.getState();
+  if (!currentProject) {
+    return;
+  }
+
+  // Serialize project state to JSON for saving
+  const projectState = {
+    version: "1.0.0",
+    openFiles: useProjectStore.getState().openFiles,
+    activeFile: useProjectStore.getState().activeFile,
+    cursorPositions: useProjectStore.getState().cursorPositions,
+    windowState: useProjectStore.getState().windowState,
+    timestamp: Date.now()
+  };
+
+  const content = JSON.stringify(projectState, null, 2);
+  const statePath = `${currentProject.path}/.toquemedia/project-state.json`;
+  
+  // Adiciona à queue para salvamento otimizado
+  autoSaveQueue.addToQueue(statePath, content);
+}
+
+// Força o salvamento imediato de todos os arquivos pendentes
+export async function flushAutoSave(): Promise<void> {
+  await autoSaveQueue.flushAll();
+}
+
+// Força o salvamento de um arquivo específico
+export async function flushAutoSaveFile(path: string): Promise<void> {
+  await autoSaveQueue.flushFile(path);
+}
+
+// Retorna estatísticas da queue de auto-save
+export function getAutoSaveStats(): {
+  queueSize: number;
+  isProcessing: boolean;
+  oldestFile?: string;
+  newestFile?: string;
+} {
+  return autoSaveQueue.getStats();
+}

@@ -1,46 +1,79 @@
 // src/App.tsx
-import React from 'react'
-import { Provider } from '@/components/ui/provider'
-import WelcomeScreen from './components/WelcomeScreen'
-import Editor from './components/Editor'
+import WelcomeScreen from './components/WelcomeScreen';
+import { CodeEditor } from './components/CodeEditor';
+import { useProjectStore } from './stores/projectStore';
+import { NewProjectDialog } from './components/dialogs/NewProjectDialog';
+import { useDialog } from './hooks/useDialog';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { useEffect, useState } from 'react';
 
-const App: React.FC = () => {
-  const [currentProject, setCurrentProject] = React.useState<{name: string, file: string} | null>(null)
+function App() {
+  const { currentProject, openProject, recentProjects } = useProjectStore();
+  const newProjectDialog = useDialog();
+  const [initializing, setInitializing] = useState(true);
+  
+  // Set up keyboard shortcuts
+  useKeyboardShortcuts();
 
-  const handleOpenProject = () => {
-    // In a real implementation, this would open a file picker dialog
-    // For demonstration purposes, we'll just set a mock project
-    setCurrentProject({
-      name: 'Discord Bot API',
-      file: 'bot.py'
-    })
-  }
+  useEffect(() => {
+    // Check if there's a recent project to open automatically
+    const initializeApp = async () => {
+      if (!currentProject && recentProjects.length > 0) {
+        // Try to open the most recent project
+        const lastProject = recentProjects[0];
+        if (lastProject.path) {
+          try {
+            await openProject(lastProject.path);
+          } catch (error) {
+            console.error('Failed to open last project:', error);
+          }
+        }
+      }
+      setInitializing(false);
+    };
 
-  const handleCreateProject = (projectData: any) => {
-    // In a real implementation, this would create a new project
-    // For demonstration purposes, we'll just set a mock project
-    setCurrentProject({
-      name: projectData.name || 'New Project',
-      file: 'index.ts'
-    })
+    initializeApp();
+  }, [currentProject, openProject, recentProjects]);
+
+  const handleOpenProject = (path?: string) => {
+    if (path) {
+      openProject(path);
+    }
+  };
+
+  // Show loading state while initializing
+  if (initializing) {
+    return (
+      <div style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        height: '100vh',
+        backgroundColor: '#0a0e13',
+        color: '#e6edf3'
+      }}>
+        Initializing...
+      </div>
+    );
   }
 
   return (
-    <Provider>
+    <>
       {currentProject ? (
-        <Editor 
-          projectName={currentProject.name} 
-          fileName={currentProject.file} 
-          filePath={`~/Projects/${currentProject.name}/${currentProject.file}`}
-        />
+        <CodeEditor />
       ) : (
         <WelcomeScreen 
-          onOpenProject={handleOpenProject} 
-          onCreateProject={handleCreateProject} 
+          onOpenProject={handleOpenProject}
+          onCreateProject={newProjectDialog.open}
         />
       )}
-    </Provider>
-  )
+      
+      <NewProjectDialog 
+        isOpen={newProjectDialog.isOpen}
+        onClose={newProjectDialog.close}
+      />
+    </>
+  );
 }
 
-export default App
+export default App;

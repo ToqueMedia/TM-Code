@@ -32,15 +32,20 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
       const validation = await ProjectValidator.validateProjectPath(projectPath);
       if (!validation.valid) {
         setError(validation.error || 'Invalid project directory. Please select a valid project folder.');
+        setIsLoading(false);
         return;
       }
       
       await openProject(projectPath);
       onClose();
       setProjectPath('');
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('Failed to open project:', error);
-      setError('Failed to open project. Please try again.');
+      if (error instanceof Error) {
+        setError(error.message || 'Failed to open project. Please try again.');
+      } else {
+        setError('Failed to open project. Please try again.');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -56,7 +61,7 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
       if (selected) {
         setProjectPath(selected as string);
       }
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('Failed to open directory dialog:', error);
     }
   };
@@ -66,34 +71,90 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
       <Portal>
         <Dialog.Backdrop />
         <Dialog.Positioner>
-          <Dialog.Content>
-            <Dialog.Header>
+          <Dialog.Content
+            bg="gray.800"
+            color="white"
+            border="1px solid"
+            borderColor="gray.600"
+          >
+            <Dialog.Header
+              bg="gray.700"
+              borderBottom="1px solid"
+              borderColor="gray.600"
+              color="white"
+            >
               <Dialog.Title>Open Project</Dialog.Title>
             </Dialog.Header>
             
-            <Dialog.Body pb={6}>
+            <Dialog.Body 
+              pb={6}
+              bg="gray.800"
+            >
               <Field.Root>
-                <Field.Label>Project Path</Field.Label>
+                <Field.Label 
+                  color="white"
+                  fontWeight="600"
+                  fontSize="14px"
+                >
+                  Project Path
+                </Field.Label>
                 <Input
                   value={projectPath}
                   onChange={(e) => setProjectPath(e.target.value)}
                   placeholder="~/Projects/my-project"
                   mb={2}
+                  bg="gray.700"
+                  color="white"
+                  border="1px solid"
+                  borderColor="gray.600"
+                  _focus={{
+                    borderColor: "blue.500",
+                    boxShadow: "0 0 0 2px rgba(88, 166, 255, 0.3)"
+                  }}
                 />
-                <Button size="sm" variant="outline" onClick={handleBrowse}>
+                <Button 
+                  size="sm" 
+                  variant="outline"
+                  onClick={handleBrowse}
+                  color="white"
+                  borderColor="gray.600"
+                  _hover={{
+                    bg: "rgba(88, 166, 255, 0.1)",
+                    borderColor: "blue.500"
+                  }}
+                >
                   Browse
                 </Button>
               </Field.Root>
               
               {error && (
-                <Field.ErrorText color="red.400" mt={2}>
-                  {error}
-                </Field.ErrorText>
+                <Field.Root>
+                  <Field.ErrorText 
+                    color="red.400" 
+                    mt={2}
+                    fontSize="13px"
+                  >
+                    {error}
+                  </Field.ErrorText>
+                </Field.Root>
               )}
             </Dialog.Body>
 
-            <Dialog.Footer>
-              <Button variant="outline" onClick={onClose}>
+            <Dialog.Footer
+              bg="gray.700"
+              borderTop="1px solid"
+              borderColor="gray.600"
+            >
+              <Button 
+                variant="outline"
+                onClick={onClose}
+                color="white"
+                borderColor="gray.600"
+                _hover={{
+                  bg: "rgba(255, 255, 255, 0.1)",
+                  borderColor: "gray.400"
+                }}
+              >
                 Cancel
               </Button>
               <Button
@@ -102,6 +163,16 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
                 loading={isLoading}
                 loadingText="Opening..."
                 disabled={!projectPath.trim()}
+                bg="blue.500"
+                color="white"
+                _hover={{
+                  bg: "blue.600"
+                }}
+                _disabled={{
+                  bg: "blue.500",
+                  opacity: 0.5,
+                  cursor: "not-allowed"
+                }}
               >
                 Open Project
               </Button>
