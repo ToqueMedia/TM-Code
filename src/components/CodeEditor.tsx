@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, memo, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, memo, useCallback, useMemo, Suspense, lazy } from 'react';
 import { 
   Flex, 
   Text, 
@@ -8,7 +8,8 @@ import {
   Box,
   Menu,
   ScrollArea,
-  Separator
+  Separator,
+  Spinner
 } from '@chakra-ui/react';
 import { 
   FiX, 
@@ -25,17 +26,43 @@ import {
   FiCode,
   FiPackage,
   FiAlertCircle,
-  FiRefreshCw
+  FiRefreshCw,
+  FiCpu
 } from 'react-icons/fi';
 import { autoSaveProjectState, useProjectStore } from '../stores/projectStore';
 import { useEditorRepository } from '../stores/editorStore';
 import { useCurrentProject } from '../hooks/useProjectState';
 import { useCodeEditorState } from '../hooks/useEditorState';
-import FileTree from './ui/FileTree';
-import MonacoEditor from './ui/MonacoEditor';
 import TypeScriptLspService from '../services/typescriptLspService';
 import RecoveryService from '../services/recoveryService';
 import WindowService from '../services/windowService';
+
+// Lazy load componentes pesados
+const FileTree = lazy(() => import('./ui/FileTree'));
+const MonacoEditor = lazy(() => import('./ui/MonacoEditor'));
+const FileTreeWorkerPanel = lazy(() => import('./ui/FileTreeWorkerPanel'));
+const PerformanceStatus = lazy(() => import('./ui/PerformanceStatus'));
+
+// Loading fallbacks para componentes lazy loaded
+const FileTreeSkeleton = () => (
+  <Box p={4} w="250px">
+    <Spinner size="sm" mr={2} />
+    <Text fontSize="sm" color="text.muted">Loading file tree...</Text>
+  </Box>
+);
+
+const EditorSkeleton = () => (
+  <Flex 
+    flex={1} 
+    align="center" 
+    justify="center" 
+    direction="column"
+    gap={2}
+  >
+    <Spinner size="lg" />
+    <Text fontSize="sm" color="text.muted">Loading editor...</Text>
+  </Flex>
+);
 
 // Status bar item component - Memoizado para evitar re-renders
 const StatusBarItem = memo<{ children: React.ReactNode; tooltip?: string }>(({ 
@@ -199,6 +226,7 @@ export function CodeEditor() {
   const [activeTerminalTab, setActiveTerminalTab] = useState('terminal');
   const [isFileTreeExpanded, setIsFileTreeExpanded] = useState(true);
   const [isTerminalExpanded, setIsTerminalExpanded] = useState(true);
+  const [isWorkerPanelVisible, setIsWorkerPanelVisible] = useState(false);
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
   
   // Refs para elementos DOM
@@ -221,6 +249,10 @@ export function CodeEditor() {
   
   const handleTerminalTabClick = useCallback((tab: string) => {
     setActiveTerminalTab(tab);
+  }, []);
+  
+  const toggleWorkerPanel = useCallback(() => {
+    setIsWorkerPanelVisible(prev => !prev);
   }, []);
 
   // Initialize services when project is opened
@@ -404,6 +436,12 @@ export function CodeEditor() {
                 >
                   Toggle Terminal
                 </Menu.Item>
+                <Menu.Item 
+                  value="toggle-worker-panel" 
+                  onClick={toggleWorkerPanel}
+                >
+                  Toggle Worker Panel
+                </Menu.Item>
               </Menu.Content>
             </Menu.Positioner>
           </Menu.Root>
@@ -437,6 +475,15 @@ export function CodeEditor() {
             size="sm" 
           >
             <FiSearch />
+          </IconButton>
+          <IconButton 
+            aria-label="Worker Panel" 
+            variant="ghost" 
+            size="sm"
+            onClick={toggleWorkerPanel}
+            bg={isWorkerPanelVisible ? 'whiteAlpha.200' : 'transparent'}
+          >
+            <FiCpu />
           </IconButton>
           <IconButton 
             aria-label="Notifications" 
@@ -533,7 +580,9 @@ export function CodeEditor() {
             {/* File Tree */}
             <ScrollArea.Root flex="1" overflowY="auto">
               <ScrollArea.Viewport p={2}>
-                <FileTree rootPath={currentProject.path} onFileSelect={handleFileSelect} />
+                <Suspense fallback={<FileTreeSkeleton />}>
+                  <FileTree rootPath={currentProject.path} onFileSelect={handleFileSelect} />
+                </Suspense>
               </ScrollArea.Viewport>
               <ScrollArea.Scrollbar 
                 orientation="vertical"
@@ -593,10 +642,12 @@ export function CodeEditor() {
             overflow="hidden"
           >
             {activeFile ? (
-              <MonacoEditor 
-                path={activeFile} 
-                onCursorPositionChange={handleCursorPositionChange} 
-              />
+              <Suspense fallback={<EditorSkeleton />}>
+                <MonacoEditor 
+                  path={activeFile} 
+                  onCursorPositionChange={handleCursorPositionChange} 
+                />
+              </Suspense>
             ) : (
               <Flex
                 flex="1"
@@ -765,6 +816,12 @@ export function CodeEditor() {
         </HStack>
         
         <HStack gap={0} height="100%" marginLeft="auto">
+          <Suspense fallback={null}>
+            <PerformanceStatus compact />
+          </Suspense>
+          
+          <Separator orientation="vertical" height="16px" mx={1} />
+          
           <StatusBarItem tooltip="Errors and warnings">
             <FiAlertCircle size={12} color="#f77f00" />
             <Text>2</Text>
@@ -784,6 +841,14 @@ export function CodeEditor() {
           </StatusBarItem>
         </HStack>
       </Flex>
+      
+      {/* Web Worker Panel */}
+      <Suspense fallback={null}>
+        <FileTreeWorkerPanel 
+          isVisible={isWorkerPanelVisible}
+          onClose={() => setIsWorkerPanelVisible(false)}
+        />
+      </Suspense>
     </Flex>
   );
 }

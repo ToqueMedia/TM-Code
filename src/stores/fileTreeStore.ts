@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { FileTreeService } from '../services/fileTreeService';
 import { FileTreeIndexer } from '../utils/fileTreeIndex';
-import type { FileTreeNode, FileTreeFilter } from '../types/fileTree';
+import { useFileTreeWorkerStore, FileNode } from './fileTreeWorkerStore';
+import type { FileTreeNode, FileTreeFilter, FileMetadata } from '../types/fileTree';
 
 interface FileTreeState {
   root: FileTreeNode | null;
@@ -9,6 +10,12 @@ interface FileTreeState {
   error: string | null;
   expandedPaths: Set<string>;
   selectedPath: string | null;
+  processingStats: {
+    lastProcessingTime?: number;
+    nodeCount?: number;
+  } | null;
+  searchResults: FileTreeNode[];
+  isProcessingInBackground: boolean;
 }
 
 interface FileTreeActions {
@@ -24,10 +31,62 @@ interface FileTreeActions {
   addNode: (parentPath: string, node: FileTreeNode) => void;
   removeNode: (path: string) => void;
   updateNode: (path: string, updatedNode: Partial<FileTreeNode>) => void;
+  // Web Worker methods
+  initWorker: () => void;
+  processTreeInBackground: (options?: { sort?: boolean; createIndex?: boolean }) => Promise<void>;
+  searchInTree: (query: string) => Promise<void>;
+  filterTreeInBackground: (filter: FileTreeFilter) => Promise<void>;
+  clearSearch: () => void;
 }
 
 // FileTree indexer instance para operações O(1)
 const fileTreeIndexer = FileTreeIndexer.getInstance();
+
+// Helper function para converter FileNode para FileTreeNode
+function convertFileNodeToTreeNode(fileNode: FileNode): FileTreeNode {
+  const defaultMetadata: FileMetadata = {
+    size: 0,
+    created: new Date().toISOString(),
+    modified: new Date().toISOString(),
+    isHidden: false,
+    permissions: 'rw-r--r--'
+  };
+  
+  return {
+    type: fileNode.type,
+    name: fileNode.name,
+    path: fileNode.path,
+    extension: fileNode.extension,
+    metadata: fileNode.metadata ? {
+      size: fileNode.metadata.size,
+      created: fileNode.metadata.created,
+      modified: fileNode.metadata.modified,
+      isHidden: fileNode.metadata.isHidden,
+      permissions: fileNode.metadata.permissions
+    } : defaultMetadata,
+    children: fileNode.children?.map(convertFileNodeToTreeNode),
+    expanded: fileNode.expanded
+  };
+}
+
+// Helper function para converter FileTreeNode para FileNode
+function convertTreeNodeToFileNode(treeNode: FileTreeNode): FileNode {
+  return {
+    type: treeNode.type,
+    name: treeNode.name,
+    path: treeNode.path,
+    extension: treeNode.extension,
+    metadata: {
+      size: treeNode.metadata.size,
+      created: treeNode.metadata.created,
+      modified: treeNode.metadata.modified,
+      isHidden: treeNode.metadata.isHidden,
+      permissions: treeNode.metadata.permissions
+    },
+    children: treeNode.children?.map(convertTreeNodeToFileNode),
+    expanded: treeNode.expanded
+  };
+}
 
 // Helper function para reconstruir árvore baseada no índice
 function rebuildTreeFromIndex(rootPath: string, originalRoot: FileTreeNode): FileTreeNode | null {
@@ -62,6 +121,9 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
   error: null,
   expandedPaths: new Set(),
   selectedPath: null,
+  processingStats: null,
+  searchResults: [],
+  isProcessingInBackground: false,
 
   loadFileTree: async (rootPath: string, filter?: FileTreeFilter) => {
     set({ loading: true, error: null });
@@ -327,5 +389,127 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>((se
       
       return { root: newRoot };
     });
+  },
+
+  // Inicializa o Web Worker
+  initWorker: () => {
+    const workerStore = useFileTreeWorkerStore.getState();
+    workerStore.initWorker();
+  },
+
+  // Processa árvore em background usando Web Worker
+  processTreeInBackground: async (options = {}) => {
+    const { root } = get();
+    if (!root) return;
+
+    const workerStore = useFileTreeWorkerStore.getState();
+    
+    try {
+      set({ isProcessingInBackground: true, error: null });
+      
+      // Converte FileTreeNode para FileNode antes de enviar para o worker
+      const fileNodeRoot = convertTreeNodeToFileNode(root);
+      const processedFileNode = await workerStore.processTree(fileNodeRoot, {
+        sort: options.sort !== false,
+        createIndex: options.createIndex !== false,
+        ...options
+      });
+      
+      // Converte de volta para FileTreeNode
+      const processedTree = convertFileNodeToTreeNode(processedFileNode);
+
+      // Atualiza estatísticas de processamento
+      const stats = workerStore.lastProcessed;
+      
+      set({
+        root: processedTree,
+        isProcessingInBackground: false,
+        processingStats: stats ? {
+          lastProcessingTime: stats.processingTime,
+          nodeCount: stats.nodeCount
+        } : null
+      });
+
+      // Reconstrói o índice local também
+      fileTreeIndexer.rebuildIndex(root.path, processedTree);
+      
+    } catch (error) {
+      set({ 
+        isProcessingInBackground: false,
+        error: error instanceof Error ? error.message : 'Failed to process tree in background'
+      });
+    }
+  },
+
+  // Busca arquivos usando Web Worker
+  searchInTree: async (query: string) => {
+    const { root } = get();
+    if (!root || !query.trim()) {
+      set({ searchResults: [] });
+      return;
+    }
+
+    const workerStore = useFileTreeWorkerStore.getState();
+    
+    try {
+      set({ isProcessingInBackground: true, error: null });
+      
+      // Converte para FileNode antes de enviar para o worker
+      const fileNodeRoot = convertTreeNodeToFileNode(root);
+      const fileNodeResults = await workerStore.searchInTree(fileNodeRoot, query.trim());
+      
+      // Converte os resultados de volta para FileTreeNode
+      const results = fileNodeResults.map(convertFileNodeToTreeNode);
+      
+      set({
+        searchResults: results,
+        isProcessingInBackground: false
+      });
+      
+    } catch (error) {
+      set({ 
+        isProcessingInBackground: false,
+        searchResults: [],
+        error: error instanceof Error ? error.message : 'Failed to search in tree'
+      });
+    }
+  },
+
+  // Filtra árvore usando Web Worker
+  filterTreeInBackground: async (filter: FileTreeFilter) => {
+    const { root } = get();
+    if (!root) return;
+
+    const workerStore = useFileTreeWorkerStore.getState();
+    
+    try {
+      set({ isProcessingInBackground: true, error: null });
+      
+      // Converte para FileNode antes de enviar para o worker
+      const fileNodeRoot = convertTreeNodeToFileNode(root);
+      const filteredFileNode = await workerStore.filterTree(fileNodeRoot, filter);
+      
+      // Converte de volta para FileTreeNode
+      const filteredTree = convertFileNodeToTreeNode(filteredFileNode);
+      
+      set({
+        root: filteredTree,
+        isProcessingInBackground: false
+      });
+
+      // Reconstrói o índice com a árvore filtrada
+      fileTreeIndexer.rebuildIndex(root.path, filteredTree);
+      
+    } catch (error) {
+      set({ 
+        isProcessingInBackground: false,
+        error: error instanceof Error ? error.message : 'Failed to filter tree'
+      });
+    }
+  },
+
+  // Limpa resultados de busca
+  clearSearch: () => {
+    set({ searchResults: [] });
   }
 }));
