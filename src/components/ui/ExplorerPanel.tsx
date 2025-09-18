@@ -19,6 +19,9 @@ import {
   FiX
 } from 'react-icons/fi'
 import { useCurrentProject } from '../../hooks/useProjectState'
+import { PanelHeader } from './PanelHeader'
+import { SearchInput } from './SearchInput'
+import { OptionButton } from './OptionButton'
 
 const FileTree = React.lazy(() => import('./FileTree'))
 
@@ -59,6 +62,10 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
     console.log('New file')
   }, [])
 
+  const handleMoreActions = useCallback(() => {
+    // Handle more actions
+    console.log('More actions')
+  }, [])
 
   if (!currentProject) {
     return (
@@ -83,101 +90,55 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
   return (
     <VStack
       height="100%"
-      bg="bg.sidebar"
+      bg="#252526"
       align="stretch"
       gap={0}
     >
-      {/* Header */}
-      <Flex
-        align="center"
-        justify="space-between"
-        p={3}
-        borderBottom="1px solid"
-        borderColor="border.glass"
-      >
-        <Text
-          fontSize="xs"
-          fontWeight="600"
-          textTransform="uppercase"
-          letterSpacing="wide"
-          color="text.secondary"
-        >
-          Explorer
-        </Text>
-        
-        <HStack gap={1}>
-          <IconButton
-            aria-label="Search in files"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-            onClick={handleSearchToggle}
-            bg={isSearching ? 'whiteAlpha.100' : 'transparent'}
-          >
-            <FiSearch size={14} />
-          </IconButton>
-          <IconButton
-            aria-label="Refresh Explorer"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-            onClick={handleRefresh}
-          >
-            <FiRefreshCw size={14} />
-          </IconButton>
-          <IconButton
-            aria-label="New File"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-            onClick={handleNewFile}
-          >
-            <FiPlus size={14} />
-          </IconButton>
-          <IconButton
-            aria-label="More actions"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-          >
-            <FiMoreHorizontal size={14} />
-          </IconButton>
-        </HStack>
-      </Flex>
-
+      <PanelHeader 
+        title="Explorer"
+        rightControls={
+          <>
+            <OptionButton 
+              label="Search in files"
+              icon={FiSearch}
+              isActive={isSearching}
+              onClick={handleSearchToggle}
+            />
+            <OptionButton 
+              label="Refresh Explorer"
+              icon={FiRefreshCw}
+              onClick={handleRefresh}
+            />
+            <OptionButton 
+              label="New File"
+              icon={FiPlus}
+              onClick={handleNewFile}
+            />
+            <OptionButton 
+              label="More actions"
+              icon={FiMoreHorizontal}
+              onClick={handleMoreActions}
+            />
+          </>
+        }
+      />
+      
       {/* Search Input */}
       {isSearching && (
         <Box p={2} borderBottom="1px solid" borderColor="border.glass">
-          <HStack>
-            <Input
-              placeholder="Search files..."
-              size="sm"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              bg="transparent"
-              border="1px solid"
-              borderColor="border.glass"
-              _focus={{
-                borderColor: 'blue.500',
-                boxShadow: '0 0 0 1px rgba(88, 166, 255, 0.6)'
-              }}
-            />
-            <IconButton
-              aria-label="Clear search"
-              variant="ghost"
-              size="xs"
-              color="text.secondary"
-              onClick={() => setSearchTerm('')}
-            >
-              <FiX size={12} />
-            </IconButton>
-          </HStack>
+          <SearchInput
+            value={searchTerm}
+            onChange={setSearchTerm}
+            onClear={() => setSearchTerm('')}
+            placeholder="Search files..."
+            compact
+          />
         </Box>
       )}
 
       {/* File Tree */}
       <ScrollArea.Root flex="1">
-        <ScrollArea.Viewport px={1} py={1}>
+        <ScrollArea.Viewport>
           <Suspense fallback={<FileTreeSkeleton />}>
             <FileTree 
               rootPath={currentProject.path}

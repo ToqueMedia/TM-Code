@@ -22,66 +22,14 @@ import {
   FiRefreshCw,
   FiCode
 } from 'react-icons/fi'
+import { PanelHeader } from './PanelHeader'
+import { PanelTab } from './PanelTab'
 
 interface BottomPanelProps {
   isVisible: boolean
   onToggle: () => void
   onClose: () => void
 }
-
-interface PanelTabProps {
-  id: string
-  label: string
-  icon: React.ElementType
-  isActive: boolean
-  badge?: number
-  badgeVariant?: 'error' | 'warning' | 'info'
-  onClick: () => void
-}
-
-const PanelTab = memo<PanelTabProps>(({ 
-  id, 
-  label, 
-  icon: Icon, 
-  isActive, 
-  badge,
-  badgeVariant = 'info',
-  onClick 
-}) => (
-  <Button
-    variant="ghost"
-    size="sm"
-    height="32px"
-    px={3}
-    bg={isActive ? 'whiteAlpha.100' : 'transparent'}
-    borderBottom={isActive ? '2px solid' : 'none'}
-    borderColor={isActive ? 'blue.500' : 'transparent'}
-    borderRadius="0"
-    color={isActive ? 'text.primary' : 'text.secondary'}
-    _hover={{
-      bg: isActive ? 'whiteAlpha.100' : 'whiteAlpha.050',
-      color: 'text.primary'
-    }}
-    onClick={onClick}
-    data-panel={id}
-  >
-    <HStack gap={2}>
-      <Icon size={14} />
-      <Text fontSize="xs" fontWeight="medium">{label}</Text>
-      {badge && badge > 0 && (
-        <Badge
-          size="sm"
-          colorPalette={badgeVariant === 'error' ? 'red' : badgeVariant === 'warning' ? 'orange' : 'blue'}
-          fontSize="xs"
-        >
-          {badge > 99 ? '99+' : badge}
-        </Badge>
-      )}
-    </HStack>
-  </Button>
-))
-
-PanelTab.displayName = 'PanelTab'
 
 interface Problem {
   id: string
@@ -219,7 +167,7 @@ const ProblemsContent = memo(() => {
               cursor="pointer"
               _hover={{ bg: 'whiteAlpha.050' }}
             >
-              <Icon size={14} color={color} />
+              {Icon && <Icon size={14} color={color} />}
               <Box ml={3} flex="1" minW="0">
                 <Text fontSize="sm" color="text.primary" mb={1}>
                   {problem.message}
@@ -331,13 +279,40 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
       borderColor="border.glass"
     >
       {/* Header with Tabs */}
-      <Flex
-        align="center"
-        justify="space-between"
-        height="32px"
-        bg="bg.sidebar"
-        borderBottom="1px solid"
-        borderColor="border.glass"
+      <PanelHeader
+        title=""
+        compact
+        rightControls={
+          <>
+            <IconButton
+              aria-label="Toggle maximize"
+              variant="ghost"
+              size="xs"
+              color="text.secondary"
+              onClick={handleMaximize}
+            >
+              {isMaximized ? <FiMinus size={12} /> : <FiMaximize2 size={12} />}
+            </IconButton>
+            <IconButton
+              aria-label="Toggle panel"
+              variant="ghost"
+              size="xs"
+              color="text.secondary"
+              onClick={onToggle}
+            >
+              <FiChevronDown size={12} />
+            </IconButton>
+            <IconButton
+              aria-label="Close panel"
+              variant="ghost"
+              size="xs"
+              color="text.secondary"
+              onClick={onClose}
+            >
+              <FiX size={12} />
+            </IconButton>
+          </>
+        }
       >
         <HStack gap={0}>
           {panels.map((panel) => (
@@ -353,37 +328,7 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
             />
           ))}
         </HStack>
-
-        <HStack gap={1} pr={2}>
-          <IconButton
-            aria-label="Toggle maximize"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-            onClick={handleMaximize}
-          >
-            {isMaximized ? <FiMinus size={12} /> : <FiMaximize2 size={12} />}
-          </IconButton>
-          <IconButton
-            aria-label="Toggle panel"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-            onClick={onToggle}
-          >
-            <FiChevronDown size={12} />
-          </IconButton>
-          <IconButton
-            aria-label="Close panel"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-            onClick={onClose}
-          >
-            <FiX size={12} />
-          </IconButton>
-        </HStack>
-      </Flex>
+      </PanelHeader>
 
       {/* Panel Content */}
       <Flex flex="1" direction="column" overflow="hidden">

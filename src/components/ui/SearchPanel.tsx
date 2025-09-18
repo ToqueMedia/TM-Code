@@ -20,6 +20,9 @@ import {
   FiX,
   FiType
 } from 'react-icons/fi'
+import { PanelHeader } from './PanelHeader'
+import { SearchInput } from './SearchInput'
+import { OptionButton } from './OptionButton'
 
 interface SearchResult {
   id: string
@@ -147,54 +150,29 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
       align="stretch"
       gap={0}
     >
-      {/* Header */}
-      <Flex
-        align="center"
-        justify="space-between"
-        p={3}
-        borderBottom="1px solid"
-        borderColor="border.glass"
-      >
-        <Text
-          fontSize="xs"
-          fontWeight="600"
-          textTransform="uppercase"
-          letterSpacing="wide"
-          color="text.secondary"
-        >
-          Search
-        </Text>
-        
-        <HStack gap={1}>
-          <IconButton
-            aria-label="Toggle replace"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-            onClick={toggleReplace}
-            bg={isReplaceVisible ? 'whiteAlpha.100' : 'transparent'}
-          >
-            <FiSearch size={14} />
-          </IconButton>
-          <IconButton
-            aria-label="Clear search"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-            onClick={clearSearch}
-          >
-            <FiX size={14} />
-          </IconButton>
-          <IconButton
-            aria-label="More options"
-            variant="ghost"
-            size="xs"
-            color="text.secondary"
-          >
-            <FiMoreHorizontal size={14} />
-          </IconButton>
-        </HStack>
-      </Flex>
+      <PanelHeader 
+        title="Search"
+        rightControls={
+          <>
+            <OptionButton 
+              label="Toggle replace"
+              icon={FiSearch}
+              isActive={isReplaceVisible}
+              onClick={toggleReplace}
+            />
+            <OptionButton 
+              label="Clear search"
+              icon={FiX}
+              onClick={clearSearch}
+            />
+            <OptionButton 
+              label="More options"
+              icon={FiMoreHorizontal}
+              onClick={() => console.log('More options')}
+            />
+          </>
+        }
+      />
 
       {/* Search Input */}
       <Box p={3} borderBottom="1px solid" borderColor="border.glass">

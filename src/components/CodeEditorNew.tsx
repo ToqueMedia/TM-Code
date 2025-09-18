@@ -1,27 +1,22 @@
 import React, { useState, useEffect, useRef, memo, useCallback, useMemo, Suspense, lazy } from 'react'
-import { 
-  Flex, 
-  Text, 
-  HStack, 
-  Button, 
-  IconButton, 
+import {
+  Flex,
+  Text,
+  HStack,
+  IconButton,
   Box,
-  Menu,
   Separator,
-  Spinner
-} from '@chakra-ui/react'
-import { 
-  FiX, 
+  Spinner} from '@chakra-ui/react'
+import {
+  FiX,
   FiFile,
   FiGitBranch,
-  FiBell,
   FiCode,
   FiAlertCircle,
-  FiCpu
-} from 'react-icons/fi'
+  FiChevronLeft,
+  FiChevronRight} from 'react-icons/fi'
 import { 
   SiJavascript, 
-  SiTypescript, 
   SiReact, 
   SiCss3, 
   SiHtml5, 
@@ -31,6 +26,7 @@ import {
   SiNpm,
   SiDocker
 } from 'react-icons/si'
+import TypeScriptIcon from './icons/TypeScriptIcon'
 import { FaFileImage, FaFilePdf, FaFileArchive } from 'react-icons/fa'
 import { autoSaveProjectState, useProjectStore } from '../stores/projectStore'
 import { useEditorRepository } from '../stores/editorStore'
@@ -40,7 +36,7 @@ import TypeScriptLspService from '../services/typescriptLspService'
 import RecoveryService from '../services/recoveryService'
 import WindowService from '../services/windowService'
 
-// Importar novos componentes
+// Importar componentes
 import ActivityBar from './ui/ActivityBar'
 import ExplorerPanel from './ui/ExplorerPanel'
 import SearchPanel from './ui/SearchPanel'
@@ -49,7 +45,6 @@ import Breadcrumbs from './ui/Breadcrumbs'
 
 // Lazy load componentes pesados
 const MonacoEditor = lazy(() => import('./ui/MonacoEditor'))
-const FileTreeWorkerPanel = lazy(() => import('./ui/FileTreeWorkerPanel'))
 const PerformanceStatus = lazy(() => import('./ui/PerformanceStatus'))
 
 // Loading fallbacks
@@ -66,10 +61,10 @@ const EditorSkeleton = () => (
   </Flex>
 )
 
-// Status bar item component - Memoizado para evitar re-renders
-const StatusBarItem = memo<{ children: React.ReactNode; tooltip?: string }>(({ 
-  children, 
-  tooltip 
+// Status bar item component - Enhanced with animations
+const StatusBarItem = memo<{ children: React.ReactNode; tooltip?: string }>(({
+  children,
+  tooltip
 }) => (
   <Box
     px={3}
@@ -77,12 +72,32 @@ const StatusBarItem = memo<{ children: React.ReactNode; tooltip?: string }>(({
     fontSize="xs"
     fontWeight="medium"
     cursor="pointer"
-    _hover={{ bg: 'whiteAlpha.100' }}
-    transition="background 0.2s"
+    position="relative"
+    _hover={{
+      bg: 'whiteAlpha.100',
+      transform: 'translateY(-1px)',
+      _after: {
+        opacity: 1,
+        transform: 'scaleX(1)',
+      }
+    }}
+    transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
     display="flex"
     alignItems="center"
     gap={1}
     title={tooltip}
+    _after={{
+      content: '""',
+      position: 'absolute',
+      bottom: 0,
+      left: '50%',
+      transform: 'translateX(-50%) scaleX(0)',
+      width: '80%',
+      height: '2px',
+      bg: 'blue.400',
+      opacity: 0,
+      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+    }}
   >
     {children}
   </Box>
@@ -90,7 +105,177 @@ const StatusBarItem = memo<{ children: React.ReactNode; tooltip?: string }>(({
 
 StatusBarItem.displayName = 'StatusBarItem'
 
-// Editor Tab Component - Melhorado
+// Enhanced Window Controls with glowing effects
+const XcodeWindowControls = memo(() => (
+  <HStack gap={2} pl={4}>
+    <Box
+      w="12px"
+      h="12px"
+      borderRadius="full"
+      bg="#ff5f57"
+      cursor="pointer"
+      position="relative"
+      boxShadow="0 0 0 0 rgba(255, 95, 87, 0.4)"
+      _hover={{
+        bg: "#ff4136",
+        transform: 'scale(1.2)',
+        boxShadow: '0 0 8px rgba(255, 95, 87, 0.6)',
+      }}
+      transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+      _active={{
+        transform: 'scale(0.95)',
+      }}
+    />
+    <Box
+      w="12px"
+      h="12px"
+      borderRadius="full"
+      bg="#ffbd2e"
+      cursor="pointer"
+      position="relative"
+      boxShadow="0 0 0 0 rgba(255, 189, 46, 0.4)"
+      _hover={{
+        bg: "#ff9500",
+        transform: 'scale(1.2)',
+        boxShadow: '0 0 8px rgba(255, 189, 46, 0.6)',
+      }}
+      transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+      _active={{
+        transform: 'scale(0.95)',
+      }}
+    />
+    <Box
+      w="12px"
+      h="12px"
+      borderRadius="full"
+      bg="#28ca42"
+      cursor="pointer"
+      position="relative"
+      boxShadow="0 0 0 0 rgba(40, 202, 66, 0.4)"
+      _hover={{
+        bg: "#00d600",
+        transform: 'scale(1.2)',
+        boxShadow: '0 0 8px rgba(40, 202, 66, 0.6)',
+      }}
+      transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+      _active={{
+        transform: 'scale(0.95)',
+      }}
+    />
+  </HStack>
+))
+
+XcodeWindowControls.displayName = 'XcodeWindowControls'
+
+// Enhanced Navigation Controls with smooth transitions
+const XcodeNavigation = memo(() => (
+  <HStack gap={1} ml={4}>
+    <IconButton
+      aria-label="Go back"
+      variant="ghost"
+      size="sm"
+      color="#8e8e93"
+      position="relative"
+      overflow="hidden"
+      _hover={{
+        color: "#ffffff",
+        bg: "whiteAlpha.100",
+        transform: 'translateX(-2px)',
+        _before: {
+          transform: 'translateX(0)',
+        }
+      }}
+      _active={{
+        transform: 'translateX(-4px) scale(0.95)',
+      }}
+      borderRadius="6px"
+      transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+      _before={{
+        content: '""',
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%) translateX(-100%)',
+        width: '100%',
+        height: '100%',
+        bg: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+        transition: 'transform 0.6s',
+      }}
+    >
+      <FiChevronLeft size={16} />
+    </IconButton>
+    <IconButton
+      aria-label="Go forward"
+      variant="ghost"
+      size="sm"
+      color="#8e8e93"
+      position="relative"
+      overflow="hidden"
+      _hover={{
+        color: "#ffffff",
+        bg: "whiteAlpha.100",
+        transform: 'translateX(2px)',
+        _before: {
+          transform: 'translateX(0)',
+        }
+      }}
+      _active={{
+        transform: 'translateX(4px) scale(0.95)',
+      }}
+      borderRadius="6px"
+      transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+      _before={{
+        content: '""',
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%) translateX(-100%)',
+        width: '100%',
+        height: '100%',
+        bg: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+        transition: 'transform 0.6s',
+      }}
+    >
+      <FiChevronRight size={16} />
+    </IconButton>
+  </HStack>
+))
+
+XcodeNavigation.displayName = 'XcodeNavigation'
+
+// Xcode Project Status
+const XcodeProjectStatus = memo<{ projectName: string; isRunning: boolean }>(({ projectName, isRunning }) => (
+  <Flex align="center" gap={3}>
+    <Text fontSize="sm" fontWeight="600" color="#ffffff">
+      {projectName}
+    </Text>
+    <Text fontSize="xs" color="#8e8e93">v1.0.4</Text>
+    <Separator orientation="vertical" height="16px" />
+    <HStack gap={1}>
+      <Box
+        w="8px"
+        h="8px"
+        borderRadius="full"
+        bg={isRunning ? "#28ca42" : "#8e8e93"}
+      />
+      <Text fontSize="xs" color="#8e8e93">
+        {isRunning ? "Running 1 of 2 tasks" : "Ready"}
+      </Text>
+    </HStack>
+    <HStack gap={1}>
+      <Box w="8px" h="8px" borderRadius="full" bg="#ff9500" />
+      <Text fontSize="xs" color="#8e8e93">4</Text>
+    </HStack>
+    <HStack gap={1}>
+      <Box w="8px" h="8px" borderRadius="full" bg="#ff3b30" />
+      <Text fontSize="xs" color="#8e8e93">12</Text>
+    </HStack>
+  </Flex>
+))
+
+XcodeProjectStatus.displayName = 'XcodeProjectStatus'
+
+// Xcode-style Editor Tab Component
 interface EditorTabProps {
   path: string
   name: string
@@ -125,9 +310,9 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
       case 'jsx':
         return { icon: SiReact, color: '#61dafb' }
       case 'ts':
-        return { icon: SiTypescript, color: '#3178c6' }
+        return { icon: TypeScriptIcon, color: '#3178c6' }
       case 'tsx':
-        return { icon: SiReact, color: '#61dafb' }
+        return { icon: TypeScriptIcon, color: '#3178c6' }
       case 'css':
         return { icon: SiCss3, color: '#1572b6' }
       case 'html':
@@ -168,28 +353,54 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
       fontSize="13px"
       cursor="pointer"
       onClick={onClick}
-      _hover={{ 
+      position="relative"
+      overflow="hidden"
+      _hover={{
         bg: isActive ? '#1e1e1e' : '#37373d',
+        _before: {
+          opacity: isActive ? 0 : 0.5,
+        }
       }}
-      transition="background-color 0.1s ease"
+      transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
       role="tab"
       aria-selected={isActive}
       data-path={path}
       borderRadius="0"
-      position="relative"
       height="35px"
       minW="0"
       maxW="240px"
       color={isActive ? '#ffffff' : '#969696'}
-      borderTop={isActive ? '1px solid #007acc' : '1px solid transparent'}
+      borderTop={isActive ? '2px solid #007acc' : '2px solid transparent'}
+      boxShadow={isActive ? 'inset 0 1px 0 rgba(0, 122, 204, 0.3)' : 'none'}
+      _before={{
+        content: '""',
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        bg: 'linear-gradient(180deg, rgba(255,255,255,0.05) 0%, transparent 100%)',
+        opacity: 0,
+        transition: 'opacity 0.3s',
+        pointerEvents: 'none',
+      }}
+      _after={{
+        content: '""',
+        position: 'absolute',
+        bottom: 0,
+        left: 0,
+        right: 0,
+        height: '1px',
+        bg: isActive ? 'linear-gradient(90deg, transparent, #007acc, transparent)' : 'transparent',
+      }}
     >
       <HStack gap={2} align="center" minW="0">
         {(() => {
           const { icon: IconComponent, color } = getFileIconComponent(name)
           return <IconComponent size={16} color={color} />
-        })()} 
-        <Text 
-          fontSize="13px" 
+        })()}
+        <Text
+          fontSize="13px"
           fontWeight="400"
           maxW="160px"
           whiteSpace="nowrap"
@@ -215,7 +426,7 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
           variant="ghost"
           color={isActive ? '#ffffff' : '#969696'}
           size="xs"
-          _hover={{ 
+          _hover={{
             bg: 'rgba(255, 255, 255, 0.1)',
             color: '#ffffff'
           }}
@@ -261,17 +472,10 @@ export function CodeEditorNew() {
   // Estados locais da UI
   const [activeActivity, setActiveActivity] = useState('explorer')
   const [isBottomPanelVisible, setIsBottomPanelVisible] = useState(true)
-  const [isWorkerPanelVisible, setIsWorkerPanelVisible] = useState(false)
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 })
   
   // Refs para elementos DOM
   const editorRef = useRef<HTMLDivElement>(null)
-  
-  // Ação de fechar projeto memoizada
-  const closeProject = useCallback(() => {
-    const { closeProject } = useProjectStore.getState()
-    closeProject()
-  }, [])
   
   // Handlers memoizados
   const handleCursorPositionChange = useCallback((line: number, column: number) => {
@@ -289,10 +493,7 @@ export function CodeEditorNew() {
   const closeBottomPanel = useCallback(() => {
     setIsBottomPanelVisible(false)
   }, [])
-  
-  const toggleWorkerPanel = useCallback(() => {
-    setIsWorkerPanelVisible(prev => !prev)
-  }, [])
+
 
   // Initialize services when project is opened
   useEffect(() => {
@@ -364,6 +565,7 @@ export function CodeEditorNew() {
     }
   }, [])
 
+
   // Render sidebar panel based on active activity
   const renderSidebarPanel = () => {
     switch (activeActivity) {
@@ -387,126 +589,90 @@ export function CodeEditorNew() {
   }
 
   return (
-    <Flex 
-      direction="column" 
-      flex="1" 
+    <Flex
+      direction="column"
+      flex="1"
       bg="#1e1e1e"
-      color="#cccccc"
+      color="#ffffff"
       height="100vh"
       overflow="hidden"
+      fontFamily="-apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif"
     >
-      {/* Menu Bar */}
+      {/* Enhanced VS Code-style Title Bar with glassmorphism */}
       <Flex
-        height="30px"
-        bg="#323233"
+        height="35px"
+        bg="rgba(50, 50, 51, 0.95)"
+        backdropFilter="blur(10px)"
         borderBottom="1px solid #1e1f22"
         alignItems="center"
-        px={2}
-        fontSize="13px"
-        fontWeight="400"
         justify="space-between"
+        px={0}
+        position="relative"
+        boxShadow="0 1px 3px rgba(0,0,0,0.2)"
+        _after={{
+          content: '""',
+          position: 'absolute',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          height: '1px',
+          bg: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+        }}
       >
-        <HStack gap={4} height="100%">
-          <Menu.Root>
-            <Menu.Trigger asChild>
-              <Button variant="ghost" size="sm" fontWeight="normal" px={2}>
-                File
-              </Button>
-            </Menu.Trigger>
-            <Menu.Positioner>
-              <Menu.Content>
-                <Menu.Item value="new-file">New File</Menu.Item>
-                <Menu.Item value="open-folder">Open Folder...</Menu.Item>
-                <Menu.Separator />
-                <Menu.Item value="save">Save</Menu.Item>
-                <Menu.Item value="save-as">Save As...</Menu.Item>
-                <Menu.Separator />
-                <Menu.Item value="close-project" onClick={closeProject}>Close Project</Menu.Item>
-              </Menu.Content>
-            </Menu.Positioner>
-          </Menu.Root>
-          
-          <Menu.Root>
-            <Menu.Trigger asChild>
-              <Button variant="ghost" size="sm" fontWeight="normal" px={2}>
-                Edit
-              </Button>
-            </Menu.Trigger>
-            <Menu.Positioner>
-              <Menu.Content>
-                <Menu.Item value="undo">Undo</Menu.Item>
-                <Menu.Item value="redo">Redo</Menu.Item>
-                <Menu.Separator />
-                <Menu.Item value="cut">Cut</Menu.Item>
-                <Menu.Item value="copy">Copy</Menu.Item>
-                <Menu.Item value="paste">Paste</Menu.Item>
-              </Menu.Content>
-            </Menu.Positioner>
-          </Menu.Root>
-          
-          <Menu.Root>
-            <Menu.Trigger asChild>
-              <Button variant="ghost" size="sm" fontWeight="normal" px={2}>
-                View
-              </Button>
-            </Menu.Trigger>
-            <Menu.Positioner>
-              <Menu.Content>
-                <Menu.Item value="toggle-panel" onClick={toggleBottomPanel}>
-                  Toggle Panel
-                </Menu.Item>
-                <Menu.Item value="toggle-worker-panel" onClick={toggleWorkerPanel}>
-                  Toggle Worker Panel
-                </Menu.Item>
-              </Menu.Content>
-            </Menu.Positioner>
-          </Menu.Root>
-          
-          <Menu.Root>
-            <Menu.Trigger asChild>
-              <Button variant="ghost" size="sm" fontWeight="normal" px={2}>
-                Terminal
-              </Button>
-            </Menu.Trigger>
-            <Menu.Positioner>
-              <Menu.Content>
-                <Menu.Item value="new-terminal">New Terminal</Menu.Item>
-                <Menu.Item value="split-terminal">Split Terminal</Menu.Item>
-              </Menu.Content>
-            </Menu.Positioner>
-          </Menu.Root>
+        {/* Left: Window Controls + Navigation */}
+        <HStack gap={0}>
+          <XcodeWindowControls />
+          <XcodeNavigation />
         </HStack>
         
-        <HStack gap={1}>
-          <IconButton aria-label="Notifications" variant="ghost" size="xs">
-            <FiBell size={12} />
-          </IconButton>
-          <IconButton 
-            aria-label="Worker Panel" 
-            variant="ghost" 
-            size="xs"
-            onClick={toggleWorkerPanel}
-            bg={isWorkerPanelVisible ? 'whiteAlpha.200' : 'transparent'}
-          >
-            <FiCpu size={12} />
-          </IconButton>
-        </HStack>
+        {/* Center: Project Name */}
+        <Text fontSize="sm" fontWeight="500" color="#cccccc">
+          {currentProject.name}
+        </Text>
+        
+        {/* Right: Empty for now */}
+        <Box width="120px" />
       </Flex>
 
       {/* Main Content Area */}
       <Flex flex="1" overflow="hidden">
-        {/* Activity Bar */}
-        <ActivityBar
-          activeActivity={activeActivity}
-          onActivityChange={handleActivityChange}
-        />
+        {/* Enhanced Activity Bar with glow effects */}
+        <Box
+          position="relative"
+          _after={{
+            content: '""',
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            bottom: 0,
+            width: '1px',
+            bg: 'linear-gradient(180deg, transparent, rgba(255,255,255,0.05), transparent)',
+          }}
+        >
+          <ActivityBar
+            activeActivity={activeActivity}
+            onActivityChange={handleActivityChange}
+          />
+        </Box>
 
-        {/* Sidebar Panel */}
+        {/* Enhanced Sidebar Panel with smooth transitions */}
         <Box
           width="300px"
           bg="bg.sidebar"
           borderRight="1px solid #1e1f22"
           height="100%"
+          position="relative"
+          transition="width 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+          boxShadow="2px 0 10px rgba(0,0,0,0.1)"
+          _after={{
+            content: '""',
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            bottom: 0,
+            width: '1px',
+            bg: 'linear-gradient(180deg, transparent, rgba(255,255,255,0.05), transparent)',
+          }}
         >
           {renderSidebarPanel()}
         </Box>
@@ -518,14 +684,26 @@ export function CodeEditorNew() {
           direction="column"
           ref={editorRef}
         >
-          {/* Editor Tabs */}
+          {/* Enhanced VS Code-style Editor Tabs with animations */}
           <Flex
             className="vscode-tabs"
             minHeight="35px"
-            bg="#2d2d30"
+            bg="linear-gradient(180deg, #2d2d30 0%, #252526 100%)"
             borderBottom="1px solid #1e1f22"
             overflowX="auto"
             align="center"
+            position="relative"
+            boxShadow="0 1px 3px rgba(0,0,0,0.1)"
+            _after={{
+              content: '""',
+              position: 'absolute',
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: '1px',
+              bg: 'linear-gradient(90deg, transparent, rgba(0,122,204,0.3), transparent)',
+              opacity: 0.5,
+            }}
           >
             {openFiles.map((file) => (
               <EditorTab
@@ -564,9 +742,9 @@ export function CodeEditorNew() {
           <Flex flex="1" overflow="hidden">
             {activeFile ? (
               <Suspense fallback={<EditorSkeleton />}>
-                <MonacoEditor 
-                  path={activeFile} 
-                  onCursorPositionChange={handleCursorPositionChange} 
+                <MonacoEditor
+                  path={activeFile}
+                  onCursorPositionChange={handleCursorPositionChange}
                 />
               </Suspense>
             ) : (
@@ -577,14 +755,59 @@ export function CodeEditorNew() {
                 bg="bg.editor"
                 direction="column"
                 p={8}
+                position="relative"
+                overflow="hidden"
               >
-                <FiCode size={64} color="#58a6ff" opacity={0.3} />
-                <Text mt={4} fontSize="xl" color="text.primary" fontWeight="600">
+                <Box
+                  position="relative"
+                  transform="translateY(0px)"
+                  transition="transform 0.3s ease"
+                  _hover={{
+                    transform: 'translateY(-10px)',
+                  }}
+                >
+                  <FiCode
+                    size={64}
+                    color="#58a6ff"
+                    style={{
+                      filter: 'drop-shadow(0 0 20px rgba(88, 166, 255, 0.3))',
+                    }}
+                  />
+                </Box>
+                <Text
+                  mt={4}
+                  fontSize="xl"
+                  color="text.primary"
+                  fontWeight="600"
+                  opacity={0}
+                  animation="fadeIn 0.8s ease-out forwards"
+                  animationDelay="0.2s"
+                >
                   Welcome to ToqueMedia Studio
                 </Text>
-                <Text mt={2} fontSize="sm" color="text.muted" textAlign="center" maxW="400px">
+                <Text
+                  mt={2}
+                  fontSize="sm"
+                  color="text.muted"
+                  textAlign="center"
+                  maxW="400px"
+                  opacity={0}
+                  animation="fadeIn 1s ease-out forwards"
+                  animationDelay="0.4s"
+                >
                   Open a file from the explorer or create a new file to start coding.
                 </Text>
+                <Box
+                  position="absolute"
+                  top="50%"
+                  left="50%"
+                  transform="translate(-50%, -50%)"
+                  width="200%"
+                  height="200%"
+                  opacity={0.03}
+                  pointerEvents="none"
+                  bg="radial-gradient(circle at center, #58a6ff 0%, transparent 70%)"
+                />
               </Flex>
             )}
           </Flex>
@@ -598,15 +821,27 @@ export function CodeEditorNew() {
         onClose={closeBottomPanel}
       />
 
-      {/* Status Bar */}
+      {/* Enhanced Status Bar with gradient */}
       <Flex
         height="24px"
-        bg="blue.600"
+        bg="linear-gradient(90deg, #2563eb 0%, #3b82f6 50%, #2563eb 100%)"
+        backgroundSize="200% 100%"
         color="white"
         alignItems="center"
         fontSize="xs"
         fontWeight="medium"
         px={2}
+        position="relative"
+        boxShadow="0 -1px 3px rgba(37, 99, 235, 0.2)"
+        _before={{
+          content: '""',
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: '1px',
+          bg: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent)',
+        }}
       >
         <HStack gap={0} height="100%">
           <StatusBarItem tooltip="Git branch">
@@ -654,13 +889,6 @@ export function CodeEditorNew() {
         </HStack>
       </Flex>
       
-      {/* Web Worker Panel */}
-      <Suspense fallback={null}>
-        <FileTreeWorkerPanel 
-          isVisible={isWorkerPanelVisible}
-          onClose={() => setIsWorkerPanelVisible(false)}
-        />
-      </Suspense>
     </Flex>
   )
 }
