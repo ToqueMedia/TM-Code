@@ -208,8 +208,8 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
       }
 
       const result = await TerminalService.shared.executeCommand(
-        session.id,
-        command
+        command,
+        session.cwd
       );
 
       if (result.success && result.stdout) {
