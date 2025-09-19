@@ -657,6 +657,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dapts"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6335ace9c51e8a262e9c45e574a6b16b6ee9c20108760902cc26abd405dbdf93"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4122,12 +4132,25 @@ dependencies = [
  "io-uring",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "slab",
  "socket2",
+ "tokio-macros",
  "tracing",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e06d43f1345a3bcd39f6a56dbb7dcab2ba47e68e8ac134855e7e2bdbaf8cab8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
 ]
 
 [[package]]
@@ -4242,8 +4265,10 @@ checksum = "fcc842091f2def52017664b53082ecbbeb5c7731092bad69d2c63050401dfd64"
 name = "toquemedia-studio"
 version = "0.1.0"
 dependencies = [
+ "dapts",
  "dirs 5.0.1",
  "flate2",
+ "regex",
  "serde",
  "serde_json",
  "tauri",
@@ -4252,6 +4277,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-opener",
  "thiserror 1.0.69",
+ "tokio",
  "uuid",
 ]
 
