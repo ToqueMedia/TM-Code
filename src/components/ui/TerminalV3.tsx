@@ -226,6 +226,10 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
 
   function setupTerminalEvents(terminal: XTerm) {
     let currentLine = '';
+    let commandHistory: string[] = [];
+    let historyIndex = -1;
+    let searchMode = false;
+    let searchTerm = '';
     
     terminal.onData(async (data) => {
       if (commandLockRef.current) return;
@@ -233,38 +237,210 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
       const code = data.charCodeAt(0);
       
       if (code === 13) { // Enter
-        if (currentLine.trim()) {
+        if (searchMode) {
+          // Execute search or exit search mode
+          searchMode = false;
+          if (searchTerm.trim()) {
+            // Find in history
+            const found = commandHistory.find(cmd => cmd.includes(searchTerm));
+            if (found) {
+              currentLine = found;
+              terminal.write(`\r\x1b[K`);
+              await displayPrompt(terminal);
+              terminal.write(currentLine);
+            } else {
+              terminal.write('\r\x1b[Knot found');
+              setTimeout(async () => {
+                terminal.write('\r\x1b[K');
+                await displayPrompt(terminal);
+              }, 1000);
+            }
+          }
+          searchTerm = '';
+        } else if (currentLine.trim()) {
+          // Add to history
+          if (!commandHistory.includes(currentLine.trim())) {
+            commandHistory.push(currentLine.trim());
+            // Keep history limited to 100 commands
+            if (commandHistory.length > 100) {
+              commandHistory.shift();
+            }
+          }
+          historyIndex = -1;
           await executeCommand(currentLine.trim(), terminal);
+          currentLine = '';
         } else {
           terminal.write('\r\n');
           await displayPrompt(terminal);
         }
-        currentLine = '';
       } else if (code === 127) { // Backspace
-        if (currentLine.length > 0) {
+        if (searchMode) {
+          if (searchTerm.length > 0) {
+            searchTerm = searchTerm.slice(0, -1);
+            terminal.write('\b \b');
+          }
+        } else if (currentLine.length > 0) {
           currentLine = currentLine.slice(0, -1);
           terminal.write('\b \b');
         }
+      } else if (code === 27) { // Escape - special handling
+        // Handle escape sequences for arrow keys
+        return;
       } else if (code >= 32 && code < 127) {
-        currentLine += data;
-        terminal.write(data);
+        if (searchMode) {
+          searchTerm += data;
+          terminal.write(data);
+        } else {
+          currentLine += data;
+          terminal.write(data);
+        }
       }
     });
 
     terminal.onKey(async ({ domEvent }) => {
       const ev = domEvent;
       
+      // History navigation with arrow keys
+      if (ev.code === 'ArrowUp') {
+        ev.preventDefault();
+        if (commandHistory.length > 0 && historyIndex < commandHistory.length - 1) {
+          historyIndex++;
+          const historyCommand = commandHistory[commandHistory.length - 1 - historyIndex];
+          // Clear current line and write history command
+          const lineLength = currentLine.length;
+          for (let i = 0; i < lineLength; i++) {
+            terminal.write('\b \b');
+          }
+          currentLine = historyCommand;
+          terminal.write(historyCommand);
+        }
+        return;
+      }
+      
+      if (ev.code === 'ArrowDown') {
+        ev.preventDefault();
+        if (historyIndex > 0) {
+          historyIndex--;
+          const historyCommand = commandHistory[commandHistory.length - 1 - historyIndex];
+          // Clear current line and write history command
+          const lineLength = currentLine.length;
+          for (let i = 0; i < lineLength; i++) {
+            terminal.write('\b \b');
+          }
+          currentLine = historyCommand;
+          terminal.write(historyCommand);
+        } else if (historyIndex === 0) {
+          // Go to empty line
+          historyIndex = -1;
+          const lineLength = currentLine.length;
+          for (let i = 0; i < lineLength; i++) {
+            terminal.write('\b \b');
+          }
+          currentLine = '';
+        }
+        return;
+      }
+      
+      // Advanced shortcuts
       if (ev.ctrlKey && ev.code === 'KeyC') {
         terminal.write('\r\n^C\r\n');
         await displayPrompt(terminal);
         currentLine = '';
+        historyIndex = -1;
         commandLockRef.current = false;
+        return;
       }
       
       if (ev.ctrlKey && ev.code === 'KeyL') {
         terminal.clear();
         await displayPrompt(terminal);
         currentLine = '';
+        historyIndex = -1;
+        return;
+      }
+      
+      // Reverse search (Ctrl+R)
+      if (ev.ctrlKey && ev.code === 'KeyR') {
+        ev.preventDefault();
+        if (!searchMode) {
+          searchMode = true;
+          terminal.write('\r\x1b[K(reverse-i-search): ');
+        }
+        return;
+      }
+      
+      // Clear line (Ctrl+U)
+      if (ev.ctrlKey && ev.code === 'KeyU') {
+        ev.preventDefault();
+        const lineLength = currentLine.length;
+        for (let i = 0; i < lineLength; i++) {
+          terminal.write('\b \b');
+        }
+        currentLine = '';
+        return;
+      }
+      
+      // Move to beginning of line (Ctrl+A)
+      if (ev.ctrlKey && ev.code === 'KeyA') {
+        ev.preventDefault();
+        const lineLength = currentLine.length;
+        for (let i = 0; i < lineLength; i++) {
+          terminal.write('\b');
+        }
+        return;
+      }
+      
+      // Move to end of line (Ctrl+E)
+      if (ev.ctrlKey && ev.code === 'KeyE') {
+        ev.preventDefault();
+        terminal.write(currentLine);
+        return;
+      }
+      
+      // Word-based navigation (Ctrl+Left/Right)
+      if (ev.ctrlKey && (ev.code === 'ArrowLeft' || ev.code === 'ArrowRight')) {
+        ev.preventDefault();
+        // Basic word navigation - could be enhanced
+        return;
+      }
+      
+      // Tab completion (basic)
+      if (ev.code === 'Tab') {
+        ev.preventDefault();
+        // Basic tab completion - show files in current directory
+        if (currentLine.trim()) {
+          try {
+            const completions = await TerminalService.shared.getCompletions(
+              currentLine.trim(), 
+              session?.cwd
+            );
+            if (completions.length === 1) {
+              // Auto-complete
+              const completion = completions[0];
+              const words = currentLine.trim().split(' ');
+              words[words.length - 1] = completion;
+              const newLine = words.join(' ');
+              
+              // Clear current line and write completed line
+              const lineLength = currentLine.length;
+              for (let i = 0; i < lineLength; i++) {
+                terminal.write('\b \b');
+              }
+              currentLine = newLine;
+              terminal.write(newLine);
+            } else if (completions.length > 1) {
+              // Show options
+              terminal.write('\r\n');
+              terminal.write(completions.join('  '));
+              terminal.write('\r\n');
+              await displayPrompt(terminal);
+              terminal.write(currentLine);
+            }
+          } catch (error) {
+            // Silent fail for tab completion
+          }
+        }
+        return;
       }
     });
 
