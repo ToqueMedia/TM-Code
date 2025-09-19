@@ -21,7 +21,7 @@ import {
 } from 'react-icons/fi'
 import { PanelHeader } from './PanelHeader'
 import { PanelTab } from './PanelTab'
-import TerminalV2 from './TerminalV2'
+import TerminalV3 from './TerminalV3'
 
 interface BottomPanelProps {
   isVisible: boolean
@@ -40,7 +40,7 @@ interface Problem {
 
 const TerminalContent = memo(() => (
   <Box height="100%" width="100%">
-    <TerminalV2 />
+    <TerminalV3 />
   </Box>
 ))
 
@@ -301,39 +301,6 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
       {/* Panel Content */}
       <Flex flex="1" direction="column" overflow="hidden">
         {renderPanelContent()}
-        
-        {/* Terminal Input (only for terminal) */}
-        {activePanel === 'terminal' && (
-          <Flex
-            align="center"
-            px={3}
-            py={2}
-            borderTop="1px solid"
-            borderColor="border.glass"
-            bg="rgba(255, 255, 255, 0.02)"
-          >
-            <Text
-              as="span"
-              color="#a371f7"
-              mr={2}
-              fontFamily="mono"
-              fontSize="sm"
-            >
-              C:\Users\dev&gt;
-            </Text>
-            <Box
-              flex="1"
-              height="20px"
-              bg="transparent"
-              outline="none"
-              contentEditable
-              fontFamily="mono"
-              fontSize="sm"
-              color="text.primary"
-              _focus={{ outline: 'none' }}
-            />
-          </Flex>
-        )}
       </Flex>
     </Flex>
   )
