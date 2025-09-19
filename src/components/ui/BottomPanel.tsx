@@ -21,7 +21,7 @@ import {
 } from 'react-icons/fi'
 import { PanelHeader } from './PanelHeader'
 import { PanelTab } from './PanelTab'
-import Terminal from './Terminal'
+import TerminalV2 from './TerminalV2'
 
 interface BottomPanelProps {
   isVisible: boolean
@@ -40,7 +40,7 @@ interface Problem {
 
 const TerminalContent = memo(() => (
   <Box height="100%" width="100%">
-    <Terminal />
+    <TerminalV2 />
   </Box>
 ))
 
