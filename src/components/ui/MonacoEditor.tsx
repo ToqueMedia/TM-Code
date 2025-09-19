@@ -114,9 +114,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     // Code assistance
     quickSuggestions: {
       other: 'on',
-      comments: 'off',
-      strings: 'off',
+      comments: 'on',
+      strings: 'on',
     },
+    wordBasedSuggestions: 'currentDocument',
     suggestOnTriggerCharacters: true,
     acceptSuggestionOnCommitCharacter: true,
     acceptSuggestionOnEnter: 'on',
@@ -205,6 +206,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         noSyntaxValidation: false,
         diagnosticCodesToIgnore: [1108], // Ignore 'return statement not in function' errors
       });
+
+      // Ensure model sync for better IntelliSense responsiveness
+      monaco.languages.typescript.typescriptDefaults.setEagerModelSync(true);
+      monaco.languages.typescript.javascriptDefaults.setEagerModelSync(true);
     }
     
     // Set up event listeners

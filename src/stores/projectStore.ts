@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { ProjectInfo, RecentProject, ProjectState, WindowState } from '../types/project';
+import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { UnsavedChangesManager } from '../utils/unsavedChangesManager';
 import { EditorManager } from '../utils/editorManager';
@@ -161,31 +162,41 @@ export const useProjectStore = create<ProjectStore>()(
       },
       
       closeProject: () => {
-        // Save current project state before closing
-        const { currentProject } = get();
-        if (currentProject) {
-          get().saveProjectState().catch(console.error);
+        const { currentProject, unsavedChanges } = get();
+        const hasUnsaved = Object.values(unsavedChanges).some(Boolean);
+        const proceed = async () => {
+          // Save current project state before closing
+          if (currentProject) {
+            get().saveProjectState().catch(console.error);
+          }
+          // Stop monitoring
+          const monitor = ProjectStatusMonitor.getInstance();
+          monitor.stopMonitoring();
+          // Stop file watching
+          fileWatcher.stopWatching();
+          // Stop managing window title
+          windowTitleManager.stopManaging();
+          // Stop recovery monitoring
+          recoveryService.stopRecoveryMonitoring();
+          set({ 
+            currentProject: null,
+            openFiles: [],
+            activeFile: null,
+            unsavedChanges: {}
+          });
+        };
+
+        if (hasUnsaved) {
+          Promise.resolve().then(async () => {
+            const count = Object.values(unsavedChanges).filter(Boolean).length;
+            const ok = await tauriConfirm(`There are ${count} unsaved file(s). Close project and discard changes?`, { title: 'Unsaved changes', kind: 'warning' });
+            if (!ok) return;
+            await proceed();
+          });
+          return;
         }
-        
-        // Stop monitoring
-        const monitor = ProjectStatusMonitor.getInstance();
-        monitor.stopMonitoring();
-        
-        // Stop file watching
-        fileWatcher.stopWatching();
-        
-        // Stop managing window title
-        windowTitleManager.stopManaging();
-        
-        // Stop recovery monitoring
-        recoveryService.stopRecoveryMonitoring();
-        
-        set({ 
-          currentProject: null,
-          openFiles: [],
-          activeFile: null,
-          unsavedChanges: {}
-        });
+
+        proceed();
       },
       
       addOpenFile: (filePath: string) => {

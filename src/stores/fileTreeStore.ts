@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { FileTreeService } from '../services/fileTreeService';
+import { FileService } from '../services/fileService';
 import { FileTreeIndexer } from '../utils/fileTreeIndex';
 import { useFileTreeWorkerStore, FileNode } from './fileTreeWorkerStore';
 import type { FileTreeNode, FileTreeFilter, FileMetadata } from '../types/fileTree';
@@ -162,6 +163,26 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>()(
 
       createFileOrDirectory: async (parentPath: string, name: string, isDirectory: boolean) => {
         try {
+          const hasNested = name.includes('/') || name.includes('\\');
+          const fullPath = `${parentPath}${parentPath.endsWith('/') ? '' : '/'}${name}`;
+
+          if (hasNested) {
+            if (isDirectory) {
+              // Create all directories along the path via Tauri
+              const result = await FileTreeService.createDirectoriesAll(fullPath);
+              if (!result.success) {
+                set({ error: result.message });
+                return false;
+              }
+            } else {
+              // Create file and parents as needed
+              await FileService.createFile(fullPath, '');
+            }
+            // Nested creation can affect multiple branches; refresh tree
+            await get().refresh();
+            return true;
+          }
+
           const result = await FileTreeService.createFileOrDirectory(parentPath, name, isDirectory);
           if (result.success) {
             // Instead of refreshing the entire tree, add the new node directly

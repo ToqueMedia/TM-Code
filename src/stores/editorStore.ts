@@ -4,6 +4,7 @@ import { FileService } from '../services/fileService';
 import { EditorManager } from '../utils/editorManager';
 import UnsavedChangesService from '../services/unsavedChangesService';
 import { AutoSaveQueue } from '../utils/autoSaveQueue';
+import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
 
 interface EditorFile {
   path: string;
@@ -34,6 +35,7 @@ interface EditorActions {
   saveFile: (path: string) => Promise<void>;
   saveAllFiles: () => Promise<void>;
   refreshFileContent: (path: string) => Promise<void>;
+  renameOpenFile: (oldPath: string, newPath: string) => void;
 }
 
 // Get language from file extension
@@ -154,25 +156,42 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
       },
 
       closeFile: (path: string) => {
+        const { openFiles } = get();
+        const f = openFiles.find(f => f.path === path);
+        const isDirty = !!f?.isDirty;
+        if (isDirty) {
+          // Ask for confirmation before closing an unsaved file
+          // Using a microtask to avoid blocking zustand set
+          Promise.resolve().then(async () => {
+            const ok = await tauriConfirm(`Close "${path}" without saving?`, { title: 'Unsaved changes', kind: 'warning' });
+            if (!ok) return;
+            set(state => {
+              const updated = state.openFiles.filter(ff => ff.path !== path);
+              const cursorPositions = { ...state.cursorPositions };
+              delete cursorPositions[path];
+              const editorManager = EditorManager.getInstance();
+              editorManager.closeFile(path);
+              unsavedChangesService.markFileAsClean(path);
+              let activeFile = state.activeFile;
+              if (activeFile === path) {
+                activeFile = updated.length > 0 ? updated[0].path : null;
+              }
+              return { openFiles: updated, activeFile, cursorPositions };
+            });
+          });
+          return;
+        }
         set(state => {
-          const openFiles = state.openFiles.filter(f => f.path !== path);
+          const updated = state.openFiles.filter(ff => ff.path !== path);
           const cursorPositions = { ...state.cursorPositions };
           delete cursorPositions[path];
-          
-          // Close file in editor manager
           const editorManager = EditorManager.getInstance();
           editorManager.closeFile(path);
-          
-          // Mark file as clean when closing
-          unsavedChangesService.markFileAsClean(path);
-          
-          // If we're closing the active file, set a new active file
           let activeFile = state.activeFile;
           if (activeFile === path) {
-            activeFile = openFiles.length > 0 ? openFiles[0].path : null;
+            activeFile = updated.length > 0 ? updated[0].path : null;
           }
-          
-          return { openFiles, activeFile, cursorPositions };
+          return { openFiles: updated, activeFile, cursorPositions };
         });
       },
 
@@ -436,6 +455,32 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           console.error(`Failed to refresh file content ${path}:`, error);
           throw error;
         }
+      },
+
+      renameOpenFile: (oldPath: string, newPath: string) => {
+        set(state => {
+          let openFiles = state.openFiles.map(f => f.path === oldPath ? { ...f, path: newPath } : f);
+
+          let activeFile = state.activeFile === oldPath ? newPath : state.activeFile;
+
+          const cursorPositions: Record<string, [number, number]> = {};
+          Object.entries(state.cursorPositions).forEach(([k, v]) => {
+            cursorPositions[k === oldPath ? newPath : k] = v;
+          });
+
+          const remapStack = (stack: Record<string, string[]>) => {
+            const next: Record<string, string[]> = {};
+            Object.entries(stack).forEach(([k, v]) => {
+              next[k === oldPath ? newPath : k] = v;
+            });
+            return next;
+          };
+
+          const undoStack = remapStack(state.undoStack);
+          const redoStack = remapStack(state.redoStack);
+
+          return { openFiles, activeFile, cursorPositions, undoStack, redoStack };
+        });
       }
     }),
     {

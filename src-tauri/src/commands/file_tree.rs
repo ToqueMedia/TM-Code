@@ -443,3 +443,23 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 
     Ok(())
 }
+
+// Create all directories for a given path
+#[tauri::command]
+pub fn create_directories_all(path: String) -> Result<FileOperationResult> {
+    let p = Path::new(&path);
+    // If the path points to a file (has extension or ends not with separator), create parent
+    let dir_to_create = if p.extension().is_some() {
+        p.parent().unwrap_or(p)
+    } else {
+        p
+    };
+
+    std::fs::create_dir_all(dir_to_create)
+        .map(|_| FileOperationResult {
+            success: true,
+            message: "Directories created successfully".to_string(),
+            path: p.to_string_lossy().to_string(),
+        })
+        .map_err(FileTreeError::from)
+}

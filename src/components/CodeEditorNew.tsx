@@ -31,6 +31,7 @@ import {
 } from 'react-icons/si'
 import TypeScriptIcon from './icons/TypeScriptIcon'
 import { FaFileImage, FaFilePdf, FaFileArchive } from 'react-icons/fa'
+import { getFileIconUrl } from '../utils/iconMapper'
 import { autoSaveProjectState, useProjectStore } from '../stores/projectStore'
 import { useEditorRepository } from '../stores/editorStore'
 import { useCurrentProject } from '../hooks/useProjectState'
@@ -364,12 +365,16 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
         bg: isActive ? '#1e1e1e' : '#37373d',
         _before: {
           opacity: isActive ? 0 : 0.5,
+        },
+        '& .tab-close': {
+          opacity: 1
         }
       }}
       transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
       role="tab"
       aria-selected={isActive}
       data-path={path}
+      data-group
       borderRadius="0"
       height="35px"
       minW="0"
@@ -401,6 +406,17 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
     >
       <HStack gap={2} align="center" minW="0">
         {(() => {
+          const ext = name.split('.').pop()?.toLowerCase()
+          const url = getFileIconUrl(ext)
+          if (url) {
+            return (
+              <img
+                src={url}
+                alt={name}
+                style={{ width: 16, height: 16 }}
+              />
+            )
+          }
           const { icon: IconComponent, color } = getFileIconComponent(name)
           return <IconComponent size={16} color={color} />
         })()}
@@ -426,6 +442,7 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
           />
         )}
         <IconButton
+          className="tab-close"
           aria-label={`Close ${name}`}
           onClick={handleClose}
           variant="ghost"
@@ -499,7 +516,7 @@ export function CodeEditorNew() {
       return 300
     }
   })
-  const [isResizingExplorer, setIsResizingExplorer] = useState(false)
+  const [, setIsResizingExplorer] = useState(false)
   
   // Refs para elementos DOM
   const editorRef = useRef<HTMLDivElement>(null)
@@ -775,23 +792,6 @@ export function CodeEditorNew() {
             ref={sidebarHandleRef}
             style={{ touchAction: 'none' }}
           />
-          {import.meta.env.DEV && isResizingExplorer && (
-            <Box
-              position="absolute"
-              top="8px"
-              right="12px"
-              bg="blackAlpha.700"
-              color="white"
-              fontSize="xs"
-              px={2}
-              py={1}
-              borderRadius="sm"
-              pointerEvents="none"
-              zIndex={20}
-            >
-              {explorerWidth}px ({Math.round((explorerWidth / window.innerWidth) * 100)}%)
-            </Box>
-          )}
         </Box>
 
         {/* Editor Area */}

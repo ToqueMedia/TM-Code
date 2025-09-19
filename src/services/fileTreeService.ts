@@ -21,4 +21,8 @@ export class FileTreeService {
   static async copyFileOrDirectory(sourcePath: string, destinationPath: string): Promise<FileOperationResult> {
     return await invoke<FileOperationResult>('copy_file_or_directory', { sourcePath, destinationPath });
   }
+
+  static async createDirectoriesAll(path: string): Promise<FileOperationResult> {
+    return await invoke<FileOperationResult>('create_directories_all', { path });
+  }
 }

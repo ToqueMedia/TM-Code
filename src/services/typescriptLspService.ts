@@ -1,11 +1,17 @@
 import * as monaco from 'monaco-editor';
 import { FileTreeService } from './fileTreeService';
+import { FileService } from './fileService';
 import type { FileTreeNode } from '../types/fileTree';
+import { FileTreeIndexer } from '../utils/fileTreeIndex';
 
 class TypeScriptLspService {
   private static instance: TypeScriptLspService;
   private projectFiles: Map<string, string> = new Map();
+  private models: Map<string, monaco.editor.ITextModel> = new Map();
   private isInitialized = false;
+  private rootPath: string | null = null;
+  private indexer = FileTreeIndexer.getInstance();
+  private disposables: monaco.IDisposable[] = [];
 
   private constructor() {}
 
@@ -17,16 +23,20 @@ class TypeScriptLspService {
   }
 
   async initialize(projectRoot: string) {
-    if (this.isInitialized) {
+    if (this.isInitialized && this.rootPath === projectRoot) {
       return;
     }
 
     try {
+      this.rootPath = projectRoot;
       // Load all TypeScript/JavaScript files in the project
       await this.loadProjectFiles(projectRoot);
       
       // Set up Monaco TypeScript language service
       this.setupLanguageService();
+
+      // Register path completion providers
+      this.registerPathCompletionProviders();
       
       this.isInitialized = true;
     } catch (error: unknown) {
@@ -34,26 +44,58 @@ class TypeScriptLspService {
     }
   }
 
+  private getLanguageFromExtension(path: string): string {
+    const ext = path.split('.').pop()?.toLowerCase();
+    switch (ext) {
+      case 'ts': return 'typescript';
+      case 'tsx': return 'typescript';
+      case 'js': return 'javascript';
+      case 'jsx': return 'javascript';
+      case 'json': return 'json';
+      case 'html': return 'html';
+      case 'css': return 'css';
+      default: return 'plaintext';
+    }
+  }
+
+  private createOrUpdateModel(filePath: string, content: string, language: string) {
+    const uri = monaco.Uri.file(filePath);
+    let model = monaco.editor.getModel(uri);
+    if (!model) {
+      model = monaco.editor.createModel(content, language, uri);
+    } else {
+      if (model.getValue() !== content) {
+        model.setValue(content);
+      }
+    }
+    this.models.set(filePath, model);
+  }
+
   private async loadProjectFiles(projectRoot: string) {
     try {
       // Build file tree with filter for TypeScript/JavaScript files
       const fileTree = await FileTreeService.buildFileTree(projectRoot, {
-        showHidden: false,
-        extensions: ['.ts', '.tsx', '.js', '.jsx', '.json'],
+        showHidden: true,
+        extensions: ['.ts', '.tsx', '.js', '.jsx', '.json', '.html', '.css'],
         maxDepth: undefined
       });
 
+      // Build index for fast path lookups
+      this.indexer.buildIndex(fileTree);
+
       // Traverse the file tree and load all relevant files
-      const traverse = (node: FileTreeNode) => {
+      const traverse = async (node: FileTreeNode) => {
         if (node.type === 'file') {
           // Load file content
-          this.loadFileContent(node.path);
+          await this.loadFileContent(node.path);
         } else if (node.type === 'directory' && node.children) {
-          node.children.forEach(traverse);
+          for (const child of node.children) {
+            await traverse(child);
+          }
         }
       };
 
-      traverse(fileTree);
+      await traverse(fileTree);
     } catch (error: unknown) {
       console.error('Failed to load project files:', error);
     }
@@ -61,15 +103,10 @@ class TypeScriptLspService {
 
   private async loadFileContent(filePath: string) {
     try {
-      // For now, we'll just register the file path
-      // In a real implementation, we would load the actual content
-      this.projectFiles.set(filePath, '');
-      
-      // Add file to Monaco's virtual file system
-      monaco.languages.typescript.typescriptDefaults.addExtraLib(
-        '', // empty content for now
-        `file://${filePath}`
-      );
+      const content = await FileService.readFile(filePath);
+      this.projectFiles.set(filePath, content);
+      const language = this.getLanguageFromExtension(filePath);
+      this.createOrUpdateModel(filePath, content, language);
     } catch (error: unknown) {
       console.error(`Failed to load file content for ${filePath}:`, error);
     }
@@ -124,8 +161,6 @@ class TypeScriptLspService {
   }
 
   private addDefaultLibraries() {
-    // Add common DOM and Node.js type definitions
-    // In a real implementation, you would load actual type definition files
     const domLib = `
       interface Window {
         document: Document;
@@ -148,14 +183,9 @@ class TypeScriptLspService {
 
   async updateFileContent(filePath: string, content: string) {
     try {
-      // Update file content in our cache
       this.projectFiles.set(filePath, content);
-      
-      // Update Monaco's virtual file system
-      monaco.languages.typescript.typescriptDefaults.addExtraLib(
-        content,
-        `file://${filePath}`
-      );
+      const language = this.getLanguageFromExtension(filePath);
+      this.createOrUpdateModel(filePath, content, language);
     } catch (error: unknown) {
       console.error(`Failed to update file content for ${filePath}:`, error);
     }
@@ -163,14 +193,9 @@ class TypeScriptLspService {
 
   async addFile(filePath: string, content: string = '') {
     try {
-      // Add file to our cache
       this.projectFiles.set(filePath, content);
-      
-      // Add file to Monaco's virtual file system
-      monaco.languages.typescript.typescriptDefaults.addExtraLib(
-        content,
-        `file://${filePath}`
-      );
+      const language = this.getLanguageFromExtension(filePath);
+      this.createOrUpdateModel(filePath, content, language);
     } catch (error: unknown) {
       console.error(`Failed to add file ${filePath}:`, error);
     }
@@ -178,21 +203,94 @@ class TypeScriptLspService {
 
   async removeFile(filePath: string) {
     try {
-      // Remove file from our cache
       this.projectFiles.delete(filePath);
-      
-      // Remove file from Monaco's virtual file system
-      const extraLibs = monaco.languages.typescript.typescriptDefaults.getExtraLibs();
-      const newExtraLibs = Object.keys(extraLibs).reduce((acc, key) => {
-        if (key !== `file://${filePath}`) {
-          acc[key] = extraLibs[key];
-        }
-        return acc;
-      }, {} as { [key: string]: { content: string } });
-      monaco.languages.typescript.typescriptDefaults.setExtraLibs(newExtraLibs as any);
+      const model = this.models.get(filePath) || monaco.editor.getModel(monaco.Uri.file(filePath));
+      if (model) {
+        model.dispose();
+        this.models.delete(filePath);
+      }
     } catch (error: unknown) {
       console.error(`Failed to remove file ${filePath}:`, error);
     }
+  }
+
+  async renameFileModel(oldPath: string, newPath: string) {
+    try {
+      const oldUri = monaco.Uri.file(oldPath);
+      const oldModel = monaco.editor.getModel(oldUri);
+      if (!oldModel) return;
+      const content = oldModel.getValue();
+      const language = this.getLanguageFromExtension(newPath);
+      // Create new model and dispose old
+      this.createOrUpdateModel(newPath, content, language);
+      oldModel.dispose();
+      this.models.delete(oldPath);
+    } catch (error) {
+      console.error(`Failed to rename model ${oldPath} -> ${newPath}:`, error);
+    }
+  }
+
+  private registerPathCompletionProviders() {
+    const provide = async (model: monaco.editor.ITextModel, position: monaco.Position) => {
+      try {
+        if (!this.rootPath) return { suggestions: [] as monaco.languages.CompletionItem[] };
+
+        const line = model.getLineContent(position.lineNumber);
+        const uptoColumn = line.slice(0, position.column - 1);
+        // Detect if we are inside import path string
+        const importMatch = uptoColumn.match(/(?:import\s+[^;]*from\s+|require\()\s*['"]([^'"]*)$/);
+        if (!importMatch) return { suggestions: [] as monaco.languages.CompletionItem[] };
+        const typedPath = importMatch[1];
+
+        // Resolve base directory
+        const currentDir = model.uri.path.substring(0, model.uri.path.lastIndexOf('/'));
+        const resolvedDir = this.resolveRelative(currentDir, typedPath);
+
+        const children = this.indexer.getChildren(this.rootPath, resolvedDir) || [];
+        const suggestions: monaco.languages.CompletionItem[] = children.map(child => {
+          const isDir = child.type === 'directory';
+          const label = child.name + (isDir ? '/' : '');
+          return {
+            label,
+            kind: isDir ? monaco.languages.CompletionItemKind.Folder : monaco.languages.CompletionItemKind.File,
+            insertText: label,
+            range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
+          };
+        });
+
+        return { suggestions };
+      } catch {
+        return { suggestions: [] as monaco.languages.CompletionItem[] };
+      }
+    };
+
+    const tsProvider = monaco.languages.registerCompletionItemProvider('typescript', {
+      triggerCharacters: ['/', '.', "'", '"'],
+      provideCompletionItems: provide as any,
+    });
+    const jsProvider = monaco.languages.registerCompletionItemProvider('javascript', {
+      triggerCharacters: ['/', '.', "'", '"'],
+      provideCompletionItems: provide as any,
+    });
+
+    this.disposables.push(tsProvider, jsProvider);
+  }
+
+  private resolveRelative(fromDir: string, typed: string): string {
+    if (typed.startsWith('/')) return typed; // absolute within root index
+    let base = fromDir;
+    let rest = typed;
+    if (typed.startsWith('./')) {
+      rest = typed.slice(2);
+    }
+    while (rest.startsWith('../')) {
+      rest = rest.slice(3);
+      base = base.substring(0, Math.max(0, base.lastIndexOf('/')));
+      if (base === '') base = '/';
+    }
+    const joined = base.endsWith('/') ? base + rest : base + '/' + rest;
+    // Normalize double slashes
+    return joined.replace(/\/+/g, '/');
   }
 
   getFileContent(filePath: string): string | undefined {
@@ -206,11 +304,18 @@ class TypeScriptLspService {
   reset() {
     // Clear all files
     this.projectFiles.clear();
+    this.models.forEach(m => m.dispose());
+    this.models.clear();
     
     // Reset Monaco's extra libraries
     monaco.languages.typescript.typescriptDefaults.setExtraLibs([]);
+
+    // Dispose providers
+    this.disposables.forEach(d => d.dispose());
+    this.disposables = [];
     
     this.isInitialized = false;
+    this.rootPath = null;
   }
 }
 

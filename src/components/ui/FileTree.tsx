@@ -10,8 +10,10 @@ import {
   Portal,
   Input,
   Dialog,
-  Alert
+  Alert,
+  Image
 } from '@chakra-ui/react';
+import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
 import {
   FiFolderPlus,
   FiFilePlus,
@@ -101,9 +103,11 @@ import {
   RiFolderWarningLine
 } from 'react-icons/ri';
 import { useFileTreeRepository } from '../../stores/fileTreeStore';
+import { useEditorRepository } from '../../stores/editorStore';
 import type { FileTreeNode } from '../../types/fileTree';
 import FileWatcherService from '../../services/fileWatcherService';
 import TypeScriptIcon from '../icons/TypeScriptIcon';
+import { getFileIconUrl, getFolderIconUrl } from '../../utils/iconMapper';
 
 interface FileTreeProps {
   rootPath: string;
@@ -437,6 +441,29 @@ const FileIcon: React.FC<{
     }
   };
   
+  // Prefer Material Icon Theme SVGs when available
+  const materialUrl = type === 'directory'
+    ? getFolderIconUrl(!!isExpanded)
+    : getFileIconUrl(extension);
+
+  if (materialUrl) {
+    return (
+      <Image
+        src={materialUrl}
+        alt={fileName || extension || 'file'}
+        boxSize="16px"
+        mr={2}
+        opacity={isSelected ? 1 : 0.95}
+        filter={isSelected ? 'none' : 'saturate(1.05)'}
+        transition="all 0.2s ease"
+        _hover={{
+          filter: 'brightness(1.05) saturate(1.2)',
+          transform: 'scale(1.05)'
+        }}
+      />
+    );
+  }
+
   const { icon: IconComponent, color } = getMaterialIconAndColor();
   
   return (
@@ -540,9 +567,16 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   };
   
   const handleDelete = async () => {
-    if (window.confirm(`Are you sure you want to delete "${node.name}"?`)) {
+    const ok = await tauriConfirm(`Delete "${node.name}"?`, { title: 'Confirm deletion', kind: 'warning' });
+    if (ok) {
       const success = await deleteNode(node.path);
       if (success) {
+        try {
+          // Close in editor if open and update LSP
+          useEditorRepository.getState().closeFile(node.path);
+          const lsp = (await import('../../services/typescriptLspService')).default.getInstance();
+          await lsp.removeFile(node.path);
+        } catch {}
         setAlert({ show: true, title: 'Success', description: `Deleted ${node.name}`, status: 'success' });
       } else {
         setAlert({ show: true, title: 'Error', description: `Failed to delete ${node.name}`, status: 'error' });
@@ -554,6 +588,14 @@ const TreeNode: React.FC<TreeNodeProps> = ({
     if (newName && newName !== node.name) {
       const success = await renameNode(node.path, newName);
       if (success) {
+        try {
+          const parentDir = node.path.substring(0, node.path.lastIndexOf('/'));
+          const newPath = parentDir ? `${parentDir}/${newName}` : newName;
+          // Update editor tabs and LSP
+          useEditorRepository.getState().renameOpenFile?.(node.path, newPath);
+          const lsp = (await import('../../services/typescriptLspService')).default.getInstance();
+          await lsp.renameFileModel(node.path, newPath);
+        } catch {}
         setAlert({ show: true, title: 'Success', description: `Renamed to ${newName}`, status: 'success' });
       } else {
         setAlert({ show: true, title: 'Error', description: `Failed to rename ${node.name}`, status: 'error' });
@@ -672,7 +714,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => handleKeyDown(e, confirmRename)}
-            onBlur={confirmRename}
+            onBlur={() => setIsRenaming(false)}
             size="xs"
             variant="flushed"
             color={isSelected ? 'white' : '#cccccc'}
@@ -751,104 +793,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
         )}
       </Menu.Root>
       
-      {/* Rename Modal */}
-      <Dialog.Root open={isRenaming} onOpenChange={() => setIsRenaming(false)}>
-        <Dialog.Backdrop bg="rgba(0, 0, 0, 0.8)" />
-        <Dialog.Positioner>
-          <Dialog.Content bg="#161b22" borderColor="#30363d" color="#c9d1d9">
-            <Dialog.Header>
-              <Dialog.Title>Rename {node.type}</Dialog.Title>
-            </Dialog.Header>
-            <Dialog.Body>
-              <Input
-                ref={renameInputRef}
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => handleKeyDown(e, confirmRename)}
-                size="sm"
-                bg="#0d1117"
-                borderColor="#30363d"
-                color="#c9d1d9"
-                _focus={{ borderColor: '#58a6ff', boxShadow: '0 0 0 3px rgba(88, 166, 255, 0.1)' }}
-              />
-            </Dialog.Body>
-            <Dialog.Footer>
-              <Button variant="outline" size="sm" onClick={() => setIsRenaming(false)} borderColor="#30363d" color="#c9d1d9" _hover={{ bg: 'rgba(255, 255, 255, 0.1)' }}>
-                Cancel
-              </Button>
-              <Button colorPalette="blue" size="sm" onClick={confirmRename} ml={3} bg="#58a6ff" color="#0d1117" _hover={{ bg: '#58a6ff', transform: 'translateY(-2px)' }}>
-                Rename
-              </Button>
-            </Dialog.Footer>
-            <Dialog.CloseTrigger color="#8b949e" _hover={{ color: '#f85149' }} />
-          </Dialog.Content>
-        </Dialog.Positioner>
-      </Dialog.Root>
       
-      {/* Create Modal */}
-      <Dialog.Root open={isCreating} onOpenChange={() => setIsCreating(false)}>
-        <Dialog.Backdrop bg="blackAlpha.800" />
-        <Dialog.Positioner>
-          <Dialog.Content 
-            bg="bg.panel" 
-            borderColor="border" 
-            color="fg"
-            shadow="xl"
-            borderRadius="lg"
-            maxW="400px"
-          >
-            <Dialog.Header pb={3}>
-              <Dialog.Title fontSize="lg" fontWeight="600">
-                Create New {createType === 'file' ? 'File' : 'Folder'}
-              </Dialog.Title>
-            </Dialog.Header>
-            <Dialog.Body py={4}>
-              <Input
-                ref={createInputRef}
-                placeholder={createType === 'file' ? 'filename.txt' : 'folder-name'}
-                value={createName}
-                onChange={(e) => setCreateName(e.target.value)}
-                onKeyDown={(e) => handleKeyDown(e, confirmCreate)}
-                size="md"
-                bg="bg"
-                borderColor="border"
-                color="fg"
-                _focus={{ 
-                  borderColor: 'blue.emphasized', 
-                  boxShadow: '0 0 0 1px var(--chakra-colors-blue-emphasized)'
-                }}
-              />
-            </Dialog.Body>
-            <Dialog.Footer pt={4}>
-              <Button 
-                variant="outline" 
-                size="sm" 
-                onClick={() => setIsCreating(false)} 
-                borderColor="border" 
-                color="fg.muted" 
-                _hover={{ bg: 'bg.muted', color: 'fg' }}
-              >
-                Cancel
-              </Button>
-              <Button 
-                colorPalette="blue" 
-                size="sm" 
-                onClick={confirmCreate} 
-                ml={3}
-                bg="blue.solid" 
-                color="blue.contrast" 
-                _hover={{ bg: 'blue.emphasized' }}
-              >
-                Create
-              </Button>
-            </Dialog.Footer>
-            <Dialog.CloseTrigger 
-              color="fg.muted" 
-              _hover={{ color: 'red.solid' }}
-            />
-          </Dialog.Content>
-        </Dialog.Positioner>
-      </Dialog.Root>
       
       {/* Copy Modal */}
       <Dialog.Root open={isCopying} onOpenChange={() => setIsCopying(false)}>
@@ -915,13 +860,54 @@ const TreeNode: React.FC<TreeNodeProps> = ({
         </Dialog.Positioner>
       </Dialog.Root>
       
-      {node.type === 'directory' && isExpanded && node.children && (
+      {node.type === 'directory' && isExpanded && (
         <VStack 
           align="stretch" 
           gap={0} 
           mt={1}
         >
-          {node.children.map((child) => (
+          {isCreating && (
+            <HStack
+              py={0}
+              pl={(level + 0.5) * 8 + 4}
+              pr={2}
+              bg={'rgba(255, 255, 255, 0.03)'}
+              color={'#cccccc'}
+              gap={0}
+              minHeight="22px"
+              alignItems="center"
+              minW="max-content"
+              w="100%"
+            >
+              <Box width="17px" />
+              <FileIcon
+                type={createType}
+                extension={createType === 'file' ? createName.split('.').pop() : undefined}
+                fileName={createName}
+                isSelected={true}
+                isExpanded={false}
+              />
+              <Input
+                ref={createInputRef}
+                placeholder={createType === 'file' ? 'filename.ts' : 'folder-name'}
+                value={createName}
+                onChange={(e) => setCreateName(e.target.value)}
+                onKeyDown={(e) => handleKeyDown(e, confirmCreate)}
+                onBlur={() => { setIsCreating(false); setCreateName(''); }}
+                size="xs"
+                variant="flushed"
+                color={'#ffffff'}
+                bg={'#37415A'}
+                flex={1}
+                px={1}
+                py={0}
+                height="20px"
+                fontSize="sm"
+              />
+            </HStack>
+          )}
+
+          {node.children && node.children.map((child) => (
             <TreeNode
               key={child.path}
               node={child}

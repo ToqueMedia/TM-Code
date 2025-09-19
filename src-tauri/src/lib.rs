@@ -41,6 +41,7 @@ pub fn run() {
             write_file,
             create_file,
             copy_file_or_directory,
+            create_directories_all,
             execute_command,
             start_interactive_shell,
             kill_process,
