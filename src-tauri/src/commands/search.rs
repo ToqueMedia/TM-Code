@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchOptions {
@@ -46,7 +46,7 @@ pub async fn search_in_files(
     options: SearchOptions,
 ) -> Result<SearchResult, String> {
     let start_time = std::time::Instant::now();
-    
+
     if query.trim().is_empty() {
         return Ok(SearchResult {
             query,
@@ -60,19 +60,22 @@ pub async fn search_in_files(
 
     let directory_path = PathBuf::from(&directory);
     if !directory_path.exists() || !directory_path.is_dir() {
-        return Err(format!("Directory does not exist or is not a directory: {}", directory));
+        return Err(format!(
+            "Directory does not exist or is not a directory: {}",
+            directory
+        ));
     }
 
     // Build ripgrep command
     let mut cmd = Command::new("rg");
-    
+
     // Basic search parameters
     cmd.arg("--json")
-       .arg("--heading")
-       .arg("--line-number")
-       .arg("--column")
-       .arg("--with-filename")
-       .arg("--no-heading");
+        .arg("--heading")
+        .arg("--line-number")
+        .arg("--column")
+        .arg("--with-filename")
+        .arg("--no-heading");
 
     // Case sensitivity
     if !options.case_sensitive {
@@ -107,21 +110,33 @@ pub async fn search_in_files(
     }
 
     // Default exclusions for common IDE patterns
-    cmd.arg("--glob").arg("!node_modules/**")
-       .arg("--glob").arg("!.git/**")
-       .arg("--glob").arg("!dist/**")
-       .arg("--glob").arg("!build/**")
-       .arg("--glob").arg("!.next/**")
-       .arg("--glob").arg("!coverage/**")
-       .arg("--glob").arg("!*.min.js")
-       .arg("--glob").arg("!*.map");
+    cmd.arg("--glob")
+        .arg("!node_modules/**")
+        .arg("--glob")
+        .arg("!.git/**")
+        .arg("--glob")
+        .arg("!dist/**")
+        .arg("--glob")
+        .arg("!build/**")
+        .arg("--glob")
+        .arg("!.next/**")
+        .arg("--glob")
+        .arg("!coverage/**")
+        .arg("--glob")
+        .arg("!*.min.js")
+        .arg("--glob")
+        .arg("!*.map");
 
     // Add the search pattern and directory
     cmd.arg(&query).arg(&directory);
 
     // Execute the command
-    let output = cmd.output()
-        .map_err(|e| format!("Failed to execute ripgrep: {}. Make sure ripgrep (rg) is installed.", e))?;
+    let output = cmd.output().map_err(|e| {
+        format!(
+            "Failed to execute ripgrep: {}. Make sure ripgrep (rg) is installed.",
+            e
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -147,12 +162,22 @@ pub async fn search_in_files(
                     match type_field {
                         "match" => {
                             if let (Some(path), Some(line_number), Some(text)) = (
-                                json.get("data").and_then(|d| d.get("path")).and_then(|p| p.get("text")).and_then(|t| t.as_str()),
-                                json.get("data").and_then(|d| d.get("line_number")).and_then(|l| l.as_u64()),
-                                json.get("data").and_then(|d| d.get("lines")).and_then(|l| l.get("text")).and_then(|t| t.as_str())
+                                json.get("data")
+                                    .and_then(|d| d.get("path"))
+                                    .and_then(|p| p.get("text"))
+                                    .and_then(|t| t.as_str()),
+                                json.get("data")
+                                    .and_then(|d| d.get("line_number"))
+                                    .and_then(|l| l.as_u64()),
+                                json.get("data")
+                                    .and_then(|d| d.get("lines"))
+                                    .and_then(|l| l.get("text"))
+                                    .and_then(|t| t.as_str()),
                             ) {
                                 // Get or create file result
-                                if current_file.is_none() || current_file.as_ref().unwrap().file_path != path {
+                                if current_file.is_none()
+                                    || current_file.as_ref().unwrap().file_path != path
+                                {
                                     if let Some(file) = current_file {
                                         files.push(file);
                                     }
@@ -164,18 +189,20 @@ pub async fn search_in_files(
                                 }
 
                                 // Extract match information
-                                let column = json.get("data")
-                                    .and_then(|d| d.get("submatches"))
-                                    .and_then(|s| s.as_array())
-                                    .and_then(|arr| arr.get(0))
-                                    .and_then(|sm| sm.get("start"))
-                                    .and_then(|start| start.as_u64())
-                                    .unwrap_or(0) as u32;
+                                let column =
+                                    json.get("data")
+                                        .and_then(|d| d.get("submatches"))
+                                        .and_then(|s| s.as_array())
+                                        .and_then(|arr| arr.first())
+                                        .and_then(|sm| sm.get("start"))
+                                        .and_then(|start| start.as_u64())
+                                        .unwrap_or(0) as u32;
 
-                                let match_text = json.get("data")
+                                let match_text = json
+                                    .get("data")
                                     .and_then(|d| d.get("submatches"))
                                     .and_then(|s| s.as_array())
-                                    .and_then(|arr| arr.get(0))
+                                    .and_then(|arr| arr.first())
                                     .and_then(|sm| sm.get("match"))
                                     .and_then(|m| m.get("text"))
                                     .and_then(|t| t.as_str())
@@ -249,11 +276,14 @@ pub async fn replace_in_files(
 
     let directory_path = PathBuf::from(&directory);
     if !directory_path.exists() || !directory_path.is_dir() {
-        return Err(format!("Directory does not exist or is not a directory: {}", directory));
+        return Err(format!(
+            "Directory does not exist or is not a directory: {}",
+            directory
+        ));
     }
 
     let mut cmd = Command::new("rg");
-    
+
     // Enable replacement mode
     cmd.arg("--replace").arg(&replacement);
     cmd.arg("--files-with-matches");
@@ -282,14 +312,19 @@ pub async fn replace_in_files(
     }
 
     // Default exclusions
-    cmd.arg("--glob").arg("!node_modules/**")
-       .arg("--glob").arg("!.git/**")
-       .arg("--glob").arg("!dist/**")
-       .arg("--glob").arg("!build/**");
+    cmd.arg("--glob")
+        .arg("!node_modules/**")
+        .arg("--glob")
+        .arg("!.git/**")
+        .arg("--glob")
+        .arg("!dist/**")
+        .arg("--glob")
+        .arg("!build/**");
 
     cmd.arg(&query).arg(&directory);
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| format!("Failed to execute ripgrep replace: {}", e))?;
 
     if !output.status.success() {
@@ -299,12 +334,15 @@ pub async fn replace_in_files(
 
     // Count the number of files that would be affected
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let affected_files = stdout.lines().filter(|line| !line.trim().is_empty()).count();
+    let affected_files = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
 
     Ok(affected_files as u32)
 }
 
-#[tauri::command] 
+#[tauri::command]
 pub async fn check_ripgrep_available() -> Result<bool, String> {
     match Command::new("rg").arg("--version").output() {
         Ok(output) => Ok(output.status.success()),

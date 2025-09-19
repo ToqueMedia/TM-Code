@@ -1,9 +1,9 @@
 mod commands;
-use commands::project::*;
-use commands::file_tree::*;
-use commands::terminal::*;
-use commands::search::*;
 use commands::debugger::*;
+use commands::file_tree::*;
+use commands::project::*;
+use commands::search::*;
+use commands::terminal::*;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -15,7 +15,7 @@ fn greet(name: &str) -> String {
 pub fn run() {
     let (command_history, _process_map) = commands::terminal::init_terminal_state();
     let debugger_state = commands::debugger::DebuggerState::new();
-    
+
     tauri::Builder::default()
         .manage(command_history)
         .manage(debugger_state)

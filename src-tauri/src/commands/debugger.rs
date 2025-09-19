@@ -14,8 +14,10 @@ pub enum DebuggerError {
     SessionNotFound(String),
     #[error("Failed to start debug session: {0}")]
     StartFailed(String),
+    #[allow(dead_code)]
     #[error("Failed to communicate with debugger: {0}")]
     CommunicationFailed(String),
+    #[allow(dead_code)]
     #[error("Invalid breakpoint: {0}")]
     InvalidBreakpoint(String),
     #[error("Node.js not found. Please ensure Node.js is installed")]
@@ -85,6 +87,7 @@ struct InternalDebugSession {
     pub process: Option<TokioChild>,
     pub status: DebugStatus,
     pub breakpoints: HashMap<String, DebugBreakpoint>,
+    #[allow(dead_code)]
     pub sender: Option<mpsc::UnboundedSender<String>>,
 }
 
@@ -133,12 +136,12 @@ fn generate_session_id() -> String {
 #[tauri::command]
 pub async fn check_debugger_availability() -> Result<HashMap<String, String>, String> {
     let mut available_debuggers = HashMap::new();
-    
+
     // Check Node.js
     if let Ok(version) = check_node_availability().await {
         available_debuggers.insert("node".to_string(), version);
     }
-    
+
     Ok(available_debuggers)
 }
 
@@ -148,10 +151,12 @@ pub async fn start_debug_session(
     state: State<'_, DebuggerState>,
 ) -> Result<String, String> {
     let session_id = generate_session_id();
-    
+
     // Validate configuration
     if config.program.is_empty() {
-        return Err(DebuggerError::InvalidConfig("Program path is required".to_string()).to_string());
+        return Err(
+            DebuggerError::InvalidConfig("Program path is required".to_string()).to_string(),
+        );
     }
 
     // Check if the debugger is available
@@ -160,7 +165,11 @@ pub async fn start_debug_session(
             check_node_availability().await.map_err(|e| e.to_string())?;
         }
         _ => {
-            return Err(DebuggerError::InvalidConfig(format!("Unsupported debug type: {}", config.debug_type)).to_string());
+            return Err(DebuggerError::InvalidConfig(format!(
+                "Unsupported debug type: {}",
+                config.debug_type
+            ))
+            .to_string());
         }
     }
 
@@ -187,21 +196,21 @@ pub async fn stop_debug_session(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut process_to_kill = {
+    let process_to_kill = {
         let mut sessions = state.sessions.lock().unwrap();
-        
+
         if let Some(session) = sessions.remove(&session_id) {
             session.process
         } else {
             return Err(DebuggerError::SessionNotFound(session_id).to_string());
         }
     };
-    
+
     // Terminate the process if running (outside the mutex lock)
     if let Some(mut process) = process_to_kill {
         let _ = process.kill().await;
     }
-    
+
     Ok(())
 }
 
@@ -211,8 +220,9 @@ pub async fn launch_debug_session(
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
-    
-    let session = sessions.get_mut(&session_id)
+
+    let session = sessions
+        .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     // Build command based on debug type
@@ -230,11 +240,18 @@ pub async fn launch_debug_session(
                 .stdin(Stdio::piped());
             node_cmd
         }
-        _ => return Err(DebuggerError::InvalidConfig(format!("Unsupported debug type: {}", session.config.debug_type)).to_string()),
+        _ => {
+            return Err(DebuggerError::InvalidConfig(format!(
+                "Unsupported debug type: {}",
+                session.config.debug_type
+            ))
+            .to_string())
+        }
     };
 
     // Start the process
-    let process = cmd.spawn()
+    let process = cmd
+        .spawn()
         .map_err(|e| DebuggerError::StartFailed(e.to_string()).to_string())?;
 
     session.process = Some(process);
@@ -251,8 +268,9 @@ pub async fn set_breakpoint(
     state: State<'_, DebuggerState>,
 ) -> Result<DebugBreakpoint, String> {
     let mut sessions = state.sessions.lock().unwrap();
-    
-    let session = sessions.get_mut(&session_id)
+
+    let session = sessions
+        .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     let breakpoint_id = format!("{}:{}:{}", session_id, file, line);
@@ -264,7 +282,9 @@ pub async fn set_breakpoint(
         message: None,
     };
 
-    session.breakpoints.insert(breakpoint_id, breakpoint.clone());
+    session
+        .breakpoints
+        .insert(breakpoint_id, breakpoint.clone());
 
     Ok(breakpoint)
 }
@@ -276,8 +296,9 @@ pub async fn remove_breakpoint(
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
-    
-    let session = sessions.get_mut(&session_id)
+
+    let session = sessions
+        .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     session.breakpoints.remove(&breakpoint_id);
@@ -291,8 +312,9 @@ pub async fn get_breakpoints(
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugBreakpoint>, String> {
     let sessions = state.sessions.lock().unwrap();
-    
-    let session = sessions.get(&session_id)
+
+    let session = sessions
+        .get(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     let breakpoints: Vec<DebugBreakpoint> = session.breakpoints.values().cloned().collect();
@@ -305,8 +327,9 @@ pub async fn debug_continue(
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
-    
-    let session = sessions.get_mut(&session_id)
+
+    let session = sessions
+        .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     // For now, just update status. In a full implementation,
@@ -322,8 +345,9 @@ pub async fn debug_pause(
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
-    
-    let session = sessions.get_mut(&session_id)
+
+    let session = sessions
+        .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     session.status = DebugStatus::Paused;
@@ -337,8 +361,9 @@ pub async fn debug_step_over(
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
-    
-    let session = sessions.get_mut(&session_id)
+
+    let session = sessions
+        .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     // In a full implementation, this would send a step over command
@@ -353,8 +378,9 @@ pub async fn debug_step_into(
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
-    
-    let session = sessions.get_mut(&session_id)
+
+    let session = sessions
+        .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     session.status = DebugStatus::Paused;
@@ -368,8 +394,9 @@ pub async fn debug_step_out(
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
-    
-    let session = sessions.get_mut(&session_id)
+
+    let session = sessions
+        .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     session.status = DebugStatus::Paused;
@@ -382,7 +409,7 @@ pub async fn get_debug_sessions(
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugSession>, String> {
     let sessions = state.sessions.lock().unwrap();
-    
+
     let debug_sessions: Vec<DebugSession> = sessions
         .iter()
         .map(|(id, internal_session)| DebugSession {
@@ -403,21 +430,20 @@ pub async fn get_call_stack(
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugStackFrame>, String> {
     let sessions = state.sessions.lock().unwrap();
-    
-    let _session = sessions.get(&session_id)
+
+    let _session = sessions
+        .get(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     // For now, return mock data. In a full implementation,
     // this would query the actual debugger for stack frames
-    let mock_stack = vec![
-        DebugStackFrame {
-            id: 1,
-            name: "main".to_string(),
-            file: "/path/to/file.js".to_string(),
-            line: 42,
-            column: 10,
-        },
-    ];
+    let mock_stack = vec![DebugStackFrame {
+        id: 1,
+        name: "main".to_string(),
+        file: "/path/to/file.js".to_string(),
+        line: 42,
+        column: 10,
+    }];
 
     Ok(mock_stack)
 }
@@ -429,8 +455,9 @@ pub async fn get_variables(
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugVariable>, String> {
     let sessions = state.sessions.lock().unwrap();
-    
-    let _session = sessions.get(&session_id)
+
+    let _session = sessions
+        .get(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
     // For now, return mock data
