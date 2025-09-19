@@ -147,6 +147,13 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
     }
   }, [isActive, debouncedResize]);
 
+  // Helper function to display prompt with context
+  function displayPrompt(terminal: XTerm) {
+    const cwd = session?.cwd || '~';
+    const shortCwd = cwd.length > 20 ? '...' + cwd.slice(-17) : cwd;
+    terminal.write(`\x1b[32m\x1b[1m${session?.name || 'terminal'}\x1b[0m:\x1b[34m${shortCwd}\x1b[0m$ `);
+  }
+
   function setupTerminalEvents(terminal: XTerm) {
     let currentLine = '';
     
@@ -159,7 +166,8 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
         if (currentLine.trim()) {
           await executeCommand(currentLine.trim(), terminal);
         } else {
-          terminal.write('\r\n$ ');
+          terminal.write('\r\n');
+          displayPrompt(terminal);
         }
         currentLine = '';
       } else if (code === 127) { // Backspace
@@ -177,20 +185,105 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
       const ev = domEvent;
       
       if (ev.ctrlKey && ev.code === 'KeyC') {
-        terminal.write('\r\n^C\r\n$ ');
+        terminal.write('\r\n^C\r\n');
+        displayPrompt(terminal);
         currentLine = '';
         commandLockRef.current = false;
       }
       
       if (ev.ctrlKey && ev.code === 'KeyL') {
         terminal.clear();
-        terminal.write('$ ');
+        displayPrompt(terminal);
         currentLine = '';
       }
     });
 
-    // Initial prompt
-    terminal.write('$ ');
+    // Initial prompt with context
+    displayPrompt(terminal);
+  }
+
+  // Helper function to add visual indicators and colors to items
+  function addVisualIndicators(items: string[]): string[] {
+    return items.map(item => {
+      // Directory indicator (assume items ending with / or common directory names)
+      if (item.endsWith('/') || ['node_modules', 'src', 'public', 'dist', 'build', '.git', '.vscode'].includes(item)) {
+        return `\x1b[34m📁 ${item}\x1b[0m`; // Blue color for directories
+      }
+      
+      // File type indicators
+      const ext = item.split('.').pop()?.toLowerCase();
+      switch (ext) {
+        case 'js': case 'jsx': case 'ts': case 'tsx':
+          return `\x1b[33m⚡ ${item}\x1b[0m`; // Yellow for JS/TS
+        case 'json':
+          return `\x1b[32m📄 ${item}\x1b[0m`; // Green for JSON
+        case 'md': case 'txt':
+          return `\x1b[36m📝 ${item}\x1b[0m`; // Cyan for docs
+        case 'css': case 'scss': case 'sass':
+          return `\x1b[35m🎨 ${item}\x1b[0m`; // Magenta for styles
+        case 'html': case 'htm':
+          return `\x1b[31m🌐 ${item}\x1b[0m`; // Red for HTML
+        case 'png': case 'jpg': case 'jpeg': case 'gif': case 'svg':
+          return `\x1b[95m🖼️  ${item}\x1b[0m`; // Bright magenta for images
+        case 'gitignore':
+        case 'env':
+        case 'yml': case 'yaml':
+          return `\x1b[90m⚙️  ${item}\x1b[0m`; // Gray for config files
+        default:
+          return `📄 ${item}`; // Default file icon
+      }
+    });
+  }
+
+  // Helper function to format command output
+  function formatCommandOutput(command: string, output: string, terminalCols: number = 80): string {
+    const trimmedCommand = command.trim().split(' ')[0];
+    
+    // Format ls output
+    if (trimmedCommand === 'ls') {
+      const items = output.trim().split(/\s+/).filter(item => item.length > 0);
+      if (items.length === 0) return output;
+      
+      // Check if it's a long format (ls -l, ls -la, etc)
+      if (command.includes('-l')) {
+        return output.replace(/\n/g, '\r\n'); // Keep original format but fix line endings
+      }
+      
+      // Add visual indicators unless using --no-color or similar
+      const enhancedItems = command.includes('--no-color') ? items : addVisualIndicators(items);
+      
+      // Calculate optimal column width (account for emoji and color codes)
+      const maxItemLength = Math.max(...items.map(item => item.length)) + 4; // Extra space for icons
+      const columnWidth = Math.min(maxItemLength + 2, Math.floor(terminalCols / 3));
+      const numColumns = Math.max(1, Math.min(3, Math.floor(terminalCols / columnWidth)));
+      
+      if (numColumns === 1) {
+        // Single column format
+        return enhancedItems.join('\r\n') + '\r\n';
+      } else {
+        // Multi-column format
+        const result: string[] = [];
+        for (let i = 0; i < enhancedItems.length; i += numColumns) {
+          const row = enhancedItems.slice(i, i + numColumns);
+          const formattedRow = row.map((item) => {
+            // Remove ANSI codes for padding calculation
+            const plainItem = item.replace(/\x1b\[[0-9;]*m/g, '');
+            const padding = Math.max(0, columnWidth - plainItem.length);
+            return item + ' '.repeat(padding);
+          }).join('');
+          result.push(formattedRow.trimEnd());
+        }
+        return result.join('\r\n') + '\r\n';
+      }
+    }
+    
+    // Format directory listing with colors
+    if (['dir', 'tree'].includes(trimmedCommand)) {
+      return output.replace(/\n/g, '\r\n');
+    }
+    
+    // Default: just ensure proper line endings
+    return output.replace(/\n/g, '\r\n');
   }
 
   async function executeCommand(command: string, terminal: XTerm) {
@@ -201,9 +294,10 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
     try {
       terminal.write('\r\n');
 
+      // Built-in terminal commands
       if (command === 'clear') {
         terminal.clear();
-        terminal.write('$ ');
+        displayPrompt(terminal);
         return;
       }
 
@@ -213,12 +307,17 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
       );
 
       if (result.success && result.stdout) {
-        terminal.write(result.stdout);
+        // Get terminal dimensions for formatting
+        const terminalCols = xtermRef.current?.cols || 80;
+        const formattedOutput = formatCommandOutput(command, result.stdout, terminalCols);
+        terminal.write(formattedOutput);
       } else if (result.stderr) {
-        terminal.write(`\x1b[31m${result.stderr}\x1b[0m`);
+        const formattedError = formatCommandOutput(command, result.stderr);
+        terminal.write(`\x1b[31m${formattedError}\x1b[0m`);
       }
 
-      terminal.write('\r\n$ ');
+      terminal.write('\r\n');
+      displayPrompt(terminal);
 
     } catch (error) {
       terminal.write(`\x1b[31mError: ${error}\x1b[0m\r\n$ `);
