@@ -27,6 +27,7 @@ import '@xterm/xterm/css/xterm.css';
 
 import { useTerminalStore } from '../../stores/terminalStore';
 import TerminalService from '../../services/terminalService';
+import { invoke } from '@tauri-apps/api/core';
 
 interface TerminalSessionProps {
   sessionId: string;
@@ -53,6 +54,7 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
     (state) => state.sessions.find(s => s.id === sessionId), 
     [sessionId]
   ));
+  const updateSessionCwd = useTerminalStore(state => state.updateSessionCwd);
   
   // Terminal theme baseado na imagem de referência
   const terminalTheme = useMemo(() => ({
@@ -147,11 +149,79 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
     }
   }, [isActive, debouncedResize]);
 
+  // Helper function to get display path
+  async function getDisplayPath(fullPath: string): Promise<string> {
+    try {
+      // Try to make relative to home directory
+      const homeDir = await invoke('get_home_directory') as string;
+      if (fullPath.startsWith(homeDir)) {
+        const relativePath = fullPath.replace(homeDir, '~');
+        return relativePath.length > 25 ? '...' + relativePath.slice(-22) : relativePath;
+      }
+      // For other paths, truncate if too long
+      return fullPath.length > 25 ? '...' + fullPath.slice(-22) : fullPath;
+    } catch {
+      return fullPath.length > 25 ? '...' + fullPath.slice(-22) : fullPath;
+    }
+  }
+
   // Helper function to display prompt with context
-  function displayPrompt(terminal: XTerm) {
+  async function displayPrompt(terminal: XTerm) {
     const cwd = session?.cwd || '~';
-    const shortCwd = cwd.length > 20 ? '...' + cwd.slice(-17) : cwd;
-    terminal.write(`\x1b[32m\x1b[1m${session?.name || 'terminal'}\x1b[0m:\x1b[34m${shortCwd}\x1b[0m$ `);
+    const displayPath = await getDisplayPath(cwd);
+    terminal.write(`\x1b[32m\x1b[1m${session?.name || 'terminal'}\x1b[0m:\x1b[34m${displayPath}\x1b[0m$ `);
+  }
+  
+  // Handle directory change
+  async function handleChangeDirectory(targetPath: string, terminal: XTerm) {
+    if (!session) return;
+    
+    try {
+      // Handle special cases
+      let resolvedPath = targetPath;
+      
+      if (targetPath === '~' || targetPath === '') {
+        resolvedPath = await invoke('get_home_directory') as string;
+      } else if (targetPath === '..') {
+        // Go to parent directory
+        const pathParts = session.cwd.split('/').filter(part => part.length > 0);
+        if (pathParts.length > 0) {
+          pathParts.pop();
+          resolvedPath = '/' + pathParts.join('/');
+          if (resolvedPath === '/') resolvedPath = '/';
+        } else {
+          resolvedPath = '/';
+        }
+      } else if (targetPath === '.') {
+        // Stay in current directory
+        resolvedPath = session.cwd;
+      } else if (!targetPath.startsWith('/')) {
+        // Relative path
+        resolvedPath = session.cwd + '/' + targetPath;
+      }
+      
+      // Normalize path (remove double slashes, etc.)
+      resolvedPath = resolvedPath.replace(/\/+/g, '/');
+      if (resolvedPath.length > 1 && resolvedPath.endsWith('/')) {
+        resolvedPath = resolvedPath.slice(0, -1);
+      }
+      
+      // Check if directory exists by trying to list it
+      const result = await TerminalService.shared.executeCommand('ls', resolvedPath);
+      
+      if (result.success) {
+        // Update session working directory
+        updateSessionCwd(session.id, resolvedPath);
+        // Display new prompt with updated path
+        await displayPrompt(terminal);
+      } else {
+        terminal.write(`\x1b[31mcd: no such file or directory: ${targetPath}\x1b[0m\r\n`);
+        await displayPrompt(terminal);
+      }
+    } catch (error) {
+      terminal.write(`\x1b[31mcd: ${error}\x1b[0m\r\n`);
+      await displayPrompt(terminal);
+    }
   }
 
   function setupTerminalEvents(terminal: XTerm) {
@@ -167,7 +237,7 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
           await executeCommand(currentLine.trim(), terminal);
         } else {
           terminal.write('\r\n');
-          displayPrompt(terminal);
+          await displayPrompt(terminal);
         }
         currentLine = '';
       } else if (code === 127) { // Backspace
@@ -181,19 +251,19 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
       }
     });
 
-    terminal.onKey(({ domEvent }) => {
+    terminal.onKey(async ({ domEvent }) => {
       const ev = domEvent;
       
       if (ev.ctrlKey && ev.code === 'KeyC') {
         terminal.write('\r\n^C\r\n');
-        displayPrompt(terminal);
+        await displayPrompt(terminal);
         currentLine = '';
         commandLockRef.current = false;
       }
       
       if (ev.ctrlKey && ev.code === 'KeyL') {
         terminal.clear();
-        displayPrompt(terminal);
+        await displayPrompt(terminal);
         currentLine = '';
       }
     });
@@ -202,35 +272,35 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
     displayPrompt(terminal);
   }
 
-  // Helper function to add visual indicators and colors to items
-  function addVisualIndicators(items: string[]): string[] {
+  // Helper function to add colors to items (no icons)
+  function addColorToItems(items: string[]): string[] {
     return items.map(item => {
-      // Directory indicator (assume items ending with / or common directory names)
+      // Directory coloring (assume items ending with / or common directory names)
       if (item.endsWith('/') || ['node_modules', 'src', 'public', 'dist', 'build', '.git', '.vscode'].includes(item)) {
-        return `\x1b[34m📁 ${item}\x1b[0m`; // Blue color for directories
+        return `\x1b[34m${item}\x1b[0m`; // Blue color for directories
       }
       
-      // File type indicators
+      // File type coloring
       const ext = item.split('.').pop()?.toLowerCase();
       switch (ext) {
         case 'js': case 'jsx': case 'ts': case 'tsx':
-          return `\x1b[33m⚡ ${item}\x1b[0m`; // Yellow for JS/TS
+          return `\x1b[33m${item}\x1b[0m`; // Yellow for JS/TS
         case 'json':
-          return `\x1b[32m📄 ${item}\x1b[0m`; // Green for JSON
+          return `\x1b[32m${item}\x1b[0m`; // Green for JSON
         case 'md': case 'txt':
-          return `\x1b[36m📝 ${item}\x1b[0m`; // Cyan for docs
+          return `\x1b[36m${item}\x1b[0m`; // Cyan for docs
         case 'css': case 'scss': case 'sass':
-          return `\x1b[35m🎨 ${item}\x1b[0m`; // Magenta for styles
+          return `\x1b[35m${item}\x1b[0m`; // Magenta for styles
         case 'html': case 'htm':
-          return `\x1b[31m🌐 ${item}\x1b[0m`; // Red for HTML
+          return `\x1b[31m${item}\x1b[0m`; // Red for HTML
         case 'png': case 'jpg': case 'jpeg': case 'gif': case 'svg':
-          return `\x1b[95m🖼️  ${item}\x1b[0m`; // Bright magenta for images
+          return `\x1b[95m${item}\x1b[0m`; // Bright magenta for images
         case 'gitignore':
         case 'env':
         case 'yml': case 'yaml':
-          return `\x1b[90m⚙️  ${item}\x1b[0m`; // Gray for config files
+          return `\x1b[90m${item}\x1b[0m`; // Gray for config files
         default:
-          return `📄 ${item}`; // Default file icon
+          return item; // Default - no color
       }
     });
   }
@@ -249,11 +319,11 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
         return output.replace(/\n/g, '\r\n'); // Keep original format but fix line endings
       }
       
-      // Add visual indicators unless using --no-color or similar
-      const enhancedItems = command.includes('--no-color') ? items : addVisualIndicators(items);
+      // Add colors unless using --no-color or similar
+      const enhancedItems = command.includes('--no-color') ? items : addColorToItems(items);
       
-      // Calculate optimal column width (account for emoji and color codes)
-      const maxItemLength = Math.max(...items.map(item => item.length)) + 4; // Extra space for icons
+      // Calculate optimal column width
+      const maxItemLength = Math.max(...items.map(item => item.length)) + 2; // Extra space for padding
       const columnWidth = Math.min(maxItemLength + 2, Math.floor(terminalCols / 3));
       const numColumns = Math.max(1, Math.min(3, Math.floor(terminalCols / columnWidth)));
       
@@ -297,7 +367,32 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
       // Built-in terminal commands
       if (command === 'clear') {
         terminal.clear();
-        displayPrompt(terminal);
+        await displayPrompt(terminal);
+        return;
+      }
+      
+      // Handle cd command
+      if (command.startsWith('cd ')) {
+        const newPath = command.substring(3).trim();
+        await handleChangeDirectory(newPath, terminal);
+        return;
+      } else if (command === 'cd') {
+        // cd without arguments - go to home directory
+        try {
+          const homeDir = await invoke('get_home_directory') as string;
+          await handleChangeDirectory(homeDir, terminal);
+          return;
+        } catch (error) {
+          terminal.write(`\x1b[31mError: Could not get home directory\x1b[0m\r\n`);
+          await displayPrompt(terminal);
+          return;
+        }
+      }
+      
+      // Handle pwd command
+      if (command === 'pwd') {
+        terminal.write(`${session.cwd}\r\n`);
+        await displayPrompt(terminal);
         return;
       }
 
@@ -317,7 +412,7 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
       }
 
       terminal.write('\r\n');
-      displayPrompt(terminal);
+      await displayPrompt(terminal);
 
     } catch (error) {
       terminal.write(`\x1b[31mError: ${error}\x1b[0m\r\n$ `);

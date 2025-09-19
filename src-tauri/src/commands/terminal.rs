@@ -127,6 +127,14 @@ pub async fn get_current_directory() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn get_home_directory() -> Result<String, String> {
+    let home_dir = dirs::home_dir()
+        .ok_or("Failed to get home directory")?;
+    
+    Ok(home_dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 pub async fn change_directory(path: String) -> Result<String, String> {
     let new_path = PathBuf::from(path);
     

@@ -41,6 +41,7 @@ pub fn run() {
             start_interactive_shell,
             kill_process,
             get_current_directory,
+            get_home_directory,
             change_directory,
             command_exists,
             get_environment_variables,
