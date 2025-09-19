@@ -1,6 +1,7 @@
 mod commands;
 use commands::project::*;
 use commands::file_tree::*;
+use commands::terminal::*;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -10,7 +11,10 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let (command_history, _process_map) = commands::terminal::init_terminal_state();
+    
     tauri::Builder::default()
+        .manage(command_history)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -32,7 +36,19 @@ pub fn run() {
             read_file,
             write_file,
             create_file,
-            copy_file_or_directory
+            copy_file_or_directory,
+            execute_command,
+            start_interactive_shell,
+            kill_process,
+            get_current_directory,
+            get_home_directory,
+            change_directory,
+            command_exists,
+            get_environment_variables,
+            get_completions,
+            get_command_history,
+            save_command_to_history,
+            clear_command_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
