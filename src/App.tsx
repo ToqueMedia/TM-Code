@@ -1,6 +1,6 @@
 // src/App.tsx
 import WelcomeScreen from './components/WelcomeScreen';
-import { CodeEditor } from './components/CodeEditor';
+import CodeEditorNew from './components/CodeEditorNew';
 import { useProjectStore } from './stores/projectStore';
 import { NewProjectDialog } from './components/dialogs/NewProjectDialog';
 import { useDialog } from './hooks/useDialog';
@@ -60,7 +60,7 @@ function App() {
   return (
     <>
       {currentProject ? (
-        <CodeEditor />
+        <CodeEditorNew />
       ) : (
         <WelcomeScreen 
           onOpenProject={handleOpenProject}

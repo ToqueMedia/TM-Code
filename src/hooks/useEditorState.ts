@@ -26,9 +26,11 @@ export function useUndoRedoStacks() {
 
 // Hook para estado de um arquivo específico - retorna valores primitivos separados
 export function useFileContent(path: string) {
-  return useEditorRepository(
+  const content = useEditorRepository(
     state => state.openFiles.find(f => f.path === path)?.content ?? ''
   );
+  
+  return content;
 }
 
 export function useFileLanguage(path: string) {
@@ -125,6 +127,9 @@ export function useMonacoEditorState(path: string) {
   const cursorPosition = useFileCursorPosition(path);
   const isActive = useFileIsActive(path);
   const exists = useFileExists(path);
+  
+  // Debug logging (temporarily disabled)
+  // console.log('useMonacoEditorState Debug:', { path, content, language, isDirty, cursorPosition, isActive, exists });
   
   // Seletores individuais de ações
   const updateFileContent = useEditorRepository(state => state.updateFileContent);

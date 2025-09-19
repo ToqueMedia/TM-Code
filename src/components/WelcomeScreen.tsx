@@ -169,7 +169,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
             bgGradient="linear(135deg, #58a6ff 0%, #a371f7 100%)"
             bgClip="text"
           >
-            Diamond
+            ToqueMedia Studio
           </Heading>
         </Flex>
 
@@ -315,7 +315,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
             letterSpacing="-0.5px"
             mb={4}
           >
-            Welcome to Diamond
+            Welcome to ToqueMedia Studio
           </Heading>
           <Text 
             fontSize="18px" 
@@ -323,8 +323,8 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
             maxW="500px" 
             lineHeight="1.5"
           >
-            The ultimate development environment designed for modern developers. 
-            Start building something amazing today.
+            A powerful, modern IDE built for today's developers. 
+            Create, code, and deploy with unmatched performance and style.
           </Text>
         </VStack>
 

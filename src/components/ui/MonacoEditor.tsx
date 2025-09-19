@@ -1,45 +1,52 @@
-import React, { useRef, useEffect, useMemo, useCallback } from 'react';
-import Editor from '@monaco-editor/react';
+import React, { useRef, useEffect, useCallback, useState } from 'react';
+import Editor, { Monaco } from '@monaco-editor/react';
 import { useMonacoEditorState } from '../../hooks/useEditorState';
-import type { editor } from 'monaco-editor';
-import { KeyCode, KeyMod } from 'monaco-editor';
-import TypeScriptLspService from '../../services/typescriptLspService';
+import { useMonacoTheme } from '../../hooks/useMonacoTheme';
+import type { editor, IDisposable } from 'monaco-editor';
 
-// Configure TypeScript language service
+// Import Monaco workers for Vite
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
 import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
 import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
 import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 
-// Initialize Monaco workers with proper typing
+// Monaco Editor environment configuration
 declare global {
   interface Window {
-    MonacoEnvironment: any;
+    MonacoEnvironment: {
+      getWorker: (workerId: string, label: string) => Worker;
+    };
   }
 }
 
-window.MonacoEnvironment = {
-  getWorker: function (_workerId: string, label: string) {
-    switch (label) {
-      case 'json':
-        return new jsonWorker();
-      case 'css':
-      case 'scss':
-      case 'less':
-        return new cssWorker();
-      case 'html':
-      case 'handlebars':
-      case 'razor':
-        return new htmlWorker();
-      case 'typescript':
-      case 'javascript':
-        return new tsWorker();
-      default:
-        return new editorWorker();
+// Configure Monaco workers and global theme initialization
+if (typeof window !== 'undefined') {
+  window.MonacoEnvironment = {
+    getWorker: function (_workerId: string, label: string) {
+      switch (label) {
+        case 'json':
+          return new jsonWorker();
+        case 'css':
+        case 'scss':
+        case 'less':
+          return new cssWorker();
+        case 'html':
+        case 'handlebars':
+        case 'razor':
+          return new htmlWorker();
+        case 'typescript':
+        case 'javascript':
+          return new tsWorker();
+        default:
+          return new editorWorker();
+      }
     }
-  }
-};
+  };
+  
+  // Global flag to track if themes are defined
+  (window as any).toqueMediaThemesDefined = false;
+}
 
 interface MonacoEditorProps {
   path: string;
@@ -47,6 +54,7 @@ interface MonacoEditorProps {
 }
 
 const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChange }) => {
+  // Get file state from our editor store
   const {
     content,
     language,
@@ -54,179 +62,208 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     handleContentChange,
     handleCursorChange,
     handleSave,
-    handleUndo,
-    handleRedo,
   } = useMonacoEditorState(path);
   
+  // Refs for editor instance
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
-  const lspServiceRef = useMemo(() => TypeScriptLspService.getInstance(), []);
+  const [monacoInstance, setMonacoInstance] = useState<Monaco | null>(null);
   
+  // Use the custom theme management hook
+  useMonacoTheme(editorRef.current, monacoInstance);
   
-  const handleEditorDidMount = useCallback((editor: editor.IStandaloneCodeEditor) => {
+  // Monaco Editor options following official documentation best practices
+  const editorOptions: editor.IStandaloneEditorConstructionOptions = {
+    // Basic editor options
+    automaticLayout: true,
+    fontSize: 14,
+    fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace',
+    lineHeight: 20,
+    tabSize: 2,
+    insertSpaces: true,
+    detectIndentation: true,
+    
+    // Theme and appearance - will be set after custom themes are defined
+    theme: 'toquemedia-vibrant',
+    
+    // Scrolling and layout
+    scrollBeyondLastLine: false,
+    wordWrap: 'on',
+    scrollbar: {
+      verticalScrollbarSize: 10,
+      horizontalScrollbarSize: 10,
+      useShadows: false,
+      verticalHasArrows: false,
+      horizontalHasArrows: false,
+    },
+    
+    // Minimap
+    minimap: {
+      enabled: true,
+      side: 'right',
+      showSlider: 'always',
+      renderCharacters: false,
+    },
+    
+    // Cursor and selection
+    cursorBlinking: 'blink',
+    cursorSmoothCaretAnimation: 'on',
+    selectionHighlight: true,
+    occurrencesHighlight: 'singleFile',
+    
+    // Code assistance
+    quickSuggestions: {
+      other: 'on',
+      comments: 'off',
+      strings: 'off',
+    },
+    suggestOnTriggerCharacters: true,
+    acceptSuggestionOnCommitCharacter: true,
+    acceptSuggestionOnEnter: 'on',
+    snippetSuggestions: 'top',
+    
+    // Code formatting
+    formatOnType: false,
+    formatOnPaste: false,
+    autoIndent: 'full',
+    
+    // Code folding
+    folding: true,
+    foldingStrategy: 'auto',
+    showFoldingControls: 'mouseover',
+    foldingHighlight: true,
+    
+    // Bracket matching and colorization
+    matchBrackets: 'always',
+    bracketPairColorization: {
+      enabled: true,
+      independentColorPoolPerBracketType: true,
+    },
+    
+    // Indentation guides
+    guides: {
+      bracketPairs: true,
+      indentation: true,
+      highlightActiveIndentation: true,
+    },
+    
+    // Other features
+    hover: {
+      enabled: true,
+      delay: 300,
+      sticky: true,
+    },
+    links: true,
+    colorDecorators: true,
+    codeLens: false, // Disable for better performance
+    contextmenu: true,
+    
+    // Accessibility
+    accessibilitySupport: 'auto',
+    
+    // Find widget
+    find: {
+      seedSearchStringFromSelection: 'never',
+      autoFindInSelection: 'never',
+      addExtraSpaceOnTop: false,
+    },
+    
+    // Render options
+    renderWhitespace: 'none',
+    renderControlCharacters: false,
+    renderLineHighlight: 'line',
+    // renderIndentGuides: true, // Removed - not in current Monaco API
+    
+    // Multi-cursor
+    multiCursorModifier: 'alt',
+    multiCursorPaste: 'spread',
+  };
+  
+  // Handle editor mounting
+  const handleEditorDidMount = useCallback((editor: editor.IStandaloneCodeEditor, monaco: Monaco) => {
+    console.log('Monaco Editor mounted successfully for:', path);
     editorRef.current = editor;
+    setMonacoInstance(monaco);
     
-    // Set up cursor position tracking
-    const cursorDisposable = editor.onDidChangeCursorPosition((e: editor.ICursorPositionChangedEvent) => {
-      const position = e.position;
-      handleCursorChange(position.lineNumber, position.column);
-      if (onCursorPositionChange) {
-        onCursorPositionChange(position.lineNumber, position.column);
-      }
-    });
-    
-    // Set up keyboard shortcuts for undo/redo
-    editor.addCommand(KeyMod.CtrlCmd | KeyCode.KeyZ, () => {
-      handleUndo();
-    });
-    
-    editor.addCommand(KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyZ, () => {
-      handleRedo();
-    });
-    
-    // On Windows/Linux, Ctrl+Y is redo
-    editor.addCommand(KeyMod.CtrlCmd | KeyCode.KeyY, () => {
-      handleRedo();
-    });
-    
-    // Save file with Ctrl+S
-    editor.addCommand(KeyMod.CtrlCmd | KeyCode.KeyS, async () => {
-      try {
-        await handleSave();
-        // Update LSP service with new content
-        if (content) {
-          await lspServiceRef.updateFileContent(path, content);
-        }
-      } catch (error) {
-        console.error('Failed to save file:', error);
-      }
-    });
-    
-    // Trigger auto-formatting on blur
-    const blurDisposable = editor.onDidBlurEditorText(async () => {
-      try {
-        await editor.getAction('editor.action.formatDocument')?.run();
-      } catch (error) {
-        console.error('Failed to format document:', error);
-      }
-    });
-    
-    // Store disposables for cleanup
-    return () => {
-      cursorDisposable?.dispose();
-      blurDisposable?.dispose();
-    };
-  }, [handleCursorChange, onCursorPositionChange, handleUndo, handleRedo, handleSave, content, lspServiceRef, path]);
-  
-  const handleEditorChange = useCallback((value: string | undefined) => {
-    if (value !== undefined) {
-      handleContentChange(value);
+    // Configure TypeScript compiler options if it's a TypeScript file
+    if (language === 'typescript' || language === 'javascript') {
+      monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
+        target: monaco.languages.typescript.ScriptTarget.ES2020,
+        allowNonTsExtensions: true,
+        moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+        module: monaco.languages.typescript.ModuleKind.ESNext,
+        noEmit: true,
+        typeRoots: ['node_modules/@types'],
+        allowSyntheticDefaultImports: true,
+        esModuleInterop: true,
+        jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
+      });
       
-      // Update LSP service with new content
-      lspServiceRef.updateFileContent(path, value);
+      // Enable strict null checks and other strict options
+      monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+        noSemanticValidation: false,
+        noSyntaxValidation: false,
+        diagnosticCodesToIgnore: [1108], // Ignore 'return statement not in function' errors
+      });
     }
-  }, [handleContentChange, lspServiceRef, path]);
+    
+    // Set up event listeners
+    const disposables: IDisposable[] = [];
+    
+    // Cursor position change
+    disposables.push(
+      editor.onDidChangeCursorPosition((e) => {
+        const { lineNumber, column } = e.position;
+        handleCursorChange(lineNumber, column);
+        onCursorPositionChange?.(lineNumber, column);
+      })
+    );
+    
+    // Content change
+    disposables.push(
+      editor.onDidChangeModelContent(() => {
+        const value = editor.getValue();
+        handleContentChange(value);
+      })
+    );
+    
+    // Add keyboard shortcuts
+    const saveCommand = editor.addCommand(
+      monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
+      () => {
+        handleSave().catch(error => {
+          console.error('Failed to save file:', error);
+        });
+      }
+    );
+    
+    if (saveCommand) {
+      disposables.push({ dispose: () => {} }); // Command disposable is managed by Monaco
+    }
+    
+    // Focus the editor
+    editor.focus();
+    
+    // Return cleanup function
+    return () => {
+      disposables.forEach(disposable => disposable.dispose());
+    };
+  }, [path, language, handleContentChange, handleCursorChange, handleSave, onCursorPositionChange]);
   
-  // Focus the editor when it becomes active
+  // Handle content changes
+  const handleChange = useCallback((value: string | undefined) => {
+    if (value !== undefined && value !== content) {
+      handleContentChange(value);
+    }
+  }, [content, handleContentChange]);
+  
+  // Focus editor when path changes
   useEffect(() => {
     if (editorRef.current) {
       editorRef.current.focus();
     }
   }, [path]);
   
-  // Monaco editor options - Memoizado para evitar re-criação
-  // MUST be declared BEFORE any early returns to respect React hooks rules
-  const editorOptions = useMemo(() => ({
-    automaticLayout: true,
-    minimap: { 
-      enabled: true,
-      showSlider: 'always' as const,
-      renderCharacters: false
-    },
-    scrollBeyondLastLine: false,
-    fontSize: 14,
-    tabSize: 2,
-    insertSpaces: true,
-    wordWrap: 'on' as const,
-    smoothScrolling: true,
-    cursorBlinking: 'smooth' as const,
-    fontLigatures: true,
-    suggest: {
-      showKeywords: true,
-      showSnippets: true,
-      showClasses: true,
-      showInterfaces: true,
-      showFunctions: true,
-      showVariables: true,
-      showProperties: true,
-      showEvents: true,
-      showOperators: true,
-      showUnits: true,
-      showValues: true,
-      showConstants: true,
-      showEnums: true,
-      showEnumMembers: true,
-      showWords: true,
-      showColors: true,
-      showFiles: true,
-      showReferences: true,
-      showFolders: true,
-      showTypeParameters: true,
-      showUsers: true,
-      showIssues: true
-    },
-    quickSuggestions: {
-      other: 'on' as const,
-      comments: 'off' as const,
-      strings: 'off' as const
-    },
-    formatOnType: true,
-    formatOnPaste: true,
-    autoIndent: 'full' as const,
-    detectIndentation: true,
-    renderWhitespace: 'boundary' as const,
-    renderControlCharacters: false,
-    renderLineHighlight: 'all' as const,
-    scrollbar: {
-      vertical: 'auto' as const,
-      horizontal: 'auto' as const,
-      verticalScrollbarSize: 10,
-      horizontalScrollbarSize: 10
-    },
-    find: {
-      addExtraSpaceOnTop: false,
-      autoFindInSelection: 'never' as const,
-      seedSearchStringFromSelection: 'never' as const
-    },
-    suggestOnTriggerCharacters: true,
-    acceptSuggestionOnCommitCharacter: true,
-    acceptSuggestionOnEnter: 'on' as const,
-    accessibilitySupport: 'auto' as const,
-    codeLens: true,
-    colorDecorators: true,
-    copyWithSyntaxHighlighting: true,
-    hover: {
-      enabled: true,
-      delay: 300,
-      sticky: true
-    },
-    links: true,
-    multiCursorModifier: 'alt' as const,
-    multiCursorPaste: 'spread' as const,
-    occurrencesHighlight: 'singleFile' as const,
-    overviewRulerBorder: true,
-    selectionHighlight: true,
-    showFoldingControls: 'mouseover' as const,
-    folding: true,
-    foldingHighlight: true,
-    foldingStrategy: 'auto' as const,
-    showUnused: true,
-    snippetSuggestions: 'top' as const,
-    lineHeight: 22,
-    mouseWheelZoom: true,
-    stickyTabStops: true
-  }), []);
-  
-  // Early return MUST come after all hooks
+  // Show loading state for files that don't exist yet
   if (!exists) {
     return (
       <div style={{ 
@@ -235,23 +272,50 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         justifyContent: 'center', 
         height: '100%', 
         color: '#8b949e',
-        fontSize: '14px'
+        fontSize: '14px',
+        flexDirection: 'column',
+        gap: '8px'
       }}>
-        File not found
+        <div>📄 File not found</div>
+        <div style={{ fontSize: '12px', opacity: 0.7 }}>{path}</div>
       </div>
     );
   }
   
+  // Debug log for content
+  console.log(`Monaco Editor [${path}]:`, {
+    hasContent: !!content,
+    contentLength: content?.length || 0,
+    language,
+    exists
+  });
+  
   return (
-    <Editor
-      height="100%"
-      language={language}
-      value={content}
-      onChange={handleEditorChange}
-      onMount={handleEditorDidMount}
-      theme="vs-dark"
-      options={editorOptions}
-    />
+    <div style={{ height: '100%', width: '100%' }}>
+      <Editor
+        height="100%"
+        defaultLanguage={language}
+        language={language}
+        value={content || ''}
+        onChange={handleChange}
+        onMount={handleEditorDidMount}
+        options={editorOptions}
+        theme="toquemedia-vibrant"
+        keepCurrentModel={true}
+        loading={
+          <div style={{ 
+            display: 'flex', 
+            alignItems: 'center', 
+            justifyContent: 'center', 
+            height: '100%', 
+            color: '#8b949e',
+            fontSize: '14px'
+          }}>
+            ⚡ Loading Monaco Editor...
+          </div>
+        }
+      />
+    </div>
   );
 };
 

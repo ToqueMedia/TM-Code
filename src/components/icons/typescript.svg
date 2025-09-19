@@ -1,0 +1,24 @@
+<!-- typescript-file-icon.svg -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="256" height="256" viewBox="0 0 256 256"
+     role="img" aria-labelledby="tsTitle tsDesc">
+  <title id="tsTitle">Ficheiro TypeScript</title>
+  <desc id="tsDesc">Ícone estilo ficheiro com dobra e “TS” no canto inferior direito.</desc>
+
+  <style>
+    :root { --ts-blue: #3178C6; }
+    .bg { fill: var(--ts-blue); }
+    .letters { fill: #ffffff; font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; font-weight: 700; }
+    .fold { fill: #1e5ea8; } /* tom mais escuro para a dobra */
+  </style>
+
+  <!-- forma do ficheiro com dobra -->
+  <path class="bg" d="M48 16h112l48 48v176H48z"/>
+  <!-- dobra no canto superior direito -->
+  <polygon class="fold" points="160,16 208,64 160,64"/>
+
+  <!-- letras TS deslocadas para o canto inferior direito -->
+  <text class="letters" x="185" y="205" font-size="72" text-anchor="end" dominant-baseline="alphabetic">
+    TS
+  </text>
+</svg>
