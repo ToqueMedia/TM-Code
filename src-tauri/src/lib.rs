@@ -1,6 +1,8 @@
 mod commands;
-use commands::project::*;
+use commands::debugger::*;
 use commands::file_tree::*;
+use commands::project::*;
+use commands::search::*;
 use commands::terminal::*;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -12,9 +14,11 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (command_history, _process_map) = commands::terminal::init_terminal_state();
-    
+    let debugger_state = commands::debugger::DebuggerState::new();
+
     tauri::Builder::default()
         .manage(command_history)
+        .manage(debugger_state)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -48,7 +52,25 @@ pub fn run() {
             get_completions,
             get_command_history,
             save_command_to_history,
-            clear_command_history
+            clear_command_history,
+            search_in_files,
+            replace_in_files,
+            check_ripgrep_available,
+            check_debugger_availability,
+            start_debug_session,
+            stop_debug_session,
+            launch_debug_session,
+            set_breakpoint,
+            remove_breakpoint,
+            get_breakpoints,
+            debug_continue,
+            debug_pause,
+            debug_step_over,
+            debug_step_into,
+            debug_step_out,
+            get_debug_sessions,
+            get_call_stack,
+            get_variables
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

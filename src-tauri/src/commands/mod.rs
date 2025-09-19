@@ -1,3 +1,5 @@
-pub mod project;
+pub mod debugger;
 pub mod file_tree;
+pub mod project;
+pub mod search;
 pub mod terminal;

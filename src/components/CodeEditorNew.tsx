@@ -42,6 +42,7 @@ import ExplorerPanel from './ui/ExplorerPanel'
 import SearchPanel from './ui/SearchPanel'
 import BottomPanel from './ui/BottomPanel'
 import Breadcrumbs from './ui/Breadcrumbs'
+import DebuggerPanel from './DebuggerPanel'
 
 // Lazy load componentes pesados
 const MonacoEditor = lazy(() => import('./ui/MonacoEditor'))
@@ -901,11 +902,50 @@ const SourceControlPanel = memo(() => (
   </Box>
 ))
 
-const RunDebugPanel = memo(() => (
-  <Box p={4} color="text.muted">
-    <Text fontSize="sm">Run & debug panel coming soon...</Text>
-  </Box>
-))
+const RunDebugPanel = memo(() => {
+  const [isDebuggerVisible, setIsDebuggerVisible] = useState(false)
+  
+  useEffect(() => {
+    const handleOpenDebugger = () => {
+      setIsDebuggerVisible(true)
+    }
+
+    window.addEventListener('debugger:open', handleOpenDebugger)
+
+    return () => {
+      window.removeEventListener('debugger:open', handleOpenDebugger)
+    }
+  }, [])
+  
+  return (
+    <>
+      <Box p={4} color="text.muted">
+        <Text fontSize="sm" mb={3}>Debug panel</Text>
+        <Text fontSize="xs" color="text.muted" mb={3}>
+          Press Ctrl+Shift+D to open debugger
+        </Text>
+        <button 
+          onClick={() => setIsDebuggerVisible(true)}
+          style={{
+            padding: '8px 16px',
+            backgroundColor: '#0969da',
+            color: 'white',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer'
+          }}
+        >
+          Open Debugger
+        </button>
+      </Box>
+      
+      <DebuggerPanel
+        isVisible={isDebuggerVisible}
+        onClose={() => setIsDebuggerVisible(false)}
+      />
+    </>
+  )
+})
 
 const ExtensionsPanel = memo(() => (
   <Box p={4} color="text.muted">

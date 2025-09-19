@@ -1,10 +1,10 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use serde::{Deserialize, Serialize};
-use tauri::State;
 use std::sync::Mutex;
+use tauri::State;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommandResult {
@@ -27,14 +27,19 @@ type CommandHistory = Mutex<Vec<String>>;
 type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
 
 #[tauri::command]
-pub async fn execute_command(command: String, cwd: Option<String>) -> Result<CommandResult, String> {
+pub async fn execute_command(
+    command: String,
+    cwd: Option<String>,
+) -> Result<CommandResult, String> {
     let working_dir = match cwd {
         Some(dir) => PathBuf::from(dir),
-        None => env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?,
+        None => {
+            env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?
+        }
     };
 
     // Parse command and arguments
-    let parts: Vec<&str> = command.trim().split_whitespace().collect();
+    let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.is_empty() {
         return Err("Empty command".to_string());
     }
@@ -66,7 +71,9 @@ pub async fn execute_command(command: String, cwd: Option<String>) -> Result<Com
 pub async fn start_interactive_shell(cwd: Option<String>) -> Result<ProcessInfo, String> {
     let working_dir = match cwd {
         Some(dir) => PathBuf::from(dir),
-        None => env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?,
+        None => {
+            env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?
+        }
     };
 
     // Determine shell command based on OS
@@ -88,7 +95,7 @@ pub async fn start_interactive_shell(cwd: Option<String>) -> Result<ProcessInfo,
         .map_err(|e| format!("Failed to start interactive shell: {}", e))?;
 
     let pid = child.id();
-    
+
     Ok(ProcessInfo {
         pid,
         command: shell_cmd,
@@ -120,35 +127,32 @@ pub async fn kill_process(pid: u32) -> Result<bool, String> {
 
 #[tauri::command]
 pub async fn get_current_directory() -> Result<String, String> {
-    let cwd = env::current_dir()
-        .map_err(|e| format!("Failed to get current directory: {}", e))?;
-    
+    let cwd = env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+
     Ok(cwd.to_string_lossy().to_string())
 }
 
 #[tauri::command]
 pub async fn get_home_directory() -> Result<String, String> {
-    let home_dir = dirs::home_dir()
-        .ok_or("Failed to get home directory")?;
-    
+    let home_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
+
     Ok(home_dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
 pub async fn change_directory(path: String) -> Result<String, String> {
     let new_path = PathBuf::from(path);
-    
+
     if !new_path.exists() {
         return Err(format!("Directory does not exist: {}", new_path.display()));
     }
-    
+
     if !new_path.is_dir() {
         return Err(format!("Path is not a directory: {}", new_path.display()));
     }
-    
-    env::set_current_dir(&new_path)
-        .map_err(|e| format!("Failed to change directory: {}", e))?;
-    
+
+    env::set_current_dir(&new_path).map_err(|e| format!("Failed to change directory: {}", e))?;
+
     Ok(new_path.to_string_lossy().to_string())
 }
 
@@ -171,11 +175,11 @@ pub async fn command_exists(command: String) -> Result<bool, String> {
 #[tauri::command]
 pub async fn get_environment_variables() -> Result<HashMap<String, String>, String> {
     let mut env_vars = HashMap::new();
-    
+
     for (key, value) in env::vars() {
         env_vars.insert(key, value);
     }
-    
+
     Ok(env_vars)
 }
 
@@ -183,7 +187,9 @@ pub async fn get_environment_variables() -> Result<HashMap<String, String>, Stri
 pub async fn get_completions(partial: String, cwd: Option<String>) -> Result<Vec<String>, String> {
     let working_dir = match cwd {
         Some(dir) => PathBuf::from(dir),
-        None => env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?,
+        None => {
+            env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?
+        }
     };
 
     let mut completions = Vec::new();
@@ -204,13 +210,13 @@ pub async fn get_completions(partial: String, cwd: Option<String>) -> Result<Vec
     // Limit results
     completions.truncate(20);
     completions.sort();
-    
+
     Ok(completions)
 }
 
 #[tauri::command]
 pub async fn get_command_history(
-    history_state: State<'_, CommandHistory>
+    history_state: State<'_, CommandHistory>,
 ) -> Result<Vec<String>, String> {
     let history = history_state.lock().map_err(|_| "Failed to lock history")?;
     Ok(history.clone())
@@ -219,33 +225,31 @@ pub async fn get_command_history(
 #[tauri::command]
 pub async fn save_command_to_history(
     command: String,
-    history_state: State<'_, CommandHistory>
+    history_state: State<'_, CommandHistory>,
 ) -> Result<(), String> {
     let mut history = history_state.lock().map_err(|_| "Failed to lock history")?;
-    
+
     // Avoid duplicates
     if let Some(last) = history.last() {
         if last == &command {
             return Ok(());
         }
     }
-    
+
     history.push(command);
-    
+
     // Limit history size
     const MAX_HISTORY: usize = 1000;
     if history.len() > MAX_HISTORY {
         let len = history.len();
         history.drain(0..len - MAX_HISTORY);
     }
-    
+
     Ok(())
 }
 
 #[tauri::command]
-pub async fn clear_command_history(
-    history_state: State<'_, CommandHistory>
-) -> Result<(), String> {
+pub async fn clear_command_history(history_state: State<'_, CommandHistory>) -> Result<(), String> {
     let mut history = history_state.lock().map_err(|_| "Failed to lock history")?;
     history.clear();
     Ok(())
@@ -255,8 +259,5 @@ pub async fn clear_command_history(
 
 // Função para inicializar o estado do terminal
 pub fn init_terminal_state() -> (CommandHistory, ProcessMap) {
-    (
-        Mutex::new(Vec::new()),
-        Mutex::new(HashMap::new()),
-    )
+    (Mutex::new(Vec::new()), Mutex::new(HashMap::new()))
 }

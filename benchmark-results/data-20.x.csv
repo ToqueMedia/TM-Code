@@ -1,0 +1,11 @@
+Suite,Benchmark,Description,Status,Timestamp,Node Version,Platform,Architecture,Memory (GB),CPUs,Mean Execution Time (ms),Median Execution Time (ms),Min Execution Time (ms),Max Execution Time (ms),StdDev Execution Time (ms),Mean Heap Used (MB),Mean Heap Total (MB),Mean External (MB),Mean Array Buffers (MB),Mean CPU User (ms),Mean CPU System (ms),Iterations
+core,app-startup-simulation,Simulate application startup operations,completed,2025-09-19T17:21:30.526Z,v22.18.0,darwin,arm64,16.00,10,50.51,49.96,49.83,51.72,0.77,7.52,11.38,2.59,0.03,0.56,0.07,5
+core,file-tree-operations,Benchmark file tree operations,completed,2025-09-19T17:21:30.882Z,v22.18.0,darwin,arm64,16.00,10,1.11,0.95,0.74,1.94,0.45,8.15,11.88,2.59,0.02,1.66,0.11,5
+core,editor-state-management,Benchmark editor state operations,completed,2025-09-19T17:21:30.894Z,v22.18.0,darwin,arm64,16.00,10,0.14,0.14,0.14,0.15,0.00,8.18,11.88,2.58,0.02,0.15,0.00,5
+core,search-indexing,Benchmark search index operations,completed,2025-09-19T17:21:30.896Z,v22.18.0,darwin,arm64,16.00,10,7.00,6.68,5.77,8.40,0.88,15.62,34.77,2.58,0.02,6.94,0.52,5
+core,memory-cleanup,Test memory cleanup and garbage collection patterns,completed,2025-09-19T17:21:30.958Z,v22.18.0,darwin,arm64,16.00,10,0.27,0.26,0.25,0.29,0.01,25.15,44.38,2.58,0.02,0.19,0.07,5
+ui,virtual-scrolling,Benchmark virtual scrolling for large file trees,completed,2025-09-19T17:21:30.961Z,v22.18.0,darwin,arm64,16.00,10,1.88,1.14,0.75,5.24,1.68,20.07,45.83,2.58,0.02,4.10,1.06,5
+ui,theme-switching,Benchmark theme switching performance,completed,2025-09-19T17:21:30.975Z,v22.18.0,darwin,arm64,16.00,10,0.39,0.40,0.18,0.59,0.18,19.16,45.13,2.58,0.02,1.06,0.04,5
+ui,monaco-editor-operations,Simulate Monaco Editor operations,completed,2025-09-19T17:21:30.979Z,v22.18.0,darwin,arm64,16.00,10,0.47,0.40,0.28,0.96,0.25,17.50,45.13,2.58,0.02,0.65,0.08,5
+ui,component-rendering,Benchmark component tree rendering,completed,2025-09-19T17:21:30.983Z,v22.18.0,darwin,arm64,16.00,10,1.12,1.15,0.60,1.75,0.41,19.20,45.13,2.58,0.02,4.18,0.07,5
+ui,drag-drop-operations,Benchmark drag and drop file operations,completed,2025-09-19T17:21:30.993Z,v22.18.0,darwin,arm64,16.00,10,0.07,0.07,0.07,0.07,0.00,18.02,45.13,2.58,0.02,0.20,0.02,5

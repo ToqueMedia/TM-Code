@@ -1,4 +1,4 @@
-import { memo, useState, useCallback } from 'react'
+import { memo, useState, useCallback, useEffect } from 'react'
 import {
   VStack,
   HStack,
@@ -9,7 +9,8 @@ import {
   Button,
   Flex,
   ScrollArea,
-  Badge
+  Badge,
+  Spinner
 } from '@chakra-ui/react'
 import {
   FiSearch,
@@ -18,29 +19,23 @@ import {
   FiChevronRight,
   FiFile,
   FiX,
-  FiType
+  FiType,
+  FiAlertCircle
 } from 'react-icons/fi'
 import { PanelHeader } from './PanelHeader'
 import { OptionButton } from './OptionButton'
+import SearchService, { SearchResult } from '../../services/searchService'
+import { useProjectStore } from '../../stores/projectStore'
 
-interface SearchResult {
-  id: string
-  file: string
-  line: number
-  column: number
-  text: string
-  match: string
-  context: string
-}
-
+// Use types from SearchService instead
 interface FileResult {
   file: string
-  matches: SearchResult[]
+  matches: any[]
   isExpanded: boolean
 }
 
 interface SearchPanelProps {
-  onFileSelect?: (path: string) => void
+  onFileSelect?: (path: string, line?: number, column?: number) => void
 }
 
 function SearchPanel({ onFileSelect }: SearchPanelProps) {
@@ -52,63 +47,79 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
   const [useRegex, setUseRegex] = useState(false)
   const [wholeWord, setWholeWord] = useState(false)
   const [fileResults, setFileResults] = useState<FileResult[]>([])
-  const [totalMatches, setTotalMatches] = useState(0)
+  const [searchResult, setSearchResult] = useState<SearchResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [ripgrepAvailable, setRipgrepAvailable] = useState<boolean | null>(null)
+  const [includePatterns, setIncludePatterns] = useState('')
+  const [excludePatterns, setExcludePatterns] = useState('')
+  
+  // Get current project directory
+  const currentProject = useProjectStore(state => state.currentProject)
 
-  // Mock search results for demonstration
-  const mockResults: FileResult[] = [
-    {
-      file: 'src/components/App.tsx',
-      isExpanded: true,
-      matches: [
-        {
-          id: '1',
-          file: 'src/components/App.tsx',
-          line: 12,
-          column: 15,
-          text: 'function App() {',
-          match: 'App',
-          context: 'function App() {'
-        },
-        {
-          id: '2',
-          file: 'src/components/App.tsx',
-          line: 25,
-          column: 8,
-          text: 'export default App',
-          match: 'App',
-          context: 'export default App'
+  // Check ripgrep availability on component mount
+  useEffect(() => {
+    async function checkRipgrep() {
+      try {
+        const available = await SearchService.shared.checkRipgrepAvailable()
+        setRipgrepAvailable(available)
+        if (!available) {
+          setError('ripgrep (rg) is not installed. Please install it for search functionality.')
         }
-      ]
-    },
-    {
-      file: 'src/hooks/useApp.ts',
-      isExpanded: false,
-      matches: [
-        {
-          id: '3',
-          file: 'src/hooks/useApp.ts',
-          line: 5,
-          column: 20,
-          text: 'const useApp = () => {',
-          match: 'App',
-          context: 'const useApp = () => {'
-        }
-      ]
+      } catch (err) {
+        setRipgrepAvailable(false)
+        setError('Failed to check ripgrep availability')
+      }
     }
-  ]
+    checkRipgrep()
+  }, [])
 
   const handleSearch = useCallback(async () => {
-    if (!searchTerm.trim()) return
+    if (!searchTerm.trim() || !currentProject?.path || !ripgrepAvailable) return
 
     setIsSearching(true)
+    setError(null)
     
-    // Simulate search delay
-    setTimeout(() => {
-      setFileResults(mockResults)
-      setTotalMatches(mockResults.reduce((sum, file) => sum + file.matches.length, 0))
+    try {
+      const searchOptions = SearchService.shared.buildSearchOptions(
+        caseSensitive,
+        wholeWord,
+        useRegex,
+        includePatterns,
+        excludePatterns
+      )
+      
+      const result = await SearchService.shared.searchInFiles(
+        searchTerm,
+        currentProject.path,
+        searchOptions
+      )
+      
+      setSearchResult(result)
+      
+      // Convert to FileResult format for existing UI
+      const convertedResults: FileResult[] = result.files.map(file => ({
+        file: file.file_path,
+        isExpanded: true,
+        matches: file.matches.map(match => ({
+          id: `${file.file_path}-${match.line_number}-${match.column}`,
+          file: file.file_path,
+          line: match.line_number,
+          column: match.column,
+          text: match.text,
+          match: match.match_text,
+          context: match.text
+        }))
+      }))
+      
+      setFileResults(convertedResults)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Search failed')
+      setSearchResult(null)
+      setFileResults([])
+    } finally {
       setIsSearching(false)
-    }, 500)
-  }, [searchTerm])
+    }
+  }, [searchTerm, currentProject?.path, caseSensitive, wholeWord, useRegex, includePatterns, excludePatterns, ripgrepAvailable])
 
   const toggleFileExpansion = useCallback((filePath: string) => {
     setFileResults(prev => 
@@ -120,26 +131,51 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
     )
   }, [])
 
-  const handleResultClick = useCallback((result: SearchResult) => {
+  const handleResultClick = useCallback((result: any) => {
     if (onFileSelect) {
-      onFileSelect(result.file)
+      onFileSelect(result.file, result.line, result.column)
     }
-    console.log('Go to:', result.file, 'line:', result.line)
   }, [onFileSelect])
 
   const toggleReplace = useCallback(() => {
     setIsReplaceVisible(!isReplaceVisible)
   }, [isReplaceVisible])
 
-  const handleReplace = useCallback(() => {
-    console.log('Replace all:', searchTerm, 'with:', replaceTerm)
-  }, [searchTerm, replaceTerm])
+  const handleReplace = useCallback(async () => {
+    if (!replaceTerm.trim() || !currentProject?.path || !searchTerm.trim()) return
+    
+    try {
+      const searchOptions = SearchService.shared.buildSearchOptions(
+        caseSensitive,
+        wholeWord,
+        useRegex,
+        includePatterns,
+        excludePatterns
+      )
+      
+      const affectedFiles = await SearchService.shared.replaceInFiles(
+        searchTerm,
+        replaceTerm,
+        currentProject.path,
+        searchOptions
+      )
+      
+      // Re-run search to get updated results
+      await handleSearch()
+      
+      console.log(`Replaced "${searchTerm}" with "${replaceTerm}" in ${affectedFiles} files`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Replace failed')
+    }
+  }, [searchTerm, replaceTerm, currentProject?.path, caseSensitive, wholeWord, useRegex, includePatterns, excludePatterns, handleSearch])
 
   const clearSearch = useCallback(() => {
+    SearchService.shared.cancelSearch()
     setSearchTerm('')
     setReplaceTerm('')
     setFileResults([])
-    setTotalMatches(0)
+    setSearchResult(null)
+    setError(null)
   }, [])
 
   return (
@@ -179,8 +215,42 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
           <Input
             placeholder="Search"
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
+            onChange={(e) => {
+              setSearchTerm(e.target.value)
+              // Debounced search while typing
+              if (e.target.value.trim() && currentProject?.path) {
+                const searchOptions = SearchService.shared.buildSearchOptions(
+                  caseSensitive,
+                  wholeWord,
+                  useRegex,
+                  includePatterns,
+                  excludePatterns
+                )
+                SearchService.shared.debouncedSearch(
+                  e.target.value.trim(),
+                  currentProject.path,
+                  searchOptions,
+                  (result) => {
+                    setSearchResult(result)
+                    const convertedResults: FileResult[] = result.files.map(file => ({
+                      file: file.file_path,
+                      isExpanded: true,
+                      matches: file.matches.map(match => ({
+                        id: `${file.file_path}-${match.line_number}-${match.column}`,
+                        file: file.file_path,
+                        line: match.line_number,
+                        column: match.column,
+                        text: match.text,
+                        match: match.match_text,
+                        context: match.text
+                      }))
+                    }))
+                    setFileResults(convertedResults)
+                  }
+                )
+              }
+            }}
             bg="transparent"
             border="1px solid"
             borderColor="border.glass"
@@ -206,6 +276,34 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
               size="sm"
             />
           )}
+          
+          {/* Advanced Options */}
+          <Input
+            placeholder="Files to include (comma-separated, e.g., *.tsx,*.ts)"
+            value={includePatterns}
+            onChange={(e) => setIncludePatterns(e.target.value)}
+            bg="transparent"
+            border="1px solid"
+            borderColor="border.glass"
+            _focus={{
+              borderColor: 'blue.500',
+              boxShadow: '0 0 0 1px rgba(88, 166, 255, 0.6)'
+            }}
+            size="sm"
+          />
+          <Input
+            placeholder="Files to exclude (comma-separated, e.g., *.min.js,node_modules/**)"
+            value={excludePatterns}
+            onChange={(e) => setExcludePatterns(e.target.value)}
+            bg="transparent"
+            border="1px solid"
+            borderColor="border.glass"
+            _focus={{
+              borderColor: 'blue.500',
+              boxShadow: '0 0 0 1px rgba(88, 166, 255, 0.6)'
+            }}
+            size="sm"
+          />
           
           <HStack justify="space-between">
             <HStack gap={1}>
@@ -233,6 +331,7 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
                 size="xs"
                 color={useRegex ? 'blue.500' : 'text.secondary'}
                 onClick={() => setUseRegex(!useRegex)}
+                title="Use regular expressions"
               >
                 <FiSearch size={12} />
               </IconButton>
@@ -241,18 +340,35 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
             <Button
               size="xs"
               onClick={handleSearch}
-              loading={isSearching}
+              disabled={isSearching || !ripgrepAvailable || !currentProject}
               colorPalette="blue"
             >
-              <FiSearch size={12} />
+              {isSearching ? <Spinner size="xs" /> : <FiSearch size={12} />}
             </Button>
           </HStack>
         </VStack>
       </Box>
 
+      {/* Error Display */}
+      {error && (
+        <Box
+          bg="red.900"
+          color="red.100"
+          p={3}
+          borderRadius="md"
+          mx={3}
+          mb={2}
+        >
+          <HStack>
+            <FiAlertCircle size={16} />
+            <Text fontSize="sm">{error}</Text>
+          </HStack>
+        </Box>
+      )}
+      
       {/* Search Results */}
       <Box flex="1">
-        {totalMatches > 0 && (
+        {searchResult && searchResult.total_matches > 0 && (
           <Flex
             align="center"
             justify="space-between"
@@ -262,7 +378,9 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
             borderColor="border.glass"
           >
             <Text fontSize="xs" color="text.muted">
-              {totalMatches} results in {fileResults.length} files
+              {searchResult.total_matches} results in {searchResult.total_files} files
+              {searchResult.truncated && ' (truncated)'}
+              {searchResult.duration_ms && ` - ${searchResult.duration_ms}ms`}
             </Text>
             {isReplaceVisible && (
               <Button
