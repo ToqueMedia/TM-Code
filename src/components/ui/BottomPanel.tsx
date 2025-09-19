@@ -21,6 +21,7 @@ import {
 } from 'react-icons/fi'
 import { PanelHeader } from './PanelHeader'
 import { PanelTab } from './PanelTab'
+import Terminal from './Terminal'
 
 interface BottomPanelProps {
   isVisible: boolean
@@ -38,39 +39,9 @@ interface Problem {
 }
 
 const TerminalContent = memo(() => (
-  <ScrollArea.Root flex="1">
-    <ScrollArea.Viewport p={3} fontFamily="mono" fontSize="sm">
-      <Text color="#58a6ff" mb={1}>
-        Microsoft Windows [Version 10.0.19044.2728]
-      </Text>
-      <Text color="text.muted" mb={2}>
-        (c) Microsoft Corporation. All rights reserved.
-      </Text>
-      <Text mb={1}>
-        <Text as="span" color="#a371f7">C:\Users\dev&gt;</Text>{' '}
-        <Text as="span" color="text.primary">npm run dev</Text>
-      </Text>
-      <Text color="#2ea043" mb={1}>
-        ✓ Starting development server...
-      </Text>
-      <Text color="#58a6ff" mb={1}>
-        ℹ Local server running at http://localhost:3000
-      </Text>
-      <Text color="#f77f00" mb={1}>
-        ⚠ Warning: Some dependencies are outdated
-      </Text>
-      <Text color="#2ea043" mb={1}>
-        ✓ Compiled successfully in 2.3s
-      </Text>
-      <Text>
-        <Text as="span" color="#a371f7">C:\Users\dev&gt;</Text>{' '}
-        <Box as="span" display="inline-block" w="8px" h="16px" bg="text.primary" animation="blink 1s infinite" />
-      </Text>
-    </ScrollArea.Viewport>
-    <ScrollArea.Scrollbar orientation="vertical">
-      <ScrollArea.Thumb />
-    </ScrollArea.Scrollbar>
-  </ScrollArea.Root>
+  <Box height="100%" width="100%">
+    <Terminal />
+  </Box>
 ))
 
 TerminalContent.displayName = 'TerminalContent'
