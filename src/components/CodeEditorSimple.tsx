@@ -1,4 +1,3 @@
-import React from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import ExplorerPanel from './ui/ExplorerPanel'
 import BottomPanel from './ui/BottomPanel'

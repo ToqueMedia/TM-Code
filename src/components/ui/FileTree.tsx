@@ -16,7 +16,6 @@ import {
   FiFolderPlus,
   FiFilePlus,
   FiTrash2,
-  FiMoreVertical,
   FiRefreshCw,
   FiEdit2,
   FiChevronRight,
@@ -466,23 +465,22 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   const isExpanded = expandedPaths.has(node.path);
   const isSelected = selectedPath === node.path;
   
-  // State for rename modal
   const [isRenaming, setIsRenaming] = useState(false);
   const [newName, setNewName] = useState(node.name);
   const renameInputRef = useRef<HTMLInputElement>(null);
   
-  // State for create modal
   const [isCreating, setIsCreating] = useState(false);
   const [createType, setCreateType] = useState<'file' | 'directory'>('file');
   const [createName, setCreateName] = useState('');
   const createInputRef = useRef<HTMLInputElement>(null);
   
-  // State for copy modal
   const [isCopying, setIsCopying] = useState(false);
   const [copyDestination, setCopyDestination] = useState('');
   const copyInputRef = useRef<HTMLInputElement>(null);
   
-  // Focus input when renaming
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  
   useEffect(() => {
     if (isRenaming && renameInputRef.current) {
       renameInputRef.current.focus();
@@ -490,14 +488,12 @@ const TreeNode: React.FC<TreeNodeProps> = ({
     }
   }, [isRenaming]);
   
-  // Focus input when creating
   useEffect(() => {
     if (isCreating && createInputRef.current) {
       createInputRef.current.focus();
     }
   }, [isCreating]);
   
-  // Focus input when copying
   useEffect(() => {
     if (isCopying && copyInputRef.current) {
       copyInputRef.current.focus();
@@ -513,7 +509,6 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   
   const handleSelect = () => {
     selectNode(node.path);
-    // Auto-expand folders when selected
     if (node.type === 'directory' && !isExpanded) {
       toggleNode(node.path);
     }
@@ -534,14 +529,12 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   };
   
   const handleCopy = () => {
-    // Default copy destination - same directory with "-copy" suffix
     const baseName = node.name;
     const copyName = node.type === 'directory' 
       ? `${baseName}-copy` 
       : baseName.includes('.') 
         ? `${baseName.split('.').slice(0, -1).join('.')} copy.${baseName.split('.').pop()}`
         : `${baseName} copy`;
-    
     setCopyDestination(copyName);
     setIsCopying(true);
   };
@@ -584,10 +577,8 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   
   const confirmCopy = async () => {
     if (copyDestination) {
-      // Construct full destination path
       const parentDir = node.path.substring(0, node.path.lastIndexOf('/'));
       const destinationPath = `${parentDir}/${copyDestination}`;
-      
       const success = await copyNode(node.path, destinationPath);
       if (success) {
         setAlert({ show: true, title: 'Success', description: `Copied ${node.name} to ${copyDestination}`, status: 'success' });
@@ -608,6 +599,24 @@ const TreeNode: React.FC<TreeNodeProps> = ({
       setIsCopying(false);
     }
   };
+
+  function handleRowContextMenu(e: React.MouseEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    selectNode(node.path)
+    setContextMenuPos({ x: e.clientX, y: e.clientY })
+    setContextMenuOpen(true)
+  }
+
+  function handleRowKeyDown(e: React.KeyboardEvent) {
+    if (e.shiftKey && e.key === 'F10') {
+      e.preventDefault()
+      const target = e.currentTarget as HTMLElement
+      const rect = target.getBoundingClientRect()
+      setContextMenuPos({ x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) })
+      setContextMenuOpen(true)
+    }
+  }
   
   return (
     <Box>
@@ -620,6 +629,9 @@ const TreeNode: React.FC<TreeNodeProps> = ({
         _hover={{ bg: isSelected ? 'rgba(9, 71, 113, 0.31)' : 'rgba(255, 255, 255, 0.04)' }}
         cursor="pointer"
         onClick={handleSelect}
+        onContextMenu={handleRowContextMenu}
+        onKeyDown={handleRowKeyDown}
+        tabIndex={0}
         borderRadius={0}
         position="relative"
         gap={0}
@@ -684,70 +696,60 @@ const TreeNode: React.FC<TreeNodeProps> = ({
             {node.name}
           </Text>
         )}
-        
-        <Menu.Root>
-          <Menu.Trigger asChild>
-            <Button
-              aria-label="File options"
-              variant="ghost"
-              size="xs"
-              color={isSelected ? 'whiteAlpha.800' : '#8b949e'}
-              _hover={{ bg: isSelected ? 'whiteAlpha.200' : 'rgba(255, 255, 255, 0.1)' }}
-              onClick={(e) => e.stopPropagation()}
-              width="20px"
-              height="20px"
-              minW="20px"
-              p={0}
-              display="flex"
-              alignItems="center"
-              justifyContent="center"
-            >
-              <FiMoreVertical size={12} />
-            </Button>
-          </Menu.Trigger>
-          <Portal>
-            <Menu.Positioner>
-              <Menu.Content bg="#161b22" borderColor="#30363d" color="#c9d1d9">
-                {node.type === 'directory' && (
-                  <>
-                    <Menu.Item value="new-file" onClick={(e) => { e.stopPropagation(); handleCreate('file'); }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
-                      <HStack gap={2}>
-                        <FiFilePlus size={14} />
-                        <span>New File</span>
-                      </HStack>
-                    </Menu.Item>
-                    <Menu.Item value="new-directory" onClick={(e) => { e.stopPropagation(); handleCreate('directory'); }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
-                      <HStack gap={2}>
-                        <FiFolderPlus size={14} />
-                        <span>New Folder</span>
-                      </HStack>
-                    </Menu.Item>
-                    <Menu.Separator borderColor="#30363d" />
-                  </>
-                )}
-                <Menu.Item value="copy" onClick={(e) => { e.stopPropagation(); handleCopy(); }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
-                  <HStack gap={2}>
-                    <FiCopy size={14} />
-                    <span>Copy</span>
-                  </HStack>
-                </Menu.Item>
-                <Menu.Item value="rename" onClick={(e) => { e.stopPropagation(); handleRename(); }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
-                  <HStack gap={2}>
-                    <FiEdit2 size={14} />
-                    <span>Rename</span>
-                  </HStack>
-                </Menu.Item>
-                <Menu.Item value="delete" onClick={(e) => { e.stopPropagation(); handleDelete(); }} _hover={{ bg: 'rgba(248, 81, 73, 0.1)' }}>
-                  <HStack gap={2}>
-                    <FiTrash2 size={14} />
-                    <span>Delete</span>
-                  </HStack>
-                </Menu.Item>
-              </Menu.Content>
-            </Menu.Positioner>
-          </Portal>
-        </Menu.Root>
       </HStack>
+
+      <Menu.Root open={contextMenuOpen} onOpenChange={(details) => setContextMenuOpen(details.open)}>
+        {contextMenuOpen && (
+          <Portal>
+            <Menu.Content
+              bg="#161b22"
+              borderColor="#30363d"
+              color="#c9d1d9"
+              position="fixed"
+              left={`${contextMenuPos.x}px`}
+              top={`${contextMenuPos.y}px`}
+              transform="none"
+              zIndex={2000}
+            >
+              {node.type === 'directory' && (
+                <>
+                  <Menu.Item value="new-file" onClick={(e) => { e.stopPropagation(); handleCreate('file'); setContextMenuOpen(false); }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
+                    <HStack gap={2}>
+                      <FiFilePlus size={14} />
+                      <span>New File</span>
+                    </HStack>
+                  </Menu.Item>
+                  <Menu.Item value="new-directory" onClick={(e) => { e.stopPropagation(); handleCreate('directory'); setContextMenuOpen(false); }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
+                    <HStack gap={2}>
+                      <FiFolderPlus size={14} />
+                      <span>New Folder</span>
+                    </HStack>
+                  </Menu.Item>
+                  <Menu.Separator borderColor="#30363d" />
+                </>
+              )}
+              <Menu.Item value="copy" onClick={(e) => { e.stopPropagation(); handleCopy(); setContextMenuOpen(false); }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
+                <HStack gap={2}>
+                  <FiCopy size={14} />
+                  <span>Copy</span>
+                </HStack>
+              </Menu.Item>
+              <Menu.Item value="rename" onClick={(e) => { e.stopPropagation(); handleRename(); setContextMenuOpen(false); }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
+                <HStack gap={2}>
+                  <FiEdit2 size={14} />
+                  <span>Rename</span>
+                </HStack>
+              </Menu.Item>
+              <Menu.Item value="delete" onClick={(e) => { e.stopPropagation(); handleDelete(); setContextMenuOpen(false); }} _hover={{ bg: 'rgba(248, 81, 73, 0.1)' }}>
+                <HStack gap={2}>
+                  <FiTrash2 size={14} />
+                  <span>Delete</span>
+                </HStack>
+              </Menu.Item>
+            </Menu.Content>
+          </Portal>
+        )}
+      </Menu.Root>
       
       {/* Rename Modal */}
       <Dialog.Root open={isRenaming} onOpenChange={() => setIsRenaming(false)}>

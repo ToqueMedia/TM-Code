@@ -11,7 +11,8 @@ import {
   FiPlay,
   FiPackage,
   FiSettings,
-  FiUser
+  FiUser,
+  FiTerminal
 } from 'react-icons/fi'
 
 interface ActivityBarProps {
@@ -37,7 +38,6 @@ const ActivityItem = memo<ActivityItemProps>(({
   badge 
 }) => (
   <Box position="relative" width="100%">
-    {/* Active indicator */}
     {isActive && (
       <Box
         position="absolute"
@@ -112,7 +112,7 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
       id: 'source-control',
       icon: FiGitBranch,
       label: 'Source Control',
-      badge: 3 // Example: 3 modified files
+      badge: 3
     },
     {
       id: 'run-debug',
@@ -123,11 +123,16 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
       id: 'extensions',
       icon: FiPackage,
       label: 'Extensions',
-      badge: 2 // Example: 2 extension updates
+      badge: 2
     }
   ]
 
   const bottomActivities = [
+    {
+      id: 'toggle-bottom-panel',
+      icon: FiTerminal,
+      label: 'Toggle Panel',
+    },
     {
       id: 'accounts',
       icon: FiUser,
@@ -151,7 +156,6 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
       flexDirection="column"
       justifyContent="space-between"
     >
-      {/* Main Activities */}
       <VStack gap={0} pt={1}>
         {activities.map((activity) => (
           <ActivityItem
@@ -166,7 +170,6 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
         ))}
       </VStack>
 
-      {/* Bottom Activities */}
       <VStack gap={0} pb={1}>
         {bottomActivities.map((activity) => (
           <ActivityItem

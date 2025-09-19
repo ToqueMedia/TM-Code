@@ -15,6 +15,9 @@ import {
   FiAlertCircle,
   FiChevronLeft,
   FiChevronRight} from 'react-icons/fi'
+
+const STORAGE_KEY_BOTTOM_VISIBLE = 'panel-visible-bottom-panel'
+const STORAGE_KEY_EXPLORER_WIDTH = 'panel-size-explorer-panel'
 import { 
   SiJavascript, 
   SiReact, 
@@ -473,13 +476,35 @@ export function CodeEditorNew() {
   
   // Estados locais da UI
   const [activeActivity, setActiveActivity] = useState('explorer')
-  const [isBottomPanelVisible, setIsBottomPanelVisible] = useState(true)
+  const [isBottomPanelVisible, setIsBottomPanelVisible] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem(STORAGE_KEY_BOTTOM_VISIBLE)
+      return v === null ? true : v === 'true'
+    } catch {
+      return true
+    }
+  })
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 })
-  const [windowWidth, setWindowWidth] = useState(window.innerWidth)
   const [windowHeight, setWindowHeight] = useState(window.innerHeight)
+  const [explorerWidth, setExplorerWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_EXPLORER_WIDTH)
+      const screen = window.innerWidth
+      const min = 40
+      const max = Math.max(100, screen - 360)
+      const def = Math.min(300, Math.max(Math.floor(screen * 0.25), min))
+      const initial = saved ? parseInt(saved, 10) : def
+      return Math.min(Math.max(initial, min), max)
+    } catch {
+      return 300
+    }
+  })
+  const [isResizingExplorer, setIsResizingExplorer] = useState(false)
   
   // Refs para elementos DOM
   const editorRef = useRef<HTMLDivElement>(null)
+  const sidebarRef = useRef<HTMLDivElement>(null)
+  const sidebarHandleRef = useRef<HTMLDivElement>(null)
   
   // Handlers memoizados
   const handleCursorPositionChange = useCallback((line: number, column: number) => {
@@ -487,17 +512,29 @@ export function CodeEditorNew() {
   }, [])
   
   const handleActivityChange = useCallback((activity: string) => {
+    if (activity === 'toggle-bottom-panel') {
+      setIsBottomPanelVisible(prev => {
+        const next = !prev
+        try { localStorage.setItem(STORAGE_KEY_BOTTOM_VISIBLE, String(next)) } catch {}
+        return next
+      })
+      return
+    }
     setActiveActivity(activity)
   }, [])
   
   const toggleBottomPanel = useCallback(() => {
-    setIsBottomPanelVisible(prev => !prev)
+    setIsBottomPanelVisible(prev => {
+      const next = !prev
+      try { localStorage.setItem(STORAGE_KEY_BOTTOM_VISIBLE, String(next)) } catch {}
+      return next
+    })
   }, [])
   
   const closeBottomPanel = useCallback(() => {
     setIsBottomPanelVisible(false)
+    try { localStorage.setItem(STORAGE_KEY_BOTTOM_VISIBLE, 'false') } catch {}
   }, [])
-
 
   // Initialize services when project is opened
   useEffect(() => {
@@ -542,8 +579,10 @@ export function CodeEditorNew() {
   // Window resize listener for responsive panel sizing
   useEffect(() => {
     function handleResize() {
-      setWindowWidth(window.innerWidth)
       setWindowHeight(window.innerHeight)
+      const min = 40
+      const max = Math.max(100, window.innerWidth - 360)
+      setExplorerWidth(prev => Math.min(Math.max(prev, min), max))
     }
 
     window.addEventListener('resize', handleResize)
@@ -580,16 +619,59 @@ export function CodeEditorNew() {
     }
   }, [])
 
-  // Calculate dynamic panel sizes based on window dimensions
-  const explorerMinSize = Math.floor(windowWidth * 0.20) // 20% of screen width
-  const explorerMaxSize = Math.floor(windowWidth * 0.70) // 70% of screen width
-  const explorerDefaultSize = Math.min(300, Math.max(explorerMinSize, Math.floor(windowWidth * 0.25))) // 25% or bounded by constraints
-  
   // Calculate dynamic bottom panel sizes (15% - 60% of screen height)
-  const bottomMinSize = Math.floor(windowHeight * 0.15) // 15% of screen height
-  const bottomMaxSize = Math.floor(windowHeight * 0.60) // 60% of screen height  
-  const bottomDefaultSize = Math.min(250, Math.max(bottomMinSize, Math.floor(windowHeight * 0.25))) // 25% or bounded by constraints
+  const bottomMinSize = Math.floor(windowHeight * 0.15)
+  const bottomDefaultSize = Math.min(250, Math.max(bottomMinSize, Math.floor(windowHeight * 0.25)))
 
+  function handleExplorerResizeStart(e: React.PointerEvent) {
+    e.preventDefault()
+    const handleEl = sidebarHandleRef.current
+    const sidebarLeft = sidebarRef.current ? sidebarRef.current.getBoundingClientRect().left : 0
+    let current = explorerWidth
+
+    const pid = e.pointerId
+    try { handleEl?.setPointerCapture(pid) } catch {}
+
+    const body = document.body
+    const prevCursor = body.style.cursor
+    const prevUserSelect = body.style.userSelect
+    body.style.cursor = 'col-resize'
+    body.style.userSelect = 'none'
+    setIsResizingExplorer(true)
+
+    function onPointerMove(pe: PointerEvent) {
+      const min = 40
+      const max = Math.max(100, window.innerWidth - 360)
+      let next = pe.clientX - sidebarLeft
+      if (next < min) next = min
+      if (next > max) next = max
+      current = next
+      setExplorerWidth(next)
+    }
+
+    function onPointerUp() {
+      try { localStorage.setItem(STORAGE_KEY_EXPLORER_WIDTH, String(current)) } catch {}
+      try { handleEl?.releasePointerCapture(pid) } catch {}
+      handleEl?.removeEventListener('pointermove', onPointerMove)
+      handleEl?.removeEventListener('pointerup', onPointerUp)
+      body.style.cursor = prevCursor
+      body.style.userSelect = prevUserSelect
+      setIsResizingExplorer(false)
+    }
+
+    handleEl?.addEventListener('pointermove', onPointerMove)
+    handleEl?.addEventListener('pointerup', onPointerUp)
+  }
+
+  useEffect(() => {
+    function onToggleEvent() {
+      toggleBottomPanel()
+    }
+    window.addEventListener('panel:toggle-bottom', onToggleEvent)
+    return () => {
+      window.removeEventListener('panel:toggle-bottom', onToggleEvent)
+    }
+  }, [toggleBottomPanel])
   // Render sidebar panel based on active activity
   const renderSidebarPanel = () => {
     switch (activeActivity) {
@@ -659,7 +741,7 @@ export function CodeEditorNew() {
       </Flex>
 
       {/* Main Content Area */}
-      <Flex flex="1" overflow="hidden">
+      <Flex flex="1" overflow="hidden" minW={0}>
         {/* Enhanced Activity Bar with glow effects */}
         <Box position="relative">
           <ActivityBar
@@ -670,14 +752,46 @@ export function CodeEditorNew() {
 
         {/* Enhanced Sidebar Panel with smooth transitions */}
         <Box
-          width={`${explorerDefaultSize}px`}
+          width={`${explorerWidth}px`}
           bg="bg.sidebar"
           height="100%"
           position="relative"
           borderRight="1px solid"
           borderColor="gray.700"
+          ref={sidebarRef}
         >
           {renderSidebarPanel()}
+          <Box
+            position="absolute"
+            right="0"
+            top="0"
+            bottom="0"
+            width="6px"
+            cursor="col-resize"
+            bg="transparent"
+            _hover={{ bg: 'whiteAlpha.200' }}
+            onPointerDown={handleExplorerResizeStart}
+            zIndex={10}
+            ref={sidebarHandleRef}
+            style={{ touchAction: 'none' }}
+          />
+          {import.meta.env.DEV && isResizingExplorer && (
+            <Box
+              position="absolute"
+              top="8px"
+              right="12px"
+              bg="blackAlpha.700"
+              color="white"
+              fontSize="xs"
+              px={2}
+              py={1}
+              borderRadius="sm"
+              pointerEvents="none"
+              zIndex={20}
+            >
+              {explorerWidth}px ({Math.round((explorerWidth / window.innerWidth) * 100)}%)
+            </Box>
+          )}
         </Box>
 
         {/* Editor Area */}
@@ -686,6 +800,7 @@ export function CodeEditorNew() {
           bg="bg.editor"
           direction="column"
           ref={editorRef}
+          minW={0}
         >
           {/* Enhanced VS Code-style Editor Tabs with animations */}
           <Flex
