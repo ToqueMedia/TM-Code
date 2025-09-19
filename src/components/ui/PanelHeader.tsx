@@ -2,10 +2,7 @@ import React from 'react'
 import { 
   Flex, 
   Text, 
-  HStack, 
-  IconButton,
-  Box
-} from '@chakra-ui/react'
+  HStack} from '@chakra-ui/react'
 
 interface PanelHeaderProps {
   title: string
@@ -25,8 +22,6 @@ export const PanelHeader: React.FC<PanelHeaderProps> = ({
       align="center"
       justify="space-between"
       p={compact ? 2 : 3}
-      borderBottom="1px solid"
-      borderColor="border.glass"
       bg="rgba(255, 255, 255, 0.01)"
     >
       <HStack gap={2}>

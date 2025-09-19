@@ -1,14 +1,11 @@
-import React, { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useState } from 'react'
 import {
   Flex,
   HStack,
   Text,
   IconButton,
   Box,
-  ScrollArea,
-  Badge,
-  Button
-} from '@chakra-ui/react'
+  ScrollArea} from '@chakra-ui/react'
 import {
   FiTerminal,
   FiList,

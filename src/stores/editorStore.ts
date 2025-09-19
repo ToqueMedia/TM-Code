@@ -91,17 +91,26 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
       redoStack: {},
 
       openFile: async (path: string) => {
+        console.log('EditorStore: Opening file:', path);
         set({ activeFile: path });
         
         // Check if file is already open
         const existingFile = get().openFiles.find(f => f.path === path);
         if (existingFile) {
+          console.log('EditorStore: File already open:', path, existingFile);
           return;
         }
         
         try {
+          console.log('EditorStore: Reading file content for:', path);
           const content = await FileService.readFile(path);
           const language = getLanguageFromExtension(path);
+          console.log('EditorStore: File loaded successfully:', {
+            path,
+            contentLength: content.length,
+            language,
+            contentPreview: content.substring(0, 100)
+          });
           
           set(state => ({
             openFiles: [

@@ -48,24 +48,13 @@ export const theme = createSystem(defaultConfig, {
       backgroundColor: '#007acc',
       color: '#ffffff',
     },
-    // Force Monaco Editor to use its own vs-dark theme colors
-    '.monaco-editor': {
+    // Ensure editor container maintains dark background
+    '.monaco-editor-background': {
       backgroundColor: '#1e1e1e !important',
-      color: '#d4d4d4 !important',
     },
-    '.monaco-editor .view-line': {
-      color: '#d4d4d4 !important',
+    '.monaco-editor .margin': {
+      backgroundColor: '#1e1e1e !important',
     },
-    '.monaco-editor .mtk1': { color: '#d4d4d4 !important' },
-    '.monaco-editor .mtk2': { color: '#dcdcaa !important' },
-    '.monaco-editor .mtk3': { color: '#6a9955 !important' },
-    '.monaco-editor .mtk4': { color: '#569cd6 !important' },
-    '.monaco-editor .mtk5': { color: '#b5cea8 !important' },
-    '.monaco-editor .mtk6': { color: '#4ec9b0 !important' },
-    '.monaco-editor .mtk7': { color: '#c586c0 !important' },
-    '.monaco-editor .mtk8': { color: '#9cdcfe !important' },
-    '.monaco-editor .mtk9': { color: '#ce9178 !important' },
-    '.monaco-editor .mtk10': { color: '#f44747 !important' },
     '.terminal, .xterm': {
       '& *': {
         color: 'inherit !important',

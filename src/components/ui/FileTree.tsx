@@ -305,8 +305,6 @@ const FileIcon: React.FC<{
         return { icon: SiYaml, color: isSelected ? 'white' : '#cb171e' };
       case 'toml':
         return { icon: FaCog, color: isSelected ? 'white' : '#9c4221' };
-      case 'xml':
-        return { icon: FaFileCode, color: isSelected ? 'white' : '#ff6600' };
       
       // Documentation
       case 'md':

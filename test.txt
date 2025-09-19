@@ -1,0 +1,10 @@
+Hello World!
+This is a test file to check if Monaco Editor can display content.
+
+Line 1
+Line 2
+Line 3
+
+console.log('Testing Monaco Editor');
+const message = 'Hello from Monaco';
+alert(message);

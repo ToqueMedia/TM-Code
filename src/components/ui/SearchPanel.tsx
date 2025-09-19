@@ -21,7 +21,6 @@ import {
   FiType
 } from 'react-icons/fi'
 import { PanelHeader } from './PanelHeader'
-import { SearchInput } from './SearchInput'
 import { OptionButton } from './OptionButton'
 
 interface SearchResult {

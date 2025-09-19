@@ -3,21 +3,15 @@ import {
   VStack,
   HStack,
   Text,
-  IconButton,
   Box,
-  Flex,
   ScrollArea,
-  Spinner,
-  Input
-} from '@chakra-ui/react'
+  Spinner} from '@chakra-ui/react'
 import {
   FiFolder,
   FiRefreshCw,
   FiPlus,
   FiMoreHorizontal,
-  FiSearch,
-  FiX
-} from 'react-icons/fi'
+  FiSearch} from 'react-icons/fi'
 import { useCurrentProject } from '../../hooks/useProjectState'
 import { PanelHeader } from './PanelHeader'
 import { SearchInput } from './SearchInput'
@@ -156,7 +150,7 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
         px={3}
         py={2}
         borderTop="1px solid"
-        borderColor="border.glass"
+        borderColor="#444"
         bg="rgba(255, 255, 255, 0.02)"
       >
         <Text

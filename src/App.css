@@ -122,6 +122,39 @@ input:focus {
   overflow: hidden;
 }
 
+/* Monaco Editor specific styles */
+.monaco-editor-container {
+  background-color: #1E1E1E !important;
+  height: 100%;
+  width: 100%;
+}
+
+/* Ensure Monaco Editor maintains dark background */
+.monaco-editor {
+  background-color: #1E1E1E !important;
+  color: #FFFFFF !important;
+}
+
+.monaco-editor .monaco-editor-background {
+  background-color: #1E1E1E !important;
+}
+
+.monaco-editor .margin-view-overlays {
+  background-color: #1E1E1E !important;
+}
+
+.monaco-editor .view-lines {
+  color: #FFFFFF !important;
+}
+
+.monaco-editor .view-line {
+  color: #FFFFFF !important;
+}
+
+.monaco-editor .token {
+  color: #FFFFFF !important;
+}
+
 /* Responsive adjustments */
 @media (max-width: 768px) {
   .container {

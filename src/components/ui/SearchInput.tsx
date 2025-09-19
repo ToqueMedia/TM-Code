@@ -2,10 +2,8 @@ import React from 'react'
 import { 
   HStack,
   Input,
-  IconButton,
-  Box
-} from '@chakra-ui/react'
-import { FiSearch, FiX } from 'react-icons/fi'
+  IconButton} from '@chakra-ui/react'
+import { FiX } from 'react-icons/fi'
 
 interface SearchInputProps {
   value: string
