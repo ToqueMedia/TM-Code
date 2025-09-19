@@ -1,6 +1,7 @@
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { PhysicalSize, PhysicalPosition } from '@tauri-apps/api/window';
 import type { WindowState } from '../types/project';
+import { logger } from '../utils/logger';
 
 class WindowService {
   private static instance: WindowService;
@@ -25,9 +26,9 @@ class WindowService {
       // Set up event listeners for window state changes
       this.setupEventListeners();
       
-      console.log('Window service initialized');
+      logger.window('Window service initialized');
     } catch (error) {
-      console.error('Failed to initialize window service:', error);
+      logger.error('window', 'Failed to initialize window service', error);
     }
   }
 
@@ -61,7 +62,7 @@ class WindowService {
       // Emit event or call callback to update store
       window.dispatchEvent(new CustomEvent('windowStateChange', { detail: windowState }));
     } catch (error) {
-      console.error('Failed to handle window resize:', error);
+      logger.error('window', 'Failed to handle window resize', error);
     }
   }
 
@@ -91,7 +92,7 @@ class WindowService {
         maximized: isMaximized
       };
     } catch (error: unknown) {
-      console.error('Failed to get current window state:', error);
+      logger.error('window', 'Failed to get current window state', error);
       
       // Fallback to browser window
       return {
@@ -121,9 +122,9 @@ class WindowService {
         await this.mainWindow.unmaximize();
       }
       
-      console.log('Window state set:', state);
+      logger.window('Window state set', state);
     } catch (error: unknown) {
-      console.error('Failed to set window state:', error);
+      logger.error('window', 'Failed to set window state', error);
     }
   }
 
@@ -131,9 +132,9 @@ class WindowService {
     try {
       // Apply the saved window state
       await this.setWindowState(state);
-      console.log('Window state restored:', state);
+      logger.window('Window state restored', state);
     } catch (error: unknown) {
-      console.error('Failed to restore window state:', error);
+      logger.error('window', 'Failed to restore window state', error);
     }
   }
 
@@ -144,10 +145,10 @@ class WindowService {
       // Save to localStorage for persistence across sessions
       localStorage.setItem('windowState', JSON.stringify(windowState));
       
-      console.log('Window state saved:', windowState);
+      logger.window('Window state saved', windowState);
       return windowState;
     } catch (error: unknown) {
-      console.error('Failed to save window state:', error);
+      logger.error('window', 'Failed to save window state', error);
       throw error;
     }
   }
@@ -157,12 +158,12 @@ class WindowService {
       const savedState = localStorage.getItem('windowState');
       if (savedState) {
         const windowState = JSON.parse(savedState) as WindowState;
-        console.log('Window state loaded:', windowState);
+        logger.window('Window state loaded', windowState);
         return windowState;
       }
       return null;
     } catch (error: unknown) {
-      console.error('Failed to load window state:', error);
+      logger.error('window', 'Failed to load window state', error);
       return null;
     }
   }
@@ -177,7 +178,7 @@ class WindowService {
     // Nullify window reference
     this.mainWindow = null;
     
-    console.log('Window service reset');
+    logger.window('Window service reset');
   }
 }
 

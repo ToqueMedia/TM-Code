@@ -1,5 +1,6 @@
 import { FileWatcher, FileEvent } from './fileWatcher';
 import { useEditorRepository } from '../stores/editorStore';
+import { logger } from './logger';
 
 export class ProjectFileWatcher {
   private fileWatcher: FileWatcher;
@@ -16,12 +17,12 @@ export class ProjectFileWatcher {
     try {
       // Start watching the project directory
       this.unwatch = await this.fileWatcher.watch(projectPath, this.handleFileEvent.bind(this));
-      console.log(`Started watching project: ${projectPath}`);
+      logger.info('file-watcher', `Started watching project: ${projectPath}`);
     } catch (error: unknown) {
-      console.warn('Failed to start file watching (falling back to no-watch mode):', error);
+      logger.warn('file-watcher', 'Failed to start file watching (falling back to no-watch mode)', error);
       // Set a no-op unwatch function so stopWatching() doesn't break
       this.unwatch = () => {
-        console.log('No-op unwatch called');
+        logger.fileWatcher('No-op unwatch called');
       };
     }
   }
@@ -35,7 +36,7 @@ export class ProjectFileWatcher {
 
   private handleFileEvent(event: FileEvent) {
     try {
-      console.log('File event detected:', event);
+      logger.fileWatcher('File event detected', event);
       
       // Handle different types of file events
       switch (event.type) {
@@ -62,7 +63,7 @@ export class ProjectFileWatcher {
           break;
       }
     } catch (error: unknown) {
-      console.error('Error handling file event:', error);
+      logger.error('file-watcher', 'Error handling file event', error);
     }
   }
 
@@ -74,7 +75,7 @@ export class ProjectFileWatcher {
     
     if (isOpen) {
       // For now, we'll just log it
-      console.log(`Open file was modified externally: ${filePath}`);
+      logger.info('file-watcher', `Open file was modified externally: ${filePath}`);
       // In a real implementation, we might show a notification or prompt the user
     }
   }
@@ -86,7 +87,7 @@ export class ProjectFileWatcher {
     
     if (isOpen) {
       editorStore.closeFile(filePath);
-      console.log(`Closed deleted file: ${filePath}`);
+      logger.info('file-watcher', `Closed deleted file: ${filePath}`);
     }
     
     // Refresh the file tree
@@ -107,7 +108,7 @@ export class ProjectFileWatcher {
         editorStore.setActiveFile(newPath);
       }
       
-      console.log(`Renamed file from ${oldPath} to ${newPath}`);
+      logger.info('file-watcher', `Renamed file from ${oldPath} to ${newPath}`);
     }
     
     // Refresh the file tree
@@ -117,6 +118,6 @@ export class ProjectFileWatcher {
   private refreshFileTree() {
     // In a real implementation, we would notify the file tree component to refresh
     // For now, we'll just log it
-    console.log('File tree refresh needed');
+    logger.fileWatcher('File tree refresh needed');
   }
 }

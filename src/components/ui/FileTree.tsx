@@ -513,6 +513,10 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   
   const handleSelect = () => {
     selectNode(node.path);
+    // Auto-expand folders when selected
+    if (node.type === 'directory' && !isExpanded) {
+      toggleNode(node.path);
+    }
     if (node.type === 'file' && onFileSelect) {
       onFileSelect(node.path);
     }

@@ -33,6 +33,7 @@ interface EditorActions {
   redo: (path: string) => void;
   saveFile: (path: string) => Promise<void>;
   saveAllFiles: () => Promise<void>;
+  refreshFileContent: (path: string) => Promise<void>;
 }
 
 // Get language from file extension
@@ -98,6 +99,29 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         const existingFile = get().openFiles.find(f => f.path === path);
         if (existingFile) {
           console.log('EditorStore: File already open:', path, existingFile);
+          // Refresh content from file system to ensure we have the latest version
+          try {
+            console.log('EditorStore: Refreshing content for:', path);
+            const content = await FileService.readFile(path);
+            if (content !== existingFile.content) {
+              console.log('EditorStore: Content changed for:', path);
+              set(state => {
+                const fileIndex = state.openFiles.findIndex(f => f.path === path);
+                if (fileIndex === -1) return state;
+                
+                const updatedFiles = [...state.openFiles];
+                updatedFiles[fileIndex] = {
+                  ...updatedFiles[fileIndex],
+                  content,
+                  isDirty: false // Reset dirty flag since we're loading fresh content
+                };
+                
+                return { openFiles: updatedFiles };
+              });
+            }
+          } catch (error) {
+            console.error(`Failed to refresh file content ${path}:`, error);
+          }
           return;
         }
         
@@ -386,6 +410,30 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           dirtyFiles.forEach(file => unsavedChangesService.markFileAsClean(file.path));
         } catch (error) {
           console.error('Failed to save all files:', error);
+          throw error;
+        }
+      },
+
+      refreshFileContent: async (path: string) => {
+        try {
+          console.log('EditorStore: Refreshing file content for:', path);
+          const content = await FileService.readFile(path);
+          
+          set(state => {
+            const fileIndex = state.openFiles.findIndex(f => f.path === path);
+            if (fileIndex === -1) return state;
+            
+            const updatedFiles = [...state.openFiles];
+            updatedFiles[fileIndex] = {
+              ...updatedFiles[fileIndex],
+              content,
+              isDirty: false // Reset dirty flag since we're loading fresh content
+            };
+            
+            return { openFiles: updatedFiles };
+          });
+        } catch (error) {
+          console.error(`Failed to refresh file content ${path}:`, error);
           throw error;
         }
       }

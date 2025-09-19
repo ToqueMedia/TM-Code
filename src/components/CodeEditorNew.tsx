@@ -48,6 +48,7 @@ import DebuggerPanel from './DebuggerPanel'
 const MonacoEditor = lazy(() => import('./ui/MonacoEditor'))
 const PerformanceStatus = lazy(() => import('./ui/PerformanceStatus'))
 
+
 // Loading fallbacks
 const EditorSkeleton = () => (
   <Flex 
@@ -474,6 +475,8 @@ export function CodeEditorNew() {
   const [activeActivity, setActiveActivity] = useState('explorer')
   const [isBottomPanelVisible, setIsBottomPanelVisible] = useState(true)
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 })
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth)
+  const [windowHeight, setWindowHeight] = useState(window.innerHeight)
   
   // Refs para elementos DOM
   const editorRef = useRef<HTMLDivElement>(null)
@@ -536,6 +539,17 @@ export function CodeEditorNew() {
     }
   }, [currentProject, lspServiceRef, recoveryServiceRef, windowServiceRef])
 
+  // Window resize listener for responsive panel sizing
+  useEffect(() => {
+    function handleResize() {
+      setWindowWidth(window.innerWidth)
+      setWindowHeight(window.innerHeight)
+    }
+
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
   // Save project state periodically
   useEffect(() => {
     if (!currentProject) return
@@ -566,6 +580,15 @@ export function CodeEditorNew() {
     }
   }, [])
 
+  // Calculate dynamic panel sizes based on window dimensions
+  const explorerMinSize = Math.floor(windowWidth * 0.20) // 20% of screen width
+  const explorerMaxSize = Math.floor(windowWidth * 0.70) // 70% of screen width
+  const explorerDefaultSize = Math.min(300, Math.max(explorerMinSize, Math.floor(windowWidth * 0.25))) // 25% or bounded by constraints
+  
+  // Calculate dynamic bottom panel sizes (15% - 60% of screen height)
+  const bottomMinSize = Math.floor(windowHeight * 0.15) // 15% of screen height
+  const bottomMaxSize = Math.floor(windowHeight * 0.60) // 60% of screen height  
+  const bottomDefaultSize = Math.min(250, Math.max(bottomMinSize, Math.floor(windowHeight * 0.25))) // 25% or bounded by constraints
 
   // Render sidebar panel based on active activity
   const renderSidebarPanel = () => {
@@ -638,18 +661,7 @@ export function CodeEditorNew() {
       {/* Main Content Area */}
       <Flex flex="1" overflow="hidden">
         {/* Enhanced Activity Bar with glow effects */}
-        <Box
-          position="relative"
-          _after={{
-            content: '""',
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            bottom: 0,
-            width: '1px',
-            bg: 'linear-gradient(180deg, transparent, rgba(255,255,255,0.05), transparent)',
-          }}
-        >
+        <Box position="relative">
           <ActivityBar
             activeActivity={activeActivity}
             onActivityChange={handleActivityChange}
@@ -658,22 +670,12 @@ export function CodeEditorNew() {
 
         {/* Enhanced Sidebar Panel with smooth transitions */}
         <Box
-          width="300px"
+          width={`${explorerDefaultSize}px`}
           bg="bg.sidebar"
-          borderRight="1px solid #1e1f22"
           height="100%"
           position="relative"
-          transition="width 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
-          boxShadow="2px 0 10px rgba(0,0,0,0.1)"
-          _after={{
-            content: '""',
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            bottom: 0,
-            width: '1px',
-            bg: 'linear-gradient(180deg, transparent, rgba(255,255,255,0.05), transparent)',
-          }}
+          borderRight="1px solid"
+          borderColor="gray.700"
         >
           {renderSidebarPanel()}
         </Box>
@@ -744,6 +746,7 @@ export function CodeEditorNew() {
             {activeFile ? (
               <Suspense fallback={<EditorSkeleton />}>
                 <MonacoEditor
+                  key={activeFile || 'no-file'}
                   path={activeFile}
                   onCursorPositionChange={handleCursorPositionChange}
                 />
@@ -816,11 +819,21 @@ export function CodeEditorNew() {
       </Flex>
 
       {/* Bottom Panel */}
-      <BottomPanel
-        isVisible={isBottomPanelVisible}
-        onToggle={toggleBottomPanel}
-        onClose={closeBottomPanel}
-      />
+      {isBottomPanelVisible && (
+        <Box
+          height={`${bottomDefaultSize}px`}
+          bg="bg.terminal"
+          position="relative"
+          borderTop="1px solid"
+          borderColor="gray.700"
+        >
+          <BottomPanel
+            isVisible={isBottomPanelVisible}
+            onToggle={toggleBottomPanel}
+            onClose={closeBottomPanel}
+          />
+        </Box>
+      )}
 
       {/* Enhanced Status Bar with gradient */}
       <Flex
@@ -889,7 +902,6 @@ export function CodeEditorNew() {
           </StatusBarItem>
         </HStack>
       </Flex>
-      
     </Flex>
   )
 }

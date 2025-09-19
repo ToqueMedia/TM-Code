@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { Monaco } from '@monaco-editor/react';
 import type { editor } from 'monaco-editor';
 import { toqueMediaTheme, toqueMediaSoftTheme } from '../themes/toqueMediaTheme';
+import { logger } from '../utils/logger';
 
 // Global state to track theme initialization
 let themesInitialized = false;
@@ -24,9 +25,9 @@ export function useMonacoTheme(
         monaco.editor.defineTheme('toquemedia-vibrant', toqueMediaTheme);
         monaco.editor.defineTheme('toquemedia-soft', toqueMediaSoftTheme);
         themesInitialized = true;
-        console.log('✅ ToqueMedia themes initialized globally');
+        logger.theme('ToqueMedia themes initialized globally');
       } catch (error) {
-        console.error('❌ Error initializing themes:', error);
+        logger.error('theme', 'Error initializing themes', error);
       }
     }
   }, [monaco]);
@@ -42,18 +43,18 @@ export function useMonacoTheme(
       // Apply theme to specific editor instance
       editorInstance.updateOptions({ theme: themeName });
       
-      console.log(`🎨 Theme '${themeName}' applied successfully`);
+      logger.theme(`Theme '${themeName}' applied successfully`);
       return true;
     } catch (error) {
-      console.error('❌ Error applying theme:', error);
+      logger.error('theme', 'Error applying theme', error);
       
       // Fallback to vs-dark
       try {
         monaco.editor.setTheme('vs-dark');
         editorInstance.updateOptions({ theme: 'vs-dark' });
-        console.log('🔄 Fallback to vs-dark theme applied');
+        logger.theme('Fallback to vs-dark theme applied');
       } catch (fallbackError) {
-        console.error('❌ Even fallback theme failed:', fallbackError);
+        logger.error('theme', 'Even fallback theme failed', fallbackError);
       }
       
       return false;
@@ -107,7 +108,7 @@ export function useMonacoTheme(
         if (themeName.startsWith('toquemedia-')) {
           return originalSetTheme.call(this, themeName);
         } else {
-          console.log(`🔄 Theme change intercepted: ${themeName} -> toquemedia-vibrant`);
+          logger.theme(`Theme change intercepted: ${themeName} -> toquemedia-vibrant`);
           return originalSetTheme.call(this, 'toquemedia-vibrant');
         }
       };

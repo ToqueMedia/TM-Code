@@ -28,6 +28,8 @@ import '@xterm/xterm/css/xterm.css';
 import { useTerminalStore } from '../../stores/terminalStore';
 import TerminalService from '../../services/terminalService';
 import { invoke } from '@tauri-apps/api/core';
+import { safeTerminalFit, createDebouncedTerminalResize } from '../../utils/terminalUtils';
+import { logger } from '../../utils/logger';
 
 interface TerminalSessionProps {
   sessionId: string;
@@ -49,6 +51,7 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const commandLockRef = useRef<boolean>(false);
   const resizeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [isTerminalReady, setIsTerminalReady] = useState(false);
   
   const session = useTerminalStore(useCallback(
     (state) => state.sessions.find(s => s.id === sessionId), 
@@ -103,7 +106,16 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
       terminal.loadAddon(webLinksAddon);
       
       terminal.open(terminalRef.current);
-      fitAddon.fit();
+      
+      // Wait a bit for the terminal to fully initialize before fitting
+      setTimeout(async () => {
+        setIsTerminalReady(true); // Mark as ready first
+        const success = await safeTerminalFit(terminal, fitAddon);
+        if (!success) {
+          // Initial fit failures are common and don't affect terminal functionality
+          logger.debug('terminal', 'Initial terminal fit deferred - terminal will resize when ready');
+        }
+      }, 100);
 
       xtermRef.current = terminal;
       fitAddonRef.current = fitAddon;
@@ -111,11 +123,12 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
       setupTerminalEvents(terminal);
 
     } catch (error) {
-      console.error('Failed to initialize terminal:', error);
+      logger.error('terminal', 'Failed to initialize terminal', error);
     }
 
     return () => {
       commandLockRef.current = false;
+      setIsTerminalReady(false);
       if (resizeTimeoutRef.current) {
         clearTimeout(resizeTimeoutRef.current);
       }
@@ -127,27 +140,48 @@ function TerminalSession({ sessionId, isActive }: TerminalSessionProps) {
     };
   }, [sessionId, terminalTheme, isActive]);
 
-  const debouncedResize = useCallback(() => {
-    if (resizeTimeoutRef.current) {
-      clearTimeout(resizeTimeoutRef.current);
-    }
-    
-    resizeTimeoutRef.current = setTimeout(() => {
-      if (isActive && fitAddonRef.current && xtermRef.current?.element) {
-        try {
-          fitAddonRef.current.fit();
-        } catch (error) {
-          console.warn('Terminal resize failed:', error);
-        }
-      }
-    }, 100);
-  }, [isActive]);
-
-  useEffect(() => {
-    if (isActive) {
+  const debouncedResize = useMemo(() => {
+    return createDebouncedTerminalResize(
+      xtermRef.current, 
+      fitAddonRef.current, 
+      150
+    );
+  }, [xtermRef.current, fitAddonRef.current]);
+  
+  // Trigger resize when active state or ready state changes
+  const triggerResize = useCallback(() => {
+    if (isActive && isTerminalReady) {
       debouncedResize();
     }
-  }, [isActive, debouncedResize]);
+  }, [isActive, isTerminalReady, debouncedResize]);
+
+  useEffect(() => {
+    triggerResize();
+  }, [triggerResize]);
+  
+  // Listen for custom resize events from ResizablePanel
+  useEffect(() => {
+    const handleTerminalResize = () => {
+      triggerResize();
+    };
+    
+    const handlePanelResize = (event: Event) => {
+      // Only respond to bottom panel or general resize events
+      const customEvent = event as CustomEvent;
+      const { panelId } = customEvent.detail;
+      if (panelId === 'bottom-panel' || panelId === 'explorer-panel') {
+        triggerResize();
+      }
+    };
+    
+    window.addEventListener('terminalResize', handleTerminalResize);
+    window.addEventListener('panelResize', handlePanelResize);
+    
+    return () => {
+      window.removeEventListener('terminalResize', handleTerminalResize);
+      window.removeEventListener('panelResize', handlePanelResize);
+    };
+  }, [triggerResize]);
 
   // Helper function to get display path
   async function getDisplayPath(fullPath: string): Promise<string> {

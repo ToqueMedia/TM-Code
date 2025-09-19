@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useState, useEffect, useRef } from 'react'
 import {
   Flex,
   HStack,
@@ -11,8 +11,6 @@ import {
   FiList,
   FiX,
   FiChevronDown,
-  FiMaximize2,
-  FiMinus,
   FiAlertTriangle,
   FiXCircle,
   FiInfo,
@@ -38,11 +36,50 @@ interface Problem {
   column: number
 }
 
-const TerminalContent = memo(() => (
-  <Box height="100%" width="100%">
-    <TerminalV3 />
-  </Box>
-))
+const TerminalContent = memo(() => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  
+  useEffect(() => {
+    if (!containerRef.current) return;
+    
+    let timeoutId: NodeJS.Timeout;
+    
+    const resizeObserver = new ResizeObserver((entries) => {
+      // Debounce the resize events to prevent too frequent updates
+      clearTimeout(timeoutId);
+      
+      timeoutId = setTimeout(() => {
+        for (const entry of entries) {
+          // Only dispatch if we have meaningful dimensions
+          if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+            const resizeEvent = new CustomEvent('terminalResize', {
+              detail: {
+                width: entry.contentRect.width,
+                height: entry.contentRect.height,
+                timestamp: Date.now()
+              }
+            });
+            window.dispatchEvent(resizeEvent);
+            break; // Only need to dispatch once per batch
+          }
+        }
+      }, 50); // Small debounce to avoid excessive events
+    });
+    
+    resizeObserver.observe(containerRef.current);
+    
+    return () => {
+      resizeObserver.disconnect();
+      clearTimeout(timeoutId);
+    };
+  }, []);
+  
+  return (
+    <Box ref={containerRef} height="100%" width="100%">
+      <TerminalV3 />
+    </Box>
+  );
+})
 
 TerminalContent.displayName = 'TerminalContent'
 
@@ -186,7 +223,6 @@ DebugConsoleContent.displayName = 'DebugConsoleContent'
 
 function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
   const [activePanel, setActivePanel] = useState('terminal')
-  const [isMaximized, setIsMaximized] = useState(false)
 
   const panels = [
     {
@@ -217,9 +253,6 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
     setActivePanel(panelId)
   }, [])
 
-  const handleMaximize = useCallback(() => {
-    setIsMaximized(!isMaximized)
-  }, [isMaximized])
 
   const renderPanelContent = () => {
     switch (activePanel) {
@@ -241,7 +274,7 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
   return (
     <Flex
       direction="column"
-      height={isMaximized ? '70vh' : '250px'}
+      height="100%"
       bg="bg.terminal"
       borderTop="1px solid"
       borderColor="border.glass"
@@ -252,15 +285,6 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
         compact
         rightControls={
           <>
-            <IconButton
-              aria-label="Toggle maximize"
-              variant="ghost"
-              size="xs"
-              color="text.secondary"
-              onClick={handleMaximize}
-            >
-              {isMaximized ? <FiMinus size={12} /> : <FiMaximize2 size={12} />}
-            </IconButton>
             <IconButton
               aria-label="Toggle panel"
               variant="ghost"

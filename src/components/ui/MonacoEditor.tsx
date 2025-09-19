@@ -3,6 +3,7 @@ import Editor, { Monaco } from '@monaco-editor/react';
 import { useMonacoEditorState } from '../../hooks/useEditorState';
 import { useMonacoTheme } from '../../hooks/useMonacoTheme';
 import type { editor, IDisposable } from 'monaco-editor';
+import { logger } from '../../utils/logger';
 
 // Import Monaco workers for Vite
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
@@ -180,7 +181,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   
   // Handle editor mounting
   const handleEditorDidMount = useCallback((editor: editor.IStandaloneCodeEditor, monaco: Monaco) => {
-    console.log('Monaco Editor mounted successfully for:', path);
+    logger.editor(`Monaco Editor mounted successfully for: ${path}`);
     editorRef.current = editor;
     setMonacoInstance(monaco);
     
@@ -231,7 +232,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
       () => {
         handleSave().catch(error => {
-          console.error('Failed to save file:', error);
+          logger.error('editor', 'Failed to save file', error);
         });
       }
     );
@@ -283,7 +284,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   }
   
   // Debug log for content
-  console.log(`Monaco Editor [${path}]:`, {
+  logger.editor(`Monaco Editor [${path}]`, {
     hasContent: !!content,
     contentLength: content?.length || 0,
     language,
@@ -296,12 +297,12 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         height="100%"
         defaultLanguage={language}
         language={language}
+        path={path}
         value={content || ''}
         onChange={handleChange}
         onMount={handleEditorDidMount}
         options={editorOptions}
         theme="toquemedia-vibrant"
-        keepCurrentModel={true}
         loading={
           <div style={{ 
             display: 'flex', 

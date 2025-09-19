@@ -1,3 +1,5 @@
+import { logger } from './logger';
+
 export interface FileEvent {
   type: 'create' | 'update' | 'delete' | 'rename';
   path: string;
@@ -15,7 +17,7 @@ export class FileWatcher {
     }
 
     if (!this.isWatchingSupported) {
-      console.warn('Native file watching is not supported, using fallback');
+      logger.warn('file-watcher', 'Native file watching is not supported, using fallback');
       // Use polling fallback for non-Tauri environments
       const cleanup = this.createPollingWatcher(path, callback);
       this.watchers.set(path, cleanup);
@@ -44,7 +46,7 @@ export class FileWatcher {
             
             callback(fileEvent);
           } catch (callbackError) {
-            console.error('Error in file watch callback:', callbackError);
+            logger.error('file-watcher', 'Error in file watch callback', callbackError);
           }
         },
         {
@@ -60,12 +62,12 @@ export class FileWatcher {
         try {
           unwatch();
         } catch (unwatchError) {
-          console.warn('Error unwatching path:', unwatchError);
+          logger.warn('file-watcher', 'Error unwatching path', unwatchError);
         }
         this.watchers.delete(path);
       };
     } catch (error: unknown) {
-      console.error('Failed to watch path:', error);
+      logger.error('file-watcher', 'Failed to watch path', error);
       this.isWatchingSupported = false;
       // Return a no-op cleanup function in case of error
       return () => {};
@@ -82,45 +84,33 @@ export class FileWatcher {
       }
       return false;
     } catch (error) {
-      console.warn('Tauri fs plugin not available:', error);
+      logger.warn('file-watcher', 'Tauri fs plugin not available', error);
       return false;
     }
   }
 
   // Fallback implementation for non-Tauri environments
-  private createPollingWatcher(path: string, callback: (event: FileEvent) => void): () => void {
-    console.info('Using polling fallback for file watching (Tauri not available)');
+  private createPollingWatcher(_path: string, _callback: (event: FileEvent) => void): () => void {
+    logger.info('file-watcher', 'File watching not available in this environment. File changes will not be detected automatically.');
     
-    // Simple polling fallback - checks every 2 seconds
-    // This is not ideal but provides basic functionality
-    let lastModified: number = Date.now();
+    // Instead of aggressive polling that causes performance issues,
+    // we'll just return a no-op watcher with much less frequent checks
     let isActive = true;
     
-    const poll = () => {
+    // Only check every 30 seconds instead of every 2 seconds to reduce performance impact
+    const checkInterval = setInterval(() => {
       if (!isActive) return;
       
-      // In a real implementation, you might use the File System Access API
-      // or other browser APIs here. For now, we just simulate.
-      const now = Date.now();
-      if (now - lastModified > 2000) {
-        // Simulate a generic update event
-        callback({
-          type: 'update',
-          path
-        });
-        lastModified = now;
-      }
+      // We could implement actual file system checks here if needed,
+      // but for now we'll just keep the watcher active without generating events
+      // to avoid the excessive logging and performance issues
       
-      // Schedule next check
-      setTimeout(poll, 2000);
-    };
-    
-    // Start polling after a delay
-    setTimeout(poll, 1000);
+    }, 30000); // Much less frequent polling
     
     // Return cleanup function
     return () => {
       isActive = false;
+      clearInterval(checkInterval);
     };
   }
 

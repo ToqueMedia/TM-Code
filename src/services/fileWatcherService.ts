@@ -1,4 +1,5 @@
 import { FileWatcher } from '../utils/fileWatcher';
+import { logger } from '../utils/logger';
 class FileWatcherService {
   private static instance: FileWatcherService;
   private fileWatcher: FileWatcher;
@@ -21,21 +22,21 @@ class FileWatcherService {
       // Stop watching if already watching
       this.unwatchDirectory(path);
       
-      console.log(`Watching directory: ${path}`);
+      logger.fileWatcher(`Starting to watch directory: ${path}`);
       
       // Use the actual Tauri file watcher
       const cleanup = await this.fileWatcher.watch(path, (event) => {
-        console.log(`File event: ${event.type} - ${event.path}`);
+        logger.fileWatcher(`File event: ${event.type} - ${event.path}`);
         // In a real implementation, we would update the file tree store directly
       });
       
       this.cleanupFunctions.set(path, cleanup);
       return cleanup;
     } catch (error) {
-      console.warn(`Failed to watch directory ${path}:`, error);
+      logger.warn('file-watcher', `Failed to watch directory ${path}`, error);
       // Don't throw the error, just warn and return a no-op cleanup
       const noOpCleanup = () => {
-        console.log(`No-op cleanup for directory: ${path}`);
+        logger.fileWatcher(`No-op cleanup for directory: ${path}`);
       };
       this.cleanupFunctions.set(path, noOpCleanup);
       return noOpCleanup;

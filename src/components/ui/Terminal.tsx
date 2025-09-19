@@ -68,8 +68,16 @@ function TerminalSession({ sessionId, isActive, onClose }: TerminalProps) {
     // Abrir terminal
     terminal.open(terminalRef.current);
     
-    // Ajustar tamanho
-    fitAddon.fit();
+    // Ajustar tamanho após inicialização completa
+    setTimeout(() => {
+      try {
+        if ((terminal as any)._core?._renderService?.dimensions) {
+          fitAddon.fit();
+        }
+      } catch (error) {
+        console.warn('Initial terminal fit failed:', error);
+      }
+    }, 50);
 
     // Salvar referências
     xtermRef.current = terminal;
@@ -93,7 +101,13 @@ function TerminalSession({ sessionId, isActive, onClose }: TerminalProps) {
   useEffect(() => {
     if (isActive && fitAddonRef.current && xtermRef.current) {
       setTimeout(() => {
-        fitAddonRef.current?.fit();
+        try {
+          if ((xtermRef.current as any)?._core?._renderService?.dimensions) {
+            fitAddonRef.current?.fit();
+          }
+        } catch (error) {
+          console.warn('Terminal resize failed:', error);
+        }
       }, 100);
     }
   }, [isActive]);

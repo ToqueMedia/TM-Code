@@ -1,6 +1,7 @@
 // src/App.tsx
 import WelcomeScreen from './components/WelcomeScreen';
 import CodeEditorNew from './components/CodeEditorNew';
+import CodeEditorSimple from './components/CodeEditorSimple';
 import { useProjectStore } from './stores/projectStore';
 import { NewProjectDialog } from './components/dialogs/NewProjectDialog';
 import { useDialog } from './hooks/useDialog';
@@ -57,10 +58,14 @@ function App() {
     );
   }
 
+  // Use simplified editor if URL has ?debug=simple
+  const urlParams = new URLSearchParams(window.location.search);
+  const useSimpleEditor = urlParams.get('debug') === 'simple';
+
   return (
     <>
       {currentProject ? (
-        <CodeEditorNew />
+        useSimpleEditor ? <CodeEditorSimple /> : <CodeEditorNew />
       ) : (
         <WelcomeScreen 
           onOpenProject={handleOpenProject}

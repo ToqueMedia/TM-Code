@@ -16,6 +16,7 @@ import { useCurrentProject } from '../../hooks/useProjectState'
 import { PanelHeader } from './PanelHeader'
 import { SearchInput } from './SearchInput'
 import { OptionButton } from './OptionButton'
+import { useFileTreeRepository } from '../../stores/fileTreeStore'
 
 const FileTree = React.lazy(() => import('./FileTree'))
 
@@ -36,6 +37,7 @@ FileTreeSkeleton.displayName = 'FileTreeSkeleton'
 
 function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
   const currentProject = useCurrentProject()
+  const { refresh } = useFileTreeRepository()
   const [searchTerm, setSearchTerm] = React.useState('')
   const [isSearching, setIsSearching] = React.useState(false)
 
@@ -46,10 +48,14 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
     }
   }, [isSearching])
 
-  const handleRefresh = useCallback(() => {
-    // Trigger file tree refresh
-    window.location.reload()
-  }, [])
+  const handleRefresh = useCallback(async () => {
+    // Trigger file tree refresh using the store method
+    try {
+      await refresh()
+    } catch (error) {
+      console.error('Failed to refresh file tree:', error)
+    }
+  }, [refresh])
 
   const handleNewFile = useCallback(() => {
     // Open new file dialog

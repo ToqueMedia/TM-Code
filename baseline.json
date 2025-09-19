@@ -3,7 +3,7 @@
     "name": "app-startup-simulation",
     "suite": "core",
     "description": "Simulate application startup operations",
-    "timestamp": "2025-09-19T17:19:42.787Z",
+    "timestamp": "2025-09-19T17:28:05.453Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -13,136 +13,136 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 51.5333998,
+        "executionTime": 50.751433600000006,
         "memoryUsage": {
-          "heapUsed": 8004532.8,
+          "heapUsed": 7874017.6,
           "heapTotal": 11927552,
           "external": 2714373,
           "arrayBuffers": 33610
         },
         "cpuUsage": {
-          "user": 408.6,
-          "system": 74.8
+          "user": 197.2,
+          "system": 17
         }
       },
       "median": {
-        "executionTime": 51.480541,
+        "executionTime": 50.794042,
         "memoryUsage": {
-          "heapUsed": 8095440,
+          "heapUsed": 7833976,
           "heapTotal": 11927552,
           "external": 2714373,
           "arrayBuffers": 33610
         },
         "cpuUsage": {
-          "user": 481,
-          "system": 120
+          "user": 176,
+          "system": 18
         }
       },
       "min": {
-        "executionTime": 51.382917,
+        "executionTime": 50.188417,
         "memoryUsage": {
-          "heapUsed": 7902864,
+          "heapUsed": 7912624,
           "heapTotal": 11927552,
           "external": 2714373,
           "arrayBuffers": 33610
         },
         "cpuUsage": {
-          "user": 324,
-          "system": 33
+          "user": 150,
+          "system": 16
         }
       },
       "max": {
-        "executionTime": 51.730875,
+        "executionTime": 51.344375,
         "memoryUsage": {
-          "heapUsed": 8011840,
+          "heapUsed": 7798296,
           "heapTotal": 11927552,
           "external": 2714373,
           "arrayBuffers": 33610
         },
         "cpuUsage": {
-          "user": 410,
-          "system": 59
+          "user": 286,
+          "system": 19
         }
       },
       "stdDev": {
-        "executionTime": 0.12717181098875638,
+        "executionTime": 0.47572582183211387,
         "memoryUsage": {
-          "heapUsed": 69242.71617549387,
+          "heapUsed": 53510.15739689055,
           "heapTotal": 0,
           "external": 0,
           "arrayBuffers": 0
         },
         "cpuUsage": {
-          "user": 55.13111644071794,
-          "system": 37.42940020892667
+          "user": 51.421396324876284,
+          "system": 1.7888543819998317
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 51.382917,
+        "executionTime": 51.344375,
         "memoryUsage": {
-          "heapUsed": 7902864,
+          "heapUsed": 7798296,
           "heapTotal": 11927552,
           "external": 2714373,
           "arrayBuffers": 33610
         },
         "cpuUsage": {
-          "user": 324,
-          "system": 33
+          "user": 286,
+          "system": 19
         }
       },
       {
-        "executionTime": 51.44575,
+        "executionTime": 50.794042,
         "memoryUsage": {
-          "heapUsed": 7954720,
+          "heapUsed": 7833976,
           "heapTotal": 11927552,
           "external": 2714373,
           "arrayBuffers": 33610
         },
         "cpuUsage": {
-          "user": 377,
-          "system": 43
+          "user": 176,
+          "system": 18
         }
       },
       {
-        "executionTime": 51.730875,
+        "executionTime": 50.236334,
         "memoryUsage": {
-          "heapUsed": 8011840,
+          "heapUsed": 7877152,
           "heapTotal": 11927552,
           "external": 2714373,
           "arrayBuffers": 33610
         },
         "cpuUsage": {
-          "user": 410,
-          "system": 59
+          "user": 222,
+          "system": 18
         }
       },
       {
-        "executionTime": 51.626916,
+        "executionTime": 50.188417,
         "memoryUsage": {
-          "heapUsed": 8057800,
+          "heapUsed": 7912624,
           "heapTotal": 11927552,
           "external": 2714373,
           "arrayBuffers": 33610
         },
         "cpuUsage": {
-          "user": 451,
-          "system": 119
+          "user": 150,
+          "system": 16
         }
       },
       {
-        "executionTime": 51.480541,
+        "executionTime": 51.194,
         "memoryUsage": {
-          "heapUsed": 8095440,
+          "heapUsed": 7948040,
           "heapTotal": 11927552,
           "external": 2714373,
           "arrayBuffers": 33610
         },
         "cpuUsage": {
-          "user": 481,
-          "system": 120
+          "user": 152,
+          "system": 14
         }
       }
     ],
@@ -152,7 +152,7 @@
     "name": "file-tree-operations",
     "suite": "core",
     "description": "Benchmark file tree operations",
-    "timestamp": "2025-09-19T17:19:43.150Z",
+    "timestamp": "2025-09-19T17:28:05.810Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -162,136 +162,136 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 0.4558834,
+        "executionTime": 0.39835,
         "memoryUsage": {
-          "heapUsed": 8597497.6,
-          "heapTotal": 12713984,
+          "heapUsed": 8533398.4,
+          "heapTotal": 12451840,
           "external": 2712685.2,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 647.2,
-          "system": 59.2
+          "user": 611.8,
+          "system": 42
         }
       },
       "median": {
-        "executionTime": 0.351792,
+        "executionTime": 0.318167,
         "memoryUsage": {
-          "heapUsed": 9364480,
-          "heapTotal": 12713984,
+          "heapUsed": 8448536,
+          "heapTotal": 12451840,
           "external": 2714373,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 560,
-          "system": 39
-        }
-      },
-      "min": {
-        "executionTime": 0.32825,
-        "memoryUsage": {
-          "heapUsed": 8511888,
-          "heapTotal": 12713984,
-          "external": 2714373,
-          "arrayBuffers": 25171
-        },
-        "cpuUsage": {
-          "user": 333,
+          "user": 321,
           "system": 6
         }
       },
-      "max": {
-        "executionTime": 0.745917,
+      "min": {
+        "executionTime": 0.297375,
         "memoryUsage": {
-          "heapUsed": 8086408,
-          "heapTotal": 12713984,
+          "heapUsed": 9303224,
+          "heapTotal": 12451840,
           "external": 2714373,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 867,
-          "system": 161
+          "user": 535,
+          "system": 2
+        }
+      },
+      "max": {
+        "executionTime": 0.621708,
+        "memoryUsage": {
+          "heapUsed": 8023992,
+          "heapTotal": 12451840,
+          "external": 2714373,
+          "arrayBuffers": 25171
+        },
+        "cpuUsage": {
+          "user": 793,
+          "system": 147
         }
       },
       "stdDev": {
-        "executionTime": 0.16213134070203702,
+        "executionTime": 0.12602934600957033,
         "memoryUsage": {
-          "heapUsed": 497116.7021300331,
+          "heapUsed": 500016.66584448965,
           "heapTotal": 0,
           "external": 3375.6,
           "arrayBuffers": 0
         },
         "cpuUsage": {
-          "user": 196.55879527510336,
-          "system": 55.23549583374807
+          "user": 171.56153415028672,
+          "system": 53.96665637224526
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 0.745917,
+        "executionTime": 0.621708,
         "memoryUsage": {
-          "heapUsed": 8086408,
-          "heapTotal": 12713984,
+          "heapUsed": 8023992,
+          "heapTotal": 12451840,
           "external": 2714373,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 867,
-          "system": 161
+          "user": 793,
+          "system": 147
         }
       },
       {
-        "executionTime": 0.32825,
+        "executionTime": 0.318167,
         "memoryUsage": {
-          "heapUsed": 8511888,
-          "heapTotal": 12713984,
+          "heapUsed": 8448536,
+          "heapTotal": 12451840,
           "external": 2714373,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 333,
+          "user": 321,
           "system": 6
         }
       },
       {
-        "executionTime": 0.330583,
+        "executionTime": 0.29975,
         "memoryUsage": {
-          "heapUsed": 8939160,
-          "heapTotal": 12713984,
+          "heapUsed": 8878832,
+          "heapTotal": 12451840,
           "external": 2714373,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 633,
-          "system": 20
+          "user": 648,
+          "system": 17
         }
       },
       {
-        "executionTime": 0.351792,
+        "executionTime": 0.297375,
         "memoryUsage": {
-          "heapUsed": 9364480,
-          "heapTotal": 12713984,
+          "heapUsed": 9303224,
+          "heapTotal": 12451840,
           "external": 2714373,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 560,
-          "system": 39
+          "user": 535,
+          "system": 2
         }
       },
       {
-        "executionTime": 0.522875,
+        "executionTime": 0.45475,
         "memoryUsage": {
-          "heapUsed": 8085552,
-          "heapTotal": 12713984,
+          "heapUsed": 8012408,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 843,
-          "system": 70
+          "user": 762,
+          "system": 38
         }
       }
     ],
@@ -301,7 +301,7 @@
     "name": "editor-state-management",
     "suite": "core",
     "description": "Benchmark editor state operations",
-    "timestamp": "2025-09-19T17:19:43.157Z",
+    "timestamp": "2025-09-19T17:28:05.813Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -311,135 +311,135 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 0.06420000000000001,
+        "executionTime": 0.057241799999999995,
         "memoryUsage": {
-          "heapUsed": 8634372.8,
-          "heapTotal": 12871270.4,
+          "heapUsed": 8558102.4,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 68.2,
-          "system": 2.4
+          "user": 58.2,
+          "system": 0.8
         }
       },
       "median": {
-        "executionTime": 0.060833,
+        "executionTime": 0.057291,
         "memoryUsage": {
-          "heapUsed": 8636696,
-          "heapTotal": 12976128,
+          "heapUsed": 8762744,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 65,
-          "system": 2
+          "user": 59,
+          "system": 1
         }
       },
       "min": {
-        "executionTime": 0.058458,
+        "executionTime": 0.056917,
         "memoryUsage": {
-          "heapUsed": 8843352,
-          "heapTotal": 12976128,
+          "heapUsed": 8353640,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 60,
+          "user": 58,
           "system": 1
         }
       },
       "max": {
-        "executionTime": 0.0795,
+        "executionTime": 0.057709,
         "memoryUsage": {
-          "heapUsed": 8527384,
-          "heapTotal": 12713984,
+          "heapUsed": 8558272,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 90,
-          "system": 4
+          "user": 58,
+          "system": 1
         }
       },
       "stdDev": {
-        "executionTime": 0.00781954389974249,
+        "executionTime": 0.00027827281577617354,
         "memoryUsage": {
-          "heapUsed": 148543.7723910363,
-          "heapTotal": 128423.80782643068,
+          "heapUsed": 144582.52551895753,
+          "heapTotal": 0,
           "external": 0,
           "arrayBuffers": 0
         },
         "cpuUsage": {
-          "user": 11.08873302050329,
-          "system": 1.019803902718557
+          "user": 0.4,
+          "system": 0.4000000000000001
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 0.063125,
+        "executionTime": 0.056917,
         "memoryUsage": {
-          "heapUsed": 8424480,
-          "heapTotal": 12713984,
+          "heapUsed": 8353640,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 65,
-          "system": 3
+          "user": 58,
+          "system": 1
         }
       },
       {
-        "executionTime": 0.0795,
+        "executionTime": 0.057292,
         "memoryUsage": {
-          "heapUsed": 8527384,
-          "heapTotal": 12713984,
+          "heapUsed": 8455856,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 90,
-          "system": 4
+          "user": 58,
+          "system": 0
         }
       },
       {
-        "executionTime": 0.060833,
+        "executionTime": 0.057709,
         "memoryUsage": {
-          "heapUsed": 8636696,
-          "heapTotal": 12976128,
+          "heapUsed": 8558272,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 65,
-          "system": 2
+          "user": 58,
+          "system": 1
         }
       },
       {
-        "executionTime": 0.059084,
+        "executionTime": 0.057,
         "memoryUsage": {
-          "heapUsed": 8739952,
-          "heapTotal": 12976128,
+          "heapUsed": 8660000,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 61,
-          "system": 2
+          "user": 58,
+          "system": 1
         }
       },
       {
-        "executionTime": 0.058458,
+        "executionTime": 0.057291,
         "memoryUsage": {
-          "heapUsed": 8843352,
-          "heapTotal": 12976128,
+          "heapUsed": 8762744,
+          "heapTotal": 12451840,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 60,
+          "user": 59,
           "system": 1
         }
       }
@@ -450,7 +450,7 @@
     "name": "search-indexing",
     "suite": "core",
     "description": "Benchmark search index operations",
-    "timestamp": "2025-09-19T17:19:43.158Z",
+    "timestamp": "2025-09-19T17:28:05.814Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -460,136 +460,136 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 6.3626752,
+        "executionTime": 6.1955165999999995,
         "memoryUsage": {
-          "heapUsed": 16921505.6,
-          "heapTotal": 36778803.2,
+          "heapUsed": 16641916.8,
+          "heapTotal": 36464230.4,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 6087.6,
-          "system": 586.8
+          "user": 6050.2,
+          "system": 518.4
         }
       },
       "median": {
-        "executionTime": 6.361875,
+        "executionTime": 6.367625,
         "memoryUsage": {
-          "heapUsed": 15578472,
-          "heapTotal": 30015488,
+          "heapUsed": 15506096,
+          "heapTotal": 29753344,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 6176,
-          "system": 638
+          "user": 6311,
+          "system": 538
         }
       },
       "min": {
-        "executionTime": 5.710125,
+        "executionTime": 5.426375,
         "memoryUsage": {
-          "heapUsed": 22445192,
-          "heapTotal": 47054848,
+          "heapUsed": 21922168,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 5565,
-          "system": 141
+          "user": 5338,
+          "system": 93
         }
       },
       "max": {
-        "executionTime": 7.454334,
+        "executionTime": 6.514542,
         "memoryUsage": {
-          "heapUsed": 15818136,
-          "heapTotal": 46792704,
+          "heapUsed": 15395384,
+          "heapTotal": 29753344,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 6373,
-          "system": 1062
+          "user": 6258,
+          "system": 645
         }
       },
       "stdDev": {
-        "executionTime": 0.6023546721151585,
+        "executionTime": 0.39220392140242544,
         "memoryUsage": {
-          "heapUsed": 2770671.525638909,
-          "heapTotal": 8283750.4,
+          "heapUsed": 2651300.870170898,
+          "heapTotal": 8219123.700891564,
           "external": 0,
           "arrayBuffers": 0
         },
         "cpuUsage": {
-          "user": 380.2360319590978,
-          "system": 317.6585588332227
+          "user": 398.2006529376867,
+          "system": 218.4789234686037
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 6.36775,
+        "executionTime": 6.273291,
         "memoryUsage": {
-          "heapUsed": 15142040,
-          "heapTotal": 30015488,
+          "heapUsed": 14858984,
+          "heapTotal": 29753344,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 6580,
-          "system": 739
+          "user": 6441,
+          "system": 624
         }
       },
       {
-        "executionTime": 6.361875,
+        "executionTime": 6.514542,
         "memoryUsage": {
-          "heapUsed": 15578472,
-          "heapTotal": 30015488,
+          "heapUsed": 15395384,
+          "heapTotal": 29753344,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 6176,
-          "system": 638
+          "user": 6258,
+          "system": 645
         }
       },
       {
-        "executionTime": 5.919292,
+        "executionTime": 6.367625,
         "memoryUsage": {
-          "heapUsed": 15623688,
-          "heapTotal": 30015488,
+          "heapUsed": 15506096,
+          "heapTotal": 29753344,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 5744,
-          "system": 354
+          "user": 6311,
+          "system": 538
         }
       },
       {
-        "executionTime": 7.454334,
+        "executionTime": 6.39575,
         "memoryUsage": {
-          "heapUsed": 15818136,
-          "heapTotal": 46792704,
+          "heapUsed": 15526952,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 6373,
-          "system": 1062
+          "user": 5903,
+          "system": 692
         }
       },
       {
-        "executionTime": 5.710125,
+        "executionTime": 5.426375,
         "memoryUsage": {
-          "heapUsed": 22445192,
-          "heapTotal": 47054848,
+          "heapUsed": 21922168,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 5565,
-          "system": 141
+          "user": 5338,
+          "system": 93
         }
       }
     ],
@@ -599,7 +599,7 @@
     "name": "memory-cleanup",
     "suite": "core",
     "description": "Test memory cleanup and garbage collection patterns",
-    "timestamp": "2025-09-19T17:19:43.207Z",
+    "timestamp": "2025-09-19T17:28:05.861Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -609,136 +609,136 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 0.3485918,
+        "executionTime": 0.23964179999999996,
         "memoryUsage": {
-          "heapUsed": 24057105.6,
-          "heapTotal": 47054848,
+          "heapUsed": 26666326.4,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 268.2,
-          "system": 94.8
+          "user": 174.4,
+          "system": 68
         }
       },
       "median": {
-        "executionTime": 0.272375,
+        "executionTime": 0.240083,
         "memoryUsage": {
-          "heapUsed": 26255016,
-          "heapTotal": 47054848,
+          "heapUsed": 27596904,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 199,
-          "system": 77
+          "user": 172,
+          "system": 70
         }
       },
       "min": {
-        "executionTime": 0.263375,
+        "executionTime": 0.222042,
         "memoryUsage": {
-          "heapUsed": 27186320,
-          "heapTotal": 47054848,
+          "heapUsed": 26665600,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 194,
-          "system": 71
+          "user": 174,
+          "system": 51
         }
       },
       "max": {
-        "executionTime": 0.634084,
+        "executionTime": 0.258542,
         "memoryUsage": {
-          "heapUsed": 13402888,
-          "heapTotal": 47054848,
+          "heapUsed": 24806624,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 555,
-          "system": 139
+          "user": 180,
+          "system": 81
         }
       },
       "stdDev": {
-        "executionTime": 0.14351071829156176,
+        "executionTime": 0.012080104675043177,
         "memoryUsage": {
-          "heapUsed": 5407409.549143087,
+          "heapUsed": 1313999.7334540978,
           "heapTotal": 0,
           "external": 0,
           "arrayBuffers": 0
         },
         "cpuUsage": {
-          "user": 143.41185446119857,
-          "system": 26.278508329050947
+          "user": 3.1368774282716245,
+          "system": 9.959919678390985
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 0.305333,
+        "executionTime": 0.258542,
         "memoryUsage": {
-          "heapUsed": 25328480,
-          "heapTotal": 47054848,
+          "heapUsed": 24806624,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 198,
-          "system": 111
+          "user": 180,
+          "system": 81
         }
       },
       {
-        "executionTime": 0.272375,
+        "executionTime": 0.244292,
         "memoryUsage": {
-          "heapUsed": 26255016,
-          "heapTotal": 47054848,
+          "heapUsed": 25739096,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 199,
-          "system": 77
+          "user": 175,
+          "system": 73
         }
       },
       {
-        "executionTime": 0.263375,
+        "executionTime": 0.222042,
         "memoryUsage": {
-          "heapUsed": 27186320,
-          "heapTotal": 47054848,
+          "heapUsed": 26665600,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 194,
-          "system": 71
+          "user": 174,
+          "system": 51
         }
       },
       {
-        "executionTime": 0.267792,
+        "executionTime": 0.240083,
         "memoryUsage": {
-          "heapUsed": 28112824,
-          "heapTotal": 47054848,
+          "heapUsed": 27596904,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 195,
-          "system": 76
+          "user": 172,
+          "system": 70
         }
       },
       {
-        "executionTime": 0.634084,
+        "executionTime": 0.23325,
         "memoryUsage": {
-          "heapUsed": 13402888,
-          "heapTotal": 47054848,
+          "heapUsed": 28523408,
+          "heapTotal": 46530560,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 555,
-          "system": 139
+          "user": 171,
+          "system": 65
         }
       }
     ],
@@ -748,7 +748,7 @@
     "name": "virtual-scrolling",
     "suite": "ui",
     "description": "Benchmark virtual scrolling for large file trees",
-    "timestamp": "2025-09-19T17:19:43.210Z",
+    "timestamp": "2025-09-19T17:28:05.863Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -758,136 +758,136 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 0.9551582,
+        "executionTime": 1.9628333999999998,
         "memoryUsage": {
-          "heapUsed": 22690552,
-          "heapTotal": 47054848,
+          "heapUsed": 21317326.4,
+          "heapTotal": 48313139.2,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25163
         },
         "cpuUsage": {
-          "user": 976.2,
-          "system": 138.6
+          "user": 3819.4,
+          "system": 1097.2
         }
       },
       "median": {
-        "executionTime": 0.98375,
+        "executionTime": 2.133625,
         "memoryUsage": {
-          "heapUsed": 28745576,
-          "heapTotal": 47054848,
+          "heapUsed": 13408136,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 768,
-          "system": 220
+          "user": 4444,
+          "system": 255
         }
       },
       "min": {
-        "executionTime": 0.747083,
+        "executionTime": 1.121167,
         "memoryUsage": {
-          "heapUsed": 19854104,
-          "heapTotal": 47054848,
+          "heapUsed": 27645640,
+          "heapTotal": 48103424,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 748,
-          "system": 1
+          "user": 871,
+          "system": 252
         }
       },
       "max": {
-        "executionTime": 1.08725,
+        "executionTime": 2.996125,
         "memoryUsage": {
-          "heapUsed": 16247928,
-          "heapTotal": 47054848,
+          "heapUsed": 22568800,
+          "heapTotal": 50200576,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 1147,
-          "system": 78
+          "user": 8566,
+          "system": 3818
         }
       },
       "stdDev": {
-        "executionTime": 0.11684367340408293,
+        "executionTime": 0.7086723817972871,
         "memoryUsage": {
-          "heapUsed": 4308724.651509029,
-          "heapTotal": 0,
+          "heapUsed": 4836026.061998657,
+          "heapTotal": 1381178.0023557283,
           "external": 0,
-          "arrayBuffers": 0
+          "arrayBuffers": 16
         },
         "cpuUsage": {
-          "user": 266.76011695903867,
-          "system": 89.16411834364763
+          "user": 2840.492464344871,
+          "system": 1378.6578110611786
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 1.031666,
+        "executionTime": 1.215875,
         "memoryUsage": {
-          "heapUsed": 25142856,
-          "heapTotal": 47054848,
+          "heapUsed": 24003184,
+          "heapTotal": 47579136,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 796,
-          "system": 240
+          "user": 906,
+          "system": 313
         }
       },
       {
-        "executionTime": 0.98375,
+        "executionTime": 1.121167,
         "memoryUsage": {
-          "heapUsed": 28745576,
-          "heapTotal": 47054848,
+          "heapUsed": 27645640,
+          "heapTotal": 48103424,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 768,
-          "system": 220
+          "user": 871,
+          "system": 252
         }
       },
       {
-        "executionTime": 1.08725,
+        "executionTime": 2.347375,
         "memoryUsage": {
-          "heapUsed": 16247928,
-          "heapTotal": 47054848,
+          "heapUsed": 18960872,
+          "heapTotal": 49414144,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 1147,
-          "system": 78
+          "user": 4310,
+          "system": 848
         }
       },
       {
-        "executionTime": 0.747083,
+        "executionTime": 2.996125,
         "memoryUsage": {
-          "heapUsed": 19854104,
-          "heapTotal": 47054848,
+          "heapUsed": 22568800,
+          "heapTotal": 50200576,
           "external": 2705934,
           "arrayBuffers": 25171
         },
         "cpuUsage": {
-          "user": 748,
-          "system": 1
+          "user": 8566,
+          "system": 3818
         }
       },
       {
-        "executionTime": 0.926042,
+        "executionTime": 2.133625,
         "memoryUsage": {
-          "heapUsed": 23462296,
-          "heapTotal": 47054848,
+          "heapUsed": 13408136,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 1422,
-          "system": 154
+          "user": 4444,
+          "system": 255
         }
       }
     ],
@@ -897,7 +897,7 @@
     "name": "theme-switching",
     "suite": "ui",
     "description": "Benchmark theme switching performance",
-    "timestamp": "2025-09-19T17:19:43.218Z",
+    "timestamp": "2025-09-19T17:28:05.876Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -907,136 +907,136 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 0.4622668,
+        "executionTime": 0.40115,
         "memoryUsage": {
-          "heapUsed": 17002696,
-          "heapTotal": 47264563.2,
+          "heapUsed": 20030233.6,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 1045.4,
-          "system": 49
+          "user": 1084,
+          "system": 15.6
         }
       },
       "median": {
-        "executionTime": 0.193125,
+        "executionTime": 0.433708,
         "memoryUsage": {
-          "heapUsed": 13879744,
-          "heapTotal": 47316992,
+          "heapUsed": 20246696,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 196,
-          "system": 2
+          "user": 796,
+          "system": 8
         }
       },
       "min": {
-        "executionTime": 0.186417,
+        "executionTime": 0.18725,
         "memoryUsage": {
-          "heapUsed": 14777544,
-          "heapTotal": 47316992,
+          "heapUsed": 22040376,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 188,
-          "system": 1
+          "user": 1642,
+          "system": 9
         }
       },
       "max": {
-        "executionTime": 1.083667,
+        "executionTime": 0.591792,
         "memoryUsage": {
-          "heapUsed": 12982016,
-          "heapTotal": 47316992,
+          "heapUsed": 17659360,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 3653,
-          "system": 169
+          "user": 1442,
+          "system": 23
         }
       },
       "stdDev": {
-        "executionTime": 0.36029944106112627,
+        "executionTime": 0.1752928439155461,
         "memoryUsage": {
-          "heapUsed": 5422931.279941652,
-          "heapTotal": 104857.6,
+          "heapUsed": 1541882.2977513685,
+          "heapTotal": 0,
           "external": 0,
           "arrayBuffers": 0
         },
         "cpuUsage": {
-          "user": 1341.0134376657081,
-          "system": 65.73583497606157
+          "user": 525.0935154808142,
+          "system": 6.499230723708768
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 0.660167,
+        "executionTime": 0.591792,
         "memoryUsage": {
-          "heapUsed": 27698904,
-          "heapTotal": 47054848,
+          "heapUsed": 17659360,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 1001,
-          "system": 71
+          "user": 1442,
+          "system": 23
         }
       },
       {
-        "executionTime": 1.083667,
+        "executionTime": 0.584166,
         "memoryUsage": {
-          "heapUsed": 12982016,
-          "heapTotal": 47316992,
+          "heapUsed": 19061208,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 3653,
-          "system": 169
+          "user": 1344,
+          "system": 23
         }
       },
       {
-        "executionTime": 0.193125,
+        "executionTime": 0.433708,
         "memoryUsage": {
-          "heapUsed": 13879744,
-          "heapTotal": 47316992,
+          "heapUsed": 20246696,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
+        },
+        "cpuUsage": {
+          "user": 796,
+          "system": 8
+        }
+      },
+      {
+        "executionTime": 0.208834,
+        "memoryUsage": {
+          "heapUsed": 21143528,
+          "heapTotal": 46268416,
+          "external": 2705934,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
           "user": 196,
-          "system": 2
+          "system": 15
         }
       },
       {
-        "executionTime": 0.186417,
+        "executionTime": 0.18725,
         "memoryUsage": {
-          "heapUsed": 14777544,
-          "heapTotal": 47316992,
+          "heapUsed": 22040376,
+          "heapTotal": 46268416,
           "external": 2705934,
-          "arrayBuffers": 25171
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 188,
-          "system": 1
-        }
-      },
-      {
-        "executionTime": 0.187958,
-        "memoryUsage": {
-          "heapUsed": 15675272,
-          "heapTotal": 47316992,
-          "external": 2705934,
-          "arrayBuffers": 25171
-        },
-        "cpuUsage": {
-          "user": 189,
-          "system": 2
+          "user": 1642,
+          "system": 9
         }
       }
     ],
@@ -1046,7 +1046,7 @@
     "name": "monaco-editor-operations",
     "suite": "ui",
     "description": "Simulate Monaco Editor operations",
-    "timestamp": "2025-09-19T17:19:43.223Z",
+    "timestamp": "2025-09-19T17:28:05.880Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -1056,136 +1056,136 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 0.38795840000000004,
+        "executionTime": 0.40845000000000004,
         "memoryUsage": {
-          "heapUsed": 19605636.8,
-          "heapTotal": 47526707.2,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 18409553.6,
+          "heapTotal": 46478131.2,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 336.4,
-          "system": 69.6
+          "user": 601.4,
+          "system": 40.4
         }
       },
       "median": {
-        "executionTime": 0.359083,
+        "executionTime": 0.312834,
         "memoryUsage": {
-          "heapUsed": 23150464,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 17484632,
+          "heapTotal": 46268416,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 318,
-          "system": 7
+          "user": 300,
+          "system": 4
         }
       },
       "min": {
-        "executionTime": 0.257792,
+        "executionTime": 0.267791,
         "memoryUsage": {
-          "heapUsed": 16322856,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16367400,
+          "heapTotal": 46792704,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 260,
+          "user": 269,
           "system": 1
         }
       },
       "max": {
-        "executionTime": 0.550709,
+        "executionTime": 0.840125,
         "memoryUsage": {
-          "heapUsed": 12909368,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 12959816,
+          "heapTotal": 46792704,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 517,
-          "system": 146
+          "user": 1901,
+          "system": 109
         }
       },
       "stdDev": {
-        "executionTime": 0.12027166062809644,
+        "executionTime": 0.2166221407714364,
         "memoryUsage": {
-          "heapUsed": 4646768.956283943,
-          "heapTotal": 104857.6,
+          "heapUsed": 3897637.107210552,
+          "heapTotal": 256847.61565286136,
           "external": 0,
           "arrayBuffers": 0
         },
         "cpuUsage": {
-          "user": 93.45929595283714,
-          "system": 81.10634993636441
+          "user": 649.9134096170043,
+          "system": 39.7421690399505
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 0.504541,
+        "executionTime": 0.312834,
         "memoryUsage": {
-          "heapUsed": 25911456,
-          "heapTotal": 47316992,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 17484632,
+          "heapTotal": 46268416,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 318,
-          "system": 189
+          "user": 300,
+          "system": 4
         }
       },
       {
-        "executionTime": 0.550709,
+        "executionTime": 0.29925,
         "memoryUsage": {
-          "heapUsed": 12909368,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
-        },
-        "cpuUsage": {
-          "user": 517,
-          "system": 146
-        }
-      },
-      {
-        "executionTime": 0.257792,
-        "memoryUsage": {
-          "heapUsed": 16322856,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
-        },
-        "cpuUsage": {
-          "user": 260,
-          "system": 1
-        }
-      },
-      {
-        "executionTime": 0.267667,
-        "memoryUsage": {
-          "heapUsed": 19734040,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 20913408,
+          "heapTotal": 46268416,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
           "user": 269,
-          "system": 5
+          "system": 32
         }
       },
       {
-        "executionTime": 0.359083,
+        "executionTime": 0.32225,
         "memoryUsage": {
-          "heapUsed": 23150464,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 24322512,
+          "heapTotal": 46268416,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 318,
-          "system": 7
+          "user": 268,
+          "system": 56
+        }
+      },
+      {
+        "executionTime": 0.840125,
+        "memoryUsage": {
+          "heapUsed": 12959816,
+          "heapTotal": 46792704,
+          "external": 2705894,
+          "arrayBuffers": 25131
+        },
+        "cpuUsage": {
+          "user": 1901,
+          "system": 109
+        }
+      },
+      {
+        "executionTime": 0.267791,
+        "memoryUsage": {
+          "heapUsed": 16367400,
+          "heapTotal": 46792704,
+          "external": 2705894,
+          "arrayBuffers": 25131
+        },
+        "cpuUsage": {
+          "user": 269,
+          "system": 1
         }
       }
     ],
@@ -1195,7 +1195,7 @@
     "name": "component-rendering",
     "suite": "ui",
     "description": "Benchmark component tree rendering",
-    "timestamp": "2025-09-19T17:19:43.226Z",
+    "timestamp": "2025-09-19T17:28:05.884Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -1205,136 +1205,136 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 1.0620582,
+        "executionTime": 1.2589669999999997,
         "memoryUsage": {
-          "heapUsed": 21295542.4,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 20887966.4,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 3679,
-          "system": 53.2
+          "user": 4223,
+          "system": 47
         }
       },
       "median": {
-        "executionTime": 0.891833,
+        "executionTime": 1.620709,
         "memoryUsage": {
-          "heapUsed": 29214872,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 14197768,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 4212,
-          "system": 74
+          "user": 4573,
+          "system": 84
         }
       },
       "min": {
-        "executionTime": 0.381375,
+        "executionTime": 0.446584,
         "memoryUsage": {
-          "heapUsed": 21702040,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 15746832,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 775,
-          "system": 14
+          "user": 1124,
+          "system": 11
         }
       },
       "max": {
-        "executionTime": 2.491791,
+        "executionTime": 1.744875,
         "memoryUsage": {
-          "heapUsed": 16560928,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 27607080,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 7182,
-          "system": 111
+          "user": 7270,
+          "system": 28
         }
       },
       "stdDev": {
-        "executionTime": 0.7562689040055528,
+        "executionTime": 0.542981181406133,
         "memoryUsage": {
-          "heapUsed": 4317903.009072881,
+          "heapUsed": 5109819.80200326,
           "heapTotal": 0,
           "external": 0,
           "arrayBuffers": 0
         },
         "cpuUsage": {
-          "user": 2083.145506199699,
-          "system": 36.41647978594307
+          "user": 2801.0306674508224,
+          "system": 36.64969304100649
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 0.891833,
+        "executionTime": 1.713875,
         "memoryUsage": {
-          "heapUsed": 29214872,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 22686648,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 4212,
-          "system": 74
+          "user": 7250,
+          "system": 98
         }
       },
       {
-        "executionTime": 2.491791,
+        "executionTime": 0.768792,
         "memoryUsage": {
-          "heapUsed": 16560928,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 24201504,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 7182,
-          "system": 111
-        }
-      },
-      {
-        "executionTime": 1.051709,
-        "memoryUsage": {
-          "heapUsed": 18641032,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
-        },
-        "cpuUsage": {
-          "user": 2928,
-          "system": 50
-        }
-      },
-      {
-        "executionTime": 0.493583,
-        "memoryUsage": {
-          "heapUsed": 20358840,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
-        },
-        "cpuUsage": {
-          "user": 3298,
-          "system": 17
-        }
-      },
-      {
-        "executionTime": 0.381375,
-        "memoryUsage": {
-          "heapUsed": 21702040,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
-        },
-        "cpuUsage": {
-          "user": 775,
+          "user": 898,
           "system": 14
+        }
+      },
+      {
+        "executionTime": 1.744875,
+        "memoryUsage": {
+          "heapUsed": 27607080,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
+        },
+        "cpuUsage": {
+          "user": 7270,
+          "system": 28
+        }
+      },
+      {
+        "executionTime": 1.620709,
+        "memoryUsage": {
+          "heapUsed": 14197768,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
+        },
+        "cpuUsage": {
+          "user": 4573,
+          "system": 84
+        }
+      },
+      {
+        "executionTime": 0.446584,
+        "memoryUsage": {
+          "heapUsed": 15746832,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
+        },
+        "cpuUsage": {
+          "user": 1124,
+          "system": 11
         }
       }
     ],
@@ -1344,7 +1344,7 @@
     "name": "drag-drop-operations",
     "suite": "ui",
     "description": "Benchmark drag and drop file operations",
-    "timestamp": "2025-09-19T17:19:43.234Z",
+    "timestamp": "2025-09-19T17:28:05.892Z",
     "environment": {
       "nodeVersion": "v22.18.0",
       "platform": "darwin",
@@ -1354,136 +1354,136 @@
     },
     "metrics": {
       "mean": {
-        "executionTime": 0.06748320000000001,
+        "executionTime": 0.06625800000000001,
         "memoryUsage": {
-          "heapUsed": 22362401.6,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16400358.4,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 346.2,
-          "system": 3.4
+          "user": 173.2,
+          "system": 7.2
         }
       },
       "median": {
-        "executionTime": 0.067541,
+        "executionTime": 0.0665,
         "memoryUsage": {
-          "heapUsed": 22363480,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16274352,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 69,
-          "system": 1
+          "user": 188,
+          "system": 5
         }
       },
       "min": {
-        "executionTime": 0.066208,
+        "executionTime": 0.065541,
         "memoryUsage": {
-          "heapUsed": 22489864,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16400096,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 67,
-          "system": 1
+          "user": 156,
+          "system": 3
         }
       },
       "max": {
-        "executionTime": 0.068875,
+        "executionTime": 0.066791,
         "memoryUsage": {
-          "heapUsed": 22106432,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16147456,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 70,
-          "system": 1
+          "user": 257,
+          "system": 9
         }
       },
       "stdDev": {
-        "executionTime": 0.0008546904468870595,
+        "executionTime": 0.0004709683641180163,
         "memoryUsage": {
-          "heapUsed": 180632.17920359597,
+          "heapUsed": 178691.15429880685,
           "heapTotal": 0,
           "external": 0,
           "arrayBuffers": 0
         },
         "cpuUsage": {
-          "user": 555.400900251341,
-          "system": 4.8
+          "user": 46.893069850458716,
+          "system": 3.1240998703626617
         }
       },
       "iterations": 5
     },
     "rawResults": [
       {
-        "executionTime": 0.068875,
+        "executionTime": 0.066791,
         "memoryUsage": {
-          "heapUsed": 22106432,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16147456,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 70,
-          "system": 1
+          "user": 257,
+          "system": 9
         }
       },
       {
-        "executionTime": 0.067208,
+        "executionTime": 0.0665,
         "memoryUsage": {
-          "heapUsed": 22234736,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16274352,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 68,
-          "system": 1
+          "user": 188,
+          "system": 5
         }
       },
       {
-        "executionTime": 0.067541,
+        "executionTime": 0.065541,
         "memoryUsage": {
-          "heapUsed": 22363480,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16400096,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 69,
-          "system": 1
+          "user": 156,
+          "system": 3
         }
       },
       {
-        "executionTime": 0.066208,
+        "executionTime": 0.066583,
         "memoryUsage": {
-          "heapUsed": 22489864,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16526976,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 67,
-          "system": 1
+          "user": 141,
+          "system": 7
         }
       },
       {
-        "executionTime": 0.067584,
+        "executionTime": 0.065875,
         "memoryUsage": {
-          "heapUsed": 22617496,
-          "heapTotal": 47579136,
-          "external": 2705934,
-          "arrayBuffers": 25171
+          "heapUsed": 16652912,
+          "heapTotal": 47054848,
+          "external": 2705894,
+          "arrayBuffers": 25131
         },
         "cpuUsage": {
-          "user": 1457,
-          "system": 13
+          "user": 124,
+          "system": 12
         }
       }
     ],

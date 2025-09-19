@@ -79,7 +79,17 @@ function TerminalSession({ sessionId, isActive, onClose }: TerminalSessionProps)
       terminal.loadAddon(webLinksAddon);
       
       terminal.open(terminalRef.current);
-      fitAddon.fit();
+      
+      // Wait for terminal to fully initialize before fitting
+      setTimeout(() => {
+        try {
+          if ((terminal as any)._core?._renderService?.dimensions) {
+            fitAddon.fit();
+          }
+        } catch (error) {
+          console.warn('Initial terminal fit failed:', error);
+        }
+      }, 50);
 
       xtermRef.current = terminal;
       fitAddonRef.current = fitAddon;
@@ -117,7 +127,12 @@ function TerminalSession({ sessionId, isActive, onClose }: TerminalSessionProps)
     resizeTimeoutRef.current = setTimeout(() => {
       if (isActive && fitAddonRef.current && xtermRef.current) {
         try {
-          fitAddonRef.current.fit();
+          // Check if the terminal renderer is properly initialized
+          if ((xtermRef.current as any)._core?._renderService?.dimensions) {
+            fitAddonRef.current.fit();
+          } else {
+            console.warn('Terminal renderer not ready for resize');
+          }
         } catch (error) {
           console.warn('Terminal resize failed:', error);
         }
