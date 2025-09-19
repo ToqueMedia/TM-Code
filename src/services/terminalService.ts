@@ -20,9 +20,18 @@ export default class TerminalService {
   // Executar comando simples e retornar resultado
   async executeCommand(command: string, cwd?: string): Promise<CommandResult> {
     try {
+      let workingDir = cwd;
+      if (!workingDir) {
+        try {
+          workingDir = await invoke('get_current_directory') as string;
+        } catch {
+          workingDir = '/'; // Fallback
+        }
+      }
+      
       const result = await invoke('execute_command', {
         command,
-        cwd: cwd || process.env.HOME || '/',
+        cwd: workingDir,
       });
 
       return result as CommandResult;
@@ -35,8 +44,17 @@ export default class TerminalService {
   // Iniciar processo interativo (para terminal em tempo real)
   async startInteractiveShell(cwd?: string): Promise<ProcessInfo> {
     try {
+      let workingDir = cwd;
+      if (!workingDir) {
+        try {
+          workingDir = await invoke('get_current_directory') as string;
+        } catch {
+          workingDir = '/'; // Fallback
+        }
+      }
+      
       const processInfo = await invoke('start_interactive_shell', {
-        cwd: cwd || process.env.HOME || '/',
+        cwd: workingDir,
       });
 
       return processInfo as ProcessInfo;
@@ -78,7 +96,7 @@ export default class TerminalService {
       return cwd as string;
     } catch (error) {
       console.error('Failed to get current directory:', error);
-      return process.env.HOME || '/';
+      return '/'; // Fallback for Unix-like systems
     }
   }
 
@@ -118,9 +136,18 @@ export default class TerminalService {
   // Completar comando/path (para autocomplete)
   async getCompletions(partial: string, cwd?: string): Promise<string[]> {
     try {
+      let workingDir = cwd;
+      if (!workingDir) {
+        try {
+          workingDir = await invoke('get_current_directory') as string;
+        } catch {
+          workingDir = '/'; // Fallback
+        }
+      }
+      
       const completions = await invoke('get_completions', {
         partial,
-        cwd: cwd || process.env.HOME || '/',
+        cwd: workingDir,
       });
 
       return completions as string[];

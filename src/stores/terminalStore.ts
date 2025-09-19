@@ -34,7 +34,18 @@ export const useTerminalStore = create<TerminalState & TerminalActions>((set, ge
   createSession: async (name?: string, cwd?: string) => {
     const sessionId = `terminal-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const sessionName = name || `Terminal ${get().sessions.length + 1}`;
-    const workingDir = cwd || process.env.HOME || '/';
+    
+    // Get working directory from Tauri backend if not provided
+    let workingDir = cwd;
+    if (!workingDir) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        workingDir = await invoke('get_current_directory') as string;
+      } catch (error) {
+        console.warn('Failed to get current directory from Tauri, using fallback');
+        workingDir = '/'; // Fallback for Unix-like systems
+      }
+    }
 
     const newSession: TerminalSession = {
       id: sessionId,
