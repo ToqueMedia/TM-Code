@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, HStack, Text, Flex, Input, Menu, Button } from '@chakra-ui/react'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { FiFolder, FiGitBranch, FiClock, FiPlus } from 'react-icons/fi'
 import { useProjectStore } from '../../stores/projectStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import QuickOpenService, { QuickOpenItem } from '../../services/quickOpenService'
@@ -179,14 +180,13 @@ function TitleBar() {
   }, [results])
 
   function shouldStartDrag(target: HTMLElement): boolean {
-    const tag = target.tagName.toLowerCase()
-    if (['input', 'textarea', 'button', 'select', 'svg', 'path'].includes(tag)) return false
-    if ((target as any).dataset && ((target as any).dataset.quickOpenItem === 'true')) return false
-    // Walk up the tree to avoid dragging when inside interactive elements
+    const isInteractiveTag = (n: string) => ['input', 'textarea', 'button', 'select', 'svg', 'path', 'a'].includes(n)
     let el: HTMLElement | null = target
     while (el) {
+      const tag = el.tagName ? el.tagName.toLowerCase() : ''
+      if (isInteractiveTag(tag)) return false
       const role = el.getAttribute && el.getAttribute('role')
-      if (role === 'button' || role === 'menu' || role === 'textbox') return false
+      if (role === 'button' || role === 'menu' || role === 'textbox' || role === 'link') return false
       if (el.getAttribute && el.getAttribute('data-tauri-drag-region') === 'false') return false
       el = el.parentElement
     }
@@ -271,7 +271,7 @@ function TitleBar() {
           />
         </HStack>
 
-        <HStack gap={2} pl={2}>
+        <HStack gap={2} pl={2} data-tauri-drag-region="false">
           <Menu.Root>
             <Menu.Trigger asChild>
               <Button
@@ -279,30 +279,48 @@ function TitleBar() {
                 variant="ghost"
                 color="#e6e6e6"
                 px={2}
-                height="22px"
-                borderRadius="6px"
+                height="24px"
+                borderRadius="8px"
                 _hover={{ bg: 'whiteAlpha.100' }}
+                data-tauri-drag-region="false"
               >
-                <HStack gap={1}>
+                <HStack gap={2}>
                   <Text fontSize="13px" color="#dcdcdc">{currentProject?.name || 'Select project'}</Text>
                   <Text aria-hidden>▾</Text>
                 </HStack>
               </Button>
             </Menu.Trigger>
             <Menu.Positioner className="no-drag" style={{ zIndex: 10000 }}>
-              <Menu.Content className="no-drag" style={{ zIndex: 10000, minWidth: '340px' }}>
-                <Menu.Item value="open-folder" onClick={handleOpenFolder}>Open Folder</Menu.Item>
-                <Menu.Item value="clone-repo" onClick={handleCloneRepo}>Clone Git Repository</Menu.Item>
-                <Menu.Item value="connect-remote" onClick={() => {}}>Connect Remote Host</Menu.Item>
+              <Menu.Content 
+                className="no-drag" 
+                style={{ zIndex: 10000, minWidth: '380px' }}
+                bg="#1e1e1e"
+                border="1px solid #2b2b2c"
+                borderRadius="10px"
+                boxShadow="0 16px 48px rgba(0,0,0,0.6)"
+                data-tauri-drag-region="false"
+              >
+                <Box px={3} py={2}>
+                  <HStack gap={2}>
+                    <Button size="sm" variant="outline" onClick={handleOpenFolder} leftIcon={<FiFolder />} borderColor="#3c3c3c" _hover={{ bg: 'whiteAlpha.100' }}>
+                      Open Folder…
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={handleCloneRepo} leftIcon={<FiGitBranch />} borderColor="#3c3c3c" _hover={{ bg: 'whiteAlpha.100' }}>
+                      Clone Repository…
+                    </Button>
+                  </HStack>
+                </Box>
                 <Menu.Separator />
-                <Box px={3} py={1} color="#7d8590" fontSize="12px">Recent</Box>
+                <Box px={3} py={2} color="#7d8590" fontSize="12px" textTransform="uppercase" letterSpacing="0.08em">
+                  <HStack gap={2}><FiClock /><Text>Recent Projects</Text></HStack>
+                </Box>
                 {recentProjects.slice(0, 8).map(function rp(item) {
                   const name = item.name || item.path.split('/').pop() || item.path
                   const monogram = name.trim().slice(0,2).toUpperCase()
                   return (
-                    <Menu.Item value={item.path} key={item.path} onClick={function onClick() { handleOpenRecent(item.path) }}>
-                      <HStack gap={3} alignItems="center">
-                        <Box width="22px" height="22px" borderRadius="6px" bg="#2b2b2c" display="flex" alignItems="center" justifyContent="center" fontSize="11px" color="#d1d1d1" border="1px solid #3c3c3c">{monogram}</Box>
+                    <Menu.Item value={item.path} key={item.path} onClick={function onClick() { handleOpenRecent(item.path) }} _hover={{ bg: '#0b2a4a' }}>
+                      <HStack gap={3} alignItems="center" px={2} py={2}>
+                        <Box width="24px" height="24px" borderRadius="6px" bg="#2b2b2c" display="flex" alignItems="center" justifyContent="center" fontSize="12px" color="#d1d1d1" border="1px solid #3c3c3c">{monogram}</Box>
                         <Box>
                           <Text fontSize="13px" color="#e6e6e6">{name}</Text>
                           <Text fontSize="11px" color="#7d8590">{item.path}</Text>
@@ -311,6 +329,9 @@ function TitleBar() {
                     </Menu.Item>
                   )
                 })}
+                {recentProjects.length === 0 && (
+                  <Box px={3} py={3} color="#7d8590" fontSize="13px">No recent projects</Box>
+                )}
               </Menu.Content>
             </Menu.Positioner>
           </Menu.Root>
@@ -331,6 +352,9 @@ function TitleBar() {
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck={false}
+            h={'24px'}
+            borderRadius={'6px'}
+            outline={'none'}
             enterKeyHint="search"
             value={query}
             onChange={handleQueryChange}

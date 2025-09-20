@@ -1,5 +1,6 @@
 // src/App.tsx
 import './utils/platformPatches'
+import './utils/monacoEnv'
 import WelcomeScreen from './components/WelcomeScreen';
 import CodeEditorNew from './components/CodeEditorNew';
 import CodeEditorSimple from './components/CodeEditorSimple';

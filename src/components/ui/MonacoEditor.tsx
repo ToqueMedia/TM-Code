@@ -4,6 +4,8 @@ import { useMonacoEditorState } from '../../hooks/useEditorState';
 import { useMonacoTheme } from '../../hooks/useMonacoTheme';
 import type { editor, IDisposable } from 'monaco-editor';
 import { logger } from '../../utils/logger';
+import MonacoBridge from '../../utils/monacoBridge';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 // Import Monaco workers for Vite
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
@@ -15,7 +17,7 @@ import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
 // Monaco Editor environment configuration
 declare global {
   interface Window {
-    MonacoEnvironment: {
+    MonacoEnvironment?: {
       getWorker: (workerId: string, label: string) => Worker;
     };
   }
@@ -71,6 +73,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   
   // Use the custom theme management hook
   useMonacoTheme(editorRef.current, monacoInstance);
+  // Read indentation settings
+  const tabSizeSetting = useSettingsStore(function (s) { return s.editor.tabSize })
+  const insertSpacesSetting = useSettingsStore(function (s) { return s.editor.insertSpaces })
+  const detectIndentationSetting = useSettingsStore(function (s) { return s.editor.detectIndentation })
   
   // Monaco Editor options following official documentation best practices
   const editorOptions: editor.IStandaloneEditorConstructionOptions = {
@@ -79,9 +85,9 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     fontSize: 14,
     fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace',
     lineHeight: 20,
-    tabSize: 2,
-    insertSpaces: true,
-    detectIndentation: true,
+    tabSize: tabSizeSetting,
+    insertSpaces: insertSpacesSetting,
+    detectIndentation: detectIndentationSetting,
     
     // Theme and appearance - will be set after custom themes are defined
     theme: 'toquemedia-vibrant',
@@ -180,11 +186,39 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     multiCursorPaste: 'spread',
   };
   
+  // Update editor options when indentation settings change
+  useEffect(() => {
+    const inst = editorRef.current
+    if (!inst) return
+    try {
+      inst.updateOptions({
+        tabSize: tabSizeSetting,
+        insertSpaces: insertSpacesSetting,
+        detectIndentation: detectIndentationSetting,
+      })
+      const model = inst.getModel?.()
+      if (model) {
+        if (detectIndentationSetting) {
+          // Let Monaco infer indentation from content using our defaults
+          // @ts-ignore - detectIndentation exists on ITextModel
+          model.detectIndentation(insertSpacesSetting, tabSizeSetting)
+        } else {
+          model.updateOptions({
+            tabSize: tabSizeSetting,
+            indentSize: tabSizeSetting,
+            insertSpaces: insertSpacesSetting,
+          })
+        }
+      }
+    } catch {}
+  }, [tabSizeSetting, insertSpacesSetting, detectIndentationSetting])
+  
   // Handle editor mounting
   const handleEditorDidMount = useCallback((editor: editor.IStandaloneCodeEditor, monaco: Monaco) => {
     logger.editor(`Monaco Editor mounted successfully for: ${path}`);
     editorRef.current = editor;
     setMonacoInstance(monaco);
+    MonacoBridge.getInstance().setCurrentEditor(editor);
     
     // Configure TypeScript compiler options if it's a TypeScript file
     if (language === 'typescript' || language === 'javascript') {
@@ -258,6 +292,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     // Return cleanup function
     return () => {
       disposables.forEach(disposable => disposable.dispose());
+      const bridge = MonacoBridge.getInstance()
+      if (bridge.getCurrentEditor() === editor) {
+        bridge.setCurrentEditor(null)
+      }
     };
   }, [path, language, handleContentChange, handleCursorChange, handleSave, onCursorPositionChange]);
   
@@ -271,6 +309,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   // Focus editor when path changes
   useEffect(() => {
     if (editorRef.current) {
+      MonacoBridge.getInstance().setCurrentEditor(editorRef.current)
       editorRef.current.focus();
     }
   }, [path]);

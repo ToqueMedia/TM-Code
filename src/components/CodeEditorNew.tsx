@@ -15,7 +15,8 @@ import {
   FiCode,
   FiAlertCircle,
   FiChevronLeft,
-  FiChevronRight} from 'react-icons/fi'
+  FiChevronRight,
+  FiChevronDown} from 'react-icons/fi'
 
 const STORAGE_KEY_BOTTOM_VISIBLE = 'panel-visible-bottom-panel'
 const STORAGE_KEY_EXPLORER_WIDTH = 'panel-size-explorer-panel'
@@ -40,6 +41,8 @@ import { useCodeEditorState } from '../hooks/useEditorState'
 import TypeScriptLspService from '../services/typescriptLspService'
 import RecoveryService from '../services/recoveryService'
 import WindowService from '../services/windowService'
+import { useSettingsStore } from '../stores/settingsStore'
+import MonacoBridge from '../utils/monacoBridge'
 
 // Importar componentes
 import ActivityBar from './ui/ActivityBar'
@@ -50,6 +53,8 @@ import Breadcrumbs from './ui/Breadcrumbs'
 import DebuggerPanel from './DebuggerPanel'
 import TitleBar from './ui/TitleBar'
 import CommandPalette from './ui/CommandPalette'
+import TabContextMenu from './ui/TabContextMenu'
+import PreferencesDialog from './dialogs/PreferencesDialog'
 
 // Lazy load componentes pesados
 const MonacoEditor = lazy(() => import('./ui/MonacoEditor'))
@@ -496,6 +501,13 @@ export function CodeEditorNew() {
   
   // Estados locais da UI
   const [activeActivity, setActiveActivity] = useState('explorer')
+  // Editor indentation settings
+  const tabSizeSetting = useSettingsStore(function (s) { return s.editor.tabSize })
+  const insertSpacesSetting = useSettingsStore(function (s) { return s.editor.insertSpaces })
+  const setInsertSpacesSetting = useSettingsStore(function (s) { return s.setInsertSpaces })
+  const setTabSizeSetting = useSettingsStore(function (s) { return s.setTabSize })
+  const detectIndentationSetting = useSettingsStore(function (s) { return s.editor.detectIndentation })
+  const setDetectIndentationSetting = useSettingsStore(function (s) { return s.setDetectIndentation })
   const [isBottomPanelVisible, setIsBottomPanelVisible] = useState<boolean>(() => {
     try {
       const v = localStorage.getItem(STORAGE_KEY_BOTTOM_VISIBLE)
@@ -556,6 +568,26 @@ export function CodeEditorNew() {
     setIsBottomPanelVisible(false)
     try { localStorage.setItem(STORAGE_KEY_BOTTOM_VISIBLE, 'false') } catch {}
   }, [])
+
+  // Apply indentation immediately to current editor model
+  function applyIndentationNow(tabSize: number, insertSpaces: boolean, detect: boolean): void {
+    try {
+      const editor = MonacoBridge.getInstance().getCurrentEditor()
+      if (!editor) return
+      editor.updateOptions({ tabSize, insertSpaces })
+      // Update active model
+      // @ts-ignore - types are available at runtime
+      const model = editor.getModel?.()
+      if (model) {
+        if (detect) {
+          // @ts-ignore
+          model.detectIndentation(insertSpaces, tabSize)
+        } else {
+          model.updateOptions({ tabSize, indentSize: tabSize, insertSpaces })
+        }
+      }
+    } catch {}
+  }
 
   // Initialize services when project is opened
   useEffect(() => {
@@ -735,6 +767,8 @@ export function CodeEditorNew() {
       fontFamily="-apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif"
     >
       <TitleBar />
+      <TabContextMenu />
+      <PreferencesDialog />
 
       {/* Main Content Area */}
       <Flex flex="1" overflow="hidden" minW={0}>
@@ -795,33 +829,7 @@ export function CodeEditorNew() {
             e.preventDefault()
             const target = (e.target as HTMLElement).closest('[data-path]') as HTMLElement | null
             const path = target?.getAttribute('data-path') || activeFile || null
-            const items: { label: string, action: () => void }[] = []
-            if (path) {
-              items.push({ label: 'Close', action: () => handleCloseFile(path, e as any) })
-              items.push({ label: 'Close Others', action: () => {
-                openFiles.forEach(f => { if (f.path !== path) handleCloseFile(f.path, e as any) })
-              }})
-            }
-            items.push({ label: 'Close All', action: () => { openFiles.forEach(f => handleCloseFile(f.path, e as any)) }})
-            items.push({ label: 'Command Palette…', action: () => window.dispatchEvent(new CustomEvent('command:palette')) })
-            const menu = document.createElement('div')
-            Object.assign(menu.style, {
-              position: 'fixed', left: e.clientX + 'px', top: e.clientY + 'px', zIndex: '3000',
-              background: '#2d2d30', border: '1px solid #3c3c3c', borderRadius: '8px',
-              minWidth: '180px', boxShadow: '0 12px 40px rgba(0,0,0,0.5)'
-            } as CSSStyleDeclaration)
-            items.forEach(it => {
-              const row = document.createElement('div')
-              row.textContent = it.label
-              Object.assign(row.style, { padding: '8px 12px', color: '#e6e6e6', cursor: 'default' } as CSSStyleDeclaration)
-              row.onmouseenter = () => { row.style.background = '#094771' }
-              row.onmouseleave = () => { row.style.background = 'transparent' }
-              row.onclick = () => { try { it.action() } finally { document.body.removeChild(menu) } }
-              menu.appendChild(row)
-            })
-            const dismiss = () => { if (menu.parentNode) { document.body.removeChild(menu) } document.removeEventListener('mousedown', dismiss) }
-            document.addEventListener('mousedown', dismiss)
-            document.body.appendChild(menu)
+            window.dispatchEvent(new CustomEvent('tabs:contextmenu:open', { detail: { x: e.clientX, y: e.clientY, path } }))
           }}
           _after={{
             content: '""',
@@ -868,9 +876,62 @@ export function CodeEditorNew() {
           />
 
           {/* Editor Content */}
-          <Flex flex="1" overflow="hidden" onContextMenu={(e) => {
+          <Flex flex="1" overflow="hidden" onContextMenu={async (e) => {
             e.preventDefault()
-            window.dispatchEvent(new CustomEvent('command:palette'))
+            const items: { label: string, action: () => void }[] = []
+            // Edit actions (Monaco)
+            const bridge = (await import('../utils/monacoBridge')).default.getInstance()
+            items.push({ label: 'Copy', action: () => bridge.trigger('editor.action.clipboardCopyAction') })
+            items.push({ label: 'Cut', action: () => bridge.trigger('editor.action.clipboardCutAction') })
+            items.push({ label: 'Paste', action: () => bridge.trigger('editor.action.clipboardPasteAction') })
+            items.push({ label: 'Select All', action: () => bridge.trigger('editor.action.selectAll') })
+            items.push({ label: 'Format Document', action: () => {
+              try { MonacoBridge.getInstance().trigger('editor.action.formatDocument') } catch {}
+            } })
+            items.push({ label: '—', action: () => {} })
+            items.push({ label: 'Command Palette…', action: () => window.dispatchEvent(new CustomEvent('command:palette')) })
+            items.push({ label: 'Quick Open', action: () => window.dispatchEvent(new CustomEvent('quickopen:toggle')) })
+            items.push({ label: 'Toggle Bottom Panel', action: () => window.dispatchEvent(new CustomEvent('panel:toggle-bottom')) })
+            if (activeFile) {
+              const filePath = activeFile
+              items.push({ label: '—', action: () => {} })
+              items.push({ label: 'Reveal in Finder', action: async () => {
+                try {
+                  const dir = filePath.substring(0, Math.max(0, filePath.lastIndexOf('/')))
+                  const opener = await import('@tauri-apps/plugin-opener')
+                  try { await opener.revealItemInDir(filePath) } catch {
+                    await opener.openPath(dir)
+                  }
+                } catch {}
+              } })
+              items.push({ label: 'Copy Path', action: async () => {
+                try { await navigator.clipboard.writeText(filePath) } catch {}
+              } })
+              if (currentProject) {
+                const rel = filePath.startsWith(currentProject.path) ? filePath.slice(currentProject.path.length + 1) : filePath
+                items.push({ label: 'Copy Relative Path', action: async () => { try { await navigator.clipboard.writeText(rel) } catch {} } })
+              }
+            }
+            // Render menu overlay
+            const menu = document.createElement('div')
+            Object.assign(menu.style, { position: 'fixed', left: e.clientX + 'px', top: e.clientY + 'px', zIndex: '3000',
+              background: '#2d2d30', border: '1px solid #3c3c3c', borderRadius: '8px', minWidth: '220px', boxShadow: '0 12px 40px rgba(0,0,0,0.5)'} as CSSStyleDeclaration)
+            items.forEach(it => {
+              const row = document.createElement('div')
+              if (it.label === '—') {
+                Object.assign(row.style, { height: '1px', background: '#3c3c3c', margin: '4px 0' } as CSSStyleDeclaration)
+              } else {
+                row.textContent = it.label
+                Object.assign(row.style, { padding: '8px 12px', color: '#e6e6e6', cursor: 'default' } as CSSStyleDeclaration)
+                row.onmouseenter = () => { row.style.background = '#094771' }
+                row.onmouseleave = () => { row.style.background = 'transparent' }
+                row.onclick = () => { try { it.action() } finally { document.body.removeChild(menu) } }
+              }
+              menu.appendChild(row)
+            })
+            const dismiss = () => { if (menu.parentNode) { document.body.removeChild(menu) } document.removeEventListener('mousedown', dismiss) }
+            document.addEventListener('mousedown', dismiss)
+            document.body.appendChild(menu)
           }}>
             {activeFile ? (
               <Suspense fallback={<EditorSkeleton />}>
@@ -968,15 +1029,18 @@ export function CodeEditorNew() {
 
       {/* Enhanced Status Bar with gradient */}
       <Flex
-        height="24px"
+        height="26px"
         bg="#0f172a"
         color="#e2e8f0"
         alignItems="center"
         fontSize="xs"
         fontWeight="medium"
-        px={4}
+        px={6}
         gap={2}
         borderTop="1px solid #1e293b"
+        boxShadow="inset 0 1px 0 rgba(255,255,255,0.03)"
+        letterSpacing="0.02em"
+        userSelect="none"
       >
         <HStack gap={0} height="100%">
           <StatusBarItem tooltip="Git branch">
@@ -1036,6 +1100,140 @@ export function CodeEditorNew() {
           <StatusBarItem tooltip="Line and column">
             <Text>Ln {cursorPosition.line}, Col {cursorPosition.column}</Text>
           </StatusBarItem>
+          
+          <Separator orientation="vertical" height="16px" mx={2} />
+          
+          {/* Indentation status */}
+          <Box position="relative">
+            <Menu.Root>
+              <Menu.Trigger asChild>
+                <Box as="button"
+                  px={3}
+                  py={1}
+                  fontSize="xs"
+                  display="flex"
+                  alignItems="center"
+                  gap={1}
+                  _hover={{ bg: 'whiteAlpha.100' }}
+                  borderRadius="4px"
+                  title="Change indentation"
+                  cursor="pointer"
+                >
+                  <Text>{insertSpacesSetting ? 'Spaces' : 'Tabs'}: {tabSizeSetting}</Text>
+                  <FiChevronDown size={12} />
+                </Box>
+              </Menu.Trigger>
+              <Menu.Positioner>
+                <Menu.Content bg="#1e1e1e" border="1px solid #2b2b2c">
+                  <Menu.Item value="indent-spaces" onClick={function(){
+                    setDetectIndentationSetting(false)
+                    setInsertSpacesSetting(true)
+                    applyIndentationNow(tabSizeSetting, true, false)
+                  }}>Indent Using Spaces</Menu.Item>
+                  <Menu.Item value="indent-tabs" onClick={function(){
+                    setDetectIndentationSetting(false)
+                    setInsertSpacesSetting(false)
+                    applyIndentationNow(tabSizeSetting, false, false)
+                  }}>Indent Using Tabs</Menu.Item>
+                  <Menu.Separator />
+                  <Menu.Item value="tab-2" onClick={function(){
+                    setDetectIndentationSetting(false)
+                    setTabSizeSetting(2)
+                    applyIndentationNow(2, insertSpacesSetting, false)
+                  }}>Tab Size: 2</Menu.Item>
+                  <Menu.Item value="tab-4" onClick={function(){
+                    setDetectIndentationSetting(false)
+                    setTabSizeSetting(4)
+                    applyIndentationNow(4, insertSpacesSetting, false)
+                  }}>Tab Size: 4</Menu.Item>
+                  <Menu.Item value="tab-8" onClick={function(){
+                    setDetectIndentationSetting(false)
+                    setTabSizeSetting(8)
+                    applyIndentationNow(8, insertSpacesSetting, false)
+                  }}>Tab Size: 8</Menu.Item>
+                  <Menu.Separator />
+                  <Menu.Item value="detect-toggle" onClick={function(){
+                    const next = !detectIndentationSetting
+                    setDetectIndentationSetting(next)
+                    applyIndentationNow(tabSizeSetting, insertSpacesSetting, next)
+                  }}>
+                    {detectIndentationSetting ? '✓ Detect Indentation' : 'Detect Indentation (Off)'}
+                  </Menu.Item>
+                  <Menu.Separator />
+                  <Menu.Item value="convert-spaces" onClick={function(){
+                    try {
+                      const editor = MonacoBridge.getInstance().getCurrentEditor()
+                      if (!editor) return
+                      const model = editor.getModel?.()
+                      const tabSize = tabSizeSetting
+                      if (!model) return
+                      const edits: any[] = []
+                      const lineCount = model.getLineCount()
+                      for (let i = 1; i <= lineCount; i++) {
+                        const content = model.getLineContent(i)
+                        let firstCol = model.getLineFirstNonWhitespaceColumn(i)
+                        if (firstCol === 0) firstCol = content.length + 1
+                        const indent = content.slice(0, Math.max(0, firstCol - 1))
+                        const desired = indent.replace(/\t/g, ' '.repeat(tabSize))
+                        if (indent !== desired) {
+                          edits.push({
+                            range: { startLineNumber: i, startColumn: 1, endLineNumber: i, endColumn: firstCol },
+                            text: desired,
+                          })
+                        }
+                      }
+                      if (edits.length > 0) {
+                        editor.pushUndoStop()
+                        editor.executeEdits('indent-convert-spaces', edits)
+                        editor.pushUndoStop()
+                      }
+                      setDetectIndentationSetting(false)
+                      setInsertSpacesSetting(true)
+                      applyIndentationNow(tabSize, true, false)
+                    } catch {}
+                  }}>Convert Indentation to Spaces</Menu.Item>
+                  <Menu.Item value="convert-tabs" onClick={function(){
+                    try {
+                      const editor = MonacoBridge.getInstance().getCurrentEditor()
+                      if (!editor) return
+                      const model = editor.getModel?.()
+                      const tabSize = tabSizeSetting
+                      if (!model) return
+                      const edits: any[] = []
+                      const lineCount = model.getLineCount()
+                      const spaces = ' '.repeat(tabSize)
+                      for (let i = 1; i <= lineCount; i++) {
+                        const content = model.getLineContent(i)
+                        let firstCol = model.getLineFirstNonWhitespaceColumn(i)
+                        if (firstCol === 0) firstCol = content.length + 1
+                        const indent = content.slice(0, Math.max(0, firstCol - 1))
+                        // Replace groups of spaces equal to tab size with tabs
+                        let desired = indent
+                        if (spaces.length > 0) {
+                          const re = new RegExp(spaces, 'g')
+                          desired = indent.replace(re, '\t')
+                        }
+                        if (indent !== desired) {
+                          edits.push({
+                            range: { startLineNumber: i, startColumn: 1, endLineNumber: i, endColumn: firstCol },
+                            text: desired,
+                          })
+                        }
+                      }
+                      if (edits.length > 0) {
+                        editor.pushUndoStop()
+                        editor.executeEdits('indent-convert-tabs', edits)
+                        editor.pushUndoStop()
+                      }
+                      setDetectIndentationSetting(false)
+                      setInsertSpacesSetting(false)
+                      applyIndentationNow(tabSize, false, false)
+                    } catch {}
+                  }}>Convert Indentation to Tabs</Menu.Item>
+                </Menu.Content>
+              </Menu.Positioner>
+            </Menu.Root>
+          </Box>
           
           <Separator orientation="vertical" height="16px" mx={2} />
           

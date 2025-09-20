@@ -794,6 +794,26 @@ const TreeNode: React.FC<TreeNodeProps> = ({
                   <span>Delete</span>
                 </HStack>
               </Menu.Item>
+              <Menu.Separator borderColor="#30363d" />
+              <Menu.Item value="reveal" onClick={async (e) => { 
+                e.stopPropagation(); 
+                try { 
+                  const opener = await import('@tauri-apps/plugin-opener'); 
+                  await opener.revealItemInDir(node.path); 
+                } catch {}
+                setContextMenuOpen(false); 
+              }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
+                <HStack gap={2}>
+                  <FiFolderPlus size={14} />
+                  <span>Reveal in Finder</span>
+                </HStack>
+              </Menu.Item>
+              <Menu.Item value="copy-path" onClick={async (e) => { e.stopPropagation(); try { await navigator.clipboard.writeText(node.path) } catch {} setContextMenuOpen(false); }} _hover={{ bg: 'rgba(88, 166, 255, 0.1)' }}>
+                <HStack gap={2}>
+                  <FiCopy size={14} />
+                  <span>Copy Path</span>
+                </HStack>
+              </Menu.Item>
             </Menu.Content>
           </Portal>
         )}
