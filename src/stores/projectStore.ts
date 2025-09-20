@@ -85,6 +85,9 @@ export const useProjectStore = create<ProjectStore>()(
             currentProject: projectInfo,
             loading: false
           });
+
+          // Clear editor open files when opening a new project
+          try { useEditorRepository.getState().closeAllFiles() } catch {}
           
           // Check for recovery state before loading project state
           const hasRecovery = await recoveryService.hasRecoveryState(projectInfo.id);

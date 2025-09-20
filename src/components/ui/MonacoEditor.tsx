@@ -214,6 +214,12 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     
     // Set up event listeners
     const disposables: IDisposable[] = [];
+
+    // Dispatch supported languages to app
+    try {
+      const languages = monaco.languages.getLanguages().map(l => l.id);
+      window.dispatchEvent(new CustomEvent('monaco:languages', { detail: languages }));
+    } catch {}
     
     // Cursor position change
     disposables.push(

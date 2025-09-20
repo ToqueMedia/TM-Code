@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 import { useProjectStore } from '../stores/projectStore';
 import { useDialog } from './useDialog';
 import DebuggerService from '../services/debuggerService';
+import { useEditorRepository } from '../stores/editorStore';
 
 export function useKeyboardShortcuts() {
   const { currentProject, closeProject } = useProjectStore();
@@ -27,9 +28,34 @@ export function useKeyboardShortcuts() {
         newProject();
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.key === 'w' && currentProject) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w' && currentProject) {
         e.preventDefault();
+        try {
+          const { activeFile, closeFile } = useEditorRepository.getState();
+          if (activeFile) {
+            closeFile(activeFile);
+            return;
+          }
+        } catch {}
         closeProject();
+      }
+
+      // Quick Open: Cmd+P
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('quickopen:toggle'));
+      }
+
+      // Command Palette: Cmd+Shift+P
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('command:palette'));
+      }
+
+      // Preferences: Cmd+,
+      if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('app:preferences'));
       }
 
       if (currentProject) {

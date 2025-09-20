@@ -4,17 +4,89 @@ import { createSystem, defaultConfig } from '@chakra-ui/react'
 export const theme = createSystem(defaultConfig, {
   globalCss: {
     'html, body': {
-      backgroundColor: '#1e1e1e',
+      backgroundColor: 'transparent',
       color: '#cccccc',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif',
+      userSelect: 'none',
+      WebkitUserSelect: 'none',
+      overscrollBehavior: 'none',
+      overflow: 'hidden',
+      margin: 0,
+      padding: 0,
+    },
+    '#root, body > div': {
+      userSelect: 'none',
+      WebkitUserSelect: 'none',
     },
     '*': {
       boxSizing: 'border-box',
+      WebkitTapHighlightColor: 'transparent',
     },
+    // Allow selection where needed
+    'input, textarea, [contenteditable="true"], .monaco-editor, .xterm-rows, .xterm-viewport, .xterm-screen': {
+      userSelect: 'text',
+      WebkitUserSelect: 'text',
+    },
+
+    // Desktop-like cursor behavior in top bars
+    '.vscode-titlebar button, .vscode-statusbar button, .vscode-tabs button, .vscode-titlebar [role="button"]': {
+      cursor: 'default',
+    },
+
+    // Focus ring refinement (remove default outline and add subtle ring on focus-visible)
+    'button:focus, [role="button"]:focus, a:focus, input:focus, textarea:focus': {
+      outline: 'none !important',
+    },
+    'button:focus-visible, [role="button"]:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible': {
+      outline: 'none',
+      boxShadow: '0 0 0 2px rgba(88, 166, 255, 0.4)',
+    },
+
+    // Search field anti-autocomplete and autofill tweaks
+'input': {
+      backgroundImage: 'none',
+      WebkitAppearance: 'none',
+    },
+    'input::-webkit-search-decoration, input::-webkit-search-cancel-button, input::-webkit-search-results-button, input::-webkit-search-results-decoration': {
+      display: 'none',
+    },
+    'input::-webkit-contacts-auto-fill-button': { display: 'none' },
+'input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus': {
+      WebkitTextFillColor: '#e6edf3',
+      boxShadow: '0 0 0px 1000px #1e1e1e inset',
+      transition: 'background-color 9999s ease-in-out 0s',
+    },
+
+    // Custom scrollbars (WebKit)
+    '::-webkit-scrollbar': {
+      width: '10px',
+      height: '10px',
+    },
+    '::-webkit-scrollbar-track': {
+      background: 'transparent',
+    },
+    '::-webkit-scrollbar-thumb': {
+      background: '#3c3c3c',
+      borderRadius: '8px',
+      border: '2px solid rgba(0,0,0,0)',
+      backgroundClip: 'padding-box',
+    },
+    '::-webkit-scrollbar-thumb:hover': {
+      background: '#4a4a4a',
+    },
+
+    // Hide scrollbars within explorer viewport but allow scroll
+    '.explorer-viewport::-webkit-scrollbar': {
+      width: '0px',
+      height: '0px',
+    },
+
+    // Tauri drag regions (handled via data-tauri-drag-region + programmatic startDragging)
     // VS Code specific styling
     '.vscode-titlebar': {
       backgroundColor: '#323233',
       borderBottom: '1px solid #2b2b2c',
+      cursor: 'pointer',
     },
     '.vscode-activitybar': {
       backgroundColor: '#333333',
@@ -86,13 +158,6 @@ export const theme = createSystem(defaultConfig, {
     // Button styling
     'button': {
       color: 'white !important',
-      backgroundImage: 'none !important',
-    },
-    // Input styling
-    'input': {
-      color: 'white !important',
-      backgroundColor: '#1e1e1e !important',
-      borderColor: '#3c3c3c !important',
       backgroundImage: 'none !important',
     },
     // Alert styling

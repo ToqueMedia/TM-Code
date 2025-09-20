@@ -1,4 +1,4 @@
-import React, { memo, Suspense, useCallback } from 'react'
+import React, { memo, Suspense } from 'react'
 import {
   VStack,
   HStack,
@@ -6,16 +6,9 @@ import {
   Box,
   ScrollArea,
   Spinner} from '@chakra-ui/react'
-import {
-  FiFolder,
-  FiRefreshCw,
-  FiPlus,
-  FiMoreHorizontal,
-  FiSearch} from 'react-icons/fi'
+import { FiFolder } from 'react-icons/fi'
 import { useCurrentProject } from '../../hooks/useProjectState'
 import { PanelHeader } from './PanelHeader'
-import { SearchInput } from './SearchInput'
-import { OptionButton } from './OptionButton'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 
 const FileTree = React.lazy(() => import('./FileTree'))
@@ -37,35 +30,7 @@ FileTreeSkeleton.displayName = 'FileTreeSkeleton'
 
 function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
   const currentProject = useCurrentProject()
-  const { refresh } = useFileTreeRepository()
-  const [searchTerm, setSearchTerm] = React.useState('')
-  const [isSearching, setIsSearching] = React.useState(false)
-
-  const handleSearchToggle = useCallback(() => {
-    setIsSearching(!isSearching)
-    if (isSearching) {
-      setSearchTerm('')
-    }
-  }, [isSearching])
-
-  const handleRefresh = useCallback(async () => {
-    // Trigger file tree refresh using the store method
-    try {
-      await refresh()
-    } catch (error) {
-      console.error('Failed to refresh file tree:', error)
-    }
-  }, [refresh])
-
-  const handleNewFile = useCallback(() => {
-    // Open new file dialog
-    console.log('New file')
-  }, [])
-
-  const handleMoreActions = useCallback(() => {
-    // Handle more actions
-    console.log('More actions')
-  }, [])
+  useFileTreeRepository()
 
   if (!currentProject) {
     return (
@@ -96,49 +61,12 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
     >
       <PanelHeader 
         title="Explorer"
-        rightControls={
-          <>
-            <OptionButton 
-              label="Search in files"
-              icon={FiSearch}
-              isActive={isSearching}
-              onClick={handleSearchToggle}
-            />
-            <OptionButton 
-              label="Refresh Explorer"
-              icon={FiRefreshCw}
-              onClick={handleRefresh}
-            />
-            <OptionButton 
-              label="New File"
-              icon={FiPlus}
-              onClick={handleNewFile}
-            />
-            <OptionButton 
-              label="More actions"
-              icon={FiMoreHorizontal}
-              onClick={handleMoreActions}
-            />
-          </>
-        }
       />
       
-      {/* Search Input */}
-      {isSearching && (
-        <Box p={2} borderBottom="1px solid" borderColor="border.glass">
-          <SearchInput
-            value={searchTerm}
-            onChange={setSearchTerm}
-            onClear={() => setSearchTerm('')}
-            placeholder="Search files..."
-            compact
-          />
-        </Box>
-      )}
 
       {/* File Tree */}
       <ScrollArea.Root flex="1">
-        <ScrollArea.Viewport>
+        <ScrollArea.Viewport className="explorer-viewport">
           <Suspense fallback={<FileTreeSkeleton />}>
             <FileTree 
               rootPath={currentProject.path}
@@ -146,9 +74,7 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
             />
           </Suspense>
         </ScrollArea.Viewport>
-        <ScrollArea.Scrollbar orientation="vertical">
-          <ScrollArea.Thumb />
-        </ScrollArea.Scrollbar>
+        {/* Invisible vertical scrollbar (removed) */}
       </ScrollArea.Root>
 
       {/* Footer Info */}

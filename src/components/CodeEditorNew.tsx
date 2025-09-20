@@ -6,7 +6,8 @@ import {
   IconButton,
   Box,
   Separator,
-  Spinner} from '@chakra-ui/react'
+  Spinner,
+  Menu} from '@chakra-ui/react'
 import {
   FiX,
   FiFile,
@@ -31,7 +32,7 @@ import {
 } from 'react-icons/si'
 import TypeScriptIcon from './icons/TypeScriptIcon'
 import { FaFileImage, FaFilePdf, FaFileArchive } from 'react-icons/fa'
-import { getFileIconUrl } from '../utils/iconMapper'
+import { getFileIconByExtension } from '../utils/iconMapper'
 import { autoSaveProjectState, useProjectStore } from '../stores/projectStore'
 import { useEditorRepository } from '../stores/editorStore'
 import { useCurrentProject } from '../hooks/useProjectState'
@@ -47,6 +48,8 @@ import SearchPanel from './ui/SearchPanel'
 import BottomPanel from './ui/BottomPanel'
 import Breadcrumbs from './ui/Breadcrumbs'
 import DebuggerPanel from './DebuggerPanel'
+import TitleBar from './ui/TitleBar'
+import CommandPalette from './ui/CommandPalette'
 
 // Lazy load componentes pesados
 const MonacoEditor = lazy(() => import('./ui/MonacoEditor'))
@@ -407,7 +410,7 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
       <HStack gap={2} align="center" minW="0">
         {(() => {
           const ext = name.split('.').pop()?.toLowerCase()
-          const url = getFileIconUrl(ext)
+          const url = getFileIconByExtension(ext, name)
           if (url) {
             return (
               <img
@@ -502,6 +505,7 @@ export function CodeEditorNew() {
     }
   })
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 })
+  const [languages, setLanguages] = useState<string[]>([])
   const [windowHeight, setWindowHeight] = useState(window.innerHeight)
   const [explorerWidth, setExplorerWidth] = useState<number>(() => {
     try {
@@ -592,6 +596,15 @@ export function CodeEditorNew() {
       windowServiceRef.reset()
     }
   }, [currentProject, lspServiceRef, recoveryServiceRef, windowServiceRef])
+
+  useEffect(() => {
+    function onLanguages(e: Event) {
+      const ce = e as CustomEvent<string[]>
+      if (Array.isArray(ce.detail)) setLanguages(ce.detail)
+    }
+    window.addEventListener('monaco:languages', onLanguages)
+    return () => window.removeEventListener('monaco:languages', onLanguages)
+  }, [])
 
   // Window resize listener for responsive panel sizing
   useEffect(() => {
@@ -721,41 +734,7 @@ export function CodeEditorNew() {
       overflow="hidden"
       fontFamily="-apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif"
     >
-      {/* Enhanced VS Code-style Title Bar with glassmorphism */}
-      <Flex
-        height="35px"
-        bg="rgba(50, 50, 51, 0.95)"
-        backdropFilter="blur(10px)"
-        borderBottom="1px solid #1e1f22"
-        alignItems="center"
-        justify="space-between"
-        px={0}
-        position="relative"
-        boxShadow="0 1px 3px rgba(0,0,0,0.2)"
-        _after={{
-          content: '""',
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: '1px',
-          bg: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
-        }}
-      >
-        {/* Left: Window Controls + Navigation */}
-        <HStack gap={0}>
-          <XcodeWindowControls />
-          <XcodeNavigation />
-        </HStack>
-        
-        {/* Center: Project Name */}
-        <Text fontSize="sm" fontWeight="500" color="#cccccc">
-          {currentProject.name}
-        </Text>
-        
-        {/* Right: Empty for now */}
-        <Box width="120px" />
-      </Flex>
+      <TitleBar />
 
       {/* Main Content Area */}
       <Flex flex="1" overflow="hidden" minW={0}>
@@ -802,52 +781,84 @@ export function CodeEditorNew() {
           ref={editorRef}
           minW={0}
         >
-          {/* Enhanced VS Code-style Editor Tabs with animations */}
-          <Flex
-            className="vscode-tabs"
-            minHeight="35px"
-            bg="linear-gradient(180deg, #2d2d30 0%, #252526 100%)"
-            borderBottom="1px solid #1e1f22"
-            overflowX="auto"
-            align="center"
-            position="relative"
-            boxShadow="0 1px 3px rgba(0,0,0,0.1)"
-            _after={{
-              content: '""',
-              position: 'absolute',
-              bottom: 0,
-              left: 0,
-              right: 0,
-              height: '1px',
-              bg: 'linear-gradient(90deg, transparent, rgba(0,122,204,0.3), transparent)',
-              opacity: 0.5,
-            }}
-          >
-            {openFiles.map((file) => (
-              <EditorTab
-                key={file.path}
-                path={file.path}
-                name={file.path.split('/').pop() || 'Untitled'}
-                isDirty={file.isDirty}
-                isActive={activeFile === file.path}
-                onClick={() => handleSetActiveFile(file.path)}
-                onClose={(e) => handleCloseFile(file.path, e)}
-              />
-            ))}
-            
-            {openFiles.length === 0 && (
-              <Flex
-                alignItems="center"
-                justifyContent="center"
-                flex="1"
-                color="text.secondary"
-                fontSize="sm"
-                height="35px"
-              >
-                No tabs open
-              </Flex>
-            )}
-          </Flex>
+        {/* Enhanced VS Code-style Editor Tabs with animations */}
+        <Flex
+          className="vscode-tabs"
+          minHeight="35px"
+          bg="linear-gradient(180deg, #2d2d30 0%, #252526 100%)"
+          borderBottom="1px solid #1e1f22"
+          overflowX="auto"
+          align="center"
+          position="relative"
+          boxShadow="0 1px 3px rgba(0,0,0,0.1)"
+          onContextMenu={(e) => {
+            e.preventDefault()
+            const target = (e.target as HTMLElement).closest('[data-path]') as HTMLElement | null
+            const path = target?.getAttribute('data-path') || activeFile || null
+            const items: { label: string, action: () => void }[] = []
+            if (path) {
+              items.push({ label: 'Close', action: () => handleCloseFile(path, e as any) })
+              items.push({ label: 'Close Others', action: () => {
+                openFiles.forEach(f => { if (f.path !== path) handleCloseFile(f.path, e as any) })
+              }})
+            }
+            items.push({ label: 'Close All', action: () => { openFiles.forEach(f => handleCloseFile(f.path, e as any)) }})
+            items.push({ label: 'Command Palette…', action: () => window.dispatchEvent(new CustomEvent('command:palette')) })
+            const menu = document.createElement('div')
+            Object.assign(menu.style, {
+              position: 'fixed', left: e.clientX + 'px', top: e.clientY + 'px', zIndex: '3000',
+              background: '#2d2d30', border: '1px solid #3c3c3c', borderRadius: '8px',
+              minWidth: '180px', boxShadow: '0 12px 40px rgba(0,0,0,0.5)'
+            } as CSSStyleDeclaration)
+            items.forEach(it => {
+              const row = document.createElement('div')
+              row.textContent = it.label
+              Object.assign(row.style, { padding: '8px 12px', color: '#e6e6e6', cursor: 'default' } as CSSStyleDeclaration)
+              row.onmouseenter = () => { row.style.background = '#094771' }
+              row.onmouseleave = () => { row.style.background = 'transparent' }
+              row.onclick = () => { try { it.action() } finally { document.body.removeChild(menu) } }
+              menu.appendChild(row)
+            })
+            const dismiss = () => { if (menu.parentNode) { document.body.removeChild(menu) } document.removeEventListener('mousedown', dismiss) }
+            document.addEventListener('mousedown', dismiss)
+            document.body.appendChild(menu)
+          }}
+          _after={{
+            content: '""',
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            height: '1px',
+            bg: 'linear-gradient(90deg, transparent, rgba(0,122,204,0.3), transparent)',
+            opacity: 0.5,
+          }}
+        >
+          {openFiles.map((file) => (
+            <EditorTab
+              key={file.path}
+              path={file.path}
+              name={file.path.split('/').pop() || 'Untitled'}
+              isDirty={file.isDirty}
+              isActive={activeFile === file.path}
+              onClick={() => handleSetActiveFile(file.path)}
+              onClose={(e) => handleCloseFile(file.path, e)}
+            />
+          ))}
+          
+          {openFiles.length === 0 && (
+            <Flex
+              alignItems="center"
+              justifyContent="center"
+              flex="1"
+              color="text.secondary"
+              fontSize="sm"
+              height="35px"
+            >
+              No tabs open
+            </Flex>
+          )}
+        </Flex>
 
           {/* Breadcrumbs */}
           <Breadcrumbs
@@ -857,7 +868,10 @@ export function CodeEditorNew() {
           />
 
           {/* Editor Content */}
-          <Flex flex="1" overflow="hidden">
+          <Flex flex="1" overflow="hidden" onContextMenu={(e) => {
+            e.preventDefault()
+            window.dispatchEvent(new CustomEvent('command:palette'))
+          }}>
             {activeFile ? (
               <Suspense fallback={<EditorSkeleton />}>
                 <MonacoEditor
@@ -933,6 +947,8 @@ export function CodeEditorNew() {
         </Flex>
       </Flex>
 
+      <CommandPalette />
+
       {/* Bottom Panel */}
       {isBottomPanelVisible && (
         <Box
@@ -953,24 +969,14 @@ export function CodeEditorNew() {
       {/* Enhanced Status Bar with gradient */}
       <Flex
         height="24px"
-        bg="linear-gradient(90deg, #2563eb 0%, #3b82f6 50%, #2563eb 100%)"
-        backgroundSize="200% 100%"
-        color="white"
+        bg="#0f172a"
+        color="#e2e8f0"
         alignItems="center"
         fontSize="xs"
         fontWeight="medium"
-        px={2}
-        position="relative"
-        boxShadow="0 -1px 3px rgba(37, 99, 235, 0.2)"
-        _before={{
-          content: '""',
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          height: '1px',
-          bg: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent)',
-        }}
+        px={4}
+        gap={2}
+        borderTop="1px solid #1e293b"
       >
         <HStack gap={0} height="100%">
           <StatusBarItem tooltip="Git branch">
@@ -980,11 +986,51 @@ export function CodeEditorNew() {
           
           <Separator orientation="vertical" height="16px" mx={2} />
           
-          <StatusBarItem tooltip="Language mode">
-            <FiCode size={12} />
-            <Text>TypeScript</Text>
-          </StatusBarItem>
-          
+          {/* Language picker */}
+          <Box position="relative">
+            <Menu.Root>
+              <Menu.Trigger asChild>
+                <Box as="button"
+                  px={3}
+                  py={1}
+                  fontSize="xs"
+                  display="flex"
+                  alignItems="center"
+                  gap={1}
+                  _hover={{ bg: 'whiteAlpha.100' }}
+                  borderRadius="4px"
+                  title="Change language"
+                >
+                  <FiCode size={12} />
+                  <Text>{(() => {
+                    const file = openFiles.find(f => f.path === activeFile)
+                    return file?.language ? file.language : 'Plain Text'
+                  })()}</Text>
+                </Box>
+              </Menu.Trigger>
+              <Menu.Positioner>
+                <Menu.Content>
+                  {['plaintext','typescript','javascript','json','html','css','scss','markdown','python','rust','go','java','c','cpp','php','sql'].map(function(lang) {
+                    return (
+                      <Menu.Item value={lang} key={lang} onClick={async function() {
+                        if (!activeFile) return
+                        try {
+                          const monaco = await import('monaco-editor')
+                          const model = monaco.editor.getModel(monaco.Uri.file(activeFile))
+                          if (model) {
+                            monaco.editor.setModelLanguage(model, lang as any)
+                            // persist in store
+                            useEditorRepository.getState().updateEditorState(activeFile, { language: lang })
+                          }
+                        } catch {}
+                      }}>{lang}</Menu.Item>
+                    )
+                  })}
+                </Menu.Content>
+              </Menu.Positioner>
+            </Menu.Root>
+          </Box>
+
           <Separator orientation="vertical" height="16px" mx={2} />
           
           <StatusBarItem tooltip="Line and column">
@@ -1008,6 +1054,12 @@ export function CodeEditorNew() {
           <StatusBarItem tooltip="Errors and warnings">
             <FiAlertCircle size={12} />
             <Text>0</Text>
+          </StatusBarItem>
+          
+          <Separator orientation="vertical" height="16px" mx={2} />
+          
+          <StatusBarItem tooltip="Monaco languages supported">
+            <Text>Langs: {languages.length}</Text>
           </StatusBarItem>
           
           <Separator orientation="vertical" height="16px" mx={2} />

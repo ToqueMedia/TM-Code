@@ -36,6 +36,7 @@ interface EditorActions {
   saveAllFiles: () => Promise<void>;
   refreshFileContent: (path: string) => Promise<void>;
   renameOpenFile: (oldPath: string, newPath: string) => void;
+  closeAllFiles: () => void;
 }
 
 // Get language from file extension
@@ -481,6 +482,9 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
 
           return { openFiles, activeFile, cursorPositions, undoStack, redoStack };
         });
+      },
+      closeAllFiles: () => {
+        set(() => ({ openFiles: [], activeFile: null, cursorPositions: {}, undoStack: {}, redoStack: {} }))
       }
     }),
     {

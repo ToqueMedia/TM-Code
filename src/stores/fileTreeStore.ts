@@ -24,7 +24,7 @@ interface FileTreeActions {
   loadFileTree: (rootPath: string, filter?: FileTreeFilter) => Promise<void>;
   toggleNode: (path: string) => void;
   selectNode: (path: string) => void;
-  createFileOrDirectory: (parentPath: string, name: string, isDirectory: boolean) => Promise<boolean>;
+  createFileOrDirectory: (parentPath: string, name: string, isDirectory: boolean) => Promise<string | null>;
   deleteNode: (path: string) => Promise<boolean>;
   renameNode: (oldPath: string, newName: string) => Promise<boolean>;
   copyNode: (sourcePath: string, destinationPath: string) => Promise<boolean>;
@@ -168,24 +168,20 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>()(
 
           if (hasNested) {
             if (isDirectory) {
-              // Create all directories along the path via Tauri
               const result = await FileTreeService.createDirectoriesAll(fullPath);
               if (!result.success) {
                 set({ error: result.message });
-                return false;
+                return null;
               }
             } else {
-              // Create file and parents as needed
               await FileService.createFile(fullPath, '');
             }
-            // Nested creation can affect multiple branches; refresh tree
             await get().refresh();
-            return true;
+            return fullPath;
           }
 
           const result = await FileTreeService.createFileOrDirectory(parentPath, name, isDirectory);
           if (result.success) {
-            // Instead of refreshing the entire tree, add the new node directly
             const newNode: FileTreeNode = {
               type: isDirectory ? 'directory' : 'file',
               name: name,
@@ -199,16 +195,15 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>()(
               },
               extension: isDirectory ? undefined : name.split('.').pop()
             };
-            
             get().addNode(parentPath, newNode);
-            return true;
+            return result.path;
           } else {
             set({ error: result.message });
-            return false;
+            return null;
           }
         } catch (error) {
           set({ error: (error as Error).message });
-          return false;
+          return null;
         }
       },
 
@@ -233,13 +228,13 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>()(
         try {
           const result = await FileTreeService.renameFileOrDirectory(oldPath, newName);
           if (result.success) {
-            // Instead of refreshing the entire tree, update the node directly
             const newPath = result.path;
+            const newExt = newName.includes('.') ? newName.split('.').pop() : undefined;
             const updatedNode: Partial<FileTreeNode> = {
               name: newName,
-              path: newPath
+              path: newPath,
+              extension: newExt
             };
-            
             get().updateNode(oldPath, updatedNode);
             return true;
           } else {

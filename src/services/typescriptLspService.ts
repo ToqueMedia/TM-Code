@@ -73,9 +73,9 @@ class TypeScriptLspService {
 
   private async loadProjectFiles(projectRoot: string) {
     try {
-      // Build file tree with filter for TypeScript/JavaScript files
+      // Build file tree (Rust side). Note: current Rust implementation doesn't filter by extensions.
       const fileTree = await FileTreeService.buildFileTree(projectRoot, {
-        showHidden: true,
+        showHidden: false,
         extensions: ['.ts', '.tsx', '.js', '.jsx', '.json', '.html', '.css'],
         maxDepth: undefined
       });
@@ -83,12 +83,24 @@ class TypeScriptLspService {
       // Build index for fast path lookups
       this.indexer.buildIndex(fileTree);
 
-      // Traverse the file tree and load all relevant files
+      // Allowed extensions and excluded directories to avoid creating excessive Monaco models
+      const allowed = new Set(['ts', 'tsx', 'js', 'jsx', 'json', 'html', 'css']);
+      const excludedDirs = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.turbo']);
+      const MODEL_LIMIT = 1000;
+      let modelCount = 0;
+
+      // Traverse the file tree and load only relevant files
       const traverse = async (node: FileTreeNode) => {
         if (node.type === 'file') {
-          // Load file content
+          const ext = node.extension ? node.extension.toLowerCase() : '';
+          if (!allowed.has(ext)) return;
+          if (modelCount >= MODEL_LIMIT) return;
           await this.loadFileContent(node.path);
+          modelCount++;
         } else if (node.type === 'directory' && node.children) {
+          // Skip heavy/common build folders
+          const name = node.name.toLowerCase();
+          if (excludedDirs.has(name)) return;
           for (const child of node.children) {
             await traverse(child);
           }

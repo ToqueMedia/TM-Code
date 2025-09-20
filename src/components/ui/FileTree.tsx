@@ -107,7 +107,7 @@ import { useEditorRepository } from '../../stores/editorStore';
 import type { FileTreeNode } from '../../types/fileTree';
 import FileWatcherService from '../../services/fileWatcherService';
 import TypeScriptIcon from '../icons/TypeScriptIcon';
-import { getFileIconUrl, getFolderIconUrl } from '../../utils/iconMapper';
+import { getFileIconByExtension, getFolderIconByPath, getFolderIconByName } from '../../utils/iconMapper';
 
 interface FileTreeProps {
   rootPath: string;
@@ -134,9 +134,10 @@ const FileIcon: React.FC<{
   type: 'file' | 'directory';
   extension?: string;
   fileName?: string;
+  fullPath?: string;
   isSelected?: boolean;
   isExpanded?: boolean;
-}> = ({ type, extension, fileName, isSelected, isExpanded }) => {
+}> = ({ type, extension, fileName, fullPath, isSelected, isExpanded }) => {
   
   const getMaterialIconAndColor = () => {
     if (type === 'directory') {
@@ -441,10 +442,10 @@ const FileIcon: React.FC<{
     }
   };
   
-  // Prefer Material Icon Theme SVGs when available
+  // Prefer Material Icon Theme SVGs when available from local assets
   const materialUrl = type === 'directory'
-    ? getFolderIconUrl(!!isExpanded)
-    : getFileIconUrl(extension);
+    ? (getFolderIconByPath(fullPath, !!isExpanded) || getFolderIconByName(fileName, !!isExpanded))
+    : getFileIconByExtension(extension, fileName);
 
   if (materialUrl) {
     return (
@@ -518,6 +519,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   useEffect(() => {
     if (isCreating && createInputRef.current) {
       createInputRef.current.focus();
+      try { createInputRef.current.select(); } catch {}
     }
   }, [isCreating]);
   
@@ -536,8 +538,9 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   
   const handleSelect = () => {
     selectNode(node.path);
-    if (node.type === 'directory' && !isExpanded) {
+    if (node.type === 'directory') {
       toggleNode(node.path);
+      return;
     }
     if (node.type === 'file' && onFileSelect) {
       onFileSelect(node.path);
@@ -567,17 +570,16 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   };
   
   const handleDelete = async () => {
-    const ok = await tauriConfirm(`Delete "${node.name}"?`, { title: 'Confirm deletion', kind: 'warning' });
+    const ok = await tauriConfirm(`Delete \"${node.name}\"?`, { title: 'Confirm deletion', kind: 'warning' });
     if (ok) {
       const success = await deleteNode(node.path);
       if (success) {
         try {
-          // Close in editor if open and update LSP
           useEditorRepository.getState().closeFile(node.path);
           const lsp = (await import('../../services/typescriptLspService')).default.getInstance();
           await lsp.removeFile(node.path);
         } catch {}
-        setAlert({ show: true, title: 'Success', description: `Deleted ${node.name}`, status: 'success' });
+        // Success alert removed by request
       } else {
         setAlert({ show: true, title: 'Error', description: `Failed to delete ${node.name}`, status: 'error' });
       }
@@ -596,7 +598,6 @@ const TreeNode: React.FC<TreeNodeProps> = ({
           const lsp = (await import('../../services/typescriptLspService')).default.getInstance();
           await lsp.renameFileModel(node.path, newPath);
         } catch {}
-        setAlert({ show: true, title: 'Success', description: `Renamed to ${newName}`, status: 'success' });
       } else {
         setAlert({ show: true, title: 'Error', description: `Failed to rename ${node.name}`, status: 'error' });
       }
@@ -606,9 +607,13 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   
   const confirmCreate = async () => {
     if (createName) {
-      const success = await createFileOrDirectory(node.path, createName, createType === 'directory');
-      if (success) {
-        setAlert({ show: true, title: 'Success', description: `Created ${createName}`, status: 'success' });
+      const createdPath = await createFileOrDirectory(node.path, createName, createType === 'directory');
+      if (createdPath) {
+        // Open the file immediately if it is a file
+        if (createType === 'file' && onFileSelect) {
+          onFileSelect(createdPath);
+        }
+        // Success alert removed by request
       } else {
         setAlert({ show: true, title: 'Error', description: `Failed to create ${createName}`, status: 'error' });
       }
@@ -704,6 +709,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
           type={node.type}
           extension={node.extension}
           fileName={node.name}
+          fullPath={node.path}
           isSelected={isSelected}
           isExpanded={isExpanded}
         />
