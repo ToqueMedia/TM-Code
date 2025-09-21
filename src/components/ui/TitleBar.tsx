@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, HStack, Text, Flex, Input, Menu, Button } from '@chakra-ui/react'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { FiFolder, FiGitBranch, FiClock, FiPlus } from 'react-icons/fi'
+import { FiFolder, FiGitBranch, FiClock } from 'react-icons/fi'
 import { useProjectStore } from '../../stores/projectStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import QuickOpenService, { QuickOpenItem } from '../../services/quickOpenService'
@@ -290,10 +290,10 @@ function TitleBar() {
                 </HStack>
               </Button>
             </Menu.Trigger>
-            <Menu.Positioner className="no-drag" style={{ zIndex: 10000 }}>
+            <Menu.Positioner className="no-drag" style={{ zIndex: 20000 }}>
               <Menu.Content 
                 className="no-drag" 
-                style={{ zIndex: 10000, minWidth: '380px' }}
+                style={{ zIndex: 20000, minWidth: '380px' }}
                 bg="#1e1e1e"
                 border="1px solid #2b2b2c"
                 borderRadius="10px"
@@ -302,13 +302,13 @@ function TitleBar() {
               >
                 <Box px={3} py={2}>
                   <HStack gap={2}>
-                    <Button size="sm" variant="outline" onClick={handleOpenFolder} leftIcon={<FiFolder />} borderColor="#3c3c3c" _hover={{ bg: 'whiteAlpha.100' }}>
-                      Open Folder…
-                    </Button>
-                    <Button size="sm" variant="outline" onClick={handleCloneRepo} leftIcon={<FiGitBranch />} borderColor="#3c3c3c" _hover={{ bg: 'whiteAlpha.100' }}>
-                      Clone Repository…
-                    </Button>
-                  </HStack>
+                  <Button size="sm" variant="outline" onClick={handleOpenFolder} borderColor="#3c3c3c" _hover={{ bg: 'whiteAlpha.100' }}>
+                    <FiFolder /><span>Open Folder…</span>
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={handleCloneRepo} borderColor="#3c3c3c" _hover={{ bg: 'whiteAlpha.100' }}>
+                    <FiGitBranch /><span>Clone Repository…</span>
+                  </Button>
+                </HStack>
                 </Box>
                 <Menu.Separator />
                 <Box px={3} py={2} color="#7d8590" fontSize="12px" textTransform="uppercase" letterSpacing="0.08em">

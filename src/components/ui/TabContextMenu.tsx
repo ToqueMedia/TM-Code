@@ -125,7 +125,7 @@ export default function TabContextMenu(): React.ReactElement | null {
         animation="menuIn 120ms ease-out forwards"
         onMouseDown={stopPropagation}
       >
-        <VStack align="stretch" spacing={0}>
+        <VStack align="stretch" gap={0}>
           {items.map(function render(item, idx) {
             const roundedTop = idx === 0 ? '10px' : '0px'
             const roundedBottom = idx === items.length - 1 ? '10px' : '0px'

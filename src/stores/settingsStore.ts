@@ -19,7 +19,7 @@ interface SettingsActions {
 
 export const useSettingsStore = create<SettingsState & SettingsActions>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       editor: {
         tabSize: 2,
         insertSpaces: true,
@@ -28,26 +28,26 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
 
       setTabSize: (size: number) => {
         const next = Math.max(1, Math.min(8, Math.floor(size)))
-        set(function (state) {
+        set((state) => {
           return { editor: { ...state.editor, tabSize: next } }
         })
       },
 
       setInsertSpaces: (value: boolean) => {
-        set(function (state) {
+        set((state) => {
           return { editor: { ...state.editor, insertSpaces: !!value } }
         })
       },
 
       setDetectIndentation: (value: boolean) => {
-        set(function (state) {
+        set((state) => {
           return { editor: { ...state.editor, detectIndentation: !!value } }
         })
       },
     }),
     {
       name: 'settings-storage',
-      partialize: function (state) {
+      partialize: (state) => {
         return { editor: state.editor }
       },
     }

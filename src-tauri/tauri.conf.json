@@ -10,12 +10,14 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "toquemedia-studio",
         "width": 1250,
         "height": 850,
-        "decorations": false
+        "decorations": false,
+        "transparent": true
       }
     ],
     "security": {

@@ -74,7 +74,52 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
             />
           </Suspense>
         </ScrollArea.Viewport>
-        {/* Invisible vertical scrollbar (removed) */}
+        <ScrollArea.Scrollbar
+          position="absolute"
+          orientation="vertical"
+          right="2px"
+          top="2px"
+          bottom="2px"
+          width="8px"
+          borderRadius="4px"
+          bg="transparent"
+          _hover={{ bg: 'rgba(128, 128, 128, 0.2)' }}
+          _active={{ bg: 'rgba(128, 128, 128, 0.4)' }}
+          transition="background 0.2s"
+          zIndex={1}
+        >
+          <ScrollArea.Thumb 
+            bg="rgba(128, 128, 128, 0.4)"
+            borderRadius="4px"
+            minH="20px"
+            _hover={{ bg: 'rgba(128, 128, 128, 0.6)' }}
+            _active={{ bg: 'rgba(128, 128, 128, 0.8)' }}
+            transition="background 0.2s"
+          />
+        </ScrollArea.Scrollbar>
+        <ScrollArea.Scrollbar
+          position="absolute"
+          orientation="horizontal"
+          bottom="2px"
+          left="2px"
+          right="2px"
+          height="8px"
+          borderRadius="4px"
+          bg="transparent"
+          _hover={{ bg: 'rgba(128, 128, 128, 0.2)' }}
+          _active={{ bg: 'rgba(128, 128, 128, 0.4)' }}
+          transition="background 0.2s"
+          zIndex={1}
+        >
+          <ScrollArea.Thumb 
+            bg="rgba(128, 128, 128, 0.4)"
+            borderRadius="4px"
+            minW="20px"
+            _hover={{ bg: 'rgba(128, 128, 128, 0.6)' }}
+            _active={{ bg: 'rgba(128, 128, 128, 0.8)' }}
+            transition="background 0.2s"
+          />
+        </ScrollArea.Scrollbar>
       </ScrollArea.Root>
 
       {/* Footer Info */}

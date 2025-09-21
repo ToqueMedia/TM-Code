@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   Box,
   Button,
@@ -37,19 +37,6 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
   }, [])
 
   function onClose(): void { setIsOpen(false) }
-
-  function onTabSizeChange(e: React.ChangeEvent<HTMLSelectElement>): void {
-    const v = parseInt(e.target.value, 10)
-    if (!Number.isNaN(v)) setTabSize(v)
-  }
-
-  function onInsertSpacesChange(e: React.ChangeEvent<HTMLInputElement>): void {
-    setInsertSpaces(e.target.checked)
-  }
-
-  function onDetectIndentationChange(e: React.ChangeEvent<HTMLInputElement>): void {
-    setDetectIndentation(e.target.checked)
-  }
 
   return (
     <Dialog.Root open={isOpen} onOpenChange={function (e) { if (!e.open) onClose() }}>
@@ -92,7 +79,6 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
                 </Field.Label>
                 <Box mt={1}>
                   <NativeSelect.Root
-                    value={String(tabSize)}
                     size="sm"
                     width="200px"
                   >
@@ -100,6 +86,7 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
                       bg="#2a2a2a" 
                       borderColor="#3c3c3c" 
                       color="#e6e6e6"
+                      value={String(tabSize)}
                       onChange={function(e){ const v = parseInt(e.target.value, 10); if (!Number.isNaN(v)) setTabSize(v) }}
                     >
                       <option value="2">2</option>
@@ -129,11 +116,14 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
                   >
                     Use spaces instead of tabs
                   </Text>
-                  <Switch
+                  <Switch.Root
                     checked={insertSpaces}
-                    onChange={onInsertSpacesChange}
+                    onCheckedChange={function(e) { setInsertSpaces(e.checked) }}
                     colorPalette="blue"
-                  />
+                  >
+                    <Switch.HiddenInput />
+                    <Switch.Control />
+                  </Switch.Root>
                 </HStack>
               </Field.Root>
 
@@ -155,11 +145,14 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
                   >
                     Infer indentation from file content
                   </Text>
-                  <Switch
+                  <Switch.Root
                     checked={detectIndentation}
-                    onChange={onDetectIndentationChange}
+                    onCheckedChange={function(e) { setDetectIndentation(e.checked) }}
                     colorPalette="blue"
-                  />
+                  >
+                    <Switch.HiddenInput />
+                    <Switch.Control />
+                  </Switch.Root>
                 </HStack>
               </Field.Root>
             </Dialog.Body>

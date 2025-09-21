@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import Editor, { Monaco } from '@monaco-editor/react';
 import { useMonacoEditorState } from '../../hooks/useEditorState';
 import { useMonacoTheme } from '../../hooks/useMonacoTheme';
@@ -79,7 +79,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   const detectIndentationSetting = useSettingsStore(function (s) { return s.editor.detectIndentation })
   
   // Monaco Editor options following official documentation best practices
-  const editorOptions: editor.IStandaloneEditorConstructionOptions = {
+  const editorOptions: editor.IStandaloneEditorConstructionOptions = useMemo(() => ({
     // Basic editor options
     automaticLayout: true,
     fontSize: 14,
@@ -184,7 +184,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     // Multi-cursor
     multiCursorModifier: 'alt',
     multiCursorPaste: 'spread',
-  };
+  }), [tabSizeSetting, insertSpacesSetting, detectIndentationSetting]);
   
   // Update editor options when indentation settings change
   useEffect(() => {
