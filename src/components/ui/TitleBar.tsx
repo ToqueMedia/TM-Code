@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Box, HStack, Text, Flex, Input, Menu, Button } from '@chakra-ui/react'
+import { Box, HStack, Flex } from '@chakra-ui/react'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { FiFolder, FiGitBranch, FiClock } from 'react-icons/fi'
-import { VscChevronDown, VscChevronUp } from "react-icons/vsc";
 import { useProjectStore } from '../../stores/projectStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import QuickOpenService, { QuickOpenItem } from '../../services/quickOpenService'
+import WindowControls from './WindowControls'
+import ProjectMenu from './ProjectMenu'
+import QuickOpen from './QuickOpen'
 
 function TitleBar() {
 	const { currentProject, recentProjects, loadRecentProjects, openProject } = useProjectStore()
@@ -239,104 +240,18 @@ function TitleBar() {
 				position="absolute"
 				left={8}
 			>
-				<HStack gap={2} className="no-drag">
-					<Box
-						width="12px"
-						height="12px"
-						borderRadius="full"
-						bg="#ff5f57"
-						cursor="pointer"
-						onClick={handleClose}
-						transition="filter 0.2s"
-						_hover={{ filter: 'brightness(1.1)' }}
-					/>
-					<Box
-						width="12px"
-						height="12px"
-						borderRadius="full"
-						bg="#ffbd2e"
-						cursor="pointer"
-						onClick={handleMinimize}
-						transition="filter 0.2s"
-						_hover={{ filter: 'brightness(1.1)' }}
-					/>
-					<Box
-						width="12px"
-						height="12px"
-						borderRadius="full"
-						bg="#28ca42"
-						cursor="pointer"
-						onClick={handleFullToggle}
-						transition="filter 0.2s"
-						_hover={{ filter: 'brightness(1.1)' }}
-					/>
-				</HStack>
-
-				<HStack gap={2} pl={2} data-tauri-drag-region="false">
-					<Menu.Root>
-						<Menu.Trigger asChild>
-							<Button
-								size="xs"
-								variant="ghost"
-								color="#e6e6e6"
-								px={2}
-								height="24px"
-								borderRadius="8px"
-								_hover={{ bg: 'whiteAlpha.100' }}
-								data-tauri-drag-region="false"
-							>
-								<HStack gap={2}>
-									<Text fontSize="13px" color="#dcdcdc">{currentProject?.name || 'Select project'}</Text>
-									<VscChevronDown />
-								</HStack>
-							</Button>
-						</Menu.Trigger>
-						<Menu.Positioner className="no-drag">
-							<Menu.Content
-								className="no-drag"
-								style={{ zIndex: 20000, minWidth: '380px' }}
-								bg="#1e1e1e"
-								border="1px solid #2b2b2c"
-								borderRadius="10px"
-								boxShadow="0 16px 48px rgba(0,0,0,0.6)"
-								data-tauri-drag-region="false"
-							>
-								<Box px={3} py={2}>
-									<HStack gap={2}>
-										<Button size="sm" variant="outline" onClick={handleOpenFolder} borderColor="#3c3c3c" _hover={{ bg: 'whiteAlpha.100' }}>
-											<FiFolder /><span>Open Folder…</span>
-										</Button>
-										<Button size="sm" variant="outline" onClick={handleCloneRepo} borderColor="#3c3c3c" _hover={{ bg: 'whiteAlpha.100' }}>
-											<FiGitBranch /><span>Clone Repository…</span>
-										</Button>
-									</HStack>
-								</Box>
-								<Menu.Separator />
-								<Box px={3} py={2} color="#7d8590" fontSize="12px" textTransform="uppercase" letterSpacing="0.08em">
-									<HStack gap={2}><FiClock /><Text>Recent Projects</Text></HStack>
-								</Box>
-								{recentProjects.slice(0, 8).map(function rp(item) {
-									const name = item.name || item.path.split('/').pop() || item.path
-									const monogram = name.trim().slice(0, 2).toUpperCase()
-									return (
-										<Menu.Item value={item.path} key={item.path} onClick={function onClick() { handleOpenRecent(item.path) }} _hover={{ bg: '#0b2a4a' }}>
-											<HStack gap={3} alignItems="center" px={2} py={2}>
-												<Box width="24px" height="24px" borderRadius="6px" bg="#2b2b2c" display="flex" alignItems="center" justifyContent="center" fontSize="12px" color="#d1d1d1" border="1px solid #3c3c3c">{monogram}</Box>
-												<Box>
-													<Text fontSize="13px" color="#e6e6e6">{name}</Text>
-													<Text fontSize="11px" color="#7d8590">{item.path}</Text>
-												</Box>
-											</HStack>
-										</Menu.Item>
-									)
-								})}
-								{recentProjects.length === 0 && (
-									<Box px={3} py={3} color="#7d8590" fontSize="13px">No recent projects</Box>
-								)}
-							</Menu.Content>
-						</Menu.Positioner>
-					</Menu.Root>
-				</HStack>
+				<WindowControls 
+					onClose={handleClose}
+					onMinimize={handleMinimize}
+					onMaximize={handleFullToggle}
+				/>
+				<ProjectMenu
+					currentProjectName={currentProject?.name}
+					recentProjects={recentProjects}
+					onOpenFolder={handleOpenFolder}
+					onCloneRepo={handleCloneRepo}
+					onOpenRecent={handleOpenRecent}
+				/>
 			</HStack>
 
 			<Flex
@@ -345,69 +260,18 @@ function TitleBar() {
 				alignItems="center"
 				px={2}
 			>
-				<Box position="relative" width="60%" minW="320px">
-					<Input
-						ref={searchRef}
-						type="search"
-						autoComplete="off"
-						autoCorrect="off"
-						autoCapitalize="off"
-						spellCheck={false}
-						h={'24px'}
-						borderRadius={'6px'}
-						outline={'none'}
-						enterKeyHint="search"
-						value={query}
-						onChange={handleQueryChange}
-						onFocus={handleInputFocus}
-						onBlur={handleInputBlur}
-						onKeyDown={handleKeyDown}
-						placeholder={currentProject ? `Search in ${currentProject.name}` : 'Search'}
-						size="sm"
-						bg="#1e1e1e"
-						borderColor="#3c3c3c"
-						color="#e6edf3"
-						_focus={{ borderColor: '#58a6ff', boxShadow: '0 0 0 2px rgba(88, 166, 255, 0.3)' }}
-						className="no-drag"
-					/>
-					{focused && query.trim().length > 0 && visibleResults.length > 0 && (
-						<Box
-							position="absolute"
-							top="32px"
-							left={0}
-							right={0}
-							bg="#2d2d30"
-							border="1px solid #3c3c3c"
-							borderRadius="6px"
-							zIndex={20}
-							maxH="300px"
-							overflowY="auto"
-							className="no-drag"
-						>
-							{visibleResults.map(function item(node: QuickOpenItem, idx: number) {
-								const isActive = idx === highlightIndex
-								return (
-									<Box
-										key={node.path}
-										data-quick-open-item="true"
-										role="button"
-										tabIndex={0}
-										px={3}
-										py={2}
-										cursor="pointer"
-										bg={isActive ? '#094771' : 'transparent'}
-										_hover={{ bg: '#094771' }}
-										onMouseDown={function md(e) { e.preventDefault() }}
-										onClick={function onClick() { openPath(node.path) }}
-									>
-										<Text fontSize="sm" color="#e6edf3">{node.name}</Text>
-										<Text fontSize="xs" color="#858585">{node.path}</Text>
-									</Box>
-								)
-							})}
-						</Box>
-					)}
-				</Box>
+				<QuickOpen
+					query={query}
+					focused={focused}
+					highlightIndex={highlightIndex}
+					visibleResults={visibleResults}
+					onQueryChange={handleQueryChange}
+					onInputFocus={handleInputFocus}
+					onInputBlur={handleInputBlur}
+					onKeyDown={handleKeyDown}
+					onOpenPath={openPath}
+					placeholder={currentProject ? `Search in ${currentProject.name}` : 'Search'}
+				/>
 			</Flex>
 
 			<Box position="absolute" right={3} width="120px" />
