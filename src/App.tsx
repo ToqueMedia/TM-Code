@@ -4,6 +4,7 @@ import './utils/monacoEnv'
 import WelcomeScreen from './components/WelcomeScreen';
 import CodeEditorNew from './components/CodeEditorNew';
 import { useProjectStore } from './stores/projectStore';
+import { logger } from './utils/logger';
 import { NewProjectDialog } from './components/dialogs/NewProjectDialog';
 import { useDialog } from './hooks/useDialog';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -28,7 +29,7 @@ function App() {
 					try {
 						await openProject(lastProject.path);
 					} catch (error) {
-						console.error('Failed to open last project:', error);
+						logger.error('app', 'Failed to open last project:', error);
 					}
 				}
 			}

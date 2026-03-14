@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { logger } from '../utils/logger'
 
 // TypeScript interfaces matching the Rust types
 export interface DebugBreakpoint {
@@ -56,7 +57,7 @@ export type DebuggerEventType =
 export interface DebuggerEvent {
   type: DebuggerEventType
   session_id: string
-  data?: any
+  data?: Record<string, unknown>
 }
 
 export type DebuggerEventCallback = (event: DebuggerEvent) => void
@@ -96,7 +97,7 @@ class DebuggerService {
     try {
       return await invoke<Record<string, string>>('check_debugger_availability')
     } catch (error) {
-      console.error('Failed to check debugger availability:', error)
+      logger.error('debugger', 'Failed to check debugger availability:', error)
       throw error
     }
   }
@@ -109,12 +110,12 @@ class DebuggerService {
       this.emitEvent({
         type: 'session-started',
         session_id: sessionId,
-        data: config
+        data: config as unknown as Record<string, unknown>
       })
 
       return sessionId
     } catch (error) {
-      console.error('Failed to start debug session:', error)
+      logger.error('debugger', 'Failed to start debug session:', error)
       throw error
     }
   }
@@ -130,7 +131,7 @@ class DebuggerService {
         session_id: sessionId
       })
     } catch (error) {
-      console.error('Failed to stop debug session:', error)
+      logger.error('debugger', 'Failed to stop debug session:', error)
       throw error
     }
   }
@@ -144,7 +145,7 @@ class DebuggerService {
         session_id: sessionId
       })
     } catch (error) {
-      console.error('Failed to launch debug session:', error)
+      logger.error('debugger', 'Failed to launch debug session:', error)
       throw error
     }
   }
@@ -161,7 +162,7 @@ class DebuggerService {
       
       return sessions
     } catch (error) {
-      console.error('Failed to get debug sessions:', error)
+      logger.error('debugger', 'Failed to get debug sessions:', error)
       throw error
     }
   }
@@ -177,7 +178,7 @@ class DebuggerService {
       
       return breakpoint
     } catch (error) {
-      console.error('Failed to set breakpoint:', error)
+      logger.error('debugger', 'Failed to set breakpoint:', error)
       throw error
     }
   }
@@ -189,7 +190,7 @@ class DebuggerService {
         breakpointId
       })
     } catch (error) {
-      console.error('Failed to remove breakpoint:', error)
+      logger.error('debugger', 'Failed to remove breakpoint:', error)
       throw error
     }
   }
@@ -198,7 +199,7 @@ class DebuggerService {
     try {
       return await invoke<DebugBreakpoint[]>('get_breakpoints', { sessionId })
     } catch (error) {
-      console.error('Failed to get breakpoints:', error)
+      logger.error('debugger', 'Failed to get breakpoints:', error)
       throw error
     }
   }
@@ -213,7 +214,7 @@ class DebuggerService {
         session_id: sessionId
       })
     } catch (error) {
-      console.error('Failed to continue debugging:', error)
+      logger.error('debugger', 'Failed to continue debugging:', error)
       throw error
     }
   }
@@ -227,7 +228,7 @@ class DebuggerService {
         session_id: sessionId
       })
     } catch (error) {
-      console.error('Failed to pause debugging:', error)
+      logger.error('debugger', 'Failed to pause debugging:', error)
       throw error
     }
   }
@@ -242,7 +243,7 @@ class DebuggerService {
         data: { type: 'step-over' }
       })
     } catch (error) {
-      console.error('Failed to step over:', error)
+      logger.error('debugger', 'Failed to step over:', error)
       throw error
     }
   }
@@ -257,7 +258,7 @@ class DebuggerService {
         data: { type: 'step-into' }
       })
     } catch (error) {
-      console.error('Failed to step into:', error)
+      logger.error('debugger', 'Failed to step into:', error)
       throw error
     }
   }
@@ -272,7 +273,7 @@ class DebuggerService {
         data: { type: 'step-out' }
       })
     } catch (error) {
-      console.error('Failed to step out:', error)
+      logger.error('debugger', 'Failed to step out:', error)
       throw error
     }
   }
@@ -282,7 +283,7 @@ class DebuggerService {
     try {
       return await invoke<DebugStackFrame[]>('get_call_stack', { sessionId })
     } catch (error) {
-      console.error('Failed to get call stack:', error)
+      logger.error('debugger', 'Failed to get call stack:', error)
       throw error
     }
   }
@@ -294,7 +295,7 @@ class DebuggerService {
         frameId
       })
     } catch (error) {
-      console.error('Failed to get variables:', error)
+      logger.error('debugger', 'Failed to get variables:', error)
       throw error
     }
   }
@@ -339,7 +340,7 @@ class DebuggerService {
         return await this.setBreakpoint(sessionId, file, line)
       }
     } catch (error) {
-      console.error('Failed to toggle breakpoint:', error)
+      logger.error('debugger', 'Failed to toggle breakpoint:', error)
       throw error
     }
   }

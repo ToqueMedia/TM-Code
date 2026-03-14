@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { logger } from '../utils/logger';
 
 interface TerminalSession {
   id: string;
@@ -42,7 +43,7 @@ export const useTerminalStore = create<TerminalState & TerminalActions>((set, ge
         const { invoke } = await import('@tauri-apps/api/core');
         workingDir = await invoke('get_current_directory') as string;
       } catch (error) {
-        console.warn('Failed to get current directory from Tauri, using fallback');
+        logger.warn('terminal', 'Failed to get current directory from Tauri, using fallback');
         workingDir = '/'; // Fallback for Unix-like systems
       }
     }

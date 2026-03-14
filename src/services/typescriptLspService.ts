@@ -3,6 +3,7 @@ import { FileTreeService } from './fileTreeService';
 import { FileService } from './fileService';
 import type { FileTreeNode } from '../types/fileTree';
 import { FileTreeIndexer } from '../utils/fileTreeIndex';
+import { logger } from '../utils/logger';
 
 class TypeScriptLspService {
   private static instance: TypeScriptLspService;
@@ -40,7 +41,7 @@ class TypeScriptLspService {
       
       this.isInitialized = true;
     } catch (error: unknown) {
-      console.error('Failed to initialize TypeScript LSP service:', error);
+      logger.error('editor', 'Failed to initialize TypeScript LSP service:', error);
     }
   }
 
@@ -109,7 +110,7 @@ class TypeScriptLspService {
 
       await traverse(fileTree);
     } catch (error: unknown) {
-      console.error('Failed to load project files:', error);
+      logger.error('editor', 'Failed to load project files:', error);
     }
   }
 
@@ -120,7 +121,7 @@ class TypeScriptLspService {
       const language = this.getLanguageFromExtension(filePath);
       this.createOrUpdateModel(filePath, content, language);
     } catch (error: unknown) {
-      console.error(`Failed to load file content for ${filePath}:`, error);
+      logger.error('editor', `Failed to load file content for ${filePath}:`, error);
     }
   }
 
@@ -199,7 +200,7 @@ class TypeScriptLspService {
       const language = this.getLanguageFromExtension(filePath);
       this.createOrUpdateModel(filePath, content, language);
     } catch (error: unknown) {
-      console.error(`Failed to update file content for ${filePath}:`, error);
+      logger.error('editor', `Failed to update file content for ${filePath}:`, error);
     }
   }
 
@@ -209,7 +210,7 @@ class TypeScriptLspService {
       const language = this.getLanguageFromExtension(filePath);
       this.createOrUpdateModel(filePath, content, language);
     } catch (error: unknown) {
-      console.error(`Failed to add file ${filePath}:`, error);
+      logger.error('editor', `Failed to add file ${filePath}:`, error);
     }
   }
 
@@ -222,7 +223,7 @@ class TypeScriptLspService {
         this.models.delete(filePath);
       }
     } catch (error: unknown) {
-      console.error(`Failed to remove file ${filePath}:`, error);
+      logger.error('editor', `Failed to remove file ${filePath}:`, error);
     }
   }
 
@@ -238,7 +239,7 @@ class TypeScriptLspService {
       oldModel.dispose();
       this.models.delete(oldPath);
     } catch (error) {
-      console.error(`Failed to rename model ${oldPath} -> ${newPath}:`, error);
+      logger.error('editor', `Failed to rename model ${oldPath} -> ${newPath}:`, error);
     }
   }
 

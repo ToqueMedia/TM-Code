@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { logger } from '../utils/logger';
 
 export interface SearchOptions {
   case_sensitive: boolean;
@@ -42,7 +43,7 @@ export default class SearchService {
       const result = await invoke('check_ripgrep_available') as boolean;
       return result;
     } catch (error) {
-      console.error('Error checking ripgrep availability:', error);
+      logger.error('search', 'Error checking ripgrep availability:', error);
       return false;
     }
   }
@@ -73,7 +74,7 @@ export default class SearchService {
 
       return result;
     } catch (error) {
-      console.error('Search error:', error);
+      logger.error('search', 'Search error:', error);
       throw new Error(`Search failed: ${error}`);
     }
   }
@@ -99,7 +100,7 @@ export default class SearchService {
 
       return affectedFiles;
     } catch (error) {
-      console.error('Replace error:', error);
+      logger.error('search', 'Replace error:', error);
       throw new Error(`Replace failed: ${error}`);
     }
   }
@@ -219,7 +220,7 @@ export default class SearchService {
         const result = await this.searchInFiles(query, directory, options);
         callback(result);
       } catch (error) {
-        console.error('Debounced search error:', error);
+        logger.error('search', 'Debounced search error:', error);
         callback({
           query,
           total_files: 0,

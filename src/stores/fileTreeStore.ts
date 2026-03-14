@@ -5,6 +5,7 @@ import { FileService } from '../services/fileService';
 import { FileTreeIndexer } from '../utils/fileTreeIndex';
 import { useFileTreeWorkerStore, FileNode } from './fileTreeWorkerStore';
 import type { FileTreeNode, FileTreeFilter, FileMetadata } from '../types/fileTree';
+import { logger } from '../utils/logger';
 
 interface FileTreeState {
   root: FileTreeNode | null;
@@ -112,7 +113,7 @@ function rebuildTreeFromIndex(rootPath: string, originalRoot: FileTreeNode): Fil
     
     return buildNodeWithChildren(rootNode);
   } catch (error) {
-    console.error('Failed to rebuild tree from index:', error);
+    logger.error('file', 'Failed to rebuild tree from index:', error);
     return originalRoot; // Fallback para árvore original
   }
 }
@@ -541,7 +542,7 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>()(
       onRehydrateStorage: (_state) => {
         return (state, error) => {
           if (error) {
-            console.error('Failed to hydrate file tree store:', error);
+            logger.error('file', 'Failed to hydrate file tree store:', error);
           } else if (state) {
             // Convert array back to Set after hydration
             state.expandedPaths = new Set(state.expandedPaths);

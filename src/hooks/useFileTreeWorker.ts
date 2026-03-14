@@ -1,4 +1,5 @@
 import { useRef, useCallback, useEffect } from 'react'
+import { logger } from '../utils/logger'
 
 // Tipos das mensagens do worker
 export type WorkerMessageType = 
@@ -30,17 +31,43 @@ export interface FileTreeOptions {
   createIndex?: boolean
 }
 
+// Tipos para mensagem enviada ao worker
+export interface WorkerMessage {
+  type: WorkerMessageType
+  payload: Record<string, unknown>
+  id: string
+}
+
 // Tipos para resposta do worker
-export interface WorkerResponse<T = any> {
+export interface WorkerResponse<T = unknown> {
   type: WorkerResponseType
   payload: T
   id: string
   success: boolean
 }
 
+export interface FileTreeNode {
+  name: string
+  path: string
+  type: 'file' | 'directory'
+  children?: FileTreeNode[]
+  parent?: string
+  extension?: string
+}
+
+export interface FileTreeIndex {
+  pathToNode: Record<string, FileTreeNode>
+  parentToChildren: Record<string, FileTreeNode[]>
+  typeIndex: {
+    files: string[]
+    directories: string[]
+  }
+  extensionIndex: Record<string, string[]>
+}
+
 export interface ParsedFileTreeResult {
-  tree: any
-  index?: any
+  tree: FileTreeNode
+  index?: FileTreeIndex
   stats: {
     processingTime: number
     nodeCount: number
@@ -53,7 +80,7 @@ export interface ParsedFileTreeResult {
 export function useFileTreeWorker() {
   const workerRef = useRef<Worker | null>(null)
   const pendingCallbacks = useRef<Map<string, {
-    resolve: (value: any) => void
+    resolve: (value: unknown) => void
     reject: (error: Error) => void
   }>>(new Map())
   
@@ -76,14 +103,15 @@ export function useFileTreeWorker() {
           if (success) {
             callbacks.resolve(payload)
           } else {
-            const error = payload.message ? new Error(payload.message) : new Error('Worker error')
+            const errorPayload = payload as { message?: string }
+            const error = errorPayload.message ? new Error(errorPayload.message) : new Error('Worker error')
             callbacks.reject(error)
           }
         }
         
         // Configura handler para erros do worker
         workerRef.current.onerror = (error) => {
-          console.error('FileTree Worker error:', error)
+          logger.error('ui', 'FileTree Worker error:', error)
           
           // Rejeita todas as promises pendentes
           for (const [id, callbacks] of pendingCallbacks.current.entries()) {
@@ -92,7 +120,7 @@ export function useFileTreeWorker() {
           }
         }
       } catch (error) {
-        console.error('Failed to create FileTree Worker:', error)
+        logger.error('ui', 'Failed to create FileTree Worker:', error)
       }
     }
     
@@ -112,9 +140,9 @@ export function useFileTreeWorker() {
   }, [])
   
   // Função genérica para enviar mensagem para o worker
-  const sendMessage = useCallback(<T = any>(
-    type: WorkerMessageType, 
-    payload: any
+  const sendMessage = useCallback(<T = unknown>(
+    type: WorkerMessageType,
+    payload: Record<string, unknown>
   ): Promise<T> => {
     return new Promise((resolve, reject) => {
       if (!workerRef.current) {
@@ -125,7 +153,7 @@ export function useFileTreeWorker() {
       const id = Math.random().toString(36).substring(2, 15)
       
       // Armazena callbacks para esta operação
-      pendingCallbacks.current.set(id, { resolve, reject })
+      pendingCallbacks.current.set(id, { resolve: resolve as (value: unknown) => void, reject })
       
       // Envia mensagem para o worker
       workerRef.current.postMessage({
@@ -147,7 +175,7 @@ export function useFileTreeWorker() {
   
   // Parse completo da árvore de arquivos
   const parseFileTree = useCallback(async (
-    tree: any, 
+    tree: FileTreeNode,
     options: FileTreeOptions = {}
   ): Promise<ParsedFileTreeResult> => {
     return sendMessage<ParsedFileTreeResult>('PARSE_FILE_TREE', {
@@ -157,28 +185,28 @@ export function useFileTreeWorker() {
   }, [sendMessage])
   
   // Indexa diretório para busca otimizada
-  const indexDirectory = useCallback(async (tree: any): Promise<any> => {
-    return sendMessage('INDEX_DIRECTORY', { tree })
+  const indexDirectory = useCallback(async (tree: FileTreeNode): Promise<FileTreeIndex> => {
+    return sendMessage<FileTreeIndex>('INDEX_DIRECTORY', { tree })
   }, [sendMessage])
   
   // Busca arquivos na árvore
   const searchFiles = useCallback(async (
-    tree: any, 
+    tree: FileTreeNode,
     query: string
   ): Promise<Array<{ name: string; path: string; type: string; parent: string }>> => {
     return sendMessage('SEARCH_FILES', { tree, query })
   }, [sendMessage])
   
   // Ordena nós da árvore
-  const sortNodes = useCallback(async (nodes: any[]): Promise<any[]> => {
-    return sendMessage('SORT_NODES', { nodes })
+  const sortNodes = useCallback(async (nodes: FileTreeNode[]): Promise<FileTreeNode[]> => {
+    return sendMessage<FileTreeNode[]>('SORT_NODES', { nodes })
   }, [sendMessage])
   
   // Filtra arquivos baseado em critérios
   const filterFiles = useCallback(async (
-    tree: any, 
+    tree: FileTreeNode,
     filter: FileTreeFilter
-  ): Promise<any> => {
+  ): Promise<FileTreeNode> => {
     return sendMessage('FILTER_FILES', { tree, filter })
   }, [sendMessage])
   

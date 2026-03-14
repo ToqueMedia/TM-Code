@@ -26,11 +26,22 @@ import { PanelHeader } from './PanelHeader'
 import { OptionButton } from './OptionButton'
 import SearchService, { SearchResult } from '../../services/searchService'
 import { useProjectStore } from '../../stores/projectStore'
+import { logger } from '../../utils/logger'
+
+interface FileMatchResult {
+  id: string
+  file: string
+  line: number
+  column: number
+  text: string
+  match: string
+  context: string
+}
 
 // Use types from SearchService instead
 interface FileResult {
   file: string
-  matches: any[]
+  matches: FileMatchResult[]
   isExpanded: boolean
 }
 
@@ -131,7 +142,7 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
     )
   }, [])
 
-  const handleResultClick = useCallback((result: any) => {
+  const handleResultClick = useCallback((result: FileMatchResult) => {
     if (onFileSelect) {
       onFileSelect(result.file, result.line, result.column)
     }
@@ -163,7 +174,7 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
       // Re-run search to get updated results
       await handleSearch()
       
-      console.log(`Replaced "${searchTerm}" with "${replaceTerm}" in ${affectedFiles} files`)
+      logger.debug('search', `Replaced "${searchTerm}" with "${replaceTerm}" in ${affectedFiles} files`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Replace failed')
     }
@@ -203,7 +214,7 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
             <OptionButton 
               label="More options"
               icon={FiMoreHorizontal}
-              onClick={() => console.log('More options')}
+              onClick={() => logger.debug('search', 'More options clicked')}
             />
           </>
         }

@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { FileService } from '../services/fileService';
+import { logger } from '../utils/logger';
 
 // Query keys para organizção do cache
 export const fileKeys = {
@@ -41,7 +42,7 @@ export function useSaveFile() {
       queryClient.setQueryData(fileKeys.file(variables.path), variables.content);
     },
     onError: (error) => {
-      console.error('Failed to save file:', error);
+      logger.error('file', 'Failed to save file:', error);
     },
   });
 }
@@ -131,7 +132,7 @@ export function useBatchFileOperations() {
         
         return { success: true };
       } catch (error) {
-        console.error('Batch save failed:', error);
+        logger.error('file', 'Batch save failed:', error);
         return { success: false, error };
       }
     },
@@ -149,7 +150,7 @@ export function useBatchFileOperations() {
         await Promise.all(prefetchPromises);
         return { success: true };
       } catch (error) {
-        console.error('Batch prefetch failed:', error);
+        logger.error('file', 'Batch prefetch failed:', error);
         return { success: false, error };
       }
     },

@@ -112,48 +112,48 @@ class Logger {
     return `[${timestamp}] [${category.toUpperCase()}] ${message}`;
   }
 
-  error(category: string, message: string, ...args: any[]): void {
+  error(category: string, message: string, ...args: unknown[]): void {
     if (this.shouldLog(category, LogLevel.ERROR)) {
       console.error(this.formatMessage(category, message), ...args);
     }
   }
 
-  warn(category: string, message: string, ...args: any[]): void {
+  warn(category: string, message: string, ...args: unknown[]): void {
     if (this.shouldLog(category, LogLevel.WARN)) {
       console.warn(this.formatMessage(category, message), ...args);
     }
   }
 
-  info(category: string, message: string, ...args: any[]): void {
+  info(category: string, message: string, ...args: unknown[]): void {
     if (this.shouldLog(category, LogLevel.INFO)) {
       console.log(this.formatMessage(category, message), ...args);
     }
   }
 
-  debug(category: string, message: string, ...args: any[]): void {
+  debug(category: string, message: string, ...args: unknown[]): void {
     if (this.shouldLog(category, LogLevel.DEBUG)) {
       console.log(this.formatMessage(category, message), ...args);
     }
   }
 
   // Convenience methods for common categories
-  fileWatcher(message: string, ...args: any[]): void {
+  fileWatcher(message: string, ...args: unknown[]): void {
     this.debug('file-watcher', message, ...args);
   }
 
-  theme(message: string, ...args: any[]): void {
+  theme(message: string, ...args: unknown[]): void {
     this.debug('theme', message, ...args);
   }
 
-  editor(message: string, ...args: any[]): void {
+  editor(message: string, ...args: unknown[]): void {
     this.debug('editor', message, ...args);
   }
 
-  window(message: string, ...args: any[]): void {
+  window(message: string, ...args: unknown[]): void {
     this.debug('window', message, ...args);
   }
 
-  terminal(message: string, ...args: any[]): void {
+  terminal(message: string, ...args: unknown[]): void {
     this.info('terminal', message, ...args);
   }
 
@@ -274,16 +274,16 @@ if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
 }
 
 // Export convenience functions
-export const logError = (category: string, message: string, ...args: any[]) => 
+export const logError = (category: string, message: string, ...args: unknown[]) => 
   logger.error(category, message, ...args);
 
-export const logWarn = (category: string, message: string, ...args: any[]) => 
+export const logWarn = (category: string, message: string, ...args: unknown[]) => 
   logger.warn(category, message, ...args);
 
-export const logInfo = (category: string, message: string, ...args: any[]) => 
+export const logInfo = (category: string, message: string, ...args: unknown[]) => 
   logger.info(category, message, ...args);
 
-export const logDebug = (category: string, message: string, ...args: any[]) => 
+export const logDebug = (category: string, message: string, ...args: unknown[]) => 
   logger.debug(category, message, ...args);
 
 // Development helper to toggle verbose logging

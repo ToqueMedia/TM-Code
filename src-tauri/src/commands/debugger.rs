@@ -184,7 +184,7 @@ pub async fn start_debug_session(
 
     // Store session
     {
-        let mut sessions = state.sessions.lock().unwrap();
+        let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
         sessions.insert(session_id.clone(), internal_session);
     }
 
@@ -197,7 +197,7 @@ pub async fn stop_debug_session(
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
     let process_to_kill = {
-        let mut sessions = state.sessions.lock().unwrap();
+        let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
         if let Some(session) = sessions.remove(&session_id) {
             session.process
@@ -219,22 +219,27 @@ pub async fn launch_debug_session(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
+    // Lock mutex, read the config, release mutex
+    let config = {
+        let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
-    let session = sessions
-        .get_mut(&session_id)
-        .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
-    // Build command based on debug type
-    let mut cmd = match session.config.debug_type.as_str() {
+        session.config.clone()
+    };
+
+    // Build command based on debug type (outside the lock)
+    let mut cmd = match config.debug_type.as_str() {
         "node" => {
             let mut node_cmd = TokioCommand::new("node");
             node_cmd
                 .arg("--inspect-brk=9229") // Enable debugger with breakpoint on start
-                .arg(&session.config.program)
-                .args(&session.config.args)
-                .current_dir(&session.config.cwd)
-                .envs(&session.config.env)
+                .arg(&config.program)
+                .args(&config.args)
+                .current_dir(&config.cwd)
+                .envs(&config.env)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .stdin(Stdio::piped());
@@ -243,19 +248,28 @@ pub async fn launch_debug_session(
         _ => {
             return Err(DebuggerError::InvalidConfig(format!(
                 "Unsupported debug type: {}",
-                session.config.debug_type
+                config.debug_type
             ))
             .to_string())
         }
     };
 
-    // Start the process
+    // Spawn process outside the lock
     let process = cmd
         .spawn()
         .map_err(|e| DebuggerError::StartFailed(e.to_string()).to_string())?;
 
-    session.process = Some(process);
-    session.status = DebugStatus::Running;
+    // Lock mutex again, store the process and update status
+    {
+        let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+
+        let session = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
+
+        session.process = Some(process);
+        session.status = DebugStatus::Running;
+    }
 
     Ok(())
 }
@@ -267,7 +281,7 @@ pub async fn set_breakpoint(
     line: u32,
     state: State<'_, DebuggerState>,
 ) -> Result<DebugBreakpoint, String> {
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
@@ -295,7 +309,7 @@ pub async fn remove_breakpoint(
     breakpoint_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
@@ -311,7 +325,7 @@ pub async fn get_breakpoints(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugBreakpoint>, String> {
-    let sessions = state.sessions.lock().unwrap();
+    let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get(&session_id)
@@ -326,14 +340,13 @@ pub async fn debug_continue(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
-    // For now, just update status. In a full implementation,
-    // this would send a continue command to the debugger
+    // TODO: Stub — only updates local status. Requires DAP integration to control the debugger process.
     session.status = DebugStatus::Running;
 
     Ok(())
@@ -344,12 +357,13 @@ pub async fn debug_pause(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
+    // TODO: Stub — only updates local status. Requires DAP integration to control the debugger process.
     session.status = DebugStatus::Paused;
 
     Ok(())
@@ -360,13 +374,13 @@ pub async fn debug_step_over(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
-    // In a full implementation, this would send a step over command
+    // TODO: Stub — only updates local status. Requires DAP integration to control the debugger process.
     session.status = DebugStatus::Paused;
 
     Ok(())
@@ -377,12 +391,13 @@ pub async fn debug_step_into(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
+    // TODO: Stub — only updates local status. Requires DAP integration to control the debugger process.
     session.status = DebugStatus::Paused;
 
     Ok(())
@@ -393,12 +408,13 @@ pub async fn debug_step_out(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
+    // TODO: Stub — only updates local status. Requires DAP integration to control the debugger process.
     session.status = DebugStatus::Paused;
 
     Ok(())
@@ -408,7 +424,7 @@ pub async fn debug_step_out(
 pub async fn get_debug_sessions(
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugSession>, String> {
-    let sessions = state.sessions.lock().unwrap();
+    let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let debug_sessions: Vec<DebugSession> = sessions
         .iter()
@@ -429,23 +445,15 @@ pub async fn get_call_stack(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugStackFrame>, String> {
-    let sessions = state.sessions.lock().unwrap();
+    let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let _session = sessions
         .get(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
-    // For now, return mock data. In a full implementation,
-    // this would query the actual debugger for stack frames
-    let mock_stack = vec![DebugStackFrame {
-        id: 1,
-        name: "main".to_string(),
-        file: "/path/to/file.js".to_string(),
-        line: 42,
-        column: 10,
-    }];
-
-    Ok(mock_stack)
+    // TODO: Not yet implemented — requires DAP (Debug Adapter Protocol) integration.
+    // Returns empty results until a real debugger adapter is connected.
+    Ok(vec![])
 }
 
 #[tauri::command]
@@ -454,29 +462,13 @@ pub async fn get_variables(
     _frame_id: u32,
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugVariable>, String> {
-    let sessions = state.sessions.lock().unwrap();
+    let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let _session = sessions
         .get(&session_id)
         .ok_or_else(|| DebuggerError::SessionNotFound(session_id.clone()).to_string())?;
 
-    // For now, return mock data
-    let mock_variables = vec![
-        DebugVariable {
-            name: "x".to_string(),
-            value: "42".to_string(),
-            type_name: "number".to_string(),
-            has_children: false,
-            variables_reference: 0,
-        },
-        DebugVariable {
-            name: "obj".to_string(),
-            value: "Object".to_string(),
-            type_name: "object".to_string(),
-            has_children: true,
-            variables_reference: 1,
-        },
-    ];
-
-    Ok(mock_variables)
+    // TODO: Not yet implemented — requires DAP (Debug Adapter Protocol) integration.
+    // Returns empty results until a real debugger adapter is connected.
+    Ok(vec![])
 }

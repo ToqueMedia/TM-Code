@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { logger } from '../utils/logger';
 
 export interface FileContent {
   path: string;
@@ -11,7 +12,7 @@ export class FileService {
       const response = await invoke<string>('read_file', { path });
       return response;
     } catch (error) {
-      console.error('Error reading file:', error);
+      logger.error('file', 'Error reading file:', error);
       throw error;
     }
   }
@@ -20,7 +21,7 @@ export class FileService {
     try {
       await invoke<void>('write_file', { path, content });
     } catch (error) {
-      console.error('Error writing file:', error);
+      logger.error('file', 'Error writing file:', error);
       throw error;
     }
   }
@@ -29,7 +30,7 @@ export class FileService {
     try {
       await invoke<void>('create_file', { path, content });
     } catch (error) {
-      console.error('Error creating file:', error);
+      logger.error('file', 'Error creating file:', error);
       throw error;
     }
   }
@@ -38,7 +39,7 @@ export class FileService {
     try {
       await invoke<void>('delete_file', { path });
     } catch (error) {
-      console.error('Error deleting file:', error);
+      logger.error('file', 'Error deleting file:', error);
       throw error;
     }
   }

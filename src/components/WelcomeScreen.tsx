@@ -16,10 +16,11 @@ import {
   Icon,
 } from '@chakra-ui/react'
 import { useProjectStore } from '../stores/projectStore'
+import { logger } from '../utils/logger'
 
 interface WelcomeScreenProps {
   onOpenProject: (path?: string) => void
-  onCreateProject: (projectData: any) => void
+  onCreateProject: () => void
 }
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreateProject: _onCreateProject }) => {
@@ -51,7 +52,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject, onCreatePr
         onOpenProject(selected as string);
       }
     } catch (error: unknown) {
-      console.error('Failed to open directory dialog:', error);
+      logger.error('ui', 'Failed to open directory dialog:', error);
     }
   };
 

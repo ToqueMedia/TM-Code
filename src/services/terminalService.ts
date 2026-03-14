@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { logger } from '../utils/logger';
 
 export interface CommandResult {
   stdout: string;
@@ -36,7 +37,7 @@ export default class TerminalService {
 
       return result as CommandResult;
     } catch (error) {
-      console.error('Failed to execute command:', error);
+      logger.error('terminal', 'Failed to execute command:', error);
       throw new Error(`Failed to execute command: ${error}`);
     }
   }
@@ -59,7 +60,7 @@ export default class TerminalService {
 
       return processInfo as ProcessInfo;
     } catch (error) {
-      console.error('Failed to start interactive shell:', error);
+      logger.error('terminal', 'Failed to start interactive shell:', error);
       throw new Error(`Failed to start interactive shell: ${error}`);
     }
   }
@@ -72,7 +73,7 @@ export default class TerminalService {
         input,
       });
     } catch (error) {
-      console.error('Failed to send input to process:', error);
+      logger.error('terminal', 'Failed to send input to process:', error);
       throw new Error(`Failed to send input to process: ${error}`);
     }
   }
@@ -84,7 +85,7 @@ export default class TerminalService {
         pid,
       });
     } catch (error) {
-      console.error('Failed to kill process:', error);
+      logger.error('terminal', 'Failed to kill process:', error);
       throw new Error(`Failed to kill process: ${error}`);
     }
   }
@@ -95,7 +96,7 @@ export default class TerminalService {
       const cwd = await invoke('get_current_directory');
       return cwd as string;
     } catch (error) {
-      console.error('Failed to get current directory:', error);
+      logger.error('terminal', 'Failed to get current directory:', error);
       return '/'; // Fallback for Unix-like systems
     }
   }
@@ -106,7 +107,7 @@ export default class TerminalService {
       const exists = await invoke('command_exists', { command });
       return exists as boolean;
     } catch (error) {
-      console.error('Failed to check if command exists:', error);
+      logger.error('terminal', 'Failed to check if command exists:', error);
       return false;
     }
   }
@@ -117,7 +118,7 @@ export default class TerminalService {
       const envVars = await invoke('get_environment_variables');
       return envVars as Record<string, string>;
     } catch (error) {
-      console.error('Failed to get environment variables:', error);
+      logger.error('terminal', 'Failed to get environment variables:', error);
       return {};
     }
   }
@@ -128,7 +129,7 @@ export default class TerminalService {
       const newCwd = await invoke('change_directory', { path });
       return newCwd as string;
     } catch (error) {
-      console.error('Failed to change directory:', error);
+      logger.error('terminal', 'Failed to change directory:', error);
       throw new Error(`Failed to change directory: ${error}`);
     }
   }
@@ -152,7 +153,7 @@ export default class TerminalService {
 
       return completions as string[];
     } catch (error) {
-      console.error('Failed to get completions:', error);
+      logger.error('terminal', 'Failed to get completions:', error);
       return [];
     }
   }
@@ -163,7 +164,7 @@ export default class TerminalService {
       const history = await invoke('get_command_history');
       return history as string[];
     } catch (error) {
-      console.error('Failed to get command history:', error);
+      logger.error('terminal', 'Failed to get command history:', error);
       return [];
     }
   }
@@ -173,7 +174,7 @@ export default class TerminalService {
     try {
       await invoke('save_command_to_history', { command });
     } catch (error) {
-      console.error('Failed to save command to history:', error);
+      logger.error('terminal', 'Failed to save command to history:', error);
     }
   }
 
@@ -182,7 +183,7 @@ export default class TerminalService {
     try {
       await invoke('clear_command_history');
     } catch (error) {
-      console.error('Failed to clear command history:', error);
+      logger.error('terminal', 'Failed to clear command history:', error);
     }
   }
 }

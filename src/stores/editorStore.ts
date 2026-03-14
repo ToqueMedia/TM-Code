@@ -1,10 +1,10 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { FileService } from '../services/fileService';
-import { EditorManager } from '../utils/editorManager';
 import UnsavedChangesService from '../services/unsavedChangesService';
 import { AutoSaveQueue } from '../utils/autoSaveQueue';
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
+import { logger } from '../utils/logger';
 
 interface EditorFile {
   path: string;
@@ -95,19 +95,19 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
       redoStack: {},
 
       openFile: async (path: string) => {
-        console.log('EditorStore: Opening file:', path);
+        logger.debug('editor', 'Opening file:', path);
         set({ activeFile: path });
         
         // Check if file is already open
         const existingFile = get().openFiles.find(f => f.path === path);
         if (existingFile) {
-          console.log('EditorStore: File already open:', path, existingFile);
+          logger.debug('editor', 'File already open:', path);
           // Refresh content from file system to ensure we have the latest version
           try {
-            console.log('EditorStore: Refreshing content for:', path);
+            logger.debug('editor', 'Refreshing content for:', path);
             const content = await FileService.readFile(path);
             if (content !== existingFile.content) {
-              console.log('EditorStore: Content changed for:', path);
+              logger.debug('editor', 'Content changed for:', path);
               set(state => {
                 const fileIndex = state.openFiles.findIndex(f => f.path === path);
                 if (fileIndex === -1) return state;
@@ -123,21 +123,16 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
               });
             }
           } catch (error) {
-            console.error(`Failed to refresh file content ${path}:`, error);
+            logger.error('editor', `Failed to refresh file content ${path}:`, error);
           }
           return;
         }
         
         try {
-          console.log('EditorStore: Reading file content for:', path);
+          logger.debug('editor', 'Reading file content for:', path);
           const content = await FileService.readFile(path);
           const language = getLanguageFromExtension(path);
-          console.log('EditorStore: File loaded successfully:', {
-            path,
-            contentLength: content.length,
-            language,
-            contentPreview: content.substring(0, 100)
-          });
+          logger.debug('editor', `File loaded successfully: ${path} (${content.length} chars, ${language})`);
           
           set(state => ({
             openFiles: [
@@ -151,49 +146,45 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             ]
           }));
         } catch (error) {
-          console.error(`Failed to open file ${path}:`, error);
+          logger.error('editor', `Failed to open file ${path}:`, error);
           throw error;
         }
       },
 
       closeFile: (path: string) => {
-        const { openFiles } = get();
-        const f = openFiles.find(f => f.path === path);
-        const isDirty = !!f?.isDirty;
-        if (isDirty) {
-          // Ask for confirmation before closing an unsaved file
-          // Using a microtask to avoid blocking zustand set
+        const removeFile = () => {
+          set(state => {
+            const updated = state.openFiles.filter(ff => ff.path !== path);
+            const cursorPositions = { ...state.cursorPositions };
+            delete cursorPositions[path];
+            unsavedChangesService.markFileAsClean(path);
+            let activeFile = state.activeFile;
+            if (activeFile === path) {
+              activeFile = updated.length > 0 ? updated[0].path : null;
+            }
+            return { openFiles: updated, activeFile, cursorPositions };
+          });
+        };
+
+        const f = get().openFiles.find(f => f.path === path);
+        if (f?.isDirty) {
           Promise.resolve().then(async () => {
+            // Re-check state after async gap — file may have been saved or already closed
+            const current = get().openFiles.find(ff => ff.path === path);
+            if (!current) return; // Already closed
+            if (!current.isDirty) {
+              removeFile();
+              return;
+            }
             const ok = await tauriConfirm(`Close "${path}" without saving?`, { title: 'Unsaved changes', kind: 'warning' });
             if (!ok) return;
-            set(state => {
-              const updated = state.openFiles.filter(ff => ff.path !== path);
-              const cursorPositions = { ...state.cursorPositions };
-              delete cursorPositions[path];
-              const editorManager = EditorManager.getInstance();
-              editorManager.closeFile(path);
-              unsavedChangesService.markFileAsClean(path);
-              let activeFile = state.activeFile;
-              if (activeFile === path) {
-                activeFile = updated.length > 0 ? updated[0].path : null;
-              }
-              return { openFiles: updated, activeFile, cursorPositions };
-            });
+            // Re-verify file still exists before removing
+            if (!get().openFiles.some(ff => ff.path === path)) return;
+            removeFile();
           });
           return;
         }
-        set(state => {
-          const updated = state.openFiles.filter(ff => ff.path !== path);
-          const cursorPositions = { ...state.cursorPositions };
-          delete cursorPositions[path];
-          const editorManager = EditorManager.getInstance();
-          editorManager.closeFile(path);
-          let activeFile = state.activeFile;
-          if (activeFile === path) {
-            activeFile = updated.length > 0 ? updated[0].path : null;
-          }
-          return { openFiles: updated, activeFile, cursorPositions };
-        });
+        removeFile();
       },
 
       setActiveFile: (path: string | null) => {
@@ -386,7 +377,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           // Mark file as clean
           unsavedChangesService.markFileAsClean(path);
         } catch (error) {
-          console.error(`Failed to save file ${path}:`, error);
+          logger.error('editor', `Failed to save file ${path}:`, error);
           throw error;
         }
       },
@@ -429,14 +420,14 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           // Mark all files as clean
           dirtyFiles.forEach(file => unsavedChangesService.markFileAsClean(file.path));
         } catch (error) {
-          console.error('Failed to save all files:', error);
+          logger.error('editor', 'Failed to save all files:', error);
           throw error;
         }
       },
 
       refreshFileContent: async (path: string) => {
         try {
-          console.log('EditorStore: Refreshing file content for:', path);
+          logger.debug('editor', 'Refreshing file content for:', path);
           const content = await FileService.readFile(path);
           
           set(state => {
@@ -453,7 +444,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             return { openFiles: updatedFiles };
           });
         } catch (error) {
-          console.error(`Failed to refresh file content ${path}:`, error);
+          logger.error('editor', `Failed to refresh file content ${path}:`, error);
           throw error;
         }
       },

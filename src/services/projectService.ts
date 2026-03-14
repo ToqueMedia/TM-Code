@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ProjectInfo, RecentProject, ProjectState, ProjectTemplate } from '../types/project';
+import { logger } from '../utils/logger';
 
 export class ProjectService {
   static async openProject(path: string): Promise<ProjectInfo> {
@@ -7,7 +8,7 @@ export class ProjectService {
       const response = await invoke<ProjectInfo>('open_project', { path });
       return response;
     } catch (error) {
-      console.error('Error opening project:', error);
+      logger.error('project', 'Error opening project:', error);
       throw error;
     }
   }
@@ -17,7 +18,7 @@ export class ProjectService {
       const response = await invoke<ProjectInfo>('create_project', { path, template });
       return response;
     } catch (error) {
-      console.error('Error creating project:', error);
+      logger.error('project', 'Error creating project:', error);
       throw error;
     }
   }
@@ -27,7 +28,7 @@ export class ProjectService {
       const response = await invoke<RecentProject[]>('get_recent_projects');
       return response;
     } catch (error) {
-      console.error('Error getting recent projects:', error);
+      logger.error('project', 'Error getting recent projects:', error);
       throw error;
     }
   }
@@ -36,7 +37,7 @@ export class ProjectService {
     try {
       await invoke<void>('save_project_state', { projectId, state });
     } catch (error) {
-      console.error('Error saving project state:', error);
+      logger.error('project', 'Error saving project state:', error);
       throw error;
     }
   }
@@ -46,7 +47,7 @@ export class ProjectService {
       const response = await invoke<ProjectState>('load_project_state', { projectId });
       return response;
     } catch (error) {
-      console.error('Error loading project state:', error);
+      logger.error('project', 'Error loading project state:', error);
       throw error;
     }
   }
@@ -105,7 +106,7 @@ export class ProjectService {
         lastModified: response.lastModified || undefined
       };
     } catch (error) {
-      console.error('Error checking project status:', error);
+      logger.error('project', 'Error checking project status:', error);
       throw error;
     }
   }

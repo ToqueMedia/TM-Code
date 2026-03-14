@@ -1145,10 +1145,33 @@ fn is_valid_npm_name(name: &str) -> bool {
 }
 
 fn decompress_data(compressed_data: &[u8]) -> Result<String> {
+    use crate::commands::file_tree::MAX_DECOMPRESS_SIZE;
+
     let mut decoder = ZlibDecoder::new(compressed_data);
-    let mut decompressed_data = String::new();
-    decoder.read_to_string(&mut decompressed_data)?;
-    Ok(decompressed_data)
+    let mut decompressed_data = Vec::new();
+    let mut buf = [0u8; 8192];
+    let mut total_read: usize = 0;
+
+    loop {
+        let n = decoder.read(&mut buf).map_err(|e| {
+            ProjectError::Io(format!("Decompression failed: {}", e))
+        })?;
+        if n == 0 {
+            break;
+        }
+        total_read += n;
+        if total_read > MAX_DECOMPRESS_SIZE {
+            return Err(ProjectError::Io(format!(
+                "Decompressed data exceeds maximum allowed size ({} MB)",
+                MAX_DECOMPRESS_SIZE / (1024 * 1024)
+            )));
+        }
+        decompressed_data.extend_from_slice(&buf[..n]);
+    }
+
+    String::from_utf8(decompressed_data).map_err(|e| {
+        ProjectError::Io(format!("Decompressed data is not valid UTF-8: {}", e))
+    })
 }
 
 fn compress_data(data: &[u8]) -> Result<Vec<u8>> {

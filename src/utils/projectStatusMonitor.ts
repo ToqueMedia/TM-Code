@@ -1,6 +1,7 @@
 // src/utils/projectStatusMonitor.ts
 import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore } from '../stores/projectStore';
+import { logger } from './logger';
 
 export interface ProjectStatus {
   exists: boolean;
@@ -27,7 +28,7 @@ export class ProjectStatusMonitor {
       const status: ProjectStatus = await invoke('check_project_status', { path });
       return status;
     } catch (error) {
-      console.error('Failed to check project status:', error);
+      logger.error('project', 'Failed to check project status:', error);
       return {
         exists: false,
         permissionsChanged: false
@@ -49,7 +50,7 @@ export class ProjectStatusMonitor {
         
         // Handle project deletion
         if (!status.exists) {
-          console.warn('Project directory no longer exists');
+          logger.warn('project', 'Project directory no longer exists');
           // Show notification to user and close project
           this.showNotification('Project directory no longer exists. Closing project.', 'error');
           useProjectStore.getState().closeProject();
@@ -57,7 +58,7 @@ export class ProjectStatusMonitor {
         
         // Handle permission changes
         if (status.permissionsChanged) {
-          console.warn('Project permissions have changed');
+          logger.warn('project', 'Project permissions have changed');
           // Show notification to user
           this.showNotification('Project permissions have changed. Some operations may be restricted.', 'warning');
         }
@@ -75,7 +76,7 @@ export class ProjectStatusMonitor {
   private showNotification(message: string, type: 'info' | 'warning' | 'error') {
     // In a real implementation, we would use a proper notification system
     // For now, we'll just show an alert
-    console.log(`[${type.toUpperCase()}] ${message}`);
+    logger.info('project', `[${type.toUpperCase()}] ${message}`);
     
     // You can replace this with a proper notification system like:
     // - Toast notifications

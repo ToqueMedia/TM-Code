@@ -107,6 +107,7 @@ import { useEditorRepository } from '../../stores/editorStore';
 import type { FileTreeNode } from '../../types/fileTree';
 import FileWatcherService from '../../services/fileWatcherService';
 import TypeScriptIcon from '../icons/TypeScriptIcon';
+import { logger } from '../../utils/logger';
 import { getFileIconByExtension, getFolderIconByPath, getFolderIconByName } from '../../utils/iconMapper';
 
 interface FileTreeProps {
@@ -820,7 +821,7 @@ const FileTree: React.FC<FileTreeProps> = ({
         try {
           await fileWatcherRef.current.watchDirectory(rootPath);
         } catch (error) {
-          console.error('Failed to set up file watching:', error);
+          logger.error('file', 'Failed to set up file watching:', error);
         }
       };
       

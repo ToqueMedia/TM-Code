@@ -1,4 +1,5 @@
 import { FileService } from '../services/fileService';
+import { logger } from './logger';
 
 export interface QueuedFile {
   path: string;
@@ -110,7 +111,7 @@ export class AutoSaveQueue {
         if (result.status === 'fulfilled') {
           // Sucesso - remove da queue
           this.queue.delete(file.path);
-          console.debug(`Auto-saved: ${file.path}`);
+          logger.debug('editor', `Auto-saved: ${file.path}`);
         } else {
           // Falha - incrementa retry count
           if (file.retryCount < this.maxRetries) {
@@ -119,11 +120,11 @@ export class AutoSaveQueue {
               retryCount: file.retryCount + 1,
               timestamp: Date.now() + (file.retryCount + 1) * 2000 // Backoff exponencial
             });
-            console.warn(`Failed to auto-save ${file.path}, retry ${file.retryCount + 1}/${this.maxRetries}`);
+            logger.warn('editor', `Failed to auto-save ${file.path}, retry ${file.retryCount + 1}/${this.maxRetries}`);
           } else {
             // Máximo de tentativas atingido - remove da queue
             this.queue.delete(file.path);
-            console.error(`Failed to auto-save ${file.path} after ${this.maxRetries} retries:`, result.reason);
+            logger.error('editor', `Failed to auto-save ${file.path} after ${this.maxRetries} retries:`, result.reason);
           }
         }
       });
@@ -134,7 +135,7 @@ export class AutoSaveQueue {
       }
 
     } catch (error) {
-      console.error('Error processing auto-save batch:', error);
+      logger.error('editor', 'Error processing auto-save batch:', error);
     } finally {
       this.isProcessing = false;
     }
@@ -182,9 +183,9 @@ export class AutoSaveQueue {
     try {
       await this.saveFile(file);
       this.queue.delete(path);
-      console.debug(`Force saved: ${path}`);
+      logger.debug('editor', `Force saved: ${path}`);
     } catch (error) {
-      console.error(`Failed to force save ${path}:`, error);
+      logger.error('editor', `Failed to force save ${path}:`, error);
       throw error;
     }
   }

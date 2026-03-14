@@ -1,9 +1,11 @@
 import { useProjectStore } from '../stores/projectStore';
 import { useEditorRepository } from '../stores/editorStore';
+import { logger } from './logger';
 
 export class WindowTitleManager {
   private static instance: WindowTitleManager;
-  private unsubscribe: (() => void) | null = null;
+  private unsubscribeProject: (() => void) | null = null;
+  private unsubscribeEditor: (() => void) | null = null;
 
   private constructor() {}
 
@@ -15,70 +17,63 @@ export class WindowTitleManager {
   }
 
   startManaging() {
-    // Subscribe to store changes
-    this.unsubscribe = useProjectStore.subscribe((state) => {
-      this.updateWindowTitle(state);
+    this.unsubscribeProject = useProjectStore.subscribe(() => {
+      this.updateWindowTitle();
     });
-    
-    // Also subscribe to editor changes
-    useEditorRepository.subscribe(() => {
-      const projectState = useProjectStore.getState();
-      this.updateWindowTitle(projectState);
+
+    this.unsubscribeEditor = useEditorRepository.subscribe(() => {
+      this.updateWindowTitle();
     });
-    
+
     // Initial update
-    const initialState = useProjectStore.getState();
-    this.updateWindowTitle(initialState);
+    this.updateWindowTitle();
   }
 
   stopManaging() {
-    if (this.unsubscribe) {
-      this.unsubscribe();
-      this.unsubscribe = null;
+    if (this.unsubscribeProject) {
+      this.unsubscribeProject();
+      this.unsubscribeProject = null;
+    }
+    if (this.unsubscribeEditor) {
+      this.unsubscribeEditor();
+      this.unsubscribeEditor = null;
     }
   }
 
-  private updateWindowTitle(projectState: ReturnType<typeof useProjectStore.getState>) {
+  private updateWindowTitle() {
     try {
-      const { currentProject, activeFile } = projectState;
-      const editorState = useEditorRepository.getState();
-      
+      const { currentProject } = useProjectStore.getState();
+      const { activeFile, openFiles } = useEditorRepository.getState();
+
       if (!currentProject) {
         document.title = 'ToqueMedia Studio';
         return;
       }
-      
+
       const projectName = currentProject.name;
       let fileName = '';
       let hasUnsavedChanges = false;
-      
+
       if (activeFile) {
-        // Extract file name from path
         fileName = activeFile.split('/').pop() || activeFile;
-        
-        // Check if file has unsaved changes
-        const openFile = editorState.openFiles.find(f => f.path === activeFile);
-        if (openFile && openFile.isDirty) {
+        const openFile = openFiles.find(f => f.path === activeFile);
+        if (openFile?.isDirty) {
           hasUnsavedChanges = true;
         }
       }
-      
-      // Build title
+
       let title = projectName;
       if (fileName) {
         title = `${projectName} - ${fileName}`;
       }
-      
-      // Add unsaved changes indicator
       if (hasUnsavedChanges) {
         title = `• ${title}`;
       }
-      
       title = `${title} - ToqueMedia Studio`;
-      
+
       document.title = title;
     } catch (error: unknown) {
-      console.error('Error updating window title:', error);
+      logger.error('ui', 'Error updating window title:', error);
       document.title = 'ToqueMedia Studio';
     }
   }

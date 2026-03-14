@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // File tree node types
@@ -74,6 +75,84 @@ impl From<std::io::Error> for FileTreeError {
 
 pub type Result<T, E = FileTreeError> = std::result::Result<T, E>;
 
+/// Maximum file size allowed for reading (50 MB)
+const MAX_READ_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+/// Maximum decompression output size (100 MB) to prevent zip bombs
+pub const MAX_DECOMPRESS_SIZE: usize = 100 * 1024 * 1024;
+
+/// Validates that a resolved path stays within the allowed project root.
+/// Prevents path traversal attacks (e.g., "../../etc/passwd").
+#[allow(dead_code)]
+fn validate_path_within_root(path: &Path, root: &Path) -> Result<PathBuf> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|_| {
+        FileTreeError::PathNotFound(format!("Root path not found: {}", root.display()))
+    })?;
+
+    // For paths that don't exist yet (create operations), canonicalize the parent
+    let canonical_path = if path.exists() {
+        std::fs::canonicalize(path).map_err(|_| {
+            FileTreeError::PathNotFound(format!("Path not found: {}", path.display()))
+        })?
+    } else {
+        let parent = path.parent().ok_or_else(|| {
+            FileTreeError::InvalidOperation("Cannot resolve parent directory".to_string())
+        })?;
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
+            FileTreeError::PathNotFound(format!("Parent path not found: {}", parent.display()))
+        })?;
+        let file_name = path.file_name().ok_or_else(|| {
+            FileTreeError::InvalidOperation("Invalid file name".to_string())
+        })?;
+        canonical_parent.join(file_name)
+    };
+
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(FileTreeError::InvalidOperation(format!(
+            "Access denied: path '{}' is outside the project root",
+            path.display()
+        )));
+    }
+
+    Ok(canonical_path)
+}
+
+/// Validates a standalone path by canonicalizing it and checking for symlink abuse.
+/// Used for commands that don't have a project root context (read_file, write_file, etc.)
+fn validate_path_safe(path: &Path) -> Result<PathBuf> {
+    // Block paths with ".." components before they reach the filesystem
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(FileTreeError::InvalidOperation(
+                "Path traversal ('..') is not allowed".to_string(),
+            ));
+        }
+    }
+
+    if path.exists() {
+        std::fs::canonicalize(path).map_err(|_| {
+            FileTreeError::PathNotFound(format!("{}", path.display()))
+        })
+    } else {
+        // For new files, canonicalize the parent
+        let parent = path.parent().ok_or_else(|| {
+            FileTreeError::InvalidOperation("Cannot resolve parent directory".to_string())
+        })?;
+        if parent.as_os_str().is_empty() {
+            return Err(FileTreeError::InvalidOperation(
+                "Cannot resolve path without parent directory".to_string(),
+            ));
+        }
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
+            FileTreeError::PathNotFound(format!("Parent not found: {}", parent.display()))
+        })?;
+        let file_name = path.file_name().ok_or_else(|| {
+            FileTreeError::InvalidOperation("Invalid file name".to_string())
+        })?;
+        Ok(canonical_parent.join(file_name))
+    }
+}
+
 // Convert SystemTime to ISO string
 fn system_time_to_iso(st: SystemTime) -> String {
     let duration = st.duration_since(UNIX_EPOCH).unwrap_or_default();
@@ -132,7 +211,14 @@ pub fn build_file_tree(root_path: String, filter: Option<FileTreeFilter>) -> Res
         ));
     }
 
-    build_tree_node(path, &filter, 0)
+    let canonical_root = std::fs::canonicalize(path).map_err(|_| {
+        FileTreeError::PathNotFound(root_path.clone())
+    })?;
+
+    let mut visited = HashSet::new();
+    visited.insert(canonical_root.clone());
+
+    build_tree_node(&canonical_root, &filter, 0, &mut visited)
 }
 
 // Recursive helper to build tree nodes
@@ -140,6 +226,7 @@ fn build_tree_node(
     path: &Path,
     filter: &Option<FileTreeFilter>,
     depth: usize,
+    visited: &mut HashSet<PathBuf>,
 ) -> Result<FileTreeNode> {
     let metadata = std::fs::metadata(path)?;
 
@@ -194,6 +281,20 @@ fn build_tree_node(
         let entry = entry?;
         let entry_path = entry.path();
 
+        // Detect symlinks and prevent infinite loops
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            if let Ok(canonical) = std::fs::canonicalize(&entry_path) {
+                if !visited.insert(canonical) {
+                    // Already visited this target — skip to prevent cycle
+                    continue;
+                }
+            } else {
+                // Broken symlink — skip
+                continue;
+            }
+        }
+
         // Skip hidden files if not showing hidden
         if let Some(filter_opts) = filter {
             if !filter_opts.show_hidden {
@@ -206,7 +307,7 @@ fn build_tree_node(
         }
 
         // Recursively build child nodes
-        match build_tree_node(&entry_path, filter, depth + 1) {
+        match build_tree_node(&entry_path, filter, depth + 1, visited) {
             Ok(child_node) => children.push(child_node),
             Err(e) => {
                 // Log error but continue processing other entries
@@ -248,7 +349,16 @@ pub fn create_file_or_directory(
     name: String,
     is_directory: bool,
 ) -> Result<FileOperationResult> {
-    let full_path = Path::new(&parent_path).join(&name);
+    // Reject names that attempt path traversal
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err(FileTreeError::InvalidOperation(
+            "Name must not contain path separators or '..'".to_string(),
+        ));
+    }
+
+    let parent = Path::new(&parent_path);
+    validate_path_safe(parent)?;
+    let full_path = parent.join(&name);
 
     if full_path.exists() {
         return Err(FileTreeError::InvalidOperation(format!(
@@ -278,19 +388,20 @@ pub fn create_file_or_directory(
 #[tauri::command]
 pub fn delete_file_or_directory(path: String) -> Result<FileOperationResult> {
     let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
 
-    if !file_path.exists() {
+    if !canonical.exists() {
         return Err(FileTreeError::PathNotFound(path));
     }
 
-    let result = if file_path.is_dir() {
-        std::fs::remove_dir_all(file_path).map(|_| FileOperationResult {
+    let result = if canonical.is_dir() {
+        std::fs::remove_dir_all(&canonical).map(|_| FileOperationResult {
             success: true,
             message: "Directory deleted successfully".to_string(),
             path: path.clone(),
         })
     } else {
-        std::fs::remove_file(file_path).map(|_| FileOperationResult {
+        std::fs::remove_file(&canonical).map(|_| FileOperationResult {
             success: true,
             message: "File deleted successfully".to_string(),
             path: path.clone(),
@@ -303,13 +414,21 @@ pub fn delete_file_or_directory(path: String) -> Result<FileOperationResult> {
 // Rename a file or directory
 #[tauri::command]
 pub fn rename_file_or_directory(old_path: String, new_name: String) -> Result<FileOperationResult> {
-    let old_path_obj = Path::new(&old_path);
+    // Reject names that attempt path traversal
+    if new_name.contains("..") || new_name.contains('/') || new_name.contains('\\') {
+        return Err(FileTreeError::InvalidOperation(
+            "Name must not contain path separators or '..'".to_string(),
+        ));
+    }
 
-    if !old_path_obj.exists() {
+    let old_path_obj = Path::new(&old_path);
+    let canonical_old = validate_path_safe(old_path_obj)?;
+
+    if !canonical_old.exists() {
         return Err(FileTreeError::PathNotFound(old_path));
     }
 
-    let parent = old_path_obj.parent().ok_or_else(|| {
+    let parent = canonical_old.parent().ok_or_else(|| {
         FileTreeError::InvalidOperation("Cannot rename root directory".to_string())
     })?;
 
@@ -322,7 +441,7 @@ pub fn rename_file_or_directory(old_path: String, new_name: String) -> Result<Fi
         )));
     }
 
-    std::fs::rename(old_path_obj, &new_path)
+    std::fs::rename(&canonical_old, &new_path)
         .map(|_| FileOperationResult {
             success: true,
             message: "Renamed successfully".to_string(),
@@ -335,52 +454,65 @@ pub fn rename_file_or_directory(old_path: String, new_name: String) -> Result<Fi
 #[tauri::command]
 pub fn read_file(path: String) -> Result<String> {
     let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
 
-    if !file_path.exists() {
+    if !canonical.exists() {
         return Err(FileTreeError::PathNotFound(path));
     }
 
-    if file_path.is_dir() {
+    if canonical.is_dir() {
         return Err(FileTreeError::InvalidOperation(
             "Path is a directory".to_string(),
         ));
     }
 
-    std::fs::read_to_string(file_path).map_err(FileTreeError::from)
+    // Prevent reading excessively large files into memory
+    let metadata = std::fs::metadata(&canonical)?;
+    if metadata.len() > MAX_READ_FILE_SIZE {
+        return Err(FileTreeError::InvalidOperation(format!(
+            "File too large ({:.1} MB). Maximum allowed: {:.0} MB",
+            metadata.len() as f64 / (1024.0 * 1024.0),
+            MAX_READ_FILE_SIZE as f64 / (1024.0 * 1024.0)
+        )));
+    }
+
+    std::fs::read_to_string(&canonical).map_err(FileTreeError::from)
 }
 
 // Write file content
 #[tauri::command]
 pub fn write_file(path: String, content: String) -> Result<()> {
     let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
 
     // Create parent directories if they don't exist
-    if let Some(parent) = file_path.parent() {
+    if let Some(parent) = canonical.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::write(file_path, content).map_err(FileTreeError::from)
+    std::fs::write(&canonical, content).map_err(FileTreeError::from)
 }
 
 // Create a new file
 #[tauri::command]
 pub fn create_file(path: String, content: Option<String>) -> Result<()> {
     let file_path = Path::new(&path);
+    let safe_path = validate_path_safe(file_path)?;
 
-    if file_path.exists() {
+    if safe_path.exists() {
         return Err(FileTreeError::InvalidOperation(format!(
             "File already exists: {}",
-            file_path.display()
+            safe_path.display()
         )));
     }
 
     // Create parent directories if they don't exist
-    if let Some(parent) = file_path.parent() {
+    if let Some(parent) = safe_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     let content = content.unwrap_or_default();
-    std::fs::write(file_path, content).map_err(FileTreeError::from)
+    std::fs::write(&safe_path, content).map_err(FileTreeError::from)
 }
 
 // Copy a file or directory
@@ -391,28 +523,30 @@ pub fn copy_file_or_directory(
 ) -> Result<FileOperationResult> {
     let source = Path::new(&source_path);
     let destination = Path::new(&destination_path);
+    let canonical_source = validate_path_safe(source)?;
+    let safe_destination = validate_path_safe(destination)?;
 
-    if !source.exists() {
+    if !canonical_source.exists() {
         return Err(FileTreeError::PathNotFound(source_path));
     }
 
-    if destination.exists() {
+    if safe_destination.exists() {
         return Err(FileTreeError::InvalidOperation(format!(
             "Destination already exists: {}",
             destination_path
         )));
     }
 
-    let result = if source.is_dir() {
+    let result = if canonical_source.is_dir() {
         // Copy directory recursively
-        copy_dir_all(source, destination).map(|_| FileOperationResult {
+        copy_dir_all(&canonical_source, &safe_destination).map(|_| FileOperationResult {
             success: true,
             message: "Directory copied successfully".to_string(),
             path: destination_path.clone(),
         })
     } else {
         // Copy file
-        std::fs::copy(source, destination).map(|_| FileOperationResult {
+        std::fs::copy(&canonical_source, &safe_destination).map(|_| FileOperationResult {
             success: true,
             message: "File copied successfully".to_string(),
             path: destination_path.clone(),
@@ -448,6 +582,16 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[tauri::command]
 pub fn create_directories_all(path: String) -> Result<FileOperationResult> {
     let p = Path::new(&path);
+
+    // Block path traversal
+    for component in p.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(FileTreeError::InvalidOperation(
+                "Path traversal ('..') is not allowed".to_string(),
+            ));
+        }
+    }
+
     // If the path points to a file (has extension or ends not with separator), create parent
     let dir_to_create = if p.extension().is_some() {
         p.parent().unwrap_or(p)

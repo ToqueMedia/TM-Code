@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { FileTreeOptions, FileTreeFilter } from '../hooks/useFileTreeWorker'
+import { logger } from '../utils/logger'
 
 export interface FileNode {
   name: string
@@ -40,14 +41,14 @@ interface FileTreeWorkerState {
   } | null
   index: FileTreeIndex | null
   pendingOperations: Map<string, {
-    resolve: (value: any) => void
+    resolve: (value: unknown) => void
     reject: (error: Error) => void
   }>
 }
 
 interface FileTreeWorkerActions {
   initWorker: () => void
-  sendMessage: (type: string, payload: any) => Promise<any>
+  sendMessage: (type: string, payload: Record<string, unknown>) => Promise<unknown>
   processTree: (tree: FileNode, options?: FileTreeOptions) => Promise<FileNode>
   searchInTree: (tree: FileNode, query: string) => Promise<Array<FileNode>>
   filterTree: (tree: FileNode, filter: FileTreeFilter) => Promise<FileNode>
@@ -107,7 +108,7 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
         
         // Configura handler para erros do worker
         worker.onerror = (error) => {
-          console.error('FileTree Worker error:', error)
+          logger.error('file', 'FileTree Worker error:', error)
           const { pendingOperations } = get()
           
           // Rejeita todas as promises pendentes
@@ -124,14 +125,14 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
         globalWorker = worker
         set({ worker })
       } catch (error) {
-        console.error('Failed to initialize FileTree Worker:', error)
+        logger.error('file', 'Failed to initialize FileTree Worker:', error)
         set({ error: error instanceof Error ? error : new Error('Failed to initialize worker') })
       }
     }
   },
 
   // Helper para enviar mensagem para o worker
-  sendMessage: (type: string, payload: any): Promise<any> => {
+  sendMessage: (type: string, payload: Record<string, unknown>): Promise<unknown> => {
     const { worker, pendingOperations } = get()
     
     if (!worker) {
@@ -175,8 +176,8 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
       const result = await get().sendMessage('PARSE_FILE_TREE', {
         tree,
         options
-      })
-      
+      }) as { tree: FileNode; index?: FileTreeIndex | null; stats: { processingTime: number; nodeCount: number } }
+
       // Atualiza o estado com informações de processamento
       set({
         isLoading: false,
@@ -187,7 +188,7 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
         },
         index: result.index || null
       })
-      
+
       return result.tree
     } catch (error) {
       set({ 
@@ -208,7 +209,7 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
       set({ isLoading: false })
       
       // Converte resultados para o tipo FileNode
-      return results.map((result: any) => ({
+      return (results as Array<{ name: string; path: string; type: string; parent: string }>).map((result) => ({
         name: result.name,
         path: result.path,
         type: result.type as 'file' | 'directory',
@@ -228,10 +229,10 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
     try {
       set({ isLoading: true, error: null })
       
-      const filteredTree = await get().sendMessage('FILTER_FILES', { tree, filter })
-      
+      const filteredTree = await get().sendMessage('FILTER_FILES', { tree, filter }) as FileNode
+
       set({ isLoading: false })
-      
+
       return filteredTree
     } catch (error) {
       set({ 
@@ -247,10 +248,10 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
     try {
       set({ isLoading: true, error: null })
       
-      const index = await get().sendMessage('INDEX_DIRECTORY', { tree })
-      
+      const index = await get().sendMessage('INDEX_DIRECTORY', { tree }) as FileTreeIndex
+
       set({ isLoading: false, index })
-      
+
       return index
     } catch (error) {
       set({ 

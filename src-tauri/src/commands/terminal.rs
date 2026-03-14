@@ -38,21 +38,24 @@ pub async fn execute_command(
         }
     };
 
-    // Parse command and arguments
-    let parts: Vec<&str> = command.split_whitespace().collect();
-    if parts.is_empty() {
+    if command.trim().is_empty() {
         return Err("Empty command".to_string());
     }
 
-    let cmd = parts[0];
-    let args = &parts[1..];
+    // Delegate parsing to the system shell so that quotes, pipes,
+    // environment variables, etc. are handled correctly.
+    let (shell, flag) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
 
-    // Execute command
-    let output = Command::new(cmd)
-        .args(args)
+    let output = Command::new(shell)
+        .arg(flag)
+        .arg(&command)
         .current_dir(&working_dir)
         .output()
-        .map_err(|e| format!("Failed to execute command '{}': {}", cmd, e))?;
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

@@ -1,11 +1,13 @@
 import { ProjectService } from './projectService';
 import type { ProjectState } from '../types/project';
+import { logger } from '../utils/logger';
 
 class RecoveryService {
   private static instance: RecoveryService;
   private recoveryStates: Map<string, ProjectState> = new Map();
   private recoveryInterval: number | null = null;
-  private readonly RECOVERY_INTERVAL = 30000; // 30 seconds
+  private readonly RECOVERY_INTERVAL = 30000;
+  private readonly MAX_CACHED_STATES = 10;
 
   private constructor() {}
 
@@ -16,57 +18,66 @@ class RecoveryService {
     return RecoveryService.instance;
   }
 
+  private enforceCacheLimit(): void {
+    while (this.recoveryStates.size > this.MAX_CACHED_STATES) {
+      // Remove oldest entry (first key in insertion order)
+      const firstKey = this.recoveryStates.keys().next().value;
+      if (firstKey !== undefined) {
+        this.recoveryStates.delete(firstKey);
+      } else {
+        break;
+      }
+    }
+  }
+
   async saveRecoveryState(projectId: string, state: ProjectState): Promise<void> {
     try {
-      // Save to a separate recovery file
       const recoveryKey = `recovery_${projectId}`;
       localStorage.setItem(recoveryKey, JSON.stringify(state));
-      
-      // Also keep in memory for quick access
+
       this.recoveryStates.set(projectId, state);
-      
-      console.log(`Recovery state saved for project ${projectId}`);
+      this.enforceCacheLimit();
     } catch (error: unknown) {
-      console.error(`Failed to save recovery state for project ${projectId}:`, error);
+      logger.error('recovery', `Failed to save recovery state for project ${projectId}:`, error);
     }
   }
 
   async loadRecoveryState(projectId: string): Promise<ProjectState | null> {
     try {
-      // First check memory cache
       if (this.recoveryStates.has(projectId)) {
         return this.recoveryStates.get(projectId) || null;
       }
-      
-      // Then check localStorage
+
       const recoveryKey = `recovery_${projectId}`;
       const recoveryState = localStorage.getItem(recoveryKey);
       if (recoveryState) {
-        const state = JSON.parse(recoveryState);
-        // Cache in memory for future access
-        this.recoveryStates.set(projectId, state);
-        return state;
+        try {
+          const state = JSON.parse(recoveryState) as ProjectState;
+          this.recoveryStates.set(projectId, state);
+          this.enforceCacheLimit();
+          return state;
+        } catch {
+          // Corrupted data — remove it
+          localStorage.removeItem(recoveryKey);
+          return null;
+        }
       }
-      
+
       return null;
     } catch (error: unknown) {
-      console.error(`Failed to load recovery state for project ${projectId}:`, error);
+      logger.error('recovery', `Failed to load recovery state for project ${projectId}:`, error);
       return null;
     }
   }
 
   async clearRecoveryState(projectId: string): Promise<void> {
     try {
-      // Remove from memory
       this.recoveryStates.delete(projectId);
-      
-      // Remove from localStorage
+
       const recoveryKey = `recovery_${projectId}`;
       localStorage.removeItem(recoveryKey);
-      
-      console.log(`Recovery state cleared for project ${projectId}`);
     } catch (error: unknown) {
-      console.error(`Failed to clear recovery state for project ${projectId}:`, error);
+      logger.error('recovery', `Failed to clear recovery state for project ${projectId}:`, error);
     }
   }
 
@@ -75,22 +86,18 @@ class RecoveryService {
       const recoveryKey = `recovery_${projectId}`;
       return this.recoveryStates.has(projectId) || !!localStorage.getItem(recoveryKey);
     } catch (error: unknown) {
-      console.error(`Failed to check recovery state for project ${projectId}:`, error);
+      logger.error('recovery', `Failed to check recovery state for project ${projectId}:`, error);
       return false;
     }
   }
 
   startRecoveryMonitoring() {
-    // Clear any existing interval
     if (this.recoveryInterval) {
       clearInterval(this.recoveryInterval);
     }
-    
-    // Start monitoring
+
     this.recoveryInterval = window.setInterval(() => {
-      // This could be used to periodically check for recovery states
-      // or perform other recovery-related tasks
-      console.log('Recovery monitoring tick');
+      // Periodic recovery check tick
     }, this.RECOVERY_INTERVAL);
   }
 
@@ -105,20 +112,14 @@ class RecoveryService {
     try {
       const recoveryState = await this.loadRecoveryState(projectId);
       if (recoveryState) {
-        // Save the recovery state as the current project state
         await ProjectService.saveProjectState(projectId, recoveryState);
-        
-        // Clear the recovery state since we've recovered
         await this.clearRecoveryState(projectId);
-        
-        console.log(`Project ${projectId} recovered successfully`);
         return true;
       }
-      
-      console.log(`No recovery state found for project ${projectId}`);
+
       return false;
     } catch (error: unknown) {
-      console.error(`Failed to recover project ${projectId}:`, error);
+      logger.error('recovery', `Failed to recover project ${projectId}:`, error);
       return false;
     }
   }
@@ -127,13 +128,12 @@ class RecoveryService {
     try {
       const hasRecovery = await this.hasRecoveryState(projectId);
       if (hasRecovery) {
-        console.log(`Recovery state found for project ${projectId}. Attempting recovery...`);
         return await this.recoverProject(projectId);
       }
-      
+
       return false;
     } catch (error: unknown) {
-      console.error(`Failed to check and recover project ${projectId}:`, error);
+      logger.error('recovery', `Failed to check and recover project ${projectId}:`, error);
       return false;
     }
   }

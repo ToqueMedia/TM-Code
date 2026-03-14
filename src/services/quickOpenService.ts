@@ -38,7 +38,7 @@ export default class QuickOpenService {
       const files: string[] = []
       while (stack.length > 0) {
         const current = stack.pop() as string
-        let entries: any[] = []
+        let entries: Array<{ name: string; path?: string; isDirectory: boolean; isFile: boolean; isSymlink: boolean }> = []
         try {
           entries = await fs.readDir(current)
         } catch {

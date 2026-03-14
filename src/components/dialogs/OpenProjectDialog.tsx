@@ -9,6 +9,7 @@ import {
 import { useProjectStore } from '../../stores/projectStore';
 import { open } from '@tauri-apps/plugin-dialog';
 import { ProjectValidator } from '../../utils/projectValidator';
+import { logger } from '../../utils/logger';
 
 interface OpenProjectDialogProps {
   isOpen: boolean;
@@ -40,7 +41,7 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
       onClose();
       setProjectPath('');
     } catch (error: unknown) {
-      console.error('Failed to open project:', error);
+      logger.error('ui', 'Failed to open project:', error);
       if (error instanceof Error) {
         setError(error.message || 'Failed to open project. Please try again.');
       } else {
@@ -62,7 +63,7 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
         setProjectPath(selected as string);
       }
     } catch (error: unknown) {
-      console.error('Failed to open directory dialog:', error);
+      logger.error('ui', 'Failed to open directory dialog:', error);
     }
   };
 

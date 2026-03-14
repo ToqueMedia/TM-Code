@@ -66,6 +66,11 @@ pub async fn search_in_files(
         ));
     }
 
+    // Canonicalize to prevent path traversal
+    let directory_path = std::fs::canonicalize(&directory_path)
+        .map_err(|e| format!("Failed to resolve directory path: {}", e))?;
+    let directory = directory_path.to_string_lossy().to_string();
+
     // Build ripgrep command
     let mut cmd = Command::new("rg");
 
@@ -281,6 +286,11 @@ pub async fn replace_in_files(
             directory
         ));
     }
+
+    // Canonicalize to prevent path traversal
+    let directory_path = std::fs::canonicalize(&directory_path)
+        .map_err(|e| format!("Failed to resolve directory path: {}", e))?;
+    let directory = directory_path.to_string_lossy().to_string();
 
     let mut cmd = Command::new("rg");
 

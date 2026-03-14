@@ -39,6 +39,7 @@ import WindowService from '../services/windowService'
 import { useSettingsStore } from '../stores/settingsStore'
 import MonacoBridge from '../utils/monacoBridge'
 import { FiCode } from 'react-icons/fi'
+import { logger } from '../utils/logger'
 
 // Lazy load componentes pesados
 const MonacoEditor = lazy(() => import('./ui/MonacoEditor'))
@@ -378,7 +379,7 @@ export function CodeEditorNew() {
 				recoveryServiceRef.startRecoveryMonitoring()
 				await windowServiceRef.initialize()
 			} catch (error) {
-				console.error('Failed to initialize services:', error)
+				logger.error('editor', 'Failed to initialize services:', error)
 			}
 		}
 
@@ -598,7 +599,7 @@ export function CodeEditorNew() {
 					<Breadcrumbs
 						filePath={activeFile || undefined}
 						projectRoot={currentProject.path}
-						onNavigate={(path) => console.log('Navigate to:', path)}
+						onNavigate={(path) => logger.debug('editor', 'Navigate to:', path)}
 					/>
 
 					{/* Editor Content */}
@@ -659,11 +660,15 @@ export function CodeEditorNew() {
 								Object.assign(row.style, { padding: '8px 12px', color: '#e6e6e6', cursor: 'default' } as CSSStyleDeclaration)
 								row.onmouseenter = () => { row.style.background = '#094771' }
 								row.onmouseleave = () => { row.style.background = 'transparent' }
-								row.onclick = () => { try { it.action() } finally { document.body.removeChild(menu) } }
+								row.onclick = () => { try { it.action() } finally { cleanup() } }
 							}
 							menu.appendChild(row)
 						})
-						const dismiss = () => { if (menu.parentNode) { document.body.removeChild(menu) } document.removeEventListener('mousedown', dismiss) }
+						const cleanup = () => {
+							if (menu.parentNode) document.body.removeChild(menu)
+							document.removeEventListener('mousedown', dismiss)
+						}
+						const dismiss = () => cleanup()
 						document.addEventListener('mousedown', dismiss)
 						document.body.appendChild(menu)
 					}}>

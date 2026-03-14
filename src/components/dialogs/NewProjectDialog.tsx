@@ -12,6 +12,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import { ProjectTemplate } from '../../types/project';
 import { open } from '@tauri-apps/plugin-dialog';
 import { ProjectValidator } from '../../utils/projectValidator';
+import { logger } from '../../utils/logger';
 
 interface NewProjectDialogProps {
   isOpen: boolean;
@@ -79,9 +80,9 @@ export function NewProjectDialog({ isOpen, onClose }: NewProjectDialogProps) {
       setTemplate(ProjectTemplate.Blank);
       setLocation('');
       setError('');
-    } catch (error: any) {
-      console.error('Failed to create project:', error);
-      setError(error.message || 'Failed to create project. Please try again.');
+    } catch (error: unknown) {
+      logger.error('ui', 'Failed to create project:', error);
+      setError((error as Error).message || 'Failed to create project. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -105,7 +106,7 @@ export function NewProjectDialog({ isOpen, onClose }: NewProjectDialogProps) {
         fileInputRef.current?.click();
       }
     } catch (error) {
-      console.error('Failed to open directory dialog:', error);
+      logger.error('ui', 'Failed to open directory dialog:', error);
     }
   };
 

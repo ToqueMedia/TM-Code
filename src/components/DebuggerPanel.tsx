@@ -31,6 +31,7 @@ import DebuggerService, {
   DebugConfiguration,
   DebuggerEvent
 } from '../services/debuggerService'
+import { logger } from '../utils/logger'
 
 interface DebuggerPanelProps {
   isVisible: boolean
@@ -83,7 +84,7 @@ function DebuggerPanel({ isVisible, onClose }: DebuggerPanelProps) {
         const debuggers = await debuggerService.checkDebuggerAvailability()
         setAvailableDebuggers(debuggers)
       } catch (error) {
-        console.error('Failed to load debuggers:', error)
+        logger.error('debugger', 'Failed to load debuggers:', error)
         addConsoleMessage('Failed to load available debuggers')
       }
     }
@@ -194,7 +195,7 @@ function DebuggerPanel({ isVisible, onClose }: DebuggerPanelProps) {
       const allSessions = await debuggerService.getDebugSessions()
       setSessions(allSessions)
     } catch (error) {
-      console.error('Failed to refresh sessions:', error)
+      logger.error('debugger', 'Failed to refresh sessions:', error)
     }
   }, [debuggerService])
 
@@ -216,7 +217,7 @@ function DebuggerPanel({ isVisible, onClose }: DebuggerPanelProps) {
         setVariables(vars)
       }
     } catch (error) {
-      console.error('Failed to refresh debug info:', error)
+      logger.error('debugger', 'Failed to refresh debug info:', error)
     }
   }, [activeSession, debuggerService])
 
@@ -250,7 +251,7 @@ function DebuggerPanel({ isVisible, onClose }: DebuggerPanelProps) {
       // Refresh debug info
       await refreshDebugInfo()
     } catch (error) {
-      console.error('Failed to start debugging:', error)
+      logger.error('debugger', 'Failed to start debugging:', error)
       addConsoleMessage(`Debug Error: Failed to start debugging: ${error}`)
     } finally {
       setLoading(false)
@@ -270,7 +271,7 @@ function DebuggerPanel({ isVisible, onClose }: DebuggerPanelProps) {
       setVariables([])
       addConsoleMessage('Debug session stopped')
     } catch (error) {
-      console.error('Failed to stop debugging:', error)
+      logger.error('debugger', 'Failed to stop debugging:', error)
       addConsoleMessage(`Error: Failed to stop debugging: ${error}`)
     } finally {
       setLoading(false)
@@ -302,7 +303,7 @@ function DebuggerPanel({ isVisible, onClose }: DebuggerPanelProps) {
           break
       }
     } catch (error) {
-      console.error(`Failed to ${action}:`, error)
+      logger.error('debugger', `Failed to ${action}:`, error)
       addConsoleMessage(`Debug Error: Failed to ${action}: ${error}`)
     } finally {
       setLoading(false)
@@ -317,7 +318,7 @@ function DebuggerPanel({ isVisible, onClose }: DebuggerPanelProps) {
       await refreshDebugInfo()
       addConsoleMessage(`Breakpoint removed: ${breakpointId}`)
     } catch (error) {
-      console.error('Failed to remove breakpoint:', error)
+      logger.error('debugger', 'Failed to remove breakpoint:', error)
     }
   }
 

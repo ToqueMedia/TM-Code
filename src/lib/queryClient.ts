@@ -1,4 +1,5 @@
 import { QueryClient } from '@tanstack/react-query';
+import { logger } from '../utils/logger';
 
 // Configuração otimizada do QueryClient
 export const queryClient = new QueryClient({
@@ -119,7 +120,7 @@ export const cacheUtils = {
     
     // Aqui você poderia implementar lógica para prefetch de arquivos relacionados
     // Por exemplo, outros arquivos na mesma pasta com a mesma extensão
-    console.log(`Prefetching related files for ${filePath} in ${directory} with extension ${extension}`);
+    logger.debug('app', `Prefetching related files for ${filePath} in ${directory} with extension ${extension}`);
   },
   
   // Estatísticas do cache
@@ -164,7 +165,7 @@ if (typeof window !== 'undefined') {
           }))
         ));
       } catch (error) {
-        console.warn('Failed to persist queries:', error);
+        logger.warn('app', 'Failed to persist queries:', error);
       }
     }
   });
@@ -176,7 +177,7 @@ if (typeof window !== 'undefined') {
       if (cachedQueries) {
         const queries = JSON.parse(cachedQueries);
         
-        queries.forEach((query: any) => {
+        queries.forEach((query: { queryKey: readonly unknown[]; data: unknown; dataUpdatedAt: number }) => {
           queryClient.setQueryData(query.queryKey, query.data);
         });
         
@@ -184,7 +185,7 @@ if (typeof window !== 'undefined') {
         localStorage.removeItem('cached_queries');
       }
     } catch (error) {
-      console.warn('Failed to restore cached queries:', error);
+      logger.warn('app', 'Failed to restore cached queries:', error);
     }
   });
 }

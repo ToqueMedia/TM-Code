@@ -1,4 +1,5 @@
 // src/utils/dialogUtils.ts
+import { logger } from './logger';
 
 /**
  * Checks if we're running in a Tauri context (Tauri v2 compatible)
@@ -22,7 +23,7 @@ export async function openDirectoryDialog(): Promise<string | null> {
     // Check if we're in a Tauri context (Tauri v2 compatible)
     const isTauri = isTauriContext();
     
-    console.log('Tauri context check:', isTauri);
+    logger.debug('ui', 'Tauri context check:', isTauri);
     
     if (!isTauri) {
       // In a browser context, we can't use the native dialog
@@ -30,21 +31,21 @@ export async function openDirectoryDialog(): Promise<string | null> {
     }
     
     // Dynamically import the dialog plugin to avoid issues in browser context
-    console.log('Importing dialog plugin...');
+    logger.debug('ui', 'Importing dialog plugin...');
     const { open } = await import('@tauri-apps/plugin-dialog');
-    console.log('Dialog plugin imported successfully');
+    logger.debug('ui', 'Dialog plugin imported successfully');
     
-    console.log('Opening directory dialog...');
+    logger.debug('ui', 'Opening directory dialog...');
     const selected = await open({
       directory: true,
       multiple: false,
       title: 'Select project directory'
     });
     
-    console.log('Selected path:', selected);
+    logger.debug('ui', 'Selected path:', selected);
     return selected as string | null;
   } catch (error: unknown) {
-    console.error('Failed to open directory dialog:', error);
+    logger.error('ui', 'Failed to open directory dialog:', error);
     if (error instanceof Error) {
       throw new Error(error.message || 'Failed to open directory dialog. Please try again.');
     } else {

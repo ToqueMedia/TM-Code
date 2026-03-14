@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from 'react';
 import { useProjectStore } from '../stores/projectStore';
+import { useEditorRepository } from '../stores/editorStore';
 
 // Hook para projeto atual - só re-renderiza quando currentProject muda
 export function useCurrentProject() {
@@ -26,9 +27,11 @@ export function useWindowState() {
   return useProjectStore(state => state.windowState);
 }
 
-// Hook para mudanças não salvas - só re-renderiza quando unsavedChanges muda
+// Hook para mudanças não salvas — derivado do editorStore (source of truth)
 export function useUnsavedChanges() {
-  return useProjectStore(state => state.unsavedChanges);
+  return useEditorRepository(state =>
+    state.openFiles.some(f => f.isDirty)
+  );
 }
 
 // Hook para ações do projeto - memoizado para evitar re-renders desnecessários
@@ -49,19 +52,6 @@ export function useProjectActions() {
   );
 }
 
-// Hook para ações de arquivos do projeto
-export function useProjectFileActions() {
-  return useProjectStore(
-    state => ({
-      addOpenFile: state.addOpenFile,
-      removeOpenFile: state.removeOpenFile,
-      setActiveFile: state.setActiveFile,
-      setUnsavedChanges: state.setUnsavedChanges,
-      updateCursorPosition: state.updateCursorPosition,
-    })
-  );
-}
-
 // Hook combinado otimizado para a WelcomeScreen
 export function useWelcomeScreenState() {
   const currentProject = useCurrentProject();
@@ -69,31 +59,27 @@ export function useWelcomeScreenState() {
   const loading = useProjectLoading();
   const error = useProjectError();
   const actions = useProjectActions();
-  
+
   const handleOpenProject = useCallback((path?: string) => {
     if (path) {
       actions.openProject(path);
     }
   }, [actions]);
-  
+
   const handleCreateProject = useCallback((path: string, template: string) => {
     actions.createProject(path, template);
   }, [actions]);
-  
-  // Estados derivados memoizados
+
   const hasRecentProjects = useMemo(() => recentProjects.length > 0, [recentProjects.length]);
   const isProjectOpen = useMemo(() => currentProject !== null, [currentProject]);
-  
+
   return {
-    // Estados
     currentProject,
     recentProjects,
     loading,
     error,
     hasRecentProjects,
     isProjectOpen,
-    
-    // Actions
     handleOpenProject,
     handleCreateProject,
     loadRecentProjects: actions.loadRecentProjects,
@@ -105,19 +91,17 @@ export function useAppState() {
   const currentProject = useCurrentProject();
   const recentProjects = useRecentProjects();
   const actions = useProjectActions();
-  
+
   const handleOpenProject = useCallback((path?: string) => {
     if (path) {
       actions.openProject(path);
     }
   }, [actions]);
-  
-  // Estado de inicialização derivado
+
   const isInitialized = useMemo(() => {
-    // Considera inicializado se não há projeto atual ou se já carregou projetos recentes
     return currentProject !== null || recentProjects.length >= 0;
   }, [currentProject, recentProjects.length]);
-  
+
   return {
     currentProject,
     recentProjects,
@@ -127,44 +111,17 @@ export function useAppState() {
   };
 }
 
-// Hook para estado de mudanças não salvas com helpers
+// Hook para estado de mudanças não salvas com helpers — derivado do editorStore
 export function useUnsavedChangesState() {
-  const unsavedChanges = useUnsavedChanges();
-  const { setUnsavedChanges } = useProjectFileActions();
-  
-  const markFileAsDirty = useCallback((filePath: string) => {
-    setUnsavedChanges(filePath, true);
-  }, [setUnsavedChanges]);
-  
-  const markFileAsClean = useCallback((filePath: string) => {
-    setUnsavedChanges(filePath, false);
-  }, [setUnsavedChanges]);
-  
-  // Estados derivados memoizados
-  const hasUnsavedChanges = useMemo(
-    () => Object.values(unsavedChanges).some(Boolean),
-    [unsavedChanges]
+  const hasUnsavedChanges = useUnsavedChanges();
+  const unsavedFilesList = useEditorRepository(state =>
+    state.openFiles.filter(f => f.isDirty).map(f => f.path)
   );
-  
-  const unsavedFilesList = useMemo(
-    () => Object.entries(unsavedChanges)
-      .filter(([, hasChanges]) => hasChanges)
-      .map(([filePath]) => filePath),
-    [unsavedChanges]
-  );
-  
-  const unsavedFilesCount = useMemo(
-    () => unsavedFilesList.length,
-    [unsavedFilesList.length]
-  );
-  
+
   return {
-    unsavedChanges,
     hasUnsavedChanges,
     unsavedFilesList,
-    unsavedFilesCount,
-    markFileAsDirty,
-    markFileAsClean,
+    unsavedFilesCount: unsavedFilesList.length,
   };
 }
 
@@ -172,7 +129,7 @@ export function useUnsavedChangesState() {
 export function useWindowStateManager() {
   const windowState = useWindowState();
   const { setWindowState, updateWindowState } = useProjectActions();
-  
+
   const handleWindowResize = useCallback((width: number, height: number) => {
     setWindowState({
       ...windowState,
@@ -180,7 +137,7 @@ export function useWindowStateManager() {
       height,
     });
   }, [windowState, setWindowState]);
-  
+
   const handleWindowMove = useCallback((x: number, y: number) => {
     setWindowState({
       ...windowState,
@@ -188,14 +145,14 @@ export function useWindowStateManager() {
       y,
     });
   }, [windowState, setWindowState]);
-  
+
   const handleWindowMaximize = useCallback((maximized: boolean) => {
     setWindowState({
       ...windowState,
       maximized,
     });
   }, [windowState, setWindowState]);
-  
+
   return {
     windowState,
     handleWindowResize,

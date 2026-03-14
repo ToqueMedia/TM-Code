@@ -1,5 +1,6 @@
 import type { ReactNode } from "react"
 import { createContext, useContext } from "react"
+import { logger } from "../../utils/logger"
 
 type ColorMode = "light" | "dark" | "system"
 
@@ -19,7 +20,7 @@ export interface ColorModeProviderProps {
 export function ColorModeProvider({ children, value = "dark" }: ColorModeProviderProps) {
   const setColorMode = (newValue: ColorMode) => {
     // For now, we'll default to dark mode for the editor
-    console.log("Setting color mode:", newValue)
+    logger.debug("ui", "Setting color mode:", newValue)
   }
 
   const toggleColorMode = () => {

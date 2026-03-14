@@ -1,8 +1,9 @@
 import { useProjectStore } from '../stores/projectStore';
+import { logger } from './logger';
 
 export class FileTreeManager {
   private static instance: FileTreeManager;
-  private watcher: any = null; // Would be a real file watcher in implementation
+  private watcher: unknown = null; // Would be a real file watcher in implementation
 
   private constructor() {}
 
@@ -15,7 +16,7 @@ export class FileTreeManager {
 
   async initialize(projectPath: string): Promise<void> {
     // In a real implementation, we would set up a file watcher here
-    console.log(`Initializing file tree for project: ${projectPath}`);
+    logger.debug('file', `Initializing file tree for project: ${projectPath}`);
     
     // Simulate loading file tree
     // In a real implementation, this would load the actual file structure
@@ -25,7 +26,7 @@ export class FileTreeManager {
     const { currentProject } = useProjectStore.getState();
     if (!currentProject) return;
     
-    console.log(`Refreshing file tree for project: ${currentProject.name}`);
+    logger.debug('file', `Refreshing file tree for project: ${currentProject.name}`);
     // In a real implementation, this would refresh the file tree display
   }
 

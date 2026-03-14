@@ -1,4 +1,5 @@
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { logger } from './logger';
 
 export class WindowManager {
   private static instance: WindowManager;
@@ -68,7 +69,7 @@ export class WindowManager {
       try {
         await window.close();
       } catch (error) {
-        console.error('Failed to close window:', error);
+        logger.error('ui', 'Failed to close window:', error);
       }
     }
   }
