@@ -279,11 +279,11 @@ class TypeScriptLspService {
 
     const tsProvider = monaco.languages.registerCompletionItemProvider('typescript', {
       triggerCharacters: ['/', '.', "'", '"'],
-      provideCompletionItems: provide as any,
+      provideCompletionItems: provide as unknown as monaco.languages.CompletionItemProvider['provideCompletionItems'],
     });
     const jsProvider = monaco.languages.registerCompletionItemProvider('javascript', {
       triggerCharacters: ['/', '.', "'", '"'],
-      provideCompletionItems: provide as any,
+      provideCompletionItems: provide as unknown as monaco.languages.CompletionItemProvider['provideCompletionItems'],
     });
 
     this.disposables.push(tsProvider, jsProvider);

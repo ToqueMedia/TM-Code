@@ -1,8 +1,9 @@
 import React from 'react'
-import { 
-  Flex, 
-  Text, 
+import {
+  Flex,
+  Text,
   HStack} from '@chakra-ui/react'
+import { tokens } from '@/theme/tokens'
 
 interface PanelHeaderProps {
   title: string
@@ -22,7 +23,7 @@ export const PanelHeader: React.FC<PanelHeaderProps> = ({
       align="center"
       justify="space-between"
       p={compact ? 2 : 3}
-      bg="rgba(255, 255, 255, 0.01)"
+      bg={tokens.colors.bg.whiteMicro}
     >
       <HStack gap={2}>
         <Text

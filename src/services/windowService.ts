@@ -7,6 +7,7 @@ class WindowService {
   private static instance: WindowService;
   private mainWindow: WebviewWindow | null = null;
   private resizeTimeout: number | null = null;
+  private resizeHandler: (() => void) | null = null;
   private readonly RESIZE_DEBOUNCE = 500; // 500ms debounce for resize events
 
   private constructor() {}
@@ -34,18 +35,22 @@ class WindowService {
 
   private setupEventListeners() {
     if (!this.mainWindow) return;
-    
+
+    // Remove previous listener if exists (prevents duplicates)
+    if (this.resizeHandler) {
+      window.removeEventListener('resize', this.resizeHandler);
+    }
+
     // Listen for resize events
-    window.addEventListener('resize', () => {
-      // Debounce resize events
+    this.resizeHandler = () => {
       if (this.resizeTimeout) {
         clearTimeout(this.resizeTimeout);
       }
-      
       this.resizeTimeout = window.setTimeout(() => {
         this.handleWindowResize();
       }, this.RESIZE_DEBOUNCE);
-    });
+    };
+    window.addEventListener('resize', this.resizeHandler);
     
     // Listen for move events
     // Note: There's no direct move event in web, but we can poll for position changes
@@ -169,12 +174,18 @@ class WindowService {
   }
 
   async reset() {
+    // Remove resize listener
+    if (this.resizeHandler) {
+      window.removeEventListener('resize', this.resizeHandler);
+      this.resizeHandler = null;
+    }
+
     // Clear any timeouts
     if (this.resizeTimeout) {
       clearTimeout(this.resizeTimeout);
       this.resizeTimeout = null;
     }
-    
+
     // Nullify window reference
     this.mainWindow = null;
     

@@ -1,5 +1,6 @@
 import { FileWatcher, FileEvent } from './fileWatcher';
 import { useEditorRepository } from '../stores/editorStore';
+import { useFileTreeRepository } from '../stores/fileTreeStore';
 import { logger } from './logger';
 
 export class ProjectFileWatcher {
@@ -95,29 +96,22 @@ export class ProjectFileWatcher {
   }
 
   private handleFileRename(oldPath: string, newPath: string) {
-    // If the old file was open, update its path
     const editorStore = useEditorRepository.getState();
     const wasOpen = editorStore.openFiles.some(file => file.path === oldPath);
-    
+
     if (wasOpen) {
-      // Close the old file and open the new one
-      editorStore.closeFile(oldPath);
-      
-      // If the old file was the active file, set the new file as active
-      if (editorStore.activeFile === oldPath) {
-        editorStore.setActiveFile(newPath);
-      }
-      
+      // Use renameOpenFile to update in-place instead of close+open which loses state
+      editorStore.renameOpenFile(oldPath, newPath);
       logger.info('file-watcher', `Renamed file from ${oldPath} to ${newPath}`);
     }
-    
+
     // Refresh the file tree
     this.refreshFileTree();
   }
 
   private refreshFileTree() {
-    // In a real implementation, we would notify the file tree component to refresh
-    // For now, we'll just log it
-    logger.fileWatcher('File tree refresh needed');
+    useFileTreeRepository.getState().refresh().catch(err => {
+      logger.error('file-watcher', 'Failed to refresh file tree:', err);
+    });
   }
 }

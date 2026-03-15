@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { FileTreeOptions, FileTreeFilter } from '../hooks/useFileTreeWorker'
+import type { FileTreeOptions, WorkerFileTreeFilter as FileTreeFilter } from '../hooks/useFileTreeWorker'
 import { logger } from '../utils/logger'
 
 export interface FileNode {
@@ -63,6 +63,8 @@ interface FileTreeWorkerActions {
 
 // Singleton para o worker que pode ser compartilhado entre componentes
 let globalWorker: Worker | null = null
+// Track timeout IDs for cleanup
+const pendingTimeouts = new Set<ReturnType<typeof setTimeout>>()
 
 // Store para gerenciar Web Worker de processamento do FileTree
 export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorkerActions>((set, get) => ({
@@ -155,7 +157,8 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
       })
       
       // Timeout de 30 segundos
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
+        pendingTimeouts.delete(timeoutId)
         const { pendingOperations } = get()
         const callbacks = pendingOperations.get(id)
         if (callbacks) {
@@ -165,6 +168,7 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
           callbacks.reject(new Error('Worker timeout'))
         }
       }, 30000)
+      pendingTimeouts.add(timeoutId)
     })
   },
 
@@ -300,12 +304,18 @@ export const useFileTreeWorkerStore = create<FileTreeWorkerState & FileTreeWorke
   // Reseta o estado
   resetState: () => {
     const { worker, pendingOperations } = get()
-    
+
+    // Clear all pending timeouts
+    for (const timeoutId of pendingTimeouts) {
+      clearTimeout(timeoutId)
+    }
+    pendingTimeouts.clear()
+
     // Rejeita todas as operações pendentes
     for (const [, callbacks] of pendingOperations.entries()) {
       callbacks.reject(new Error('Worker reset'))
     }
-    
+
     // Termina o worker se existir
     if (worker) {
       worker.terminate()

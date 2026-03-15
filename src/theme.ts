@@ -1,12 +1,15 @@
 // src/theme.ts
 import { createSystem, defaultConfig } from '@chakra-ui/react'
+import { tokens } from './theme/tokens'
+
+const t = tokens.colors
 
 export const theme = createSystem(defaultConfig, {
   globalCss: {
     'html, body': {
       backgroundColor: 'transparent',
-      color: '#cccccc',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif',
+      color: t.text.dimmed,
+      fontFamily: tokens.fontFamily.ui,
       userSelect: 'none',
       WebkitUserSelect: 'none',
       overscrollBehavior: 'none',
@@ -33,17 +36,17 @@ export const theme = createSystem(defaultConfig, {
       cursor: 'default',
     },
 
-    // Focus ring refinement (remove default outline and add subtle ring on focus-visible)
+    // Focus ring refinement
     'button:focus, [role="button"]:focus, a:focus, input:focus, textarea:focus': {
       outline: 'none !important',
     },
     'button:focus-visible, [role="button"]:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible': {
       outline: 'none',
-      boxShadow: '0 0 0 2px rgba(88, 166, 255, 0.4)',
+      boxShadow: 'none',
     },
 
     // Search field anti-autocomplete and autofill tweaks
-'input': {
+    'input': {
       backgroundImage: 'none',
       WebkitAppearance: 'none',
     },
@@ -51,9 +54,9 @@ export const theme = createSystem(defaultConfig, {
       display: 'none',
     },
     'input::-webkit-contacts-auto-fill-button': { display: 'none' },
-'input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus': {
-      WebkitTextFillColor: '#e6edf3',
-      boxShadow: '0 0 0px 1000px #1e1e1e inset',
+    'input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus': {
+      WebkitTextFillColor: t.text.primary,
+      boxShadow: `0 0 0px 1000px ${t.bg.app} inset`,
       transition: 'background-color 9999s ease-in-out 0s',
     },
 
@@ -63,16 +66,16 @@ export const theme = createSystem(defaultConfig, {
       height: '10px',
     },
     '::-webkit-scrollbar-track': {
-      background: 'transparent',
+      background: t.scrollbar.track,
     },
     '::-webkit-scrollbar-thumb': {
-      background: '#3c3c3c',
-      borderRadius: '8px',
+      background: t.scrollbar.thumb,
+      borderRadius: tokens.radius.scrollbar,
       border: '2px solid rgba(0,0,0,0)',
       backgroundClip: 'padding-box',
     },
     '::-webkit-scrollbar-thumb:hover': {
-      background: '#4a4a4a',
+      background: t.scrollbar.thumbHover,
     },
 
     // Hide scrollbars within explorer viewport but allow scroll
@@ -81,51 +84,50 @@ export const theme = createSystem(defaultConfig, {
       height: '0px',
     },
 
-    // Tauri drag regions (handled via data-tauri-drag-region + programmatic startDragging)
     // VS Code specific styling
     '.vscode-titlebar': {
       backgroundColor: '#323233',
-      borderBottom: '1px solid #2b2b2c',
+      borderBottom: `1px solid ${t.border.subtle}`,
       cursor: 'pointer',
     },
     '.vscode-activitybar': {
-      backgroundColor: '#333333',
-      borderRight: '1px solid #2b2b2c',
+      backgroundColor: t.bg.activitybar,
+      borderRight: `1px solid ${t.border.subtle}`,
     },
     '.vscode-sidebar': {
-      backgroundColor: '#252526',
-      borderRight: '1px solid #2b2b2c',
+      backgroundColor: t.bg.sidebar,
+      borderRight: `1px solid ${t.border.subtle}`,
     },
     '.vscode-editor-area': {
-      backgroundColor: '#1e1e1e',
+      backgroundColor: t.bg.app,
     },
     '.vscode-tabs': {
-      backgroundColor: '#2d2d30',
-      borderBottom: '1px solid #2b2b2c',
+      backgroundColor: t.bg.overlay,
+      borderBottom: `1px solid ${t.border.subtle}`,
     },
     '.vscode-tab': {
-      backgroundColor: '#2d2d30',
-      borderRight: '1px solid #2b2b2c',
-      color: '#969696',
+      backgroundColor: t.bg.overlay,
+      borderRight: `1px solid ${t.border.subtle}`,
+      color: t.text.dimmed,
       '&.active': {
-        backgroundColor: '#1e1e1e',
-        color: '#ffffff',
+        backgroundColor: t.bg.app,
+        color: t.text.inverse,
       },
     },
     '.vscode-bottom-panel': {
-      backgroundColor: '#252526',
-      borderTop: '1px solid #2b2b2c',
+      backgroundColor: t.bg.sidebar,
+      borderTop: `1px solid ${t.border.subtle}`,
     },
     '.vscode-statusbar': {
-      backgroundColor: '#007acc',
-      color: '#ffffff',
+      backgroundColor: t.accent.blue,
+      color: t.text.inverse,
     },
     // Ensure editor container maintains dark background
     '.monaco-editor-background': {
-      backgroundColor: '#1e1e1e !important',
+      backgroundColor: `${t.bg.app} !important`,
     },
     '.monaco-editor .margin': {
-      backgroundColor: '#1e1e1e !important',
+      backgroundColor: `${t.bg.app} !important`,
     },
     '.terminal, .xterm': {
       '& *': {
@@ -134,25 +136,25 @@ export const theme = createSystem(defaultConfig, {
     },
     // Menu and dropdown styling
     '[data-scope="menu"][data-part="content"]': {
-      backgroundColor: '#2d2d30 !important',
+      backgroundColor: `${t.menu.bg} !important`,
       color: 'white !important',
-      borderColor: '#3c3c3c !important',
+      borderColor: `${t.menu.border} !important`,
       backgroundImage: 'none !important',
     },
     '[data-scope="menu"][data-part="item"]': {
       color: 'white !important',
       backgroundImage: 'none !important',
       _hover: {
-        backgroundColor: '#094771 !important',
+        backgroundColor: `${t.menu.hover} !important`,
         color: 'white !important',
         backgroundImage: 'none !important',
       },
     },
     // Dialog styling
     '[data-scope="dialog"][data-part="content"]': {
-      backgroundColor: '#2d2d30 !important',
+      backgroundColor: `${t.menu.bg} !important`,
       color: 'white !important',
-      borderColor: '#3c3c3c !important',
+      borderColor: `${t.menu.border} !important`,
       backgroundImage: 'none !important',
     },
     // Button styling
@@ -169,84 +171,81 @@ export const theme = createSystem(defaultConfig, {
   theme: {
     tokens: {
       colors: {
-        // VS Code theme colors
-        'bg': { value: '#1e1e1e' },
+        'bg': { value: t.bg.app },
         'fg': { value: '#cccccc' },
-        'bg.muted': { value: '#252526' },
-        'fg.muted': { value: '#969696' },
-        'bg.subtle': { value: '#2d2d30' },
-        'fg.subtle': { value: '#858585' },
-        'border': { value: '#2b2b2c' },
+        'bg.muted': { value: t.bg.sidebar },
+        'fg.muted': { value: t.text.dimmed },
+        'bg.subtle': { value: t.bg.overlay },
+        'fg.subtle': { value: t.text.subtle },
+        'border': { value: t.border.subtle },
         'border.muted': { value: '#3e3e3e' },
-        
-        // Syntax highlighting colors
-        blue: { 
-          500: { value: '#58a6ff' },
-          solid: { value: '#0078d4' },
-          muted: { value: '#264f78' },
-          subtle: { value: 'rgba(88, 166, 255, 0.1)' },
+
+        blue: {
+          500: { value: t.accent.primary },
+          solid: { value: t.accent.blueAlt },
+          muted: { value: t.bg.selection },
+          subtle: { value: t.accent.primarySubtle },
         },
-        purple: { 500: { value: '#a371f7' } },
-        green: { 
-          500: { value: '#2ea043' },
+        purple: { 500: { value: t.accent.purple } },
+        green: {
+          500: { value: t.accent.green },
           muted: { value: 'rgba(46, 160, 67, 0.4)' },
-          subtle: { value: 'rgba(46, 160, 67, 0.1)' },
+          subtle: { value: t.accent.greenSubtle },
         },
-        orange: { 500: { value: '#f77f00' } },
-        red: { 
+        orange: { 500: { value: t.accent.orange } },
+        red: {
           500: { value: '#ff5555' },
-          solid: { value: '#f85149' },
+          solid: { value: t.accent.red },
           muted: { value: 'rgba(248, 81, 73, 0.4)' },
-          subtle: { value: 'rgba(248, 81, 73, 0.1)' },
+          subtle: { value: t.accent.redSubtle },
         },
         yellow: { 500: { value: '#f1fa8c' } },
         pink: { 500: { value: '#ff79c6' } },
         cyan: { 500: { value: '#8be9fd' } },
-        
-        // IDE-specific colors
+
         ide: {
           bg: {
-            welcome: { value: '#0a0e13' },
-            editor: { value: '#1e1e1e' },
-            glass: { value: 'rgba(30, 30, 30, 0.9)' },
-            sidebar: { value: '#252526' },
-            overlay: { value: '#2d2d30' },
-            terminal: { value: '#1e1e1e' },
-            status: { value: '#007acc' },
-            tabActive: { value: '#1e1e1e' },
-            tabInactive: { value: '#2d2d30' },
+            welcome: { value: t.bg.welcome },
+            editor: { value: t.bg.app },
+            glass: { value: t.bg.glass },
+            sidebar: { value: t.bg.sidebar },
+            overlay: { value: t.bg.overlay },
+            terminal: { value: t.bg.terminal },
+            status: { value: t.accent.blue },
+            tabActive: { value: t.bg.app },
+            tabInactive: { value: t.bg.overlay },
             tabHover: { value: '#37415A' },
           },
           text: {
-            primary: { value: 'white' },
+            primary: { value: t.text.inverse },
             secondary: { value: 'rgba(255, 255, 255, 0.9)' },
             muted: { value: 'rgba(255, 255, 255, 0.7)' },
-            link: { value: '#58a6ff' },
+            link: { value: t.accent.primary },
           },
           border: {
-            default: { value: '#3c3c3c' },
-            glass: { value: 'rgba(56, 56, 56, 0.6)' },
-            focus: { value: '#007fd4' },
-            tab: { value: '#252526' },
+            default: { value: t.border.default },
+            glass: { value: t.border.glass },
+            focus: { value: t.accent.primary },
+            tab: { value: t.border.tab },
           },
-          selection: { value: '#264f78' },
+          selection: { value: t.bg.selection },
           findMatch: { value: '#515c6a' },
           currentFindMatch: { value: '#613214' },
         }
       },
       fonts: {
-        heading: { value: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif' },
-        body: { value: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif' },
-        mono: { value: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace' },
+        heading: { value: tokens.fontFamily.ui },
+        body: { value: tokens.fontFamily.ui },
+        mono: { value: tokens.fontFamily.mono },
       },
       radii: {
-        sm: { value: '2px' },
-        md: { value: '4px' },
-        lg: { value: '6px' },
+        sm: { value: tokens.radius.sm },
+        md: { value: tokens.radius.md },
+        lg: { value: tokens.radius.lg },
       },
       shadows: {
-        'toolbar': { value: '0 1px 3px rgba(0, 0, 0, 0.3)' },
-        'panel': { value: '0 2px 8px rgba(0, 0, 0, 0.4)' },
+        'toolbar': { value: tokens.shadow.toolbar },
+        'panel': { value: tokens.shadow.panel },
       }
     },
   },

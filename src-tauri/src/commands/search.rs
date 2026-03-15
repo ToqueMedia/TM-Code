@@ -143,7 +143,21 @@ pub async fn search_in_files(
         )
     })?;
 
-    if !output.status.success() {
+    // Ripgrep exit codes: 0 = matches found, 1 = no matches, 2+ = error
+    let exit_code = output.status.code().unwrap_or(-1);
+    if exit_code == 1 {
+        // No matches found — return empty result, not an error
+        let duration = start_time.elapsed();
+        return Ok(SearchResult {
+            query,
+            total_files: 0,
+            total_matches: 0,
+            files: vec![],
+            duration_ms: duration.as_millis() as u64,
+            truncated: false,
+        });
+    }
+    if exit_code >= 2 {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Ripgrep search failed: {}", stderr));
     }
@@ -237,8 +251,8 @@ pub async fn search_in_files(
                     }
                 }
             }
-            Err(_) => {
-                // Skip invalid JSON lines
+            Err(e) => {
+                eprintln!("Warning: failed to parse ripgrep JSON line: {}", e);
                 continue;
             }
         }
@@ -292,23 +306,18 @@ pub async fn replace_in_files(
         .map_err(|e| format!("Failed to resolve directory path: {}", e))?;
     let directory = directory_path.to_string_lossy().to_string();
 
+    // Step 1: Use ripgrep to find files containing matches
     let mut cmd = Command::new("rg");
-
-    // Enable replacement mode
-    cmd.arg("--replace").arg(&replacement);
     cmd.arg("--files-with-matches");
 
-    // Case sensitivity
     if !options.case_sensitive {
         cmd.arg("--ignore-case");
     }
 
-    // Whole word matching
     if options.whole_word {
         cmd.arg("--word-regexp");
     }
 
-    // Include/exclude patterns
     for pattern in &options.include_patterns {
         if !pattern.trim().is_empty() {
             cmd.arg("--glob").arg(pattern);
@@ -335,21 +344,69 @@ pub async fn replace_in_files(
 
     let output = cmd
         .output()
-        .map_err(|e| format!("Failed to execute ripgrep replace: {}", e))?;
+        .map_err(|e| format!("Failed to execute ripgrep: {}", e))?;
 
-    if !output.status.success() {
+    let exit_code = output.status.code().unwrap_or(-1);
+    if exit_code == 1 {
+        // No matches found
+        return Ok(0);
+    }
+    if exit_code >= 2 {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Replace operation failed: {}", stderr));
+        return Err(format!("Replace search failed: {}", stderr));
     }
 
-    // Count the number of files that would be affected
+    // Step 2: Read each matched file, perform replacement, and write back
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let affected_files = stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count();
+    let files: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut affected_count: u32 = 0;
 
-    Ok(affected_files as u32)
+    // Build the regex for replacement
+    let regex = if options.use_regex {
+        if options.case_sensitive {
+            regex::Regex::new(&query)
+        } else {
+            regex::Regex::new(&format!("(?i){}", query))
+        }
+    } else {
+        let escaped = regex::escape(&query);
+        let pattern = if options.whole_word {
+            format!(r"\b{}\b", escaped)
+        } else {
+            escaped
+        };
+        if options.case_sensitive {
+            regex::Regex::new(&pattern)
+        } else {
+            regex::Regex::new(&format!("(?i){}", pattern))
+        }
+    }
+    .map_err(|e| format!("Invalid search pattern: {}", e))?;
+
+    for file_path in &files {
+        let path = PathBuf::from(file_path);
+        // Ensure the file is within the project directory
+        if !path.starts_with(&directory_path) {
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let new_content = regex.replace_all(&content, replacement.as_str()).to_string();
+                if new_content != content {
+                    if let Err(e) = std::fs::write(&path, &new_content) {
+                        eprintln!("Failed to write replacement to {}: {}", file_path, e);
+                        continue;
+                    }
+                    affected_count += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to read {}: {}", file_path, e);
+            }
+        }
+    }
+
+    Ok(affected_count)
 }
 
 #[tauri::command]

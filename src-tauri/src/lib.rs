@@ -5,25 +5,50 @@ use commands::project::*;
 use commands::search::*;
 use commands::terminal::*;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+use tauri::webview::NewWindowResponse;
+use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+/// Domains allowed to open as popup windows (OAuth flows).
+fn is_oauth_domain(host: &str) -> bool {
+    host.contains("google.com")
+        || host.contains("googleapis.com")
+        || host.contains("firebaseapp.com")
+        || host == "127.0.0.1"
+        || host == "localhost"
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let (command_history, _process_map) = commands::terminal::init_terminal_state();
+    let (command_history, process_map) = commands::terminal::init_terminal_state();
     let debugger_state = commands::debugger::DebuggerState::new();
 
     tauri::Builder::default()
         .manage(command_history)
+        .manage(process_map)
         .manage(debugger_state)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .setup(|app| {
+            // Create main window programmatically so we can attach on_new_window
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                .title("toquemedia-studio")
+                .inner_size(1250.0, 850.0)
+                .decorations(false)
+                .transparent(true)
+                .on_new_window(|url, _features| {
+                    let host = url.host_str().unwrap_or("");
+                    if is_oauth_domain(host) {
+                        NewWindowResponse::Allow
+                    } else {
+                        NewWindowResponse::Deny
+                    }
+                })
+                .build()?;
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
-            greet,
             open_project,
             create_project,
             get_recent_projects,

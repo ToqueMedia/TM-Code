@@ -230,6 +230,21 @@ pub async fn launch_debug_session(
         session.config.clone()
     };
 
+    // Validate program path is within the working directory to prevent arbitrary execution
+    if !config.cwd.is_empty() && !config.program.is_empty() {
+        let cwd_path = std::path::Path::new(&config.cwd);
+        let program_path = cwd_path.join(&config.program);
+        if let Ok(canonical_program) = std::fs::canonicalize(&program_path) {
+            if let Ok(canonical_cwd) = std::fs::canonicalize(cwd_path) {
+                if !canonical_program.starts_with(&canonical_cwd) {
+                    return Err(DebuggerError::InvalidConfig(
+                        "Program path must be within the project directory".to_string()
+                    ).to_string());
+                }
+            }
+        }
+    }
+
     // Build command based on debug type (outside the lock)
     let mut cmd = match config.debug_type.as_str() {
         "node" => {

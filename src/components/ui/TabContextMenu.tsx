@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Flex, Text, VStack } from '@chakra-ui/react'
 import { useEditorRepository } from '../../stores/editorStore'
+import { tokens } from '../../theme/tokens'
 
 interface OpenEventDetail {
   x: number
@@ -114,11 +115,11 @@ export default function TabContextMenu(): React.ReactElement | null {
         position="fixed"
         left={coords.x}
         top={coords.y}
-        bg="#1e1e1e"
-        border="1px solid #2b2b2c"
+        bg={tokens.colors.bg.app}
+        border={`1px solid ${tokens.colors.border.subtle}`}
         borderRadius="10px"
         minW="200px"
-        boxShadow="0 12px 40px rgba(0,0,0,0.5)"
+        boxShadow={tokens.shadow.overlay}
         overflow="hidden"
         transform="scale(0.98)"
         opacity={0.0}
@@ -141,8 +142,8 @@ export default function TabContextMenu(): React.ReactElement | null {
                 gap={3}
                 cursor="default"
                 bg="transparent"
-                _hover={{ bg: '#0b2a4a' }}
-                _focus={{ bg: '#0b2a4a' }}
+                _hover={{ bg: tokens.colors.bg.activeItem }}
+                _focus={{ bg: tokens.colors.bg.activeItem }}
                 borderTopLeftRadius={roundedTop}
                 borderTopRightRadius={roundedTop}
                 borderBottomLeftRadius={roundedBottom}
@@ -150,7 +151,7 @@ export default function TabContextMenu(): React.ReactElement | null {
                 onClick={item.onClick}
                 onKeyDown={function (e) { if (e.key === 'Enter') item.onClick() }}
               >
-                <Text color="#e6e6e6" fontSize="sm">{item.label}</Text>
+                <Text color={tokens.colors.menu.text} fontSize="sm">{item.label}</Text>
                 <Box />
               </Flex>
             )

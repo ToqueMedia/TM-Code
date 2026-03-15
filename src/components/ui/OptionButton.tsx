@@ -28,7 +28,7 @@ export const OptionButton: React.FC<OptionButtonProps> = ({
     <IconButton
       aria-label={label}
       variant="ghost"
-      size={sizeProps.buttonSize as any}
+      size={sizeProps.buttonSize as "xs" | "sm" | "md"}
       color={isActive ? 'blue.500' : 'text.secondary'}
       onClick={onClick}
       bg={isActive ? 'whiteAlpha.100' : 'transparent'}

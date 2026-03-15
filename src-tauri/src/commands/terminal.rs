@@ -71,7 +71,10 @@ pub async fn execute_command(
 }
 
 #[tauri::command]
-pub async fn start_interactive_shell(cwd: Option<String>) -> Result<ProcessInfo, String> {
+pub async fn start_interactive_shell(
+    cwd: Option<String>,
+    process_map: State<'_, ProcessMap>,
+) -> Result<ProcessInfo, String> {
     let working_dir = match cwd {
         Some(dir) => PathBuf::from(dir),
         None => {
@@ -99,6 +102,12 @@ pub async fn start_interactive_shell(cwd: Option<String>) -> Result<ProcessInfo,
 
     let pid = child.id();
 
+    // Track the spawned process so kill_process can validate it
+    {
+        let mut map = process_map.lock().map_err(|_| "Failed to lock process map")?;
+        map.insert(pid, child);
+    }
+
     Ok(ProcessInfo {
         pid,
         command: shell_cmd,
@@ -108,13 +117,33 @@ pub async fn start_interactive_shell(cwd: Option<String>) -> Result<ProcessInfo,
 }
 
 #[tauri::command]
-pub async fn kill_process(pid: u32) -> Result<bool, String> {
+pub async fn kill_process(
+    pid: u32,
+    process_map: State<'_, ProcessMap>,
+) -> Result<bool, String> {
+    // Only allow killing processes that we spawned (tracked in ProcessMap)
+    {
+        let map = process_map.lock().map_err(|_| "Failed to lock process map")?;
+        if !map.contains_key(&pid) {
+            return Err(format!(
+                "Cannot kill PID {}: not a process managed by this application",
+                pid
+            ));
+        }
+    }
+
     // On Unix systems, use kill command
     if cfg!(unix) {
         let output = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output()
             .map_err(|e| format!("Failed to kill process {}: {}", pid, e))?;
+
+        // Remove from tracked processes
+        if output.status.success() {
+            let mut map = process_map.lock().map_err(|_| "Failed to lock process map")?;
+            map.remove(&pid);
+        }
 
         Ok(output.status.success())
     } else {
@@ -123,6 +152,12 @@ pub async fn kill_process(pid: u32) -> Result<bool, String> {
             .args(["/F", "/PID", &pid.to_string()])
             .output()
             .map_err(|e| format!("Failed to kill process {}: {}", pid, e))?;
+
+        // Remove from tracked processes
+        if output.status.success() {
+            let mut map = process_map.lock().map_err(|_| "Failed to lock process map")?;
+            map.remove(&pid);
+        }
 
         Ok(output.status.success())
     }
@@ -144,7 +179,7 @@ pub async fn get_home_directory() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn change_directory(path: String) -> Result<String, String> {
-    let new_path = PathBuf::from(path);
+    let new_path = PathBuf::from(&path);
 
     if !new_path.exists() {
         return Err(format!("Directory does not exist: {}", new_path.display()));
@@ -154,9 +189,14 @@ pub async fn change_directory(path: String) -> Result<String, String> {
         return Err(format!("Path is not a directory: {}", new_path.display()));
     }
 
-    env::set_current_dir(&new_path).map_err(|e| format!("Failed to change directory: {}", e))?;
+    // Canonicalize to resolve symlinks and return absolute path.
+    // NOTE: We intentionally do NOT call env::set_current_dir() because it
+    // mutates process-global state, which would affect all concurrent
+    // terminal sessions. The frontend tracks cwd per-terminal instead.
+    let canonical = std::fs::canonicalize(&new_path)
+        .map_err(|e| format!("Failed to resolve directory: {}", e))?;
 
-    Ok(new_path.to_string_lossy().to_string())
+    Ok(canonical.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -177,10 +217,22 @@ pub async fn command_exists(command: String) -> Result<bool, String> {
 
 #[tauri::command]
 pub async fn get_environment_variables() -> Result<HashMap<String, String>, String> {
+    // Patterns that indicate sensitive environment variables
+    let sensitive_patterns = [
+        "SECRET", "TOKEN", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL",
+        "AUTH", "PRIVATE", "API_KEY", "APIKEY", "ACCESS_KEY",
+        "AWS_SECRET", "AWS_SESSION", "DATABASE_URL", "DB_PASS",
+        "ENCRYPTION", "SIGNING",
+    ];
+
     let mut env_vars = HashMap::new();
 
     for (key, value) in env::vars() {
-        env_vars.insert(key, value);
+        let upper = key.to_uppercase();
+        let is_sensitive = sensitive_patterns.iter().any(|pat| upper.contains(pat));
+        if !is_sensitive {
+            env_vars.insert(key, value);
+        }
     }
 
     Ok(env_vars)
@@ -197,9 +249,9 @@ pub async fn get_completions(partial: String, cwd: Option<String>) -> Result<Vec
 
     let mut completions = Vec::new();
 
-    // Simple file/directory completion
-    if let Some(parent) = working_dir.parent() {
-        if let Ok(entries) = std::fs::read_dir(parent) {
+    // Simple file/directory completion based on the working directory itself
+    {
+        if let Ok(entries) = std::fs::read_dir(&working_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
                     if name.starts_with(&partial) {

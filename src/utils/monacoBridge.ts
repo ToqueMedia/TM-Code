@@ -21,8 +21,8 @@ class MonacoBridge {
   trigger(commandId: string): void {
     try {
       if (this.editor) {
-        // @ts-ignore
-        this.editor.trigger('monacoBridge', commandId, null)
+        ;(this.editor as unknown as { trigger(source: string, handlerId: string, payload: unknown): void })
+          .trigger('monacoBridge', commandId, null)
       }
     } catch {}
   }

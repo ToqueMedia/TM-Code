@@ -160,7 +160,8 @@ export default class SearchService {
   }
 
   // Format search results for display
-  formatResultsForDisplay(searchResult: SearchResult) {
+  formatResultsForDisplay(searchResult: SearchResult, searchDir?: string) {
+    if (searchDir) this.currentSearchDir = searchDir;
     return {
       ...searchResult,
       files: searchResult.files.map(file => ({
@@ -175,17 +176,16 @@ export default class SearchService {
     };
   }
 
-  // Get relative path for display
+  // Store the current search directory for relative path computation
+  private currentSearchDir: string = '';
+
+  // Get relative path for display using the project root
   private getRelativePath(fullPath: string): string {
-    // Simple relative path extraction - could be enhanced
-    const segments = fullPath.split('/');
-    const srcIndex = segments.findIndex(seg => seg === 'src');
-    
-    if (srcIndex >= 0) {
-      return segments.slice(srcIndex).join('/');
+    if (this.currentSearchDir && fullPath.startsWith(this.currentSearchDir)) {
+      const relative = fullPath.slice(this.currentSearchDir.length);
+      return relative.startsWith('/') ? relative.slice(1) : relative;
     }
-    
-    return segments.slice(-3).join('/'); // Last 3 segments
+    return fullPath;
   }
 
   // Highlight matching text

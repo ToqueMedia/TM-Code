@@ -7,9 +7,8 @@ import { logger } from './logger';
  */
 function isTauriContext(): boolean {
   try {
-    // @ts-ignore
-    return !!(window.__TAURI__ || window.__TAURI_INTERNALS__);
-  } catch (error) {
+    return !!('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
+  } catch {
     return false;
   }
 }

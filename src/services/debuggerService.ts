@@ -88,6 +88,11 @@ class DebuggerService {
     }
   }
 
+  dispose(): void {
+    this.eventCallbacks = []
+    this.activeSessions.clear()
+  }
+
   private emitEvent(event: DebuggerEvent): void {
     this.eventCallbacks.forEach(callback => callback(event))
   }
@@ -321,7 +326,7 @@ class DebuggerService {
       name: options.name,
       program: options.program,
       args: options.args || [],
-      cwd: options.cwd || process.cwd(),
+      cwd: options.cwd || '',
       env: options.env || {},
       debug_type: 'node'
     }

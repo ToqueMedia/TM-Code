@@ -1,4 +1,5 @@
 import { HStack, Box } from '@chakra-ui/react'
+import { tokens } from '../../theme/tokens'
 
 interface WindowControlsProps {
 	onClose: () => void
@@ -12,7 +13,7 @@ const WindowControls = ({ onClose, onMinimize, onMaximize }: WindowControlsProps
 			width="12px"
 			height="12px"
 			borderRadius="full"
-			bg="#ff5f57"
+			bg={tokens.colors.windowControl.close}
 			cursor="pointer"
 			onClick={onClose}
 			transition="filter 0.2s"
@@ -22,7 +23,7 @@ const WindowControls = ({ onClose, onMinimize, onMaximize }: WindowControlsProps
 			width="12px"
 			height="12px"
 			borderRadius="full"
-			bg="#ffbd2e"
+			bg={tokens.colors.windowControl.minimize}
 			cursor="pointer"
 			onClick={onMinimize}
 			transition="filter 0.2s"
@@ -32,7 +33,7 @@ const WindowControls = ({ onClose, onMinimize, onMaximize }: WindowControlsProps
 			width="12px"
 			height="12px"
 			borderRadius="full"
-			bg="#28ca42"
+			bg={tokens.colors.windowControl.maximize}
 			cursor="pointer"
 			onClick={onMaximize}
 			transition="filter 0.2s"

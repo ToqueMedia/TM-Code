@@ -6,7 +6,6 @@ class RecoveryService {
   private static instance: RecoveryService;
   private recoveryStates: Map<string, ProjectState> = new Map();
   private recoveryInterval: number | null = null;
-  private readonly RECOVERY_INTERVAL = 30000;
   private readonly MAX_CACHED_STATES = 10;
 
   private constructor() {}
@@ -92,13 +91,9 @@ class RecoveryService {
   }
 
   startRecoveryMonitoring() {
-    if (this.recoveryInterval) {
-      clearInterval(this.recoveryInterval);
-    }
-
-    this.recoveryInterval = window.setInterval(() => {
-      // Periodic recovery check tick
-    }, this.RECOVERY_INTERVAL);
+    // No-op: periodic recovery monitoring is not needed since recovery state
+    // is saved synchronously during project state saves.
+    this.stopRecoveryMonitoring();
   }
 
   stopRecoveryMonitoring() {

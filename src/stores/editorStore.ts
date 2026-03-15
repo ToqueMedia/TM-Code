@@ -84,6 +84,7 @@ const getLanguageFromExtension = (filePath: string): string => {
 
 const unsavedChangesService = UnsavedChangesService.getInstance();
 const autoSaveQueue = AutoSaveQueue.getInstance();
+const openingFiles = new Set<string>(); // Concurrency guard for openFile
 
 export const useEditorRepository = create<EditorState & EditorActions>()(
   persist(
@@ -96,12 +97,19 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
 
       openFile: async (path: string) => {
         logger.debug('editor', 'Opening file:', path);
+        // Concurrency guard: skip if this file is already being opened
+        if (openingFiles.has(path)) return;
+
         set({ activeFile: path });
-        
+
         // Check if file is already open
         const existingFile = get().openFiles.find(f => f.path === path);
         if (existingFile) {
           logger.debug('editor', 'File already open:', path);
+          // If file has unsaved edits, do NOT overwrite from disk — just activate
+          if (existingFile.isDirty) {
+            return;
+          }
           // Refresh content from file system to ensure we have the latest version
           try {
             logger.debug('editor', 'Refreshing content for:', path);
@@ -111,14 +119,16 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
               set(state => {
                 const fileIndex = state.openFiles.findIndex(f => f.path === path);
                 if (fileIndex === -1) return state;
-                
+                // Double-check isDirty hasn't changed while we were reading
+                if (state.openFiles[fileIndex].isDirty) return state;
+
                 const updatedFiles = [...state.openFiles];
                 updatedFiles[fileIndex] = {
                   ...updatedFiles[fileIndex],
                   content,
-                  isDirty: false // Reset dirty flag since we're loading fresh content
+                  isDirty: false
                 };
-                
+
                 return { openFiles: updatedFiles };
               });
             }
@@ -128,26 +138,32 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           return;
         }
         
+        openingFiles.add(path);
         try {
           logger.debug('editor', 'Reading file content for:', path);
           const content = await FileService.readFile(path);
           const language = getLanguageFromExtension(path);
           logger.debug('editor', `File loaded successfully: ${path} (${content.length} chars, ${language})`);
-          
-          set(state => ({
-            openFiles: [
-              ...state.openFiles,
-              {
-                path,
-                content,
-                language,
-                isDirty: false
-              }
-            ]
-          }));
+
+          // Re-check: another concurrent call may have added the file while we awaited
+          if (!get().openFiles.some(f => f.path === path)) {
+            set(state => ({
+              openFiles: [
+                ...state.openFiles,
+                {
+                  path,
+                  content,
+                  language,
+                  isDirty: false
+                }
+              ]
+            }));
+          }
         } catch (error) {
           logger.error('editor', `Failed to open file ${path}:`, error);
           throw error;
+        } finally {
+          openingFiles.delete(path);
         }
       },
 
@@ -157,12 +173,20 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             const updated = state.openFiles.filter(ff => ff.path !== path);
             const cursorPositions = { ...state.cursorPositions };
             delete cursorPositions[path];
+            // Clean undo/redo stacks for closed file
+            const undoStack = { ...state.undoStack };
+            const redoStack = { ...state.redoStack };
+            delete undoStack[path];
+            delete redoStack[path];
             unsavedChangesService.markFileAsClean(path);
             let activeFile = state.activeFile;
             if (activeFile === path) {
-              activeFile = updated.length > 0 ? updated[0].path : null;
+              // Select adjacent tab instead of first tab
+              const closedIndex = state.openFiles.findIndex(ff => ff.path === path);
+              const adjacentIndex = Math.min(closedIndex, updated.length - 1);
+              activeFile = updated.length > 0 ? updated[Math.max(0, adjacentIndex)].path : null;
             }
-            return { openFiles: updated, activeFile, cursorPositions };
+            return { openFiles: updated, activeFile, cursorPositions, undoStack, redoStack };
           });
         };
 
@@ -408,17 +432,28 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             }
           }
           
-          // Update file states to mark as not dirty
+          // Only mark files as clean if they haven't been re-dirtied during save
+          const savedPaths = new Set(dirtyFiles.map(f => f.path));
           set(state => {
-            const updatedFiles = state.openFiles.map(file => 
-              file.isDirty ? { ...file, isDirty: false } : file
-            );
-            
+            const updatedFiles = state.openFiles.map(file => {
+              if (!savedPaths.has(file.path)) return file;
+              // Re-check: content may have changed during async save
+              const originalFile = dirtyFiles.find(f => f.path === file.path);
+              if (originalFile && file.content === originalFile.content) {
+                return { ...file, isDirty: false };
+              }
+              return file; // File was re-dirtied, keep dirty flag
+            });
             return { openFiles: updatedFiles };
           });
-          
-          // Mark all files as clean
-          dirtyFiles.forEach(file => unsavedChangesService.markFileAsClean(file.path));
+
+          // Only mark clean if content matches what was saved
+          dirtyFiles.forEach(file => {
+            const current = get().openFiles.find(f => f.path === file.path);
+            if (current && !current.isDirty) {
+              unsavedChangesService.markFileAsClean(file.path);
+            }
+          });
         } catch (error) {
           logger.error('editor', 'Failed to save all files:', error);
           throw error;
@@ -480,10 +515,9 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
     }),
     {
       name: 'editor-storage',
-      partialize: (state) => ({ 
-        openFiles: state.openFiles.map(f => ({ 
-          path: f.path, 
-          content: f.content, 
+      partialize: (state) => ({
+        openFiles: state.openFiles.map(f => ({
+          path: f.path,
           language: f.language,
           isDirty: f.isDirty
         })),

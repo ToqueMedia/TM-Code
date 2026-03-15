@@ -6,6 +6,7 @@ import {
   Input,
   Portal,
 } from '@chakra-ui/react';
+import { tokens } from '@/theme/tokens';
 import { useProjectStore } from '../../stores/projectStore';
 import { open } from '@tauri-apps/plugin-dialog';
 import { ProjectValidator } from '../../utils/projectValidator';
@@ -110,7 +111,7 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
                   borderColor="gray.600"
                   _focus={{
                     borderColor: "blue.500",
-                    boxShadow: "0 0 0 2px rgba(88, 166, 255, 0.3)"
+                    boxShadow: "none"
                   }}
                 />
                 <Button 
@@ -120,8 +121,8 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
                   color="white"
                   borderColor="gray.600"
                   _hover={{
-                    bg: "rgba(88, 166, 255, 0.1)",
-                    borderColor: "blue.500"
+                    bg: tokens.colors.accent.primarySubtle,
+                    borderColor: tokens.colors.accent.blue
                   }}
                 >
                   Browse
@@ -152,8 +153,8 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
                 color="white"
                 borderColor="gray.600"
                 _hover={{
-                  bg: "rgba(255, 255, 255, 0.1)",
-                  borderColor: "gray.400"
+                  bg: tokens.colors.bg.whiteOverlay,
+                  borderColor: tokens.colors.border.subtle
                 }}
               >
                 Cancel

@@ -22,7 +22,7 @@ interface ProjectStore {
   openProject: (path: string) => Promise<void>;
   createProject: (path: string, template: string) => Promise<void>;
   loadRecentProjects: () => Promise<void>;
-  closeProject: () => void;
+  closeProject: () => Promise<void>;
   saveProjectState: () => Promise<void>;
   loadProjectState: (projectId: string) => Promise<void>;
   setWindowState: (state: WindowState) => void;
@@ -68,7 +68,9 @@ export const useProjectStore = create<ProjectStore>()(
           });
 
           // Clear editor open files when opening a new project
-          try { useEditorRepository.getState().closeAllFiles() } catch {}
+          try { useEditorRepository.getState().closeAllFiles() } catch (e) {
+            logger.error('project', 'Failed to close editor files during project switch:', e)
+          }
 
           // Check for recovery state before loading project state
           const hasRecovery = await recoveryService.hasRecoveryState(projectInfo.id);
@@ -144,41 +146,33 @@ export const useProjectStore = create<ProjectStore>()(
         }
       },
 
-      closeProject: () => {
+      closeProject: async () => {
         const { currentProject } = get();
         const editorState = useEditorRepository.getState();
         const hasDirtyFiles = editorState.openFiles.some(f => f.isDirty);
 
-        const proceed = async () => {
-          // Save current project state before closing
-          if (currentProject) {
-            get().saveProjectState().catch(console.error);
-          }
-          // Stop monitoring
-          const monitor = ProjectStatusMonitor.getInstance();
-          monitor.stopMonitoring();
-          // Stop file watching
-          fileWatcher.stopWatching();
-          // Stop managing window title
-          windowTitleManager.stopManaging();
-          // Stop recovery monitoring
-          recoveryService.stopRecoveryMonitoring();
-          // Close all editor files
-          useEditorRepository.getState().closeAllFiles();
-          set({ currentProject: null });
-        };
-
         if (hasDirtyFiles) {
-          Promise.resolve().then(async () => {
-            const dirtyCount = editorState.openFiles.filter(f => f.isDirty).length;
-            const ok = await tauriConfirm(`There are ${dirtyCount} unsaved file(s). Close project and discard changes?`, { title: 'Unsaved changes', kind: 'warning' });
-            if (!ok) return;
-            await proceed();
-          });
-          return;
+          const dirtyCount = editorState.openFiles.filter(f => f.isDirty).length;
+          const ok = await tauriConfirm(`There are ${dirtyCount} unsaved file(s). Close project and discard changes?`, { title: 'Unsaved changes', kind: 'warning' });
+          if (!ok) return;
         }
 
-        proceed();
+        // Save current project state before closing
+        if (currentProject) {
+          await get().saveProjectState().catch(console.error);
+        }
+        // Stop monitoring
+        const monitor = ProjectStatusMonitor.getInstance();
+        monitor.stopMonitoring();
+        // Stop file watching
+        fileWatcher.stopWatching();
+        // Stop managing window title
+        windowTitleManager.stopManaging();
+        // Stop recovery monitoring
+        recoveryService.stopRecoveryMonitoring();
+        // Close all editor files
+        useEditorRepository.getState().closeAllFiles();
+        set({ currentProject: null });
       },
 
       saveProjectState: async () => {

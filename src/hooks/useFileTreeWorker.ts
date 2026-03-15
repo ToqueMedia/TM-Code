@@ -18,7 +18,7 @@ export type WorkerResponseType =
   | 'ERROR'
 
 // Tipos para opções de processamento
-export interface FileTreeFilter {
+export interface WorkerFileTreeFilter {
   showHidden?: boolean
   extensions?: string[]
   maxDepth?: number
@@ -26,7 +26,7 @@ export interface FileTreeFilter {
 }
 
 export interface FileTreeOptions {
-  filter?: FileTreeFilter
+  filter?: WorkerFileTreeFilter
   sort?: boolean
   createIndex?: boolean
 }
@@ -205,7 +205,7 @@ export function useFileTreeWorker() {
   // Filtra arquivos baseado em critérios
   const filterFiles = useCallback(async (
     tree: FileTreeNode,
-    filter: FileTreeFilter
+    filter: WorkerFileTreeFilter
   ): Promise<FileTreeNode> => {
     return sendMessage('FILTER_FILES', { tree, filter })
   }, [sendMessage])

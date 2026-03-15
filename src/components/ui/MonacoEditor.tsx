@@ -3,6 +3,7 @@ import Editor, { Monaco } from '@monaco-editor/react';
 import { useMonacoEditorState } from '../../hooks/useEditorState';
 import { useMonacoTheme } from '../../hooks/useMonacoTheme';
 import type { editor, IDisposable } from 'monaco-editor';
+import { tokens } from '@/theme/tokens';
 import { logger } from '../../utils/logger';
 import MonacoBridge from '../../utils/monacoBridge';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -48,7 +49,7 @@ if (typeof window !== 'undefined') {
   };
   
   // Global flag to track if themes are defined
-  (window as any).toqueMediaThemesDefined = false;
+  (window as unknown as { toqueMediaThemesDefined: boolean }).toqueMediaThemesDefined = false;
 }
 
 interface MonacoEditorProps {
@@ -200,8 +201,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       if (model) {
         if (detectIndentationSetting) {
           // Let Monaco infer indentation from content using our defaults
-          // @ts-ignore - detectIndentation exists on ITextModel
-          model.detectIndentation(insertSpacesSetting, tabSizeSetting)
+          ;(model as unknown as { detectIndentation(insertSpaces: boolean, tabSize: number): void })
+            .detectIndentation(insertSpacesSetting, tabSizeSetting)
         } else {
           model.updateOptions({
             tabSize: tabSizeSetting,
@@ -210,12 +211,33 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
           })
         }
       }
-    } catch {}
+    } catch (e) {
+      logger.error('editor', 'Failed to update editor options:', e)
+    }
   }, [tabSizeSetting, insertSpacesSetting, detectIndentationSetting])
   
+  // Cleanup disposables when editor unmounts or changes
+  const disposablesRef = useRef<IDisposable[]>([]);
+  useEffect(() => {
+    return () => {
+      disposablesRef.current.forEach(d => d.dispose());
+      disposablesRef.current = [];
+      const inst = editorRef.current;
+      if (inst) {
+        const bridge = MonacoBridge.getInstance();
+        if (bridge.getCurrentEditor() === inst) {
+          bridge.setCurrentEditor(null);
+        }
+      }
+    };
+  }, [path]);
+
   // Handle editor mounting
   const handleEditorDidMount = useCallback((editor: editor.IStandaloneCodeEditor, monaco: Monaco) => {
     logger.editor(`Monaco Editor mounted successfully for: ${path}`);
+    // Dispose previous listeners before setting new ones
+    disposablesRef.current.forEach(d => d.dispose());
+    disposablesRef.current = [];
     editorRef.current = editor;
     setMonacoInstance(monaco);
     MonacoBridge.getInstance().setCurrentEditor(editor);
@@ -247,33 +269,31 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     }
     
     // Set up event listeners
-    const disposables: IDisposable[] = [];
-
     // Dispatch supported languages to app
     try {
       const languages = monaco.languages.getLanguages().map(l => l.id);
       window.dispatchEvent(new CustomEvent('monaco:languages', { detail: languages }));
     } catch {}
-    
+
     // Cursor position change
-    disposables.push(
+    disposablesRef.current.push(
       editor.onDidChangeCursorPosition((e) => {
         const { lineNumber, column } = e.position;
         handleCursorChange(lineNumber, column);
         onCursorPositionChange?.(lineNumber, column);
       })
     );
-    
+
     // Content change
-    disposables.push(
+    disposablesRef.current.push(
       editor.onDidChangeModelContent(() => {
         const value = editor.getValue();
         handleContentChange(value);
       })
     );
-    
+
     // Add keyboard shortcuts
-    const saveCommand = editor.addCommand(
+    editor.addCommand(
       monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
       () => {
         handleSave().catch(error => {
@@ -281,22 +301,9 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         });
       }
     );
-    
-    if (saveCommand) {
-      disposables.push({ dispose: () => {} }); // Command disposable is managed by Monaco
-    }
-    
+
     // Focus the editor
     editor.focus();
-    
-    // Return cleanup function
-    return () => {
-      disposables.forEach(disposable => disposable.dispose());
-      const bridge = MonacoBridge.getInstance()
-      if (bridge.getCurrentEditor() === editor) {
-        bridge.setCurrentEditor(null)
-      }
-    };
   }, [path, language, handleContentChange, handleCursorChange, handleSave, onCursorPositionChange]);
   
   // Handle content changes
@@ -322,12 +329,12 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         alignItems: 'center', 
         justifyContent: 'center', 
         height: '100%', 
-        color: '#8b949e',
+        color: tokens.colors.text.secondary,
         fontSize: '14px',
         flexDirection: 'column',
         gap: '8px'
       }}>
-        <div>📄 File not found</div>
+        <div>File not found</div>
         <div style={{ fontSize: '12px', opacity: 0.7 }}>{path}</div>
       </div>
     );
@@ -359,10 +366,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
             alignItems: 'center', 
             justifyContent: 'center', 
             height: '100%', 
-            color: '#8b949e',
+            color: tokens.colors.text.secondary,
             fontSize: '14px'
           }}>
-            ⚡ Loading Monaco Editor...
+            Loading Monaco Editor...
           </div>
         }
       />

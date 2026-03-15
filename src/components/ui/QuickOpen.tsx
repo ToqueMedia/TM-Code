@@ -1,6 +1,7 @@
 import React, { useRef } from 'react'
 import { Box, Input, Text } from '@chakra-ui/react'
 import type { QuickOpenItem } from '../../services/quickOpenService'
+import { tokens } from '@/theme/tokens'
 
 interface QuickOpenProps {
 	query: string
@@ -15,15 +16,15 @@ interface QuickOpenProps {
 	placeholder: string
 }
 
-const QuickOpen = ({ 
-	query, 
-	focused, 
-	highlightIndex, 
+const QuickOpen = ({
+	query,
+	focused,
+	highlightIndex,
 	visibleResults,
-	onQueryChange, 
-	onInputFocus, 
-	onInputBlur, 
-	onKeyDown, 
+	onQueryChange,
+	onInputFocus,
+	onInputBlur,
+	onKeyDown,
 	onOpenPath,
 	placeholder
 }: QuickOpenProps) => {
@@ -49,10 +50,10 @@ const QuickOpen = ({
 				onKeyDown={onKeyDown}
 				placeholder={placeholder}
 				size="sm"
-				bg="#1e1e1e"
-				borderColor="#3c3c3c"
-				color="#e6edf3"
-				_focus={{ borderColor: '#58a6ff', boxShadow: '0 0 0 2px rgba(88, 166, 255, 0.3)' }}
+				bg={tokens.colors.bg.app}
+				borderColor={tokens.colors.border.default}
+				color={tokens.colors.text.primary}
+				_focus={{ borderColor: tokens.colors.border.focus }}
 				className="no-drag"
 			/>
 			{focused && query.trim().length > 0 && visibleResults.length > 0 && (
@@ -61,8 +62,8 @@ const QuickOpen = ({
 					top="32px"
 					left={0}
 					right={0}
-					bg="#2d2d30"
-					border="1px solid #3c3c3c"
+					bg={tokens.colors.bg.overlay}
+					border={`1px solid ${tokens.colors.border.default}`}
 					borderRadius="6px"
 					zIndex={20}
 					maxH="300px"
@@ -80,13 +81,13 @@ const QuickOpen = ({
 								px={3}
 								py={2}
 								cursor="pointer"
-								bg={isActive ? '#094771' : 'transparent'}
-								_hover={{ bg: '#094771' }}
+								bg={isActive ? tokens.colors.bg.hover : 'transparent'}
+								_hover={{ bg: tokens.colors.bg.hover }}
 								onMouseDown={function md(e) { e.preventDefault() }}
 								onClick={function onClick() { onOpenPath(node.path) }}
 							>
-								<Text fontSize="sm" color="#e6edf3">{node.name}</Text>
-								<Text fontSize="xs" color="#858585">{node.path}</Text>
+								<Text fontSize="sm" color={tokens.colors.text.primary}>{node.name}</Text>
+								<Text fontSize="xs" color={tokens.colors.text.subtle}>{node.path}</Text>
 							</Box>
 						)
 					})}

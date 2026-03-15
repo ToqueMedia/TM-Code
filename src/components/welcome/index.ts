@@ -1,0 +1,5 @@
+export { default as WelcomeSidebar } from './WelcomeSidebar'
+export { default as WelcomeHero } from './WelcomeHero'
+export { default as WelcomeFeatureCard } from './WelcomeFeatureCard'
+export { default as NewProjectDialog } from './NewProjectDialog'
+export { default as CloneDialog } from './CloneDialog'

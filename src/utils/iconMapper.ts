@@ -18,14 +18,14 @@ for (const fullPath in files) {
 // - folders.json: { "controllers": "controller", "controller": "controller", ... }
 // - files.json:   { "ts": "typescript", "tsx": "react_ts", "js": "javascript", ... }
 // - names.json:   { "dockerfile": "docker", "readme": "markdown", ... }
-const jsonMaps = import.meta.glob('../assets/icons/material/mappings/*.json', { eager: true, import: 'default' }) as Record<string, any>;
+const jsonMaps = import.meta.glob('../assets/icons/material/mappings/*.json', { eager: true, import: 'default' }) as Record<string, Record<string, string>>;
 let folderNameToIcon: Record<string, string> = {};
 let fileExtToIcon: Record<string, string> = {};
 let fileNameToIcon: Record<string, string> = {};
 for (const p in jsonMaps) {
   const base = p.split('/').pop() as string;
   try {
-    const data = jsonMaps[p] as any;
+    const data = jsonMaps[p];
     if (base === 'folders.json' && data && typeof data === 'object') {
       folderNameToIcon = { ...folderNameToIcon, ...Object.fromEntries(Object.entries(data).map(([k, v]) => [String(k).toLowerCase(), String(v)])) };
     } else if (base === 'files.json' && data && typeof data === 'object') {

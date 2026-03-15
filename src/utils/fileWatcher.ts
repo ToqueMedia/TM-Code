@@ -31,19 +31,21 @@ export class FileWatcher {
       // Use Tauri's file system watcher
       const unwatch = await watch(
         path,
-        (event: any) => {
+        (event) => {
           try {
             // Convert Tauri fs events to our FileEvent format
+            const eventKind = event.type
+            const kindStr = typeof eventKind === 'string' ? eventKind : Object.keys(eventKind)[0] || 'update'
             const fileEvent: FileEvent = {
-              type: this.convertEventType(event.type),
-              path: Array.isArray(event.paths) ? event.paths[0] : event.path || path
+              type: this.convertEventType(kindStr),
+              path: Array.isArray(event.paths) ? event.paths[0] : path
             };
-            
+
             // Handle rename events which have oldPath
-            if (event.type === 'rename' && event.paths && event.paths.length > 1) {
+            if (kindStr === 'rename' && event.paths && event.paths.length > 1) {
               fileEvent.oldPath = event.paths[1];
             }
-            
+
             callback(fileEvent);
           } catch (callbackError) {
             logger.error('file-watcher', 'Error in file watch callback', callbackError);
@@ -77,7 +79,7 @@ export class FileWatcher {
   private async checkWatchSupport(): Promise<boolean> {
     try {
       // Check if we're running in Tauri environment
-      if (typeof window !== 'undefined' && (window as any).__TAURI__) {
+      if (typeof window !== 'undefined' && '__TAURI__' in window) {
         // Try to import the watch function to check if it's available
         const { watch } = await import('@tauri-apps/plugin-fs');
         return typeof watch === 'function';
@@ -115,7 +117,16 @@ export class FileWatcher {
   }
 
   private convertEventType(kind: string): FileEvent['type'] {
-    return kind as FileEvent['type'];
+    switch (kind) {
+      case 'create': return 'create';
+      case 'delete':
+      case 'remove': return 'delete';
+      case 'rename': return 'rename';
+      case 'modify':
+      case 'update':
+      case 'write':
+      default: return 'update';
+    }
   }
 
   // Stop watching all paths

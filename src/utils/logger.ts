@@ -223,47 +223,60 @@ class Logger {
   }
 }
 
+// Augment window for dev debugging helpers
+declare global {
+  interface Window {
+    toggleFileWatcherLogs?: () => void
+    toggleThemeLogs?: () => void
+    toggleWindowLogs?: () => void
+    toggleTerminalFitLogs?: () => void
+    getLoggerStats?: () => { category: string; logsPerSecond: number; enabled: boolean }[]
+    silenceLogs?: (seconds?: number) => void
+    loggerHelp?: () => void
+  }
+}
+
 // Export singleton instance
 export const logger = Logger.getInstance();
 
 // Global convenience functions for debugging in browser console
 if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
-  (window as any).toggleFileWatcherLogs = () => {
+  window.toggleFileWatcherLogs = () => {
     logger.enableFileWatcher(!logger['config'].enableFileWatcher);
     console.log('File watcher logs:', logger['config'].enableFileWatcher ? 'ENABLED' : 'DISABLED');
   };
 
-  (window as any).toggleThemeLogs = () => {
+  window.toggleThemeLogs = () => {
     logger.enableThemeLogger(!logger['config'].enableThemeLogger);
     console.log('Theme logs:', logger['config'].enableThemeLogger ? 'ENABLED' : 'DISABLED');
   };
 
-  (window as any).toggleWindowLogs = () => {
+  window.toggleWindowLogs = () => {
     logger.enableWindowService(!logger['config'].enableWindowService);
     console.log('Window service logs:', logger['config'].enableWindowService ? 'ENABLED' : 'DISABLED');
   };
 
-  (window as any).toggleTerminalFitLogs = () => {
+  window.toggleTerminalFitLogs = () => {
     logger.enableTerminalFit(!logger['config'].enableTerminalFit);
     console.log('Terminal fit logs:', logger['config'].enableTerminalFit ? 'ENABLED' : 'DISABLED');
   };
 
-  (window as any).getLoggerStats = () => {
+  window.getLoggerStats = () => {
     const stats = logger.getStats();
     console.table(stats);
     return stats;
   };
 
-  (window as any).silenceLogs = (seconds: number = 30) => {
+  window.silenceLogs = (seconds: number = 30) => {
     logger.silenceFor(seconds * 1000);
     console.log(`Logs silenced for ${seconds} seconds`);
   };
 
-  (window as any).loggerHelp = () => {
+  window.loggerHelp = () => {
     console.log(`
-🔧 Logger Debug Commands:
+Logger Debug Commands:
 - toggleFileWatcherLogs() - Toggle file watcher logs
-- toggleThemeLogs() - Toggle theme logs  
+- toggleThemeLogs() - Toggle theme logs
 - toggleWindowLogs() - Toggle window service logs
 - toggleTerminalFitLogs() - Toggle terminal fit logs
 - getLoggerStats() - Show logging statistics
@@ -274,33 +287,16 @@ if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
 }
 
 // Export convenience functions
-export const logError = (category: string, message: string, ...args: unknown[]) => 
+export const logError = (category: string, message: string, ...args: unknown[]) =>
   logger.error(category, message, ...args);
 
-export const logWarn = (category: string, message: string, ...args: unknown[]) => 
+export const logWarn = (category: string, message: string, ...args: unknown[]) =>
   logger.warn(category, message, ...args);
 
-export const logInfo = (category: string, message: string, ...args: unknown[]) => 
+export const logInfo = (category: string, message: string, ...args: unknown[]) =>
   logger.info(category, message, ...args);
 
-export const logDebug = (category: string, message: string, ...args: unknown[]) => 
+export const logDebug = (category: string, message: string, ...args: unknown[]) =>
   logger.debug(category, message, ...args);
-
-// Development helper to toggle verbose logging
-if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
-  (window as any).toggleFileWatcherLogs = () => {
-    logger.enableFileWatcher(!logger['config'].enableFileWatcher);
-    console.log('File watcher logs:', logger['config'].enableFileWatcher ? 'ENABLED' : 'DISABLED');
-  };
-
-  (window as any).toggleThemeLogs = () => {
-    logger.enableThemeLogger(!logger['config'].enableThemeLogger);
-    console.log('Theme logs:', logger['config'].enableThemeLogger ? 'ENABLED' : 'DISABLED');
-  };
-
-  (window as any).getLoggerStats = () => {
-    console.table(logger.getStats());
-  };
-}
 
 export default logger;

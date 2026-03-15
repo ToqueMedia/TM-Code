@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Flex, Input, Text, VStack } from '@chakra-ui/react'
 import { useProjectStore } from '../../stores/projectStore'
 import { useEditorRepository } from '../../stores/editorStore'
+import { tokens } from '../../theme/tokens'
 
 interface CommandItem {
   id: string
@@ -48,7 +49,7 @@ function CommandPalette(): React.ReactElement | null {
       const selected = await open({ directory: true, multiple: false, title: 'Select project directory' })
       if (selected) { await openProject(String(selected)) }
       setIsOpen(false)
-    } catch {}
+    } catch (e) { console.error('Open folder failed:', e) }
   }
 
   function runToggleBottom(): void {
@@ -65,7 +66,7 @@ function CommandPalette(): React.ReactElement | null {
     try {
       const { activeFile, closeFile } = useEditorRepository.getState()
       if (activeFile) closeFile(activeFile)
-    } catch {}
+    } catch (e) { console.error('Close tab failed:', e) }
     setIsOpen(false)
   }
 
@@ -82,14 +83,14 @@ function CommandPalette(): React.ReactElement | null {
     return cmds
   }
 
-  const allCommands = getCommands()
+  const allCommands = useMemo(getCommands, [editorRepo.activeFile])
   const filtered = useMemo(function filter() {
     const q = query.trim().toLowerCase()
     if (!q) return allCommands
     return allCommands.filter(function c(item) {
       return item.title.toLowerCase().includes(q)
     })
-  }, [query, editorRepo.activeFile])
+  }, [query, allCommands])
 
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>): void {
     if (e.key === 'Escape') { setIsOpen(false); return }
@@ -108,10 +109,10 @@ function CommandPalette(): React.ReactElement | null {
   if (!isOpen) return null
 
   return (
-    <Box position="fixed" inset={0} bg="rgba(0,0,0,0.5)" zIndex={2000} onMouseDown={onBackdrop}>
+    <Box position="fixed" inset={0} bg={tokens.colors.bg.blackOverlay} zIndex={2000} onMouseDown={onBackdrop}>
       <Flex justify="center" mt="10vh">
-        <Box bg="#1e1e1e" border="1px solid #3c3c3c" borderRadius="12px" width="min(720px, 90vw)" boxShadow="0 12px 40px rgba(0,0,0,0.5)">
-          <Box p={3} borderBottom="1px solid #2b2b2c">
+        <Box bg={tokens.colors.bg.app} border={`1px solid ${tokens.colors.border.default}`} borderRadius="12px" width="min(720px, 90vw)" boxShadow={tokens.shadow.overlay}>
+          <Box p={3} borderBottom={`1px solid ${tokens.colors.border.subtle}`}>
             <Input
               ref={inputRef}
               type="search"
@@ -123,15 +124,15 @@ function CommandPalette(): React.ReactElement | null {
               value={query}
               onChange={function(e){ setQuery(e.target.value) }}
               onKeyDown={onKeyDown}
-              bg="#0f172a"
-              borderColor="#334155"
-              color="#e2e8f0"
-              _focus={{ borderColor: '#60a5fa', boxShadow: '0 0 0 2px rgba(96,165,250,0.35)' }}
+              bg={tokens.colors.bg.statusbar}
+              borderColor={tokens.colors.border.inputAlt}
+              color={tokens.colors.text.statusbar}
+              _focus={{ borderColor: tokens.colors.accent.blueBright, boxShadow: '0 0 0 2px rgba(96,165,250,0.35)' }}
             />
           </Box>
           <VStack align="stretch" maxH="50vh" overflowY="auto">
             {filtered.length === 0 ? (
-              <Box px={3} py={3} color="#94a3b8">No results</Box>
+              <Box px={3} py={3} color={tokens.colors.text.placeholder}>No results</Box>
             ) : filtered.map(function(item, i){
               const active = i === index
               return (
@@ -139,16 +140,16 @@ function CommandPalette(): React.ReactElement | null {
                   key={item.id}
                   px={3}
                   py={2}
-                  bg={active ? '#0b2a4a' : 'transparent'}
-                  _hover={{ bg: '#0b2a4a' }}
+                  bg={active ? tokens.colors.bg.activeItem : 'transparent'}
+                  _hover={{ bg: tokens.colors.bg.activeItem }}
                   cursor="default"
                   onMouseEnter={function(){ setIndex(i) }}
                   onMouseDown={function(e){ e.preventDefault(); }}
                   onClick={function(){ Promise.resolve(item.run()).catch(function(){}) }}
                 >
                   <Flex align="center" justify="space-between">
-                    <Text color="#e2e8f0" fontSize="sm">{item.title}</Text>
-                    {item.hint ? <Text color="#64748b" fontSize="xs">{item.hint}</Text> : null}
+                    <Text color={tokens.colors.text.statusbar} fontSize="sm">{item.title}</Text>
+                    {item.hint ? <Text color={tokens.colors.text.hint} fontSize="xs">{item.hint}</Text> : null}
                   </Flex>
                 </Box>
               )

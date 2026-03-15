@@ -11,6 +11,7 @@ import {
   FiFile,
   FiHome
 } from 'react-icons/fi'
+import { tokens } from '@/theme/tokens'
 
 interface BreadcrumbsProps {
   filePath?: string
@@ -26,64 +27,60 @@ interface BreadcrumbItem {
 
 const getFileIcon = (fileName: string) => {
   const ext = fileName.split('.').pop()?.toLowerCase()
-  
-  // Retorna cores baseadas na extensão
+  const fe = tokens.colors.fileExtension
+
   const iconColors: { [key: string]: string } = {
-    'tsx': '#58a6ff',
-    'ts': '#58a6ff', 
-    'jsx': '#61dafb',
-    'js': '#f7df1e',
-    'json': '#f7df1e',
-    'md': '#58a6ff',
-    'css': '#1572b6',
-    'scss': '#cf649a',
-    'html': '#e34f26',
-    'vue': '#4fc08d',
-    'py': '#3776ab',
-    'rs': '#ce422b',
-    'go': '#00add8',
-    'java': '#ed8b00',
-    'php': '#777bb4',
-    'rb': '#cc342d',
-    'swift': '#fa7343',
-    'kt': '#7f52ff',
-    'dart': '#0175c2',
-    'yaml': '#cb171e',
-    'yml': '#cb171e',
-    'toml': '#9c4221',
-    'xml': '#e34f26',
-    'svg': '#ff9900'
+    'tsx': tokens.colors.accent.primary,
+    'ts': tokens.colors.accent.primary,
+    'jsx': fe.jsx,
+    'js': fe.js,
+    'json': fe.js,
+    'md': tokens.colors.accent.primary,
+    'css': fe.css,
+    'scss': fe.scss,
+    'html': fe.html,
+    'vue': fe.vue,
+    'py': fe.py,
+    'rs': fe.rs,
+    'go': fe.go,
+    'java': fe.java,
+    'php': fe.php,
+    'rb': fe.rb,
+    'swift': fe.swift,
+    'kt': fe.kt,
+    'dart': fe.dart,
+    'yaml': fe.yaml,
+    'yml': fe.yml,
+    'toml': fe.toml,
+    'xml': fe.xml,
+    'svg': fe.svg,
   }
 
-  return iconColors[ext || ''] || '#8b949e'
+  return iconColors[ext || ''] || tokens.colors.text.secondary
 }
 
 function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
   const breadcrumbs = useMemo(() => {
     if (!filePath || !projectRoot) return []
 
-    // Remove project root do caminho
-    const relativePath = filePath.startsWith(projectRoot) 
+    const relativePath = filePath.startsWith(projectRoot)
       ? filePath.slice(projectRoot.length)
       : filePath
 
-    // Divide o caminho em segmentos
     const segments = relativePath.split('/').filter(Boolean)
     const items: BreadcrumbItem[] = []
 
-    // Adiciona o projeto como primeiro item
     items.push({
       name: projectRoot.split('/').pop() || 'Project',
       path: projectRoot,
       isFile: false
     })
 
-    // Adiciona cada segmento do caminho
     let currentPath = projectRoot
     segments.forEach((segment, index) => {
       currentPath += `/${segment}`
       const isLastSegment = index === segments.length - 1
-      
+
       items.push({
         name: segment,
         path: currentPath,
@@ -108,10 +105,10 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
         px={3}
         borderBottom="1px solid"
         borderColor="border.glass"
-        bg="rgba(255, 255, 255, 0.01)"
+        bg={tokens.colors.bg.whiteMicro}
       >
         <HStack gap={1}>
-          <FiHome size={14} color="#8b949e" />
+          <FiHome size={14} color={tokens.colors.text.secondary} />
           <Text fontSize="xs" color="text.muted">
             No file selected
           </Text>
@@ -127,14 +124,14 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
       px={3}
       borderBottom="1px solid"
       borderColor="border.glass"
-      bg="rgba(255, 255, 255, 0.01)"
+      bg={tokens.colors.bg.whiteMicro}
       overflow="hidden"
     >
       <HStack gap={1} flex="1" minW="0">
         {breadcrumbs.map((item, index) => {
           const isLast = index === breadcrumbs.length - 1
           const isClickable = !isLast && onNavigate
-          
+
           return (
             <React.Fragment key={item.path}>
               <HStack
@@ -146,13 +143,13 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
                 maxW="150px"
               >
                 {index === 0 ? (
-                  <FiHome size={12} color="#8b949e" />
+                  <FiHome size={12} color={tokens.colors.text.secondary} />
                 ) : item.isFile ? (
                   <FiFile size={12} color={getFileIcon(item.name)} />
                 ) : (
-                  <FiFolder size={12} color="#58a6ff" />
+                  <FiFolder size={12} color={tokens.colors.accent.primary} />
                 )}
-                
+
                 <Text
                   fontSize="xs"
                   color={isLast ? 'text.primary' : 'text.secondary'}
@@ -165,11 +162,11 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
                   {item.name}
                 </Text>
               </HStack>
-              
+
               {!isLast && (
-                <FiChevronRight 
-                  size={10} 
-                  color="#8b949e" 
+                <FiChevronRight
+                  size={10}
+                  color={tokens.colors.text.secondary}
                   style={{ flexShrink: 0 }}
                 />
               )}
@@ -177,15 +174,15 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
           )
         })}
       </HStack>
-      
-      {/* Fade gradient no final se necessário */}
+
+      {/* Fade gradient at end */}
       <Box
         position="absolute"
         right="0"
         top="0"
         bottom="0"
         width="20px"
-        bgGradient="linear(to-r, transparent, rgba(13, 17, 23, 0.8))"
+        bgGradient={tokens.gradient.breadcrumbFade}
         pointerEvents="none"
       />
     </Flex>

@@ -1,0 +1,5 @@
+export { default as SearchFilters } from './SearchFilters'
+export { default as SearchResultsList } from './SearchResultsList'
+export { default as SearchInputArea } from './SearchInputArea'
+export type { FileMatchResult, FileResult } from './types'
+export { convertToFileResults } from './types'

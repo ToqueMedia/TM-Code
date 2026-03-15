@@ -83,8 +83,7 @@ pub const MAX_DECOMPRESS_SIZE: usize = 100 * 1024 * 1024;
 
 /// Validates that a resolved path stays within the allowed project root.
 /// Prevents path traversal attacks (e.g., "../../etc/passwd").
-#[allow(dead_code)]
-fn validate_path_within_root(path: &Path, root: &Path) -> Result<PathBuf> {
+pub fn validate_path_within_root(path: &Path, root: &Path) -> Result<PathBuf> {
     let canonical_root = std::fs::canonicalize(root).map_err(|_| {
         FileTreeError::PathNotFound(format!("Root path not found: {}", root.display()))
     })?;
@@ -218,7 +217,22 @@ pub fn build_file_tree(root_path: String, filter: Option<FileTreeFilter>) -> Res
     let mut visited = HashSet::new();
     visited.insert(canonical_root.clone());
 
-    build_tree_node(&canonical_root, &filter, 0, &mut visited)
+    // Enforce a default max_depth of 20 to prevent unbounded recursion
+    let filter_with_default = match filter {
+        Some(mut f) => {
+            if f.max_depth.is_none() {
+                f.max_depth = Some(20);
+            }
+            Some(f)
+        }
+        None => Some(FileTreeFilter {
+            show_hidden: true,
+            extensions: None,
+            max_depth: Some(20),
+        }),
+    };
+
+    build_tree_node(&canonical_root, &filter_with_default, 0, &mut visited)
 }
 
 // Recursive helper to build tree nodes
@@ -233,14 +247,12 @@ fn build_tree_node(
     if metadata.is_file() {
         let name = path
             .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
 
         let extension = path
             .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_string());
+            .map(|ext| ext.to_string_lossy().to_string());
 
         return Ok(FileTreeNode::File {
             name,
@@ -253,9 +265,8 @@ fn build_tree_node(
     // Handle directory
     let name = path
         .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_string();
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     // Check filters
     if let Some(filter_opts) = filter {
@@ -309,9 +320,9 @@ fn build_tree_node(
         // Recursively build child nodes
         match build_tree_node(&entry_path, filter, depth + 1, visited) {
             Ok(child_node) => children.push(child_node),
-            Err(e) => {
-                // Log error but continue processing other entries
-                eprintln!("Error processing {}: {}", entry_path.display(), e);
+            Err(_) => {
+                // Skip entries that can't be read (permissions, broken links, etc.)
+                // Silently continue to build partial tree rather than fail entirely
             }
         }
     }
@@ -476,7 +487,15 @@ pub fn read_file(path: String) -> Result<String> {
         )));
     }
 
-    std::fs::read_to_string(&canonical).map_err(FileTreeError::from)
+    std::fs::read_to_string(&canonical).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            FileTreeError::InvalidOperation(
+                "Cannot read binary file as text".to_string(),
+            )
+        } else {
+            FileTreeError::from(e)
+        }
+    })
 }
 
 // Write file content
@@ -568,6 +587,11 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
+        // Skip symlinks to prevent data leaks and infinite recursion
+        if file_type.is_symlink() {
+            continue;
+        }
+
         if file_type.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else {
@@ -592,12 +616,8 @@ pub fn create_directories_all(path: String) -> Result<FileOperationResult> {
         }
     }
 
-    // If the path points to a file (has extension or ends not with separator), create parent
-    let dir_to_create = if p.extension().is_some() {
-        p.parent().unwrap_or(p)
-    } else {
-        p
-    };
+    // Always create the full path as directories — callers should pass the directory path
+    let dir_to_create = p;
 
     std::fs::create_dir_all(dir_to_create)
         .map(|_| FileOperationResult {

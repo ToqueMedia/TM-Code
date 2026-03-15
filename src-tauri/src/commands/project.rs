@@ -133,7 +133,7 @@ fn get_project_permissions_path(project_id: &str) -> PathBuf {
     get_projects_dir().join(project_id).join("permissions.json")
 }
 
-fn now_iso() -> String {
+fn now_unix_secs() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
@@ -262,16 +262,6 @@ pub fn validate_project_location(location: String) -> Result<ValidationResult> {
         });
     }
 
-    // Check disk space (at least 100MB free)
-    // if let Some(available_space) = get_available_disk_space(location_path) {
-    //     if available_space < 100 * 1024 * 1024 {
-    //         return Ok(ValidationResult {
-    //             valid: false,
-    //             error: Some("Insufficient disk space (minimum 100MB required)".to_string()),
-    //         });
-    //     }
-    // }
-
     Ok(ValidationResult {
         valid: true,
         error: None,
@@ -320,10 +310,12 @@ pub fn open_project(path: String) -> Result<ProjectInfo> {
     if metadata.permissions().readonly() {
         // Try to create a temporary file to test write permissions
         let test_path = project_path.join(".toquemedia_test");
-        if fs::File::create(&test_path).is_err() {
-            // We can't write, but we can still open for read-only
-        } else {
-            let _ = fs::remove_file(&test_path);
+        if let Ok(_) = fs::File::create(&test_path) {
+            if let Err(e) = fs::remove_file(&test_path) {
+                eprintln!("Warning: failed to remove test file {:?}: {}", test_path, e);
+                // Retry once
+                let _ = fs::remove_file(&test_path);
+            }
         }
     }
 
@@ -354,8 +346,8 @@ pub fn open_project(path: String) -> Result<ProjectInfo> {
         name: project_name,
         path: path.clone(),
         project_type,
-        last_opened: now_iso(),
-        created_at: now_iso(),
+        last_opened: now_unix_secs(),
+        created_at: now_unix_secs(),
         metadata: HashMap::new(),
     };
 
@@ -398,13 +390,6 @@ pub fn create_project(path: String, template: ProjectTemplate) -> Result<Project
             "Cannot create projects in system folders".to_string(),
         ));
     }
-
-    // Check disk space (at least 100MB free)
-    // if let Some(available_space) = get_available_disk_space(parent_path) {
-    //     if available_space < 100 * 1024 * 1024 {
-    //         return Err(ProjectError::InsufficientDiskSpace("Insufficient disk space (minimum 100MB required)".to_string()));
-    //     }
-    // }
 
     // Create project directory
     fs::create_dir_all(project_path)?;
@@ -786,8 +771,8 @@ cargo run
         name: project_name,
         path: path.clone(),
         project_type,
-        last_opened: now_iso(),
-        created_at: now_iso(),
+        last_opened: now_unix_secs(),
+        created_at: now_unix_secs(),
         metadata: HashMap::new(),
     };
 
@@ -836,12 +821,17 @@ pub fn save_project_state(project_id: String, state: ProjectState) -> Result<()>
         )));
     }
 
-    // Read existing metadata
-    let meta_content = fs::read_to_string(&meta_path)?;
+    // Read existing metadata — handle both compressed and plain JSON formats
+    let raw_data = fs::read(&meta_path)?;
+    let meta_content = match decompress_data(&raw_data) {
+        Ok(decompressed) => decompressed,
+        Err(_) => String::from_utf8(raw_data)
+            .map_err(|e| ProjectError::Io(format!("Invalid metadata encoding: {}", e)))?,
+    };
     let mut project_info: ProjectInfo = serde_json::from_str(&meta_content)?;
 
     // Update last opened time
-    project_info.last_opened = now_iso();
+    project_info.last_opened = now_unix_secs();
 
     // Save updated metadata
     let updated_meta = serde_json::json!({
@@ -889,9 +879,13 @@ pub fn load_project_state(project_id: String) -> Result<ProjectState> {
         )));
     }
 
-    // Read and decompress the metadata
-    let compressed_data = fs::read(&meta_path)?;
-    let json_string = decompress_data(&compressed_data)?;
+    // Read metadata — handle both compressed and plain JSON formats
+    let raw_data = fs::read(&meta_path)?;
+    let json_string = match decompress_data(&raw_data) {
+        Ok(decompressed) => decompressed,
+        Err(_) => String::from_utf8(raw_data)
+            .map_err(|e| ProjectError::Io(format!("Invalid metadata encoding: {}", e)))?,
+    };
     let project_info: ProjectInfo = serde_json::from_str(&json_string)?;
 
     // Extract state from metadata
@@ -1039,20 +1033,26 @@ fn save_project_metadata(project_info: &ProjectInfo) -> Result<()> {
 fn update_recent_projects(project_info: &ProjectInfo) -> Result<()> {
     let settings_path = get_settings_path();
 
+    let default_settings = GlobalSettings {
+        recent_projects: vec![],
+        max_recent_projects: 10,
+        editor_settings: HashMap::new(),
+    };
+
     // Load existing settings or create new ones
     let mut settings: GlobalSettings = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&content).unwrap_or(GlobalSettings {
-            recent_projects: vec![],
-            max_recent_projects: 10,
-            editor_settings: HashMap::new(),
-        })
-    } else {
-        GlobalSettings {
-            recent_projects: vec![],
-            max_recent_projects: 10,
-            editor_settings: HashMap::new(),
+        match serde_json::from_str(&content) {
+            Ok(s) => s,
+            Err(_) => {
+                // Backup corrupted settings file before overwriting
+                let backup_path = settings_path.with_extension("json.bak");
+                let _ = fs::copy(&settings_path, &backup_path);
+                default_settings
+            }
         }
+    } else {
+        default_settings
     };
 
     // Remove existing entry if it exists
@@ -1081,44 +1081,49 @@ fn update_recent_projects(project_info: &ProjectInfo) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    // Save settings
+    // Atomic write: write to temp file then rename to prevent corruption
     let settings_content = serde_json::to_string_pretty(&settings)?;
-    fs::write(&settings_path, settings_content)?;
+    let tmp_path = settings_path.with_extension("json.tmp");
+    fs::write(&tmp_path, &settings_content)?;
+    fs::rename(&tmp_path, &settings_path)?;
 
     Ok(())
 }
 
 fn is_system_folder(path: &Path) -> bool {
-    // Check for common system folders
-    if let Some(path_str) = path.to_str() {
-        let system_paths = [
-            "/System",
-            "/Library",
-            "/Applications",
-            "/usr",
-            "/bin",
-            "/sbin",
-            "/etc",
-            "/proc",
-            "/sys",
-            "/dev",
-            "/run",
-            "/tmp",
-            "/var",
-            "/boot",
-            "/root",
-            "C:\\\\Windows",
-            "C:\\\\Program Files",
-            "C:\\\\Program Files (x86)",
-            "C:\\\\ProgramData",
-            "C:\\\\Recovery",
-            "C:\\\\System Volume Information",
-        ];
+    // Canonicalize to resolve symlinks and normalize the path
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path_str = canonical.to_string_lossy();
 
-        for sys_path in &system_paths {
-            if path_str.starts_with(sys_path) {
-                return true;
-            }
+    let system_paths = [
+        "/System",
+        "/Library",
+        "/Applications",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/etc",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/run",
+        "/tmp",
+        "/var",
+        "/boot",
+        "/root",
+        "C:\\Windows",
+        "C:\\Program Files",
+        "C:\\Program Files (x86)",
+        "C:\\ProgramData",
+        "C:\\Recovery",
+        "C:\\System Volume Information",
+    ];
+
+    // Case-insensitive comparison for macOS/Windows compatibility
+    let path_lower = path_str.to_lowercase();
+    for sys_path in &system_paths {
+        if path_lower.starts_with(&sys_path.to_lowercase()) {
+            return true;
         }
     }
 

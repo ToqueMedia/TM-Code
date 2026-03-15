@@ -11,17 +11,9 @@
   },
   "app": {
     "macOSPrivateApi": true,
-    "windows": [
-      {
-        "title": "toquemedia-studio",
-        "width": 1250,
-        "height": 850,
-        "decorations": false,
-        "transparent": true
-      }
-    ],
+    "windows": [],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: asset: blob:; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost; worker-src 'self' blob:"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: asset: blob: https://*.googleusercontent.com https://*.googleapis.com; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost http://127.0.0.1:9099 http://127.0.0.1:8081 http://127.0.0.1:5001 https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com wss://*.firebaseio.com https://accounts.google.com; frame-src http://127.0.0.1:9099 https://*.firebaseapp.com https://accounts.google.com; worker-src 'self' blob:"
     }
   },
   "bundle": {

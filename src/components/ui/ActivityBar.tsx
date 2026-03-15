@@ -12,8 +12,11 @@ import {
   FiPackage,
   FiSettings,
   FiUser,
-  FiTerminal
+  FiTerminal,
+  FiMessageSquare,
+  FiCode
 } from 'react-icons/fi'
+import { tokens } from '@/theme/tokens'
 
 interface ActivityBarProps {
   activeActivity: string
@@ -29,13 +32,13 @@ interface ActivityItemProps {
   badge?: number
 }
 
-const ActivityItem = memo<ActivityItemProps>(({ 
-  id, 
-  icon: Icon, 
-  label, 
-  isActive, 
-  onClick, 
-  badge 
+const ActivityItem = memo<ActivityItemProps>(({
+  id,
+  icon: Icon,
+  label,
+  isActive,
+  onClick,
+  badge
 }) => (
   <Box position="relative" width="100%">
     {isActive && (
@@ -45,20 +48,20 @@ const ActivityItem = memo<ActivityItemProps>(({
         top="0"
         bottom="0"
         width="2px"
-        bg="#0078d4"
+        bg={tokens.colors.accent.blueAlt}
         zIndex={1}
       />
     )}
-    
+
     <IconButton
       aria-label={label}
       onClick={onClick}
       variant="ghost"
       size="lg"
-      color={isActive ? '#ffffff' : '#858585'}
+      color={isActive ? tokens.colors.text.inverse : tokens.colors.text.subtle}
       bg="transparent"
       _hover={{
-        color: '#ffffff',
+        color: tokens.colors.text.inverse,
         bg: 'transparent'
       }}
       borderRadius="0"
@@ -74,8 +77,8 @@ const ActivityItem = memo<ActivityItemProps>(({
           position="absolute"
           top="6px"
           right="6px"
-          bg="#007acc"
-          color="white"
+          bg={tokens.colors.badge.notificationBg}
+          color={tokens.colors.badge.notificationText}
           borderRadius="full"
           fontSize="10px"
           fontWeight="bold"
@@ -85,7 +88,7 @@ const ActivityItem = memo<ActivityItemProps>(({
           alignItems="center"
           justifyContent="center"
           px={1}
-          border="2px solid #333333"
+          border={`2px solid ${tokens.colors.badge.notificationBorder}`}
         >
           {badge > 99 ? '99+' : badge}
         </Box>
@@ -99,6 +102,11 @@ ActivityItem.displayName = 'ActivityItem'
 function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
   const activities = [
     {
+      id: 'chat',
+      icon: FiMessageSquare,
+      label: 'Chat',
+    },
+    {
       id: 'explorer',
       icon: FiFolder,
       label: 'Explorer',
@@ -107,6 +115,11 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
       id: 'search',
       icon: FiSearch,
       label: 'Search',
+    },
+    {
+      id: 'editor',
+      icon: FiCode,
+      label: 'Editor',
     },
     {
       id: 'source-control',
@@ -147,11 +160,14 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
 
   return (
     <Box
+      as="nav"
+      role="navigation"
+      aria-label="Activity Bar"
       className="vscode-activitybar"
       width="48px"
       height="100%"
-      bg="#333333"
-      borderRight="1px solid #1e1f22"
+      bg={tokens.colors.bg.activitybar}
+      borderRight={`1px solid ${tokens.colors.border.activitybar}`}
       display="flex"
       flexDirection="column"
       justifyContent="space-between"

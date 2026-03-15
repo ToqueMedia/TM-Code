@@ -11,7 +11,7 @@ interface TerminalSession {
 
 interface TerminalState {
   sessions: TerminalSession[];
-  activeSectionId: string | null;
+  activeSessionId: string | null;
   isVisible: boolean;
 }
 
@@ -28,7 +28,7 @@ interface TerminalActions {
 export const useTerminalStore = create<TerminalState & TerminalActions>((set, get) => ({
   // Estado inicial
   sessions: [],
-  activeSectionId: null,
+  activeSessionId: null,
   isVisible: true,
 
   // Ações
@@ -57,24 +57,24 @@ export const useTerminalStore = create<TerminalState & TerminalActions>((set, ge
 
     set(state => ({
       sessions: [...state.sessions, newSession],
-      activeSectionId: sessionId,
+      activeSessionId: sessionId,
     }));
 
     return sessionId;
   },
 
   removeSession: async (sessionId: string) => {
-    const { sessions, activeSectionId } = get();
+    const { sessions, activeSessionId } = get();
     const updatedSessions = sessions.filter(session => session.id !== sessionId);
     
-    let newActiveId = activeSectionId;
-    if (activeSectionId === sessionId) {
+    let newActiveId = activeSessionId;
+    if (activeSessionId === sessionId) {
       newActiveId = updatedSessions.length > 0 ? updatedSessions[0].id : null;
     }
 
     set({
       sessions: updatedSessions,
-      activeSectionId: newActiveId,
+      activeSessionId: newActiveId,
     });
   },
 
@@ -84,7 +84,7 @@ export const useTerminalStore = create<TerminalState & TerminalActions>((set, ge
     
     if (sessionExists) {
       set({
-        activeSectionId: sessionId,
+        activeSessionId: sessionId,
       });
     }
   },
@@ -114,7 +114,7 @@ export const useTerminalStore = create<TerminalState & TerminalActions>((set, ge
   clearSessions: () => {
     set({
       sessions: [],
-      activeSectionId: null,
+      activeSessionId: null,
     });
   },
 }));

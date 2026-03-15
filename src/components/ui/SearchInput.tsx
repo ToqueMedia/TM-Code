@@ -31,7 +31,7 @@ export const SearchInput: React.FC<SearchInputProps> = ({
         borderColor="border.glass"
         _focus={{
           borderColor: 'blue.500',
-          boxShadow: '0 0 0 1px rgba(88, 166, 255, 0.6)'
+          boxShadow: 'none'
         }}
         size={compact ? "sm" : "md"}
       />

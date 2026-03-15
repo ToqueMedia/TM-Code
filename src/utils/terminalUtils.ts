@@ -12,7 +12,7 @@ export function isTerminalReady(terminal: XTerm | null): boolean {
 
   try {
     // Check if the internal renderer service is available and has dimensions
-    const core = (terminal as any)._core;
+    const core = (terminal as unknown as { _core?: { _renderService?: { dimensions?: unknown } } })._core;
     if (!core || !core._renderService || !core._renderService.dimensions) {
       return false;
     }

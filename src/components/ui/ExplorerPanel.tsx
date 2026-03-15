@@ -1,33 +1,22 @@
 import React, { memo, Suspense } from 'react'
 import {
 	VStack,
-	HStack,
 	Text,
 	Box,
 	ScrollArea,
-	Spinner
 } from '@chakra-ui/react'
 import { FiFolder } from 'react-icons/fi'
 import { useCurrentProject } from '../../hooks/useProjectState'
 import { PanelHeader } from './PanelHeader'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
+import FileTreeSkeleton from './FileTreeSkeleton'
+import { tokens } from '@/theme/tokens'
 
 const FileTree = React.lazy(() => import('./FileTree'))
 
 interface ExplorerPanelProps {
 	onFileSelect: (path: string) => void
 }
-
-const FileTreeSkeleton = memo(() => (
-	<Box p={4}>
-		<HStack mb={2}>
-			<Spinner size="sm" />
-			<Text fontSize="sm" color="text.muted">Loading project files...</Text>
-		</HStack>
-	</Box>
-))
-
-FileTreeSkeleton.displayName = 'FileTreeSkeleton'
 
 function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 	const currentProject = useCurrentProject()
@@ -56,7 +45,7 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 	return (
 		<VStack
 			height="100%"
-			bg="#252526"
+			bg={tokens.colors.bg.sidebar}
 			align="stretch"
 			gap={0}
 		>
@@ -86,17 +75,17 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 					width="8px"
 					borderRadius="4px"
 					bg="transparent"
-					_hover={{ bg: 'rgba(128, 128, 128, 0.2)' }}
-					_active={{ bg: 'rgba(128, 128, 128, 0.4)' }}
+					_hover={{ bg: tokens.colors.scrollbar.explorerTrackHover }}
+					_active={{ bg: tokens.colors.scrollbar.explorerTrackActive }}
 					transition="background 0.2s"
 					zIndex={1}
 				>
 					<ScrollArea.Thumb
-						bg="rgba(128, 128, 128, 0.4)"
+						bg={tokens.colors.scrollbar.explorerThumb}
 						borderRadius="4px"
 						minH="20px"
-						_hover={{ bg: 'rgba(128, 128, 128, 0.6)' }}
-						_active={{ bg: 'rgba(128, 128, 128, 0.8)' }}
+						_hover={{ bg: tokens.colors.scrollbar.explorerThumbHover }}
+						_active={{ bg: tokens.colors.scrollbar.explorerThumbActive }}
 						transition="background 0.2s"
 					/>
 				</ScrollArea.Scrollbar>
@@ -107,8 +96,8 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 				px={3}
 				py={2}
 				borderTop="1px solid"
-				borderColor="#444"
-				bg="rgba(255, 255, 255, 0.02)"
+				borderColor={tokens.colors.border.footer}
+				bg={tokens.colors.bg.footerOverlay}
 			>
 				<Text
 					fontSize="xs"

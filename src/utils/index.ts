@@ -1,7 +1,19 @@
 export { FileWatcher as MockFileWatcher } from './fileWatcher';
+export type { FileEvent } from './fileWatcher';
 export { UnsavedChangesManager } from './unsavedChangesManager';
-export { WindowStateManager } from './windowStateManager';
 export { ProjectValidator } from './projectValidator';
-export { FileTreeManager } from './fileTreeManager';
-
-export { WindowManager } from './windowManager';
+export { WindowTitleManager } from './windowTitleManager';
+export { ProjectFileWatcher } from './projectFileWatcher';
+export { ProjectStatusMonitor } from './projectStatusMonitor';
+export type { ProjectStatus } from './projectStatusMonitor';
+export { AutoSaveQueue } from './autoSaveQueue';
+export type { QueuedFile } from './autoSaveQueue';
+export { FileTreeIndexer } from './fileTreeIndex';
+export type { FileTreeIndex } from './fileTreeIndex';
+export { ServiceError } from './errors';
+export { logger, logError, logWarn, logInfo, logDebug } from './logger';
+export { LogLevel } from './logger';
+export type { LoggerConfig } from './logger';
+export { default as MonacoBridge } from './monacoBridge';
+export { getFileIconByExtension, getFolderIconByName, getFolderIconByPath } from './iconMapper';
+export { isTerminalReady, safeTerminalFit, createDebouncedTerminalResize, createTerminalResizeObserver } from './terminalUtils';

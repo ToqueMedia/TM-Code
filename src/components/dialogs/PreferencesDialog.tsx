@@ -11,6 +11,7 @@ import {
   Text,
 } from '@chakra-ui/react'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { tokens } from '@/theme/tokens'
 
 interface PreferencesDialogProps {}
 
@@ -44,25 +45,25 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
         <Dialog.Backdrop />
         <Dialog.Positioner>
           <Dialog.Content
-            bg="#1e1e1e"
-            color="#e6e6e6"
+            bg={tokens.colors.bg.app}
+            color={tokens.colors.text.primary}
             border="1px solid"
-            borderColor="#3c3c3c"
+            borderColor={tokens.colors.border.default}
             minW="560px"
           >
             <Dialog.Header
-              bg="#2a2a2a"
+              bg={tokens.colors.bg.overlay}
               borderBottom="1px solid"
-              borderColor="#3c3c3c"
-              color="#ffffff"
+              borderColor={tokens.colors.border.default}
+              color={tokens.colors.text.inverse}
             >
               <Dialog.Title>Preferences</Dialog.Title>
             </Dialog.Header>
 
-            <Dialog.Body bg="#1e1e1e" pb={6}>
+            <Dialog.Body bg={tokens.colors.bg.app} pb={6}>
               <Text
                 fontSize="sm"
-                color="#cccccc"
+                color={tokens.colors.text.primary}
                 mb={3}
                 fontWeight="600"
               >
@@ -71,7 +72,7 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
 
               <Field.Root mb={4}>
                 <Field.Label
-                  color="#e6e6e6"
+                  color={tokens.colors.text.primary}
                   fontWeight="600"
                   fontSize="14px"
                 >
@@ -83,9 +84,9 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
                     width="200px"
                   >
                     <NativeSelect.Field 
-                      bg="#2a2a2a" 
-                      borderColor="#3c3c3c" 
-                      color="#e6e6e6"
+                      bg={tokens.colors.bg.overlay} 
+                      borderColor={tokens.colors.border.default} 
+                      color={tokens.colors.text.primary}
                       value={String(tabSize)}
                       onChange={function(e){ const v = parseInt(e.target.value, 10); if (!Number.isNaN(v)) setTabSize(v) }}
                     >
@@ -100,7 +101,7 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
 
               <Field.Root mb={4}>
                 <Field.Label
-                  color="#e6e6e6"
+                  color={tokens.colors.text.primary}
                   fontWeight="600"
                   fontSize="14px"
                 >
@@ -111,7 +112,7 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
                   mt={1}
                 >
                   <Text
-                    color="#a3a3a3"
+                    color={tokens.colors.text.secondary}
                     fontSize="sm"
                   >
                     Use spaces instead of tabs
@@ -129,7 +130,7 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
 
               <Field.Root mb={2}>
                 <Field.Label
-                  color="#e6e6e6"
+                  color={tokens.colors.text.primary}
                   fontWeight="600"
                   fontSize="14px"
                 >
@@ -140,7 +141,7 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
                   mt={1}
                 >
                   <Text
-                    color="#a3a3a3"
+                    color={tokens.colors.text.secondary}
                     fontSize="sm"
                   >
                     Infer indentation from file content
@@ -158,18 +159,18 @@ export default function PreferencesDialog(_: PreferencesDialogProps): React.Reac
             </Dialog.Body>
 
             <Dialog.Footer
-              bg="#2a2a2a"
+              bg={tokens.colors.bg.overlay}
               borderTop="1px solid"
-              borderColor="#3c3c3c"
+              borderColor={tokens.colors.border.default}
             >
               <Button
                 variant="outline"
                 onClick={onClose}
-                color="#e6e6e6"
-                borderColor="#3c3c3c"
+                color={tokens.colors.text.primary}
+                borderColor={tokens.colors.border.default}
                 _hover={{
-                  bg: 'rgba(255,255,255,0.06)',
-                  borderColor: '#5b5b5b'
+                  bg: tokens.colors.bg.whiteSubtle,
+                  borderColor: tokens.colors.border.subtle
                 }}
               >
                 Close

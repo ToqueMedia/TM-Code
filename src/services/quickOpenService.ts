@@ -18,7 +18,12 @@ export default class QuickOpenService {
   }
 
   async initialize(rootPath: string): Promise<void> {
+    // If already building for a different root, cancel by resetting and restarting
+    if (this.building) {
+      this.building = false
+    }
     this.rootPath = rootPath
+    this.index = []
     await this.buildIndex()
   }
 
@@ -32,9 +37,10 @@ export default class QuickOpenService {
     if (!this.rootPath) return
     if (this.building) return
     this.building = true
+    const targetRoot = this.rootPath
     try {
       const fs = await import('@tauri-apps/plugin-fs')
-      const stack: string[] = [this.rootPath]
+      const stack: string[] = [targetRoot]
       const files: string[] = []
       while (stack.length > 0) {
         const current = stack.pop() as string
@@ -64,7 +70,10 @@ export default class QuickOpenService {
           }
         }
       }
-      this.index = files
+      // Only apply results if rootPath hasn't changed during build
+      if (this.rootPath === targetRoot) {
+        this.index = files
+      }
     } finally {
       this.building = false
     }

@@ -5,7 +5,7 @@ export interface ProjectInfo {
   projectType: string;
   lastOpened: string;
   createdAt: string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
 }
 
 export interface RecentProject {
@@ -20,7 +20,7 @@ export interface ProjectState {
   openFiles: string[];
   activeFile: string | null;
   cursorPositions: Record<string, [number, number]>; // line, column
-  editorStates: Record<string, any>;
+  editorStates: Record<string, unknown>;
   windowState: WindowState;
 }
 
@@ -45,5 +45,5 @@ export enum ProjectTemplate {
 export interface GlobalSettings {
   recentProjects: RecentProject[];
   maxRecentProjects: number;
-  editorSettings: Record<string, any>;
+  editorSettings: Record<string, unknown>;
 }
