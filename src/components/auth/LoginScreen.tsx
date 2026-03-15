@@ -1,8 +1,10 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
 import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import { useAuthStore } from '../../stores/authStore'
+import WindowControls from '../ui/WindowControls'
 
 type AuthMode = 'signin' | 'signup'
 

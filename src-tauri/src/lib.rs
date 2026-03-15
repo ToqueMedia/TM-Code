@@ -1,6 +1,7 @@
 mod commands;
 use commands::debugger::*;
 use commands::file_tree::*;
+use commands::filesystem::*;
 use commands::project::*;
 use commands::search::*;
 use commands::terminal::*;
@@ -96,7 +97,8 @@ pub fn run() {
             debug_step_out,
             get_debug_sessions,
             get_call_stack,
-            get_variables
+            get_variables,
+            copy_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

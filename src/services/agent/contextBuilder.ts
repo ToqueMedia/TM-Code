@@ -18,7 +18,7 @@ class ContextBuilder {
     return ContextBuilder.instance
   }
 
-  async buildSystemPrompt(projectPath: string, projectType: string): Promise<string> {
+  async buildSystemPrompt(projectPath: string, projectType: string, templateInfo?: { name: string; framework: string; devCommand: string }): Promise<string> {
     // Gather context in parallel for speed
     const [treeString, pkgSummary, readme] = await Promise.all([
       this.buildFileTree(projectPath),
@@ -129,7 +129,17 @@ Response style:
 Tool call fails → read error → fix that step → retry. Do not restart from scratch. If unsure, verify with read_file or list_directory.
 </error_recovery>`)
 
-    // ── 8. REMINDER (recency — U-Curve) ──
+    // ── 8. TEMPLATE CONTEXT (if scaffolded from template) ──
+    if (templateInfo) {
+      sections.push(`<template_context>
+This project was scaffolded from the "${templateInfo.name}" template.
+Framework: ${templateInfo.framework}
+Dev command: ${templateInfo.devCommand}
+The base Hello World structure is in place. Build on top of it.
+</template_context>`)
+    }
+
+    // ── 9. REMINDER (recency — U-Curve) ──
     sections.push(`<reminder>
 Absolute paths: "${projectPath}". Read before write. Complete file content only — partial = data loss. Do not stop early.
 </reminder>`)

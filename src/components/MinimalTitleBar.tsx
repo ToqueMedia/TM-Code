@@ -1,5 +1,5 @@
-import { memo, useState, useRef, useEffect } from 'react'
-import { Box, Flex, Text, HStack } from '@chakra-ui/react'
+import { memo, useState, useRef, useEffect, useCallback } from 'react'
+import { Box, Flex, Text, HStack, Portal } from '@chakra-ui/react'
 import { FiLogOut } from 'react-icons/fi'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
@@ -7,6 +7,7 @@ import { useProjectStore } from '../stores/projectStore'
 import { useAgentStore } from '../stores/agentStore'
 import { useAuthStore } from '../stores/authStore'
 import { usePermissionStore } from '../stores/permissionStore'
+import { useChatStore } from '../stores/chatStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
 import WindowControls from './ui/WindowControls'
 
@@ -35,13 +36,29 @@ function MinimalTitleBar() {
   const user = useAuthStore(s => s.user)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const [showUserMenu, setShowUserMenu] = useState(false)
+  const avatarRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const [menuPos, setMenuPos] = useState({ top: 0, right: 0 })
+
+  // Position the dropdown relative to the avatar
+  useEffect(() => {
+    if (!showUserMenu || !avatarRef.current) return
+    const rect = avatarRef.current.getBoundingClientRect()
+    setMenuPos({
+      top: rect.bottom + 4,
+      right: window.innerWidth - rect.right,
+    })
+  }, [showUserMenu])
 
   // Close menu on outside click
   useEffect(() => {
     if (!showUserMenu) return
     function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node
+      if (
+        avatarRef.current && !avatarRef.current.contains(target) &&
+        menuRef.current && !menuRef.current.contains(target)
+      ) {
         setShowUserMenu(false)
       }
     }
@@ -84,17 +101,29 @@ function MinimalTitleBar() {
     } catch (e) { console.error('Window toggle failed:', e) }
   }
 
-  async function handleMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
     const t = e.target as HTMLElement
     const tag = t.tagName?.toLowerCase() || ''
     if (['button', 'input', 'svg', 'path'].includes(tag)) return
     if (t.getAttribute?.('role') === 'button') return
-    try { await getCurrentWindow().startDragging() } catch (e) { console.error('Drag start failed:', e) }
-  }
+    // Don't start dragging if clicking inside user menu area
+    if (avatarRef.current?.contains(t)) return
+    getCurrentWindow().startDragging().catch(() => {})
+  }, [])
 
   async function handleSignOut() {
     setShowUserMenu(false)
+
+    // Clean up project and chat state before signing out
+    const project = useProjectStore.getState().currentProject
+    if (project) {
+      await useChatStore.getState().cleanupOnExit(project.path).catch(() => {})
+      await useProjectStore.getState().closeProject().catch(() => {})
+    }
+
+    // Clear auth state and sign out
+    useAuthStore.getState().clear()
     await FirebaseAuthService.getInstance().signOut()
   }
 
@@ -172,7 +201,7 @@ function MinimalTitleBar() {
 
         {/* User identity */}
         {user && (
-          <Box position="relative" ref={menuRef}>
+          <Box ref={avatarRef}>
             <Flex
               align="center"
               gap={1.5}
@@ -182,6 +211,7 @@ function MinimalTitleBar() {
               borderRadius="6px"
               transition={`background ${tokens.transition.fast}`}
               _hover={{ bg: tokens.colors.bg.whiteSubtle }}
+              role="button"
               onClick={() => setShowUserMenu(!showUserMenu)}
             >
               {/* Avatar with initials */}
@@ -202,53 +232,57 @@ function MinimalTitleBar() {
                 {displayEmail}
               </Text>
             </Flex>
-
-            {/* Dropdown menu */}
-            {showUserMenu && (
-              <Box
-                position="absolute"
-                top="100%"
-                right={0}
-                mt={1}
-                bg={tokens.colors.dialog.bg}
-                border={`1px solid ${tokens.colors.border.panel}`}
-                borderRadius="8px"
-                boxShadow="0 4px 12px rgba(0,0,0,0.3)"
-                py={1}
-                minW="200px"
-                zIndex={100}
-              >
-                <Box px={3} py={2} borderBottom={`1px solid ${tokens.colors.border.panel}`}>
-                  <Text fontSize="12px" color={tokens.colors.text.primary} fontWeight="500">
-                    {user.displayName || user.email}
-                  </Text>
-                  {user.displayName && (
-                    <Text fontSize="11px" color={tokens.colors.text.secondary} mt={0.5}>
-                      {user.email}
-                    </Text>
-                  )}
-                </Box>
-                <Box
-                  px={3}
-                  py={1.5}
-                  cursor="pointer"
-                  display="flex"
-                  alignItems="center"
-                  gap={2}
-                  transition={`background ${tokens.transition.fast}`}
-                  _hover={{ bg: tokens.colors.bg.whiteSubtle }}
-                  onClick={handleSignOut}
-                >
-                  <FiLogOut size={13} color={tokens.colors.text.secondary} />
-                  <Text fontSize="12px" color={tokens.colors.text.secondary}>
-                    Sign Out
-                  </Text>
-                </Box>
-              </Box>
-            )}
           </Box>
         )}
       </HStack>
+
+      {/* Dropdown rendered in portal to escape overflow:hidden */}
+      {showUserMenu && user && (
+        <Portal>
+          <Box
+            ref={menuRef}
+            position="fixed"
+            top={`${menuPos.top}px`}
+            right={`${menuPos.right}px`}
+            bg={tokens.colors.dialog.bg}
+            border={`1px solid ${tokens.colors.border.panel}`}
+            borderRadius="8px"
+            boxShadow="0 4px 12px rgba(0,0,0,0.3)"
+            py={1}
+            minW="200px"
+            zIndex={tokens.zIndex.overlay}
+            backdropFilter="blur(16px)"
+          >
+            <Box px={3} py={2} borderBottom={`1px solid ${tokens.colors.border.panel}`}>
+              <Text fontSize="12px" color={tokens.colors.text.primary} fontWeight="500">
+                {user.displayName || user.email}
+              </Text>
+              {user.displayName && (
+                <Text fontSize="11px" color={tokens.colors.text.secondary} mt={0.5}>
+                  {user.email}
+                </Text>
+              )}
+            </Box>
+            <Box
+              px={3}
+              py={1.5}
+              cursor="pointer"
+              display="flex"
+              alignItems="center"
+              gap={2}
+              role="button"
+              transition={`background ${tokens.transition.fast}`}
+              _hover={{ bg: tokens.colors.bg.whiteSubtle }}
+              onClick={handleSignOut}
+            >
+              <FiLogOut size={13} color={tokens.colors.text.secondary} />
+              <Text fontSize="12px" color={tokens.colors.text.secondary}>
+                Sign Out
+              </Text>
+            </Box>
+          </Box>
+        </Portal>
+      )}
     </Box>
   )
 }

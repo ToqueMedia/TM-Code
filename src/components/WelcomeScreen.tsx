@@ -1,9 +1,12 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Box, Flex, useDialog } from '@chakra-ui/react'
 import { useProjectStore } from '../stores/projectStore'
+import { useChatStore } from '../stores/chatStore'
+import { templateService, Template } from '../services/templateService'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { WelcomeSidebar, WelcomeHero, CloneDialog } from './welcome'
+import TemplateSelector from './TemplateSelector'
 
 interface WelcomeScreenProps {
   onOpenProject: (path?: string) => void
@@ -12,6 +15,7 @@ interface WelcomeScreenProps {
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   const cloneDialog = useDialog()
   const { recentProjects, loadRecentProjects } = useProjectStore()
+  const [showTemplateSelector, setShowTemplateSelector] = useState(false)
 
   useEffect(() => {
     loadRecentProjects()
@@ -33,7 +37,39 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     }
   }
 
-  const handleNewProject = async () => {
+  const handleNewProject = () => {
+    setShowTemplateSelector(true)
+  }
+
+  const handleSelectTemplate = async (template: Template) => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Choose a folder for your new project',
+      })
+      if (!selected) return
+
+      const projectPath = selected as string
+
+      // Scaffold the template
+      await templateService.scaffold(template.id, projectPath)
+
+      // Open the project
+      await useProjectStore.getState().openProject(projectPath)
+
+      // Create a new chat session
+      const chatStore = useChatStore.getState()
+      await chatStore.createNewSession(projectPath)
+
+      setShowTemplateSelector(false)
+    } catch (error: unknown) {
+      logger.error('ui', 'Failed to scaffold template:', error)
+    }
+  }
+
+  const handleSelectEmpty = async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
       const selected = await open({
@@ -42,11 +78,22 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         title: 'Choose a folder for your new project',
       })
       if (selected) {
+        setShowTemplateSelector(false)
         onOpenProject(selected as string)
       }
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
     }
+  }
+
+  if (showTemplateSelector) {
+    return (
+      <TemplateSelector
+        onSelectTemplate={handleSelectTemplate}
+        onSelectEmpty={handleSelectEmpty}
+        onBack={() => setShowTemplateSelector(false)}
+      />
+    )
   }
 
   return (
