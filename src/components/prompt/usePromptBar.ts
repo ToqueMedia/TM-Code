@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
@@ -24,6 +24,7 @@ export function usePromptBar() {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      flushBufferedDeltas()
       AgentService.getInstance().cancelLoop()
     }
   }, [])
@@ -82,7 +83,7 @@ export function usePromptBar() {
       chatStore = useChatStore.getState()
 
       chatStore.addUserMessage(prompt)
-      const messageId = chatStore.startAssistantMessage()
+      chatStore.startAssistantMessage()
       agentStore.setStatus('thinking')
 
       const projectPath = currentProject?.path || ''
@@ -95,15 +96,21 @@ export function usePromptBar() {
       agentService.setSystemPrompt(systemPrompt)
 
       await agentService.runAgentLoop(prompt, history, {
-        onTextChunk: (text) => {
+        onTextDelta: (delta) => {
           if (!mountedRef.current) return
           agentStore.setStatus('generating')
-          chatStore.appendToAssistantMessage(text)
+          appendTextDeltaBuffered(delta)
         },
-        onToolCall: (toolName, toolInput) => {
+        onReasoningDelta: (delta) => {
           if (!mountedRef.current) return
+          agentStore.setStatus('thinking')
+          appendReasoningDeltaBuffered(delta)
+        },
+        onToolCallPending: (toolId, toolName) => {
+          if (!mountedRef.current) return
+          flushBufferedDeltas()
           agentStore.setStatus('applying')
-          chatStore.appendToolCallToMessage(messageId, toolName, toolInput)
+          chatStore.addPendingToolCall(toolId, toolName)
 
           // Auto-transition to generating view when writing files
           if (toolName === 'write_file') {
@@ -113,9 +120,13 @@ export function usePromptBar() {
             }
           }
         },
-        onToolResult: (toolName, result, isError) => {
+        onToolCallStart: (toolId, _toolName, args) => {
           if (!mountedRef.current) return
-          chatStore.appendToolResultToMessage(messageId, toolName, result, isError)
+          chatStore.updateToolCallWithArgs(toolId, args)
+        },
+        onToolResult: (toolId, _toolName, result, isError) => {
+          if (!mountedRef.current) return
+          chatStore.updateToolCallWithResult(toolId, result, isError)
           agentStore.setStatus('thinking')
         },
         onTurnComplete: () => {
@@ -124,13 +135,13 @@ export function usePromptBar() {
         },
         onDone: () => {
           if (!mountedRef.current) return
+          flushBufferedDeltas()
           chatStore.finalizeAssistantMessage()
           agentStore.setStatus('idle')
 
-          // If no pending diffs and we're in generating view, go back to chat
+          // If we're in generating view, go back
           const layoutStore = useLayoutStore.getState()
-          const pendingDiffs = useChatStore.getState().pendingDiffs.filter(d => d.status === 'pending')
-          if (layoutStore.viewMode === 'generating' && pendingDiffs.length === 0) {
+          if (layoutStore.viewMode === 'generating') {
             if (layoutStore.isPreviewServerRunning) {
               layoutStore.setViewMode('preview')
             } else {
@@ -140,6 +151,7 @@ export function usePromptBar() {
         },
         onError: (error) => {
           if (!mountedRef.current) return
+          flushBufferedDeltas()
           agentStore.setStatus('error')
           agentStore.setError(error.message)
           chatStore.finalizeAssistantMessage()

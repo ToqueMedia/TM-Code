@@ -3,9 +3,8 @@ import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { usePermissionStore } from '../../stores/permissionStore'
-import DiffService from './diffService'
-import { useChatStore } from '../../stores/chatStore'
 import { useLayoutStore } from '../../stores/layoutStore'
+import FirebaseAuthService from '../auth/firebaseAuth'
 
 // === Types ===
 
@@ -198,7 +197,7 @@ class ToolExecutor {
     this.tools.set('read_file', {
       definition: {
         name: 'read_file',
-        description: 'Read the contents of a file at the given path. Use this when you need to examine existing code, configuration files, or any text file in the project.',
+        description: 'Read the contents of a file at the given path.',
         input_schema: {
           type: 'object',
           properties: {
@@ -217,7 +216,7 @@ class ToolExecutor {
     this.tools.set('list_directory', {
       definition: {
         name: 'list_directory',
-        description: 'List the contents of a directory. Returns a file tree structure with file names, types, and sizes. Use this to understand project structure.',
+        description: 'List the contents of a directory. Returns a file tree with names and types.',
         input_schema: {
           type: 'object',
           properties: {
@@ -239,7 +238,7 @@ class ToolExecutor {
     this.tools.set('search_files', {
       definition: {
         name: 'search_files',
-        description: 'Search for text patterns across files in a directory using ripgrep. Returns matching lines with file paths and line numbers.',
+        description: 'Search for text patterns across files in a directory using ripgrep. Returns up to 50 matching lines with file paths and line numbers. If you need more results, narrow your search with includePatterns.',
         input_schema: {
           type: 'object',
           properties: {
@@ -275,7 +274,7 @@ class ToolExecutor {
     this.tools.set('write_file', {
       definition: {
         name: 'write_file',
-        description: 'Write content to a file. If the file exists, it will be overwritten. If it doesn\'t exist, it will be created. Use this to create new files or completely replace file contents.',
+        description: 'Replace the entire content of an existing file, or create a new file. Always read_file first on existing files to understand what you are replacing. For creating new files, prefer create_file. For small edits (1–20 lines), prefer edit_file instead.',
         input_schema: {
           type: 'object',
           properties: {
@@ -287,14 +286,28 @@ class ToolExecutor {
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.path as string)
-        const diffService = DiffService.getInstance()
-        const diff = await diffService.createDiff(input.path as string, input.content as string)
+        const path = input.path as string
+        const newContent = input.content as string
 
-        // All files (new and modified) go through user review
-        useChatStore.getState().addPendingDiff(diff)
+        // Read current content to generate diff data
+        let oldContent = ''
+        let isNewFile = true
+        try {
+          oldContent = await invoke<string>('read_file', { path })
+          isNewFile = false
+        } catch {
+          isNewFile = true
+        }
 
-        const action = diff.isNewFile ? 'creation' : 'modification'
-        return `File ${action} queued for user review: ${input.path}. The user will accept or reject this change.`
+        // Return diff data as JSON for inline display
+        // The file is NOT written yet — user approves via InlineDiff
+        return JSON.stringify({
+          type: 'diff',
+          path,
+          oldContent,
+          newContent,
+          isNewFile,
+        })
       }
     })
 
@@ -302,7 +315,7 @@ class ToolExecutor {
     this.tools.set('create_file', {
       definition: {
         name: 'create_file',
-        description: 'Create a new file with optional content. Fails if file already exists. Use create_file for new files, write_file for overwriting existing files.',
+        description: 'Create a new file with optional content. Fails if the file already exists.',
         input_schema: {
           type: 'object',
           properties: {
@@ -314,9 +327,25 @@ class ToolExecutor {
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.path as string)
-        await invoke('create_file', { path: input.path, content: (input.content as string) || '' })
-        this.refreshFileTree()
-        return `File created successfully: ${input.path}`
+        const path = input.path as string
+        const content = (input.content as string) || ''
+
+        // Check if file already exists
+        try {
+          await invoke<string>('read_file', { path })
+          return `Error: File already exists: ${path}. Use write_file to overwrite or edit_file for small changes.`
+        } catch {
+          // File doesn't exist — good, proceed
+        }
+
+        // Return diff data as JSON for inline display (consistent with write_file)
+        return JSON.stringify({
+          type: 'diff',
+          path,
+          oldContent: '',
+          newContent: content,
+          isNewFile: true,
+        })
       }
     })
 
@@ -345,7 +374,7 @@ class ToolExecutor {
     this.tools.set('delete_file', {
       definition: {
         name: 'delete_file',
-        description: 'Delete a file or directory. Use with caution - this is irreversible.',
+        description: 'Delete a file or directory permanently. There is no undo. Only use when the user explicitly asks to delete, or when removing a file you just created in error.',
         input_schema: {
           type: 'object',
           properties: {
@@ -393,11 +422,157 @@ class ToolExecutor {
       }
     })
 
+    // === edit_file ===
+    this.tools.set('edit_file', {
+      definition: {
+        name: 'edit_file',
+        description: 'Replace a specific string in a file with new content. The old_str must match exactly and appear only once in the file. Use this for surgical edits instead of rewriting entire files with write_file.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Absolute path to the file to edit' },
+            old_str: { type: 'string', description: 'Exact string to find and replace. Must be unique in the file.' },
+            new_str: { type: 'string', description: 'String to replace old_str with. Use empty string to delete.' }
+          },
+          required: ['path', 'old_str', 'new_str']
+        }
+      },
+      execute: async (input) => {
+        const path = input.path as string
+        const oldStr = input.old_str as string
+        const newStr = input.new_str as string
+
+        if (!oldStr) {
+          return 'Error: old_str cannot be empty. Provide the exact text you want to replace.'
+        }
+
+        this.validatePathWithinProject(path)
+
+        const content = await invoke<string>('read_file', { path })
+
+        const occurrences = content.split(oldStr).length - 1
+
+        if (occurrences === 0) {
+          return `Error: old_str not found in ${path}. The content you're trying to replace doesn't exist in the file. Read the file first to see the current content.`
+        }
+
+        if (occurrences > 1) {
+          return `Error: old_str appears ${occurrences} times in ${path}. It must be unique. Include more surrounding context to make it unique.`
+        }
+
+        const newContent = content.replace(oldStr, newStr)
+
+        // Return diff data as JSON for inline display
+        return JSON.stringify({
+          type: 'diff',
+          path,
+          oldContent: content,
+          newContent,
+          isNewFile: false,
+        })
+      }
+    })
+
+    // === glob ===
+    this.tools.set('glob', {
+      definition: {
+        name: 'glob',
+        description: 'Find files matching a glob pattern. Returns a list of absolute file paths.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Glob pattern (e.g., "**/*.tsx", "src/**/*.test.ts", "**/package.json")' },
+            directory: { type: 'string', description: 'Absolute path to search from. Default: project root' }
+          },
+          required: ['pattern']
+        }
+      },
+      execute: async (input) => {
+        const pattern = input.pattern as string
+        const directory = (input.directory as string) || this.getProjectRoot()
+
+        this.validatePathWithinProject(directory)
+
+        const result = await invoke<string[]>('glob_files', {
+          pattern,
+          directory
+        })
+
+        if (result.length === 0) {
+          return `No files found matching pattern: ${pattern}`
+        }
+
+        return result.join('\n')
+      }
+    })
+
+    // === web_fetch ===
+    this.tools.set('web_fetch', {
+      definition: {
+        name: 'web_fetch',
+        description: 'Fetch the contents of a web URL. Returns the text content of the page. Use this to read documentation, check API endpoints, look up package information on npm, or research technical topics. Cannot access localhost or internal URLs.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'The URL to fetch (must be http or https)' },
+            maxLength: { type: 'number', description: 'Maximum characters to return. Default: 50000' }
+          },
+          required: ['url']
+        }
+      },
+      execute: async (input) => {
+        const url = input.url as string
+        const maxLength = (input.maxLength as number) || 50000
+
+        const firebaseAuth = FirebaseAuthService.getInstance()
+        const idToken = await firebaseAuth.getIdToken()
+
+        if (!idToken) {
+          return 'Error: Not authenticated. Cannot fetch web content.'
+        }
+
+        const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+
+        const response = await fetch(`${workerUrl}/v1/web-fetch`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${idToken}`
+          },
+          body: JSON.stringify({ url, maxLength })
+        })
+
+        if (!response.ok) {
+          return `Error: Failed to fetch ${url} (status: ${response.status})`
+        }
+
+        const result = await response.json() as {
+          url: string
+          status: number
+          content: string
+          truncated: boolean
+          error?: string
+        }
+
+        if (result.error) {
+          return `Error fetching ${url}: ${result.error}`
+        }
+
+        let output = `URL: ${result.url}\nStatus: ${result.status}\n\n${result.content}`
+
+        if (result.truncated) {
+          output += '\n\n[Content was truncated to fit context window]'
+        }
+
+        return output
+      }
+    })
+
     // === execute_command ===
     this.tools.set('execute_command', {
       definition: {
         name: 'execute_command',
-        description: 'Execute a shell command in the project directory. Use for running tests, installing dependencies, building, linting, or any CLI operation. Returns stdout, stderr, and exit code.',
+        description: 'Execute a shell command in the project directory. Blocks until the command exits — do NOT use for dev servers or watchers (they never exit and will block the agent). Use for running tests, installing dependencies, building, linting, or short-lived CLI operations. Returns stdout, stderr, and exit code.',
         input_schema: {
           type: 'object',
           properties: {

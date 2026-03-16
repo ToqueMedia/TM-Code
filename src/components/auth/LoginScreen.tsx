@@ -97,6 +97,39 @@ function LoginScreen() {
     setError(null)
   }
 
+  const handleDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    const t = e.target as HTMLElement
+    const tag = t.tagName?.toLowerCase() || ''
+    if (['button', 'input', 'label', 'svg', 'path', 'a'].includes(tag)) return
+    if (t.getAttribute?.('role') === 'button') return
+    // Don't drag when interacting with the form card
+    if (t.closest?.('[data-login-card]')) return
+    getCurrentWindow().startDragging().catch(() => {})
+  }, [])
+
+  async function handleClose() {
+    try { await getCurrentWindow().close() } catch { /* noop */ }
+  }
+
+  async function handleMinimize() {
+    try { await getCurrentWindow().minimize() } catch { /* noop */ }
+  }
+
+  async function handleFullToggle() {
+    try {
+      const win = getCurrentWindow()
+      if (/Mac/.test(navigator.platform || '')) {
+        const fs = await win.isFullscreen()
+        await win.setFullscreen(!fs)
+      } else {
+        const isMax = await win.isMaximized()
+        if (isMax) await win.unmaximize()
+        else await win.maximize()
+      }
+    } catch { /* noop */ }
+  }
+
   return (
     <Flex
       direction="column"
@@ -108,7 +141,18 @@ function LoginScreen() {
       fontFamily={tokens.fontFamily.ui}
       position="relative"
       overflow="hidden"
+      data-tauri-drag-region
+      onMouseDown={handleDrag}
     >
+      {/* Window controls */}
+      <Box position="absolute" top={3} left={4} zIndex={10}>
+        <WindowControls
+          onClose={handleClose}
+          onMinimize={handleMinimize}
+          onMaximize={handleFullToggle}
+        />
+      </Box>
+
       {/* Background gradient */}
       <Box
         position="fixed"
@@ -199,6 +243,7 @@ function LoginScreen() {
           border={`1px solid ${tokens.colors.border.panel}`}
           p={6}
           boxShadow="0 8px 32px rgba(0, 0, 0, 0.3)"
+          data-login-card
         >
           {/* Google button */}
           <button
@@ -352,7 +397,7 @@ function LoginScreen() {
         </Box>
 
         {/* Toggle mode */}
-        <Flex justify="center" mt={5} gap={1}>
+        <Flex justify="center" mt={5} gap={1} data-login-card>
           <Text fontSize="12px" color={tokens.colors.text.secondary}>
             {mode === 'signin' ? 'Não tem conta?' : 'Já tem conta?'}
           </Text>
@@ -361,6 +406,7 @@ function LoginScreen() {
             color={tokens.colors.accent.primary}
             cursor="pointer"
             fontWeight="500"
+            role="button"
             _hover={{ textDecoration: 'underline' }}
             onClick={toggleMode}
           >

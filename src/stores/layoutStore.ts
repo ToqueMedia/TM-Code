@@ -1,5 +1,4 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
 
 export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor'
 export type PreviewMode = 'server' | 'static'
@@ -8,6 +7,8 @@ interface LayoutState {
   viewMode: ViewMode
   previousViewMode: ViewMode | null
   isSidebarVisible: boolean
+  isProjectsSidebarVisible: boolean
+  showTemplateSelector: boolean
   isPreviewServerRunning: boolean
   previewUrl: string | null
   previewServerPid: number | null
@@ -19,6 +20,8 @@ interface LayoutState {
 interface LayoutActions {
   setViewMode: (mode: ViewMode) => void
   toggleSidebar: () => void
+  toggleProjectsSidebar: () => void
+  setShowTemplateSelector: (show: boolean) => void
   setPreviewServer: (url: string, pid: number) => void
   setStaticPreview: (html: string, sourcePath: string) => void
   clearPreviewServer: () => void
@@ -29,6 +32,8 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   viewMode: 'chat',
   previousViewMode: null,
   isSidebarVisible: false,
+  isProjectsSidebarVisible: false,
+  showTemplateSelector: false,
   isPreviewServerRunning: false,
   previewUrl: null,
   previewServerPid: null,
@@ -47,6 +52,14 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
 
   toggleSidebar: () => {
     set(state => ({ isSidebarVisible: !state.isSidebarVisible }))
+  },
+
+  toggleProjectsSidebar: () => {
+    set(state => ({ isProjectsSidebarVisible: !state.isProjectsSidebarVisible }))
+  },
+
+  setShowTemplateSelector: (show: boolean) => {
+    set({ showTemplateSelector: show })
   },
 
   setPreviewServer: (url: string, pid: number) => {
@@ -74,10 +87,8 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   },
 
   clearPreviewServer: () => {
-    const pid = get().previewServerPid
-    if (pid) {
-      invoke('kill_process', { pid }).catch(() => {})
-    }
+    // Only resets UI state — killing the process is devServerManager's
+    // responsibility. This avoids double-kill when both are called.
     set({
       isPreviewServerRunning: false,
       previewUrl: null,

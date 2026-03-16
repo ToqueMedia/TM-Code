@@ -40,8 +40,10 @@ export default defineConfig(async () => ({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          monaco: ['monaco-editor'],
+        manualChunks(id: string) {
+          if (id.includes('monaco-editor')) {
+            return 'monaco'
+          }
         }
       }
     }

@@ -1,5 +1,5 @@
-import { memo, useCallback } from 'react'
-import { Flex, Text, Box, IconButton } from '@chakra-ui/react'
+import { memo, useCallback, useState } from 'react'
+import { Flex, Text, Box } from '@chakra-ui/react'
 import { FiCheck, FiX, FiCopy } from 'react-icons/fi'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -18,120 +18,167 @@ function CodeBlockAction({ block, onApply, onReject, onCopy }: CodeBlockActionPr
   const isApplied = block.status === 'applied'
   const isRejected = block.status === 'rejected'
   const isPending = block.status === 'pending'
+  const [copied, setCopied] = useState(false)
 
-  const handleApply = useCallback(() => {
-    onApply(block)
-  }, [block, onApply])
-
-  const handleReject = useCallback(() => {
-    onReject(block)
-  }, [block, onReject])
-
+  const handleApply = useCallback(() => onApply(block), [block, onApply])
+  const handleReject = useCallback(() => onReject(block), [block, onReject])
   const handleCopy = useCallback(() => {
     onCopy(block.code)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
   }, [block.code, onCopy])
+
+  const statusBorderColor = isApplied
+    ? 'rgba(46, 160, 67, 0.3)'
+    : isRejected
+    ? 'rgba(248, 81, 73, 0.2)'
+    : 'rgba(255, 255, 255, 0.06)'
 
   return (
     <Box
-      borderRadius="6px"
+      borderRadius="10px"
       overflow="hidden"
-      border="1px solid"
-      borderColor={isApplied ? tokens.colors.accent.green : isRejected ? tokens.colors.accent.red : tokens.colors.border.default}
-      my={2}
+      border={`1px solid ${statusBorderColor}`}
+      my={3}
+      bg={tokens.colors.bg.codeBlock}
+      opacity={isRejected ? 0.5 : 1}
+      transition="opacity 0.2s"
     >
       {/* Header */}
       <Flex
         align="center"
         justify="space-between"
         px={3}
-        py={1.5}
-        bg={tokens.colors.bg.codeBlockHeader}
-        borderBottom={`1px solid ${tokens.colors.border.default}`}
+        py="6px"
+        bg="rgba(255, 255, 255, 0.03)"
+        borderBottom="1px solid rgba(255, 255, 255, 0.05)"
       >
         <Flex align="center" gap={2}>
           {block.filePath && (
-            <Text fontSize="xs" color={tokens.colors.accent.primary} fontFamily="mono">
+            <Text
+              fontSize="12px"
+              color={tokens.colors.accent.primary}
+              fontFamily={tokens.fontFamily.mono}
+              fontWeight="500"
+            >
               {block.filePath}
             </Text>
           )}
-          <Text fontSize="xs" color={tokens.colors.text.subtle}>
+          <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
             {block.language}
           </Text>
+          {isApplied && (
+            <Text
+              fontSize="10px"
+              color={tokens.colors.accent.green}
+              fontWeight="600"
+              bg="rgba(46, 160, 67, 0.1)"
+              px="6px"
+              py="1px"
+              borderRadius="4px"
+            >
+              Applied
+            </Text>
+          )}
+          {isRejected && (
+            <Text
+              fontSize="10px"
+              color={tokens.colors.accent.red}
+              fontWeight="600"
+              bg="rgba(248, 81, 73, 0.1)"
+              px="6px"
+              py="1px"
+              borderRadius="4px"
+            >
+              Rejected
+            </Text>
+          )}
         </Flex>
-        {isApplied && (
-          <Text fontSize="xs" color={tokens.colors.accent.green} fontWeight="600">Applied</Text>
-        )}
-        {isRejected && (
-          <Text fontSize="xs" color={tokens.colors.accent.red} fontWeight="600" textDecoration="line-through">Rejected</Text>
-        )}
+
+        {/* Action buttons */}
+        <Flex align="center" gap={1}>
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            gap="4px"
+            px="7px"
+            py="3px"
+            borderRadius="5px"
+            bg="transparent"
+            color={copied ? tokens.colors.accent.green : tokens.colors.text.disabled}
+            fontSize="11px"
+            cursor="pointer"
+            transition="all 0.15s"
+            _hover={{ bg: 'rgba(255,255,255,0.06)', color: tokens.colors.text.secondary }}
+            onClick={handleCopy}
+          >
+            {copied ? <FiCheck size={11} /> : <FiCopy size={11} />}
+            {copied ? 'Copied' : 'Copy'}
+          </Box>
+
+          {isPending && (
+            <>
+              <Box
+                as="button"
+                display="flex"
+                alignItems="center"
+                gap="4px"
+                px="7px"
+                py="3px"
+                borderRadius="5px"
+                bg="transparent"
+                color={tokens.colors.accent.red}
+                fontSize="11px"
+                cursor="pointer"
+                transition="all 0.15s"
+                _hover={{ bg: 'rgba(248, 81, 73, 0.1)' }}
+                _active={{ transform: 'scale(0.95)' }}
+                onClick={handleReject}
+              >
+                <FiX size={12} />
+              </Box>
+              <Box
+                as="button"
+                display="flex"
+                alignItems="center"
+                gap="4px"
+                px="7px"
+                py="3px"
+                borderRadius="5px"
+                bg="transparent"
+                color={tokens.colors.accent.green}
+                fontSize="11px"
+                cursor="pointer"
+                transition="all 0.15s"
+                _hover={{ bg: 'rgba(46, 160, 67, 0.1)' }}
+                _active={{ transform: 'scale(0.95)' }}
+                onClick={handleApply}
+              >
+                <FiCheck size={12} />
+                Apply
+              </Box>
+            </>
+          )}
+        </Flex>
       </Flex>
 
       {/* Code */}
-      <Box
-        opacity={isRejected ? 0.5 : 1}
-        textDecoration={isRejected ? 'line-through' : 'none'}
+      <SyntaxHighlighter
+        language={block.language}
+        style={vscDarkPlus}
+        customStyle={{
+          margin: 0,
+          padding: '14px 16px',
+          fontSize: '12.5px',
+          lineHeight: '1.65',
+          background: 'transparent',
+          borderRadius: 0,
+          textDecoration: isRejected ? 'line-through' : 'none',
+        }}
       >
-        <SyntaxHighlighter
-          language={block.language}
-          style={vscDarkPlus}
-          customStyle={{
-            margin: 0,
-            padding: '12px',
-            fontSize: '13px',
-            background: tokens.colors.bg.codeBlock,
-            borderRadius: 0,
-          }}
-        >
-          {block.code}
-        </SyntaxHighlighter>
-      </Box>
-
-      {/* Actions */}
-      <Flex
-        align="center"
-        justify="flex-end"
-        gap={1}
-        px={2}
-        py={1.5}
-        bg={tokens.colors.bg.codeBlockHeader}
-        borderTop={`1px solid ${tokens.colors.border.default}`}
-      >
-        <IconButton
-          aria-label="Copy code"
-          size="xs"
-          variant="ghost"
-          color={tokens.colors.text.subtle}
-          _hover={{ color: tokens.colors.text.inverse, bg: 'whiteAlpha.100' }}
-          onClick={handleCopy}
-        >
-          <FiCopy size={14} />
-        </IconButton>
-
-        {isPending && (
-          <>
-            <IconButton
-              aria-label="Reject code"
-              size="xs"
-              variant="ghost"
-              color={tokens.colors.accent.red}
-              _hover={{ bg: tokens.colors.accent.redSubtle }}
-              onClick={handleReject}
-            >
-              <FiX size={14} />
-            </IconButton>
-            <IconButton
-              aria-label="Apply code"
-              size="xs"
-              variant="ghost"
-              color={tokens.colors.accent.green}
-              _hover={{ bg: tokens.colors.accent.greenSubtle }}
-              onClick={handleApply}
-            >
-              <FiCheck size={14} />
-            </IconButton>
-          </>
-        )}
-      </Flex>
+        {block.code}
+      </SyntaxHighlighter>
     </Box>
   )
 }

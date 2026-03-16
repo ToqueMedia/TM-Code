@@ -1,8 +1,9 @@
 import { memo, useRef, useEffect, useCallback } from 'react'
 import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
-import { FiRefreshCw, FiExternalLink } from 'react-icons/fi'
+import { FiRefreshCw, FiExternalLink, FiSquare } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { useLayoutStore } from '../../stores/layoutStore'
+import { devServerManager } from '../../services/devServerManager'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
 import MessageBubble from '../chat/MessageBubble'
 import { tokens } from '@/theme/tokens'
@@ -54,6 +55,13 @@ function PreviewView() {
       window.open(previewUrl, '_blank')
     }
   }
+
+  const handleStopServer = useCallback(async () => {
+    await devServerManager.stop()
+    const layout = useLayoutStore.getState()
+    layout.clearPreviewServer()
+    layout.goBack()
+  }, [])
 
   const hasPreview = previewUrl || previewHtmlContent
   if (!hasPreview) return null
@@ -146,17 +154,30 @@ function PreviewView() {
               <FiRefreshCw size={14} />
             </IconButton>
             {previewMode === 'server' && previewUrl && (
-              <IconButton
-                aria-label="Open in browser"
-                size="sm"
-                variant="ghost"
-                color={tokens.colors.text.secondary}
-                _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
-                borderRadius="6px"
-                onClick={handleOpenExternal}
-              >
-                <FiExternalLink size={14} />
-              </IconButton>
+              <>
+                <IconButton
+                  aria-label="Open in browser"
+                  size="sm"
+                  variant="ghost"
+                  color={tokens.colors.text.secondary}
+                  _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
+                  borderRadius="6px"
+                  onClick={handleOpenExternal}
+                >
+                  <FiExternalLink size={14} />
+                </IconButton>
+                <IconButton
+                  aria-label="Stop server"
+                  size="sm"
+                  variant="ghost"
+                  color={tokens.colors.text.secondary}
+                  _hover={{ bg: 'rgba(248, 81, 73, 0.15)', color: '#f85149' }}
+                  borderRadius="6px"
+                  onClick={handleStopServer}
+                >
+                  <FiSquare size={14} />
+                </IconButton>
+              </>
             )}
           </HStack>
         </Flex>

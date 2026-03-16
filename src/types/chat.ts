@@ -20,6 +20,12 @@ export interface ToolCallDisplay {
   isError?: boolean
   status: 'running' | 'completed' | 'failed'
   timestamp: number
+  // Diff data (populated for write_file and edit_file)
+  diffOldContent?: string
+  diffNewContent?: string
+  isNewFile?: boolean
+  diffStatus?: 'pending' | 'approved' | 'denied'
+  diffResultId?: string
 }
 
 export interface ChatMessage {
@@ -30,6 +36,9 @@ export interface ChatMessage {
   codeBlocks?: CodeBlock[]
   toolCalls?: ToolCallDisplay[]
   isStreaming?: boolean
+  // Reasoning (collapsible)
+  reasoningContent?: string
+  isReasoningVisible?: boolean
 }
 
 export interface CodeBlock {

@@ -1,7 +1,7 @@
 import React, { memo, useState, useCallback, useRef, useEffect } from 'react'
-import { Flex, Box, IconButton } from '@chakra-ui/react'
+import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiSend } from 'react-icons/fi'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -17,21 +17,20 @@ function PromptInput() {
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const currentProject = useProjectStore(s => s.currentProject)
 
-  // Track mount state for async cleanup
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      flushBufferedDeltas()
       AgentService.getInstance().cancelLoop()
     }
   }, [])
 
-  // Auto-resize textarea
   useEffect(() => {
     const textarea = textareaRef.current
     if (!textarea) return
     textarea.style.height = 'auto'
-    const maxHeight = 6 * 24 // ~6 lines
+    const maxHeight = 6 * 24
     textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`
   }, [input])
 
@@ -39,14 +38,12 @@ function PromptInput() {
     const prompt = input.trim()
     if (!prompt || isStreaming) return
 
-    // Check authentication
     const { isAuthenticated } = useAuthStore.getState()
     if (!isAuthenticated) return
 
     const chatStore = useChatStore.getState()
     const agentStore = useAgentStore.getState()
 
-    // Ensure session exists
     let sessionId = chatStore.activeSessionId
     if (!sessionId) {
       sessionId = chatStore.createSession(currentProject?.path || '')
@@ -54,41 +51,43 @@ function PromptInput() {
 
     setInput('')
 
-    // Add user message
     chatStore.addUserMessage(prompt)
-
-    // Start assistant message
-    const messageId = chatStore.startAssistantMessage()
+    chatStore.startAssistantMessage()
     agentStore.setStatus('thinking')
 
-    // Build context
     const projectPath = currentProject?.path || ''
     const projectType = currentProject?.projectType || 'unknown'
     const contextBuilder = ContextBuilder.getInstance()
     const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType)
-
-    // Get conversation history
     const history = chatStore.conversationHistory
 
-    // Configure agent
     const agentService = AgentService.getInstance()
     agentService.setSystemPrompt(systemPrompt)
 
-    // Run agentic loop with mounted guard on callbacks
     await agentService.runAgentLoop(prompt, history, {
-      onTextChunk: (text) => {
+      onTextDelta: (delta) => {
         if (!mountedRef.current) return
         agentStore.setStatus('generating')
-        chatStore.appendToAssistantMessage(text)
+        appendTextDeltaBuffered(delta)
       },
-      onToolCall: (toolName, toolInput) => {
+      onReasoningDelta: (delta) => {
         if (!mountedRef.current) return
+        agentStore.setStatus('thinking')
+        appendReasoningDeltaBuffered(delta)
+      },
+      onToolCallPending: (toolId, toolName) => {
+        if (!mountedRef.current) return
+        flushBufferedDeltas()
         agentStore.setStatus('applying')
-        chatStore.appendToolCallToMessage(messageId, toolName, toolInput)
+        chatStore.addPendingToolCall(toolId, toolName)
       },
-      onToolResult: (toolName, result, isError) => {
+      onToolCallStart: (toolId, _toolName, args) => {
         if (!mountedRef.current) return
-        chatStore.appendToolResultToMessage(messageId, toolName, result, isError)
+        chatStore.updateToolCallWithArgs(toolId, args)
+      },
+      onToolResult: (toolId, _toolName, result, isError) => {
+        if (!mountedRef.current) return
+        chatStore.updateToolCallWithResult(toolId, result, isError)
         agentStore.setStatus('thinking')
       },
       onTurnComplete: () => {
@@ -97,11 +96,13 @@ function PromptInput() {
       },
       onDone: () => {
         if (!mountedRef.current) return
+        flushBufferedDeltas()
         chatStore.finalizeAssistantMessage()
         agentStore.setStatus('idle')
       },
       onError: (error) => {
         if (!mountedRef.current) return
+        flushBufferedDeltas()
         agentStore.setStatus('error')
         agentStore.setError(error.message)
         chatStore.finalizeAssistantMessage()
@@ -123,62 +124,85 @@ function PromptInput() {
     [handleSend]
   )
 
+  const canSend = input.trim().length > 0 && !isStreaming
+
   return (
-    <Box px={3} py={2} bg={tokens.colors.bg.app} borderTop={`1px solid ${tokens.colors.border.default}`}>
-      <Flex
-        align="flex-end"
-        gap={2}
-        bg={tokens.colors.bg.sidebar}
-        borderRadius="8px"
-        border={`1px solid ${tokens.colors.border.default}`}
-        px={3}
-        py={2}
-        _focusWithin={{
-          borderColor: tokens.colors.accent.primaryFocus,
+    <Box px={4} py={3} bg={tokens.colors.bg.app}>
+      <Box
+        borderRadius="14px"
+        border="1px solid rgba(255, 255, 255, 0.08)"
+        bg="rgba(255, 255, 255, 0.03)"
+        overflow="hidden"
+        transition="all 0.2s"
+        css={{
+          '&:focus-within': {
+            borderColor: 'rgba(254, 16, 99, 0.35)',
+            boxShadow: '0 0 0 1px rgba(254, 16, 99, 0.1), 0 4px 20px rgba(254, 16, 99, 0.06)',
+          },
         }}
-        transition="border-color 0.2s"
       >
-        <Box flex="1" position="relative">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask the agent to help with your code..."
-            aria-label="Message prompt"
-            disabled={isStreaming}
-            rows={1}
-            style={{
-              width: '100%',
-              background: 'transparent',
-              border: 'none',
-              outline: 'none',
-              color: tokens.colors.text.primary,
-              fontSize: '13px',
-              fontFamily: tokens.fontFamily.ui,
-              resize: 'none',
-              lineHeight: '24px',
-              maxHeight: `${6 * 24}px`,
-              overflowY: 'auto',
-              opacity: isStreaming ? 0.5 : 1,
-            }}
-          />
-        </Box>
-        <IconButton
-          aria-label="Send message"
-          size="sm"
-          variant="ghost"
-          color={input.trim() && !isStreaming ? tokens.colors.accent.primary : tokens.colors.text.subtle}
-          _hover={{
-            bg: input.trim() && !isStreaming ? tokens.colors.accent.primarySubtle : 'transparent',
-          }}
-          onClick={handleSend}
-          disabled={!input.trim() || isStreaming}
-          flexShrink={0}
+        <Flex align="flex-end" gap={2} px={3} py="10px">
+          <Box flex="1" position="relative">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask Diamond to help with your code..."
+              aria-label="Message prompt"
+              disabled={isStreaming}
+              rows={1}
+              style={{
+                width: '100%',
+                background: 'transparent',
+                border: 'none',
+                outline: 'none',
+                color: tokens.colors.text.primary,
+                fontSize: '13.5px',
+                fontFamily: tokens.fontFamily.ui,
+                resize: 'none',
+                lineHeight: '24px',
+                maxHeight: `${6 * 24}px`,
+                overflowY: 'auto',
+                opacity: isStreaming ? 0.4 : 1,
+                letterSpacing: '-0.005em',
+              }}
+            />
+          </Box>
+          <Flex
+            as="button"
+            w="30px"
+            h="30px"
+            borderRadius="8px"
+            bg={canSend ? tokens.gradient.accentPrimary : 'transparent'}
+            align="center"
+            justify="center"
+            cursor={canSend ? 'pointer' : 'default'}
+            transition="all 0.15s"
+            flexShrink={0}
+            onClick={handleSend}
+            aria-disabled={!canSend}
+            opacity={canSend ? 1 : 0.3}
+            boxShadow={canSend ? '0 2px 10px rgba(254, 16, 99, 0.3)' : 'none'}
+            _hover={canSend ? { transform: 'scale(1.05)', boxShadow: '0 4px 16px rgba(254, 16, 99, 0.4)' } : undefined}
+            _active={canSend ? { transform: 'scale(0.95)' } : undefined}
+          >
+            <FiSend size={14} color={canSend ? '#ffffff' : tokens.colors.text.disabled} />
+          </Flex>
+        </Flex>
+
+        {/* Shortcut hint */}
+        <Flex
+          px={3}
+          py="5px"
+          justify="flex-end"
+          borderTop="1px solid rgba(255, 255, 255, 0.03)"
         >
-          <FiSend size={16} />
-        </IconButton>
-      </Flex>
+          <Text fontSize="10px" color="rgba(255,255,255,0.15)" letterSpacing="0.02em">
+            {navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'} + Enter to send
+          </Text>
+        </Flex>
+      </Box>
     </Box>
   )
 }

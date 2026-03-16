@@ -19,6 +19,14 @@ jest.mock('../../services/agent/sessionService', () => ({
 }))
 
 jest.mock('../../services/agent/diffService', () => ({
+  __esModule: true,
+  default: {
+    getInstance: () => ({
+      registerDiff: jest.fn(),
+      acceptDiff: jest.fn(),
+      rejectDiff: jest.fn(),
+    }),
+  },
   DiffResult: {},
 }))
 
@@ -121,7 +129,7 @@ describe('chatStore', () => {
     })
   })
 
-  describe('startAssistantMessage / appendToAssistantMessage / finalizeAssistantMessage', () => {
+  describe('startAssistantMessage / appendTextDelta / finalizeAssistantMessage', () => {
     it('streams an assistant message', () => {
       useChatStore.getState().createSession('/test/project')
       const assistantId = useChatStore.getState().startAssistantMessage()
@@ -129,8 +137,8 @@ describe('chatStore', () => {
       expect(useChatStore.getState().isStreaming).toBe(true)
       expect(useChatStore.getState().streamingMessageId).toBe(assistantId)
 
-      useChatStore.getState().appendToAssistantMessage('Hello ')
-      useChatStore.getState().appendToAssistantMessage('world')
+      useChatStore.getState().appendTextDelta('Hello ')
+      useChatStore.getState().appendTextDelta('world')
 
       const session = useChatStore.getState().getActiveSession()!
       const msg = session.messages.find(m => m.id === assistantId)!

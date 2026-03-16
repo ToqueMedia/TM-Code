@@ -40,15 +40,22 @@ function MinimalTitleBar() {
   const menuRef = useRef<HTMLDivElement>(null)
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 })
 
-  // Position the dropdown relative to the avatar
-  useEffect(() => {
-    if (!showUserMenu || !avatarRef.current) return
+  // Position the dropdown relative to the avatar (recalculate on resize)
+  const recalcMenuPos = useCallback(() => {
+    if (!avatarRef.current) return
     const rect = avatarRef.current.getBoundingClientRect()
     setMenuPos({
       top: rect.bottom + 4,
       right: window.innerWidth - rect.right,
     })
-  }, [showUserMenu])
+  }, [])
+
+  useEffect(() => {
+    if (!showUserMenu) return
+    recalcMenuPos()
+    window.addEventListener('resize', recalcMenuPos)
+    return () => window.removeEventListener('resize', recalcMenuPos)
+  }, [showUserMenu, recalcMenuPos])
 
   // Close menu on outside click
   useEffect(() => {

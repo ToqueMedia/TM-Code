@@ -11,12 +11,16 @@ export interface AgentTool {
 export type AgentToolName =
   | 'read_file'
   | 'write_file'
+  | 'edit_file'
   | 'create_file'
   | 'create_directory'
   | 'delete_file'
+  | 'rename_file'
   | 'list_directory'
   | 'search_files'
+  | 'glob'
   | 'execute_command'
+  | 'web_fetch'
 
 export interface AgentToolCall {
   id: string

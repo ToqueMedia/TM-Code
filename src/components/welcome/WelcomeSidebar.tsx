@@ -47,6 +47,8 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
       display="flex"
       flexDirection="column"
       p={6}
+      pt={10}
+      data-no-drag
     >
       <Flex alignItems="center" mb={8}>
         <Box

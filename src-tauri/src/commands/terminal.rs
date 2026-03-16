@@ -4,7 +4,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommandResult {
@@ -70,6 +70,107 @@ pub async fn execute_command(
     })
 }
 
+#[derive(Clone, Serialize)]
+struct DevServerOutput {
+    pid: u32,
+    stream: String,
+    data: String,
+}
+
+/// Spawn a long-running dev server process and stream its output back to the
+/// frontend via Tauri events (`dev-server-output` and `dev-server-exit`).
+/// Returns the child PID so the frontend can kill it later via `kill_process`.
+#[tauri::command]
+pub async fn start_dev_server(
+    app: tauri::AppHandle,
+    command: String,
+    cwd: String,
+    process_map: State<'_, ProcessMap>,
+) -> Result<u32, String> {
+    if command.trim().is_empty() {
+        return Err("Empty command".to_string());
+    }
+
+    let (shell, flag) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+
+    let mut cmd = Command::new(shell);
+    cmd.arg(flag)
+        .arg(&command)
+        .current_dir(&cwd)
+        .env("FORCE_COLOR", "0")
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Put the child in its own process group so kill_process can
+    // terminate the entire tree (npm → node → vite, etc.).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start dev server: {}", e))?;
+
+    let pid = child.id();
+
+    // Stream stdout to frontend
+    if let Some(stdout) = child.stdout.take() {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                let _ = app_clone.emit(
+                    "dev-server-output",
+                    DevServerOutput {
+                        pid,
+                        stream: "stdout".into(),
+                        data: line,
+                    },
+                );
+            }
+            // stdout closed — process has exited
+            let _ = app_clone.emit("dev-server-exit", pid);
+        });
+    }
+
+    // Stream stderr to frontend
+    if let Some(stderr) = child.stderr.take() {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                let _ = app_clone.emit(
+                    "dev-server-output",
+                    DevServerOutput {
+                        pid,
+                        stream: "stderr".into(),
+                        data: line,
+                    },
+                );
+            }
+        });
+    }
+
+    // Track the process so kill_process can validate it
+    {
+        let mut map = process_map
+            .lock()
+            .map_err(|_| "Failed to lock process map")?;
+        map.insert(pid, child);
+    }
+
+    Ok(pid)
+}
+
 #[tauri::command]
 pub async fn start_interactive_shell(
     cwd: Option<String>,
@@ -132,35 +233,32 @@ pub async fn kill_process(
         }
     }
 
-    // On Unix systems, use kill command
     if cfg!(unix) {
-        let output = Command::new("kill")
+        // Kill the process group first — handles child processes spawned
+        // via process_group(0) (e.g. npm → node → vite).
+        // Negative PID = send signal to the entire process group.
+        let _ = Command::new("kill")
+            .args(["-TERM", &format!("-{}", pid)])
+            .output();
+
+        // Also kill the individual process as fallback
+        let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
-            .output()
-            .map_err(|e| format!("Failed to kill process {}: {}", pid, e))?;
-
-        // Remove from tracked processes
-        if output.status.success() {
-            let mut map = process_map.lock().map_err(|_| "Failed to lock process map")?;
-            map.remove(&pid);
-        }
-
-        Ok(output.status.success())
+            .output();
     } else {
-        // On Windows, use taskkill
-        let output = Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output()
-            .map_err(|e| format!("Failed to kill process {}: {}", pid, e))?;
-
-        // Remove from tracked processes
-        if output.status.success() {
-            let mut map = process_map.lock().map_err(|_| "Failed to lock process map")?;
-            map.remove(&pid);
-        }
-
-        Ok(output.status.success())
+        // On Windows, /T kills the entire process tree
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .output();
     }
+
+    // Always remove from tracked processes — we've done our best to kill it
+    {
+        let mut map = process_map.lock().map_err(|_| "Failed to lock process map")?;
+        map.remove(&pid);
+    }
+
+    Ok(true)
 }
 
 #[tauri::command]

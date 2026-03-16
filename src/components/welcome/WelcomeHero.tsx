@@ -94,6 +94,7 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onOpenFolder }) => {
         gap={6}
         maxW="900px"
         w="100%"
+        data-no-drag
       >
         {featureCards.map((card) => (
           <WelcomeFeatureCard

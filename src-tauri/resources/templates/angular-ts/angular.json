@@ -15,7 +15,7 @@
             "outputPath": "dist/angular-ts-template",
             "index": "src/index.html",
             "browser": "src/main.ts",
-            "tsConfig": "tsconfig.json",
+            "tsConfig": "tsconfig.app.json",
             "assets": [],
             "styles": [],
             "scripts": []

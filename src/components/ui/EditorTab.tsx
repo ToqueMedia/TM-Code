@@ -1,7 +1,7 @@
 import React, { memo, useCallback } from 'react'
 import { Flex, Text, Box, IconButton, HStack } from '@chakra-ui/react'
 import { FiX, FiFile } from 'react-icons/fi'
-import { SiJavascript, SiReact, SiCss3, SiHtml5, SiJson, SiMarkdown, SiPython, SiNpm, SiDocker } from 'react-icons/si'
+import { SiJavascript, SiReact, SiCss, SiHtml5, SiJson, SiMarkdown, SiPython, SiNpm, SiDocker } from 'react-icons/si'
 import { FaFileImage, FaFilePdf, FaFileArchive } from 'react-icons/fa'
 import TypeScriptIcon from '../icons/TypeScriptIcon'
 import { getFileIconByExtension } from '../../utils/iconMapper'
@@ -33,7 +33,7 @@ const getFileIconComponent = (fileName: string) => {
 		case 'js': return { icon: SiJavascript, color: fe.js }
 		case 'jsx': return { icon: SiReact, color: fe.jsx }
 		case 'ts': case 'tsx': return { icon: TypeScriptIcon, color: fe.ts }
-		case 'css': return { icon: SiCss3, color: fe.css }
+		case 'css': return { icon: SiCss, color: fe.css }
 		case 'html': return { icon: SiHtml5, color: fe.html }
 		case 'json': return { icon: SiJson, color: fe.json }
 		case 'md': return { icon: SiMarkdown, color: fe.md }

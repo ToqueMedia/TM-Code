@@ -69,29 +69,43 @@ function GeneratingView() {
   }, [tryStaticPreview])
 
   const handleAcceptDiff = useCallback(async (diffId: string) => {
-    const diff = useChatStore.getState().pendingDiffs.find(d => d.id === diffId)
+    const chatStore = useChatStore.getState()
+    const diff = chatStore.pendingDiffs.find(d => d.id === diffId)
     if (diff) acceptedPathsRef.current.push(diff.filePath)
     await DiffService.getInstance().acceptDiff(diffId)
-    useChatStore.getState().removePendingDiff(diffId)
+    chatStore.removePendingDiff(diffId)
+    // Sync inline diff status in chat messages
+    chatStore.syncDiffStatusByResultId(diffId, 'approved')
     checkAllDiffsResolved()
   }, [checkAllDiffsResolved])
 
   const handleRejectDiff = useCallback((diffId: string) => {
+    const chatStore = useChatStore.getState()
     DiffService.getInstance().rejectDiff(diffId)
-    useChatStore.getState().removePendingDiff(diffId)
+    chatStore.removePendingDiff(diffId)
+    // Sync inline diff status in chat messages
+    chatStore.syncDiffStatusByResultId(diffId, 'denied')
     checkAllDiffsResolved()
   }, [checkAllDiffsResolved])
 
   const handleAcceptAll = useCallback(async () => {
-    acceptedPathsRef.current = useChatStore.getState().pendingDiffs.filter(d => d.status === 'pending').map(d => d.filePath)
-    await DiffService.getInstance().acceptAllDiffs()
-    useChatStore.getState().clearPendingDiffs()
+    const chatStore = useChatStore.getState()
+    acceptedPathsRef.current = chatStore.pendingDiffs
+      .filter(d => d.status === 'pending')
+      .map(d => d.filePath)
+    await chatStore.approveAllPendingDiffs()
     checkAllDiffsResolved()
   }, [checkAllDiffsResolved])
 
   const handleRejectAll = useCallback(() => {
+    const chatStore = useChatStore.getState()
+    const pending = chatStore.pendingDiffs.filter(d => d.status === 'pending')
     DiffService.getInstance().rejectAllDiffs()
-    useChatStore.getState().clearPendingDiffs()
+    // Sync all inline diff statuses
+    for (const diff of pending) {
+      chatStore.syncDiffStatusByResultId(diff.id, 'denied')
+    }
+    chatStore.clearPendingDiffs()
     acceptedPathsRef.current = []
     checkAllDiffsResolved()
   }, [checkAllDiffsResolved])

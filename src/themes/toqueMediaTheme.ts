@@ -106,7 +106,7 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
   ],
   colors: {
     // Editor background
-    'editor.background': '#1a1a1a',
+    'editor.background': '#24262c',
     'editor.foreground': '#f8f8f2',
     
     // Line numbers
@@ -193,7 +193,7 @@ export const toqueMediaSoftTheme: editor.IStandaloneThemeData = {
     { token: 'comment', foreground: '#94a3b8', fontStyle: 'italic' },
   ],
   colors: {
-    'editor.background': '#0f172a', // Slate 900
+    'editor.background': '#1e2030', // Slate 900 (lighter)
     'editor.foreground': '#f1f5f9', // Slate 100
     'editor.lineHighlightBackground': '#1e293b50', // Slate 800 with opacity
     'editorLineNumber.foreground': '#64748b', // Slate 500

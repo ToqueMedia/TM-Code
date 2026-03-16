@@ -46,6 +46,10 @@ class DiffService {
     return diff
   }
 
+  registerDiff(diff: DiffResult): void {
+    this.pendingDiffs.set(diff.id, diff)
+  }
+
   async acceptDiff(diffId: string): Promise<void> {
     const diff = this.pendingDiffs.get(diffId)
     if (!diff) return

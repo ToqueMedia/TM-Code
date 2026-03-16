@@ -1,13 +1,11 @@
-import { memo, useRef, useEffect, useCallback } from 'react'
+import { memo, useRef, useEffect, useCallback, useState } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiMessageSquare } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
-import DiffService from '../../services/agent/diffService'
 import MessageBubble from './MessageBubble'
 import ChatSkeleton from './ChatSkeleton'
 import AgentStatusBar from './AgentStatusBar'
 import PromptInput from './PromptInput'
-import DiffPreview from './DiffPreview'
 import { tokens } from '@/theme/tokens'
 
 function ChatPanel() {
@@ -15,47 +13,46 @@ function ChatPanel() {
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
-  const pendingDiffs = useChatStore(s => s.pendingDiffs)
+  const isStreaming = useChatStore(s => s.isStreaming)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const [userScrolledUp, setUserScrolledUp] = useState(false)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
+  const lastMessage = messages[messages.length - 1]
 
-  // Auto-scroll to bottom when messages change or during streaming (debounced via rAF)
+  // Auto-scroll: smooth scroll to bottom during streaming (unless user scrolled up)
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    const rafId = requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight
-    })
-    return () => cancelAnimationFrame(rafId)
-  }, [messages, messages.length])
 
-  const handleAcceptDiff = useCallback(async (diffId: string) => {
-    const diffService = DiffService.getInstance()
-    await diffService.acceptDiff(diffId)
-    useChatStore.getState().removePendingDiff(diffId)
-  }, [])
+    if (!isStreaming) {
+      // When not streaming, always scroll to bottom on new messages
+      const rafId = requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight
+      })
+      setUserScrolledUp(false)
+      return () => cancelAnimationFrame(rafId)
+    }
 
-  const handleRejectDiff = useCallback((diffId: string) => {
-    const diffService = DiffService.getInstance()
-    diffService.rejectDiff(diffId)
-    useChatStore.getState().removePendingDiff(diffId)
-  }, [])
+    if (!userScrolledUp) {
+      const rafId = requestAnimationFrame(() => {
+        el.scrollTo({
+          top: el.scrollHeight,
+          behavior: 'smooth',
+        })
+      })
+      return () => cancelAnimationFrame(rafId)
+    }
+  }, [messages, messages.length, lastMessage?.content, isStreaming, userScrolledUp])
 
-  const handleAcceptAll = useCallback(async () => {
-    const diffService = DiffService.getInstance()
-    await diffService.acceptAllDiffs()
-    useChatStore.getState().clearPendingDiffs()
-  }, [])
-
-  const handleRejectAll = useCallback(() => {
-    const diffService = DiffService.getInstance()
-    diffService.rejectAllDiffs()
-    useChatStore.getState().clearPendingDiffs()
-  }, [])
-
-  const activeDiffs = pendingDiffs.filter(d => d.status === 'pending')
+  // Detect user scroll
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    if (!isStreaming) return
+    const el = e.currentTarget
+    const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50
+    setUserScrolledUp(!isAtBottom)
+  }, [isStreaming])
 
   return (
     <Flex
@@ -75,6 +72,7 @@ function ChatPanel() {
         flex="1"
         overflowY="auto"
         py={3}
+        onScroll={handleScroll}
       >
         {isLoadingSession ? (
           <ChatSkeleton />
@@ -115,63 +113,6 @@ function ChatPanel() {
           ))
         )}
       </Box>
-
-      {/* Pending Diffs */}
-      {activeDiffs.length > 0 && (
-        <Box
-          borderTop={`1px solid ${tokens.colors.border.default}`}
-          bg={tokens.colors.bg.dark}
-          px={3}
-          py={3}
-          maxH="40vh"
-          overflowY="auto"
-        >
-          <Flex align="center" justify="space-between" mb={2}>
-            <Text fontSize="xs" color={tokens.colors.text.primary} fontWeight="600">
-              Pending changes ({activeDiffs.length})
-            </Text>
-            <Flex gap={2}>
-              <button
-                onClick={handleRejectAll}
-                style={{
-                  padding: '3px 8px',
-                  background: 'transparent',
-                  border: `1px solid ${tokens.colors.accent.redMuted}`,
-                  borderRadius: '4px',
-                  color: tokens.colors.accent.red,
-                  fontSize: '11px',
-                  cursor: 'pointer',
-                }}
-              >
-                Reject All
-              </button>
-              <button
-                onClick={handleAcceptAll}
-                style={{
-                  padding: '3px 8px',
-                  background: tokens.colors.accent.greenSubtle,
-                  border: `1px solid ${tokens.colors.accent.greenMuted}`,
-                  borderRadius: '4px',
-                  color: tokens.colors.accent.green,
-                  fontSize: '11px',
-                  cursor: 'pointer',
-                }}
-              >
-                Accept All
-              </button>
-            </Flex>
-          </Flex>
-
-          {activeDiffs.map(diff => (
-            <DiffPreview
-              key={diff.id}
-              diff={diff}
-              onAccept={handleAcceptDiff}
-              onReject={handleRejectDiff}
-            />
-          ))}
-        </Box>
-      )}
 
       {/* Agent Status Bar */}
       <AgentStatusBar />

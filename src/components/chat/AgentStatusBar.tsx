@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Flex, Text, Box, IconButton } from '@chakra-ui/react'
+import { Flex, Text, Box } from '@chakra-ui/react'
 import { FiSquare } from 'react-icons/fi'
 import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -26,8 +26,8 @@ function AgentStatusBar() {
   }
 
   const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
-    idle: { color: tokens.colors.status.idle, label: 'Ready', pulse: false },
-    thinking: { color: tokens.colors.status.warning, label: 'Thinking...', pulse: true },
+    idle: { color: tokens.colors.text.disabled, label: 'Ready', pulse: false },
+    thinking: { color: tokens.colors.toolCall.runningText, label: 'Thinking...', pulse: true },
     generating: { color: tokens.colors.accent.primary, label: 'Generating...', pulse: true },
     applying: { color: tokens.colors.accent.green, label: 'Applying changes...', pulse: true },
     error: { color: tokens.colors.accent.red, label: error || 'Error', pulse: false },
@@ -43,47 +43,56 @@ function AgentStatusBar() {
       align="center"
       justify="space-between"
       px={3}
-      py={1.5}
-      bg={tokens.colors.bg.sidebar}
-      borderTop={`1px solid ${tokens.colors.border.default}`}
+      py="6px"
+      bg="rgba(255, 255, 255, 0.02)"
+      borderTop="1px solid rgba(255, 255, 255, 0.04)"
       minH="28px"
     >
       <Flex align="center" gap={2}>
         <Box
-          w="8px"
-          h="8px"
+          w="6px"
+          h="6px"
           borderRadius="full"
           bg={config.color}
           flexShrink={0}
-          animation={config.pulse ? 'pulse 1.5s ease-in-out infinite' : undefined}
+          animation={config.pulse ? 'statusPulse 1.5s ease-in-out infinite' : undefined}
           css={config.pulse ? {
-            '@keyframes pulse': {
+            '@keyframes statusPulse': {
               '0%, 100%': { opacity: 1 },
-              '50%': { opacity: 0.4 },
+              '50%': { opacity: 0.3 },
             }
           } : undefined}
         />
-        <Text fontSize="xs" color={tokens.colors.text.subtle}>
+        <Text fontSize="11px" color={tokens.colors.text.muted} letterSpacing="0.01em">
           {config.label}
         </Text>
       </Flex>
 
       <Flex align="center" gap={3}>
-        <Text fontSize="xs" color={tokens.colors.diff.lineNumber}>
-          Tokens: {formatTokens(totalTokens)} | Turns: {currentTurnCount}
+        <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+          {formatTokens(totalTokens)} tokens · {currentTurnCount} turns
         </Text>
 
         {isStreaming && (
-          <IconButton
-            aria-label="Stop generation"
-            size="xs"
-            variant="ghost"
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            w="20px"
+            h="20px"
+            borderRadius="5px"
+            bg="transparent"
             color={tokens.colors.accent.red}
-            _hover={{ bg: tokens.colors.accent.redSubtle }}
+            cursor="pointer"
+            transition="all 0.12s"
+            _hover={{ bg: 'rgba(248, 81, 73, 0.1)' }}
+            _active={{ transform: 'scale(0.9)' }}
             onClick={handleStop}
+            aria-label="Stop generation"
           >
-            <FiSquare size={12} />
-          </IconButton>
+            <FiSquare size={11} />
+          </Box>
         )}
       </Flex>
     </Flex>

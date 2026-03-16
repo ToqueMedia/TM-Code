@@ -1,12 +1,17 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { Box, Flex, useDialog } from '@chakra-ui/react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { message as tauriMessage } from '@tauri-apps/plugin-dialog'
 import { useProjectStore } from '../stores/projectStore'
-import { useChatStore } from '../stores/chatStore'
-import { templateService, Template } from '../services/templateService'
+import { Template } from '../services/templateService'
+import { verifyRequirements, CheckResult } from '../services/environmentCheck'
+import { setupScaffoldedProject } from '../services/postScaffoldPipeline'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { WelcomeSidebar, WelcomeHero, CloneDialog } from './welcome'
+import { RequirementsDialog } from './dialogs'
 import TemplateSelector from './TemplateSelector'
+import WindowControls from './ui/WindowControls'
 
 interface WelcomeScreenProps {
   onOpenProject: (path?: string) => void
@@ -16,10 +21,47 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   const cloneDialog = useDialog()
   const { recentProjects, loadRecentProjects } = useProjectStore()
   const [showTemplateSelector, setShowTemplateSelector] = useState(false)
+  const [isScaffolding, setIsScaffolding] = useState(false)
+
+  // Environment requirements check state
+  const [requirementsResults, setRequirementsResults] = useState<CheckResult[] | null>(null)
+  const [pendingScaffold, setPendingScaffold] = useState<{ template: Template; projectPath: string } | null>(null)
 
   useEffect(() => {
     loadRecentProjects()
   }, [loadRecentProjects])
+
+  const handleDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    const t = e.target as HTMLElement
+    const tag = t.tagName?.toLowerCase() || ''
+    if (['button', 'input', 'svg', 'path', 'a'].includes(tag)) return
+    if (t.getAttribute?.('role') === 'button') return
+    if (t.closest?.('[data-no-drag]')) return
+    getCurrentWindow().startDragging().catch(() => {})
+  }, [])
+
+  async function handleClose() {
+    try { await getCurrentWindow().close() } catch { /* noop */ }
+  }
+
+  async function handleMinimize() {
+    try { await getCurrentWindow().minimize() } catch { /* noop */ }
+  }
+
+  async function handleFullToggle() {
+    try {
+      const win = getCurrentWindow()
+      if (/Mac/.test(navigator.platform || '')) {
+        const fs = await win.isFullscreen()
+        await win.setFullscreen(!fs)
+      } else {
+        const isMax = await win.isMaximized()
+        if (isMax) await win.unmaximize()
+        else await win.maximize()
+      }
+    } catch { /* noop */ }
+  }
 
   const handleOpenFolder = async () => {
     try {
@@ -41,32 +83,69 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     setShowTemplateSelector(true)
   }
 
-  const handleSelectTemplate = async (template: Template) => {
+  const doScaffold = async (template: Template, projectPath: string) => {
+    try {
+      setIsScaffolding(true)
+      await setupScaffoldedProject(template, projectPath)
+      setShowTemplateSelector(false)
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      logger.error('ui', 'Failed to scaffold template:', error)
+      await tauriMessage(
+        `Failed to create project: ${msg}`,
+        { title: 'Error', kind: 'error' }
+      ).catch(() => {})
+    } finally {
+      setIsScaffolding(false)
+    }
+  }
+
+  const handleSelectTemplate = async (template: Template, projectName: string) => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
       const selected = await open({
         directory: true,
         multiple: false,
-        title: 'Choose a folder for your new project',
+        title: 'Choose where to create the project',
       })
       if (!selected) return
 
-      const projectPath = selected as string
+      const projectPath = `${selected as string}/${projectName}`
 
-      // Scaffold the template
-      await templateService.scaffold(template.id, projectPath)
+      // Check environment requirements before scaffolding
+      if (template.requirements && template.requirements.length > 0) {
+        const checkResult = await verifyRequirements(template.requirements)
 
-      // Open the project
-      await useProjectStore.getState().openProject(projectPath)
+        if (!checkResult.allPassed) {
+          setPendingScaffold({ template, projectPath })
+          setRequirementsResults(checkResult.results)
+          return
+        }
+      }
 
-      // Create a new chat session
-      const chatStore = useChatStore.getState()
-      await chatStore.createNewSession(projectPath)
-
-      setShowTemplateSelector(false)
+      await doScaffold(template, projectPath)
     } catch (error: unknown) {
-      logger.error('ui', 'Failed to scaffold template:', error)
+      const msg = error instanceof Error ? error.message : String(error)
+      logger.error('ui', 'Failed to check requirements:', error)
+      await tauriMessage(
+        `Failed to create project: ${msg}`,
+        { title: 'Error', kind: 'error' }
+      ).catch(() => {})
     }
+  }
+
+  const handleRequirementsContinue = () => {
+    if (pendingScaffold) {
+      const { template, projectPath } = pendingScaffold
+      setRequirementsResults(null)
+      setPendingScaffold(null)
+      doScaffold(template, projectPath)
+    }
+  }
+
+  const handleRequirementsCancel = () => {
+    setRequirementsResults(null)
+    setPendingScaffold(null)
   }
 
   const handleSelectEmpty = async () => {
@@ -88,11 +167,21 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
 
   if (showTemplateSelector) {
     return (
-      <TemplateSelector
-        onSelectTemplate={handleSelectTemplate}
-        onSelectEmpty={handleSelectEmpty}
-        onBack={() => setShowTemplateSelector(false)}
-      />
+      <>
+        <TemplateSelector
+          onSelectTemplate={handleSelectTemplate}
+          onSelectEmpty={handleSelectEmpty}
+          onBack={() => setShowTemplateSelector(false)}
+          isLoading={isScaffolding}
+        />
+        {requirementsResults && (
+          <RequirementsDialog
+            results={requirementsResults}
+            onContinue={handleRequirementsContinue}
+            onCancel={handleRequirementsCancel}
+          />
+        )}
+      </>
     )
   }
 
@@ -101,7 +190,19 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       minHeight="100vh"
       bg={tokens.colors.bg.welcome}
       color={tokens.colors.text.primary}
+      data-tauri-drag-region
+      onMouseDown={handleDrag}
+      position="relative"
     >
+      {/* Window controls */}
+      <Box position="absolute" top={3} left={4} zIndex={10}>
+        <WindowControls
+          onClose={handleClose}
+          onMinimize={handleMinimize}
+          onMaximize={handleFullToggle}
+        />
+      </Box>
+
       {/* Animated Background */}
       <Box
         position="fixed"
@@ -111,6 +212,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         height="100%"
         zIndex="-1"
         background={tokens.gradient.welcomeBg}
+        pointerEvents="none"
       />
 
       <WelcomeSidebar

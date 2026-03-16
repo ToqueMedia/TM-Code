@@ -15,10 +15,16 @@ pub struct ProjectInfo {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(default = "default_project_type")]
     pub project_type: String,
     pub last_opened: String,
     pub created_at: String,
+    #[serde(default)]
     pub metadata: HashMap<String, serde_json::Value>,
+}
+
+fn default_project_type() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

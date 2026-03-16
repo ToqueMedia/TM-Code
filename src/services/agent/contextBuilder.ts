@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { TemplateManifest } from '../templateService'
 
 interface PackageSummary {
   name: string
@@ -18,12 +19,13 @@ class ContextBuilder {
     return ContextBuilder.instance
   }
 
-  async buildSystemPrompt(projectPath: string, projectType: string, templateInfo?: { name: string; framework: string; devCommand: string }): Promise<string> {
-    // Gather context in parallel for speed
-    const [treeString, pkgSummary, readme] = await Promise.all([
+  async buildSystemPrompt(projectPath: string, projectType: string): Promise<string> {
+    // Gather context in parallel for speed — includes template manifest
+    const [treeString, pkgSummary, readme, templateManifest] = await Promise.all([
       this.buildFileTree(projectPath),
       this.extractPackageSummary(projectPath),
       this.safeReadFile(`${projectPath}/README.md`),
+      this.readTemplateManifest(projectPath),
     ])
 
     // Detect package manager from lock files
@@ -36,6 +38,7 @@ class ContextBuilder {
     // ── 1. COMPLETION RULE (primacy — U-Curve) ──
     sections.push(`<completion_rule>
 Complete every file the task requires. Do not stop early. Do not skip files.
+Before finishing, verify: did you create or modify all files mentioned in your plan? If any are missing, continue.
 </completion_rule>`)
 
     // ── 2. ROLE ──
@@ -67,9 +70,10 @@ ${readme.slice(0, 400)}
     // ── 4. CONSTRAINTS (contract — no preamble) ──
     sections.push(`<constraints>
 - All paths absolute, starting with "${projectPath}"
-- read_file before write_file. Never modify unread files.
-- write_file replaces entire file. Omitting code deletes it. Always emit complete content.
-- Do not use placeholders ("...", "// rest of code"). Output goes directly to disk.
+- read_file before editing existing files. Never modify unread files. For new files, write directly.
+- Prefer edit_file for small changes (1–20 lines) — it sends only the diff, saving tokens. Use write_file only for new files or when changing >50% of the file.
+- write_file replaces the entire file — there is no merge. Omitting code deletes it, so always emit the complete file content.
+- Do not use placeholders ("...", "// rest of code") because output is written directly to disk as-is. Placeholders become literal text in the user's code.
 - File changes require user approval. Do not assume applied.
 - Do not run long-lived processes (dev servers, watchers) via execute_command — it blocks until exit.
 - Do not install dependencies unless the task requires it.
@@ -91,7 +95,17 @@ ${readme.slice(0, 400)}
 <steps>
 1. read_file → examine current code
 2. search_files → find related usages if needed
-3. write_file → corrected full file content
+3. edit_file → replace only the broken code (old_str/new_str)
+</steps>
+</example>
+
+<example>
+<task>Change the page title in a component</task>
+<steps>
+1. glob → "**/*.tsx" to find component files
+2. search_files → query "title" to locate the exact file and line
+3. read_file → confirm context around the match
+4. edit_file → replace only the title string
 </steps>
 </example>
 
@@ -100,8 +114,9 @@ ${readme.slice(0, 400)}
 <steps>
 1. list_directory → understand layout
 2. read_file → each relevant file
-3. write_file → each modified file (complete content)
-4. execute_command → run tests if they exist
+3. edit_file → surgical changes to existing files
+4. write_file → new files only (complete content)
+5. execute_command → run tests if they exist
 </steps>
 </example>
 </examples>`)
@@ -129,19 +144,20 @@ Response style:
 Tool call fails → read error → fix that step → retry. Do not restart from scratch. If unsure, verify with read_file or list_directory.
 </error_recovery>`)
 
-    // ── 8. TEMPLATE CONTEXT (if scaffolded from template) ──
-    if (templateInfo) {
+    // ── 8. TEMPLATE CONTEXT (auto-detected from .toquemedia-template) ──
+    if (templateManifest) {
       sections.push(`<template_context>
-This project was scaffolded from the "${templateInfo.name}" template.
-Framework: ${templateInfo.framework}
-Dev command: ${templateInfo.devCommand}
+This project was scaffolded from the "${templateManifest.name}" template.
+Framework: ${templateManifest.framework}
+Dev command: ${templateManifest.devCommand}
+Install command: ${templateManifest.installCommand}
 The base Hello World structure is in place. Build on top of it.
 </template_context>`)
     }
 
     // ── 9. REMINDER (recency — U-Curve) ──
     sections.push(`<reminder>
-Absolute paths: "${projectPath}". Read before write. Complete file content only — partial = data loss. Do not stop early.
+Absolute paths: "${projectPath}". Read before editing. Prefer edit_file for small changes, write_file for new files. No placeholders — output goes to disk as-is. Do not stop early.
 </reminder>`)
 
     return sections.join('\n\n')
@@ -172,6 +188,21 @@ Absolute paths: "${projectPath}". Read before write. Complete file content only 
         devDependencies: Object.keys(pkg.devDependencies || {}).slice(0, 10),
         packageManager: pkg.packageManager || '',
       }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Reads the .toquemedia-template manifest from the project root.
+   * Returns null if the file doesn't exist (project wasn't scaffolded from a template).
+   */
+  private async readTemplateManifest(projectPath: string): Promise<TemplateManifest | null> {
+    const raw = await this.safeReadFile(`${projectPath}/.toquemedia-template`)
+    if (!raw) return null
+
+    try {
+      return JSON.parse(raw) as TemplateManifest
     } catch {
       return null
     }

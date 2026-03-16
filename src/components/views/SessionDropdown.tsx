@@ -1,6 +1,6 @@
 import { memo, useRef, useEffect, useCallback, useState } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
-import { FiPlus, FiClock, FiChevronDown } from 'react-icons/fi'
+import { FiPlus, FiClock, FiChevronDown, FiTrash2 } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { SessionSummary } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
@@ -62,6 +62,13 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
     if (!projectPath || isStreaming) return
     setShowSessions(false)
     await useChatStore.getState().switchSession(projectPath, sessionId)
+  }, [projectPath, isStreaming])
+
+  const handleDeleteSession = useCallback(async (e: React.MouseEvent, sessionId: string) => {
+    e.stopPropagation()
+    if (!projectPath || isStreaming) return
+    await useChatStore.getState().deleteSessionFromDisk(projectPath, sessionId)
+    setSessionList(prev => prev.filter(s => s.id !== sessionId))
   }, [projectPath, isStreaming])
 
   return (
@@ -153,14 +160,12 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
               </Text>
             ) : (
               sessionList.map(s => (
-                <Box
+                <Flex
                   key={s.id}
-                  as="button"
                   role="option"
                   aria-selected={s.id === activeSessionId}
-                  display="block"
                   w="100%"
-                  textAlign="left"
+                  align="center"
                   px={3}
                   py={2}
                   cursor="pointer"
@@ -172,24 +177,52 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
                       : tokens.colors.bg.panelAlt
                   }}
                   onClick={() => handleSwitchSession(s.id)}
+                  className="group"
                 >
-                  <Flex justify="space-between" align="center" mb={0.5}>
-                    <Text
-                      fontSize={tokens.fontSize.sm}
-                      fontWeight={s.id === activeSessionId ? '600' : '400'}
-                      color={s.id === activeSessionId ? tokens.colors.accent.primary : tokens.colors.text.primary}
-                      lineClamp={1}
-                    >
-                      {s.lastMessage || 'Empty session'}
+                  <Box flex={1} textAlign="left" overflow="hidden">
+                    <Flex justify="space-between" align="center" mb={0.5}>
+                      <Text
+                        fontSize={tokens.fontSize.sm}
+                        fontWeight={s.id === activeSessionId ? '600' : '400'}
+                        color={s.id === activeSessionId ? tokens.colors.accent.primary : tokens.colors.text.primary}
+                        lineClamp={1}
+                      >
+                        {s.lastMessage || 'Empty session'}
+                      </Text>
+                      <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled} flexShrink={0} ml={2}>
+                        {formatRelativeTime(s.updatedAt)}
+                      </Text>
+                    </Flex>
+                    <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
+                      {s.messageCount} messages
                     </Text>
-                    <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled} flexShrink={0} ml={2}>
-                      {formatRelativeTime(s.updatedAt)}
-                    </Text>
-                  </Flex>
-                  <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
-                    {s.messageCount} messages
-                  </Text>
-                </Box>
+                  </Box>
+                  <Box
+                    as="button"
+                    display="flex"
+                    alignItems="center"
+                    justifyContent="center"
+                    w="24px"
+                    h="24px"
+                    ml={2}
+                    flexShrink={0}
+                    borderRadius="6px"
+                    color={tokens.colors.text.disabled}
+                    bg="transparent"
+                    opacity={0}
+                    cursor="pointer"
+                    transition={`all ${tokens.transition.fast}`}
+                    _hover={{
+                      color: tokens.colors.status.error,
+                      bg: 'rgba(248, 81, 73, 0.1)',
+                    }}
+                    _groupHover={{ opacity: 1 }}
+                    onClick={(e: React.MouseEvent) => handleDeleteSession(e, s.id)}
+                    aria-label="Delete session"
+                  >
+                    <FiTrash2 size={13} />
+                  </Box>
+                </Flex>
               ))
             )}
           </Box>

@@ -4,11 +4,13 @@ const SAFE_TOOLS = new Set([
   'read_file',
   'list_directory',
   'search_files',
+  'glob',
 ])
 
 // Tools that already have their own user approval flow (e.g. DiffPreview)
 const HAS_OWN_APPROVAL = new Set([
   'write_file',
+  'edit_file',
 ])
 
 interface PendingPermission {

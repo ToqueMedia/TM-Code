@@ -1,9 +1,11 @@
-import { memo } from 'react'
-import { Box, Flex, Text } from '@chakra-ui/react'
+import { memo, useMemo } from 'react'
+import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import { FiCheck, FiX } from 'react-icons/fi'
 import { diffLines } from 'diff'
 import { DiffResult } from '../../services/agent/diffService'
+import { getFileIconUrl } from '@/utils/fileIcons'
 import { tokens } from '@/theme/tokens'
+import { detectLanguage, highlightLines, type HighlightedLine } from '@/utils/syntaxHighlight'
 
 interface DiffPreviewProps {
   diff: DiffResult
@@ -11,18 +13,67 @@ interface DiffPreviewProps {
   onReject: (diffId: string) => void
 }
 
+interface DiffLine {
+  type: 'added' | 'removed' | 'normal'
+  oldNum: number | null
+  newNum: number | null
+  sourceLineIdx: number
+}
+
 function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
   const fileName = diff.filePath.split('/').pop() || diff.filePath
-  const changes = diff.isNewFile
-    ? [{ value: diff.newContent, added: true, removed: false }]
-    : diffLines(diff.originalContent, diff.newContent)
+  const language = useMemo(() => detectLanguage(diff.filePath), [diff.filePath])
+
+  const changes = useMemo(() =>
+    diff.isNewFile
+      ? [{ value: diff.newContent, added: true, removed: false }]
+      : diffLines(diff.originalContent, diff.newContent),
+    [diff.originalContent, diff.newContent, diff.isNewFile]
+  )
+
+  // Highlighted lines for old and new content
+  const oldHighlighted = useMemo(() => highlightLines(diff.originalContent, language), [diff.originalContent, language])
+  const newHighlighted = useMemo(() => highlightLines(diff.newContent, language), [diff.newContent, language])
+
+  const { allLines, addedCount, removedCount } = useMemo(() => {
+    const lines: DiffLine[] = []
+    let oldNum = 1
+    let newNum = 1
+    let added = 0
+    let removed = 0
+    for (const change of changes) {
+      const changeLines = change.value.replace(/\n$/, '').split('\n')
+      const type = change.added ? 'added' as const : change.removed ? 'removed' as const : 'normal' as const
+      for (let _ci = 0; _ci < changeLines.length; _ci++) {
+        if (type === 'added') {
+          lines.push({ type, oldNum: null, newNum, sourceLineIdx: newNum - 1 })
+          newNum++
+          added++
+        } else if (type === 'removed') {
+          lines.push({ type, oldNum, newNum: null, sourceLineIdx: oldNum - 1 })
+          oldNum++
+          removed++
+        } else {
+          lines.push({ type, oldNum, newNum, sourceLineIdx: newNum - 1 })
+          oldNum++
+          newNum++
+        }
+      }
+    }
+    return { allLines: lines, addedCount: added, removedCount: removed }
+  }, [changes])
+
+  const getLineTokens = (line: DiffLine): HighlightedLine => {
+    const source = line.type === 'removed' ? oldHighlighted : newHighlighted
+    return source[line.sourceLineIdx] || [{ text: '', color: '#f8f9fb' }]
+  }
 
   return (
     <Box
-      border={`1px solid ${tokens.colors.border.default}`}
-      borderRadius="8px"
+      border="1px solid rgba(255, 255, 255, 0.06)"
+      borderRadius="10px"
       overflow="hidden"
-      mb={2}
+      mb={3}
       bg={tokens.colors.bg.codeBlock}
     >
       {/* Header */}
@@ -30,107 +81,204 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
         align="center"
         justify="space-between"
         px={3}
-        py={2}
-        bg={tokens.colors.bg.sidebar}
-        borderBottom={`1px solid ${tokens.colors.border.default}`}
+        py="8px"
+        bg="rgba(255, 255, 255, 0.03)"
+        borderBottom="1px solid rgba(255, 255, 255, 0.05)"
       >
         <Flex align="center" gap={2}>
-          <Text fontSize="12px">
-            {diff.isNewFile ? '\u{1F7E2}' : '\u{1F7E1}'}
-          </Text>
-          <Text fontSize="xs" color={tokens.colors.text.primary} fontWeight="500">
-            {diff.isNewFile ? 'New file' : 'Modified'}:
-          </Text>
-          <Text fontSize="xs" color={tokens.colors.accent.primary} fontFamily="mono">
+          <Image src={getFileIconUrl(diff.filePath)} w="15px" h="15px" flexShrink={0} />
+          <Text
+            fontSize="12px"
+            color={tokens.colors.accent.primary}
+            fontFamily={tokens.fontFamily.mono}
+            fontWeight="500"
+          >
             {fileName}
           </Text>
+          {diff.isNewFile ? (
+            <Text
+              fontSize="10px"
+              color={tokens.colors.accent.green}
+              fontWeight="600"
+              bg="rgba(46, 160, 67, 0.1)"
+              px="6px"
+              py="1px"
+              borderRadius="4px"
+              textTransform="uppercase"
+              letterSpacing="0.03em"
+            >
+              new
+            </Text>
+          ) : (
+            <Flex align="center" gap={1.5}>
+              <Text
+                fontSize="10px"
+                color={tokens.colors.text.muted}
+                fontWeight="500"
+                bg="rgba(255, 255, 255, 0.05)"
+                px="6px"
+                py="1px"
+                borderRadius="4px"
+              >
+                modified
+              </Text>
+              {addedCount > 0 && (
+                <Text fontSize="10px" color={tokens.colors.diff.addedText} fontFamily={tokens.fontFamily.mono}>
+                  +{addedCount}
+                </Text>
+              )}
+              {removedCount > 0 && (
+                <Text fontSize="10px" color={tokens.colors.diff.removedText} fontFamily={tokens.fontFamily.mono}>
+                  -{removedCount}
+                </Text>
+              )}
+            </Flex>
+          )}
         </Flex>
 
-        <Flex gap={1}>
-          <button
+        <Flex gap="6px">
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            gap="5px"
+            px="10px"
+            py="4px"
+            bg="transparent"
+            border="1px solid rgba(248, 81, 73, 0.2)"
+            borderRadius="6px"
+            color={tokens.colors.accent.red}
+            fontSize="11px"
+            fontWeight="500"
+            cursor="pointer"
+            transition="all 0.15s"
+            _hover={{ bg: 'rgba(248, 81, 73, 0.1)', borderColor: 'rgba(248, 81, 73, 0.35)' }}
+            _active={{ transform: 'scale(0.97)' }}
             onClick={() => onReject(diff.id)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              padding: '4px 10px',
-              background: tokens.colors.accent.redSubtle,
-              border: `1px solid ${tokens.colors.accent.redMuted}`,
-              borderRadius: '4px',
-              color: tokens.colors.accent.red,
-              fontSize: '11px',
-              cursor: 'pointer',
-            }}
           >
             <FiX size={12} /> Reject
-          </button>
-          <button
+          </Box>
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            gap="5px"
+            px="10px"
+            py="4px"
+            bg="rgba(46, 160, 67, 0.1)"
+            border="1px solid rgba(46, 160, 67, 0.2)"
+            borderRadius="6px"
+            color={tokens.colors.accent.green}
+            fontSize="11px"
+            fontWeight="500"
+            cursor="pointer"
+            transition="all 0.15s"
+            _hover={{ bg: 'rgba(46, 160, 67, 0.18)', borderColor: 'rgba(46, 160, 67, 0.35)' }}
+            _active={{ transform: 'scale(0.97)' }}
             onClick={() => onAccept(diff.id)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              padding: '4px 10px',
-              background: tokens.colors.accent.greenSubtle,
-              border: `1px solid ${tokens.colors.accent.greenMuted}`,
-              borderRadius: '4px',
-              color: tokens.colors.accent.green,
-              fontSize: '11px',
-              cursor: 'pointer',
-            }}
           >
             <FiCheck size={12} /> Accept
-          </button>
+          </Box>
         </Flex>
       </Flex>
 
-      {/* Diff content */}
+      {/* Diff content with line numbers + syntax highlighting */}
       <Box
-        maxH="300px"
+        maxH="340px"
         overflowY="auto"
+        overflowX="auto"
         fontSize="12px"
         fontFamily={tokens.fontFamily.mono}
         lineHeight="20px"
+        css={{
+          '&::-webkit-scrollbar': { width: '4px', height: '4px' },
+          '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.1)', borderRadius: '2px' },
+        }}
       >
-        {changes.map((change, i) => {
-          const lines = change.value.replace(/\n$/, '').split('\n')
-          return lines.map((line, j) => {
-            let bg: string = 'transparent'
-            let color: string = tokens.colors.text.primary
-            let prefix = ' '
+        {allLines.map((line, i) => {
+          let bg = 'transparent'
+          let prefixChar = '\u00A0'
 
-            if (change.added) {
-              bg = tokens.colors.diff.addedBg
-              color = tokens.colors.diff.addedText
-              prefix = '+'
-            } else if (change.removed) {
-              bg = tokens.colors.diff.removedBg
-              color = tokens.colors.diff.removedText
-              prefix = '-'
-            }
+          if (line.type === 'added') {
+            bg = 'rgba(46, 160, 67, 0.08)'
+            prefixChar = '+'
+          } else if (line.type === 'removed') {
+            bg = 'rgba(248, 81, 73, 0.08)'
+            prefixChar = '-'
+          }
 
-            return (
-              <Box
-                key={`${i}-${j}`}
-                bg={bg}
-                px={3}
-                py={0}
-                whiteSpace="pre"
-                color={color}
+          const gutterTextColor = line.type === 'normal' ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.25)'
+          const gutterBg = line.type === 'removed' ? 'rgba(248, 81, 73, 0.06)' : line.type === 'added' ? 'rgba(46, 160, 67, 0.04)' : 'transparent'
+          const lineTokens = getLineTokens(line)
+
+          return (
+            <Flex key={i} bg={bg} align="stretch" minH="20px">
+              {/* Old line number */}
+              <Flex
+                w="40px"
+                flexShrink={0}
+                justify="flex-end"
+                align="center"
+                pr="8px"
+                bg={gutterBg}
+                userSelect="none"
               >
-                <Text as="span" color={tokens.colors.diff.lineNumber} mr={2} userSelect="none">
-                  {prefix}
+                <Text fontSize="10px" color={gutterTextColor}>
+                  {line.oldNum ?? ''}
                 </Text>
-                {line}
+              </Flex>
+              {/* New line number */}
+              <Flex
+                w="40px"
+                flexShrink={0}
+                justify="flex-end"
+                align="center"
+                pr="8px"
+                bg={gutterBg}
+                borderRight={`1px solid ${line.type === 'added' ? 'rgba(46, 160, 67, 0.15)' : line.type === 'removed' ? 'rgba(248, 81, 73, 0.15)' : 'rgba(255,255,255,0.06)'}`}
+                userSelect="none"
+              >
+                <Text fontSize="10px" color={gutterTextColor}>
+                  {line.newNum ?? ''}
+                </Text>
+              </Flex>
+              {/* Prefix */}
+              <Flex
+                w="22px"
+                flexShrink={0}
+                justify="center"
+                align="center"
+                userSelect="none"
+              >
+                <Text
+                  fontSize="11px"
+                  color={line.type === 'added' ? tokens.colors.diff.addedText : line.type === 'removed' ? tokens.colors.diff.removedText : 'transparent'}
+                  fontWeight="700"
+                >
+                  {prefixChar}
+                </Text>
+              </Flex>
+              {/* Code — syntax highlighted */}
+              <Box flex="1" pr={3} whiteSpace="pre" fontSize="12px" display="flex">
+                {lineTokens.map((token, ti) => (
+                  <span key={ti} style={{ color: token.color }}>
+                    {token.text}
+                  </span>
+                ))}
               </Box>
-            )
-          })
+            </Flex>
+          )
         })}
       </Box>
 
-      {/* File path */}
-      <Box px={3} py={1.5} bg={tokens.colors.bg.sidebar} borderTop={`1px solid ${tokens.colors.border.default}`}>
-        <Text fontSize="10px" color={tokens.colors.diff.lineNumber} fontFamily="mono">
+      {/* File path footer */}
+      <Box
+        px={3}
+        py="5px"
+        bg="rgba(255, 255, 255, 0.02)"
+        borderTop="1px solid rgba(255, 255, 255, 0.04)"
+      >
+        <Text fontSize="10px" color="rgba(255,255,255,0.18)" fontFamily={tokens.fontFamily.mono}>
           {diff.filePath}
         </Text>
       </Box>

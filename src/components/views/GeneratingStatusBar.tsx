@@ -9,7 +9,7 @@ function formatTokens(count: number): string {
 }
 
 const statusConfig: Record<string, { color: string; label: string }> = {
-  idle: { color: tokens.colors.text.subtle, label: 'Ready' },
+  idle: { color: tokens.colors.text.disabled, label: 'Ready' },
   thinking: { color: tokens.colors.toolCall.runningText, label: 'Thinking...' },
   generating: { color: tokens.colors.accent.primary, label: 'Generating...' },
   applying: { color: tokens.colors.accent.green, label: 'Applying changes...' },
@@ -31,30 +31,30 @@ function GeneratingStatusBar({ status, isStreaming, totalTokens, currentTurnCoun
       align="center"
       justify="space-between"
       px={3}
-      py={2}
-      bg={tokens.colors.bg.panel}
-      borderTop={`1px solid ${tokens.colors.border.sidebarPanel}`}
+      py="6px"
+      bg="rgba(255, 255, 255, 0.02)"
+      borderTop="1px solid rgba(255, 255, 255, 0.04)"
       flexShrink={0}
     >
       <Flex align="center" gap={2}>
         <Box
-          w="7px"
-          h="7px"
+          w="6px"
+          h="6px"
           borderRadius="full"
           bg={config.color}
-          animation={isStreaming ? 'pulse 1.5s ease-in-out infinite' : undefined}
+          animation={isStreaming ? 'genPulse 1.5s ease-in-out infinite' : undefined}
           css={isStreaming ? {
-            '@keyframes pulse': {
+            '@keyframes genPulse': {
               '0%, 100%': { opacity: 1 },
-              '50%': { opacity: 0.4 },
+              '50%': { opacity: 0.3 },
             }
           } : undefined}
         />
-        <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.secondary}>
+        <Text fontSize="11px" color={tokens.colors.text.muted} letterSpacing="0.01em">
           {config.label}
         </Text>
       </Flex>
-      <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
+      <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
         {formatTokens(totalTokens)} tokens · Turn {currentTurnCount}
       </Text>
     </Flex>

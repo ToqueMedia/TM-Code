@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useCallback, useState } from 'react'
 import {
   Box,
   Flex,
@@ -8,14 +8,19 @@ import {
   VStack,
   HStack,
   Button,
+  Input,
 } from '@chakra-ui/react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
 import { templateService, Template } from '../services/templateService'
+import { LoadingSpinner } from './ui/LoadingSpinner'
+import WindowControls from './ui/WindowControls'
 
 interface TemplateSelectorProps {
-  onSelectTemplate: (template: Template) => void
+  onSelectTemplate: (template: Template, projectName: string) => void
   onSelectEmpty: () => void
   onBack: () => void
+  isLoading?: boolean
 }
 
 const categoryLabels: Record<string, string> = {
@@ -87,14 +92,51 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
   onSelectTemplate,
   onSelectEmpty,
   onBack,
+  isLoading = false,
 }) => {
   const [selected, setSelected] = useState<Template | null>(null)
+  const [projectName, setProjectName] = useState('')
   const categories: Template['category'][] = ['frontend', 'backend', 'fullstack']
 
+  const sanitizedName = projectName.trim().replace(/\s+/g, '-').toLowerCase()
+  const isNameValid = sanitizedName.length > 0 && /^[a-z0-9][a-z0-9._-]*$/.test(sanitizedName)
+
   const handleConfirm = () => {
-    if (selected) {
-      onSelectTemplate(selected)
+    if (selected && isNameValid) {
+      onSelectTemplate(selected, sanitizedName)
     }
+  }
+
+  const handleDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    const t = e.target as HTMLElement
+    const tag = t.tagName?.toLowerCase() || ''
+    if (['button', 'input', 'svg', 'path'].includes(tag)) return
+    if (t.getAttribute?.('role') === 'button') return
+    if (t.closest?.('[data-no-drag]')) return
+    getCurrentWindow().startDragging().catch(() => {})
+  }, [])
+
+  async function handleClose() {
+    try { await getCurrentWindow().close() } catch { /* noop */ }
+  }
+
+  async function handleMinimize() {
+    try { await getCurrentWindow().minimize() } catch { /* noop */ }
+  }
+
+  async function handleFullToggle() {
+    try {
+      const win = getCurrentWindow()
+      if (/Mac/.test(navigator.platform || '')) {
+        const fs = await win.isFullscreen()
+        await win.setFullscreen(!fs)
+      } else {
+        const isMax = await win.isMaximized()
+        if (isMax) await win.unmaximize()
+        else await win.maximize()
+      }
+    } catch { /* noop */ }
   }
 
   return (
@@ -108,15 +150,28 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
       zIndex={tokens.zIndex.modal}
       flexDirection="column"
       overflow="hidden"
+      data-tauri-drag-region
+      onMouseDown={handleDrag}
     >
+      {/* Window controls */}
+      <Box position="absolute" top={3} left={4} zIndex={10}>
+        <WindowControls
+          onClose={handleClose}
+          onMinimize={handleMinimize}
+          onMaximize={handleFullToggle}
+        />
+      </Box>
+
       {/* Header */}
       <Flex
         px={8}
         py={5}
+        pt={10}
         borderBottom={`1px solid ${tokens.colors.border.subtle}`}
         alignItems="center"
         justifyContent="space-between"
         flexShrink={0}
+        data-no-drag
       >
         <VStack gap={1} alignItems="flex-start">
           <Heading fontSize="20px" fontWeight="700" color={tokens.colors.text.primary}>
@@ -128,12 +183,29 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
         </VStack>
 
         <HStack gap={3}>
+          <Input
+            placeholder="Project name"
+            value={projectName}
+            onChange={(e) => setProjectName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleConfirm() }}
+            size="sm"
+            width="200px"
+            bg={tokens.colors.bg.card}
+            border={`1px solid ${projectName && !isNameValid ? tokens.colors.accent.red : tokens.colors.border.subtle}`}
+            borderRadius="6px"
+            color={tokens.colors.text.primary}
+            fontSize="13px"
+            _placeholder={{ color: tokens.colors.text.muted }}
+            _focus={{ borderColor: tokens.colors.accent.primary, outline: 'none' }}
+            disabled={isLoading}
+          />
           <Button
             variant="ghost"
             size="sm"
             color={tokens.colors.text.secondary}
             _hover={{ color: tokens.colors.text.primary, bg: tokens.colors.bg.hoverSubtle }}
             onClick={onBack}
+            disabled={isLoading}
           >
             Cancel
           </Button>
@@ -142,8 +214,8 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
             bg={tokens.colors.accent.primary}
             color="white"
             _hover={{ bg: tokens.colors.accent.primaryDark }}
-            disabled={!selected}
-            opacity={selected ? 1 : 0.5}
+            disabled={!selected || !isNameValid || isLoading}
+            opacity={selected && isNameValid && !isLoading ? 1 : 0.5}
             onClick={handleConfirm}
           >
             Create Project
@@ -152,7 +224,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
       </Flex>
 
       {/* Content */}
-      <Box flex={1} overflow="auto" px={8} py={6}>
+      <Box flex={1} overflow="auto" px={8} py={6} data-no-drag>
         <VStack gap={8} alignItems="stretch" maxW="900px" mx="auto">
           {categories.map(category => {
             const templates = templateService.getByCategory(category)
@@ -226,6 +298,24 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
           </Box>
         </VStack>
       </Box>
+
+      {/* Loading overlay */}
+      {isLoading && (
+        <Flex
+          position="absolute"
+          top={0}
+          left={0}
+          right={0}
+          bottom={0}
+          bg="rgba(10, 14, 19, 0.85)"
+          zIndex={20}
+          alignItems="center"
+          justifyContent="center"
+          backdropFilter="blur(4px)"
+        >
+          <LoadingSpinner size="lg" label="Creating project..." />
+        </Flex>
+      )}
     </Flex>
   )
 }

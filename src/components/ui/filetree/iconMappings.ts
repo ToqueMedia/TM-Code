@@ -2,12 +2,12 @@ import React from 'react';
 import { tokens } from '@/theme/tokens';
 
 import {
-  SiJavascript, SiReact, SiHtml5, SiCss3, SiJson, SiMarkdown,
+  SiJavascript, SiReact, SiHtml5, SiCss, SiJson, SiMarkdown,
   SiPython, SiDocker, SiNpm, SiNodedotjs, SiGit,
   SiWebpack, SiVite, SiTailwindcss, SiSass, SiLess, SiStylus,
   SiYaml, SiGraphql, SiPrettier, SiEslint, SiJest, SiVitest,
   SiCypress, SiStorybook, SiBabel, SiPostcss, SiSvelte,
-  SiVuedotjs, SiAngular, SiNextdotjs, SiNuxtdotjs, SiPrisma,
+  SiVuedotjs, SiAngular, SiNextdotjs, SiNuxt, SiPrisma,
   SiVercel, SiNetlify, SiGithub, SiAndroid, SiIos, SiFlutter
 } from 'react-icons/si';
 import {
@@ -69,7 +69,7 @@ export function getSpecialFolderIcon(
     '.github':        { icon: SiGithub,               color: isSelected ? selected : fi.github },
     '.vscode':        { icon: FaFileCode,             color: isSelected ? selected : fi.vscode },
     '.next':          { icon: SiNextdotjs,            color: isSelected ? selected : fi.next },
-    '.nuxt':          { icon: SiNuxtdotjs,            color: isSelected ? selected : fi.nuxt },
+    '.nuxt':          { icon: SiNuxt,            color: isSelected ? selected : fi.nuxt },
     'android':        { icon: SiAndroid,              color: isSelected ? selected : fi.android },
     'ios':            { icon: SiIos,                  color: isSelected ? selected : fi.ios },
     'mobile':         { icon: FaMobile,               color: isSelected ? selected : fi.generic },
@@ -135,8 +135,8 @@ export function getSpecialFileIcon(
     'cypress.config.ts':     { icon: SiCypress,     color: isSelected ? selected : '#17202c' },
     '.storybook/main.js':    { icon: SiStorybook,   color: isSelected ? selected : '#ff4785' },
     'next.config.js':        { icon: SiNextdotjs,   color: isSelected ? selected : fi.next },
-    'nuxt.config.js':        { icon: SiNuxtdotjs,   color: isSelected ? selected : fi.nuxt },
-    'nuxt.config.ts':        { icon: SiNuxtdotjs,   color: isSelected ? selected : fi.nuxt },
+    'nuxt.config.js':        { icon: SiNuxt,   color: isSelected ? selected : fi.nuxt },
+    'nuxt.config.ts':        { icon: SiNuxt,   color: isSelected ? selected : fi.nuxt },
     'vercel.json':           { icon: SiVercel,      color: isSelected ? selected : '#000000' },
     'netlify.toml':          { icon: SiNetlify,     color: isSelected ? selected : '#00c7b7' },
   };
@@ -163,7 +163,7 @@ export function getExtensionIcon(
     case 'angular':
       return { icon: SiAngular, color: isSelected ? selected : '#dd0031' };
     case 'css':
-      return { icon: SiCss3, color: isSelected ? selected : '#1572b6' };
+      return { icon: SiCss, color: isSelected ? selected : '#1572b6' };
     case 'scss': case 'sass':
       return { icon: SiSass, color: isSelected ? selected : '#cc6699' };
     case 'less':

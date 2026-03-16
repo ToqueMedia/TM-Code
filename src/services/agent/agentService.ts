@@ -1,6 +1,8 @@
 import ToolExecutor, { OpenAIToolDefinition } from './toolExecutor'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { ServiceError } from '../../utils/errors'
+import { parseSSEStream, createThinkingDetector } from './streamParser'
+import type { StreamEvent } from './streamParser'
 
 // === Types ===
 
@@ -20,23 +22,6 @@ interface OpenAIToolCall {
   }
 }
 
-interface OpenAIResponse {
-  id: string
-  choices: Array<{
-    message: {
-      role: 'assistant'
-      content: string | null
-      tool_calls?: OpenAIToolCall[]
-    }
-    finish_reason: 'stop' | 'tool_calls' | 'length' | 'function_call'
-  }>
-  usage: {
-    prompt_tokens: number
-    completion_tokens: number
-    total_tokens?: number
-  }
-}
-
 // === Config ===
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
@@ -44,13 +29,42 @@ const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
 // === Callbacks ===
 
 export interface AgentCallbacks {
-  onTextChunk: (text: string) => void
-  onToolCall: (toolName: string, input: Record<string, unknown>) => void
-  onToolResult: (toolName: string, result: string, isError: boolean) => void
+  // Streaming text (token by token)
+  onTextDelta: (text: string) => void
+
+  // Streaming reasoning (token by token, collapsible in UI)
+  onReasoningDelta: (text: string) => void
+
+  // Tool call detected but still accumulating args
+  onToolCallPending: (toolId: string, toolName: string) => void
+
+  // Tool call complete, being executed
+  onToolCallStart: (toolId: string, toolName: string, args: Record<string, unknown>) => void
+
+  // Tool executed, result available
+  onToolResult: (toolId: string, toolName: string, result: string, isError: boolean) => void
+
+  // Turn completed
   onTurnComplete: (turnNumber: number) => void
+
+  // Loop finished
   onDone: (finalText: string) => void
+
+  // Error
   onError: (error: Error) => void
+
+  // Usage
   onUsageUpdate: (inputTokens: number, outputTokens: number) => void
+}
+
+// === Turn result ===
+
+interface TurnResult {
+  textContent: string
+  reasoningContent: string
+  toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }>
+  finishReason: string
+  usage: { promptTokens: number; completionTokens: number } | null
 }
 
 // === Service ===
@@ -84,7 +98,6 @@ class AgentService {
     conversationHistory: Array<{ role: string; content: string | null; tool_calls?: OpenAIToolCall[]; tool_call_id?: string }>,
     callbacks: AgentCallbacks
   ): Promise<void> {
-    // Cancel any existing loop before starting a new one
     if (this.isRunning) {
       this.cancelLoop()
     }
@@ -113,83 +126,80 @@ class AgentService {
 
         turnCount++
 
-        // Stream the response token by token
-        const response = await this.callAPIStreaming(messages, callbacks)
-        const choice = response.choices[0]
-        const message = choice.message
+        // Get streaming response
+        const response = await this.callAPI(messages)
 
-        // Text content was already streamed via onTextChunk in parseSSEStream
-
-        // Notify tool calls (with fully parsed arguments)
-        const toolCalls = message.tool_calls || []
-        for (const tc of toolCalls) {
-          try {
-            const args = JSON.parse(tc.function.arguments)
-            callbacks.onToolCall(tc.function.name, args)
-          } catch {
-            callbacks.onToolCall(tc.function.name, {})
-          }
-        }
-
-        // Report token usage
-        if (response.usage.prompt_tokens || response.usage.completion_tokens) {
-          callbacks.onUsageUpdate(
-            response.usage.prompt_tokens,
-            response.usage.completion_tokens
-          )
-        }
+        // Process the stream
+        const turnResult = await this.processStreamedTurn(response, callbacks)
 
         // Add assistant message to history
-        const assistantMsg: OpenAIMessage = { role: 'assistant' }
-        assistantMsg.content = message.content ?? null
-        if (message.tool_calls) {
-          assistantMsg.tool_calls = message.tool_calls
+        const assistantMsg: OpenAIMessage = {
+          role: 'assistant',
+          content: turnResult.textContent || null,
+        }
+        if (turnResult.toolCalls.length > 0) {
+          assistantMsg.tool_calls = turnResult.toolCalls.map(tc => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+          }))
         }
         messages.push(assistantMsg)
 
+        // Report usage
+        if (turnResult.usage) {
+          callbacks.onUsageUpdate(turnResult.usage.promptTokens, turnResult.usage.completionTokens)
+        }
+
         // If no tool calls, loop is done
         if (
-          toolCalls.length === 0 ||
-          (choice.finish_reason !== 'tool_calls' && choice.finish_reason !== 'function_call')
+          turnResult.toolCalls.length === 0 ||
+          (turnResult.finishReason !== 'tool_calls' && turnResult.finishReason !== 'function_call')
         ) {
-          callbacks.onDone(message.content || '')
+          callbacks.onDone(turnResult.textContent || '')
           return
         }
 
-        // Execute each tool locally
-        for (const toolCall of toolCalls) {
+        // Execute tools and add results to history
+        for (const toolCall of turnResult.toolCalls) {
           if (this.abortController.signal.aborted) return
 
-          let args: Record<string, unknown>
-          try {
-            args = JSON.parse(toolCall.function.arguments)
-          } catch {
-            args = {}
-          }
+          callbacks.onToolCallStart(toolCall.id, toolCall.name, toolCall.args)
 
           try {
-            const result = await this.toolExecutor.execute(toolCall.function.name, args)
+            const result = await this.toolExecutor.execute(toolCall.name, toolCall.args)
+
+            // Sanitize diff JSON: send short summary to LLM, full result to UI
+            let llmResult = result
+            try {
+              const parsed = JSON.parse(result)
+              if (parsed.type === 'diff') {
+                llmResult = `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
+              }
+            } catch {
+              // Not JSON, use as-is
+            }
+
             messages.push({
               role: 'tool',
               tool_call_id: toolCall.id,
-              content: result
+              content: llmResult,
             })
-            callbacks.onToolResult(toolCall.function.name, result, false)
+            callbacks.onToolResult(toolCall.id, toolCall.name, result, false)
           } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error)
             messages.push({
               role: 'tool',
               tool_call_id: toolCall.id,
-              content: `Error: ${errorMsg}`
+              content: `Error: ${errorMsg}`,
             })
-            callbacks.onToolResult(toolCall.function.name, errorMsg, true)
+            callbacks.onToolResult(toolCall.id, toolCall.name, errorMsg, true)
           }
         }
 
         callbacks.onTurnComplete(turnCount)
       }
 
-      // Safety: maxTurns reached
       callbacks.onError(new Error(`Agent exceeded maximum turns (50)`))
     } catch (error) {
       if (this.abortController?.signal.aborted) return
@@ -206,16 +216,12 @@ class AgentService {
     }
   }
 
-  private async callAPIStreaming(
-    messages: OpenAIMessage[],
-    callbacks: AgentCallbacks
-  ): Promise<OpenAIResponse> {
+  private async callAPI(messages: OpenAIMessage[]): Promise<Response> {
     const url = `${WORKER_URL}/v1/chat/completions`
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
     }
 
-    // Always authenticate with Firebase token
     const firebaseToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!firebaseToken) {
       throw new ServiceError(
@@ -232,20 +238,18 @@ class AgentService {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          // No "model" field — Worker decides
-          max_tokens: 8192,
+          max_tokens: 16384,
           temperature: 0.3,
           messages,
           tools: this.tools,
           stream: true,
-          stream_options: { include_usage: true }
+          stream_options: { include_usage: true },
         }),
-        signal: this.abortController?.signal
+        signal: this.abortController?.signal,
       })
     } catch (err) {
-      // Network-level failure (no internet, DNS, CORS, etc.)
       if (err instanceof DOMException && err.name === 'AbortError') {
-        throw err // Let abort propagation continue as-is
+        throw err
       }
       throw new ServiceError(
         'Sem conexão. Verifica a internet.',
@@ -255,7 +259,6 @@ class AgentService {
     }
 
     if (!response.ok) {
-      // Handle specific HTTP status codes with user-friendly messages
       if (response.status === 401) {
         throw new ServiceError(
           'Sessão expirada. Faz login novamente.',
@@ -286,117 +289,116 @@ class AgentService {
       )
     }
 
-    return this.parseSSEStream(response, callbacks)
-  }
-
-  private async parseSSEStream(
-    response: Response,
-    callbacks: AgentCallbacks
-  ): Promise<OpenAIResponse> {
     if (!response.body) {
       throw new ServiceError('Response body is null', 'API_ERROR', false)
     }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
 
-    let accumulatedContent = ''
-    const accumulatedToolCalls: OpenAIToolCall[] = []
-    const toolCallBuffers: Map<number, { id: string; name: string; args: string }> = new Map()
-    let finishReason: string = 'stop'
-    let usage = { prompt_tokens: 0, completion_tokens: 0 }
-    let responseId = ''
-    let buffer = ''
+    return response
+  }
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (this.abortController?.signal.aborted) break
+  private async processStreamedTurn(
+    response: Response,
+    callbacks: AgentCallbacks
+  ): Promise<TurnResult> {
+    let textContent = ''
+    let reasoningContent = ''
+    let finishReason = ''
+    let usage: { promptTokens: number; completionTokens: number } | null = null
 
-      buffer += decoder.decode(value, { stream: true })
+    // Tool calls accumulator
+    const toolCallsMap = new Map<number, {
+      id: string
+      name: string
+      argsStr: string
+    }>()
 
-      // Process complete SSE lines
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
+    // Detector for <think> blocks
+    const thinkingDetector = createThinkingDetector()
 
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed || trimmed.startsWith(':')) continue
-        if (trimmed === 'data: [DONE]') continue
+    await parseSSEStream(response, {
+      onEvent: (event: StreamEvent) => {
+        switch (event.type) {
+          case 'text_delta': {
+            const { reasoning, content } = thinkingDetector.process(event.content)
 
-        if (trimmed.startsWith('data: ')) {
-          const jsonStr = trimmed.slice(6)
-          try {
-            const chunk = JSON.parse(jsonStr)
-            responseId = chunk.id || responseId
-
-            if (chunk.usage) {
-              usage = {
-                prompt_tokens: chunk.usage.prompt_tokens || usage.prompt_tokens,
-                completion_tokens: chunk.usage.completion_tokens || usage.completion_tokens
-              }
+            if (reasoning) {
+              reasoningContent += reasoning
+              callbacks.onReasoningDelta(reasoning)
             }
 
-            const delta = chunk.choices?.[0]?.delta
-            const chunkFinish = chunk.choices?.[0]?.finish_reason
-
-            if (chunkFinish) {
-              finishReason = chunkFinish
+            if (content) {
+              textContent += content
+              callbacks.onTextDelta(content)
             }
+            break
+          }
 
-            if (delta) {
-              // Text content delta — stream to UI immediately
-              if (delta.content) {
-                accumulatedContent += delta.content
-                callbacks.onTextChunk(delta.content)
-              }
+          case 'reasoning_delta': {
+            reasoningContent += event.content
+            callbacks.onReasoningDelta(event.content)
+            break
+          }
 
-              // Tool call deltas
-              if (delta.tool_calls) {
-                for (const tc of delta.tool_calls) {
-                  const idx = tc.index ?? 0
-                  if (tc.id) {
-                    // New tool call starting
-                    toolCallBuffers.set(idx, {
-                      id: tc.id,
-                      name: tc.function?.name || '',
-                      args: tc.function?.arguments || ''
-                    })
-                  } else if (toolCallBuffers.has(idx)) {
-                    // Continuation — append argument fragments
-                    const existing = toolCallBuffers.get(idx)!
-                    if (tc.function?.name) existing.name += tc.function.name
-                    if (tc.function?.arguments) existing.args += tc.function.arguments
-                  }
-                }
-              }
+          case 'tool_call_start': {
+            toolCallsMap.set(event.index, {
+              id: event.id,
+              name: event.name,
+              argsStr: '',
+            })
+            callbacks.onToolCallPending(event.id, event.name)
+            break
+          }
+
+          case 'tool_call_args_delta': {
+            const tc = toolCallsMap.get(event.index)
+            if (tc) {
+              tc.argsStr += event.argsDelta
             }
-          } catch {
-            // Skip unparseable chunks
+            break
+          }
+
+          case 'finish': {
+            finishReason = event.reason
+            break
+          }
+
+          case 'usage': {
+            usage = {
+              promptTokens: event.promptTokens,
+              completionTokens: event.completionTokens,
+            }
+            break
+          }
+
+          case 'error': {
+            callbacks.onError(new Error(event.message))
+            break
+          }
+
+          case 'done': {
+            break
           }
         }
-      }
-    }
+      },
+    })
 
-    // Finalize tool calls from buffers
-    for (const [, buf] of toolCallBuffers) {
-      accumulatedToolCalls.push({
-        id: buf.id,
-        type: 'function',
-        function: { name: buf.name, arguments: buf.args }
-      })
-    }
+    // Parse tool call arguments (now JSON is complete)
+    const toolCalls = Array.from(toolCallsMap.values()).map(tc => {
+      let args: Record<string, unknown> = {}
+      try {
+        args = JSON.parse(tc.argsStr)
+      } catch {
+        args = { _raw: tc.argsStr, _parseError: true }
+      }
+      return { id: tc.id, name: tc.name, args }
+    })
 
     return {
-      id: responseId,
-      choices: [{
-        message: {
-          role: 'assistant',
-          content: accumulatedContent || null,
-          tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
-        },
-        finish_reason: finishReason as OpenAIResponse['choices'][0]['finish_reason']
-      }],
-      usage
+      textContent,
+      reasoningContent,
+      toolCalls,
+      finishReason,
+      usage,
     }
   }
 }

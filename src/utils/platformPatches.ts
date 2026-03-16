@@ -42,5 +42,41 @@
         }
       }
     }
+
+    // Patch read() / write() — Monaco's clipboardService uses these too
+    const originalRead = nav.clipboard.read?.bind(nav.clipboard)
+    const originalWrite = nav.clipboard.write?.bind(nav.clipboard)
+
+    if (typeof originalRead === 'function') {
+      nav.clipboard.read = async function() {
+        try {
+          return await originalRead()
+        } catch (e: unknown) {
+          if (e instanceof DOMException && (e.name === 'NotAllowedError' || e.code === 0)) {
+            return [] as unknown as ClipboardItems
+          }
+          if (typeof e === 'object' && e !== null && String(e).includes('NotAllowedError')) {
+            return [] as unknown as ClipboardItems
+          }
+          throw e
+        }
+      }
+    }
+
+    if (typeof originalWrite === 'function') {
+      nav.clipboard.write = async function(data: ClipboardItems) {
+        try {
+          return await originalWrite(data)
+        } catch (e: unknown) {
+          if (e instanceof DOMException && (e.name === 'NotAllowedError' || e.code === 0)) {
+            return
+          }
+          if (typeof e === 'object' && e !== null && String(e).includes('NotAllowedError')) {
+            return
+          }
+          throw e
+        }
+      }
+    }
   } catch {}
 })()

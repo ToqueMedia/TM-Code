@@ -63,7 +63,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
             alignItems: 'center',
             justifyContent: 'center',
             height: '100vh',
-            backgroundColor: '#0a0e13',
+            backgroundColor: '#1e2028',
             color: '#e6edf3',
             fontFamily: 'system-ui, -apple-system, sans-serif',
             padding: '20px',
@@ -71,7 +71,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
         >
           <div 
             style={{
-              backgroundColor: '#2d2d30',
+              backgroundColor: '#383b42',
               padding: '24px',
               borderRadius: '8px',
               border: '1px solid #3c3c3c',
@@ -97,7 +97,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
             {this.state.error && (
               <div 
                 style={{
-                  backgroundColor: '#1e1e1e',
+                  backgroundColor: '#2b2d33',
                   padding: '12px',
                   borderRadius: '4px',
                   border: '1px solid #ff5555',
@@ -119,7 +119,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
                 </summary>
                 <pre 
                   style={{
-                    backgroundColor: '#1e1e1e',
+                    backgroundColor: '#2b2d33',
                     padding: '12px',
                     borderRadius: '4px',
                     border: '1px solid #3c3c3c',
@@ -161,7 +161,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
               <button
                 onClick={() => window.location.reload()}
                 style={{
-                  backgroundColor: '#2d2d30',
+                  backgroundColor: '#383b42',
                   color: '#cccccc',
                   border: '1px solid #3c3c3c',
                   padding: '12px 24px',

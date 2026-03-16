@@ -37,6 +37,7 @@ pub fn run() {
                 .inner_size(1250.0, 850.0)
                 .decorations(false)
                 .transparent(true)
+                .accept_first_mouse(true)
                 .on_new_window(|url, _features| {
                     let host = url.host_str().unwrap_or("");
                     if is_oauth_domain(host) {
@@ -69,6 +70,7 @@ pub fn run() {
             copy_file_or_directory,
             create_directories_all,
             execute_command,
+            start_dev_server,
             start_interactive_shell,
             kill_process,
             get_current_directory,
@@ -98,7 +100,9 @@ pub fn run() {
             get_debug_sessions,
             get_call_stack,
             get_variables,
-            copy_directory
+            copy_directory,
+            scaffold_template,
+            glob_files
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
