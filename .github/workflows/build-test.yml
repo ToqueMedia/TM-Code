@@ -1,56 +1,28 @@
 name: Build Test
 
 on:
-  push:
-    branches: [ feature/debugger-integration ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main]
 
 jobs:
-  build-test:
+  build:
     name: Quick Build Test
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Setup Node.js 22.12
-      uses: actions/setup-node@v4
-      with:
-        node-version: '22.12'
-        cache: 'npm'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'yarn'
 
-    - name: Check Node.js version
-      run: node --version
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
 
-    - name: Clean install (fix rollup issue)
-      run: |
-        echo "Removing node_modules and package-lock.json to fix rollup issue..."
-        rm -rf node_modules package-lock.json
-        npm install
+      - name: Build
+        run: yarn build
 
-    - name: Verify installation
-      run: |
-        echo "Checking if Vite is properly installed..."
-        npx vite --version
-        echo "Checking if TypeScript is available..."
-        npx tsc --version
-
-    - name: Build project
-      run: |
-        echo "Building frontend..."
-        npm run build
-
-    - name: Verify build output
-      run: |
-        echo "Checking build output..."
-        ls -la dist/
-        echo "Build completed successfully!"
-
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-test-dist
-        path: dist/
-        retention-days: 1
+      - name: Verify output
+        run: ls -la dist/

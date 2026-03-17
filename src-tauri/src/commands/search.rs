@@ -391,7 +391,9 @@ pub async fn replace_in_files(
         }
         match std::fs::read_to_string(&path) {
             Ok(content) => {
-                let new_content = regex.replace_all(&content, replacement.as_str()).to_string();
+                let new_content = regex
+                    .replace_all(&content, replacement.as_str())
+                    .to_string();
                 if new_content != content {
                     if let Err(e) = std::fs::write(&path, &new_content) {
                         eprintln!("Failed to write replacement to {}: {}", file_path, e);

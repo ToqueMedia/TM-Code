@@ -1,7 +1,7 @@
+use glob::glob as glob_match;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
-use glob::glob as glob_match;
 
 /// Validates that a template ID contains only safe characters (alphanumeric, hyphens).
 /// Prevents path traversal via crafted IDs like "../../../etc".
@@ -13,7 +13,10 @@ fn validate_template_id(id: &str) -> Result<(), String> {
         return Err(format!("Invalid template ID: {}", id));
     }
     // Allow only alphanumeric, hyphens, and underscores
-    if !id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !id
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(format!("Invalid template ID: {}", id));
     }
     Ok(())
@@ -50,7 +53,10 @@ pub async fn scaffold_template(
         .join(&template_id);
 
     if !template_path.exists() || !template_path.is_dir() {
-        return Err(format!("Template '{}' not found at {:?}", template_id, template_path));
+        return Err(format!(
+            "Template '{}' not found at {:?}",
+            template_id, template_path
+        ));
     }
 
     let mut visited = HashSet::new();
@@ -70,8 +76,8 @@ pub async fn copy_directory(source: String, destination: String) -> Result<(), S
     }
 
     // Canonicalize to prevent path traversal via symlinks in the source arg
-    let canonical_source = std::fs::canonicalize(source_path)
-        .map_err(|e| format!("Invalid source path: {}", e))?;
+    let canonical_source =
+        std::fs::canonicalize(source_path).map_err(|e| format!("Invalid source path: {}", e))?;
 
     let mut visited = HashSet::new();
     copy_dir_safe(&canonical_source, dest_path, &mut visited)
@@ -80,11 +86,7 @@ pub async fn copy_directory(source: String, destination: String) -> Result<(), S
 
 /// Recursively copies a directory, skipping symlinks and tracking visited
 /// inodes to prevent infinite loops from circular symlinks.
-fn copy_dir_safe(
-    src: &Path,
-    dst: &Path,
-    visited: &mut HashSet<PathBuf>,
-) -> std::io::Result<()> {
+fn copy_dir_safe(src: &Path, dst: &Path, visited: &mut HashSet<PathBuf>) -> std::io::Result<()> {
     if !dst.exists() {
         std::fs::create_dir_all(dst)?;
     }
@@ -132,13 +134,12 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
     let full_pattern = format!("{}/{}", directory, pattern);
 
     // Canonicalize directory to compare results against
-    let canonical_dir = std::fs::canonicalize(&directory)
-        .map_err(|e| format!("Invalid directory: {}", e))?;
+    let canonical_dir =
+        std::fs::canonicalize(&directory).map_err(|e| format!("Invalid directory: {}", e))?;
 
     let mut results = Vec::new();
 
-    let entries = glob_match(&full_pattern)
-        .map_err(|e| format!("Invalid glob pattern: {}", e))?;
+    let entries = glob_match(&full_pattern).map_err(|e| format!("Invalid glob pattern: {}", e))?;
 
     for entry in entries {
         match entry {

@@ -128,7 +128,7 @@ pub async fn start_dev_server(
         std::thread::spawn(move || {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 let _ = app_clone.emit(
                     "dev-server-output",
                     DevServerOutput {
@@ -149,7 +149,7 @@ pub async fn start_dev_server(
         std::thread::spawn(move || {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 let _ = app_clone.emit(
                     "dev-server-output",
                     DevServerOutput {
@@ -207,7 +207,9 @@ pub async fn start_interactive_shell(
 
     // Track the spawned process so kill_process can validate it
     {
-        let mut map = process_map.lock().map_err(|_| "Failed to lock process map")?;
+        let mut map = process_map
+            .lock()
+            .map_err(|_| "Failed to lock process map")?;
         map.insert(pid, child);
     }
 
@@ -220,13 +222,12 @@ pub async fn start_interactive_shell(
 }
 
 #[tauri::command]
-pub async fn kill_process(
-    pid: u32,
-    process_map: State<'_, ProcessMap>,
-) -> Result<bool, String> {
+pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Result<bool, String> {
     // Only allow killing processes that we spawned (tracked in ProcessMap)
     {
-        let map = process_map.lock().map_err(|_| "Failed to lock process map")?;
+        let map = process_map
+            .lock()
+            .map_err(|_| "Failed to lock process map")?;
         if !map.contains_key(&pid) {
             return Err(format!(
                 "Cannot kill PID {}: not a process managed by this application",
@@ -277,7 +278,9 @@ pub async fn kill_process(
 
     // Always remove from tracked processes
     {
-        let mut map = process_map.lock().map_err(|_| "Failed to lock process map")?;
+        let mut map = process_map
+            .lock()
+            .map_err(|_| "Failed to lock process map")?;
         map.remove(&pid);
     }
 
@@ -340,10 +343,23 @@ pub async fn command_exists(command: String) -> Result<bool, String> {
 pub async fn get_environment_variables() -> Result<HashMap<String, String>, String> {
     // Patterns that indicate sensitive environment variables
     let sensitive_patterns = [
-        "SECRET", "TOKEN", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL",
-        "AUTH", "PRIVATE", "API_KEY", "APIKEY", "ACCESS_KEY",
-        "AWS_SECRET", "AWS_SESSION", "DATABASE_URL", "DB_PASS",
-        "ENCRYPTION", "SIGNING",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "KEY",
+        "CREDENTIAL",
+        "AUTH",
+        "PRIVATE",
+        "API_KEY",
+        "APIKEY",
+        "ACCESS_KEY",
+        "AWS_SECRET",
+        "AWS_SESSION",
+        "DATABASE_URL",
+        "DB_PASS",
+        "ENCRYPTION",
+        "SIGNING",
     ];
 
     let mut env_vars = HashMap::new();

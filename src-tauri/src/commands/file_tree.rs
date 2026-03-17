@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -83,6 +83,7 @@ pub const MAX_DECOMPRESS_SIZE: usize = 100 * 1024 * 1024;
 
 /// Validates that a resolved path stays within the allowed project root.
 /// Prevents path traversal attacks (e.g., "../../etc/passwd").
+#[allow(dead_code)]
 pub fn validate_path_within_root(path: &Path, root: &Path) -> Result<PathBuf> {
     let canonical_root = std::fs::canonicalize(root).map_err(|_| {
         FileTreeError::PathNotFound(format!("Root path not found: {}", root.display()))
@@ -100,9 +101,9 @@ pub fn validate_path_within_root(path: &Path, root: &Path) -> Result<PathBuf> {
         let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
             FileTreeError::PathNotFound(format!("Parent path not found: {}", parent.display()))
         })?;
-        let file_name = path.file_name().ok_or_else(|| {
-            FileTreeError::InvalidOperation("Invalid file name".to_string())
-        })?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| FileTreeError::InvalidOperation("Invalid file name".to_string()))?;
         canonical_parent.join(file_name)
     };
 
@@ -129,9 +130,8 @@ fn validate_path_safe(path: &Path) -> Result<PathBuf> {
     }
 
     if path.exists() {
-        std::fs::canonicalize(path).map_err(|_| {
-            FileTreeError::PathNotFound(format!("{}", path.display()))
-        })
+        std::fs::canonicalize(path)
+            .map_err(|_| FileTreeError::PathNotFound(format!("{}", path.display())))
     } else {
         // For new files, canonicalize the parent
         let parent = path.parent().ok_or_else(|| {
@@ -145,9 +145,9 @@ fn validate_path_safe(path: &Path) -> Result<PathBuf> {
         let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
             FileTreeError::PathNotFound(format!("Parent not found: {}", parent.display()))
         })?;
-        let file_name = path.file_name().ok_or_else(|| {
-            FileTreeError::InvalidOperation("Invalid file name".to_string())
-        })?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| FileTreeError::InvalidOperation("Invalid file name".to_string()))?;
         Ok(canonical_parent.join(file_name))
     }
 }
@@ -210,9 +210,8 @@ pub fn build_file_tree(root_path: String, filter: Option<FileTreeFilter>) -> Res
         ));
     }
 
-    let canonical_root = std::fs::canonicalize(path).map_err(|_| {
-        FileTreeError::PathNotFound(root_path.clone())
-    })?;
+    let canonical_root =
+        std::fs::canonicalize(path).map_err(|_| FileTreeError::PathNotFound(root_path.clone()))?;
 
     let mut visited = HashSet::new();
     visited.insert(canonical_root.clone());
@@ -489,9 +488,7 @@ pub fn read_file(path: String) -> Result<String> {
 
     std::fs::read_to_string(&canonical).map_err(|e| {
         if e.kind() == std::io::ErrorKind::InvalidData {
-            FileTreeError::InvalidOperation(
-                "Cannot read binary file as text".to_string(),
-            )
+            FileTreeError::InvalidOperation("Cannot read binary file as text".to_string())
         } else {
             FileTreeError::from(e)
         }

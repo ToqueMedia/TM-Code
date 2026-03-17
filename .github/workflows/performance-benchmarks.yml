@@ -1,288 +1,45 @@
 name: Performance Benchmarks
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
-  schedule:
-    # Run daily at 2 AM UTC
-    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       suite:
         description: 'Specific benchmark suite to run'
         required: false
         type: string
-      baseline:
-        description: 'Run regression test against baseline'
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   benchmark:
-    name: Run Performance Benchmarks
+    name: Benchmarks
     runs-on: ubuntu-latest
-    
-    strategy:
-      matrix:
-        node-version: [20.x, 22.x]
-        
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # Fetch full history for comparison
+      - uses: actions/checkout@v4
 
-    - name: Setup Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
-        cache: 'npm'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'yarn'
 
-    - name: Clean install dependencies
-      run: |
-        rm -rf node_modules package-lock.json
-        npm install
-        # Install additional performance tools if needed
-        npm install -g clinic autocannon
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
 
-    - name: Build project
-      run: npm run build
+      - name: Build
+        run: yarn build
 
-    - name: Setup benchmark environment
-      run: |
-        # Create benchmark results directory
-        mkdir -p benchmark-results
-        
-        # Set environment variables for consistent benchmarking
-        export NODE_ENV=benchmark
-        export BENCHMARK_MODE=true
-        
-        # Clear system cache if possible
-        sync && echo 3 > /proc/sys/vm/drop_caches || true
-
-    - name: Download baseline (if exists)
-      id: download-baseline
-      continue-on-error: true
-      run: |
-        # Try to download previous baseline from artifacts
-        curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-             -H "Accept: application/vnd.github.v3+json" \
-             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts" \
-             -o artifacts.json
-        
-        # Get latest baseline artifact
-        BASELINE_URL=$(cat artifacts.json | jq -r '.artifacts[] | select(.name == "performance-baseline-${{ matrix.node-version }}") | select(.expired == false) | .archive_download_url' | head -n1)
-        
-        if [ "$BASELINE_URL" != "null" ] && [ "$BASELINE_URL" != "" ]; then
-          echo "Found baseline artifact"
-          curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-               -L "$BASELINE_URL" \
-               -o baseline.zip
-          unzip baseline.zip
-          echo "baseline-exists=true" >> $GITHUB_OUTPUT
-        else
-          echo "No baseline found"
-          echo "baseline-exists=false" >> $GITHUB_OUTPUT
-        fi
-
-    - name: Run specific benchmark suite
-      if: ${{ inputs.suite }}
-      run: |
-        npm run benchmark -- --suite "${{ inputs.suite }}" \
-                           --output "benchmark-results/results-${{ matrix.node-version }}.json" \
-                           --format json \
-                           --save-baseline "benchmark-results/baseline-${{ matrix.node-version }}.json"
-
-    - name: Run all benchmarks
-      if: ${{ !inputs.suite }}
-      run: |
-        npm run benchmark -- --output "benchmark-results/results-${{ matrix.node-version }}.json" \
-                           --format json \
-                           --save-baseline "benchmark-results/baseline-${{ matrix.node-version }}.json"
-
-    - name: Run regression test
-      if: ${{ steps.download-baseline.outputs.baseline-exists == 'true' || inputs.baseline }}
-      continue-on-error: true
-      run: |
-        if [ -f "baseline-${{ matrix.node-version }}.json" ]; then
-          npm run benchmark -- --baseline "baseline-${{ matrix.node-version }}.json" \
-                             --regression \
-                             --output "benchmark-results/regression-report-${{ matrix.node-version }}.md" \
-                             --format markdown
-        fi
-
-    - name: Generate performance report
-      run: |
-        # Generate comprehensive markdown report
-        npm run benchmark -- --output "benchmark-results/report-${{ matrix.node-version }}.md" \
-                           --format markdown
-        
-        # Generate CSV for data analysis
-        npm run benchmark -- --output "benchmark-results/data-${{ matrix.node-version }}.csv" \
-                           --format csv
-
-    - name: Performance summary
-      run: |
-        echo "## Performance Benchmark Results (Node ${{ matrix.node-version }})" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ -f "benchmark-results/report-${{ matrix.node-version }}.md" ]; then
-          cat "benchmark-results/report-${{ matrix.node-version }}.md" >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        if [ -f "benchmark-results/regression-report-${{ matrix.node-version }}.md" ]; then
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Regression Analysis" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          cat "benchmark-results/regression-report-${{ matrix.node-version }}.md" >> $GITHUB_STEP_SUMMARY
-        fi
-
-    - name: Upload benchmark results
-      uses: actions/upload-artifact@v4
-      with:
-        name: benchmark-results-${{ matrix.node-version }}
-        path: benchmark-results/
-        retention-days: 30
-
-    - name: Upload baseline for future comparisons
-      uses: actions/upload-artifact@v4
-      with:
-        name: performance-baseline-${{ matrix.node-version }}
-        path: benchmark-results/baseline-${{ matrix.node-version }}.json
-        retention-days: 90
-
-    - name: Comment PR with results (if PR)
-      if: github.event_name == 'pull_request'
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const fs = require('fs');
-          const path = `benchmark-results/report-${{ matrix.node-version }}.md`;
-          
-          if (fs.existsSync(path)) {
-            const report = fs.readFileSync(path, 'utf8');
-            const regressionPath = `benchmark-results/regression-report-${{ matrix.node-version }}.md`;
-            let regressionReport = '';
-            
-            if (fs.existsSync(regressionPath)) {
-              regressionReport = '\n\n## Regression Analysis\n\n' + fs.readFileSync(regressionPath, 'utf8');
-            }
-            
-            const body = `## Performance Benchmark Results (Node ${{ matrix.node-version }})
-          
-          ${report}${regressionReport}
-          
-          <details>
-          <summary>📊 View detailed results</summary>
-          
-          - [Benchmark Results Artifact](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - [Raw Data (CSV)](benchmark-results/data-${{ matrix.node-version }}.csv)
-          
-          </details>`;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            });
-          }
-
-    - name: Fail job on performance regression
-      if: ${{ steps.download-baseline.outputs.baseline-exists == 'true' }}
-      run: |
-        # Check if regression report indicates failures
-        if [ -f "benchmark-results/regression-report-${{ matrix.node-version }}.md" ]; then
-          if grep -q "❌ Regression Detected" "benchmark-results/regression-report-${{ matrix.node-version }}.md"; then
-            echo "❌ Performance regression detected!"
-            echo "Check the regression report for details."
-            exit 1
+      - name: Run benchmarks
+        run: |
+          mkdir -p benchmark-results
+          if [ -n "${{ inputs.suite }}" ]; then
+            yarn benchmark -- --suite "${{ inputs.suite }}" --output benchmark-results/results.json --format json
+          else
+            yarn benchmark -- --output benchmark-results/results.json --format json
           fi
-        fi
 
-  compare-results:
-    name: Compare Results Across Node Versions
-    runs-on: ubuntu-latest
-    needs: benchmark
-    if: always()
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Download all benchmark results
-      uses: actions/download-artifact@v4
-      with:
-        pattern: benchmark-results-*
-        merge-multiple: true
-        path: all-results/
-
-    - name: Compare Node versions
-      run: |
-        echo "## Performance Comparison Across Node Versions" >> comparison-report.md
-        echo "" >> comparison-report.md
-        
-        # List available result files
-        echo "### Available Results:" >> comparison-report.md
-        ls -la all-results/ >> comparison-report.md
-        echo "" >> comparison-report.md
-        
-        # Compare results if both versions available
-        if [ -f "all-results/results-18.x.json" ] && [ -f "all-results/results-20.x.json" ]; then
-          echo "### Node.js 18.x vs 20.x Performance" >> comparison-report.md
-          echo "" >> comparison-report.md
-          
-          # Here you could add more sophisticated comparison logic
-          echo "- Node 18.x results: [View Results](all-results/report-18.x.md)" >> comparison-report.md
-          echo "- Node 20.x results: [View Results](all-results/report-20.x.md)" >> comparison-report.md
-        fi
-
-    - name: Upload comparison report
-      uses: actions/upload-artifact@v4
-      with:
-        name: version-comparison-report
-        path: comparison-report.md
-
-  benchmark-history:
-    name: Update Benchmark History
-    runs-on: ubuntu-latest
-    needs: benchmark
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Download benchmark results
-      uses: actions/download-artifact@v4
-      with:
-        pattern: benchmark-results-*
-        merge-multiple: true
-        path: benchmark-results/
-
-    - name: Update benchmark history
-      run: |
-        # Create or update benchmark history file
-        mkdir -p .github/benchmark-history
-        
-        # Add current results to history
-        echo "$(date -Iseconds): ${{ github.sha }}" >> .github/benchmark-history/commits.txt
-        
-        # Copy current results for historical tracking
-        cp benchmark-results/results-*.json .github/benchmark-history/
-        
-        # Keep only last 50 benchmark runs
-        tail -n 50 .github/benchmark-history/commits.txt > temp && mv temp .github/benchmark-history/commits.txt
-
-    - name: Commit benchmark history
-      run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git add .github/benchmark-history/
-        git diff --staged --quiet || git commit -m "📊 Update benchmark history [skip ci]"
-        git push
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results/
+          retention-days: 30

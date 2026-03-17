@@ -184,7 +184,10 @@ pub async fn start_debug_session(
 
     // Store session
     {
-        let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
         sessions.insert(session_id.clone(), internal_session);
     }
 
@@ -197,7 +200,10 @@ pub async fn stop_debug_session(
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
     let process_to_kill = {
-        let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
         if let Some(session) = sessions.remove(&session_id) {
             session.process
@@ -221,7 +227,10 @@ pub async fn launch_debug_session(
 ) -> Result<(), String> {
     // Lock mutex, read the config, release mutex
     let config = {
-        let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
         let session = sessions
             .get(&session_id)
@@ -238,8 +247,9 @@ pub async fn launch_debug_session(
             if let Ok(canonical_cwd) = std::fs::canonicalize(cwd_path) {
                 if !canonical_program.starts_with(&canonical_cwd) {
                     return Err(DebuggerError::InvalidConfig(
-                        "Program path must be within the project directory".to_string()
-                    ).to_string());
+                        "Program path must be within the project directory".to_string(),
+                    )
+                    .to_string());
                 }
             }
         }
@@ -276,7 +286,10 @@ pub async fn launch_debug_session(
 
     // Lock mutex again, store the process and update status
     {
-        let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
         let session = sessions
             .get_mut(&session_id)
@@ -296,7 +309,10 @@ pub async fn set_breakpoint(
     line: u32,
     state: State<'_, DebuggerState>,
 ) -> Result<DebugBreakpoint, String> {
-    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
@@ -324,7 +340,10 @@ pub async fn remove_breakpoint(
     breakpoint_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
@@ -340,7 +359,10 @@ pub async fn get_breakpoints(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugBreakpoint>, String> {
-    let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get(&session_id)
@@ -355,7 +377,10 @@ pub async fn debug_continue(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
@@ -372,7 +397,10 @@ pub async fn debug_pause(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
@@ -389,7 +417,10 @@ pub async fn debug_step_over(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
@@ -406,7 +437,10 @@ pub async fn debug_step_into(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
@@ -423,7 +457,10 @@ pub async fn debug_step_out(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let session = sessions
         .get_mut(&session_id)
@@ -439,7 +476,10 @@ pub async fn debug_step_out(
 pub async fn get_debug_sessions(
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugSession>, String> {
-    let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let debug_sessions: Vec<DebugSession> = sessions
         .iter()
@@ -460,7 +500,10 @@ pub async fn get_call_stack(
     session_id: String,
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugStackFrame>, String> {
-    let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let _session = sessions
         .get(&session_id)
@@ -477,7 +520,10 @@ pub async fn get_variables(
     _frame_id: u32,
     state: State<'_, DebuggerState>,
 ) -> Result<Vec<DebugVariable>, String> {
-    let sessions = state.sessions.lock().map_err(|_| "Failed to acquire debugger session lock".to_string())?;
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "Failed to acquire debugger session lock".to_string())?;
 
     let _session = sessions
         .get(&session_id)

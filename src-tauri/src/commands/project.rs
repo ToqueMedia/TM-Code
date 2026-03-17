@@ -319,7 +319,7 @@ pub fn open_project(path: String) -> Result<ProjectInfo> {
     if metadata.permissions().readonly() {
         // Try to create a temporary file to test write permissions
         let test_path = project_path.join(".toquemedia_test");
-        if let Ok(_) = fs::File::create(&test_path) {
+        if fs::File::create(&test_path).is_ok() {
             if let Err(e) = fs::remove_file(&test_path) {
                 eprintln!("Warning: failed to remove test file {:?}: {}", test_path, e);
                 // Retry once
@@ -1167,9 +1167,9 @@ fn decompress_data(compressed_data: &[u8]) -> Result<String> {
     let mut total_read: usize = 0;
 
     loop {
-        let n = decoder.read(&mut buf).map_err(|e| {
-            ProjectError::Io(format!("Decompression failed: {}", e))
-        })?;
+        let n = decoder
+            .read(&mut buf)
+            .map_err(|e| ProjectError::Io(format!("Decompression failed: {}", e)))?;
         if n == 0 {
             break;
         }
@@ -1183,9 +1183,8 @@ fn decompress_data(compressed_data: &[u8]) -> Result<String> {
         decompressed_data.extend_from_slice(&buf[..n]);
     }
 
-    String::from_utf8(decompressed_data).map_err(|e| {
-        ProjectError::Io(format!("Decompressed data is not valid UTF-8: {}", e))
-    })
+    String::from_utf8(decompressed_data)
+        .map_err(|e| ProjectError::Io(format!("Decompressed data is not valid UTF-8: {}", e)))
 }
 
 fn compress_data(data: &[u8]) -> Result<Vec<u8>> {
@@ -1277,9 +1276,10 @@ pub fn delete_project(project_id: String, project_path: String) -> Result<()> {
         // We also accept an empty directory — a previous partial delete may have
         // removed .toquemedia-id but failed to remove the root folder.
         let is_project = canonical.join(".toquemedia-id").exists();
-        let is_empty_dir = !is_project && fs::read_dir(&canonical)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(false);
+        let is_empty_dir = !is_project
+            && fs::read_dir(&canonical)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false);
 
         if !is_project && !is_empty_dir {
             return Err(ProjectError::InvalidPath(
@@ -1296,7 +1296,7 @@ pub fn delete_project(project_id: String, project_path: String) -> Result<()> {
 
             if canonical.exists() {
                 // Retry full removal (handles may be released now)
-                if let Err(_) = fs::remove_dir_all(&canonical) {
+                if fs::remove_dir_all(&canonical).is_err() {
                     // Last resort: if only the empty root dir remains, remove it
                     if canonical.exists() {
                         fs::remove_dir(&canonical)?;
