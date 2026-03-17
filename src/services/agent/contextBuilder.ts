@@ -1,5 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
 import { TemplateManifest } from '../templateService'
+import SkillService from './skillService'
+
+interface MCPToolSummary {
+  name: string
+  description: string
+  serverName: string
+}
 
 interface PackageSummary {
   name: string
@@ -19,7 +26,7 @@ class ContextBuilder {
     return ContextBuilder.instance
   }
 
-  async buildSystemPrompt(projectPath: string, projectType: string): Promise<string> {
+  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[]): Promise<string> {
     // Gather context in parallel for speed — includes template manifest
     const [treeString, pkgSummary, readme, templateManifest] = await Promise.all([
       this.buildFileTree(projectPath),
@@ -67,6 +74,20 @@ Respond in the same language the developer writes in.
       sections.push(`<readme_summary>\n${readme.slice(0, 400)}\n</readme_summary>`)
     }
 
+    // ── 3b. SKILLS (between context data and constraints — long data zone) ──
+    try {
+      const detectedType = this.detectProjectType(pkgSummary)
+        ?? await this.detectProjectTypeFromFiles(projectPath)
+      const skillService = SkillService.getInstance()
+      const skills = await skillService.loadSkills(projectPath, detectedType)
+      const skillsBlock = skillService.buildSkillsPromptBlock(skills)
+      if (skillsBlock) {
+        sections.push(skillsBlock)
+      }
+    } catch {
+      // Skills are optional — don't break prompt building
+    }
+
     // ── 4. CONSTRAINTS (principle 6 — contract, not suggestions) ──
     sections.push(`<constraints>
 Paths and files:
@@ -88,8 +109,14 @@ Judgment:
 </constraints>`)
 
     // ── 4b. TOOL ROUTING (decision matrix — models know tools, but not THIS tool set's semantics) ──
+    const activeMcpTools = mcpTools || []
+    const totalTools = 14 + activeMcpTools.length
+    const mcpSection = activeMcpTools.length > 0
+      ? `\n\nMCP (external tools — require developer approval):\n${activeMcpTools.map(t => `- mcp__${t.serverName}__${t.name} → ${t.description}`).join('\n')}`
+      : ''
+
     sections.push(`<tool_routing>
-Choose the right tool for the job. You have 14 tools — using the wrong one wastes tokens and turns.
+Choose the right tool for the job. You have ${totalTools} tools — using the wrong one wastes tokens and turns.
 
 Discover (understand before acting):
 - read_file(path) → read a specific file you already know the path to
@@ -111,7 +138,7 @@ Manage:
 Execute:
 - execute_command(command, cwd?) → run shell command. Blocks until exit — never use for dev servers or watchers. Good for: npm install, npm test, npx, git, lint, build.
 - start_dev_server(command) → start a dev server in the background. Returns immediately. Preview opens automatically. Use for: npm run dev, yarn dev, npx vite. Only one server at a time.
-- web_fetch(url) → fetch URL content. Use to check docs, npm packages, or API references. Cannot access localhost.
+- web_fetch(url) → fetch URL content. Use to check docs, npm packages, or API references. Cannot access localhost.${mcpSection}
 
 Decision flow:
 1. Don't know what files exist? → list_directory or glob
@@ -263,6 +290,49 @@ Complete every file. Do not stop early. No placeholders — output goes to disk 
 </reminder>`)
 
     return sections.join('\n\n')
+  }
+
+  private detectProjectType(pkg: PackageSummary | null): string | undefined {
+    if (!pkg) return undefined
+    const allDeps = [...pkg.dependencies, ...pkg.devDependencies]
+
+    // Check for specific frameworks first (more specific → less specific)
+    if (allDeps.includes('next')) return 'nextjs'
+    if (allDeps.includes('nuxt')) return 'nuxt'
+    if (allDeps.includes('@angular/core')) return 'angular'
+    if (allDeps.includes('svelte')) return 'svelte'
+    if (allDeps.includes('vue')) return 'vue'
+    if (allDeps.includes('react')) return 'react'
+
+    // Generic categories
+    if (pkg.scripts.some(s => s.includes('node') || s.includes('ts-node'))) return 'node'
+
+    return 'node'
+  }
+
+  /**
+   * Fallback detection for non-JS projects (Go, Python, Rust, etc.)
+   * by checking for characteristic files in the project root.
+   */
+  private async detectProjectTypeFromFiles(projectPath: string): Promise<string | undefined> {
+    // Check multiple markers in parallel for speed
+    const checks = [
+      { file: 'go.mod', type: 'go' },
+      { file: 'requirements.txt', type: 'python' },
+      { file: 'pyproject.toml', type: 'python' },
+      { file: 'setup.py', type: 'python' },
+      { file: 'Pipfile', type: 'python' },
+      { file: 'Cargo.toml', type: 'rust' },
+    ]
+
+    const results = await Promise.all(
+      checks.map(async ({ file, type }) => {
+        const content = await this.safeReadFile(`${projectPath}/${file}`)
+        return content !== null ? type : null
+      })
+    )
+
+    return results.find(t => t !== null) ?? undefined
   }
 
   private async buildFileTree(projectPath: string): Promise<string> {

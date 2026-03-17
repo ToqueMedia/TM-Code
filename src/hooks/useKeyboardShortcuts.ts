@@ -1,6 +1,7 @@
 // src/hooks/useKeyboardShortcuts.ts
 import { useEffect } from 'react';
 import { useProjectStore } from '../stores/projectStore';
+import { useLayoutStore } from '../stores/layoutStore';
 import { useDialog } from './useDialog';
 import DebuggerService from '../services/debuggerService';
 import { useEditorRepository } from '../stores/editorStore';
@@ -52,10 +53,15 @@ export function useKeyboardShortcuts() {
         window.dispatchEvent(new CustomEvent('command:palette'));
       }
 
-      // Preferences: Cmd+,
+      // Settings: Cmd+,
       if ((e.ctrlKey || e.metaKey) && e.key === ',') {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent('app:preferences'));
+        const layout = useLayoutStore.getState();
+        if (layout.viewMode === 'settings') {
+          layout.goBack();
+        } else {
+          layout.setViewMode('settings');
+        }
       }
 
       if (currentProject) {

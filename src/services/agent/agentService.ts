@@ -143,6 +143,13 @@ class AgentService {
   }
 
   /**
+   * Refreshes the tool definitions (call after MCP tools are registered/changed).
+   */
+  refreshTools(): void {
+    this.tools = this.toolExecutor.getToolDefinitions()
+  }
+
+  /**
    * Set the context window size explicitly (e.g., from backend API response).
    * If not called, the service infers from MODEL_CONTEXT_WINDOWS or uses DEFAULT_CONTEXT_WINDOW.
    */

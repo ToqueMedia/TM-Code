@@ -4,6 +4,8 @@ import { FiSquare } from 'react-icons/fi'
 import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { useSkillStore } from '../../stores/skillStore'
+import { useMcpStore } from '../../stores/mcpStore'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
 
@@ -19,6 +21,10 @@ function AgentStatusBar() {
   const isStreaming = useChatStore(s => s.isStreaming)
   const totalTokensUsed = useChatStore(s => s.totalTokensUsed)
   const currentTurnCount = useChatStore(s => s.currentTurnCount)
+  const skillCount = useSkillStore(s => s.skills.length)
+  const mcpIsInitializing = useMcpStore(s => s.isInitializing)
+  const runningServers = useMcpStore(s => s.getRunningServers())
+  const totalMcpTools = useMcpStore(s => s.getTotalToolCount())
 
   const handleStop = () => {
     usePermissionStore.getState().clearPending()
@@ -39,6 +45,17 @@ function AgentStatusBar() {
 
   const config = statusConfig[status] || statusConfig.idle
   const totalTokens = totalTokensUsed.input + totalTokensUsed.output
+
+  // Build info segments
+  const infoSegments: string[] = []
+  if (skillCount > 0) infoSegments.push(`${skillCount} skills`)
+  if (mcpIsInitializing) {
+    infoSegments.push('MCP starting...')
+  } else if (runningServers.length > 0) {
+    infoSegments.push(`${runningServers.length} MCP (${totalMcpTools} tools)`)
+  }
+  infoSegments.push(`${formatTokens(totalTokens)} tokens`)
+  infoSegments.push(`${currentTurnCount} turns`)
 
   return (
     <Flex
@@ -74,7 +91,7 @@ function AgentStatusBar() {
 
       <Flex align="center" gap={3}>
         <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-          {formatTokens(totalTokens)} tokens · {currentTurnCount} turns
+          {infoSegments.join(' \u00B7 ')}
         </Text>
 
         {isStreaming && (

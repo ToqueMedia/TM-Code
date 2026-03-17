@@ -1,12 +1,13 @@
 import { memo, useState, useRef, useEffect, useCallback } from 'react'
 import { Box, Flex, Text, HStack, Portal } from '@chakra-ui/react'
-import { FiLogOut } from 'react-icons/fi'
+import { FiLogOut, FiSettings } from 'react-icons/fi'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
 import { useProjectStore } from '../stores/projectStore'
 import { useAgentStore } from '../stores/agentStore'
 import { useAuthStore } from '../stores/authStore'
 import { usePermissionStore } from '../stores/permissionStore'
+import { useLayoutStore } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
 import WindowControls from './ui/WindowControls'
@@ -205,6 +206,30 @@ function MinimalTitleBar() {
             {config.label}
           </Text>
         </HStack>
+
+        {/* Settings */}
+        <Flex
+          align="center"
+          justify="center"
+          w="28px"
+          h="28px"
+          borderRadius="6px"
+          cursor="pointer"
+          color={tokens.colors.text.secondary}
+          transition={`all ${tokens.transition.fast}`}
+          _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
+          role="button"
+          onClick={function () {
+            const layout = useLayoutStore.getState()
+            if (layout.viewMode === 'settings') {
+              layout.goBack()
+            } else {
+              layout.setViewMode('settings')
+            }
+          }}
+        >
+          <FiSettings size={14} />
+        </Flex>
 
         {/* User identity */}
         {user && (

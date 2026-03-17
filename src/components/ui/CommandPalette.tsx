@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Flex, Input, Text, VStack } from '@chakra-ui/react'
 import { useProjectStore } from '../../stores/projectStore'
 import { useEditorRepository } from '../../stores/editorStore'
+import { useLayoutStore } from '../../stores/layoutStore'
 import { tokens } from '../../theme/tokens'
 
 interface CommandItem {
@@ -58,7 +59,7 @@ function CommandPalette(): React.ReactElement | null {
   }
 
   function runPreferences(): void {
-    window.dispatchEvent(new CustomEvent('app:preferences'))
+    useLayoutStore.getState().setViewMode('settings')
     setIsOpen(false)
   }
 

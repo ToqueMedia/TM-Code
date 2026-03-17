@@ -27,7 +27,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/templates/**/*"
+      "resources/templates/**/*",
+      "resources/skills/**/*"
     ]
   }
 }

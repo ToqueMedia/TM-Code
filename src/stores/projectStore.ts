@@ -62,6 +62,11 @@ function tearDownProject() {
     m.default.getInstance().cancelLoop();
   });
 
+  // Shutdown MCP servers (dynamic import to avoid circular deps)
+  import('../services/mcp/mcpService').then(m => {
+    m.default.getInstance().shutdown().catch(() => {});
+  });
+
   // Stop auto-save timer to prevent stale writes after session is cleared
   sessionService.stopAutoSave();
 
