@@ -38,7 +38,7 @@ const EditorEmptyState = () => (
 			animation="fadeIn 0.8s ease-out forwards"
 			animationDelay="0.2s"
 		>
-			Welcome to ToqueMedia Studio
+			Welcome to TM Code
 		</Text>
 		<Text
 			mt={2}

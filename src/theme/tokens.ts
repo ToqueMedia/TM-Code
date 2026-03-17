@@ -2,41 +2,41 @@
 
 export const tokens = {
   colors: {
-    // === Backgrounds (Lighter Dark / Charcoal) ===
+    // === Backgrounds (Deep Dark — #0a0a0a base) ===
     bg: {
-      app: '#2b2d33',
-      welcome: '#1e2028',
-      sidebar: '#2f3138',
-      overlay: '#383b42',
-      titlebar: 'rgba(47, 49, 56, 0.95)',
-      activitybar: '#3c3f46',
-      statusbar: '#1e2030',
-      terminal: '#22242a',
-      input: 'rgba(34, 38, 46, 0.8)',
-      hover: '#3a6ea5',
-      hoverSubtle: 'rgba(139, 148, 158, 0.12)',
-      selection: '#3a6ea5',
-      activeItem: '#2a4a6a',
-      glass: 'rgba(43, 45, 51, 0.92)',
-      card: 'rgba(34, 38, 46, 0.6)',
-      cardBorder: 'rgba(68, 74, 81, 0.8)',
-      codeBlock: '#282b32',
-      codeInline: 'rgba(130, 138, 149, 0.15)',
-      codeBlockHeader: '#363940',
-      dark: '#24262c',
-      mainLayout: '#1e2025',
-      sidebarBackdrop: 'rgba(0,0,0,0.25)',
-      sidebarGlass: 'rgba(30, 32, 38, 0.85)',
-      tabHover: '#40434a',
+      app: '#0a0a0a',
+      welcome: '#0a0a0a',
+      sidebar: '#0f0f0f',
+      overlay: '#1a1a1a',
+      titlebar: 'rgba(15, 15, 15, 0.95)',
+      activitybar: '#111111',
+      statusbar: '#0d0d0d',
+      terminal: '#0a0a0a',
+      input: 'rgba(255, 255, 255, 0.05)',
+      hover: 'rgba(254, 16, 99, 0.15)',
+      hoverSubtle: 'rgba(255, 255, 255, 0.06)',
+      selection: 'rgba(254, 16, 99, 0.2)',
+      activeItem: 'rgba(254, 16, 99, 0.12)',
+      glass: 'rgba(15, 15, 15, 0.92)',
+      card: 'rgba(255, 255, 255, 0.05)',
+      cardBorder: 'rgba(255, 255, 255, 0.08)',
+      codeBlock: '#111111',
+      codeInline: 'rgba(255, 255, 255, 0.06)',
+      codeBlockHeader: '#1a1a1a',
+      dark: '#0a0a0a',
+      mainLayout: '#0a0a0a',
+      sidebarBackdrop: 'rgba(0, 0, 0, 0.5)',
+      sidebarGlass: 'rgba(10, 10, 10, 0.95)',
+      tabHover: '#1a1a1a',
       footerOverlay: 'rgba(255, 255, 255, 0.02)',
       whiteMicro: 'rgba(255, 255, 255, 0.01)',
       whiteHover: 'rgba(255, 255, 255, 0.04)',
       whiteOverlay: 'rgba(255, 255, 255, 0.1)',
       whiteSubtle: 'rgba(255, 255, 255, 0.06)',
-      blackOverlay: 'rgba(0, 0, 0, 0.4)',
-      blackOverlayStrong: 'rgba(0, 0, 0, 0.5)',
-      panel: '#262a30',
-      panelAlt: '#2c3038',
+      blackOverlay: 'rgba(0, 0, 0, 0.5)',
+      blackOverlayStrong: 'rgba(0, 0, 0, 0.6)',
+      panel: '#111111',
+      panelAlt: '#141414',
     },
 
     // === Text ===
@@ -57,19 +57,19 @@ export const tokens = {
 
     // === Borders ===
     border: {
-      default: '#484b54',
-      subtle: '#3a3d44',
-      input: 'rgba(68, 74, 81, 0.8)',
-      inputAlt: '#3c4a5c',
-      glass: 'rgba(76, 80, 86, 0.6)',
+      default: '#262626',
+      subtle: '#1a1a1a',
+      input: 'rgba(255, 255, 255, 0.1)',
+      inputAlt: 'rgba(255, 255, 255, 0.12)',
+      glass: 'rgba(255, 255, 255, 0.08)',
       focus: '#FE1063',
-      statusbar: '#2a3548',
-      activitybar: '#32343a',
-      sidebar: 'rgba(68, 74, 81, 0.5)',
-      sidebarPanel: '#333840',
-      panel: '#40464d',
-      tab: '#2f3138',
-      footer: '#505560',
+      statusbar: '#1a1a1a',
+      activitybar: '#1a1a1a',
+      sidebar: 'rgba(255, 255, 255, 0.06)',
+      sidebarPanel: 'rgba(255, 255, 255, 0.06)',
+      panel: 'rgba(255, 255, 255, 0.08)',
+      tab: '#1a1a1a',
+      footer: '#262626',
     },
 
     // === Accent / Brand ===
@@ -101,8 +101,8 @@ export const tokens = {
 
     // === Chat ===
     chat: {
-      userBubble: '#2a3a4c',
-      assistantBubble: '#383b42',
+      userBubble: 'rgba(254, 16, 99, 0.08)',
+      assistantBubble: 'rgba(255, 255, 255, 0.05)',
     },
 
     // === Diff rendering ===
@@ -159,30 +159,30 @@ export const tokens = {
 
     // === Scrollbar ===
     scrollbar: {
-      thumb: '#4c4f56',
-      thumbHover: '#5a5d64',
+      thumb: 'rgba(255, 255, 255, 0.12)',
+      thumbHover: 'rgba(255, 255, 255, 0.2)',
       track: 'transparent',
-      explorerThumb: 'rgba(128, 128, 128, 0.4)',
-      explorerThumbHover: 'rgba(128, 128, 128, 0.6)',
-      explorerThumbActive: 'rgba(128, 128, 128, 0.8)',
-      explorerTrackHover: 'rgba(128, 128, 128, 0.2)',
-      explorerTrackActive: 'rgba(128, 128, 128, 0.4)',
+      explorerThumb: 'rgba(255, 255, 255, 0.1)',
+      explorerThumbHover: 'rgba(255, 255, 255, 0.18)',
+      explorerThumbActive: 'rgba(255, 255, 255, 0.25)',
+      explorerTrackHover: 'rgba(255, 255, 255, 0.04)',
+      explorerTrackActive: 'rgba(255, 255, 255, 0.08)',
     },
 
     // === Dialog / Modal ===
     dialog: {
-      backdrop: 'rgba(0, 0, 0, 0.7)',
-      bg: 'rgba(36, 38, 44, 0.96)',
-      border: 'rgba(68, 74, 81, 0.8)',
+      backdrop: 'rgba(0, 0, 0, 0.75)',
+      bg: 'rgba(15, 15, 15, 0.98)',
+      border: 'rgba(254, 16, 99, 0.15)',
     },
 
     // === Terminal ANSI palette ===
     terminal: {
-      background: '#22242a',
+      background: '#0a0a0a',
       foreground: '#d4d4d4',
       cursor: '#ffffff',
-      cursorAccent: '#22242a',
-      selectionBackground: '#3a6ea5',
+      cursorAccent: '#0a0a0a',
+      selectionBackground: 'rgba(254, 16, 99, 0.25)',
       black: '#000000',
       red: '#cd3131',
       green: '#0dbc79',
@@ -210,19 +210,19 @@ export const tokens = {
 
     // === Menu ===
     menu: {
-      bg: '#383b42',
-      border: '#4c4f56',
-      separator: '#4c4f56',
+      bg: '#141414',
+      border: '#262626',
+      separator: '#1a1a1a',
       text: '#e6e6e6',
-      hover: '#3a6ea5',
+      hover: 'rgba(254, 16, 99, 0.12)',
     },
 
     // === Shortcut badge ===
     badge: {
-      bg: 'rgba(110, 118, 129, 0.1)',
-      notificationBg: '#007acc',
+      bg: 'rgba(255, 255, 255, 0.06)',
+      notificationBg: '#FE1063',
       notificationText: 'white',
-      notificationBorder: '#3c3f46',
+      notificationBorder: 'rgba(254, 16, 99, 0.3)',
     },
 
     // === File extension colors (per-language / format) ===
@@ -389,10 +389,10 @@ export const tokens = {
     shimmer: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent)',
     cardLine: 'linear-gradient(90deg, transparent, rgba(254, 16, 99, 0.5), transparent)',
     welcomeBg: 'radial-gradient(ellipse at top, rgba(254, 16, 99, 0.05) 0%, transparent 50%), radial-gradient(ellipse at bottom, rgba(163, 108, 255, 0.03) 0%, transparent 50%)',
-    tabBar: 'linear-gradient(180deg, #383b42 0%, #2f3138 100%)',
-    tabHoverOverlay: 'linear-gradient(180deg, rgba(255,255,255,0.05) 0%, transparent 100%)',
+    tabBar: 'linear-gradient(180deg, #111111 0%, #0f0f0f 100%)',
+    tabHoverOverlay: 'linear-gradient(180deg, rgba(255,255,255,0.04) 0%, transparent 100%)',
     tabActiveBottom: 'linear-gradient(90deg, transparent, #FE1063, transparent)',
-    breadcrumbFade: 'linear(to-r, transparent, rgba(30, 32, 37, 0.8))',
+    breadcrumbFade: 'linear(to-r, transparent, rgba(10, 10, 10, 0.8))',
   },
 } as const
 

@@ -11,11 +11,15 @@ interface ChatState {
   isStreaming: boolean
   isLoadingSession: boolean
   streamingMessageId: string | null
+  /** Incremented on each streaming flush — triggers re-renders for the active message */
+  streamingVersion: number
   error: string | null
   conversationHistory: ConversationMessage[]
   currentTurnCount: number
   totalTokensUsed: { input: number; output: number }
   pendingDiffs: DiffResult[]
+  /** Draft prompt text — shared across PromptBar instances (chat + preview) */
+  draftInput: string
 }
 
 interface ChatActions {
@@ -40,9 +44,12 @@ interface ChatActions {
   addPendingToolCall: (toolId: string, toolName: string) => void
   updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>) => void
   updateToolCallWithResult: (toolId: string, result: string, isError: boolean) => void
-  // Inline diff actions
+  // Inline diff actions (centralized — handle DiffService + store + agent unblock atomically)
+  approveDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => Promise<void>
+  rejectDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => void
+  approveAllPendingDiffs: () => Promise<void>
+  // Low-level diff status (used internally / by GeneratingView)
   updateToolCallDiffStatus: (messageId: string, toolCallId: string, status: 'approved' | 'denied') => void
-  // Sync diff status by DiffResult ID (used by GeneratingView)
   syncDiffStatusByResultId: (diffResultId: string, status: 'approved' | 'denied') => void
   updateConversationHistory: (messages: ConversationMessage[]) => void
   incrementTurnCount: () => void
@@ -51,7 +58,6 @@ interface ChatActions {
   addPendingDiff: (diff: DiffResult) => void
   removePendingDiff: (diffId: string) => void
   clearPendingDiffs: () => void
-  approveAllPendingDiffs: () => Promise<void>
   // Persistence actions
   saveSessionToDisk: () => Promise<void>
   loadSessionFromDisk: (projectPath: string, sessionId: string) => Promise<void>
@@ -62,6 +68,8 @@ interface ChatActions {
   deleteSessionFromDisk: (projectPath: string, sessionId: string) => Promise<void>
   initPersistence: (projectPath: string) => Promise<void>
   cleanupOnExit: (projectPath: string) => Promise<void>
+  setDraftInput: (value: string) => void
+  clearAllSessions: () => void
 }
 
 let idCounter = 0
@@ -80,6 +88,58 @@ function debouncedSave() {
       logger.error('chat', 'Auto-save failed:', err)
     )
   }, 2000)
+}
+
+// === Diff approval promises ===
+// Module-level map: toolCallId → resolve callback
+// Used to make the agent wait until the user approves/rejects a file change.
+const pendingDiffApprovals = new Map<string, (approved: boolean) => void>()
+
+export async function createDiffApprovalPromise(toolCallId: string): Promise<boolean> {
+  // If auto-approve diffs is enabled (user clicked "Accept All" earlier),
+  // accept the diff immediately without blocking the agent.
+  if (usePermissionStore.getState().autoApproveDiffs) {
+    const session = useChatStore.getState().getActiveSession()
+    if (session) {
+      // Find the tool call to get its diffResultId (set by updateToolCallWithResult)
+      for (let i = session.messages.length - 1; i >= 0; i--) {
+        const tc = session.messages[i].toolCalls?.find(t => t.id === toolCallId)
+        if (tc?.diffResultId) {
+          // Write the file via DiffService — AWAIT to ensure file is written
+          // before the agent continues (may read the file in the next turn)
+          try {
+            await DiffService.getInstance().acceptDiff(tc.diffResultId)
+          } catch (err) {
+            logger.error('chat', 'Auto-approve acceptDiff failed:', String(err))
+          }
+          // Update store: mark as approved and remove from pendingDiffs
+          useChatStore.getState().syncDiffStatusByResultId(tc.diffResultId, 'approved')
+          useChatStore.getState().removePendingDiff(tc.diffResultId)
+          break
+        }
+      }
+    }
+    return true
+  }
+
+  return new Promise(resolve => {
+    pendingDiffApprovals.set(toolCallId, resolve)
+  })
+}
+
+export function resolveDiffApproval(toolCallId: string, approved: boolean) {
+  const resolve = pendingDiffApprovals.get(toolCallId)
+  if (resolve) {
+    resolve(approved)
+    pendingDiffApprovals.delete(toolCallId)
+  }
+}
+
+export function resolveAllPendingDiffApprovals(approved: boolean) {
+  for (const [, resolve] of pendingDiffApprovals) {
+    resolve(approved)
+  }
+  pendingDiffApprovals.clear()
 }
 
 // Token buffering for streaming performance (50ms flush)
@@ -128,6 +188,9 @@ export function flushBufferedDeltas() {
   if (reasoning) store.appendReasoningDelta(reasoning)
 }
 
+// Per-result truncation for very large tool outputs (e.g. read_file on huge files)
+const MAX_TOOL_RESULT_CHARS = 4000
+
 function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessage[] {
   const history: ConversationMessage[] = []
 
@@ -151,30 +214,41 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
           })),
         })
 
-        // Add tool results (sanitize diff JSON to avoid bloating LLM context)
         for (const tc of msg.toolCalls) {
-          if (tc.status !== 'running' && tc.result !== undefined) {
-            let resultContent = tc.result || ''
-
-            // Sanitize diff JSON: send short summary instead of full file content
-            try {
-              const parsed = JSON.parse(resultContent)
-              if (parsed.type === 'diff') {
-                resultContent = `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
-              }
-            } catch {
-              // Not JSON, use as-is
-            }
-
-            const isTruncated = resultContent.endsWith('...')
+          // Orphan tool call: agent was cancelled mid-execution.
+          // Must still emit a tool result — the API rejects assistant messages
+          // with tool_calls that lack matching tool results.
+          if (tc.status === 'running' || tc.result === undefined) {
             history.push({
               role: 'tool',
-              content: isTruncated
-                ? `${resultContent}\n[Note: result was truncated from a previous session]`
-                : resultContent,
+              content: 'Tool call was interrupted.',
               tool_call_id: tc.id,
             })
+            continue
           }
+
+          let resultContent = tc.result || ''
+
+          // Sanitize diff JSON: send short summary instead of full file content
+          try {
+            const parsed = JSON.parse(resultContent)
+            if (parsed.type === 'diff') {
+              resultContent = `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
+            }
+          } catch {
+            // Not JSON, use as-is
+          }
+
+          // Truncate large tool results to prevent context overflow
+          if (resultContent.length > MAX_TOOL_RESULT_CHARS) {
+            resultContent = resultContent.slice(0, MAX_TOOL_RESULT_CHARS) + '\n[... truncated]'
+          }
+
+          history.push({
+            role: 'tool',
+            content: resultContent,
+            tool_call_id: tc.id,
+          })
         }
       } else {
         history.push({ role: 'assistant', content: msg.content })
@@ -202,11 +276,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     isStreaming: false,
     isLoadingSession: false,
     streamingMessageId: null,
+    streamingVersion: 0,
     error: null,
     conversationHistory: [],
     currentTurnCount: 0,
     totalTokensUsed: { input: 0, output: 0 },
     pendingDiffs: [],
+    draftInput: '',
+
+    setDraftInput: (value: string) => set({ draftInput: value }),
 
     createSession: (projectPath: string) => {
       const sessionId = generateId('session')
@@ -316,6 +394,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         timestamp: Date.now(),
         codeBlocks: [],
         toolCalls: [],
+        contentBlocks: [],
         isStreaming: true,
       }
 
@@ -346,6 +425,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     // === Streaming actions (buffered for performance) ===
+    //
+    // IMPORTANT — INTENTIONAL MUTATION PATTERN:
+    // These actions mutate message/session objects IN PLACE instead of creating
+    // immutable copies. This violates Zustand's immutability contract but avoids
+    // allocating new Map/session/messages arrays on every token (~20-50 per second).
+    //
+    // This works because:
+    //   1. `streamingVersion` (a plain counter) is the ONLY selector that changes,
+    //      forcing ChatView/ChatPanel to re-render.
+    //   2. MessageBubble's custom `memo` comparator returns `false` (always re-render)
+    //      when `isStreaming` is true.
+    //
+    // WARNING: Any new subscriber that does reference-equality checks on `sessions`
+    // or individual session objects will NOT detect streaming content changes.
+    // Always use `streamingVersion` as the reactivity trigger for streaming data.
 
     appendTextDelta: (delta: string) => {
       const { activeSessionId, streamingMessageId, sessions } = get()
@@ -356,11 +450,23 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
       if (msg) {
+        // Finalize reasoning timing when first text arrives
+        if (msg.reasoningStartedAt && !msg.reasoningDurationMs) {
+          msg.reasoningDurationMs = Date.now() - msg.reasoningStartedAt
+        }
         msg.content = msg.content + delta
+        // Maintain interleaved contentBlocks: append to last text block or create new one
+        const blocks = msg.contentBlocks || (msg.contentBlocks = [])
+        const last = blocks[blocks.length - 1]
+        if (last && last.type === 'text') {
+          last.text += delta
+        } else {
+          blocks.push({ type: 'text', text: delta })
+        }
         session.updatedAt = Date.now()
       }
 
-      set({ sessions })
+      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },
 
     appendReasoningDelta: (delta: string) => {
@@ -372,11 +478,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
       if (msg) {
+        // Track when reasoning started
+        if (!msg.reasoningStartedAt) {
+          msg.reasoningStartedAt = Date.now()
+        }
         msg.reasoningContent = (msg.reasoningContent || '') + delta
         session.updatedAt = Date.now()
       }
 
-      set({ sessions })
+      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },
 
     toggleReasoning: (messageId: string) => {
@@ -416,9 +526,17 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       const messages = session.messages.map(msg => {
         if (msg.id !== streamingMessageId) return msg
+        // Finalize reasoning timing if tool call arrives before text
+        const reasoningDurationMs = (msg.reasoningStartedAt && !msg.reasoningDurationMs)
+          ? Date.now() - msg.reasoningStartedAt
+          : msg.reasoningDurationMs
+        const contentBlocks = [...(msg.contentBlocks || [])]
+        contentBlocks.push({ type: 'tool_call', toolCallId: toolId })
         return {
           ...msg,
           toolCalls: [...(msg.toolCalls || []), toolCall],
+          contentBlocks,
+          ...(reasoningDurationMs !== undefined && { reasoningDurationMs }),
         }
       })
 
@@ -530,6 +648,83 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
     },
 
+    // === Centralized diff approve/reject ===
+    // These handle the ENTIRE flow atomically: DiffService → store update → agent unblock
+
+    approveDiff: async (messageId: string, toolCallId: string, diffResultId: string | undefined) => {
+      // 1. Write file via DiffService (non-blocking on failure)
+      if (diffResultId) {
+        try {
+          await DiffService.getInstance().acceptDiff(diffResultId)
+        } catch (err) {
+          logger.error('chat', 'DiffService.acceptDiff failed:', String(err))
+        }
+      }
+
+      // 2. Atomic state update: set diffStatus + remove from pendingDiffs
+      set(state => {
+        const { activeSessionId, sessions, pendingDiffs } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const messages = session.messages.map(msg => {
+          if (msg.id !== messageId) return msg
+          const toolCalls = (msg.toolCalls || []).map(tc =>
+            tc.id === toolCallId ? { ...tc, diffStatus: 'approved' as const } : tc
+          )
+          return { ...msg, toolCalls }
+        })
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+
+        return {
+          sessions: updatedSessions,
+          pendingDiffs: diffResultId ? pendingDiffs.filter(d => d.id !== diffResultId) : pendingDiffs,
+        }
+      })
+
+      // 3. Unblock agent
+      resolveDiffApproval(toolCallId, true)
+    },
+
+    rejectDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => {
+      // 1. Reject in DiffService
+      if (diffResultId) {
+        DiffService.getInstance().rejectDiff(diffResultId)
+      }
+
+      // 2. Atomic state update: set diffStatus + remove from pendingDiffs
+      set(state => {
+        const { activeSessionId, sessions, pendingDiffs } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const messages = session.messages.map(msg => {
+          if (msg.id !== messageId) return msg
+          const toolCalls = (msg.toolCalls || []).map(tc =>
+            tc.id === toolCallId ? { ...tc, diffStatus: 'denied' as const } : tc
+          )
+          return { ...msg, toolCalls }
+        })
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+
+        return {
+          sessions: updatedSessions,
+          pendingDiffs: diffResultId ? pendingDiffs.filter(d => d.id !== diffResultId) : pendingDiffs,
+        }
+      })
+
+      // 3. Unblock agent (rejected)
+      resolveDiffApproval(toolCallId, false)
+    },
+
     updateToolCallDiffStatus: (messageId: string, toolCallId: string, status: 'approved' | 'denied') => {
       set(state => {
         const { activeSessionId, sessions } = state
@@ -583,6 +778,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     finalizeAssistantMessage: () => {
+      let finalMessages: ChatMessage[] | null = null
+
       set(state => {
         const { activeSessionId, streamingMessageId, sessions } = state
         if (!activeSessionId || !streamingMessageId) return state
@@ -590,11 +787,22 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const session = sessions.get(activeSessionId)
         if (!session) return state
 
-        const messages = session.messages.map(msg =>
-          msg.id === streamingMessageId
-            ? { ...msg, isStreaming: false }
-            : msg
-        )
+        const messages = session.messages.map(msg => {
+          if (msg.id !== streamingMessageId) return msg
+          // Finalize reasoning duration if still open
+          const reasoningDurationMs = (msg.reasoningStartedAt && !msg.reasoningDurationMs)
+            ? Date.now() - msg.reasoningStartedAt
+            : msg.reasoningDurationMs
+          return {
+            ...msg,
+            isStreaming: false,
+            // Auto-collapse reasoning when streaming ends
+            isReasoningVisible: false,
+            ...(reasoningDurationMs !== undefined && { reasoningDurationMs }),
+          }
+        })
+
+        finalMessages = messages
 
         const updatedSession: ChatSession = {
           ...session,
@@ -612,6 +820,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           streamingMessageId: null,
         }
       })
+
+      // Rebuild conversation history outside set() — avoids blocking
+      // render with JSON parsing and string processing on large sessions.
+      if (finalMessages) {
+        const conversationHistory = rebuildConversationHistory(finalMessages)
+        set({ conversationHistory })
+      }
 
       debouncedSave()
     },
@@ -744,6 +959,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       } catch (err) {
         logger.error('Failed to accept all diffs:', String(err))
       }
+
+      // 1b. Resolve all pending approval promises (unblocks agent)
+      resolveAllPendingDiffApprovals(true)
+
+      // 1c. Enable auto-approve for ALL future approvals in this session
+      // (both tool permissions and file diffs — user expects single "Accept All")
+      const permStore = usePermissionStore.getState()
+      permStore.setAutoApproveDiffs(true)
+      usePermissionStore.setState({ autoApproveAll: true })
 
       // 2. Update ALL pending tool calls in a single state update
       set(state => {
@@ -982,6 +1206,25 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       // Clean up empty sessions
       await sessionService.cleanupEmptySessions(projectPath)
+    },
+
+    clearAllSessions: () => {
+      // Clear module-level debounce timer to prevent stale writes
+      if (saveTimeout) {
+        clearTimeout(saveTimeout)
+        saveTimeout = null
+      }
+      set({
+        sessions: new Map(),
+        activeSessionId: null,
+        conversationHistory: [],
+        isStreaming: false,
+        streamingMessageId: null,
+        currentTurnCount: 0,
+        totalTokensUsed: { input: 0, output: 0 },
+        pendingDiffs: [],
+        draftInput: '',
+      })
     },
   }
 })

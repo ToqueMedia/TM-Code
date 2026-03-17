@@ -17,7 +17,9 @@ pub struct ProjectInfo {
     pub path: String,
     #[serde(default = "default_project_type")]
     pub project_type: String,
+    #[serde(default)]
     pub last_opened: String,
+    #[serde(default)]
     pub created_at: String,
     #[serde(default)]
     pub metadata: HashMap<String, serde_json::Value>,
@@ -33,6 +35,7 @@ pub struct RecentProject {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(default)]
     pub last_opened: String,
 }
 
@@ -1197,6 +1200,117 @@ pub struct ProjectStatus {
     pub exists: bool,
     pub permissions_changed: bool,
     pub last_modified: Option<u64>,
+}
+
+/// Validates that a project_id is a safe UUID (no path traversal).
+fn validate_project_id(project_id: &str) -> Result<()> {
+    if project_id.is_empty()
+        || project_id.contains('/')
+        || project_id.contains('\\')
+        || project_id.contains("..")
+    {
+        return Err(ProjectError::InvalidPath(format!(
+            "Invalid project ID: {}",
+            project_id
+        )));
+    }
+    Ok(())
+}
+
+/// Internal helper: removes a project from the recent list in settings.json.
+/// Does NOT delete metadata or project files.
+fn remove_project_from_settings(project_id: &str) -> Result<()> {
+    let settings_path = get_settings_path();
+
+    if !settings_path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&settings_path)?;
+    let mut settings: GlobalSettings = serde_json::from_str(&content)?;
+
+    settings.recent_projects.retain(|p| p.id != project_id);
+
+    let settings_content = serde_json::to_string_pretty(&settings)?;
+    let tmp_path = settings_path.with_extension("json.tmp");
+    fs::write(&tmp_path, &settings_content)?;
+    fs::rename(&tmp_path, &settings_path)?;
+
+    Ok(())
+}
+
+/// Removes a project's metadata directory from the config folder.
+fn remove_project_metadata(project_id: &str) -> Result<()> {
+    validate_project_id(project_id)?;
+    let meta_dir = get_projects_dir().join(project_id);
+    if meta_dir.exists() {
+        let _ = fs::remove_dir_all(&meta_dir);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_from_recent_projects(project_id: String) -> Result<()> {
+    validate_project_id(&project_id)?;
+    remove_project_from_settings(&project_id)
+}
+
+#[tauri::command]
+pub fn delete_project(project_id: String, project_path: String) -> Result<()> {
+    validate_project_id(&project_id)?;
+
+    let path = Path::new(&project_path);
+
+    if path.exists() && path.is_dir() {
+        // Canonicalize to resolve symlinks before safety checks
+        let canonical = fs::canonicalize(path)
+            .map_err(|e| ProjectError::Io(format!("Cannot resolve path: {}", e)))?;
+
+        // Safety: don't delete system folders
+        if is_system_folder(&canonical) {
+            return Err(ProjectError::SystemFolder(
+                "Cannot delete system folders".to_string(),
+            ));
+        }
+
+        // Safety: verify this is actually a project (has .toquemedia-id).
+        // We also accept an empty directory — a previous partial delete may have
+        // removed .toquemedia-id but failed to remove the root folder.
+        let is_project = canonical.join(".toquemedia-id").exists();
+        let is_empty_dir = !is_project && fs::read_dir(&canonical)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(false);
+
+        if !is_project && !is_empty_dir {
+            return Err(ProjectError::InvalidPath(
+                "Directory is not a recognized project (missing .toquemedia-id)".to_string(),
+            ));
+        }
+
+        // Delete the project directory.
+        // remove_dir_all can partially succeed (contents removed but root dir
+        // remains) when a background process still holds a handle.
+        if let Err(_first_err) = fs::remove_dir_all(&canonical) {
+            // Brief yield to let OS release file handles from killed processes.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+
+            if canonical.exists() {
+                // Retry full removal (handles may be released now)
+                if let Err(_) = fs::remove_dir_all(&canonical) {
+                    // Last resort: if only the empty root dir remains, remove it
+                    if canonical.exists() {
+                        fs::remove_dir(&canonical)?;
+                    }
+                }
+            }
+        }
+    }
+
+    // Always clean up references regardless of whether path existed
+    remove_project_from_settings(&project_id)?;
+    remove_project_metadata(&project_id)?;
+
+    Ok(())
 }
 
 #[tauri::command]

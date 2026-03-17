@@ -87,7 +87,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
                 fontWeight: 'bold',
               }}
             >
-              🚨 Erro no ToqueMedia Studio
+              🚨 Erro no TM Code
             </h1>
             
             <p style={{ marginBottom: '16px', color: '#cccccc' }}>

@@ -1,7 +1,7 @@
 import React, { memo, useState, useCallback, useRef, useEffect } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiSend } from 'react-icons/fi'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -12,19 +12,9 @@ import { tokens } from '@/theme/tokens'
 function PromptInput() {
   const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const mountedRef = useRef(true)
   const isStreaming = useChatStore(s => s.isStreaming)
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const currentProject = useProjectStore(s => s.currentProject)
-
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-      flushBufferedDeltas()
-      AgentService.getInstance().cancelLoop()
-    }
-  }, [])
 
   useEffect(() => {
     const textarea = textareaRef.current
@@ -41,75 +31,66 @@ function PromptInput() {
     const { isAuthenticated } = useAuthStore.getState()
     if (!isAuthenticated) return
 
-    const chatStore = useChatStore.getState()
     const agentStore = useAgentStore.getState()
 
-    let sessionId = chatStore.activeSessionId
+    let sessionId = useChatStore.getState().activeSessionId
     if (!sessionId) {
-      sessionId = chatStore.createSession(currentProject?.path || '')
+      sessionId = useChatStore.getState().createSession(currentProject?.path || '')
     }
 
     setInput('')
 
-    chatStore.addUserMessage(prompt)
-    chatStore.startAssistantMessage()
+    useChatStore.getState().addUserMessage(prompt)
+    useChatStore.getState().startAssistantMessage()
     agentStore.setStatus('thinking')
 
     const projectPath = currentProject?.path || ''
     const projectType = currentProject?.projectType || 'unknown'
     const contextBuilder = ContextBuilder.getInstance()
     const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType)
-    const history = chatStore.conversationHistory
+    const history = useChatStore.getState().conversationHistory
 
     const agentService = AgentService.getInstance()
     agentService.setSystemPrompt(systemPrompt)
 
     await agentService.runAgentLoop(prompt, history, {
       onTextDelta: (delta) => {
-        if (!mountedRef.current) return
         agentStore.setStatus('generating')
         appendTextDeltaBuffered(delta)
       },
       onReasoningDelta: (delta) => {
-        if (!mountedRef.current) return
         agentStore.setStatus('thinking')
         appendReasoningDeltaBuffered(delta)
       },
       onToolCallPending: (toolId, toolName) => {
-        if (!mountedRef.current) return
         flushBufferedDeltas()
         agentStore.setStatus('applying')
-        chatStore.addPendingToolCall(toolId, toolName)
+        useChatStore.getState().addPendingToolCall(toolId, toolName)
       },
       onToolCallStart: (toolId, _toolName, args) => {
-        if (!mountedRef.current) return
-        chatStore.updateToolCallWithArgs(toolId, args)
+        useChatStore.getState().updateToolCallWithArgs(toolId, args)
       },
       onToolResult: (toolId, _toolName, result, isError) => {
-        if (!mountedRef.current) return
-        chatStore.updateToolCallWithResult(toolId, result, isError)
+        useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
         agentStore.setStatus('thinking')
       },
       onTurnComplete: () => {
-        if (!mountedRef.current) return
-        chatStore.incrementTurnCount()
+        useChatStore.getState().incrementTurnCount()
       },
       onDone: () => {
-        if (!mountedRef.current) return
         flushBufferedDeltas()
-        chatStore.finalizeAssistantMessage()
+        useChatStore.getState().finalizeAssistantMessage()
         agentStore.setStatus('idle')
       },
       onError: (error) => {
-        if (!mountedRef.current) return
         flushBufferedDeltas()
+        resolveAllPendingDiffApprovals(false)
         agentStore.setStatus('error')
         agentStore.setError(error.message)
-        chatStore.finalizeAssistantMessage()
+        useChatStore.getState().finalizeAssistantMessage()
       },
       onUsageUpdate: (inputTokens, outputTokens) => {
-        if (!mountedRef.current) return
-        chatStore.addTokenUsage(inputTokens, outputTokens)
+        useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
       },
     })
   }, [input, isStreaming, activeSessionId, currentProject])
@@ -148,7 +129,7 @@ function PromptInput() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Ask Diamond to help with your code..."
+              placeholder="Ask TM Code to help with your code..."
               aria-label="Message prompt"
               disabled={isStreaming}
               rows={1}

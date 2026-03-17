@@ -1,5 +1,10 @@
 // === Chat Types ===
 
+/** Ordered content block — tracks interleaving of text and tool calls */
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_call'; toolCallId: string }
+
 /** Message format for OpenAI-compatible conversation history */
 export interface ConversationMessage {
   role: 'user' | 'assistant' | 'system' | 'tool'
@@ -35,10 +40,16 @@ export interface ChatMessage {
   timestamp: number
   codeBlocks?: CodeBlock[]
   toolCalls?: ToolCallDisplay[]
+  /** Ordered sequence of text and tool-call blocks for interleaved rendering */
+  contentBlocks?: ContentBlock[]
   isStreaming?: boolean
   // Reasoning (collapsible)
   reasoningContent?: string
   isReasoningVisible?: boolean
+  /** Epoch ms when first reasoning delta arrived */
+  reasoningStartedAt?: number
+  /** Duration in ms of the reasoning phase */
+  reasoningDurationMs?: number
 }
 
 export interface CodeBlock {

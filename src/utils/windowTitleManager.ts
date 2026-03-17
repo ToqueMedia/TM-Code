@@ -46,7 +46,7 @@ export class WindowTitleManager {
       const { activeFile, openFiles } = useEditorRepository.getState();
 
       if (!currentProject) {
-        document.title = 'ToqueMedia Studio';
+        document.title = 'TM Code';
         return;
       }
 
@@ -69,12 +69,12 @@ export class WindowTitleManager {
       if (hasUnsavedChanges) {
         title = `• ${title}`;
       }
-      title = `${title} - ToqueMedia Studio`;
+      title = `${title} - TM Code`;
 
       document.title = title;
     } catch (error: unknown) {
       logger.error('ui', 'Error updating window title:', error);
-      document.title = 'ToqueMedia Studio';
+      document.title = 'TM Code';
     }
   }
 }

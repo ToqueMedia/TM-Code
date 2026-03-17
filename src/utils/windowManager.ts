@@ -25,7 +25,7 @@ export class WindowManager {
 
     // Create new window
     const window = new WebviewWindow(windowId, {
-      title: options?.title || 'Diamond IDE',
+      title: options?.title || 'TM Code',
       url: options?.url || '/index.html',
       width: options?.width || 1200,
       height: options?.height || 800,

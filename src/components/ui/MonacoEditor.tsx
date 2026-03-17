@@ -271,7 +271,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     // Set up event listeners
     // Dispatch supported languages to app
     try {
-      const languages = monaco.languages.getLanguages().map(l => l.id);
+      const languages = monaco.languages.getLanguages().map((l: { id: string }) => l.id);
       window.dispatchEvent(new CustomEvent('monaco:languages', { detail: languages }));
     } catch {}
 

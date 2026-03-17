@@ -171,7 +171,6 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
         alignItems="center"
         justifyContent="space-between"
         flexShrink={0}
-        data-no-drag
       >
         <VStack gap={1} alignItems="flex-start">
           <Heading fontSize="20px" fontWeight="700" color={tokens.colors.text.primary}>
@@ -198,6 +197,9 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
             _placeholder={{ color: tokens.colors.text.muted }}
             _focus={{ borderColor: tokens.colors.accent.primary, outline: 'none' }}
             disabled={isLoading}
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
           />
           <Button
             variant="ghost"

@@ -1,6 +1,6 @@
 // === Agent Types ===
 
-export type AgentStatus = 'idle' | 'thinking' | 'generating' | 'applying' | 'error'
+export type AgentStatus = 'idle' | 'thinking' | 'generating' | 'applying' | 'compressing' | 'error'
 
 export interface AgentTool {
   name: string
@@ -20,6 +20,8 @@ export type AgentToolName =
   | 'search_files'
   | 'glob'
   | 'execute_command'
+  | 'start_dev_server'
+  | 'get_diagnostics'
   | 'web_fetch'
 
 export interface AgentToolCall {

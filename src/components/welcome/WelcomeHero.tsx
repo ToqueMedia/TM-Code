@@ -6,57 +6,66 @@ import {
   Heading,
   Text,
   VStack,
-  HStack,
 } from '@chakra-ui/react'
+import {
+  LuRocket,
+  LuFolderOpen,
+  LuGitBranch,
+  LuFileCode,
+} from 'react-icons/lu'
 import { tokens } from '@/theme/tokens'
 import WelcomeFeatureCard from './WelcomeFeatureCard'
 
 interface WelcomeHeroProps {
+  onNewProject: () => void
   onOpenFolder: () => void
+  onProjectFromScratch: () => void
+  onCloneRepository: () => void
 }
 
 const featureCards = [
   {
-    icon: '🚀',
+    id: 'new',
+    icon: LuRocket,
     title: 'New Project',
-    description: 'Create a new project from scratch with templates and boilerplates.',
-    shortcut: 'Ctrl+Shift+N',
-    gradient: tokens.gradient.accentGreen,
-    iconShadow: tokens.shadow.cardIconGreen,
+    description: 'Start fresh with templates and boilerplates for any framework.',
+    shortcut: '⌘ Shift N',
+    color: tokens.colors.accent.primary,
   },
   {
-    icon: '📁',
+    id: 'scratch',
+    icon: LuFileCode,
+    title: 'Project from Scratch',
+    description: 'Pick an empty folder and start building from zero.',
+    shortcut: '⌘ Shift S',
+    color: tokens.colors.accent.orange,
+  },
+  {
+    id: 'open',
+    icon: LuFolderOpen,
     title: 'Open Folder',
-    description: 'Open an existing project folder and start coding immediately.',
-    shortcut: 'Ctrl+K Ctrl+O',
-    gradient: tokens.gradient.accentPrimary,
-    iconShadow: tokens.shadow.cardIconAccent,
+    description: 'Open an existing project and start coding immediately.',
+    shortcut: '⌘ K ⌘ O',
+    color: tokens.colors.accent.greenBright,
   },
   {
-    icon: '🔗',
+    id: 'clone',
+    icon: LuGitBranch,
     title: 'Clone Repository',
-    description: 'Clone a Git repository from GitHub, GitLab, or any Git server.',
-    shortcut: 'Ctrl+Shift+P',
-    gradient: tokens.gradient.accentPurple,
-    iconShadow: tokens.shadow.cardIconPurple,
-  },
-  {
-    icon: '📦',
-    title: 'Import Project',
-    description: 'Import existing projects and configure them automatically.',
-    shortcut: 'Ctrl+Shift+I',
-    gradient: tokens.gradient.accentOrange,
-    iconShadow: tokens.shadow.cardIconOrange,
+    description: 'Clone from GitHub, GitLab, or any Git remote server.',
+    shortcut: '⌘ Shift P',
+    color: tokens.colors.accent.purple,
   },
 ]
 
-const statusItems = [
-  { icon: '🔥', label: '12 Projects' },
-  { icon: '⚡', label: 'Fast Launch' },
-  { icon: '🎯', label: 'Smart Tools' },
-]
+const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onProjectFromScratch, onCloneRepository }) => {
+  const cardActions: Record<string, () => void> = {
+    new: onNewProject,
+    scratch: onProjectFromScratch,
+    open: onOpenFolder,
+    clone: onCloneRepository,
+  }
 
-const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onOpenFolder }) => {
   return (
     <Flex
       flex={1}
@@ -65,34 +74,64 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onOpenFolder }) => {
       justifyContent="center"
       p={12}
       position="relative"
+      overflow="hidden"
     >
-      <VStack textAlign="center" mb={12}>
+      {/* Background radial accents */}
+      <Box
+        position="absolute"
+        top="10%"
+        left="30%"
+        width="400px"
+        height="400px"
+        bg="radial-gradient(ellipse, rgba(254, 16, 99, 0.06) 0%, transparent 70%)"
+        pointerEvents="none"
+      />
+      <Box
+        position="absolute"
+        bottom="10%"
+        right="20%"
+        width="300px"
+        height="300px"
+        bg="radial-gradient(ellipse, rgba(163, 113, 247, 0.04) 0%, transparent 70%)"
+        pointerEvents="none"
+      />
+
+      <VStack textAlign="center" mb={12} position="relative">
         <Heading
-          fontSize={{ base: '32px', md: '48px' }}
-          fontWeight="800"
-          background={tokens.gradient.heroTitle}
-          backgroundClip="text"
-          color="transparent"
+          fontSize={{ base: '28px', md: '40px' }}
+          fontWeight="900"
+          color="white"
           letterSpacing="-0.5px"
-          mb={4}
+          mb={3}
+          lineHeight="1.1"
         >
-          Welcome to ToqueMedia Studio
+          Welcome to{' '}
+          <Box
+            as="span"
+            bgGradient="to-r"
+            gradientFrom={tokens.colors.accent.primary}
+            gradientTo={tokens.colors.accent.purple}
+            bgClip="text"
+          >
+            TM Code
+          </Box>
         </Heading>
         <Text
-          fontSize="18px"
+          fontSize="16px"
           color={tokens.colors.text.secondary}
-          maxW="500px"
-          lineHeight="1.5"
+          maxW="460px"
+          lineHeight="1.6"
+          fontWeight="400"
         >
           A powerful, modern IDE built for today's developers.
-          Create, code, and deploy with unmatched performance and style.
+          Create, code, and ship with style.
         </Text>
       </VStack>
 
       <Grid
-        templateColumns={{ base: '1fr', md: 'repeat(auto-fit, minmax(280px, 1fr))' }}
-        gap={6}
-        maxW="900px"
+        templateColumns={{ base: '1fr', md: 'repeat(2, 1fr)' }}
+        gap={5}
+        maxW="720px"
         w="100%"
         data-no-drag
       >
@@ -103,32 +142,11 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onOpenFolder }) => {
             title={card.title}
             description={card.description}
             shortcut={card.shortcut}
-            gradient={card.gradient}
-            iconShadow={card.iconShadow}
-            onClick={onOpenFolder}
+            color={card.color}
+            onClick={cardActions[card.id]}
           />
         ))}
       </Grid>
-
-      <HStack position="absolute" bottom={6} right={6} gap={4}>
-        {statusItems.map((item) => (
-          <HStack key={item.label} gap={2} fontSize="12px" color={tokens.colors.text.muted}>
-            <Box
-              width="16px"
-              height="16px"
-              bg={tokens.colors.accent.primaryGlow}
-              borderRadius="50%"
-              display="flex"
-              alignItems="center"
-              justifyContent="center"
-              fontSize="10px"
-            >
-              {item.icon}
-            </Box>
-            <Text>{item.label}</Text>
-          </HStack>
-        ))}
-      </HStack>
     </Flex>
   )
 }

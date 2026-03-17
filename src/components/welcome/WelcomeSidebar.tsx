@@ -1,7 +1,6 @@
 import React from 'react'
 import {
   Box,
-  Button,
   Flex,
   Heading,
   Text,
@@ -9,178 +8,259 @@ import {
   HStack,
   Icon,
 } from '@chakra-ui/react'
+import {
+  LuFilePlus2,
+  LuFolderOpen,
+  LuGitBranch,
+  LuFileCode,
+  LuFolder,
+  LuClock,
+  LuChevronRight,
+} from 'react-icons/lu'
 import { tokens } from '@/theme/tokens'
 
 interface RecentProject {
   id?: string
   name: string
   path: string
+  lastOpened?: string
 }
 
 interface WelcomeSidebarProps {
   recentProjects: RecentProject[]
   onNewProject: () => void
+  onProjectFromScratch: () => void
   onOpenFolder: () => void
   onCloneRepository: () => void
   onOpenProject: (path?: string) => void
 }
 
-const sidebarButtonHover = {
-  bg: tokens.colors.accent.primarySubtle,
-  borderColor: tokens.colors.accent.primaryMuted,
-  transform: 'translateX(4px)',
-}
+const actionItems = [
+  { id: 'new', icon: LuFilePlus2, label: 'New Project', color: tokens.colors.accent.primary },
+  { id: 'scratch', icon: LuFileCode, label: 'Project from Scratch', color: tokens.colors.accent.orange },
+  { id: 'open', icon: LuFolderOpen, label: 'Open Folder', color: tokens.colors.accent.greenBright },
+  { id: 'clone', icon: LuGitBranch, label: 'Clone Repository', color: tokens.colors.accent.purple },
+]
 
 const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   recentProjects,
   onNewProject,
+  onProjectFromScratch,
   onOpenFolder,
   onCloneRepository,
   onOpenProject,
 }) => {
+  const handleAction = (id: string) => {
+    if (id === 'new') onNewProject()
+    else if (id === 'scratch') onProjectFromScratch()
+    else if (id === 'open') onOpenFolder()
+    else if (id === 'clone') onCloneRepository()
+  }
+
+  const truncatePath = (path: string, maxLen = 38) => {
+    if (path.length <= maxLen) return path
+    const parts = path.split('/')
+    if (parts.length <= 3) return '...' + path.slice(-maxLen)
+    return parts[0] + '/.../' + parts.slice(-2).join('/')
+  }
+
   return (
     <Box
-      width={{ base: '100%', md: '320px' }}
-      bg={tokens.colors.bg.sidebarGlass}
-      backdropFilter="blur(20px)"
-      borderRight={`1px solid ${tokens.colors.border.sidebar}`}
+      width="300px"
+      minWidth="300px"
+      bg="rgba(15, 15, 15, 0.95)"
+      backdropFilter="blur(24px)"
+      borderRight="1px solid"
+      borderColor="rgba(254, 16, 99, 0.15)"
       display="flex"
       flexDirection="column"
-      p={6}
-      pt={10}
+      py={8}
+      px={5}
+      pt={12}
       data-no-drag
+      position="relative"
+      overflow="hidden"
     >
-      <Flex alignItems="center" mb={8}>
+      {/* Subtle glow at top */}
+      <Box
+        position="absolute"
+        top="-60px"
+        left="50%"
+        transform="translateX(-50%)"
+        width="200px"
+        height="120px"
+        bg="radial-gradient(ellipse, rgba(254, 16, 99, 0.12) 0%, transparent 70%)"
+        pointerEvents="none"
+      />
+
+      {/* Logo */}
+      <Flex alignItems="center" mb={10} position="relative">
         <Box
-          width="48px"
-          height="48px"
-          background={tokens.gradient.logoTitle}
-          borderRadius="12px"
-          display="flex"
-          alignItems="center"
-          justifyContent="center"
-          fontSize="24px"
+          width="36px"
+          height="36px"
           mr={3}
-          boxShadow={tokens.shadow.logoGlow}
+          flexShrink={0}
+          filter="drop-shadow(0 4px 12px rgba(254, 16, 99, 0.4))"
         >
-          💎
+          <img
+            src="/isologo.svg"
+            alt="TM Code"
+            style={{ width: '100%', height: '100%' }}
+          />
         </Box>
         <Heading
-          fontSize="24px"
-          fontWeight="700"
-          background={tokens.gradient.logoTitle}
-          backgroundClip="text"
-          color="transparent"
+          fontSize="18px"
+          fontWeight="800"
+          color="white"
+          letterSpacing="-0.3px"
         >
-          ToqueMedia Studio
+          TM Code
         </Heading>
       </Flex>
 
-      <VStack align="stretch" flex="1">
+      {/* Action buttons */}
+      <VStack align="stretch" gap={1} mb={8}>
         <Text
-          fontSize="12px"
-          fontWeight="600"
+          fontSize="11px"
+          fontWeight="700"
           textTransform="uppercase"
           color={tokens.colors.text.muted}
-          mb={4}
-          letterSpacing="0.5px"
+          mb={3}
+          letterSpacing="1px"
+          px={2}
         >
           Start
         </Text>
 
-        <Button
-          variant="ghost"
-          justifyContent="flex-start"
-          p={4}
-          borderRadius="8px"
-          mb={1}
-          border="1px solid transparent"
-          _hover={sidebarButtonHover}
-          onClick={onNewProject}
-        >
-          <Icon as={() => <span>📄</span>} mr={3} fontSize="18px" width="20px" />
-          New Project
-        </Button>
-
-        <Button
-          variant="ghost"
-          justifyContent="flex-start"
-          p={4}
-          borderRadius="8px"
-          mb={1}
-          border="1px solid transparent"
-          _hover={sidebarButtonHover}
-          onClick={onOpenFolder}
-        >
-          <Icon as={() => <span>📁</span>} mr={3} fontSize="18px" width="20px" />
-          Open Folder
-        </Button>
-
-        <Button
-          variant="ghost"
-          justifyContent="flex-start"
-          p={4}
-          borderRadius="8px"
-          mb={1}
-          border="1px solid transparent"
-          _hover={sidebarButtonHover}
-          onClick={onCloneRepository}
-        >
-          <Icon as={() => <span>🔗</span>} mr={3} fontSize="18px" width="20px" />
-          Clone Repository
-        </Button>
-
-        <Button
-          variant="ghost"
-          justifyContent="flex-start"
-          p={4}
-          borderRadius="8px"
-          mb={1}
-          border="1px solid transparent"
-          _hover={sidebarButtonHover}
-        >
-          <Icon as={() => <span>📦</span>} mr={3} fontSize="18px" width="20px" />
-          Import Project
-        </Button>
-      </VStack>
-
-      <VStack align="stretch" mt={6}>
-        <Text
-          fontSize="12px"
-          fontWeight="600"
-          textTransform="uppercase"
-          color={tokens.colors.text.muted}
-          mb={4}
-          letterSpacing="0.5px"
-        >
-          Recent
-        </Text>
-
-        {recentProjects.map((project, index) => (
-          <Box
-            key={project.id || index}
-            p={2}
-            borderRadius="6px"
+        {actionItems.map((item) => (
+          <Flex
+            key={item.id}
+            alignItems="center"
+            gap={3}
+            px={3}
+            py={2.5}
+            borderRadius="10px"
             cursor="pointer"
+            transition="all 0.2s ease"
             _hover={{
-              bg: tokens.colors.bg.hoverSubtle,
+              bg: 'rgba(254, 16, 99, 0.08)',
+              transform: 'translateX(4px)',
             }}
-            onClick={() => {
-              if (project.path) {
-                onOpenProject(project.path)
-              }
-            }}
+            onClick={() => handleAction(item.id)}
           >
-            <HStack>
-              <Icon as={() => <span>📁</span>} mr={2} fontSize="14px" color={tokens.colors.text.muted} />
-              <VStack gap={0} alignItems="flex-start">
-                <Text fontSize="13px" color={tokens.colors.text.primary}>{project.name}</Text>
-                <Text fontSize="11px" color={tokens.colors.text.muted}>{project.path}</Text>
-              </VStack>
-            </HStack>
-          </Box>
+            <Flex
+              width="32px"
+              height="32px"
+              borderRadius="8px"
+              alignItems="center"
+              justifyContent="center"
+              bg="rgba(255, 255, 255, 0.05)"
+              border="1px solid"
+              borderColor="rgba(255, 255, 255, 0.08)"
+              flexShrink={0}
+            >
+              <Icon color={item.color} fontSize="15px">
+                {React.createElement(item.icon)}
+              </Icon>
+            </Flex>
+            <Text
+              fontSize="13px"
+              fontWeight="500"
+              color={tokens.colors.text.primary}
+            >
+              {item.label}
+            </Text>
+          </Flex>
         ))}
       </VStack>
+
+      {/* Recent projects */}
+      <VStack align="stretch" flex={1} overflow="hidden">
+        <HStack px={2} mb={3}>
+          <Icon color={tokens.colors.text.muted} fontSize="12px">
+            <LuClock />
+          </Icon>
+          <Text
+            fontSize="11px"
+            fontWeight="700"
+            textTransform="uppercase"
+            color={tokens.colors.text.muted}
+            letterSpacing="1px"
+          >
+            Recent
+          </Text>
+        </HStack>
+
+        <VStack
+          align="stretch"
+          gap={0.5}
+          flex={1}
+          overflowY="auto"
+          css={{
+            '&::-webkit-scrollbar': { width: '4px' },
+            '&::-webkit-scrollbar-track': { background: 'transparent' },
+            '&::-webkit-scrollbar-thumb': {
+              background: 'rgba(255,255,255,0.1)',
+              borderRadius: '4px',
+            },
+          }}
+        >
+          {recentProjects.length === 0 && (
+            <Text fontSize="12px" color={tokens.colors.text.muted} px={3} py={4} textAlign="center">
+              No recent projects
+            </Text>
+          )}
+
+          {recentProjects.map((project, index) => (
+            <Flex
+              key={project.id || index}
+              alignItems="center"
+              gap={3}
+              px={3}
+              py={2}
+              borderRadius="8px"
+              cursor="pointer"
+              transition="all 0.2s ease"
+              _hover={{
+                bg: 'rgba(255, 255, 255, 0.05)',
+              }}
+              onClick={() => project.path && onOpenProject(project.path)}
+            >
+              <Icon color={tokens.colors.accent.primary} fontSize="14px" flexShrink={0} opacity={0.7}>
+                <LuFolder />
+              </Icon>
+              <VStack gap={0} alignItems="flex-start" flex={1} minWidth={0}>
+                <Text
+                  fontSize="13px"
+                  fontWeight="500"
+                  color={tokens.colors.text.primary}
+                  lineClamp={1}
+                >
+                  {project.name}
+                </Text>
+                <Text
+                  fontSize="10px"
+                  color={tokens.colors.text.muted}
+                  lineClamp={1}
+                  opacity={0.7}
+                >
+                  {truncatePath(project.path)}
+                </Text>
+              </VStack>
+              <Icon color={tokens.colors.text.muted} fontSize="12px" opacity={0} transition="opacity 0.2s" css={{ '.group:hover &, *:hover > &': { opacity: 1 } }}>
+                <LuChevronRight />
+              </Icon>
+            </Flex>
+          ))}
+        </VStack>
+      </VStack>
+
+      {/* Version footer */}
+      <Box pt={4} mt={4} borderTop="1px solid rgba(255,255,255,0.05)">
+        <Text fontSize="10px" color={tokens.colors.text.muted} textAlign="center" opacity={0.5}>
+          TM Code v0.1.0
+        </Text>
+      </Box>
     </Box>
   )
 }

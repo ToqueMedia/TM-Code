@@ -5,6 +5,10 @@ import type { FileTreeNode } from '../types/fileTree';
 import { FileTreeIndexer } from '../utils/fileTreeIndex';
 import { logger } from '../utils/logger';
 
+// Monaco v0.55+ marks languages.typescript as deprecated in types but it still works at runtime.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const monacoTs = monaco.languages.typescript as any;
+
 class TypeScriptLspService {
   private static instance: TypeScriptLspService;
   private projectFiles: Map<string, string> = new Map();
@@ -127,14 +131,14 @@ class TypeScriptLspService {
 
   private setupLanguageService() {
     // Configure TypeScript compiler options for better IntelliSense
-    monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
-      target: monaco.languages.typescript.ScriptTarget.ES2020,
+    monacoTs.typescriptDefaults.setCompilerOptions({
+      target: monacoTs.ScriptTarget.ES2020,
       allowNonTsExtensions: true,
-      moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
-      module: monaco.languages.typescript.ModuleKind.ESNext,
+      moduleResolution: monacoTs.ModuleResolutionKind.NodeJs,
+      module: monacoTs.ModuleKind.ESNext,
       noEmit: true,
       esModuleInterop: true,
-      jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
+      jsx: monacoTs.JsxEmit.ReactJSX,
       reactNamespace: 'React',
       allowJs: true,
       strict: true,
@@ -155,14 +159,14 @@ class TypeScriptLspService {
     });
 
     // Configure JavaScript compiler options
-    monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
-      target: monaco.languages.typescript.ScriptTarget.ES2020,
+    monacoTs.javascriptDefaults.setCompilerOptions({
+      target: monacoTs.ScriptTarget.ES2020,
       allowNonTsExtensions: true,
-      moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
-      module: monaco.languages.typescript.ModuleKind.ESNext,
+      moduleResolution: monacoTs.ModuleResolutionKind.NodeJs,
+      module: monacoTs.ModuleKind.ESNext,
       noEmit: true,
       esModuleInterop: true,
-      jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
+      jsx: monacoTs.JsxEmit.ReactJSX,
       allowJs: true,
       checkJs: true,
       skipLibCheck: true,
@@ -191,7 +195,7 @@ class TypeScriptLspService {
       }
     `;
     
-    monaco.languages.typescript.typescriptDefaults.addExtraLib(domLib, 'file:///node_modules/@types/dom/index.d.ts');
+    monacoTs.typescriptDefaults.addExtraLib(domLib, 'file:///node_modules/@types/dom/index.d.ts');
   }
 
   async updateFileContent(filePath: string, content: string) {
@@ -306,6 +310,59 @@ class TypeScriptLspService {
     return joined.replace(/\/+/g, '/');
   }
 
+  /**
+   * Get TypeScript/JavaScript diagnostics for a file using Monaco's language worker.
+   * Returns semantic + syntactic diagnostics with line/column positions.
+   */
+  async getDiagnostics(filePath: string): Promise<Array<{
+    line: number
+    column: number
+    message: string
+    severity: 'error' | 'warning' | 'info'
+    code: number
+  }>> {
+    const uri = monaco.Uri.file(filePath);
+    let model = monaco.editor.getModel(uri);
+
+    // If model doesn't exist, try to load the file first
+    if (!model) {
+      await this.loadFileContent(filePath);
+      model = monaco.editor.getModel(uri);
+    }
+
+    if (!model) {
+      throw new Error(`File not loaded in editor: ${filePath}`);
+    }
+
+    const isTs = filePath.endsWith('.ts') || filePath.endsWith('.tsx');
+    const getWorker = isTs
+      ? await monacoTs.getTypeScriptWorker()
+      : await monacoTs.getJavaScriptWorker();
+
+    const worker = await getWorker(uri);
+
+    const [semantic, syntactic] = await Promise.all([
+      worker.getSemanticDiagnostics(uri.toString()),
+      worker.getSyntacticDiagnostics(uri.toString()),
+    ]);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return [...syntactic, ...semantic].map((d: any) => {
+      const pos = model.getPositionAt(d.start);
+      const messageText = typeof d.messageText === 'string'
+        ? d.messageText
+        : d.messageText?.messageText || 'Unknown error';
+
+      return {
+        line: pos.lineNumber,
+        column: pos.column,
+        message: messageText,
+        severity: d.category === 1 ? 'error' as const : d.category === 0 ? 'warning' as const : 'info' as const,
+        code: d.code,
+      };
+    });
+  }
+
   getFileContent(filePath: string): string | undefined {
     return this.projectFiles.get(filePath);
   }
@@ -321,7 +378,7 @@ class TypeScriptLspService {
     this.models.clear();
     
     // Reset Monaco's extra libraries
-    monaco.languages.typescript.typescriptDefaults.setExtraLibs([]);
+    monacoTs.typescriptDefaults.setExtraLibs([]);
 
     // Dispose providers
     this.disposables.forEach(d => d.dispose());

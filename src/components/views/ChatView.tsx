@@ -16,6 +16,8 @@ function ChatView() {
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
   const isStreaming = useChatStore(s => s.isStreaming)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
+  // Subscribe to streaming version changes to trigger re-renders during streaming
+  useChatStore(s => s.streamingVersion)
   const currentProject = useProjectStore(s => s.currentProject)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const scrollRef = useRef<HTMLDivElement>(null)

@@ -31,6 +31,10 @@ function App() {
 	}, []);
 
 	useEffect(() => {
+		// Only auto-open during initial app load, not on subsequent state changes
+		// (e.g. after project deletion sets currentProject to null)
+		if (!initializing) return;
+
 		// Wait for auth to resolve before trying to auto-open project
 		if (authLoading) return;
 
@@ -55,7 +59,7 @@ function App() {
 		};
 
 		initializeApp();
-	}, [authLoading, isAuthenticated, currentProject, openProject, recentProjects]);
+	}, [authLoading, isAuthenticated, initializing, currentProject, openProject, recentProjects]);
 
 	// Restore session when project changes
 	useEffect(() => {
@@ -127,12 +131,30 @@ function App() {
 	}
 
 	return (
-		<Box>
-			{currentProject ? <MainLayout /> :
-				<WelcomeScreen
-					onOpenProject={handleOpenProject}
-				/>
-			}
+		<Box
+			bg="#0a0a0a"
+			minHeight="100vh"
+			position="relative"
+		>
+			{/* Global ambient gradient */}
+			<Box
+				position="fixed"
+				top="0"
+				left="0"
+				width="100%"
+				height="100%"
+				pointerEvents="none"
+				zIndex={0}
+				background="radial-gradient(ellipse at top, rgba(254, 16, 99, 0.04) 0%, transparent 50%), radial-gradient(ellipse at bottom right, rgba(163, 113, 247, 0.03) 0%, transparent 50%)"
+			/>
+
+			<Box position="relative" zIndex={1}>
+				{currentProject ? <MainLayout /> :
+					<WelcomeScreen
+						onOpenProject={handleOpenProject}
+					/>
+				}
+			</Box>
 
 			<ToastContainer />
 		</Box>

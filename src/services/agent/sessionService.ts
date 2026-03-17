@@ -168,6 +168,16 @@ class SessionService {
     }
   }
 
+  async deleteAllProjectSessions(projectPath: string): Promise<void> {
+    try {
+      const dir = await this.getSessionsDir(projectPath)
+      await invoke('delete_file_or_directory', { path: dir })
+      logger.info('session', `Deleted all sessions for project: ${projectPath}`)
+    } catch (error) {
+      logger.error('session', 'Failed to delete all project sessions:', error)
+    }
+  }
+
   // === Session listing ===
 
   async listSessions(projectPath: string): Promise<SessionSummary[]> {

@@ -16,6 +16,92 @@ interface MessageBubbleProps {
   isStreaming?: boolean
 }
 
+const markdownStyles = {
+  '& p': {
+    margin: '0 0 10px 0',
+    lineHeight: '1.75',
+    fontSize: '13.5px',
+    color: tokens.colors.text.primary,
+    letterSpacing: '-0.005em',
+  },
+  '& p:last-child': { marginBottom: 0 },
+  '& strong': { color: '#ffffff', fontWeight: 600 },
+  '& em': { color: tokens.colors.markdown.emphasis, fontStyle: 'italic' },
+  '& ul, & ol': {
+    margin: '6px 0 10px 0',
+    paddingLeft: '20px',
+    fontSize: '13.5px',
+    color: tokens.colors.text.primary,
+  },
+  '& li': {
+    marginBottom: '4px',
+    lineHeight: '1.75',
+    '&::marker': { color: tokens.colors.text.disabled },
+  },
+  '& a': {
+    color: tokens.colors.accent.primary,
+    textDecoration: 'none',
+    borderBottom: '1px solid rgba(254, 16, 99, 0.3)',
+    transition: 'border-color 0.15s',
+    '&:hover': { borderColor: tokens.colors.accent.primary },
+  },
+  '& code': {
+    background: 'rgba(255, 255, 255, 0.07)',
+    borderRadius: '5px',
+    padding: '2px 7px',
+    fontSize: '12px',
+    fontFamily: tokens.fontFamily.mono,
+    color: '#e6a1c0',
+    border: '1px solid rgba(255, 255, 255, 0.05)',
+  },
+  '& pre': { margin: 0, padding: 0 },
+  '& pre code': {
+    background: 'none',
+    padding: 0,
+    border: 'none',
+    color: 'inherit',
+    borderRadius: 0,
+  },
+  '& h1, & h2, & h3, & h4': {
+    color: '#ffffff',
+    fontWeight: 600,
+    letterSpacing: '-0.02em',
+  },
+  '& h1': { fontSize: '20px', margin: '20px 0 10px' },
+  '& h2': { fontSize: '17px', margin: '18px 0 8px' },
+  '& h3': { fontSize: '15px', margin: '14px 0 6px' },
+  '& h4': { fontSize: '13.5px', margin: '12px 0 4px' },
+  '& blockquote': {
+    borderLeft: `3px solid ${tokens.colors.accent.primaryMuted}`,
+    margin: '10px 0',
+    paddingLeft: '14px',
+    color: tokens.colors.text.secondary,
+    fontStyle: 'italic',
+  },
+  '& hr': {
+    border: 'none',
+    height: '1px',
+    background: tokens.colors.border.subtle,
+    margin: '18px 0',
+  },
+  '& table': {
+    borderCollapse: 'collapse' as const,
+    width: '100%',
+    margin: '10px 0',
+    fontSize: '12.5px',
+  },
+  '& th, & td': {
+    border: `1px solid ${tokens.colors.border.subtle}`,
+    padding: '7px 12px',
+    textAlign: 'left' as const,
+  },
+  '& th': {
+    background: 'rgba(255, 255, 255, 0.03)',
+    fontWeight: 600,
+    color: '#ffffff',
+  },
+}
+
 function CopyButton({ code }: { code: string }) {
   const [copied, setCopied] = useState(false)
 
@@ -47,6 +133,64 @@ function CopyButton({ code }: { code: string }) {
       {copied ? 'Copied' : 'Copy'}
     </Box>
   )
+}
+
+const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
+  code({ className, children, ...props }) {
+    const match = /language-(\w+)/.exec(className || '')
+    const codeString = String(children).replace(/\n$/, '')
+
+    if (match) {
+      return (
+        <Box
+          borderRadius="10px"
+          overflow="hidden"
+          my={3}
+          border="1px solid rgba(255, 255, 255, 0.06)"
+          bg={tokens.colors.bg.codeBlock}
+        >
+          <Flex
+            align="center"
+            justify="space-between"
+            px={3}
+            py="6px"
+            bg="rgba(255, 255, 255, 0.03)"
+            borderBottom="1px solid rgba(255, 255, 255, 0.05)"
+          >
+            <Text
+              fontSize="11px"
+              color={tokens.colors.text.disabled}
+              fontFamily={tokens.fontFamily.mono}
+              textTransform="lowercase"
+            >
+              {match[1]}
+            </Text>
+            <CopyButton code={codeString} />
+          </Flex>
+          <SyntaxHighlighter
+            style={vscDarkPlus}
+            language={match[1]}
+            customStyle={{
+              margin: 0,
+              padding: '14px 16px',
+              fontSize: '12.5px',
+              lineHeight: '1.65',
+              background: 'transparent',
+              borderRadius: 0,
+            }}
+          >
+            {codeString}
+          </SyntaxHighlighter>
+        </Box>
+      )
+    }
+
+    return (
+      <code className={className} {...props}>
+        {children}
+      </code>
+    )
+  },
 }
 
 function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
@@ -141,7 +285,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           color={tokens.colors.text.primary}
           letterSpacing="-0.01em"
         >
-          {isUser ? 'You' : 'Diamond'}
+          {isUser ? 'You' : 'TM Code'}
         </Text>
         {isStreaming && !isUser && (
           <Box
@@ -162,176 +306,84 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
 
       {/* Content area */}
       <Box pl="34px">
+        {/* Activity indicator — shown when streaming but no content yet */}
+        {isStreaming && !isUser && !message.content && !message.reasoningContent && (!message.toolCalls || message.toolCalls.length === 0) && (
+          <Flex align="center" gap={2} py={2}>
+            <Flex gap="4px" align="center">
+              {[0, 1, 2].map(i => (
+                <Box
+                  key={i}
+                  w="6px"
+                  h="6px"
+                  borderRadius="full"
+                  bg={tokens.colors.accent.primary}
+                  animation={`activityPulse 1.4s ease-in-out ${i * 0.2}s infinite`}
+                  css={{
+                    '@keyframes activityPulse': {
+                      '0%, 80%, 100%': { opacity: 0.15, transform: 'scale(0.7)' },
+                      '40%': { opacity: 1, transform: 'scale(1)' },
+                    },
+                  }}
+                />
+              ))}
+            </Flex>
+            <Text fontSize="12px" color={tokens.colors.text.muted} fontStyle="italic">
+              Processing...
+            </Text>
+          </Flex>
+        )}
+
         {/* Reasoning block */}
         {message.reasoningContent && (
           <ReasoningBlock
             content={message.reasoningContent}
             isVisible={message.isReasoningVisible || false}
             isStreaming={isStreaming || false}
+            durationMs={message.reasoningDurationMs}
             onToggle={() => toggleReasoning(message.id)}
           />
         )}
 
-        {/* Markdown content */}
-        {message.content && (
-          <Box
-            css={{
-              '& p': {
-                margin: '0 0 10px 0',
-                lineHeight: '1.75',
-                fontSize: '13.5px',
-                color: tokens.colors.text.primary,
-                letterSpacing: '-0.005em',
-              },
-              '& p:last-child': { marginBottom: 0 },
-              '& strong': { color: '#ffffff', fontWeight: 600 },
-              '& em': { color: tokens.colors.markdown.emphasis, fontStyle: 'italic' },
-              '& ul, & ol': {
-                margin: '6px 0 10px 0',
-                paddingLeft: '20px',
-                fontSize: '13.5px',
-                color: tokens.colors.text.primary,
-              },
-              '& li': {
-                marginBottom: '4px',
-                lineHeight: '1.75',
-                '&::marker': { color: tokens.colors.text.disabled },
-              },
-              '& a': {
-                color: tokens.colors.accent.primary,
-                textDecoration: 'none',
-                borderBottom: '1px solid rgba(254, 16, 99, 0.3)',
-                transition: 'border-color 0.15s',
-                '&:hover': { borderColor: tokens.colors.accent.primary },
-              },
-              '& code': {
-                background: 'rgba(255, 255, 255, 0.07)',
-                borderRadius: '5px',
-                padding: '2px 7px',
-                fontSize: '12px',
-                fontFamily: tokens.fontFamily.mono,
-                color: '#e6a1c0',
-                border: '1px solid rgba(255, 255, 255, 0.05)',
-              },
-              '& pre': { margin: 0, padding: 0 },
-              '& pre code': {
-                background: 'none',
-                padding: 0,
-                border: 'none',
-                color: 'inherit',
-                borderRadius: 0,
-              },
-              '& h1, & h2, & h3, & h4': {
-                color: '#ffffff',
-                fontWeight: 600,
-                letterSpacing: '-0.02em',
-              },
-              '& h1': { fontSize: '20px', margin: '20px 0 10px' },
-              '& h2': { fontSize: '17px', margin: '18px 0 8px' },
-              '& h3': { fontSize: '15px', margin: '14px 0 6px' },
-              '& h4': { fontSize: '13.5px', margin: '12px 0 4px' },
-              '& blockquote': {
-                borderLeft: `3px solid ${tokens.colors.accent.primaryMuted}`,
-                margin: '10px 0',
-                paddingLeft: '14px',
-                color: tokens.colors.text.secondary,
-                fontStyle: 'italic',
-              },
-              '& hr': {
-                border: 'none',
-                height: '1px',
-                background: tokens.colors.border.subtle,
-                margin: '18px 0',
-              },
-              '& table': {
-                borderCollapse: 'collapse',
-                width: '100%',
-                margin: '10px 0',
-                fontSize: '12.5px',
-              },
-              '& th, & td': {
-                border: `1px solid ${tokens.colors.border.subtle}`,
-                padding: '7px 12px',
-                textAlign: 'left',
-              },
-              '& th': {
-                background: 'rgba(255, 255, 255, 0.03)',
-                fontWeight: 600,
-                color: '#ffffff',
-              },
-            }}
-          >
-            <ReactMarkdown
-              components={{
-                code({ className, children, ...props }) {
-                  const match = /language-(\w+)/.exec(className || '')
-                  const codeString = String(children).replace(/\n$/, '')
-
-                  if (match) {
-                    return (
-                      <Box
-                        borderRadius="10px"
-                        overflow="hidden"
-                        my={3}
-                        border="1px solid rgba(255, 255, 255, 0.06)"
-                        bg={tokens.colors.bg.codeBlock}
-                      >
-                        <Flex
-                          align="center"
-                          justify="space-between"
-                          px={3}
-                          py="6px"
-                          bg="rgba(255, 255, 255, 0.03)"
-                          borderBottom="1px solid rgba(255, 255, 255, 0.05)"
-                        >
-                          <Text
-                            fontSize="11px"
-                            color={tokens.colors.text.disabled}
-                            fontFamily={tokens.fontFamily.mono}
-                            textTransform="lowercase"
-                          >
-                            {match[1]}
-                          </Text>
-                          <CopyButton code={codeString} />
-                        </Flex>
-                        <SyntaxHighlighter
-                          style={vscDarkPlus}
-                          language={match[1]}
-                          customStyle={{
-                            margin: 0,
-                            padding: '14px 16px',
-                            fontSize: '12.5px',
-                            lineHeight: '1.65',
-                            background: 'transparent',
-                            borderRadius: 0,
-                          }}
-                        >
-                          {codeString}
-                        </SyntaxHighlighter>
-                      </Box>
-                    )
-                  }
-
-                  return (
-                    <code className={className} {...props}>
-                      {children}
-                    </code>
-                  )
-                },
-              }}
-            >
-              {message.content}
-            </ReactMarkdown>
-          </Box>
-        )}
-
-        {/* Tool calls */}
-        {message.toolCalls && message.toolCalls.length > 0 && (
-          <Box mt={message.content ? 3 : 0}>
-            {message.toolCalls.map(tc => (
-              <ToolCallDisplayComponent key={tc.id} toolCall={tc} messageId={message.id} />
-            ))}
-          </Box>
+        {/* Interleaved content blocks (text + tool calls in order) */}
+        {message.contentBlocks && message.contentBlocks.length > 0 ? (
+          <>
+            {message.contentBlocks.map((block, idx) => {
+              if (block.type === 'text' && block.text) {
+                return (
+                  <Box key={`text-${idx}`} css={markdownStyles}>
+                    <ReactMarkdown components={markdownComponents}>
+                      {block.text}
+                    </ReactMarkdown>
+                  </Box>
+                )
+              }
+              if (block.type === 'tool_call') {
+                const tc = message.toolCalls?.find(t => t.id === block.toolCallId)
+                if (tc) {
+                  return <ToolCallDisplayComponent key={tc.id} toolCall={tc} messageId={message.id} />
+                }
+              }
+              return null
+            })}
+          </>
+        ) : (
+          <>
+            {/* Fallback for legacy messages without contentBlocks */}
+            {message.content && (
+              <Box css={markdownStyles}>
+                <ReactMarkdown components={markdownComponents}>
+                  {message.content}
+                </ReactMarkdown>
+              </Box>
+            )}
+            {message.toolCalls && message.toolCalls.length > 0 && (
+              <Box mt={message.content ? 3 : 0}>
+                {message.toolCalls.map(tc => (
+                  <ToolCallDisplayComponent key={tc.id} toolCall={tc} messageId={message.id} />
+                ))}
+              </Box>
+            )}
+          </>
         )}
 
         {/* Standalone code blocks */}
@@ -346,30 +398,37 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           />
         ))}
 
-        {/* Streaming cursor */}
-        {isStreaming && (
-          <Box
-            as="span"
-            display="inline-block"
-            w="2px"
-            h="15px"
-            bg={tokens.colors.accent.primary}
-            ml={1}
-            mt={1}
-            verticalAlign="text-bottom"
-            borderRadius="1px"
-            animation="cursorBlink 1s step-end infinite"
-            css={{
-              '@keyframes cursorBlink': {
-                '0%, 100%': { opacity: 1 },
-                '50%': { opacity: 0 },
-              },
-            }}
-          />
+        {/* Activity indicator — shown during tool execution */}
+        {isStreaming && !isUser && message.toolCalls?.some(tc => tc.status === 'running') && (
+          <Flex align="center" gap={2} py={2} mt={2}>
+            <Flex gap="4px" align="center">
+              {[0, 1, 2].map(i => (
+                <Box
+                  key={i}
+                  w="6px"
+                  h="6px"
+                  borderRadius="full"
+                  bg={tokens.colors.accent.primary}
+                  animation={`activityPulse 1.4s ease-in-out ${i * 0.2}s infinite`}
+                  css={{
+                    '@keyframes activityPulse': {
+                      '0%, 80%, 100%': { opacity: 0.15, transform: 'scale(0.7)' },
+                      '40%': { opacity: 1, transform: 'scale(1)' },
+                    },
+                  }}
+                />
+              ))}
+            </Flex>
+          </Flex>
         )}
       </Box>
     </Box>
   )
 }
 
-export default memo(MessageBubble)
+export default memo(MessageBubble, (prev, next) => {
+  // Always re-render the streaming message (content is mutated in place)
+  if (next.isStreaming) return false
+  // Otherwise, skip re-render if props are the same
+  return prev.message === next.message && prev.isStreaming === next.isStreaming
+})

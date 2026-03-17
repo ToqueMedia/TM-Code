@@ -1,42 +1,94 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas } from '../../stores/chatStore'
+import { invoke } from '@tauri-apps/api/core'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { devServerManager } from '../../services/devServerManager'
 import AgentService from '../../services/agent/agentService'
 import ContextBuilder from '../../services/agent/contextBuilder'
 
 export function usePromptBar() {
-  const [input, setInput] = useState('')
+  const input = useChatStore(s => s.draftInput)
+  const setInput = useChatStore(s => s.setDraftInput)
+  const [devCommand, setDevCommand] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const mountedRef = useRef(true)
   const runningRef = useRef(false)
   const isStreaming = useChatStore(s => s.isStreaming)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
+  const isPreviewServerRunning = useLayoutStore(s => s.isPreviewServerRunning)
+  const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const isDisabled = isStreaming || hasPendingPermission
+  const hasPreview = isPreviewServerRunning || !!previewHtmlContent || !!devCommand
 
-  // Track mount state; abort agent loop on unmount
+  // Detect if project can run a dev server
   useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-      flushBufferedDeltas()
-      AgentService.getInstance().cancelLoop()
+    if (!currentProject?.path) {
+      setDevCommand(null)
+      return
     }
-  }, [])
 
-  // Auto-resize textarea
+    let cancelled = false
+    const projectPath = currentProject.path
+
+    async function detect() {
+      // 1. Check .toquemedia-template manifest
+      try {
+        const raw = await invoke<string>('read_file', { path: `${projectPath}/.toquemedia-template` })
+        if (!cancelled && raw) {
+          const manifest = JSON.parse(raw)
+          if (manifest.devCommand) {
+            setDevCommand(manifest.devCommand)
+            return
+          }
+        }
+      } catch { /* no manifest */ }
+
+      // 2. Check package.json for "dev" or "start" script
+      try {
+        const raw = await invoke<string>('read_file', { path: `${projectPath}/package.json` })
+        if (!cancelled && raw) {
+          const pkg = JSON.parse(raw)
+          if (pkg.scripts?.dev) {
+            setDevCommand('npm run dev')
+            return
+          }
+          if (pkg.scripts?.start) {
+            setDevCommand('npm start')
+            return
+          }
+        }
+      } catch { /* no package.json */ }
+
+      if (!cancelled) setDevCommand(null)
+    }
+
+    detect()
+    return () => { cancelled = true }
+  }, [currentProject?.path])
+
+  // Auto-resize textarea (runs on every input change AND on mount so the
+  // preview PromptBar gets the correct height when it mounts with existing text)
   useEffect(() => {
     const textarea = textareaRef.current
     if (!textarea) return
     textarea.style.height = 'auto'
     const maxHeight = 6 * 24
     textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`
-  }, [input])
+  })
+
+  // Preserve focus across view switches (e.g. chat → preview).
+  // When the PromptBar remounts with draft text, the user was typing — refocus.
+  useEffect(() => {
+    const draft = useChatStore.getState().draftInput
+    if (draft && textareaRef.current) {
+      textareaRef.current.focus()
+    }
+  }, [])
 
   // Listen for suggestion chip inserts
   useEffect(() => {
@@ -52,8 +104,8 @@ export function usePromptBar() {
   }, [])
 
   const handleSend = useCallback(async () => {
-    const prompt = input.trim()
-    if (!prompt || isStreaming) return
+    const prompt = useChatStore.getState().draftInput.trim()
+    if (!prompt || useChatStore.getState().isStreaming) return
     if (usePermissionStore.getState().pendingPermission) return
 
     // Non-reentrant guard: prevent overlapping sends
@@ -77,10 +129,16 @@ export function usePromptBar() {
         sessionId = await chatStore.createNewSession(projectPath)
       }
 
-      setInput('')
+      chatStore.setDraftInput('')
 
       // Re-read state after potential async createNewSession to get fresh conversationHistory
       chatStore = useChatStore.getState()
+
+      // If preview is open, switch to chat so the user sees the agent working
+      const layoutStore = useLayoutStore.getState()
+      if (layoutStore.viewMode === 'preview') {
+        layoutStore.setViewMode('chat')
+      }
 
       chatStore.addUserMessage(prompt)
       chatStore.startAssistantMessage()
@@ -97,78 +155,91 @@ export function usePromptBar() {
 
       await agentService.runAgentLoop(prompt, history, {
         onTextDelta: (delta) => {
-          if (!mountedRef.current) return
           agentStore.setStatus('generating')
           appendTextDeltaBuffered(delta)
         },
         onReasoningDelta: (delta) => {
-          if (!mountedRef.current) return
           agentStore.setStatus('thinking')
           appendReasoningDeltaBuffered(delta)
         },
         onToolCallPending: (toolId, toolName) => {
-          if (!mountedRef.current) return
           flushBufferedDeltas()
           agentStore.setStatus('applying')
-          chatStore.addPendingToolCall(toolId, toolName)
-
-          // Auto-transition to generating view when writing files
-          if (toolName === 'write_file') {
-            const layoutStore = useLayoutStore.getState()
-            if (layoutStore.viewMode === 'chat') {
-              layoutStore.setViewMode('generating')
-            }
-          }
+          useChatStore.getState().addPendingToolCall(toolId, toolName)
         },
         onToolCallStart: (toolId, _toolName, args) => {
-          if (!mountedRef.current) return
-          chatStore.updateToolCallWithArgs(toolId, args)
+          useChatStore.getState().updateToolCallWithArgs(toolId, args)
         },
         onToolResult: (toolId, _toolName, result, isError) => {
-          if (!mountedRef.current) return
-          chatStore.updateToolCallWithResult(toolId, result, isError)
+          useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
           agentStore.setStatus('thinking')
         },
         onTurnComplete: () => {
-          if (!mountedRef.current) return
-          chatStore.incrementTurnCount()
+          useChatStore.getState().incrementTurnCount()
         },
-        onDone: () => {
-          if (!mountedRef.current) return
+        onDone: async () => {
           flushBufferedDeltas()
-          chatStore.finalizeAssistantMessage()
+          useChatStore.getState().finalizeAssistantMessage()
           agentStore.setStatus('idle')
 
-          // If we're in generating view, go back
           const layoutStore = useLayoutStore.getState()
-          if (layoutStore.viewMode === 'generating') {
-            if (layoutStore.isPreviewServerRunning) {
-              layoutStore.setViewMode('preview')
-            } else {
-              layoutStore.setViewMode('chat')
+
+          // If preview server is running, reload and show preview
+          if (layoutStore.isPreviewServerRunning) {
+            layoutStore.reloadPreview()
+            layoutStore.setViewMode('preview')
+            return
+          }
+
+          // If a server is already starting (e.g. postScaffoldPipeline kicked
+          // it off and waitForServerReady hasn't resolved yet), don't start a
+          // second one — the first will auto-transition when ready.
+          if (devServerManager.isActive()) return
+
+          // Otherwise, try to start preview if we have a dev command
+          if (devCommand && currentProject?.path) {
+            layoutStore.addDevServerLog(`Starting dev server (${devCommand})...`, 'info')
+            try {
+              await devServerManager.start(currentProject.path, devCommand)
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err)
+              layoutStore.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
             }
           }
         },
         onError: (error) => {
-          if (!mountedRef.current) return
           flushBufferedDeltas()
+          resolveAllPendingDiffApprovals(false)
           agentStore.setStatus('error')
           agentStore.setError(error.message)
-          chatStore.finalizeAssistantMessage()
+          useChatStore.getState().finalizeAssistantMessage()
         },
         onUsageUpdate: (inputTokens, outputTokens) => {
-          if (!mountedRef.current) return
-          chatStore.addTokenUsage(inputTokens, outputTokens)
+          useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
+        },
+        onContextCompression: (beforeTokens, signal) => {
+          if (signal === 0) {
+            // Compression starting
+            agentStore.setStatus('compressing')
+            useChatStore.getState().addSystemMessage(
+              `Comprimindo contexto (${Math.round(beforeTokens / 1000)}K tokens)...`
+            )
+          } else if (signal === -1) {
+            // Compression complete
+            agentStore.setStatus('thinking')
+          }
         },
       })
     } finally {
       runningRef.current = false
     }
-  }, [input, isStreaming, currentProject])
+  }, [currentProject])
 
   const handleStop = useCallback(() => {
     // Clear any pending permission first — resolves the dangling Promise
     usePermissionStore.getState().clearPending()
+    // Resolve any pending diff approval waits (rejects them)
+    resolveAllPendingDiffApprovals(false)
     AgentService.getInstance().cancelLoop()
     useAgentStore.getState().setStatus('idle')
     useChatStore.getState().finalizeAssistantMessage()
@@ -193,6 +264,50 @@ export function usePromptBar() {
     }
   }, [])
 
+  const togglePreview = useCallback(async () => {
+    const layoutStore = useLayoutStore.getState()
+
+    if (layoutStore.viewMode === 'preview') {
+      layoutStore.goBack()
+      return
+    }
+
+    // If server is already running or static preview exists, just switch view
+    if (layoutStore.isPreviewServerRunning || layoutStore.previewHtmlContent) {
+      layoutStore.setViewMode('preview')
+      return
+    }
+
+    // No server running — start one if we have a devCommand
+    if (devCommand && currentProject?.path) {
+      const layout = useLayoutStore.getState()
+      layout.addDevServerLog(`Starting dev server (${devCommand})...`, 'info')
+      try {
+        await devServerManager.start(currentProject.path, devCommand)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        layout.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
+      }
+    }
+  }, [devCommand, currentProject?.path])
+
+  const closePreview = useCallback(async () => {
+    const layoutStore = useLayoutStore.getState()
+
+    // If currently viewing preview, go back first
+    if (layoutStore.viewMode === 'preview') {
+      layoutStore.goBack()
+    }
+
+    // Stop dev server if running
+    if (layoutStore.isPreviewServerRunning) {
+      await devServerManager.stop()
+    }
+
+    // Clear all preview state
+    layoutStore.clearPreviewServer()
+  }, [])
+
   return {
     input,
     setInput,
@@ -200,9 +315,12 @@ export function usePromptBar() {
     isStreaming,
     isDisabled,
     viewMode,
+    hasPreview,
     handleSend,
     handleStop,
     handleKeyDown,
     toggleEditor,
+    togglePreview,
+    closePreview,
   }
 }

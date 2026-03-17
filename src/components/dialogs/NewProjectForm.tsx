@@ -59,6 +59,9 @@ export function NewProjectForm({
           border="1px solid"
           borderColor="border.default"
           _focus={focusStyle}
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
         />
       </Field.Root>
 

@@ -177,7 +177,6 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
                       : tokens.colors.bg.panelAlt
                   }}
                   onClick={() => handleSwitchSession(s.id)}
-                  className="group"
                 >
                   <Box flex={1} textAlign="left" overflow="hidden">
                     <Flex justify="space-between" align="center" mb={0.5}>
@@ -209,14 +208,14 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
                     borderRadius="6px"
                     color={tokens.colors.text.disabled}
                     bg="transparent"
-                    opacity={0}
+                    opacity={0.4}
                     cursor="pointer"
-                    transition={`all ${tokens.transition.fast}`}
+                    transition={`opacity ${tokens.transition.fast}, color ${tokens.transition.fast}, background ${tokens.transition.fast}`}
                     _hover={{
+                      opacity: 1,
                       color: tokens.colors.status.error,
                       bg: 'rgba(248, 81, 73, 0.1)',
                     }}
-                    _groupHover={{ opacity: 1 }}
                     onClick={(e: React.MouseEvent) => handleDeleteSession(e, s.id)}
                     aria-label="Delete session"
                   >

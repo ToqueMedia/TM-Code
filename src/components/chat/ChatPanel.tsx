@@ -14,6 +14,8 @@ function ChatPanel() {
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
   const isStreaming = useChatStore(s => s.isStreaming)
+  // Subscribe to streaming version changes to trigger re-renders during streaming
+  useChatStore(s => s.streamingVersion)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
 
@@ -97,7 +99,7 @@ function ChatPanel() {
               />
             </Box>
             <Text fontSize="lg" color={tokens.colors.text.primary} fontWeight="600">
-              ToqueMedia Studio AI
+              TM Code
             </Text>
             <Text fontSize="sm" color={tokens.colors.text.subtle} textAlign="center" maxW="320px">
               Ask me to help with your code. I can create files, explain code, fix bugs, and more.

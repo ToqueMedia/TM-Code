@@ -1,14 +1,14 @@
 import { memo, useState, useCallback, useMemo } from 'react'
-import { Box, Flex, Text } from '@chakra-ui/react'
+import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import {
-  FiFile, FiEdit2, FiFilePlus, FiFolder, FiSearch, FiTerminal,
-  FiTrash2, FiGlobe, FiTool, FiChevronRight, FiChevronDown,
+  FiFolder, FiSearch, FiTerminal,
+  FiGlobe, FiTool, FiChevronRight, FiChevronDown,
   FiCheck, FiX, FiLoader,
 } from 'react-icons/fi'
 import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import InlineDiff from './InlineDiff'
-import DiffService from '../../services/agent/diffService'
 import { useChatStore } from '../../stores/chatStore'
+import { getFileIconUrl } from '@/utils/fileIcons'
 import { tokens } from '@/theme/tokens'
 import { detectLanguage, highlightLines } from '@/utils/syntaxHighlight'
 
@@ -18,19 +18,16 @@ interface ToolCallDisplayProps {
 }
 
 const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>> = {
-  read_file: FiFile,
-  write_file: FiFilePlus,
-  edit_file: FiEdit2,
-  create_file: FiFilePlus,
   list_directory: FiFolder,
   search_files: FiSearch,
   glob: FiSearch,
   execute_command: FiTerminal,
-  delete_file: FiTrash2,
-  rename_file: FiEdit2,
   create_directory: FiFolder,
   web_fetch: FiGlobe,
 }
+
+/** Tools where we show a file-extension icon instead of the generic tool icon. */
+const FILE_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'])
 
 function getInputSummary(toolName: string, input: Record<string, unknown>): string {
   switch (toolName) {
@@ -63,6 +60,8 @@ function isWriteTool(toolName: string): boolean {
 
 function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps) {
   const [expanded, setExpanded] = useState(false)
+  const filePath = (toolCall.input?.path || toolCall.input?.oldPath || '') as string
+  const useFileIcon = FILE_TOOLS.has(toolCall.toolName) && !!filePath
   const IconComponent = TOOL_ICONS[toolCall.toolName] || FiTool
   const inputSummary = getInputSummary(toolCall.toolName, toolCall.input)
   const isRunning = toolCall.status === 'running'
@@ -81,27 +80,17 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
     return highlightLines(resultText, readFileLang)
   }, [readFileLang, resultText])
 
-  const handleApprove = useCallback(async () => {
-    const chatStore = useChatStore.getState()
-    if (toolCall.diffResultId) {
-      await DiffService.getInstance().acceptDiff(toolCall.diffResultId)
-      chatStore.removePendingDiff(toolCall.diffResultId)
-    }
-    chatStore.updateToolCallDiffStatus(messageId, toolCall.id, 'approved')
-  }, [toolCall.diffResultId, toolCall.id, messageId])
+  const handleApprove = useCallback(() => {
+    useChatStore.getState().approveDiff(messageId, toolCall.id, toolCall.diffResultId)
+  }, [messageId, toolCall.id, toolCall.diffResultId])
 
-  const handleApproveAll = useCallback(async () => {
-    await useChatStore.getState().approveAllPendingDiffs()
+  const handleApproveAll = useCallback(() => {
+    useChatStore.getState().approveAllPendingDiffs()
   }, [])
 
   const handleDeny = useCallback(() => {
-    const chatStore = useChatStore.getState()
-    if (toolCall.diffResultId) {
-      DiffService.getInstance().rejectDiff(toolCall.diffResultId)
-      chatStore.removePendingDiff(toolCall.diffResultId)
-    }
-    chatStore.updateToolCallDiffStatus(messageId, toolCall.id, 'denied')
-  }, [toolCall.diffResultId, toolCall.id, messageId])
+    useChatStore.getState().rejectDiff(messageId, toolCall.id, toolCall.diffResultId)
+  }, [messageId, toolCall.id, toolCall.diffResultId])
 
   // Render inline diff for write tools
   if (isCompleted && hasDiff) {
@@ -111,9 +100,13 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
           <Box color={tokens.colors.accent.green} flexShrink={0}>
             <FiCheck size={12} />
           </Box>
-          <Box color={tokens.colors.text.muted} flexShrink={0}>
-            <IconComponent size={13} />
-          </Box>
+          {useFileIcon ? (
+            <Image src={getFileIconUrl(filePath)} w="14px" h="14px" flexShrink={0} />
+          ) : (
+            <Box color={tokens.colors.text.muted} flexShrink={0}>
+              <IconComponent size={13} />
+            </Box>
+          )}
           <Text
             color={tokens.colors.text.secondary}
             fontFamily={tokens.fontFamily.mono}
@@ -199,9 +192,13 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
         )}
 
         {/* Tool icon */}
-        <Box color={tokens.colors.text.muted} flexShrink={0}>
-          <IconComponent size={13} />
-        </Box>
+        {useFileIcon ? (
+          <Image src={getFileIconUrl(filePath)} w="14px" h="14px" flexShrink={0} />
+        ) : (
+          <Box color={tokens.colors.text.muted} flexShrink={0}>
+            <IconComponent size={13} />
+          </Box>
+        )}
 
         {/* Tool name */}
         <Text

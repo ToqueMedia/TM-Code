@@ -2,7 +2,8 @@ import { memo } from 'react'
 import { Flex, Text, Box } from '@chakra-ui/react'
 import { FiSquare } from 'react-icons/fi'
 import { useAgentStore } from '../../stores/agentStore'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
+import { usePermissionStore } from '../../stores/permissionStore'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
 
@@ -20,6 +21,8 @@ function AgentStatusBar() {
   const currentTurnCount = useChatStore(s => s.currentTurnCount)
 
   const handleStop = () => {
+    usePermissionStore.getState().clearPending()
+    resolveAllPendingDiffApprovals(false)
     AgentService.getInstance().cancelLoop()
     useAgentStore.getState().setStatus('idle')
     useChatStore.getState().finalizeAssistantMessage()
@@ -30,6 +33,7 @@ function AgentStatusBar() {
     thinking: { color: tokens.colors.toolCall.runningText, label: 'Thinking...', pulse: true },
     generating: { color: tokens.colors.accent.primary, label: 'Generating...', pulse: true },
     applying: { color: tokens.colors.accent.green, label: 'Applying changes...', pulse: true },
+    compressing: { color: tokens.colors.accent.orange, label: 'Compressing context...', pulse: true },
     error: { color: tokens.colors.accent.red, label: error || 'Error', pulse: false },
   }
 

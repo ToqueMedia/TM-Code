@@ -5,6 +5,8 @@ import { useProjectStore } from '../../stores/projectStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
+import { devServerManager } from '../devServerManager'
+import TypeScriptLspService from '../typescriptLspService'
 
 // === Types ===
 
@@ -59,10 +61,12 @@ class ToolExecutor {
       throw new Error(`Unknown tool: ${toolName}`)
     }
 
-    // Check permission before executing
-    const approved = await usePermissionStore.getState().requestPermission(toolName, input)
+    // Sensitive files require explicit developer authorization
+    const isSensitive = toolName === 'read_file' && this.isSensitiveFile(input.path as string)
+
+    const approved = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive)
     if (!approved) {
-      return 'Permission denied by user'
+      return 'Permission denied by user. The file may contain secrets — the developer chose not to share it.'
     }
 
     const result = await tool.execute(input)
@@ -139,21 +143,63 @@ class ToolExecutor {
     return '/' + resolved.join('/')
   }
 
+  // Files that may contain secrets — require explicit user authorization
+  private static readonly SENSITIVE_FILE_PATTERNS = [
+    /^\.env($|\.)/, // .env, .env.local, .env.production, etc.
+    /^\.npmrc$/,
+    /\.pem$/,
+    /\.key$/,
+    /credentials\.json$/,
+    /_secret/,
+  ]
+
+  private isSensitiveFile(filePath: string): boolean {
+    const filename = filePath.split('/').pop() || ''
+    return ToolExecutor.SENSITIVE_FILE_PATTERNS.some(p => p.test(filename))
+  }
+
   private static readonly BLOCKED_COMMANDS = [
+    // Destructive filesystem
     /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|--force|--recursive)\b/,
     /\brm\s+-rf\b/,
     /\bmkfs\b/,
     /\bdd\s+/,
     /\bformat\b/,
     /\b:\(\)\s*\{\s*:\|:&\s*\}\s*;/,  // fork bomb
-    /\bcurl\b.*\|\s*(bash|sh|zsh)/,    // remote code exec
-    /\bwget\b.*\|\s*(bash|sh|zsh)/,
     /\bchmod\s+[0-7]*777\b/,
-    /\bsudo\b/,
-    /\bsu\s+/,
     />\s*\/dev\/sd[a-z]/,
     /\bshutdown\b/,
     /\breboot\b/,
+
+    // Privilege escalation
+    /\bsudo\b/,
+    /\bsu\s+/,
+    /\bdoas\b/,
+    /\bpkexec\b/,
+
+    // Remote code execution / exfiltration
+    /\bcurl\b.*\|\s*(bash|sh|zsh)/,
+    /\bwget\b.*\|\s*(bash|sh|zsh)/,
+    /\bpython[23]?\s+-c\b/,
+    /\bnode\s+-e\b/,
+    /\bperl\s+-e\b/,
+    /\bruby\s+-e\b/,
+    /\bphp\s+-r\b/,
+
+    // Network tools
+    /\bnc\s+/,
+    /\bncat\b/,
+    /\bsocat\b/,
+
+    // Secret exfiltration
+    /\bprintenv\b/,
+    /\bcat\b.*\.env\b/,
+    /\bbase64\b.*\.env\b/,
+
+    // System services
+    /\blaunchctl\b/,
+    /\bsystemctl\b/,
+    /\bkillall\b/,
   ]
 
   private validateCommand(command: string): void {
@@ -602,6 +648,83 @@ class ToolExecutor {
         this.detectServerUrl(output)
 
         return output
+      }
+    })
+
+    // === start_dev_server ===
+    this.tools.set('start_dev_server', {
+      definition: {
+        name: 'start_dev_server',
+        description: 'Start a dev server as a background process. Returns immediately — the server runs in the background and the preview panel opens automatically when it is ready. Use this instead of execute_command for dev servers, watchers, or any long-running process. Only one dev server can run at a time (starting a new one stops the previous).',
+        input_schema: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'Dev server command (e.g., "npm run dev", "yarn dev", "npx vite")' }
+          },
+          required: ['command']
+        }
+      },
+      execute: async (input) => {
+        const command = input.command as string
+        this.validateCommand(command)
+        const projectRoot = this.getProjectRoot()
+
+        // Stop any existing server
+        if (devServerManager.isActive()) {
+          await devServerManager.stop()
+        }
+
+        try {
+          await devServerManager.start(projectRoot, command)
+          const url = devServerManager.getUrl()
+          if (url) {
+            return `Dev server started and running at ${url}. Preview panel opened automatically.`
+          }
+          return `Dev server starting with command: ${command}. The preview panel will open automatically when the server is ready (port 5174).`
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error)
+          return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`
+        }
+      }
+    })
+
+    // === get_diagnostics ===
+    this.tools.set('get_diagnostics', {
+      definition: {
+        name: 'get_diagnostics',
+        description: 'Get TypeScript/JavaScript diagnostics (type errors, syntax errors, unused variables) for a file. Uses the built-in language service — no compilation step needed. Returns errors and warnings with line numbers. Use after writing/editing code to verify correctness.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Absolute path to the TS/JS file to check' }
+          },
+          required: ['path']
+        }
+      },
+      execute: async (input) => {
+        const filePath = input.path as string
+        this.validatePathWithinProject(filePath)
+
+        const ext = filePath.split('.').pop()?.toLowerCase() || ''
+        if (!['ts', 'tsx', 'js', 'jsx'].includes(ext)) {
+          return `get_diagnostics only supports TypeScript/JavaScript files (.ts, .tsx, .js, .jsx). Got: .${ext}`
+        }
+
+        const lspService = TypeScriptLspService.getInstance()
+        try {
+          const diagnostics = await lspService.getDiagnostics(filePath)
+          if (diagnostics.length === 0) {
+            return `No errors or warnings in ${filePath.split('/').pop()}`
+          }
+
+          const lines = diagnostics.map(d =>
+            `${d.severity.toUpperCase()} (line ${d.line}, col ${d.column}): ${d.message} [TS${d.code}]`
+          )
+          return `${diagnostics.length} diagnostic(s) in ${filePath.split('/').pop()}:\n${lines.join('\n')}`
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error)
+          return `Could not get diagnostics: ${msg}. Try running "npx tsc --noEmit" via execute_command as a fallback.`
+        }
       }
     })
   }

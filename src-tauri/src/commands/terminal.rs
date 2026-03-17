@@ -103,6 +103,8 @@ pub async fn start_dev_server(
         .current_dir(&cwd)
         .env("FORCE_COLOR", "0")
         .env("NO_COLOR", "1")
+        .env("PORT", "5174")
+        .env("BROWSER", "none")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -234,25 +236,46 @@ pub async fn kill_process(
     }
 
     if cfg!(unix) {
-        // Kill the process group first — handles child processes spawned
-        // via process_group(0) (e.g. npm → node → vite).
-        // Negative PID = send signal to the entire process group.
+        // 1. SIGTERM the process group (npm → node → vite tree)
         let _ = Command::new("kill")
             .args(["-TERM", &format!("-{}", pid)])
             .output();
-
-        // Also kill the individual process as fallback
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output();
+
+        // 2. Wait then SIGKILL if still alive (non-blocking via tokio)
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // Check if process is still alive before SIGKILL
+        let still_alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if still_alive {
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{}", pid)])
+                .output();
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .output();
+        }
+
+        // 3. Nuclear fallback: kill anything on port 5174
+        // Dev servers often spawn child processes not in the process group.
+        let _ = Command::new("sh")
+            .args(["-c", "lsof -ti:5174 | xargs -r kill -9 2>/dev/null"])
+            .output();
     } else {
-        // On Windows, /T kills the entire process tree
+        // On Windows, /T kills the entire process tree, /F forces
         let _ = Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .output();
     }
 
-    // Always remove from tracked processes — we've done our best to kill it
+    // Always remove from tracked processes
     {
         let mut map = process_map.lock().map_err(|_| "Failed to lock process map")?;
         map.remove(&pid);

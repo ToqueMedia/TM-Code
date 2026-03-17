@@ -1,13 +1,19 @@
 import { memo, useEffect, useCallback } from 'react'
 import { Box, Flex, Text, VStack } from '@chakra-ui/react'
 import { FiPlus, FiFolder, FiCode, FiClock } from 'react-icons/fi'
+import { Menu, MenuItem, PredefinedMenuItem } from '@tauri-apps/api/menu'
+import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useChatStore } from '../../stores/chatStore'
 import { tokens } from '@/theme/tokens'
+import type { RecentProject } from '../../types/project'
 
 function formatTimeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime()
+  if (!dateStr) return ''
+  const date = new Date(dateStr)
+  if (isNaN(date.getTime())) return ''
+  const diff = Date.now() - date.getTime()
   const minutes = Math.floor(diff / 60000)
   if (minutes < 1) return 'now'
   if (minutes < 60) return `${minutes}m`
@@ -22,6 +28,59 @@ function getProjectInitial(name: string): string {
   return name.charAt(0).toUpperCase()
 }
 
+const isMac = /Mac/.test(navigator.platform || '')
+const revealLabel = isMac ? 'Mostrar no Finder' : 'Mostrar no Explorador de Ficheiros'
+
+async function switchProject(projectPath: string) {
+  const currentProject = useProjectStore.getState().currentProject
+  if (currentProject?.path === projectPath) return
+  const chatStore = useChatStore.getState()
+  if (currentProject) {
+    await chatStore.cleanupOnExit(currentProject.path).catch(() => {})
+  }
+  await useProjectStore.getState().openProject(projectPath)
+}
+
+async function switchAndOpenEditor(projectPath: string) {
+  await switchProject(projectPath)
+  useLayoutStore.getState().setViewMode('editor')
+}
+
+async function showProjectContextMenu(project: RecentProject) {
+  // Build all menu items in parallel to reduce IPC round-trips
+  const [openEditorItem, revealItem, separator1, removeItem, separator2, deleteItem] =
+    await Promise.all([
+      MenuItem.new({
+        text: 'Abrir no Editor',
+        action: () => switchAndOpenEditor(project.path),
+      }),
+      MenuItem.new({
+        text: revealLabel,
+        action: () => { revealItemInDir(project.path).catch(() => {}) },
+      }),
+      PredefinedMenuItem.new({ item: 'Separator' }),
+      MenuItem.new({
+        text: 'Remover dos Recentes',
+        action: () => {
+          useProjectStore.getState().removeFromRecent(project.id).catch(() => {})
+        },
+      }),
+      PredefinedMenuItem.new({ item: 'Separator' }),
+      MenuItem.new({
+        text: 'Eliminar Projecto...',
+        action: () => {
+          useProjectStore.getState().deleteProject(project.id, project.path).catch(() => {})
+        },
+      }),
+    ])
+
+  const menu = await Menu.new({
+    items: [openEditorItem, revealItem, separator1, removeItem, separator2, deleteItem],
+  })
+
+  await menu.popup()
+}
+
 function ProjectsSidebar() {
   const recentProjects = useProjectStore(s => s.recentProjects)
   const currentProject = useProjectStore(s => s.currentProject)
@@ -31,25 +90,16 @@ function ProjectsSidebar() {
     loadRecentProjects()
   }, [loadRecentProjects])
 
-  const handleSwitchProject = useCallback(async (path: string) => {
-    if (currentProject?.path === path) return
-    const chatStore = useChatStore.getState()
-    if (currentProject) {
-      await chatStore.cleanupOnExit(currentProject.path).catch(() => {})
-    }
-    await useProjectStore.getState().openProject(path)
-  }, [currentProject])
-
   const handleOpenInEditor = useCallback((e: React.MouseEvent, path: string) => {
     e.stopPropagation()
-    if (currentProject?.path !== path) {
-      handleSwitchProject(path).then(() => {
-        useLayoutStore.getState().setViewMode('editor')
-      })
-    } else {
-      useLayoutStore.getState().setViewMode('editor')
-    }
-  }, [currentProject, handleSwitchProject])
+    switchAndOpenEditor(path)
+  }, [])
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, project: RecentProject) => {
+    e.preventDefault()
+    e.stopPropagation()
+    showProjectContextMenu(project)
+  }, [])
 
   const handleNewProject = () => {
     useLayoutStore.getState().setShowTemplateSelector(true)
@@ -201,7 +251,8 @@ function ProjectsSidebar() {
                   bg: isActive ? tokens.colors.accent.primaryHover : tokens.colors.bg.hoverSubtle,
                 }}
                 cursor="pointer"
-                onClick={() => handleSwitchProject(project.path)}
+                onClick={() => switchProject(project.path)}
+                onContextMenu={(e) => handleContextMenu(e, project)}
                 role="group"
               >
                 <Flex align="center" gap={2.5} px={2.5} py={2}>

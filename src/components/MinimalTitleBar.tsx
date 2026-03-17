@@ -171,7 +171,7 @@ function MinimalTitleBar() {
         gap={2}
       >
         <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
-          ToqueMedia Studio
+          TM Code
         </Text>
         {currentProject && (
           <>

@@ -29,7 +29,7 @@ function ChatSuggestions() {
       px={8}
       pb={16}
     >
-      {/* Diamond icon */}
+      {/* ToqueMedia icon */}
       <Flex
         w="48px"
         h="48px"
@@ -60,7 +60,7 @@ function ChatSuggestions() {
         color={tokens.colors.text.muted}
         mb={2}
       >
-        Diamond can help you code, debug, and ship faster.
+        TM Code can help you code, debug, and ship faster.
       </Text>
 
       {projectPath && (

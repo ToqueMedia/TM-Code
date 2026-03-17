@@ -5,7 +5,7 @@
   font-weight: 400;
 
   color: white;
-  background-color: #0a0e13;
+  background-color: #0a0a0a;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -27,15 +27,15 @@ a:hover {
 input,
 button {
   border-radius: 8px;
-  border: 1px solid #30363d;
+  border: 1px solid rgba(255, 255, 255, 0.1);
   padding: 0.6em 1.2em;
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
   color: white;
-  background-color: rgba(21, 32, 43, 0.8);
+  background-color: rgba(255, 255, 255, 0.05);
   transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+  box-shadow: none;
 }
 
 button {
@@ -67,7 +67,7 @@ input:focus {
 /* Welcome screen specific styles */
 .welcome-container {
   min-height: 100vh;
-  background: #0a0e13;
+  background: #0a0a0a;
   color: white;
   overflow-x: hidden;
 }
@@ -75,7 +75,7 @@ input:focus {
 /* Code editor specific styles */
 .editor-container {
   height: 100vh;
-  background: #0d1117;
+  background: #0a0a0a;
   color: white;
   overflow: hidden;
 }

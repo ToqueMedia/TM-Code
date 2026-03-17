@@ -196,7 +196,7 @@ function LoginScreen() {
         <Box mb={8} textAlign="center">
           <img
             src="/isologo.svg"
-            alt="ToqueMedia Studio"
+            alt="TM Code"
             width={44}
             height={44}
             style={{ margin: '0 auto 14px', display: 'block' }}
@@ -213,7 +213,7 @@ function LoginScreen() {
               WebkitTextFillColor: 'transparent',
             }}
           >
-            ToqueMedia Studio
+            TM Code
           </Text>
           <Text
             fontSize="24px"

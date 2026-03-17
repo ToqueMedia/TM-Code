@@ -2,6 +2,14 @@ import { create } from 'zustand'
 
 export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor'
 export type PreviewMode = 'server' | 'static'
+export type DevLogLevel = 'info' | 'warn' | 'error'
+
+export interface DevServerLogEntry {
+  id: number
+  level: DevLogLevel
+  text: string
+  timestamp: number
+}
 
 interface LayoutState {
   viewMode: ViewMode
@@ -15,6 +23,11 @@ interface LayoutState {
   previewMode: PreviewMode
   previewHtmlContent: string | null
   previewSourcePath: string | null
+  /** Incremented to signal the preview iframe should reload */
+  previewReloadKey: number
+  /** Dev server console output */
+  devServerLogs: DevServerLogEntry[]
+  isConsoleVisible: boolean
 }
 
 interface LayoutActions {
@@ -25,6 +38,10 @@ interface LayoutActions {
   setPreviewServer: (url: string, pid: number) => void
   setStaticPreview: (html: string, sourcePath: string) => void
   clearPreviewServer: () => void
+  reloadPreview: () => void
+  addDevServerLog: (text: string, level?: DevLogLevel) => void
+  clearDevServerLogs: () => void
+  toggleConsole: () => void
   goBack: () => void
 }
 
@@ -40,6 +57,9 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   previewMode: 'server',
   previewHtmlContent: null,
   previewSourcePath: null,
+  previewReloadKey: 0,
+  devServerLogs: [],
+  isConsoleVisible: false,
 
   setViewMode: (mode: ViewMode) => {
     const current = get().viewMode
@@ -87,8 +107,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   },
 
   clearPreviewServer: () => {
-    // Only resets UI state — killing the process is devServerManager's
-    // responsibility. This avoids double-kill when both are called.
+    // Resets ALL preview UI state. Killing the process is devServerManager's job.
     set({
       isPreviewServerRunning: false,
       previewUrl: null,
@@ -96,7 +115,31 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
       previewMode: 'server',
       previewHtmlContent: null,
       previewSourcePath: null,
+      previewReloadKey: 0,
+      devServerLogs: [],
+      isConsoleVisible: false,
     })
+  },
+
+  reloadPreview: () => {
+    set(state => ({ previewReloadKey: state.previewReloadKey + 1 }))
+  },
+
+  addDevServerLog: (text: string, level: DevLogLevel = 'info') => {
+    set(state => ({
+      devServerLogs: [
+        ...state.devServerLogs,
+        { id: Date.now() + Math.random(), level, text, timestamp: Date.now() },
+      ],
+    }))
+  },
+
+  clearDevServerLogs: () => {
+    set({ devServerLogs: [] })
+  },
+
+  toggleConsole: () => {
+    set(state => ({ isConsoleVisible: !state.isConsoleVisible }))
   },
 
   goBack: () => {

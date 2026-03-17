@@ -18,6 +18,33 @@ interface StreamParserCallbacks {
   onEvent: (event: StreamEvent) => void
 }
 
+function processSSELines(
+  rawText: string,
+  callbacks: StreamParserCallbacks
+): boolean {
+  const lines = rawText.split('\n')
+  for (const line of lines) {
+    const trimmed = line.trim()
+
+    if (trimmed === '') continue
+    if (trimmed === 'data: [DONE]') {
+      callbacks.onEvent({ type: 'done' })
+      return true // stream finished
+    }
+    if (!trimmed.startsWith('data: ')) continue
+
+    let json: any
+    try {
+      json = JSON.parse(trimmed.slice(6))
+    } catch {
+      // Skip malformed JSON — don't swallow callback errors
+      continue
+    }
+    processChunk(json, callbacks)
+  }
+  return false
+}
+
 export async function parseSSEStream(
   response: Response,
   callbacks: StreamParserCallbacks
@@ -25,7 +52,6 @@ export async function parseSSEStream(
   const reader = response.body!.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-
   try {
     while (true) {
       const { done, value } = await reader.read()
@@ -33,26 +59,19 @@ export async function parseSSEStream(
 
       buffer += decoder.decode(value, { stream: true })
 
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
+      // Split keeping the last (possibly incomplete) line in the buffer
+      const lastNewline = buffer.lastIndexOf('\n')
+      if (lastNewline === -1) continue
 
-      for (const line of lines) {
-        const trimmed = line.trim()
+      const complete = buffer.slice(0, lastNewline)
+      buffer = buffer.slice(lastNewline + 1)
 
-        if (trimmed === '') continue
-        if (trimmed === 'data: [DONE]') {
-          callbacks.onEvent({ type: 'done' })
-          return
-        }
-        if (!trimmed.startsWith('data: ')) continue
+      if (processSSELines(complete, callbacks)) return
+    }
 
-        try {
-          const json = JSON.parse(trimmed.slice(6))
-          processChunk(json, callbacks)
-        } catch {
-          // Skip malformed JSON chunks
-        }
-      }
+    // Process any remaining data in the buffer after stream ends
+    if (buffer.trim()) {
+      processSSELines(buffer, callbacks)
     }
   } finally {
     reader.releaseLock()

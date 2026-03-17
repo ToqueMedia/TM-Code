@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Diamond IDE (internal name: `toquemedia-studio`) — a cross-platform desktop IDE built with **Tauri 2** (Rust backend) + **React 19** (TypeScript frontend). Features Monaco-based code editor, integrated terminal, file explorer, debugger, and search.
+**TM Code** (internal name: `toquemedia-studio`) — an **AI Agent-First desktop IDE** built with **Tauri 2** (Rust backend) + **React 19** (TypeScript frontend).
+
+Unlike Cursor/VS Code (editor-first, AI in sidebar), TM Code is **chat-first**: the developer starts in a conversational interface where the AI agent writes code, shows diffs inline, displays progress, and opens a live preview — all without leaving the chat. The Monaco editor is available as a secondary mode for manual editing.
+
+**UX flow:** Open project → Chat (default) → Agent works (diffs + preview visible) → Switch to Editor mode if needed → Back to Chat.
+
+> **Naming:** UI-visible text uses "TM Code". Internal identifiers (config dirs, Cargo.toml, tauri.conf.json) remain `toquemedia-studio` to avoid breaking existing user data.
 
 ## Common Commands
 
@@ -45,23 +51,25 @@ Frontend calls Rust functions via Tauri's `invoke()`. All backend commands are r
 ### Data Persistence
 - Project metadata: `~/.config/toquemedia-studio/projects/{project-id}/meta.json`
 - Global settings: `~/.config/toquemedia-studio/settings.json`
+- Chat sessions: `~/.toquemedia-studio/sessions/{project-hash}/session_*.json`
 - Project ID file: `.toquemedia-id` in project root
 
 ## Tech Stack
 
-- **Frontend**: React 19, TypeScript 5.8, Chakra UI v3, Monaco Editor, Zustand, xterm.js, Framer Motion
+- **Frontend**: React 19, TypeScript 5.9, Chakra UI v3, Monaco Editor, Zustand, xterm.js, Framer Motion
 - **Backend**: Rust (edition 2021), Tauri 2, tokio, serde
-- **Build**: Vite 7, ts-jest for testing
-- **Package Manager**: Yarn 1.22.19 (Node >= 20.19.0)
+- **Build**: Vite 8, ts-jest for testing
+- **Package Manager**: Yarn 1.22.22 (Node >= 20.19.0)
 
 ## Design System
 
-Dark theme with GitHub-inspired palette:
-- Backgrounds: `#0a0e13` (welcome), `#0d1117` (editor)
-- Primary text: `#e6edf3`, secondary: `#8b949e`
-- Accent colors: blue `#58a6ff`, purple `#a371f7`, green `#2ea043`, orange `#f77f00`
-- Borders: `rgba(48, 54, 61, 0.8)`
-- Glassmorphism effects with backdrop blur
+Dark theme with pink/magenta brand accent (`src/theme/tokens.ts` is the single source of truth):
+- Backgrounds: `#0a0a0a` (app/welcome), `#0f0f0f` (sidebar), `#1a1a1a` (overlay/cards)
+- Primary text: `#e6edf3`, secondary: `#8b949e`, muted: `#7d8590`
+- Brand accent: `#FE1063` (pink/magenta), gradient `#FE1063 → #C10A69`
+- Secondary accents: purple `#a371f7`, green `#2ea043`, orange `#f77f00`
+- Borders: `#262626` (default), `rgba(255, 255, 255, 0.08)` (glass)
+- Glassmorphism effects with backdrop blur, pink glow shadows
 
 ## Conventions
 
@@ -71,3 +79,4 @@ Dark theme with GitHub-inspired palette:
 - Service layer pattern: components → stores → services → Tauri invoke
 - Lazy loading for heavy components (Monaco, Debugger)
 - Web Workers for expensive operations (file tree indexing)
+- **UI quality is not over-engineering.** Components should always be visually polished, using `tokens.ts` design tokens, proper spacing, transitions, and glassmorphism effects. "Avoid over-engineering" means no unnecessary abstractions or extra features — not skipping visual polish.

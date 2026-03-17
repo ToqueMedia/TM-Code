@@ -13,10 +13,13 @@ function PromptBar() {
     isStreaming,
     isDisabled,
     viewMode,
+    hasPreview,
     handleSend,
     handleStop,
     handleKeyDown,
     toggleEditor,
+    togglePreview,
+    closePreview,
   } = usePromptBar()
 
   return (
@@ -50,7 +53,10 @@ function PromptBar() {
             viewMode={viewMode}
             isStreaming={isStreaming}
             hasInput={!!input.trim() && !isDisabled}
+            hasPreview={hasPreview}
             onToggleEditor={toggleEditor}
+            onTogglePreview={togglePreview}
+            onClosePreview={closePreview}
             onSend={handleSend}
             onStop={handleStop}
           />

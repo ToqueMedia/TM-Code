@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useChatStore } from '../stores/chatStore'
 import { useProjectStore } from '../stores/projectStore'
+import { useLayoutStore } from '../stores/layoutStore'
 import { devServerManager } from './devServerManager'
 import { templateService, Template } from './templateService'
 import { logger } from '../utils/logger'
@@ -23,7 +23,7 @@ export async function setupScaffoldedProject(
 ): Promise<void> {
   await templateService.scaffold(template.id, projectPath)
   await useProjectStore.getState().openProject(projectPath)
-  await useChatStore.getState().createNewSession(projectPath)
+  // Session creation is handled by App.tsx's useEffect on currentProject change
 
   // Post-scaffold pipeline runs in background (install + dev server)
   postScaffoldPipeline(projectPath, template)
@@ -40,11 +40,12 @@ async function postScaffoldPipeline(
   projectPath: string,
   template: Template,
 ): Promise<void> {
-  const chatStore = useChatStore.getState()
+  const layoutStore = useLayoutStore.getState()
 
   // === Phase 1: Install dependencies ===
-  chatStore.addSystemMessage(
-    `Installing dependencies (${template.installCommand})... This may take a minute.`,
+  layoutStore.addDevServerLog(
+    `Installing dependencies (${template.installCommand})...`,
+    'info',
   )
 
   const installSuccess = await runInstall(projectPath, template)
@@ -55,15 +56,16 @@ async function postScaffoldPipeline(
   }
 
   // === Phase 2: Start dev server ===
-  chatStore.addSystemMessage(`Starting dev server (${template.devCommand})...`)
+  layoutStore.addDevServerLog(`Starting dev server (${template.devCommand})...`, 'info')
 
   try {
     await devServerManager.start(projectPath, template.devCommand)
     // URL detection + preview transition happens inside devServerManager
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
-    chatStore.addSystemMessage(
-      `Could not start dev server: ${msg}\nYou can start it manually: ${template.devCommand}`,
+    layoutStore.addDevServerLog(
+      `Could not start dev server: ${msg}. You can start it manually: ${template.devCommand}`,
+      'error',
     )
     logger.error('postScaffold', 'Dev server failed:', error)
   }
@@ -81,7 +83,7 @@ async function runInstall(
   projectPath: string,
   template: Template,
 ): Promise<boolean> {
-  const chatStore = useChatStore.getState()
+  const layoutStore = useLayoutStore.getState()
 
   try {
     const result = await invoke<CommandResult>('execute_command', {
@@ -90,19 +92,21 @@ async function runInstall(
     })
 
     if (!result.success) {
-      chatStore.addSystemMessage(
-        `Failed to install dependencies (exit code ${result.exit_code}).\n${result.stderr?.slice(0, 500) || ''}\nYou can try running "${template.installCommand}" manually.`,
+      layoutStore.addDevServerLog(
+        `Failed to install dependencies (exit code ${result.exit_code}). ${result.stderr?.slice(0, 300) || ''}`,
+        'error',
       )
       logger.error('postScaffold', 'Install failed:', result.stderr)
       return false
     }
 
-    chatStore.addSystemMessage('Dependencies installed successfully')
+    layoutStore.addDevServerLog('Dependencies installed successfully', 'info')
     return true
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
-    chatStore.addSystemMessage(
-      `Failed to install dependencies: ${msg}\nYou can try running "${template.installCommand}" manually.`,
+    layoutStore.addDevServerLog(
+      `Failed to install dependencies: ${msg}`,
+      'error',
     )
     logger.error('postScaffold', 'Install failed:', error)
     return false

@@ -1,18 +1,21 @@
 import { memo, useEffect } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiAlertTriangle } from 'react-icons/fi'
+import { FiAlertTriangle, FiShield } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 
 interface PermissionDialogProps {
   toolName: string
   args: Record<string, unknown>
+  sensitive?: boolean
   onApprove: () => void
   onApproveAll: () => void
   onDeny: () => void
 }
 
-function getToolLabel(toolName: string): string {
+function getToolLabel(toolName: string, sensitive?: boolean): string {
+  if (sensitive) return 'Read sensitive file'
   switch (toolName) {
+    case 'read_file': return 'Read file'
     case 'write_file': return 'Write file'
     case 'create_file': return 'Create file'
     case 'create_directory': return 'Create directory'
@@ -25,6 +28,7 @@ function getToolLabel(toolName: string): string {
 
 function getPreviewPath(toolName: string, args: Record<string, unknown>): string | null {
   switch (toolName) {
+    case 'read_file':
     case 'write_file':
     case 'create_file':
     case 'delete_file':
@@ -58,6 +62,9 @@ function getPreviewContent(toolName: string, args: Record<string, unknown>): str
 const isDestructive = (toolName: string) =>
   toolName === 'delete_file' || toolName === 'execute_command'
 
+const isWarning = (toolName: string, sensitive?: boolean) =>
+  isDestructive(toolName) || !!sensitive
+
 const buttonBase: React.CSSProperties = {
   padding: '6px 14px',
   borderRadius: '6px',
@@ -68,7 +75,7 @@ const buttonBase: React.CSSProperties = {
   transition: 'all 0.15s ease',
 }
 
-function PermissionDialog({ toolName, args, onApprove, onApproveAll, onDeny }: PermissionDialogProps) {
+function PermissionDialog({ toolName, args, sensitive, onApprove, onApproveAll, onDeny }: PermissionDialogProps) {
   // Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -92,14 +99,14 @@ function PermissionDialog({ toolName, args, onApprove, onApproveAll, onDeny }: P
 
   const path = getPreviewPath(toolName, args)
   const content = getPreviewContent(toolName, args)
-  const destructive = isDestructive(toolName)
+  const warning = isWarning(toolName, sensitive)
 
   return (
     <Box
       mx={4}
       mb={2}
       bg={tokens.colors.bg.panel}
-      border={`1px solid ${destructive ? tokens.colors.accent.redMuted : tokens.colors.border.panel}`}
+      border={`1px solid ${warning ? (sensitive ? 'rgba(247, 127, 0, 0.3)' : tokens.colors.accent.redMuted) : tokens.colors.border.panel}`}
       borderRadius="10px"
       overflow="hidden"
       maxW="800px"
@@ -108,7 +115,9 @@ function PermissionDialog({ toolName, args, onApprove, onApproveAll, onDeny }: P
     >
       {/* Header */}
       <Flex align="center" gap={2} px={4} py={3}>
-        {destructive ? (
+        {sensitive ? (
+          <FiShield size={16} color={tokens.colors.accent.orange} />
+        ) : warning ? (
           <FiAlertTriangle size={16} color={tokens.colors.accent.orange} />
         ) : (
           <Box
@@ -126,9 +135,18 @@ function PermissionDialog({ toolName, args, onApprove, onApproveAll, onDeny }: P
           />
         )}
         <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
-          The agent wants to: {getToolLabel(toolName)}
+          The agent wants to: {getToolLabel(toolName, sensitive)}
         </Text>
       </Flex>
+
+      {/* Sensitive file warning */}
+      {sensitive && (
+        <Box px={4} pb={2}>
+          <Text fontSize="11px" color={tokens.colors.accent.orange}>
+            This file may contain secrets (API keys, tokens, passwords). The full content will be shared with the AI model.
+          </Text>
+        </Box>
+      )}
 
       {/* Path */}
       {path && (
@@ -136,7 +154,7 @@ function PermissionDialog({ toolName, args, onApprove, onApproveAll, onDeny }: P
           <Text
             fontSize="12px"
             fontFamily={tokens.fontFamily.mono}
-            color={destructive ? tokens.colors.accent.red : tokens.colors.text.secondary}
+            color={warning ? tokens.colors.accent.orange : tokens.colors.text.secondary}
           >
             {path}
           </Text>

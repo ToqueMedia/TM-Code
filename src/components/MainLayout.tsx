@@ -23,7 +23,6 @@ import { ErrorBoundary } from './ErrorBoundary'
 import { RequirementsDialog } from './dialogs'
 import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
-import { useChatStore } from '../stores/chatStore'
 import { Template } from '../services/templateService'
 import { verifyRequirements, CheckResult } from '../services/environmentCheck'
 import { setupScaffoldedProject } from '../services/postScaffoldPipeline'
@@ -116,8 +115,7 @@ function MainLayout() {
       if (selected) {
         useLayoutStore.getState().setShowTemplateSelector(false)
         await useProjectStore.getState().openProject(selected as string)
-        const chatStore = useChatStore.getState()
-        await chatStore.createNewSession(selected as string)
+        // Session creation is handled by App.tsx's useEffect on currentProject change
       }
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
@@ -229,7 +227,7 @@ function MainLayout() {
     <Flex
       direction="column"
       height="100vh"
-      bg={tokens.colors.bg.mainLayout}
+      bg="transparent"
       color={tokens.colors.text.primary}
       overflow="hidden"
       fontFamily={tokens.fontFamily.ui}
@@ -299,11 +297,12 @@ function MainLayout() {
             )}
 
             {/* Main view content */}
-            {viewMode === 'chat' && (
+            {/* ChatView stays mounted (hidden via CSS) to preserve session, messages and scroll position */}
+            <Box display={viewMode === 'chat' ? 'flex' : 'none'} flex="1" overflow="hidden">
               <ErrorBoundary>
                 <ChatView />
               </ErrorBoundary>
-            )}
+            </Box>
             {viewMode === 'generating' && (
               <ErrorBoundary>
                 <GeneratingView />
@@ -322,18 +321,20 @@ function MainLayout() {
           </Flex>
 
           {/* Permission dialog - shown above PromptBar when agent needs approval */}
-          {pendingPermission && viewMode !== 'editor' && (
+          {/* In preview mode, PermissionDialog is rendered inside PreviewView */}
+          {pendingPermission && viewMode !== 'editor' && viewMode !== 'preview' && (
             <PermissionDialog
               toolName={pendingPermission.toolName}
               args={pendingPermission.args}
+              sensitive={pendingPermission.sensitive}
               onApprove={() => usePermissionStore.getState().approve()}
               onApproveAll={() => usePermissionStore.getState().approveAll()}
               onDeny={() => usePermissionStore.getState().deny()}
             />
           )}
 
-          {/* PromptBar - always visible except in full editor mode */}
-          {viewMode !== 'editor' && <PromptBar />}
+          {/* PromptBar - hidden in editor and preview (preview has its own) */}
+          {viewMode !== 'editor' && viewMode !== 'preview' && <PromptBar />}
         </Flex>
       </Flex>
 

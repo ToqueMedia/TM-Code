@@ -188,7 +188,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   return (
     <Flex
       minHeight="100vh"
-      bg={tokens.colors.bg.welcome}
+      bg="#0a0a0a"
       color={tokens.colors.text.primary}
       data-tauri-drag-region
       onMouseDown={handleDrag}
@@ -203,27 +203,21 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         />
       </Box>
 
-      {/* Animated Background */}
-      <Box
-        position="fixed"
-        top="0"
-        left="0"
-        width="100%"
-        height="100%"
-        zIndex="-1"
-        background={tokens.gradient.welcomeBg}
-        pointerEvents="none"
-      />
-
       <WelcomeSidebar
         recentProjects={recentProjects}
         onNewProject={handleNewProject}
+        onProjectFromScratch={handleSelectEmpty}
         onOpenFolder={handleOpenFolder}
         onCloneRepository={() => cloneDialog.setOpen(true)}
         onOpenProject={onOpenProject}
       />
 
-      <WelcomeHero onOpenFolder={handleOpenFolder} />
+      <WelcomeHero
+        onNewProject={handleNewProject}
+        onProjectFromScratch={handleSelectEmpty}
+        onOpenFolder={handleOpenFolder}
+        onCloneRepository={() => cloneDialog.setOpen(true)}
+      />
 
       <CloneDialog dialog={cloneDialog} />
     </Flex>

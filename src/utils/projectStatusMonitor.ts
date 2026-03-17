@@ -1,86 +1,75 @@
-// src/utils/projectStatusMonitor.ts
-import { invoke } from '@tauri-apps/api/core';
-import { useProjectStore } from '../stores/projectStore';
-import { logger } from './logger';
+import { invoke } from '@tauri-apps/api/core'
+import { useProjectStore } from '../stores/projectStore'
+import { useToastStore } from '../stores/toastStore'
+import { logger } from './logger'
 
 export interface ProjectStatus {
-  exists: boolean;
-  permissionsChanged: boolean;
-  lastModified?: number;
+  exists: boolean
+  permissionsChanged: boolean
+  lastModified?: number
 }
 
+/**
+ * Checks project status only when the user returns to the app (visibility change).
+ * Replaces the previous 5-second polling which was wasteful — directory deletion
+ * and permission changes are rare events that only matter when the user is active.
+ */
 export class ProjectStatusMonitor {
-  private static instance: ProjectStatusMonitor;
-  private intervalId: number | null = null;
-  private checkInterval = 5000; // 5 seconds
+  private static instance: ProjectStatusMonitor
+  private listening = false
+  private handler: (() => void) | null = null
 
   private constructor() {}
 
   static getInstance(): ProjectStatusMonitor {
     if (!ProjectStatusMonitor.instance) {
-      ProjectStatusMonitor.instance = new ProjectStatusMonitor();
+      ProjectStatusMonitor.instance = new ProjectStatusMonitor()
     }
-    return ProjectStatusMonitor.instance;
+    return ProjectStatusMonitor.instance
   }
 
   async checkProjectStatus(path: string): Promise<ProjectStatus> {
     try {
-      const status: ProjectStatus = await invoke('check_project_status', { path });
-      return status;
+      const status: ProjectStatus = await invoke('check_project_status', { path })
+      return status
     } catch (error) {
-      logger.error('project', 'Failed to check project status:', error);
-      return {
-        exists: false,
-        permissionsChanged: false
-      };
+      logger.error('project', 'Failed to check project status:', error)
+      return { exists: false, permissionsChanged: false }
     }
   }
 
   startMonitoring() {
-    // Clear any existing interval
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
+    if (this.listening) return
+
+    this.handler = async () => {
+      if (document.visibilityState !== 'visible') return
+
+      const { currentProject } = useProjectStore.getState()
+      if (!currentProject) return
+
+      const status = await this.checkProjectStatus(currentProject.path)
+
+      if (!status.exists) {
+        logger.warn('project', 'Project directory no longer exists')
+        useToastStore.getState().addToast('error', 'Project directory no longer exists. The project has been closed.')
+        useProjectStore.getState().closeProject()
+      }
+
+      if (status.permissionsChanged) {
+        logger.warn('project', 'Project permissions have changed')
+        useToastStore.getState().addToast('warning', 'Project directory permissions have changed. Some operations may fail.')
+      }
     }
 
-    // Start monitoring
-    this.intervalId = window.setInterval(async () => {
-      const { currentProject } = useProjectStore.getState();
-      if (currentProject) {
-        const status = await this.checkProjectStatus(currentProject.path);
-        
-        // Handle project deletion
-        if (!status.exists) {
-          logger.warn('project', 'Project directory no longer exists');
-          // Show notification to user and close project
-          this.showNotification('Project directory no longer exists. Closing project.', 'error');
-          useProjectStore.getState().closeProject();
-        }
-        
-        // Handle permission changes
-        if (status.permissionsChanged) {
-          logger.warn('project', 'Project permissions have changed');
-          // Show notification to user
-          this.showNotification('Project permissions have changed. Some operations may be restricted.', 'warning');
-        }
-      }
-    }, this.checkInterval);
+    document.addEventListener('visibilitychange', this.handler)
+    this.listening = true
   }
 
   stopMonitoring() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    if (this.handler) {
+      document.removeEventListener('visibilitychange', this.handler)
+      this.handler = null
     }
-  }
-
-  private showNotification(message: string, type: 'info' | 'warning' | 'error') {
-    // In a real implementation, we would use a proper notification system
-    // For now, we'll just show an alert
-    logger.info('project', `[${type.toUpperCase()}] ${message}`);
-    
-    // You can replace this with a proper notification system like:
-    // - Toast notifications
-    // - Status bar messages
-    // - Dialog boxes
+    this.listening = false
   }
 }
