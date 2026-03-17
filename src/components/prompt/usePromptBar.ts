@@ -8,7 +8,9 @@ import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { devServerManager } from '../../services/devServerManager'
 import AgentService from '../../services/agent/agentService'
+import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
+import MCPService from '../../services/mcp/mcpService'
 
 export function usePromptBar() {
   const input = useChatStore(s => s.draftInput)
@@ -146,8 +148,26 @@ export function usePromptBar() {
 
       const projectPath = currentProject?.path || ''
       const projectType = currentProject?.projectType || 'unknown'
+
+      // Refresh MCP tools before building prompt (handles mid-session server changes)
+      const mcpService = MCPService.getInstance()
+      const mcpTools = mcpService.getAllTools()
+      if (mcpTools.length > 0) {
+        const toolExecutor = ToolExecutor.getInstance()
+        toolExecutor.registerMCPTools(mcpTools, (serverName, toolName, args) =>
+          mcpService.callTool(serverName, toolName, args)
+        )
+        AgentService.getInstance().refreshTools()
+      }
+
+      // Build system prompt with MCP tool info for the tool_routing section
       const contextBuilder = ContextBuilder.getInstance()
-      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType)
+      const mcpToolSummaries = mcpTools.map(t => ({
+        name: t.name,
+        description: t.description,
+        serverName: t.serverName,
+      }))
+      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries)
 
       const history = useChatStore.getState().conversationHistory
       const agentService = AgentService.getInstance()

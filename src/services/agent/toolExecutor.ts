@@ -7,6 +7,7 @@ import { useLayoutStore } from '../../stores/layoutStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { devServerManager } from '../devServerManager'
 import TypeScriptLspService from '../typescriptLspService'
+import type { MCPTool } from '../mcp/mcpService'
 
 // === Types ===
 
@@ -82,6 +83,35 @@ class ToolExecutor {
         parameters: t.definition.input_schema
       }
     }))
+  }
+
+  /**
+   * Registers MCP tools, replacing any previously registered MCP tools.
+   * Tool names use double-underscore separator: mcp__serverName__toolName
+   */
+  registerMCPTools(mcpTools: MCPTool[], callToolFn: (serverName: string, toolName: string, args: Record<string, unknown>) => Promise<string>): void {
+    // Remove old MCP tools
+    for (const [name] of this.tools) {
+      if (name.startsWith('mcp__')) {
+        this.tools.delete(name)
+      }
+    }
+
+    // Register new MCP tools
+    for (const tool of mcpTools) {
+      const fullName = `mcp__${tool.serverName}__${tool.name}`
+
+      this.tools.set(fullName, {
+        definition: {
+          name: fullName,
+          description: `[MCP: ${tool.serverName}] ${tool.description}`,
+          input_schema: tool.inputSchema as ToolDefinition['input_schema'],
+        },
+        execute: async (input: Record<string, unknown>) => {
+          return await callToolFn(tool.serverName, tool.name, input)
+        },
+      })
+    }
   }
 
   private truncateResult(result: string, maxChars: number = 30000): string {

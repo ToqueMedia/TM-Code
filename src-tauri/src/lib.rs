@@ -2,6 +2,7 @@ mod commands;
 use commands::debugger::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
+use commands::mcp::*;
 use commands::project::*;
 use commands::search::*;
 use commands::terminal::*;
@@ -22,11 +23,13 @@ fn is_oauth_domain(host: &str) -> bool {
 pub fn run() {
     let (command_history, process_map) = commands::terminal::init_terminal_state();
     let debugger_state = commands::debugger::DebuggerState::new();
+    let mcp_state = commands::mcp::McpState::new();
 
     tauri::Builder::default()
         .manage(command_history)
         .manage(process_map)
         .manage(debugger_state)
+        .manage(mcp_state)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -104,7 +107,15 @@ pub fn run() {
             get_variables,
             copy_directory,
             scaffold_template,
-            glob_files
+            glob_files,
+            list_skills_bundled,
+            read_skill_content,
+            mcp_start_server,
+            mcp_stop_server,
+            mcp_send_request,
+            mcp_send_notification,
+            mcp_list_servers,
+            mcp_stop_all_servers
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

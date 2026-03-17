@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor'
+export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings'
 export type PreviewMode = 'server' | 'static'
 export type DevLogLevel = 'info' | 'warn' | 'error'
 

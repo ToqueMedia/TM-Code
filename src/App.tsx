@@ -7,7 +7,12 @@ import LoginScreen from './components/auth/LoginScreen';
 import { useProjectStore } from './stores/projectStore';
 import { useAuthStore } from './stores/authStore';
 import { useChatStore } from './stores/chatStore';
+import { useSkillStore } from './stores/skillStore';
 import FirebaseAuthService from './services/auth/firebaseAuth';
+import SkillService from './services/agent/skillService';
+import MCPService from './services/mcp/mcpService';
+import ToolExecutor from './services/agent/toolExecutor';
+import AgentService from './services/agent/agentService';
 import { logger } from './utils/logger';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useEffect, useRef, useState } from 'react';
@@ -89,6 +94,54 @@ function App() {
 			chatStore.createNewSession(projectPath);
 		});
 	}, [currentProject]);
+
+	// Initialize MCP servers and preload skills when project changes
+	useEffect(() => {
+		if (!currentProject?.path) return;
+
+		const projectPath = currentProject.path;
+		let cancelled = false;
+
+		async function initializeServices() {
+			// Load skills into store (for status bar display)
+			try {
+				const skillService = SkillService.getInstance();
+				skillService.invalidateCache();
+				const skills = await skillService.loadSkills(projectPath);
+				if (!cancelled) {
+					useSkillStore.getState().setSkills(skills);
+				}
+			} catch (error) {
+				logger.warn('app', 'Failed to preload skills:', error);
+			}
+
+			// Initialize MCP servers from config
+			try {
+				const mcpService = MCPService.getInstance();
+				await mcpService.initialize(projectPath);
+
+				if (!cancelled) {
+					// Register MCP tools with the agent's tool executor
+					const mcpTools = mcpService.getAllTools();
+					if (mcpTools.length > 0) {
+						const toolExecutor = ToolExecutor.getInstance();
+						toolExecutor.registerMCPTools(mcpTools, (serverName, toolName, args) =>
+							mcpService.callTool(serverName, toolName, args)
+						);
+						AgentService.getInstance().refreshTools();
+					}
+				}
+			} catch (error) {
+				logger.warn('app', 'Failed to initialize MCP servers:', error);
+			}
+		}
+
+		initializeServices();
+
+		return () => {
+			cancelled = true;
+		};
+	}, [currentProject?.path]);
 
 	// Save session on window close (beforeunload fires synchronously but we fire-and-forget the save)
 	useEffect(() => {

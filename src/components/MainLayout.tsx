@@ -21,6 +21,7 @@ import ProjectsSidebar from './chat/ProjectsSidebar'
 import TemplateSelector from './TemplateSelector'
 import { ErrorBoundary } from './ErrorBoundary'
 import { RequirementsDialog } from './dialogs'
+import SettingsView from './views/SettingsView'
 import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
 import { Template } from '../services/templateService'
@@ -318,6 +319,11 @@ function MainLayout() {
                 <EditorView />
               </ErrorBoundary>
             )}
+            {viewMode === 'settings' && (
+              <ErrorBoundary>
+                <SettingsView />
+              </ErrorBoundary>
+            )}
           </Flex>
 
           {/* Permission dialog - shown above PromptBar when agent needs approval */}
@@ -333,8 +339,8 @@ function MainLayout() {
             />
           )}
 
-          {/* PromptBar - hidden in editor and preview (preview has its own) */}
-          {viewMode !== 'editor' && viewMode !== 'preview' && <PromptBar />}
+          {/* PromptBar - hidden in editor, preview, and settings */}
+          {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && <PromptBar />}
         </Flex>
       </Flex>
 

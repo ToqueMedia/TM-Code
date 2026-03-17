@@ -1,4 +1,5 @@
 use glob::glob as glob_match;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
@@ -171,4 +172,93 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
     }
 
     Ok(results)
+}
+
+// === Bundled Skills ===
+
+#[derive(Debug, Serialize)]
+pub struct SkillEntry {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillContent {
+    pub content: String,
+    pub references: Vec<String>,
+}
+
+/// Lists all bundled skills from the app's resource directory.
+/// Each skill is a directory containing a SKILL.md file.
+#[tauri::command]
+pub async fn list_skills_bundled(app: tauri::AppHandle) -> Result<Vec<SkillEntry>, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Failed to resolve resource directory: {}", e))?;
+
+    let skills_dir = resource_dir.join("resources").join("skills");
+
+    if !skills_dir.exists() || !skills_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+
+    let read_dir = std::fs::read_dir(&skills_dir)
+        .map_err(|e| format!("Failed to read skills directory: {}", e))?;
+
+    for entry in read_dir {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            let skill_file = path.join("SKILL.md");
+            if skill_file.exists() {
+                let name = entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string();
+                entries.push(SkillEntry {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(entries)
+}
+
+/// Reads the content of a skill directory (SKILL.md + optional references/*.md).
+#[tauri::command]
+pub async fn read_skill_content(skill_path: String) -> Result<SkillContent, String> {
+    let base = Path::new(&skill_path);
+
+    // Read main SKILL.md
+    let skill_file = base.join("SKILL.md");
+    let content = std::fs::read_to_string(&skill_file)
+        .map_err(|e| format!("Failed to read SKILL.md: {}", e))?;
+
+    // Read optional references
+    let mut references = Vec::new();
+    let refs_dir = base.join("references");
+    if refs_dir.exists() && refs_dir.is_dir() {
+        if let Ok(read_dir) = std::fs::read_dir(&refs_dir) {
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "md") {
+                    if let Ok(ref_content) = std::fs::read_to_string(&path) {
+                        references.push(ref_content);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(SkillContent {
+        content,
+        references,
+    })
 }
