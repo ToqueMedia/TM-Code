@@ -8,6 +8,7 @@ import { useMcpStore } from '../../stores/mcpStore'
 import { useContainerStore } from '../../stores/containerStore'
 import MessageBubble from '../chat/MessageBubble'
 import ChatSkeleton from '../chat/ChatSkeleton'
+import AttachContainerDialog from '../chat/AttachContainerDialog'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
 import { tokens } from '@/theme/tokens'
@@ -24,17 +25,23 @@ function ChatView() {
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const isolationMode = useContainerStore(s => s.isolationMode)
+  const devcontainerName = useContainerStore(s => s.devcontainerName)
+  const [showAttachDialog, setShowAttachDialog] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
   const projectPath = currentProject?.path || ''
 
+  // Auto-scroll to bottom when messages change
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [messages, messages.length, messages[messages.length - 1]?.content])
+    const rafId = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight
+    })
+    return () => cancelAnimationFrame(rafId)
+  }, [messages.length, messages[messages.length - 1]?.content, isStreaming])
 
   return (
     <Flex
@@ -82,15 +89,25 @@ function ChatView() {
           {isolationMode === 'docker' && (
             <IsolationPill
               icon={FiBox}
-              label="Ambiente isolado (Docker)"
+              label={devcontainerName ? `${devcontainerName} (Docker)` : 'Ambiente isolado (Docker)'}
               color={tokens.colors.accent.greenBright}
+              onClick={() => setShowAttachDialog(true)}
             />
           )}
           {isolationMode === 'app-level' && (
             <IsolationPill
               icon={FiShield}
-              label="Ambiente isolado"
+              label={devcontainerName || 'Ambiente isolado'}
               color="#58a6ff"
+              onClick={() => setShowAttachDialog(true)}
+            />
+          )}
+          {isolationMode === 'none' && (
+            <IsolationPill
+              icon={FiBox}
+              label="Attach container"
+              color={tokens.colors.text.muted}
+              onClick={() => setShowAttachDialog(true)}
             />
           )}
           <McpIndicator
@@ -142,13 +159,19 @@ function ChatView() {
             </Box>
           )}
         </Box>
+
+      {/* Attach Container Dialog */}
+      <AttachContainerDialog
+        isOpen={showAttachDialog}
+        onClose={() => setShowAttachDialog(false)}
+      />
     </Flex>
   )
 }
 
 // ─── Isolation Pill ──────────────────────────────────────────────────────────
 
-function IsolationPill(props: { icon: React.ElementType; label: string; color: string }) {
+function IsolationPill(props: { icon: React.ElementType; label: string; color: string; onClick?: () => void }) {
   const Icon = props.icon
   return (
     <HStack
@@ -159,7 +182,10 @@ function IsolationPill(props: { icon: React.ElementType; label: string; color: s
       bg="rgba(255, 255, 255, 0.04)"
       border="1px solid"
       borderColor="rgba(255, 255, 255, 0.06)"
+      cursor="pointer"
       transition={`all ${tokens.transition.fast}`}
+      _hover={{ bg: 'rgba(255, 255, 255, 0.08)', borderColor: 'rgba(255, 255, 255, 0.12)' }}
+      onClick={props.onClick}
     >
       <Icon size={10} color={props.color} />
       <Text fontSize="10px" color={props.color} fontWeight="600" fontFamily={tokens.fontFamily.mono}>

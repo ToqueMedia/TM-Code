@@ -2,6 +2,7 @@ mod commands;
 use commands::checkpoint::*;
 use commands::container::*;
 use commands::debugger::*;
+use commands::devcontainer::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
 use commands::mcp::*;
@@ -136,7 +137,11 @@ pub fn run() {
             get_active_container_info,
             set_active_project,
             clear_active_project,
-            cleanup_orphaned_containers
+            cleanup_orphaned_containers,
+            detect_devcontainer,
+            list_running_containers,
+            attach_to_container,
+            is_attached_container
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

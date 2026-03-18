@@ -35,6 +35,8 @@ interface ContainerState {
   isolationMode: IsolationMode;
   projectPath: string | null;
   projectId: string | null;
+  devcontainerName: string | null;
+  isAttached: boolean;
   dockerAvailable: boolean | null;
   isInitializing: boolean;
   error: string | null;
@@ -43,6 +45,7 @@ interface ContainerState {
 interface ContainerActions {
   checkDocker: () => Promise<boolean>;
   initContainer: (projectId: string, projectPath: string) => Promise<boolean>;
+  attachToContainer: (containerName: string, projectId: string, projectPath: string) => Promise<boolean>;
   stopContainer: (projectId: string) => Promise<void>;
   removeContainer: (projectId: string) => Promise<void>;
   clear: () => void;
@@ -53,6 +56,8 @@ export const useContainerStore = create<ContainerState & ContainerActions>((set,
   isolationMode: 'none',
   projectPath: null,
   projectId: null,
+  devcontainerName: null,
+  isAttached: false,
   dockerAvailable: null,
   isInitializing: false,
   error: null,
@@ -79,6 +84,13 @@ export const useContainerStore = create<ContainerState & ContainerActions>((set,
       logger.info('container', 'Docker daemon not running — using app-level isolation');
     }
 
+    // ── Detect devcontainer.json ─────────────────────────────────
+    const devconfig = await ContainerService.shared.detectDevcontainer(projectPath);
+    const dcName = devconfig?.name ?? null;
+    if (devconfig) {
+      logger.info('container', `Found devcontainer.json: "${dcName || 'unnamed'}"`);
+    }
+
     // ── Step 1: activate app-level isolation IMMEDIATELY ─────────
     try {
       await ContainerService.shared.setActiveProject(projectId, projectPath);
@@ -91,6 +103,8 @@ export const useContainerStore = create<ContainerState & ContainerActions>((set,
         error: null,
         projectPath,
         projectId,
+        devcontainerName: dockerAvailable ? dcName : null,
+        isAttached: false,
         containerInfo: null,
         isolationMode: 'app-level',
       });
@@ -133,30 +147,55 @@ export const useContainerStore = create<ContainerState & ContainerActions>((set,
     return true;
   },
 
-  stopContainer: async (projectId: string) => {
-    const { isolationMode } = get();
+  attachToContainer: async (containerName: string, projectId: string, projectPath: string) => {
     try {
-      if (isolationMode === 'docker') {
+      const info = await ContainerService.shared.attachToContainer(containerName, projectId, projectPath);
+      set({
+        containerInfo: info,
+        isolationMode: 'docker',
+        projectPath,
+        projectId,
+        devcontainerName: `Attached: ${containerName}`,
+        isAttached: true,
+        isInitializing: false,
+        error: null,
+      });
+      logger.info('container', `Attached to container ${containerName}`);
+      return true;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error('container', 'Failed to attach to container:', msg);
+      set({ error: msg });
+      return false;
+    }
+  },
+
+  stopContainer: async (projectId: string) => {
+    const { isolationMode, isAttached } = get();
+    try {
+      // Only stop managed (tmcode-*) containers, NOT attached external ones
+      if (isolationMode === 'docker' && !isAttached) {
         await ContainerService.shared.stopContainer(projectId);
       }
       await ContainerService.shared.clearActiveProject(projectId);
     } catch (error) {
       logger.warn('container', 'Failed to stop/clear project isolation:', error);
     }
-    set({ containerInfo: null, isolationMode: 'none', projectPath: null, projectId: null });
+    set({ containerInfo: null, isolationMode: 'none', projectPath: null, projectId: null, devcontainerName: null, isAttached: false });
   },
 
   removeContainer: async (projectId: string) => {
-    const { isolationMode } = get();
+    const { isolationMode, isAttached } = get();
     try {
-      if (isolationMode === 'docker') {
+      // Only remove managed containers, NOT attached external ones
+      if (isolationMode === 'docker' && !isAttached) {
         await ContainerService.shared.removeContainer(projectId);
       }
       await ContainerService.shared.clearActiveProject(projectId);
     } catch (error) {
       logger.warn('container', 'Failed to remove container:', error);
     }
-    set({ containerInfo: null, isolationMode: 'none', projectPath: null, projectId: null });
+    set({ containerInfo: null, isolationMode: 'none', projectPath: null, projectId: null, devcontainerName: null, isAttached: false });
   },
 
   clear: () => {
@@ -165,6 +204,8 @@ export const useContainerStore = create<ContainerState & ContainerActions>((set,
       isolationMode: 'none',
       projectPath: null,
       projectId: null,
+      devcontainerName: null,
+      isAttached: false,
       isInitializing: false,
       error: null,
     });

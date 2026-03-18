@@ -5,6 +5,8 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::{Emitter, State};
 
+use super::devcontainer::{self, DevcontainerConfig};
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,11 +24,13 @@ pub struct ContainerInfo {
 ///
 /// - `container_name: Some(name)` → Docker container mode (full isolation)
 /// - `container_name: None`       → App-level mode (cwd clamping + virtual paths)
+/// - `attached: true`             → External container (do NOT stop on project close)
 #[derive(Debug, Clone)]
 pub struct ActiveProject {
     pub project_id: String,
     pub project_path: String,
     pub container_name: Option<String>,
+    pub attached: bool,
 }
 
 pub type ContainerMap = Mutex<HashMap<String, ContainerInfo>>;
@@ -107,12 +111,14 @@ fn set_active(
     project_id: &str,
     project_path: &str,
     container_name: Option<&str>,
+    attached: bool,
 ) -> Result<(), String> {
     let mut guard = state.lock().map_err(|_| "Failed to lock active project")?;
     *guard = Some(ActiveProject {
         project_id: project_id.to_string(),
         project_path: project_path.to_string(),
         container_name: container_name.map(|s| s.to_string()),
+        attached,
     });
     Ok(())
 }
@@ -159,7 +165,7 @@ pub async fn set_active_project(
     project_path: String,
     active_project: State<'_, ActiveProjectState>,
 ) -> Result<(), String> {
-    set_active(&active_project, &project_id, &project_path, None)
+    set_active(&active_project, &project_id, &project_path, None, false)
 }
 
 /// Deactivate isolation for a project.
@@ -173,10 +179,10 @@ pub async fn clear_active_project(
 
 /// Create and start a Docker container for a project.
 ///
-/// - Mounts the project directory at `/workspace`
-/// - Exposes common dev server ports
-/// - Sets the project as active with Docker routing
-/// - Installs basic dev tools in the background (git, bash, curl)
+/// Automatically detects `.devcontainer/devcontainer.json` and uses its
+/// configuration (custom image, Dockerfile build, ports, env vars, lifecycle
+/// hooks). Falls back to the default `node:20-alpine` image when no
+/// devcontainer config is present.
 #[tauri::command]
 pub async fn create_project_container(
     app: tauri::AppHandle,
@@ -186,113 +192,68 @@ pub async fn create_project_container(
     container_map: State<'_, ContainerMap>,
     active_project: State<'_, ActiveProjectState>,
 ) -> Result<ContainerInfo, String> {
-    let img = image.unwrap_or_else(|| DEFAULT_IMAGE.to_string());
     let name = container_name_for_project(&project_id);
 
+    // ── Detect devcontainer.json ─────────────────────────────────────────
+    let devconfig = devcontainer::load_devcontainer_config(&project_path);
+    let has_devcontainer = devconfig.is_some();
+
+    // ── Resolve image ────────────────────────────────────────────────────
+    let img = resolve_image(&image, &devconfig, &project_path, &name).await?;
+
     // ── Check for existing container ─────────────────────────────────────
-    if let Ok(output) = Command::new("docker")
-        .args(["inspect", "--format", "{{.State.Status}}", &name])
-        .output()
-    {
-        if output.status.success() {
-            let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-            if status == "running" {
-                let container_id = get_container_id(&name).unwrap_or_default();
-                let info = ContainerInfo {
-                    container_id,
-                    container_name: name.clone(),
-                    project_id: project_id.clone(),
-                    project_path: project_path.clone(),
-                    status: "running".to_string(),
-                    image: img,
-                };
-
-                container_map
-                    .lock()
-                    .map_err(|_| "Lock error")?
-                    .insert(project_id.clone(), info.clone());
-
-                set_active(&active_project, &project_id, &project_path, Some(&name))?;
-                return Ok(info);
-            }
-
-            if status == "exited" || status == "created" {
-                let start = Command::new("docker")
-                    .args(["start", &name])
-                    .output()
-                    .map_err(|e| format!("Failed to start existing container: {}", e))?;
-
-                if start.status.success() {
-                    let container_id = get_container_id(&name).unwrap_or_default();
-                    let info = ContainerInfo {
-                        container_id,
-                        container_name: name.clone(),
-                        project_id: project_id.clone(),
-                        project_path: project_path.clone(),
-                        status: "running".to_string(),
-                        image: img,
-                    };
-
-                    container_map
-                        .lock()
-                        .map_err(|_| "Lock error")?
-                        .insert(project_id.clone(), info.clone());
-
-                    set_active(&active_project, &project_id, &project_path, Some(&name))?;
-                    return Ok(info);
-                }
-            }
-
-            let _ = Command::new("docker").args(["rm", "-f", &name]).output();
-        }
+    if let Some(info) = try_adopt_existing(
+        &name,
+        &project_id,
+        &project_path,
+        &img,
+        &container_map,
+        &active_project,
+    )? {
+        return Ok(info);
     }
 
-    // ── Ensure image is available (non-blocking pull) ──────────────────
-    let has_image = Command::new("docker")
-        .args(["image", "inspect", &img])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    // ── Resolve workspace folder ─────────────────────────────────────────
+    let workspace = devconfig
+        .as_ref()
+        .and_then(|c| c.workspace_folder.clone())
+        .unwrap_or_else(|| WORKSPACE_PATH.to_string());
 
-    if !has_image {
-        // Pull in a blocking task so the Tauri async runtime isn't starved.
-        let img_clone = img.clone();
-        let pull_result = tokio::task::spawn_blocking(move || {
-            Command::new("docker")
-                .args(["pull", &img_clone])
-                .output()
-        })
-        .await
-        .map_err(|e| format!("Pull task failed: {}", e))?
-        .map_err(|e| format!("Failed to pull image: {}", e))?;
-
-        if !pull_result.status.success() {
-            return Err(format!(
-                "Failed to pull image {}: {}",
-                img,
-                String::from_utf8_lossy(&pull_result.stderr)
-            ));
-        }
-    }
-
-    // ── Create container ─────────────────────────────────────────────────
-    let base_args: Vec<String> = vec![
+    // ── Build docker create args ─────────────────────────────────────────
+    let mut base_args: Vec<String> = vec![
         "create".into(),
         "--name".into(),
         name.clone(),
         "-v".into(),
-        format!("{}:{}", project_path, WORKSPACE_PATH),
+        format!("{}:{}", project_path, workspace),
         "-w".into(),
-        WORKSPACE_PATH.into(),
+        workspace.clone(),
         "-e".into(),
-        format!("HOME={}", WORKSPACE_PATH),
+        format!("HOME={}", workspace),
         "-e".into(),
         "TERM=xterm-256color".into(),
         "--init".into(),
     ];
+
+    // Container env vars from devcontainer.json
+    if let Some(ref dc) = devconfig {
+        if let Some(ref env) = dc.container_env {
+            for (key, val) in env {
+                base_args.push("-e".into());
+                base_args.push(format!("{}={}", key, val));
+            }
+        }
+        if let Some(ref user) = dc.remote_user {
+            base_args.push("-u".into());
+            base_args.push(user.clone());
+        }
+    }
+
+    // Port mappings: devcontainer forwardPorts or default set
+    let ports: Vec<u16> = devconfig
+        .as_ref()
+        .and_then(|c| c.forward_ports.clone())
+        .unwrap_or_else(|| EXPOSED_PORTS.to_vec());
 
     let tail_args: Vec<String> = vec![
         img.clone(),
@@ -301,9 +262,9 @@ pub async fn create_project_container(
         "/dev/null".into(),
     ];
 
-    // Try with port mappings first; if any port is busy, retry without.
+    // Try with port mappings; retry without on conflict
     let mut args_with_ports = base_args.clone();
-    for port in EXPOSED_PORTS {
+    for port in &ports {
         args_with_ports.push("-p".into());
         args_with_ports.push(format!("{}:{}", port, port));
     }
@@ -317,8 +278,8 @@ pub async fn create_project_container(
     let create_stdout = if !create.status.success() {
         let stderr = String::from_utf8_lossy(&create.stderr);
 
-        // Port conflict → retry without port bindings
-        if stderr.contains("port is already allocated") || stderr.contains("address already in use")
+        if stderr.contains("port is already allocated")
+            || stderr.contains("address already in use")
         {
             let _ = Command::new("docker").args(["rm", "-f", &name]).output();
 
@@ -361,40 +322,72 @@ pub async fn create_project_container(
         ));
     }
 
-    // ── Install common dev tools in background with retry ───────────────
+    // ── Post-create / post-start lifecycle hooks (background) ────────────
     let bg_name = name.clone();
     let app_handle = app.clone();
+    let bg_devconfig = devconfig.clone();
     tokio::spawn(async move {
         let container = bg_name;
-        let install_cmd = "apk add --no-cache git bash curl python3 2>/dev/null || \
-                           (apt-get update -qq && apt-get install -y -qq git bash curl python3 2>/dev/null) || \
-                           true";
 
-        for attempt in 1..=2 {
-            let c = container.clone();
-            let cmd = install_cmd.to_string();
-            let result = tokio::task::spawn_blocking(move || {
-                Command::new("docker")
-                    .args(["exec", &c, "sh", "-c", &cmd])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-            })
-            .await;
-
-            match result {
-                Ok(Ok(status)) if status.success() => {
-                    let _ = app_handle.emit("container-tools-ready", &container);
-                    return;
-                }
-                _ if attempt < 2 => {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                }
-                _ => {
-                    let _ = app_handle.emit("container-tools-failed", &container);
+        // 1. Install basic tools (unless devcontainer provides its own image)
+        if !has_devcontainer {
+            let install_cmd = "apk add --no-cache git bash curl python3 2>/dev/null || \
+                               (apt-get update -qq && apt-get install -y -qq git bash curl python3 2>/dev/null) || \
+                               true";
+            for attempt in 1..=2 {
+                let c = container.clone();
+                let cmd = install_cmd.to_string();
+                let result = tokio::task::spawn_blocking(move || {
+                    Command::new("docker")
+                        .args(["exec", &c, "sh", "-c", &cmd])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                })
+                .await;
+                match result {
+                    Ok(Ok(s)) if s.success() => break,
+                    _ if attempt < 2 => {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                    _ => {}
                 }
             }
         }
+
+        // 2. postCreateCommand
+        if let Some(ref dc) = bg_devconfig {
+            if let Some(ref cmd) = dc.post_create_command {
+                let shell_cmd = cmd.to_shell_string();
+                let c = container.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    Command::new("docker")
+                        .args(["exec", &c, "sh", "-c", &shell_cmd])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                })
+                .await;
+            }
+        }
+
+        // 3. postStartCommand
+        if let Some(ref dc) = bg_devconfig {
+            if let Some(ref cmd) = dc.post_start_command {
+                let shell_cmd = cmd.to_shell_string();
+                let c = container.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    Command::new("docker")
+                        .args(["exec", &c, "sh", "-c", &shell_cmd])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                })
+                .await;
+            }
+        }
+
+        let _ = app_handle.emit("container-tools-ready", &container);
     });
 
     // ── Update state ─────────────────────────────────────────────────────
@@ -412,9 +405,193 @@ pub async fn create_project_container(
         .map_err(|_| "Lock error")?
         .insert(project_id.clone(), info.clone());
 
-    set_active(&active_project, &project_id, &project_path, Some(&name))?;
+    set_active(&active_project, &project_id, &project_path, Some(&name), false)?;
 
     Ok(info)
+}
+
+// ─── Container creation helpers ──────────────────────────────────────────────
+
+/// Resolve the Docker image to use: Dockerfile build > devcontainer image > explicit > default.
+async fn resolve_image(
+    explicit: &Option<String>,
+    devconfig: &Option<DevcontainerConfig>,
+    project_path: &str,
+    container_name: &str,
+) -> Result<String, String> {
+    // 1. Dockerfile build (devcontainer)
+    if let Some(ref dc) = devconfig {
+        if let Some(ref build) = dc.build {
+            let config_base = devcontainer::config_dir(project_path);
+            let dockerfile = config_base.join(&build.dockerfile);
+
+            if !dockerfile.is_file() {
+                return Err(format!(
+                    "Dockerfile not found: {}",
+                    dockerfile.display()
+                ));
+            }
+
+            let context = build
+                .context
+                .as_ref()
+                .map(|c| config_base.join(c))
+                .unwrap_or_else(|| config_base.clone());
+
+            let tag = format!("tmcode-devcontainer-{}", container_name);
+
+            let mut args = vec![
+                "build".to_string(),
+                "-f".to_string(),
+                dockerfile.to_string_lossy().to_string(),
+                "-t".to_string(),
+                tag.clone(),
+            ];
+
+            if let Some(ref target) = build.target {
+                args.push("--target".into());
+                args.push(target.clone());
+            }
+
+            if let Some(ref build_args) = build.args {
+                for (key, val) in build_args {
+                    args.push("--build-arg".into());
+                    args.push(format!("{}={}", key, val));
+                }
+            }
+
+            args.push(context.to_string_lossy().to_string());
+
+            let build_result = tokio::task::spawn_blocking(move || {
+                Command::new("docker").args(&args).output()
+            })
+            .await
+            .map_err(|e| format!("Build task failed: {}", e))?
+            .map_err(|e| format!("Docker build failed: {}", e))?;
+
+            if !build_result.status.success() {
+                return Err(format!(
+                    "Docker build failed:\n{}",
+                    String::from_utf8_lossy(&build_result.stderr)
+                ));
+            }
+
+            return Ok(tag);
+        }
+    }
+
+    // 2. Image from devcontainer.json
+    if let Some(ref dc) = devconfig {
+        if let Some(ref img) = dc.image {
+            return ensure_image_available(img).await;
+        }
+    }
+
+    // 3. Explicit image parameter
+    if let Some(ref img) = explicit {
+        return ensure_image_available(img).await;
+    }
+
+    // 4. Default
+    ensure_image_available(DEFAULT_IMAGE).await
+}
+
+/// Ensure a Docker image is available locally, pulling if needed.
+async fn ensure_image_available(image: &str) -> Result<String, String> {
+    let has_image = Command::new("docker")
+        .args(["image", "inspect", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !has_image {
+        let img = image.to_string();
+        let pull = tokio::task::spawn_blocking(move || {
+            Command::new("docker").args(["pull", &img]).output()
+        })
+        .await
+        .map_err(|e| format!("Pull task failed: {}", e))?
+        .map_err(|e| format!("Failed to pull image: {}", e))?;
+
+        if !pull.status.success() {
+            return Err(format!(
+                "Failed to pull image {}: {}",
+                image,
+                String::from_utf8_lossy(&pull.stderr)
+            ));
+        }
+    }
+
+    Ok(image.to_string())
+}
+
+/// Try to adopt an existing container (running or stopped).
+fn try_adopt_existing(
+    name: &str,
+    project_id: &str,
+    project_path: &str,
+    img: &str,
+    container_map: &State<'_, ContainerMap>,
+    active_project: &State<'_, ActiveProjectState>,
+) -> Result<Option<ContainerInfo>, String> {
+    let output = match Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Status}}", name])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Ok(None),
+    };
+
+    let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if status == "running" {
+        let container_id = get_container_id(name).unwrap_or_default();
+        let info = ContainerInfo {
+            container_id,
+            container_name: name.to_string(),
+            project_id: project_id.to_string(),
+            project_path: project_path.to_string(),
+            status: "running".to_string(),
+            image: img.to_string(),
+        };
+        container_map
+            .lock()
+            .map_err(|_| "Lock error")?
+            .insert(project_id.to_string(), info.clone());
+        set_active(active_project, project_id, project_path, Some(name), false)?;
+        return Ok(Some(info));
+    }
+
+    if status == "exited" || status == "created" {
+        let start = Command::new("docker")
+            .args(["start", name])
+            .output()
+            .map_err(|e| format!("Failed to start container: {}", e))?;
+
+        if start.status.success() {
+            let container_id = get_container_id(name).unwrap_or_default();
+            let info = ContainerInfo {
+                container_id,
+                container_name: name.to_string(),
+                project_id: project_id.to_string(),
+                project_path: project_path.to_string(),
+                status: "running".to_string(),
+                image: img.to_string(),
+            };
+            container_map
+                .lock()
+                .map_err(|_| "Lock error")?
+                .insert(project_id.to_string(), info.clone());
+            set_active(active_project, project_id, project_path, Some(name), false)?;
+            return Ok(Some(info));
+        }
+    }
+
+    // Any other state — remove so we can recreate
+    let _ = Command::new("docker").args(["rm", "-f", name]).output();
+    Ok(None)
 }
 
 /// Stop a project's Docker container gracefully (5s timeout then force).
@@ -539,4 +716,167 @@ pub async fn cleanup_orphaned_containers(
     }
 
     Ok(removed)
+}
+
+// ─── Attach to Running Container ─────────────────────────────────────────────
+
+/// Info about a running Docker container (for the attach picker).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningContainer {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub status: String,
+    pub ports: String,
+    pub created: String,
+}
+
+/// List all running Docker containers (for the "Attach" picker UI).
+/// Excludes `tmcode-*` containers managed by Container Code.
+#[tauri::command]
+pub async fn list_running_containers() -> Result<Vec<RunningContainer>, String> {
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "--format",
+            "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.CreatedAt}}",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to list containers: {}", e))?;
+
+    if !output.status.success() {
+        return Err("Docker daemon not available".to_string());
+    }
+
+    let mut containers = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        let name = parts[1].to_string();
+        // Skip tmcode-managed containers
+        if name.starts_with("tmcode-") {
+            continue;
+        }
+        containers.push(RunningContainer {
+            id: parts[0][..12.min(parts[0].len())].to_string(),
+            name,
+            image: parts[2].to_string(),
+            status: parts[3].to_string(),
+            ports: parts[4].to_string(),
+            created: parts[5].to_string(),
+        });
+    }
+
+    Ok(containers)
+}
+
+/// Attach to an existing running container.
+///
+/// Detects the working directory from the container's config.
+/// Marks the project as `attached: true` so that tearDown does NOT
+/// stop the container — it lives independently of the IDE.
+#[tauri::command]
+pub async fn attach_to_container(
+    container_name: String,
+    project_id: String,
+    project_path: String,
+    active_project: State<'_, ActiveProjectState>,
+    container_map: State<'_, ContainerMap>,
+) -> Result<ContainerInfo, String> {
+    // Verify container is running
+    let status_output = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Status}}", &container_name])
+        .output()
+        .map_err(|e| format!("Failed to inspect container: {}", e))?;
+
+    if !status_output.status.success() {
+        return Err(format!("Container '{}' not found", container_name));
+    }
+
+    let status = String::from_utf8_lossy(&status_output.stdout)
+        .trim()
+        .to_string();
+    if status != "running" {
+        return Err(format!(
+            "Container '{}' is not running (status: {})",
+            container_name, status
+        ));
+    }
+
+    // Get container ID, image, and working directory
+    let inspect = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{.Id}}\t{{.Config.Image}}\t{{.Config.WorkingDir}}",
+            &container_name,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to inspect container: {}", e))?;
+
+    let inspect_str = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
+    let parts: Vec<&str> = inspect_str.split('\t').collect();
+    let container_id = parts
+        .first()
+        .map(|s| s[..12.min(s.len())].to_string())
+        .unwrap_or_default();
+    let image = parts.get(1).unwrap_or(&"unknown").to_string();
+    let working_dir = parts.get(2).unwrap_or(&"").to_string();
+
+    // Use the container's WorkingDir as project_path for path mapping.
+    // If no WorkingDir set, fall back to the host project_path.
+    let effective_project_path = if working_dir.is_empty() {
+        project_path.clone()
+    } else {
+        // For attached containers, project_path is used by the frontend
+        // for display. The actual cwd mapping uses the container's WorkingDir.
+        project_path.clone()
+    };
+
+    let info = ContainerInfo {
+        container_id,
+        container_name: container_name.clone(),
+        project_id: project_id.clone(),
+        project_path: effective_project_path.clone(),
+        status: "running".to_string(),
+        image,
+    };
+
+    // Stop any previously managed tmcode-* container for this project
+    let managed_name = container_name_for_project(&project_id);
+    if managed_name != container_name {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &managed_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    container_map
+        .lock()
+        .map_err(|_| "Lock error")?
+        .insert(project_id.clone(), info.clone());
+
+    // Mark as attached so tearDown doesn't stop the external container
+    set_active(
+        &active_project,
+        &project_id,
+        &effective_project_path,
+        Some(&container_name),
+        true, // attached = true
+    )?;
+
+    Ok(info)
+}
+
+/// Check if the current active project is an attached (external) container.
+#[tauri::command]
+pub async fn is_attached_container(
+    active_project: State<'_, ActiveProjectState>,
+) -> Result<bool, String> {
+    let guard = active_project.lock().map_err(|_| "Lock error")?;
+    Ok(guard.as_ref().map(|ap| ap.attached).unwrap_or(false))
 }

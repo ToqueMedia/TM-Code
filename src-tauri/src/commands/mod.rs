@@ -1,6 +1,7 @@
 pub mod checkpoint;
 pub mod container;
 pub mod debugger;
+pub mod devcontainer;
 pub mod file_tree;
 pub mod filesystem;
 pub mod mcp;

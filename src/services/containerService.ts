@@ -1,6 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
 import { logger } from '../utils/logger';
 
+export interface RunningContainer {
+  id: string;
+  name: string;
+  image: string;
+  status: string;
+  ports: string;
+  created: string;
+}
+
 export interface ContainerInfo {
   containerId: string;
   containerName: string;
@@ -8,6 +17,18 @@ export interface ContainerInfo {
   projectPath: string;
   status: string;
   image: string;
+}
+
+export interface DevcontainerConfig {
+  name?: string;
+  image?: string;
+  build?: { dockerfile: string; context?: string };
+  forwardPorts?: number[];
+  containerEnv?: Record<string, string>;
+  workspaceFolder?: string;
+  postCreateCommand?: string | string[];
+  postStartCommand?: string | string[];
+  remoteUser?: string;
 }
 
 export default class ContainerService {
@@ -89,6 +110,49 @@ export default class ContainerService {
       await invoke('clear_active_project', { projectId });
     } catch (error) {
       logger.warn('container', 'Failed to clear active project:', error);
+    }
+  }
+
+  async detectDevcontainer(projectPath: string): Promise<DevcontainerConfig | null> {
+    try {
+      return await invoke<DevcontainerConfig | null>('detect_devcontainer', { projectPath });
+    } catch (error) {
+      logger.warn('container', 'Failed to detect devcontainer config:', error);
+      return null;
+    }
+  }
+
+  async listRunningContainers(): Promise<RunningContainer[]> {
+    try {
+      return await invoke<RunningContainer[]>('list_running_containers');
+    } catch (error) {
+      logger.warn('container', 'Failed to list running containers:', error);
+      return [];
+    }
+  }
+
+  async attachToContainer(
+    containerName: string,
+    projectId: string,
+    projectPath: string
+  ): Promise<ContainerInfo> {
+    try {
+      return await invoke<ContainerInfo>('attach_to_container', {
+        containerName,
+        projectId,
+        projectPath,
+      });
+    } catch (error) {
+      logger.error('container', 'Failed to attach to container:', error);
+      throw new Error(`Failed to attach to container: ${error}`);
+    }
+  }
+
+  async isAttachedContainer(): Promise<boolean> {
+    try {
+      return await invoke<boolean>('is_attached_container');
+    } catch {
+      return false;
     }
   }
 
