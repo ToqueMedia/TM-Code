@@ -1,17 +1,22 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{Emitter, State};
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommandResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
     pub success: bool,
+    #[serde(default)]
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,6 +35,7 @@ type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
 pub async fn execute_command(
     command: String,
     cwd: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<CommandResult, String> {
     let working_dir = match cwd {
         Some(dir) => PathBuf::from(dir),
@@ -42,6 +48,9 @@ pub async fn execute_command(
         return Err("Empty command".to_string());
     }
 
+    // Default: 5 minutes. The agent tool passes a shorter timeout.
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
+
     // Delegate parsing to the system shell so that quotes, pipes,
     // environment variables, etc. are handled correctly.
     let (shell, flag) = if cfg!(target_os = "windows") {
@@ -50,24 +59,174 @@ pub async fn execute_command(
         ("sh", "-c")
     };
 
-    let output = Command::new(shell)
-        .arg(flag)
+    let mut cmd = Command::new(shell);
+    cmd.arg(flag)
         .arg(&command)
         .current_dir(&working_dir)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Put the child in its own process group so we can kill the entire
+    // tree on timeout (e.g. npm → node → jest).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to execute command: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
-    let success = output.status.success();
+    let child_pid = child.id();
 
-    Ok(CommandResult {
-        stdout,
-        stderr,
-        exit_code,
-        success,
-    })
+    // Take pipes so we can read output incrementally in background threads.
+    // This way, on timeout we still have whatever output was produced so far.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_buf = Arc::new(Mutex::new(String::new()));
+    let stderr_buf = Arc::new(Mutex::new(String::new()));
+
+    let stdout_handle = stdout_pipe.map(|pipe| {
+        let buf = Arc::clone(&stdout_buf);
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(pipe);
+            let mut chunk = [0u8; 8192];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut b) = buf.lock() {
+                            b.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                        }
+                    }
+                }
+            }
+        })
+    });
+
+    let stderr_handle = stderr_pipe.map(|pipe| {
+        let buf = Arc::clone(&stderr_buf);
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(pipe);
+            let mut chunk = [0u8; 8192];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut b) = buf.lock() {
+                            b.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                        }
+                    }
+                }
+            }
+        })
+    });
+
+    // Wait for the child exit, wrapped with a timeout.
+    let wait_result = tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || child.wait()),
+    )
+    .await;
+
+    match wait_result {
+        // Normal completion — join reader threads so all output is drained.
+        Ok(Ok(Ok(status))) => {
+            if let Some(h) = stdout_handle {
+                let _ = h.join();
+            }
+            if let Some(h) = stderr_handle {
+                let _ = h.join();
+            }
+
+            let stdout = stdout_buf.lock().map(|b| b.clone()).unwrap_or_default();
+            let stderr = stderr_buf.lock().map(|b| b.clone()).unwrap_or_default();
+
+            Ok(CommandResult {
+                stdout,
+                stderr,
+                exit_code: status.code().unwrap_or(-1),
+                success: status.success(),
+                timed_out: false,
+            })
+        }
+        // Process I/O error
+        Ok(Ok(Err(e))) => Err(format!("Failed to execute command: {}", e)),
+        // Tokio task join error
+        Ok(Err(e)) => Err(format!("Task error: {}", e)),
+        // Timeout — kill, then drain whatever output was captured so far.
+        Err(_) => {
+            kill_process_tree(child_pid);
+
+            // Killing closes the pipes, so the reader threads will finish.
+            if let Some(h) = stdout_handle {
+                let _ = h.join();
+            }
+            if let Some(h) = stderr_handle {
+                let _ = h.join();
+            }
+
+            let stdout = stdout_buf.lock().map(|b| b.clone()).unwrap_or_default();
+            let mut stderr = stderr_buf.lock().map(|b| b.clone()).unwrap_or_default();
+
+            let secs = timeout.as_secs();
+            stderr.push_str(&format!(
+                "\n\n[Timed out after {}s. Use start_dev_server for long-running processes.]",
+                secs
+            ));
+
+            Ok(CommandResult {
+                stdout,
+                stderr,
+                exit_code: -1,
+                success: false,
+                timed_out: true,
+            })
+        }
+    }
+}
+
+/// Kill a process and its entire tree by PID.
+/// Sends SIGTERM first for graceful shutdown, then SIGKILL if still alive.
+fn kill_process_tree(pid: u32) {
+    #[cfg(unix)]
+    {
+        // 1. SIGTERM the process group for graceful shutdown
+        let _ = Command::new("kill")
+            .args(["-TERM", &format!("-{}", pid)])
+            .output();
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+
+        // 2. Brief wait for graceful exit
+        std::thread::sleep(Duration::from_millis(200));
+
+        // 3. SIGKILL if still alive
+        let still_alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if still_alive {
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{}", pid)])
+                .output();
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .output();
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .output();
+    }
 }
 
 #[derive(Clone, Serialize)]

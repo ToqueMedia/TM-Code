@@ -6,6 +6,7 @@ export interface CommandResult {
   stderr: string;
   exitCode: number;
   success: boolean;
+  timedOut: boolean;
 }
 
 export interface ProcessInfo {
@@ -19,7 +20,7 @@ export default class TerminalService {
   static shared = new TerminalService();
 
   // Executar comando simples e retornar resultado
-  async executeCommand(command: string, cwd?: string): Promise<CommandResult> {
+  async executeCommand(command: string, cwd?: string, timeoutSecs?: number): Promise<CommandResult> {
     try {
       let workingDir = cwd;
       if (!workingDir) {
@@ -29,10 +30,11 @@ export default class TerminalService {
           workingDir = '/'; // Fallback
         }
       }
-      
+
       const result = await invoke('execute_command', {
         command,
         cwd: workingDir,
+        timeoutSecs,
       });
 
       return result as CommandResult;
