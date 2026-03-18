@@ -23,6 +23,12 @@ jest.mock('@tauri-apps/plugin-dialog', () => ({
   ask: jest.fn(),
 }))
 
+// Mock remoteTransport — uses import.meta.env which Jest cannot parse
+jest.mock('../../services/mcp/remoteTransport', () => ({
+  discoverRemoteTools: jest.fn().mockResolvedValue([]),
+  callRemoteTool: jest.fn().mockResolvedValue(null),
+}))
+
 // Mock window.crypto.subtle for sessionService hashing
 if (typeof globalThis.crypto === 'undefined') {
   Object.defineProperty(globalThis, 'crypto', {

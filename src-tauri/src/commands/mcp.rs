@@ -331,7 +331,12 @@ pub async fn mcp_send_notification(
     stdin
         .write_all(notification_str.as_bytes())
         .await
-        .map_err(|e| format!("Failed to write notification to MCP server '{}': {}", name, e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to write notification to MCP server '{}': {}",
+                name, e
+            )
+        })?;
     stdin
         .flush()
         .await

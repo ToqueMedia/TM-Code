@@ -156,7 +156,7 @@ describe('SkillService', () => {
     })
 
     it('respects token budget — drops lower priority skills', () => {
-      const longContent = 'x'.repeat(7000)
+      const longContent = 'x'.repeat(7950)
       const block = service.buildSkillsPromptBlock([
         { id: 'p:rules', name: 'rules', path: '/p', content: longContent, references: [], scope: 'project' },
         { id: 'b:general', name: 'general', path: '/p', content: '# General\nShort.', references: [], scope: 'bundled' },

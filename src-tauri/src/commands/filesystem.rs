@@ -215,10 +215,7 @@ pub async fn list_skills_bundled(app: tauri::AppHandle) -> Result<Vec<SkillEntry
         if path.is_dir() {
             let skill_file = path.join("SKILL.md");
             if skill_file.exists() {
-                let name = entry
-                    .file_name()
-                    .to_string_lossy()
-                    .to_string();
+                let name = entry.file_name().to_string_lossy().to_string();
                 entries.push(SkillEntry {
                     name,
                     path: path.to_string_lossy().to_string(),

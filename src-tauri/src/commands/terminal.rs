@@ -125,11 +125,8 @@ pub async fn execute_command(
     });
 
     // Wait for the child exit, wrapped with a timeout.
-    let wait_result = tokio::time::timeout(
-        timeout,
-        tokio::task::spawn_blocking(move || child.wait()),
-    )
-    .await;
+    let wait_result =
+        tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || child.wait())).await;
 
     match wait_result {
         // Normal completion — join reader threads so all output is drained.
