@@ -1,18 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
 import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDisplay } from '../../types/chat'
 import { logger } from '../../utils/logger'
+import { hashProjectPath } from '../../utils/crypto'
 
 const MAX_SESSIONS_PER_PROJECT = 50
 const MAX_TOOL_RESULT_LENGTH = 2000
 const BASE_DIR_NAME = '.toquemedia-studio'
-
-async function hashProjectPath(projectPath: string): Promise<string> {
-  const encoder = new TextEncoder()
-  const data = encoder.encode(projectPath)
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data)
-  const hashArray = Array.from(new Uint8Array(hashBuffer))
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
-}
 
 class SessionService {
   private static instance: SessionService

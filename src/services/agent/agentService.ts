@@ -311,7 +311,14 @@ class AgentService {
           callbacks.onToolCallStart(toolCall.id, toolCall.name, toolCall.args)
 
           try {
-            const result = await this.toolExecutor.execute(toolCall.name, toolCall.args)
+            // Set tool call context for checkpoint tracking (delete_file, rename_file)
+            let result: string
+            this.toolExecutor.setCurrentToolCallId(toolCall.id)
+            try {
+              result = await this.toolExecutor.execute(toolCall.name, toolCall.args)
+            } finally {
+              this.toolExecutor.setCurrentToolCallId(null)
+            }
 
             if (this.abortController?.signal.aborted) return
 

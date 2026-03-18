@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod debugger;
 pub mod file_tree;
 pub mod filesystem;

@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
+import CheckpointService from './checkpointService'
+import { useCheckpointStore } from '../../stores/checkpointStore'
 
 export interface DiffResult {
   id: string
@@ -9,6 +11,10 @@ export interface DiffResult {
   newContent: string
   isNewFile: boolean
   status: 'pending' | 'accepted' | 'rejected'
+  /** Tool call ID that produced this diff (for checkpoint tracking). */
+  toolCallId?: string
+  /** Tool name that produced this diff (for checkpoint tracking). */
+  toolName?: string
 }
 
 class DiffService {
@@ -53,6 +59,21 @@ class DiffService {
   async acceptDiff(diffId: string): Promise<void> {
     const diff = this.pendingDiffs.get(diffId)
     if (!diff) return
+
+    // Capture checkpoint BEFORE writing to disk
+    try {
+      const checkpointService = CheckpointService.getInstance()
+      await checkpointService.captureBeforeWrite(
+        diff.filePath,
+        diff.originalContent,
+        diff.isNewFile,
+        diff.toolCallId || diffId,
+        diff.toolName || (diff.isNewFile ? 'create_file' : 'write_file'),
+      )
+      useCheckpointStore.getState().syncFromService()
+    } catch {
+      // Checkpoint failure should not block file writes
+    }
 
     await invoke('write_file', { path: diff.filePath, content: diff.newContent })
     diff.status = 'accepted'

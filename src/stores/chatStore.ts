@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import { ChatMessage, ChatSession, CodeBlock, ConversationMessage, SessionSummary, ToolCallDisplay } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService } from '../services/agent/sessionService'
+import CheckpointService from '../services/agent/checkpointService'
+import { useCheckpointStore } from './checkpointStore'
 import { usePermissionStore } from './permissionStore'
 import { logger } from '../utils/logger'
 
@@ -610,6 +612,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                   newContent: parsed.newContent || '',
                   isNewFile: parsed.isNewFile || false,
                   status: 'pending',
+                  toolCallId: toolId,
+                  toolName: toolCalls[i].toolName,
                 }
               }
             } catch {
@@ -1031,6 +1035,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
         const conversationHistory = rebuildConversationHistory(session.messages)
 
+        // Initialize checkpoints for the loaded session
+        await CheckpointService.getInstance().initSession(projectPath, sessionId)
+        useCheckpointStore.getState().syncFromService()
+
         set(() => {
           // Only keep the loaded session in memory to avoid unbounded growth
           const sessions = new Map<string, ChatSession>()
@@ -1066,6 +1074,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (session.messages.length === 0) return false
 
         const conversationHistory = rebuildConversationHistory(session.messages)
+
+        // Initialize checkpoint service for this restored session
+        await CheckpointService.getInstance().initSession(projectPath, session.id)
+        useCheckpointStore.getState().syncFromService()
 
         set(() => {
           const sessions = new Map<string, ChatSession>()
@@ -1113,6 +1125,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       await sessionService.init(projectPath)
       const session = await sessionService.createSession(projectPath)
 
+      // Initialize checkpoint service for this session
+      await CheckpointService.getInstance().initSession(projectPath, session.id)
+      useCheckpointStore.getState().clear()
+
       set(() => {
         // Only keep the new session in memory
         const sessions = new Map<string, ChatSession>()
@@ -1148,6 +1164,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // Reset tool permission auto-approve for the new session
         usePermissionStore.getState().resetAutoApprove()
 
+        // loadSessionFromDisk already initializes checkpoints for the session
         await get().loadSessionFromDisk(projectPath, sessionId)
       } finally {
         set({ isLoadingSession: false })
@@ -1187,6 +1204,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       // Delete from disk
       await sessionService.deleteSession(projectPath, sessionId)
+
+      // Clean up checkpoint data for this session
+      await CheckpointService.getInstance().deleteSessionCheckpoints(projectPath, sessionId)
+      if (state.activeSessionId === sessionId) {
+        useCheckpointStore.getState().clear()
+      }
     },
 
     cleanupOnExit: async (projectPath: string) => {
@@ -1200,6 +1223,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           turns: state.currentTurnCount,
         })
       }
+
+      // Flush pending checkpoint data to disk before exit
+      await CheckpointService.getInstance().flushPersist()
 
       // Stop auto-save
       sessionService.stopAutoSave()

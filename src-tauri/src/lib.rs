@@ -1,4 +1,5 @@
 mod commands;
+use commands::checkpoint::*;
 use commands::debugger::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
@@ -115,7 +116,14 @@ pub fn run() {
             mcp_send_request,
             mcp_send_notification,
             mcp_list_servers,
-            mcp_stop_all_servers
+            mcp_stop_all_servers,
+            save_checkpoint_file,
+            save_checkpoint_new_marker,
+            load_checkpoint_file,
+            save_checkpoint_index,
+            load_checkpoint_index,
+            delete_checkpoint_files,
+            delete_checkpoint_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

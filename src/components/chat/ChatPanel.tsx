@@ -1,4 +1,4 @@
-import { memo, useRef, useEffect, useCallback, useState } from 'react'
+import { memo, useRef, useEffect, useCallback, useState, lazy, Suspense } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiMessageSquare } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
@@ -7,6 +7,8 @@ import ChatSkeleton from './ChatSkeleton'
 import AgentStatusBar from './AgentStatusBar'
 import PromptInput from './PromptInput'
 import { tokens } from '@/theme/tokens'
+
+const CheckpointPanel = lazy(() => import('./CheckpointPanel'))
 
 function ChatPanel() {
   const activeSessionId = useChatStore(s => s.activeSessionId)
@@ -115,6 +117,11 @@ function ChatPanel() {
           ))
         )}
       </Box>
+
+      {/* Checkpoint Panel */}
+      <Suspense fallback={null}>
+        <CheckpointPanel />
+      </Suspense>
 
       {/* Agent Status Bar */}
       <AgentStatusBar />

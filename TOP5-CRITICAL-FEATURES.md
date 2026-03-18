@@ -5,14 +5,9 @@
 
 ---
 
-## 1. Undo/Rollback de alterações do agente
+## ~~1. Undo/Rollback de alterações do agente~~ ✓
 
-O agente pode modificar 10 ficheiros numa sessão. Se algo correu mal, **não há forma de voltar atrás** além de `Cmd+Z` ficheiro a ficheiro no editor (se estiver aberto). Não existe:
-- "Desfazer última acção do agente" (volta todos os ficheiros ao estado anterior)
-- Checkpoint antes de cada tool call do agente
-- Histórico visual de alterações por sessão
-
-**Porquê crítico**: Num IDE onde o agente escreve a maior parte do código, o developer precisa de confiança para dizer "vai em frente" — e essa confiança vem de saber que pode reverter. Sem isto, o developer hesita em aprovar diffs.
+Implementado: Checkpoint system com snapshots automáticos antes de cada tool call que modifica ficheiros. Painel visual no chat com botão "Undo" e revert por checkpoint.
 
 ---
 
@@ -37,14 +32,9 @@ O Rust `Command::new().output()` não tem limite de tempo. Se o agente correr `n
 
 ---
 
-## 4. Histórico de versões por sessão (Session Snapshots)
+## ~~4. Histórico de versões por sessão (Session Snapshots)~~ ✓
 
-O agente altera ficheiros ao longo de uma sessão. Não existe:
-- "Antes da sessão" vs "depois da sessão" diff
-- Snapshot do projecto no início de cada sessão
-- Capacidade de comparar o estado do projecto entre sessões
-
-**Porquê crítico**: O developer quer saber "o que mudou desde que comecei a trabalhar com o agente hoje?" — especialmente quando houve 20+ turns com múltiplos ficheiros alterados.
+Implementado: Session baseline tracking com lazy snapshots. O sistema captura o conteúdo original dos ficheiros no primeiro acesso e permite comparar "antes da sessão" vs "agora" via `getSessionDiff()`.
 
 ---
 
