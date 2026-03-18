@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { isProjectIsolated, getContainerProjectPath } from './containerStore';
 import { logger } from '../utils/logger';
 
 interface TerminalSession {
@@ -36,15 +37,23 @@ export const useTerminalStore = create<TerminalState & TerminalActions>((set, ge
     const sessionId = `terminal-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const sessionName = name || `Terminal ${get().sessions.length + 1}`;
     
-    // Get working directory from Tauri backend if not provided
+    // Determine working directory:
+    // 1. Use explicit cwd if provided
+    // 2. In container mode, use the project path (maps to /workspace in container)
+    // 3. Fall back to Tauri current directory
     let workingDir = cwd;
     if (!workingDir) {
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        workingDir = await invoke('get_current_directory') as string;
-      } catch (error) {
-        logger.warn('terminal', 'Failed to get current directory from Tauri, using fallback');
-        workingDir = '/'; // Fallback for Unix-like systems
+      const projectPath = getContainerProjectPath();
+      if (isProjectIsolated() && projectPath) {
+        workingDir = projectPath;
+      } else {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          workingDir = await invoke('get_current_directory') as string;
+        } catch (error) {
+          logger.warn('terminal', 'Failed to get current directory from Tauri, using fallback');
+          workingDir = '/';
+        }
       }
     }
 

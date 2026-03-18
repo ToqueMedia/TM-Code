@@ -1,5 +1,6 @@
 mod commands;
 use commands::checkpoint::*;
+use commands::container::*;
 use commands::debugger::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
@@ -23,12 +24,15 @@ fn is_oauth_domain(host: &str) -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (command_history, process_map) = commands::terminal::init_terminal_state();
+    let (container_map, active_container) = commands::container::init_container_state();
     let debugger_state = commands::debugger::DebuggerState::new();
     let mcp_state = commands::mcp::McpState::new();
 
     tauri::Builder::default()
         .manage(command_history)
         .manage(process_map)
+        .manage(container_map)
+        .manage(active_container)
         .manage(debugger_state)
         .manage(mcp_state)
         .plugin(tauri_plugin_opener::init())
@@ -123,7 +127,16 @@ pub fn run() {
             save_checkpoint_index,
             load_checkpoint_index,
             delete_checkpoint_files,
-            delete_checkpoint_session
+            delete_checkpoint_session,
+            check_docker_available,
+            create_project_container,
+            stop_project_container,
+            remove_project_container,
+            get_container_status,
+            get_active_container_info,
+            set_active_project,
+            clear_active_project,
+            cleanup_orphaned_containers
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

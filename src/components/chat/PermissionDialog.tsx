@@ -109,7 +109,7 @@ function PermissionDialog({ toolName, args, sensitive, onApprove, onApproveAll, 
       border={`1px solid ${warning ? (sensitive ? 'rgba(247, 127, 0, 0.3)' : tokens.colors.accent.redMuted) : tokens.colors.border.panel}`}
       borderRadius="10px"
       overflow="hidden"
-      maxW="800px"
+      maxW="900px"
       alignSelf="center"
       w="100%"
     >

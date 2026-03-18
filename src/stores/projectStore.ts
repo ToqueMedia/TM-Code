@@ -8,6 +8,7 @@ import { ProjectFileWatcher } from '../utils/projectFileWatcher';
 import { WindowTitleManager } from '../utils/windowTitleManager';
 import { useEditorRepository } from './editorStore';
 import { useLayoutStore } from './layoutStore';
+import { useContainerStore } from './containerStore';
 import RecoveryService from '../services/recoveryService';
 import WindowService from '../services/windowService';
 import { sessionService } from '../services/agent/sessionService';
@@ -91,6 +92,13 @@ function tearDownProject() {
     layout.setViewMode('chat');
   }
 
+  // Stop Container Code — release project isolation (Docker or app-level)
+  const { projectId: containerProjectId, isolationMode, stopContainer, clear: clearContainer } = useContainerStore.getState();
+  if (isolationMode !== 'none' && containerProjectId) {
+    stopContainer(containerProjectId).catch(() => {});
+  }
+  clearContainer();
+
   // Clear current project
   useProjectStore.setState({ currentProject: null });
 }
@@ -161,6 +169,11 @@ export const useProjectStore = create<ProjectStore>()(
           // Start managing window title
           windowTitleManager.startManaging();
 
+          // Initialize Container Code — run project inside Docker
+          useContainerStore.getState().initContainer(projectInfo.id, path).catch(err => {
+            logger.warn('project', 'Container Code unavailable — running on host:', err);
+          });
+
           // Load project state if exists
           try {
             await get().loadProjectState(projectInfo.id);
@@ -194,6 +207,11 @@ export const useProjectStore = create<ProjectStore>()(
 
           // Start managing window title
           windowTitleManager.startManaging();
+
+          // Initialize Container Code
+          useContainerStore.getState().initContainer(projectInfo.id, path).catch(err => {
+            logger.warn('project', 'Container Code unavailable — running on host:', err);
+          });
         } catch (error: unknown) {
           set({
             loading: false,
@@ -279,6 +297,9 @@ export const useProjectStore = create<ProjectStore>()(
 
           // Remove from persisted recent list so it doesn't reappear on WelcomeScreen
           await invoke('remove_from_recent_projects', { projectId }).catch(() => {});
+
+          // Remove Container Code container entirely
+          await useContainerStore.getState().removeContainer(projectId).catch(() => {});
 
           // Async cleanup: delete sessions and project files from disk
           await sessionService.deleteAllProjectSessions(projectPath);

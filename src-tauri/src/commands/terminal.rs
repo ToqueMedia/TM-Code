@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, State};
 
+use super::container::{clamp_to_project, host_to_container_path, ActiveProjectState, WORKSPACE_PATH};
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandResult {
@@ -31,28 +33,10 @@ pub struct ProcessInfo {
 type CommandHistory = Mutex<Vec<String>>;
 type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
 
-#[tauri::command]
-pub async fn execute_command(
-    command: String,
-    cwd: Option<String>,
-    timeout_secs: Option<u64>,
-) -> Result<CommandResult, String> {
-    let working_dir = match cwd {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?
-        }
-    };
+// ─── Shared execution engine ─────────────────────────────────────────────────
 
-    if command.trim().is_empty() {
-        return Err("Empty command".to_string());
-    }
-
-    // Default: 5 minutes. The agent tool passes a shorter timeout.
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
-
-    // Delegate parsing to the system shell so that quotes, pipes,
-    // environment variables, etc. are handled correctly.
+/// Build a host-local shell command.
+fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
     let (shell, flag) = if cfg!(target_os = "windows") {
         ("cmd", "/C")
     } else {
@@ -61,27 +45,48 @@ pub async fn execute_command(
 
     let mut cmd = Command::new(shell);
     cmd.arg(flag)
-        .arg(&command)
-        .current_dir(&working_dir)
+        .arg(command)
+        .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // Put the child in its own process group so we can kill the entire
-    // tree on timeout (e.g. npm → node → jest).
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
 
+    cmd
+}
+
+/// Build a `docker exec` command that runs inside a container.
+fn build_container_command(command: &str, workdir: &str, container_name: &str) -> Command {
+    let mut cmd = Command::new("docker");
+    cmd.args(["exec", "-w", workdir, container_name, "sh", "-c", command])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    cmd
+}
+
+/// Spawn a command, stream its output into buffers, and wait with a timeout.
+/// Returns `CommandResult` on completion or timeout.
+async fn run_command_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+) -> Result<CommandResult, String> {
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to execute command: {}", e))?;
 
     let child_pid = child.id();
 
-    // Take pipes so we can read output incrementally in background threads.
-    // This way, on timeout we still have whatever output was produced so far.
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
@@ -124,12 +129,10 @@ pub async fn execute_command(
         })
     });
 
-    // Wait for the child exit, wrapped with a timeout.
     let wait_result =
         tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || child.wait())).await;
 
     match wait_result {
-        // Normal completion — join reader threads so all output is drained.
         Ok(Ok(Ok(status))) => {
             if let Some(h) = stdout_handle {
                 let _ = h.join();
@@ -149,15 +152,11 @@ pub async fn execute_command(
                 timed_out: false,
             })
         }
-        // Process I/O error
         Ok(Ok(Err(e))) => Err(format!("Failed to execute command: {}", e)),
-        // Tokio task join error
         Ok(Err(e)) => Err(format!("Task error: {}", e)),
-        // Timeout — kill, then drain whatever output was captured so far.
         Err(_) => {
             kill_process_tree(child_pid);
 
-            // Killing closes the pipes, so the reader threads will finish.
             if let Some(h) = stdout_handle {
                 let _ = h.join();
             }
@@ -185,12 +184,13 @@ pub async fn execute_command(
     }
 }
 
+// ─── Process tree kill ───────────────────────────────────────────────────────
+
 /// Kill a process and its entire tree by PID.
 /// Sends SIGTERM first for graceful shutdown, then SIGKILL if still alive.
-fn kill_process_tree(pid: u32) {
+pub(crate) fn kill_process_tree(pid: u32) {
     #[cfg(unix)]
     {
-        // 1. SIGTERM the process group for graceful shutdown
         let _ = Command::new("kill")
             .args(["-TERM", &format!("-{}", pid)])
             .output();
@@ -198,10 +198,8 @@ fn kill_process_tree(pid: u32) {
             .args(["-TERM", &pid.to_string()])
             .output();
 
-        // 2. Brief wait for graceful exit
         std::thread::sleep(Duration::from_millis(200));
 
-        // 3. SIGKILL if still alive
         let still_alive = Command::new("kill")
             .args(["-0", &pid.to_string()])
             .output()
@@ -226,6 +224,61 @@ fn kill_process_tree(pid: u32) {
     }
 }
 
+// ─── Tauri Commands ──────────────────────────────────────────────────────────
+
+/// Execute a one-shot command with project isolation.
+///
+/// Routing logic (transparent to all frontend callers):
+///   1. Docker container active → `docker exec` inside container
+///   2. App-level isolation (no Docker) → host shell, cwd clamped to project
+///   3. No active project → host shell, unrestricted (shouldn't happen)
+#[tauri::command]
+pub async fn execute_command(
+    command: String,
+    cwd: Option<String>,
+    timeout_secs: Option<u64>,
+    active_project: State<'_, ActiveProjectState>,
+) -> Result<CommandResult, String> {
+    if command.trim().is_empty() {
+        return Err("Empty command".to_string());
+    }
+
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
+
+    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+
+    if let Some(ref ap) = project {
+        if let Some(ref container_name) = ap.container_name {
+            // ── Docker mode: route through container ─────────────────
+            let workdir = match &cwd {
+                Some(dir) => host_to_container_path(dir, &ap.project_path),
+                None => WORKSPACE_PATH.to_string(),
+            };
+            let cmd = build_container_command(&command, &workdir, container_name);
+            return run_command_with_timeout(cmd, timeout).await;
+        }
+
+        // ── App-level isolation: clamp cwd to project ────────────────
+        let working_dir = match &cwd {
+            Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+            None => PathBuf::from(&ap.project_path),
+        };
+        let cmd = build_host_command(&command, &working_dir);
+        return run_command_with_timeout(cmd, timeout).await;
+    }
+
+    // ── No active project: unrestricted host execution ───────────────
+    let working_dir = match cwd {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?
+        }
+    };
+
+    let cmd = build_host_command(&command, &working_dir);
+    run_command_with_timeout(cmd, timeout).await
+}
+
 #[derive(Clone, Serialize)]
 struct DevServerOutput {
     pid: u32,
@@ -235,42 +288,109 @@ struct DevServerOutput {
 
 /// Spawn a long-running dev server process and stream its output back to the
 /// frontend via Tauri events (`dev-server-output` and `dev-server-exit`).
-/// Returns the child PID so the frontend can kill it later via `kill_process`.
+///
+/// Routing:
+///   - Docker mode → `docker exec` (ports already forwarded on container)
+///   - App-level / no project → host shell (cwd clamped when isolated)
 #[tauri::command]
 pub async fn start_dev_server(
     app: tauri::AppHandle,
     command: String,
     cwd: String,
     process_map: State<'_, ProcessMap>,
+    active_project: State<'_, ActiveProjectState>,
 ) -> Result<u32, String> {
     if command.trim().is_empty() {
         return Err("Empty command".to_string());
     }
 
-    let (shell, flag) = if cfg!(target_os = "windows") {
-        ("cmd", "/C")
+    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+
+    let mut cmd = if let Some(ref ap) = project {
+        if let Some(ref container_name) = ap.container_name {
+            // Docker mode
+            let workdir = host_to_container_path(&cwd, &ap.project_path);
+            let mut c = Command::new("docker");
+            c.args([
+                "exec",
+                "-w",
+                &workdir,
+                "-e",
+                "FORCE_COLOR=0",
+                "-e",
+                "NO_COLOR=1",
+                "-e",
+                "BROWSER=none",
+                container_name,
+                "sh",
+                "-c",
+                &command,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                c.process_group(0);
+            }
+
+            c
+        } else {
+            // App-level isolation: clamp cwd
+            let clamped = clamp_to_project(&cwd, &ap.project_path);
+            let (shell, flag) = if cfg!(target_os = "windows") {
+                ("cmd", "/C")
+            } else {
+                ("sh", "-c")
+            };
+
+            let mut c = Command::new(shell);
+            c.arg(flag)
+                .arg(&command)
+                .current_dir(&clamped)
+                .env("FORCE_COLOR", "0")
+                .env("NO_COLOR", "1")
+                .env("PORT", "5174")
+                .env("BROWSER", "none")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                c.process_group(0);
+            }
+
+            c
+        }
     } else {
-        ("sh", "-c")
+        // No active project
+        let (shell, flag) = if cfg!(target_os = "windows") {
+            ("cmd", "/C")
+        } else {
+            ("sh", "-c")
+        };
+
+        let mut c = Command::new(shell);
+        c.arg(flag)
+            .arg(&command)
+            .current_dir(&cwd)
+            .env("FORCE_COLOR", "0")
+            .env("NO_COLOR", "1")
+            .env("PORT", "5174")
+            .env("BROWSER", "none")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            c.process_group(0);
+        }
+
+        c
     };
-
-    let mut cmd = Command::new(shell);
-    cmd.arg(flag)
-        .arg(&command)
-        .current_dir(&cwd)
-        .env("FORCE_COLOR", "0")
-        .env("NO_COLOR", "1")
-        .env("PORT", "5174")
-        .env("BROWSER", "none")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    // Put the child in its own process group so kill_process can
-    // terminate the entire tree (npm → node → vite, etc.).
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
 
     let mut child = cmd
         .spawn()
@@ -294,7 +414,6 @@ pub async fn start_dev_server(
                     },
                 );
             }
-            // stdout closed — process has exited
             let _ = app_clone.emit("dev-server-exit", pid);
         });
     }
@@ -318,7 +437,6 @@ pub async fn start_dev_server(
         });
     }
 
-    // Track the process so kill_process can validate it
     {
         let mut map = process_map
             .lock()
@@ -333,7 +451,89 @@ pub async fn start_dev_server(
 pub async fn start_interactive_shell(
     cwd: Option<String>,
     process_map: State<'_, ProcessMap>,
+    active_project: State<'_, ActiveProjectState>,
 ) -> Result<ProcessInfo, String> {
+    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+
+    if let Some(ref ap) = project {
+        if let Some(ref container_name) = ap.container_name {
+            // Docker mode: prefer bash if available, fallback to sh
+            let workdir = match &cwd {
+                Some(dir) => host_to_container_path(dir, &ap.project_path),
+                None => WORKSPACE_PATH.to_string(),
+            };
+
+            let has_bash = Command::new("docker")
+                .args(["exec", container_name, "which", "bash"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            let shell = if has_bash { "bash" } else { "sh" };
+
+            let child = Command::new("docker")
+                .args([
+                    "exec", "-i", "-w", &workdir, container_name, shell,
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start shell in container: {}", e))?;
+
+            let pid = child.id();
+            process_map
+                .lock()
+                .map_err(|_| "Failed to lock process map")?
+                .insert(pid, child);
+
+            return Ok(ProcessInfo {
+                pid,
+                command: "docker".to_string(),
+                args: vec!["exec".into(), container_name.clone(), shell.into()],
+                cwd: workdir,
+            });
+        }
+
+        // App-level isolation: clamp cwd
+        let working_dir = match &cwd {
+            Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+            None => PathBuf::from(&ap.project_path),
+        };
+
+        let (shell_cmd, shell_args) = if cfg!(target_os = "windows") {
+            ("cmd".to_string(), vec!["/C".to_string()])
+        } else {
+            let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            (shell, vec!["-i".to_string()])
+        };
+
+        let child = Command::new(&shell_cmd)
+            .args(&shell_args)
+            .current_dir(&working_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start interactive shell: {}", e))?;
+
+        let pid = child.id();
+        process_map
+            .lock()
+            .map_err(|_| "Failed to lock process map")?
+            .insert(pid, child);
+
+        return Ok(ProcessInfo {
+            pid,
+            command: shell_cmd,
+            args: shell_args,
+            cwd: working_dir.to_string_lossy().to_string(),
+        });
+    }
+
+    // No active project: unrestricted
     let working_dir = match cwd {
         Some(dir) => PathBuf::from(dir),
         None => {
@@ -341,11 +541,9 @@ pub async fn start_interactive_shell(
         }
     };
 
-    // Determine shell command based on OS
     let (shell_cmd, shell_args) = if cfg!(target_os = "windows") {
         ("cmd".to_string(), vec!["/C".to_string()])
     } else {
-        // Use user's preferred shell or default to bash
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         (shell, vec!["-i".to_string()])
     };
@@ -360,14 +558,10 @@ pub async fn start_interactive_shell(
         .map_err(|e| format!("Failed to start interactive shell: {}", e))?;
 
     let pid = child.id();
-
-    // Track the spawned process so kill_process can validate it
-    {
-        let mut map = process_map
-            .lock()
-            .map_err(|_| "Failed to lock process map")?;
-        map.insert(pid, child);
-    }
+    process_map
+        .lock()
+        .map_err(|_| "Failed to lock process map")?
+        .insert(pid, child);
 
     Ok(ProcessInfo {
         pid,
@@ -379,7 +573,6 @@ pub async fn start_interactive_shell(
 
 #[tauri::command]
 pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Result<bool, String> {
-    // Only allow killing processes that we spawned (tracked in ProcessMap)
     {
         let map = process_map
             .lock()
@@ -393,7 +586,6 @@ pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Resul
     }
 
     if cfg!(unix) {
-        // 1. SIGTERM the process group (npm → node → vite tree)
         let _ = Command::new("kill")
             .args(["-TERM", &format!("-{}", pid)])
             .output();
@@ -401,10 +593,8 @@ pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Resul
             .args(["-TERM", &pid.to_string()])
             .output();
 
-        // 2. Wait then SIGKILL if still alive (non-blocking via tokio)
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        // Check if process is still alive before SIGKILL
         let still_alive = Command::new("kill")
             .args(["-0", &pid.to_string()])
             .output()
@@ -420,19 +610,15 @@ pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Resul
                 .output();
         }
 
-        // 3. Nuclear fallback: kill anything on port 5174
-        // Dev servers often spawn child processes not in the process group.
         let _ = Command::new("sh")
             .args(["-c", "lsof -ti:5174 | xargs -r kill -9 2>/dev/null"])
             .output();
     } else {
-        // On Windows, /T kills the entire process tree, /F forces
         let _ = Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .output();
     }
 
-    // Always remove from tracked processes
     {
         let mut map = process_map
             .lock()
@@ -446,20 +632,29 @@ pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Resul
 #[tauri::command]
 pub async fn get_current_directory() -> Result<String, String> {
     let cwd = env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
-
     Ok(cwd.to_string_lossy().to_string())
 }
 
 #[tauri::command]
 pub async fn get_home_directory() -> Result<String, String> {
     let home_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
-
     Ok(home_dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub async fn change_directory(path: String) -> Result<String, String> {
-    let new_path = PathBuf::from(&path);
+pub async fn change_directory(
+    path: String,
+    active_project: State<'_, ActiveProjectState>,
+) -> Result<String, String> {
+    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+
+    let effective_path = if let Some(ref ap) = project {
+        clamp_to_project(&path, &ap.project_path)
+    } else {
+        path
+    };
+
+    let new_path = PathBuf::from(&effective_path);
 
     if !new_path.exists() {
         return Err(format!("Directory does not exist: {}", new_path.display()));
@@ -469,18 +664,42 @@ pub async fn change_directory(path: String) -> Result<String, String> {
         return Err(format!("Path is not a directory: {}", new_path.display()));
     }
 
-    // Canonicalize to resolve symlinks and return absolute path.
-    // NOTE: We intentionally do NOT call env::set_current_dir() because it
-    // mutates process-global state, which would affect all concurrent
-    // terminal sessions. The frontend tracks cwd per-terminal instead.
     let canonical = std::fs::canonicalize(&new_path)
         .map_err(|e| format!("Failed to resolve directory: {}", e))?;
+
+    // After canonicalization, re-check that we're still inside the project
+    if let Some(ref ap) = project {
+        let clamped = clamp_to_project(
+            &canonical.to_string_lossy(),
+            &ap.project_path,
+        );
+        return Ok(clamped);
+    }
 
     Ok(canonical.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub async fn command_exists(command: String) -> Result<bool, String> {
+pub async fn command_exists(
+    command: String,
+    active_project: State<'_, ActiveProjectState>,
+) -> Result<bool, String> {
+    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+
+    // Docker mode: check inside container (use which as separate arg, no shell interpolation)
+    if let Some(ref ap) = project {
+        if let Some(ref container_name) = ap.container_name {
+            let output = Command::new("docker")
+                .args(["exec", container_name, "which", &command])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map_err(|e| format!("Failed to check command in container: {}", e))?;
+            return Ok(output.success());
+        }
+    }
+
+    // Host execution (app-level or no isolation)
     let which_cmd = if cfg!(target_os = "windows") {
         "where"
     } else {
@@ -496,8 +715,9 @@ pub async fn command_exists(command: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub async fn get_environment_variables() -> Result<HashMap<String, String>, String> {
-    // Patterns that indicate sensitive environment variables
+pub async fn get_environment_variables(
+    active_project: State<'_, ActiveProjectState>,
+) -> Result<HashMap<String, String>, String> {
     let sensitive_patterns = [
         "SECRET",
         "TOKEN",
@@ -518,6 +738,34 @@ pub async fn get_environment_variables() -> Result<HashMap<String, String>, Stri
         "SIGNING",
     ];
 
+    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+
+    // Docker mode: read env from container
+    if let Some(ref ap) = project {
+        if let Some(ref container_name) = ap.container_name {
+            let output = Command::new("docker")
+                .args(["exec", container_name, "env"])
+                .output()
+                .map_err(|e| format!("Failed to get container env: {}", e))?;
+
+            if output.status.success() {
+                let mut env_vars = HashMap::new();
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
+                    if let Some((key, value)) = line.split_once('=') {
+                        let upper = key.to_uppercase();
+                        let is_sensitive =
+                            sensitive_patterns.iter().any(|pat| upper.contains(pat));
+                        if !is_sensitive {
+                            env_vars.insert(key.to_string(), value.to_string());
+                        }
+                    }
+                }
+                return Ok(env_vars);
+            }
+        }
+    }
+
+    // Host env (app-level or no isolation)
     let mut env_vars = HashMap::new();
 
     for (key, value) in env::vars() {
@@ -532,30 +780,67 @@ pub async fn get_environment_variables() -> Result<HashMap<String, String>, Stri
 }
 
 #[tauri::command]
-pub async fn get_completions(partial: String, cwd: Option<String>) -> Result<Vec<String>, String> {
-    let working_dir = match cwd {
-        Some(dir) => PathBuf::from(dir),
-        None => {
+pub async fn get_completions(
+    partial: String,
+    cwd: Option<String>,
+    active_project: State<'_, ActiveProjectState>,
+) -> Result<Vec<String>, String> {
+    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+
+    // Docker mode: list files inside container
+    if let Some(ref ap) = project {
+        if let Some(ref container_name) = ap.container_name {
+            let workdir = match &cwd {
+                Some(dir) => host_to_container_path(dir, &ap.project_path),
+                None => WORKSPACE_PATH.to_string(),
+            };
+            let output = Command::new("docker")
+                .args([
+                    "exec",
+                    "-w",
+                    &workdir,
+                    container_name,
+                    "ls",
+                    "-1A",
+                ])
+                .output()
+                .map_err(|e| format!("Failed to list files in container: {}", e))?;
+
+            if output.status.success() {
+                let mut completions: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|name| name.starts_with(&partial))
+                    .map(|s| s.to_string())
+                    .collect();
+                completions.truncate(20);
+                completions.sort();
+                return Ok(completions);
+            }
+        }
+    }
+
+    // Host mode: read filesystem (clamp cwd if isolated)
+    let working_dir = match (&cwd, &project) {
+        (Some(dir), Some(ap)) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+        (Some(dir), None) => PathBuf::from(dir),
+        (None, Some(ap)) => PathBuf::from(&ap.project_path),
+        (None, None) => {
             env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?
         }
     };
 
     let mut completions = Vec::new();
 
-    // Simple file/directory completion based on the working directory itself
-    {
-        if let Ok(entries) = std::fs::read_dir(&working_dir) {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(&partial) {
-                        completions.push(name.to_string());
-                    }
+    if let Ok(entries) = std::fs::read_dir(&working_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(&partial) {
+                    completions.push(name.to_string());
                 }
             }
         }
     }
 
-    // Limit results
     completions.truncate(20);
     completions.sort();
 
@@ -577,7 +862,6 @@ pub async fn save_command_to_history(
 ) -> Result<(), String> {
     let mut history = history_state.lock().map_err(|_| "Failed to lock history")?;
 
-    // Avoid duplicates
     if let Some(last) = history.last() {
         if last == &command {
             return Ok(());
@@ -586,7 +870,6 @@ pub async fn save_command_to_history(
 
     history.push(command);
 
-    // Limit history size
     const MAX_HISTORY: usize = 1000;
     if history.len() > MAX_HISTORY {
         let len = history.len();
@@ -602,8 +885,6 @@ pub async fn clear_command_history(history_state: State<'_, CommandHistory>) -> 
     history.clear();
     Ok(())
 }
-
-// Função helper removida - não é mais necessária no Tauri v2
 
 // Função para inicializar o estado do terminal
 pub fn init_terminal_state() -> (CommandHistory, ProcessMap) {

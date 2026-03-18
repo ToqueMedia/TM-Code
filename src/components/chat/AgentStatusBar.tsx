@@ -1,11 +1,12 @@
 import { memo } from 'react'
 import { Flex, Text, Box } from '@chakra-ui/react'
-import { FiSquare } from 'react-icons/fi'
+import { FiSquare, FiBox, FiShield } from 'react-icons/fi'
 import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore } from '../../stores/mcpStore'
+import { useContainerStore } from '../../stores/containerStore'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
 
@@ -25,6 +26,7 @@ function AgentStatusBar() {
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const runningServers = useMcpStore(s => s.getRunningServers())
   const totalMcpTools = useMcpStore(s => s.getTotalToolCount())
+  const isolationMode = useContainerStore(s => s.isolationMode)
 
   const handleStop = () => {
     usePermissionStore.getState().clearPending()
@@ -57,6 +59,12 @@ function AgentStatusBar() {
   infoSegments.push(`${formatTokens(totalTokens)} tokens`)
   infoSegments.push(`${currentTurnCount} turns`)
 
+  const isolationBadge = isolationMode === 'docker'
+    ? { icon: FiBox, label: 'Ambiente isolado (Docker)', color: tokens.colors.accent.greenBright, bg: tokens.colors.accent.greenSubtle }
+    : isolationMode === 'app-level'
+    ? { icon: FiShield, label: 'Ambiente isolado', color: '#58a6ff', bg: 'rgba(56, 139, 253, 0.12)' }
+    : null
+
   return (
     <Flex
       role="status"
@@ -87,6 +95,27 @@ function AgentStatusBar() {
         <Text fontSize="11px" color={tokens.colors.text.muted} letterSpacing="0.01em">
           {config.label}
         </Text>
+
+        {isolationBadge && (
+          <Flex
+            align="center"
+            gap="4px"
+            px="6px"
+            py="1px"
+            ml={1}
+            borderRadius="3px"
+            bg={isolationBadge.bg}
+            title={isolationMode === 'docker'
+              ? 'Projecto corre dentro de um container Docker isolado'
+              : 'Terminal e agente restritos ao directorio do projecto'
+            }
+          >
+            <isolationBadge.icon size={9} color={isolationBadge.color} />
+            <Text fontSize="10px" fontWeight="600" color={isolationBadge.color} letterSpacing="0.02em">
+              {isolationBadge.label}
+            </Text>
+          </Flex>
+        )}
       </Flex>
 
       <Flex align="center" gap={3}>

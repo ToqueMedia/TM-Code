@@ -29,7 +29,7 @@ function PromptBar() {
       bg={tokens.colors.bg.mainLayout}
       flexShrink={0}
     >
-      <Box maxW="800px" mx="auto">
+      <Box maxW="900px" mx="auto">
         {/* Main input container */}
         <Box
           bg={tokens.colors.bg.panel}
