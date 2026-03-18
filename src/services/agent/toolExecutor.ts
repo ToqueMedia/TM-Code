@@ -694,12 +694,13 @@ class ToolExecutor {
     this.tools.set('execute_command', {
       definition: {
         name: 'execute_command',
-        description: 'Execute a shell command in the project directory. Blocks until the command exits — do NOT use for dev servers or watchers (they never exit and will block the agent). Use for running tests, installing dependencies, building, linting, or short-lived CLI operations. Returns stdout, stderr, and exit code.',
+        description: 'Execute a shell command in the project directory. Blocks until the command exits or the timeout is reached — do NOT use for dev servers or watchers (they never exit). Use for running tests, installing dependencies, building, linting, or short-lived CLI operations. Returns stdout, stderr, and exit code. Default timeout: 120 seconds.',
         input_schema: {
           type: 'object',
           properties: {
             command: { type: 'string', description: 'Shell command to execute (e.g., "npm install", "npm test", "ls -la")' },
-            cwd: { type: 'string', description: 'Working directory. Default: project root' }
+            cwd: { type: 'string', description: 'Working directory. Default: project root' },
+            timeout_secs: { type: 'number', description: 'Timeout in seconds. Default: 120. Max: 600.' }
           },
           required: ['command']
         }
@@ -711,10 +712,19 @@ class ToolExecutor {
         const cwd = (input.cwd as string) || projectRoot
         this.validatePathWithinProject(cwd)
 
-        const result = await invoke<{ stdout: string; stderr: string; exitCode: number; success: boolean }>('execute_command', {
+        // Agent default: 120s. Clamp to max 600s.
+        const timeoutSecs = Math.min(Number(input.timeout_secs) || 120, 600)
+
+        const result = await invoke<{ stdout: string; stderr: string; exitCode: number; success: boolean; timedOut: boolean }>('execute_command', {
           command: input.command,
-          cwd
+          cwd,
+          timeoutSecs,
         })
+
+        if (result.timedOut) {
+          return `TIMEOUT: Command exceeded ${timeoutSecs}s limit and was terminated.\nFor long-running processes, use start_dev_server instead.\nSTDERR:\n${result.stderr}`
+        }
+
         let output = ''
         if (result.stdout) output += result.stdout
         if (result.stderr) output += `\nSTDERR:\n${result.stderr}`

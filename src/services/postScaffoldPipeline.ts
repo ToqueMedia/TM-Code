@@ -8,7 +8,7 @@ import { logger } from '../utils/logger'
 interface CommandResult {
   stdout: string
   stderr: string
-  exit_code: number
+  exitCode: number
   success: boolean
 }
 
@@ -93,7 +93,7 @@ async function runInstall(
 
     if (!result.success) {
       layoutStore.addDevServerLog(
-        `Failed to install dependencies (exit code ${result.exit_code}). ${result.stderr?.slice(0, 300) || ''}`,
+        `Failed to install dependencies (exit code ${result.exitCode}). ${result.stderr?.slice(0, 300) || ''}`,
         'error',
       )
       logger.error('postScaffold', 'Install failed:', result.stderr)

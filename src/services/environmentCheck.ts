@@ -17,7 +17,7 @@ export interface EnvironmentCheckResult {
 interface CommandResult {
   stdout: string
   stderr: string
-  exit_code: number
+  exitCode: number
   success: boolean
 }
 
