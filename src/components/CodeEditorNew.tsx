@@ -83,7 +83,7 @@ export function CodeEditorNew() {
 			direction="column"
 			flex="1"
 			bg={tokens.colors.bg.app}
-			color={tokens.colors.text.inverse}
+			color={tokens.colors.text.primary}
 			borderRadius={12}
 			height="100vh"
 			overflow="hidden"
@@ -96,37 +96,39 @@ export function CodeEditorNew() {
 			{/* Main Content Area */}
 			<Flex flex="1" overflow="hidden" minW={0}>
 				{/* Activity Bar */}
-				<Box position="relative">
-					<ActivityBar
-						activeActivity={activeActivity}
-						onActivityChange={handleActivityChange}
-					/>
-				</Box>
+				<ActivityBar
+					activeActivity={activeActivity}
+					onActivityChange={handleActivityChange}
+				/>
 
 				{/* Sidebar Panel */}
 				<Box
 					width={`${explorerWidth}px`}
-					bg="bg.sidebar"
+					bg={tokens.colors.bg.sidebar}
 					height="100%"
 					position="relative"
-					borderRight="1px solid"
-					borderColor={tokens.colors.border.default}
+					borderRight={`1px solid ${tokens.colors.border.default}`}
 					ref={sidebarRef}
 				>
 					{renderSidebarPanel()}
+					{/* Resize handle */}
 					<Box
 						position="absolute"
-						right="0"
+						right="-2px"
 						top="0"
 						bottom="0"
-						width="6px"
+						width="4px"
 						cursor="col-resize"
 						bg="transparent"
-						_hover={{ bg: tokens.colors.bg.hoverSubtle }}
+						_hover={{
+							bg: tokens.colors.accent.primary,
+							opacity: 0.5,
+						}}
 						onPointerDown={handleExplorerResizeStart}
 						zIndex={10}
 						ref={sidebarHandleRef}
 						style={{ touchAction: 'none' }}
+						transition={`background ${tokens.transition.fast}`}
 					/>
 				</Box>
 
@@ -162,10 +164,9 @@ export function CodeEditorNew() {
 			{isBottomPanelVisible && (
 				<Box
 					height={`${bottomDefaultSize}px`}
-					bg="bg.terminal"
+					bg={tokens.colors.bg.terminal}
 					position="relative"
-					borderTop="1px solid"
-					borderColor={tokens.colors.border.default}
+					borderTop={`1px solid ${tokens.colors.border.default}`}
 				>
 					<BottomPanel
 						isVisible={isBottomPanelVisible}

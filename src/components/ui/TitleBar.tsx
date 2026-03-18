@@ -48,22 +48,22 @@ function TitleBar() {
 	return (
 		<Box
 			className="vscode-titlebar drag-region"
-			height="35px"
+			height="38px"
 			bg={tokens.colors.bg.titlebar}
-			borderBottom={`1px solid ${tokens.colors.border.activitybar}`}
+			borderBottom={`1px solid ${tokens.colors.border.default}`}
 			display="flex"
 			alignItems="center"
-			px={2}
+			px={3}
 			position="relative"
 			userSelect="none"
-			backdropFilter="blur(10px)"
+			backdropFilter="blur(12px)"
 			data-tauri-drag-region
 			onMouseDown={handleMouseDown}
 		>
 			<HStack
 				gap={3}
 				position="absolute"
-				left={8}
+				left={10}
 			>
 				<WindowControls
 					onClose={handleClose}

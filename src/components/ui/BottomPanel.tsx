@@ -3,22 +3,23 @@ import {
   Flex,
   HStack,
   IconButton,
-  Box} from '@chakra-ui/react'
+  Box
+} from '@chakra-ui/react'
 import {
   FiTerminal,
   FiList,
   FiX,
-  FiChevronDown,
+  FiMinus,
   FiRefreshCw,
   FiCode
 } from 'react-icons/fi'
-import { PanelHeader } from './PanelHeader'
 import { PanelTab } from './PanelTab'
 import TerminalV3 from './TerminalV3'
 import ProblemsContent from './ProblemsContent'
 import OutputContent from './OutputContent'
 import DebugConsoleContent from './DebugConsoleContent'
 import { useProblemsStore, selectErrorCount, selectWarningCount } from '@/stores/problemsStore'
+import { tokens } from '@/theme/tokens'
 
 interface BottomPanelProps {
   isVisible: boolean
@@ -79,6 +80,11 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
 
   const panels = [
     {
+      id: 'terminal',
+      label: 'Terminal',
+      icon: FiTerminal,
+    },
+    {
       id: 'problems',
       label: 'Problems',
       icon: FiList,
@@ -95,11 +101,6 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
       label: 'Debug Console',
       icon: FiCode,
     },
-    {
-      id: 'terminal',
-      label: 'Terminal',
-      icon: FiTerminal,
-    }
   ]
 
   const handlePanelChange = useCallback((panelId: string) => {
@@ -127,38 +128,19 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
     <Flex
       direction="column"
       height="100%"
-      bg="bg.terminal"
-      borderTop="1px solid"
-      borderColor="border.glass"
+      bg={tokens.colors.bg.terminal}
     >
       {/* Header with Tabs */}
-      <PanelHeader
-        title=""
-        compact
-        rightControls={
-          <>
-            <IconButton
-              aria-label="Toggle panel"
-              variant="ghost"
-              size="xs"
-              color="text.secondary"
-              onClick={onToggle}
-            >
-              <FiChevronDown size={12} />
-            </IconButton>
-            <IconButton
-              aria-label="Close panel"
-              variant="ghost"
-              size="xs"
-              color="text.secondary"
-              onClick={onClose}
-            >
-              <FiX size={12} />
-            </IconButton>
-          </>
-        }
+      <Flex
+        align="center"
+        justify="space-between"
+        height="32px"
+        flexShrink={0}
+        borderBottom={`1px solid ${tokens.colors.border.default}`}
+        bg={tokens.colors.bg.panel}
+        px={1}
       >
-        <HStack gap={0}>
+        <HStack gap={0} height="100%">
           {panels.map((panel) => (
             <PanelTab
               key={panel.id}
@@ -172,7 +154,40 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
             />
           ))}
         </HStack>
-      </PanelHeader>
+
+        <HStack gap={0.5} pr={1}>
+          <IconButton
+            aria-label="Minimize panel"
+            title="Minimize panel"
+            variant="ghost"
+            size="xs"
+            color={tokens.colors.text.muted}
+            _hover={{ color: tokens.colors.text.primary, bg: tokens.colors.bg.hoverSubtle }}
+            onClick={onToggle}
+            borderRadius="4px"
+            width="24px"
+            height="24px"
+            minW="24px"
+          >
+            <FiMinus size={13} />
+          </IconButton>
+          <IconButton
+            aria-label="Close panel"
+            title="Close panel"
+            variant="ghost"
+            size="xs"
+            color={tokens.colors.text.muted}
+            _hover={{ color: tokens.colors.text.primary, bg: tokens.colors.bg.hoverSubtle }}
+            onClick={onClose}
+            borderRadius="4px"
+            width="24px"
+            height="24px"
+            minW="24px"
+          >
+            <FiX size={13} />
+          </IconButton>
+        </HStack>
+      </Flex>
 
       {/* Panel Content */}
       <Flex flex="1" direction="column" overflow="hidden">

@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import {
-  Text, IconButton, Box, Button, Flex, ScrollArea, Badge, HStack
+  Text, IconButton, Box, Button, Flex, ScrollArea, HStack
 } from '@chakra-ui/react'
 import {
   FiSearch, FiChevronDown, FiChevronRight, FiFile, FiAlertCircle
@@ -66,12 +66,24 @@ function SearchResultsList({
                   whiteSpace="nowrap" overflow="hidden" textOverflow="ellipsis">
                   {fileResult.file}
                 </Text>
-                <Badge size="sm" colorPalette="blue" ml={2}>{fileResult.matches.length}</Badge>
+                <Box
+                  fontSize="9px"
+                  fontWeight="bold"
+                  px="5px"
+                  py="1px"
+                  borderRadius="full"
+                  bg={tokens.colors.accent.primarySubtle}
+                  color={tokens.colors.accent.primary}
+                  ml={2}
+                  lineHeight="1.3"
+                >
+                  {fileResult.matches.length}
+                </Box>
               </Flex>
 
               {fileResult.isExpanded && fileResult.matches.map((match) => (
                 <Flex key={match.id} align="center" px={6} py={1} cursor="pointer"
-                  _hover={{ bg: 'whiteAlpha.050', borderColor: tokens.colors.accent.blue }}
+                  _hover={{ bg: tokens.colors.bg.hoverSubtle, borderColor: tokens.colors.accent.primary }}
                   onClick={() => onResultClick(match)} borderLeft="2px solid transparent">
                   <Text fontSize="xs" color="text.muted" minW="40px" mr={3}>{match.line}</Text>
                   <Text fontSize="xs" color={tokens.colors.text.primary} fontFamily="mono" flex="1"

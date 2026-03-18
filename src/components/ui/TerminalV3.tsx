@@ -1,24 +1,16 @@
 import { useEffect, useCallback } from 'react';
 import {
   Box,
-  HStack,
   VStack,
   Text,
-  Button,
   Flex,
-  IconButton,
 } from '@chakra-ui/react';
-import {
-  FiTerminal,
-  FiPlay,
-  FiSettings,
-} from 'react-icons/fi';
+import { FiTerminal } from 'react-icons/fi';
 
 import { tokens } from '@/theme/tokens';
 import { useTerminalStore } from '../../stores/terminalStore';
 import TerminalSession from './terminal/TerminalSession';
 import TerminalTabBar from './terminal/TerminalTabBar';
-import BackendProcessesSidebar from './terminal/BackendProcessesSidebar';
 
 export default function TerminalV3() {
   const sessions = useTerminalStore(state => state.sessions);
@@ -47,81 +39,57 @@ export default function TerminalV3() {
   }, [sessions.length, createSession]);
 
   return (
-    <Flex height="100%" bg={tokens.colors.terminal.background}>
-      {/* Sidebar com Backend Processes */}
-      <BackendProcessesSidebar />
+    <Flex height="100%" direction="column" bg={tokens.colors.terminal.background}>
+      {/* Terminal Tabs */}
+      <TerminalTabBar
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        onSelectSession={handleSetActiveSession}
+        onCloseSession={handleCloseTerminal}
+        onNewSession={handleNewTerminal}
+      />
 
-      {/* Main Terminal Area */}
-      <Flex direction="column" flex={1}>
-        {/* Terminal Tabs Header */}
-        <TerminalTabBar
-          sessions={sessions}
-          activeSessionId={activeSessionId}
-          onSelectSession={handleSetActiveSession}
-          onCloseSession={handleCloseTerminal}
-          onNewSession={handleNewTerminal}
-        />
+      {/* Terminal Content */}
+      <Box flex={1} position="relative" overflow="hidden">
+        {sessions.map((session) => (
+          <TerminalSession
+            key={session.id}
+            sessionId={session.id}
+            isActive={activeSessionId === session.id}
+          />
+        ))}
 
-        {/* Terminal Content */}
-        <Box flex={1} position="relative" overflow="hidden">
-          {sessions.map((session) => (
-            <TerminalSession
-              key={session.id}
-              sessionId={session.id}
-              isActive={activeSessionId === session.id}
-            />
-          ))}
-
-          {sessions.length === 0 && (
-            <VStack
-              height="100%"
-              justify="center"
-              gap={6}
-              bg={tokens.colors.terminal.background}
-            >
-              <VStack gap={3}>
-                <FiTerminal size={48} color={tokens.colors.text.subtle} />
-                <Text fontSize="lg" color={tokens.colors.terminal.foreground}>
-                  No terminal sessions
-                </Text>
-                <Text fontSize="sm" color={tokens.colors.text.subtle} textAlign="center">
-                  Create a new terminal session to get started
-                </Text>
-              </VStack>
-
-              <Button
-                colorScheme="blue"
-                size="md"
-                onClick={handleNewTerminal}
-              >
-                <FiPlay style={{ marginRight: '8px' }} />
-                New Terminal
-              </Button>
-            </VStack>
-          )}
-        </Box>
-
-        {/* Footer Bar */}
-        <HStack
-          bg={tokens.colors.bg.overlay}
-          borderTop="1px solid"
-          borderColor={tokens.colors.border.default}
-          px={3}
-          py={2}
-          gap={3}
-          justify="flex-end"
-        >
-          <IconButton
-            size="sm"
-            variant="ghost"
-            aria-label="Settings"
-            color={tokens.colors.text.subtle}
-            _hover={{ color: tokens.colors.terminal.foreground }}
+        {sessions.length === 0 && (
+          <VStack
+            height="100%"
+            justify="center"
+            gap={4}
+            bg={tokens.colors.terminal.background}
           >
-            <FiSettings size={14} />
-          </IconButton>
-        </HStack>
-      </Flex>
+            <Box
+              p={4}
+              borderRadius="12px"
+              bg={tokens.colors.accent.primarySubtle}
+              transition={`all ${tokens.transition.slow}`}
+              _hover={{ transform: 'translateY(-3px)' }}
+            >
+              <FiTerminal
+                size={32}
+                color={tokens.colors.accent.primary}
+                style={{ filter: `drop-shadow(0 0 8px ${tokens.colors.accent.primaryGlow})` }}
+              />
+            </Box>
+            <VStack gap={1}>
+              <Text fontSize="md" color={tokens.colors.text.primary} fontWeight="500">
+                No terminal sessions
+              </Text>
+              <Text fontSize="xs" color={tokens.colors.text.muted} textAlign="center">
+                Click + to create a new terminal
+              </Text>
+            </VStack>
+          </VStack>
+        )}
+      </Box>
     </Flex>
   );
 }

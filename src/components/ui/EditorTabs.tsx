@@ -1,5 +1,6 @@
 import React, { memo } from 'react'
-import { Flex, ScrollArea } from '@chakra-ui/react'
+import { Flex, ScrollArea, Text } from '@chakra-ui/react'
+import { FiCode } from 'react-icons/fi'
 import EditorTab from './EditorTab'
 import { tokens } from '@/theme/tokens'
 
@@ -13,10 +14,9 @@ interface EditorTabsProps {
 const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFile, onCloseFile }) => {
 	return (
 		<ScrollArea.Root
-			bg={tokens.gradient.tabBar}
-			borderBottom={`1px solid ${tokens.colors.border.activitybar}`}
+			bg={tokens.colors.bg.panel}
+			borderBottom={`1px solid ${tokens.colors.border.default}`}
 			position="relative"
-			boxShadow={tokens.shadow.tabBar}
 			h={'auto'}
 		>
 			<ScrollArea.Viewport>
@@ -48,12 +48,14 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 							<Flex
 								alignItems="center"
 								justifyContent="center"
+								gap={2}
 								flex="1"
-								color="text.secondary"
-								fontSize="sm"
+								color={tokens.colors.text.muted}
+								fontSize="12px"
 								height="35px"
 							>
-								No tabs open
+								<FiCode size={12} />
+								<Text>No open tabs</Text>
 							</Flex>
 						)}
 					</Flex>

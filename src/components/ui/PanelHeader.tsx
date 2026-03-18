@@ -2,7 +2,8 @@ import React from 'react'
 import {
   Flex,
   Text,
-  HStack} from '@chakra-ui/react'
+  HStack
+} from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 
 interface PanelHeaderProps {
@@ -12,8 +13,8 @@ interface PanelHeaderProps {
   compact?: boolean
 }
 
-export const PanelHeader: React.FC<PanelHeaderProps> = ({ 
-  title, 
+export const PanelHeader: React.FC<PanelHeaderProps> = ({
+  title,
   children,
   rightControls,
   compact = false
@@ -22,24 +23,29 @@ export const PanelHeader: React.FC<PanelHeaderProps> = ({
     <Flex
       align="center"
       justify="space-between"
-      p={compact ? 2 : 3}
-      bg={tokens.colors.bg.whiteMicro}
+      px={compact ? 2 : 3}
+      height={compact ? '32px' : '36px'}
+      flexShrink={0}
+      borderBottom={`1px solid ${tokens.colors.border.default}`}
+      bg={tokens.colors.bg.panel}
     >
-      <HStack gap={2}>
-        <Text
-          fontSize={compact ? "xs" : "sm"}
-          fontWeight="600"
-          textTransform="uppercase"
-          letterSpacing="wide"
-          color="text.secondary"
-        >
-          {title}
-        </Text>
+      <HStack gap={1}>
+        {title && (
+          <Text
+            fontSize="11px"
+            fontWeight="600"
+            textTransform="uppercase"
+            letterSpacing="0.06em"
+            color={tokens.colors.text.muted}
+          >
+            {title}
+          </Text>
+        )}
         {children}
       </HStack>
-      
+
       {rightControls && (
-        <HStack gap={1}>
+        <HStack gap={0.5}>
           {rightControls}
         </HStack>
       )}

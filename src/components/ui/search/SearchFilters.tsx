@@ -19,30 +19,36 @@ function SearchFilters({
     <Box px={3} pb={2}>
       <VStack gap={2} align="stretch">
         <Input
-          placeholder="Files to include (comma-separated, e.g., *.tsx,*.ts)"
+          placeholder="Files to include (e.g., *.tsx, *.ts)"
           value={includePatterns}
           onChange={(e) => onIncludeChange(e.target.value)}
-          bg="transparent"
-          border="1px solid"
-          borderColor="border.glass"
+          bg={tokens.colors.bg.input}
+          border={`1px solid ${tokens.colors.border.glass}`}
+          borderRadius="6px"
+          fontSize="12px"
           _focus={{
-            borderColor: tokens.colors.accent.blue,
-            boxShadow: 'none'
+            borderColor: tokens.colors.accent.primaryBorder,
+            boxShadow: `0 0 0 1px ${tokens.colors.accent.primarySubtle}`,
           }}
+          _placeholder={{ color: tokens.colors.text.hint, fontSize: '12px' }}
           size="sm"
+          transition={`all ${tokens.transition.normal}`}
         />
         <Input
-          placeholder="Files to exclude (comma-separated, e.g., *.min.js,node_modules/**)"
+          placeholder="Files to exclude (e.g., node_modules/**)"
           value={excludePatterns}
           onChange={(e) => onExcludeChange(e.target.value)}
-          bg="transparent"
-          border="1px solid"
-          borderColor="border.glass"
+          bg={tokens.colors.bg.input}
+          border={`1px solid ${tokens.colors.border.glass}`}
+          borderRadius="6px"
+          fontSize="12px"
           _focus={{
-            borderColor: tokens.colors.accent.blue,
-            boxShadow: 'none'
+            borderColor: tokens.colors.accent.primaryBorder,
+            boxShadow: `0 0 0 1px ${tokens.colors.accent.primarySubtle}`,
           }}
+          _placeholder={{ color: tokens.colors.text.hint, fontSize: '12px' }}
           size="sm"
+          transition={`all ${tokens.transition.normal}`}
         />
       </VStack>
     </Box>

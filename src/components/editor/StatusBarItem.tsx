@@ -7,37 +7,22 @@ const StatusBarItem = memo<{ children: React.ReactNode; tooltip?: string }>(({
 	tooltip
 }) => (
 	<Box
-		px={3}
-		py={1}
-		fontSize="xs"
+		px={2}
+		py={0.5}
+		fontSize="11px"
 		fontWeight="medium"
 		cursor="pointer"
-		position="relative"
+		borderRadius="3px"
 		_hover={{
 			bg: tokens.colors.bg.hoverSubtle,
-			transform: 'translateY(-1px)',
-			_after: {
-				opacity: 1,
-				transform: 'scaleX(1)',
-			}
+			color: tokens.colors.text.primary,
 		}}
-		transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+		transition={`all ${tokens.transition.fast}`}
 		display="flex"
 		alignItems="center"
 		gap={1}
 		title={tooltip}
-		_after={{
-			content: '""',
-			position: 'absolute',
-			bottom: 0,
-			left: '50%',
-			transform: 'translateX(-50%) scaleX(0)',
-			width: '80%',
-			height: '2px',
-			bg: tokens.colors.accent.blue,
-			opacity: 0,
-			transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-		}}
+		color={tokens.colors.text.secondary}
 	>
 		{children}
 	</Box>

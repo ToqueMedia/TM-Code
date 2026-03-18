@@ -29,13 +29,23 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 				justify="center"
 				align="center"
 				p={6}
-				color="text.muted"
+				gap={3}
 			>
-				<FiFolder size={48} />
-				<Text fontSize="sm" textAlign="center">
+				<Box
+					p={4}
+					borderRadius="12px"
+					bg={tokens.colors.accent.primarySubtle}
+				>
+					<FiFolder
+						size={32}
+						color={tokens.colors.accent.primary}
+						style={{ filter: `drop-shadow(0 0 8px ${tokens.colors.accent.primaryGlow})` }}
+					/>
+				</Box>
+				<Text fontSize="sm" color={tokens.colors.text.primary} fontWeight="500" textAlign="center">
 					No folder opened
 				</Text>
-				<Text fontSize="xs" textAlign="center" mt={2}>
+				<Text fontSize="xs" color={tokens.colors.text.muted} textAlign="center">
 					Open a folder to start exploring
 				</Text>
 			</VStack>
@@ -49,21 +59,18 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 			align="stretch"
 			gap={0}
 		>
-			<PanelHeader
-				title="Explorer"
-			/>
-
+			<PanelHeader title="Explorer" />
 
 			{/* File Tree */}
 			<ScrollArea.Root flex="1">
 				<ScrollArea.Viewport className="explorer-viewport">
 					<ScrollArea.Content>
 						<Suspense fallback={<FileTreeSkeleton />}>
-						<FileTree
-							rootPath={currentProject.path}
-							onFileSelect={onFileSelect}
-						/>
-					</Suspense>
+							<FileTree
+								rootPath={currentProject.path}
+								onFileSelect={onFileSelect}
+							/>
+						</Suspense>
 					</ScrollArea.Content>
 				</ScrollArea.Viewport>
 				<ScrollArea.Scrollbar
@@ -72,39 +79,37 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 					right="2px"
 					top="2px"
 					bottom="2px"
-					width="8px"
-					borderRadius="4px"
+					width="6px"
+					borderRadius="3px"
 					bg="transparent"
 					_hover={{ bg: tokens.colors.scrollbar.explorerTrackHover }}
-					_active={{ bg: tokens.colors.scrollbar.explorerTrackActive }}
-					transition="background 0.2s"
+					transition={`background ${tokens.transition.normal}`}
 					zIndex={1}
 				>
 					<ScrollArea.Thumb
 						bg={tokens.colors.scrollbar.explorerThumb}
-						borderRadius="4px"
+						borderRadius="3px"
 						minH="20px"
 						_hover={{ bg: tokens.colors.scrollbar.explorerThumbHover }}
 						_active={{ bg: tokens.colors.scrollbar.explorerThumbActive }}
-						transition="background 0.2s"
+						transition={`background ${tokens.transition.normal}`}
 					/>
 				</ScrollArea.Scrollbar>
 			</ScrollArea.Root>
 
-			{/* Footer Info */}
+			{/* Footer */}
 			<Box
 				px={3}
-				py={2}
-				borderTop="1px solid"
-				borderColor={tokens.colors.border.footer}
-				bg={tokens.colors.bg.footerOverlay}
+				py={1.5}
+				borderTop={`1px solid ${tokens.colors.border.default}`}
 			>
 				<Text
-					fontSize="xs"
-					color="text.muted"
+					fontSize="10px"
+					color={tokens.colors.text.disabled}
 					whiteSpace="nowrap"
 					overflow="hidden"
 					textOverflow="ellipsis"
+					fontFamily={tokens.fontFamily.mono}
 				>
 					{currentProject.path}
 				</Text>

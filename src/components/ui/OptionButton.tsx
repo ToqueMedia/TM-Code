@@ -1,7 +1,6 @@
 import React from 'react'
-import { 
-  IconButton
-} from '@chakra-ui/react'
+import { IconButton } from '@chakra-ui/react'
+import { tokens } from '@/theme/tokens'
 
 interface OptionButtonProps {
   label: string
@@ -11,7 +10,7 @@ interface OptionButtonProps {
   size?: "xs" | "sm" | "md"
 }
 
-export const OptionButton: React.FC<OptionButtonProps> = ({ 
+export const OptionButton: React.FC<OptionButtonProps> = ({
   label,
   icon: Icon,
   isActive = false,
@@ -23,19 +22,22 @@ export const OptionButton: React.FC<OptionButtonProps> = ({
     sm: { iconSize: 14, buttonSize: "sm" },
     md: { iconSize: 16, buttonSize: "md" }
   }[size]
-  
+
   return (
     <IconButton
       aria-label={label}
+      title={label}
       variant="ghost"
       size={sizeProps.buttonSize as "xs" | "sm" | "md"}
-      color={isActive ? 'blue.500' : 'text.secondary'}
+      color={isActive ? tokens.colors.accent.primary : tokens.colors.text.muted}
       onClick={onClick}
-      bg={isActive ? 'whiteAlpha.100' : 'transparent'}
+      bg={isActive ? tokens.colors.accent.primarySubtle : 'transparent'}
+      borderRadius="4px"
       _hover={{
-        bg: 'whiteAlpha.050',
-        color: isActive ? 'blue.500' : 'text.primary'
+        bg: tokens.colors.bg.hoverSubtle,
+        color: isActive ? tokens.colors.accent.primary : tokens.colors.text.primary,
       }}
+      transition={`all ${tokens.transition.fast}`}
     >
       <Icon size={sizeProps.iconSize} />
     </IconButton>

@@ -1,4 +1,4 @@
-import { Flex, Text } from '@chakra-ui/react'
+import { Flex, Text, Box, VStack } from '@chakra-ui/react'
 import { FiCode } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 
@@ -7,14 +7,22 @@ const FallbackPanel = () => (
 		flex="1"
 		alignItems="center"
 		justifyContent="center"
-		bg="bg.editor"
+		bg={tokens.colors.bg.app}
 		direction="column"
 		p={8}
 	>
-		<FiCode size={48} color={tokens.colors.text.subtle} />
-		<Text mt={4} fontSize="sm" color={tokens.colors.text.subtle}>
-			Use the activity bar to show the Chat or Editor panel.
-		</Text>
+		<VStack gap={3}>
+			<Box
+				p={4}
+				borderRadius="12px"
+				bg={tokens.colors.bg.hoverSubtle}
+			>
+				<FiCode size={28} color={tokens.colors.text.muted} />
+			</Box>
+			<Text fontSize="sm" color={tokens.colors.text.muted} textAlign="center" maxW="280px">
+				Use the activity bar to show the Chat or Editor panel
+			</Text>
+		</VStack>
 	</Flex>
 )
 

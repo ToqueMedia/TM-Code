@@ -67,11 +67,23 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     handleCursorChange,
     handleSave,
   } = useMonacoEditorState(path);
-  
+
   // Refs for editor instance
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const pendingRevealRef = useRef<{ file: string; line: number; column: number } | null>(null);
   const [monacoInstance, setMonacoInstance] = useState<Monaco | null>(null);
+
+  // Stable refs for callbacks — prevents Monaco from unbinding/rebinding
+  // listeners on every re-render. The refs always point to the latest
+  // version of the callback without changing identity.
+  const handleContentChangeRef = useRef(handleContentChange);
+  handleContentChangeRef.current = handleContentChange;
+  const handleCursorChangeRef = useRef(handleCursorChange);
+  handleCursorChangeRef.current = handleCursorChange;
+  const handleSaveRef = useRef(handleSave);
+  handleSaveRef.current = handleSave;
+  const onCursorPositionChangeRef = useRef(onCursorPositionChange);
+  onCursorPositionChangeRef.current = onCursorPositionChange;
   
   // Use the custom theme management hook
   useMonacoTheme(editorRef.current, monacoInstance);
@@ -233,7 +245,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     };
   }, [path]);
 
-  // Handle editor mounting
+  // Handle editor mounting — uses refs so this callback never changes identity,
+  // preventing Monaco from re-mounting or rebinding listeners.
   const handleEditorDidMount = useCallback((editor: editor.IStandaloneCodeEditor, monaco: Monaco) => {
     logger.editor(`Monaco Editor mounted successfully for: ${path}`);
     // Dispose previous listeners before setting new ones
@@ -242,7 +255,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     editorRef.current = editor;
     setMonacoInstance(monaco);
     MonacoBridge.getInstance().setCurrentEditor(editor);
-    
+
     // Configure TypeScript compiler options if it's a TypeScript file
     if (language === 'typescript' || language === 'javascript') {
       monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
@@ -256,54 +269,51 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         esModuleInterop: true,
         jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
       });
-      
-      // Enable strict null checks and other strict options
+
       monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
         noSemanticValidation: false,
         noSyntaxValidation: false,
-        diagnosticCodesToIgnore: [1108], // Ignore 'return statement not in function' errors
+        diagnosticCodesToIgnore: [1108],
       });
 
-      // Ensure model sync for better IntelliSense responsiveness
       monaco.languages.typescript.typescriptDefaults.setEagerModelSync(true);
       monaco.languages.typescript.javascriptDefaults.setEagerModelSync(true);
     }
-    
-    // Set up event listeners
+
     // Dispatch supported languages to app
     try {
       const languages = monaco.languages.getLanguages().map((l: { id: string }) => l.id);
       window.dispatchEvent(new CustomEvent('monaco:languages', { detail: languages }));
     } catch {}
 
-    // Cursor position change
+    // Cursor position change — read from ref so closure stays fresh
     disposablesRef.current.push(
       editor.onDidChangeCursorPosition((e) => {
         const { lineNumber, column } = e.position;
-        handleCursorChange(lineNumber, column);
-        onCursorPositionChange?.(lineNumber, column);
+        handleCursorChangeRef.current(lineNumber, column);
+        onCursorPositionChangeRef.current?.(lineNumber, column);
       })
     );
 
-    // Content change
+    // Content change — read from ref
     disposablesRef.current.push(
       editor.onDidChangeModelContent(() => {
         const value = editor.getValue();
-        handleContentChange(value);
+        handleContentChangeRef.current(value);
       })
     );
 
-    // Add keyboard shortcuts
+    // Keyboard shortcuts — read from ref
     editor.addCommand(
       monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
       () => {
-        handleSave().catch(error => {
+        handleSaveRef.current().catch(error => {
           logger.error('editor', 'Failed to save file', error);
         });
       }
     );
 
-    // Apply pending reveal position (e.g. from Problems panel click before editor mounted)
+    // Apply pending reveal position
     if (pendingRevealRef.current && pendingRevealRef.current.file === path) {
       const { line, column } = pendingRevealRef.current;
       editor.setPosition({ lineNumber: line, column });
@@ -311,17 +321,45 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       pendingRevealRef.current = null;
     }
 
-    // Focus the editor
     editor.focus();
-  }, [path, language, handleContentChange, handleCursorChange, handleSave, onCursorPositionChange]);
-  
-  // Handle content changes
+  }, [path, language]); // Only re-create on file/language change — callbacks via refs
+
+  // Stable onChange for @monaco-editor/react — identity never changes
   const handleChange = useCallback((value: string | undefined) => {
-    if (value !== undefined && value !== content) {
-      handleContentChange(value);
+    if (value !== undefined) {
+      handleContentChangeRef.current(value);
     }
-  }, [content, handleContentChange]);
+  }, []);
   
+  // Sync content from store when changed externally (e.g. agent writes a file).
+  // We use defaultValue so Monaco owns its state, but external updates
+  // (where the store content differs from what Monaco has) need to be pushed in.
+  const lastSyncedContentRef = useRef(content);
+  useEffect(() => {
+    const inst = editorRef.current;
+    if (!inst) return;
+    // Only sync if content was changed externally (not by user typing)
+    if (content !== lastSyncedContentRef.current) {
+      const currentValue = inst.getValue();
+      if (content !== currentValue) {
+        // Preserve cursor position across external updates
+        const pos = inst.getPosition();
+        inst.setValue(content || '');
+        if (pos) inst.setPosition(pos);
+      }
+      lastSyncedContentRef.current = content;
+    }
+  }, [content]);
+
+  // Track user edits so we can distinguish them from external syncs
+  const origHandleChange = handleChange;
+  const stableHandleChange = useCallback((value: string | undefined) => {
+    if (value !== undefined) {
+      lastSyncedContentRef.current = value;
+    }
+    origHandleChange(value);
+  }, [origHandleChange]);
+
   // Focus editor when path changes
   useEffect(() => {
     if (editorRef.current) {
@@ -383,8 +421,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         defaultLanguage={language}
         language={language}
         path={path}
-        value={content || ''}
-        onChange={handleChange}
+        defaultValue={content || ''}
+        onChange={stableHandleChange}
         onMount={handleEditorDidMount}
         options={editorOptions}
         theme="toquemedia-vibrant"

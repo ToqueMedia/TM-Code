@@ -1,9 +1,6 @@
 import React, { memo, useCallback } from 'react'
 import { Flex, Text, Box, IconButton, HStack } from '@chakra-ui/react'
-import { FiX, FiFile } from 'react-icons/fi'
-import { SiJavascript, SiReact, SiCss, SiHtml5, SiJson, SiMarkdown, SiPython, SiNpm, SiDocker } from 'react-icons/si'
-import { FaFileImage, FaFilePdf, FaFileArchive } from 'react-icons/fa'
-import TypeScriptIcon from '../icons/TypeScriptIcon'
+import { FiX } from 'react-icons/fi'
 import { getFileIconByExtension } from '../../utils/iconMapper'
 import { tokens } from '@/theme/tokens'
 
@@ -16,42 +13,14 @@ export interface EditorTabProps {
 	onClose: (e: React.MouseEvent) => void
 }
 
-const fe = tokens.colors.fileExtension
-
-const getFileIconComponent = (fileName: string) => {
-	const ext = fileName.split('.').pop()?.toLowerCase()
-	const name = fileName.toLowerCase()
-
-	if (name === 'package.json') {
-		return { icon: SiNpm, color: fe.npm }
-	}
-	if (name === 'dockerfile') {
-		return { icon: SiDocker, color: fe.docker }
-	}
-
-	switch (ext) {
-		case 'js': return { icon: SiJavascript, color: fe.js }
-		case 'jsx': return { icon: SiReact, color: fe.jsx }
-		case 'ts': case 'tsx': return { icon: TypeScriptIcon, color: fe.ts }
-		case 'css': return { icon: SiCss, color: fe.css }
-		case 'html': return { icon: SiHtml5, color: fe.html }
-		case 'json': return { icon: SiJson, color: fe.json }
-		case 'md': return { icon: SiMarkdown, color: fe.md }
-		case 'py': return { icon: SiPython, color: fe.py }
-		case 'png': case 'jpg': case 'jpeg': case 'gif': case 'svg': case 'webp':
-			return { icon: FaFileImage, color: fe.image }
-		case 'pdf': return { icon: FaFilePdf, color: fe.pdf }
-		case 'zip': case 'rar': case 'tar': case 'gz':
-			return { icon: FaFileArchive, color: fe.archive }
-		default: return { icon: FiFile, color: fe.default }
-	}
-}
-
 const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick, onClose }) => {
 	const handleClose = useCallback((e: React.MouseEvent) => {
 		e.stopPropagation()
 		onClose(e)
 	}, [onClose])
+
+	const ext = name.split('.').pop()?.toLowerCase()
+	const iconUrl = getFileIconByExtension(ext, name)
 
 	return (
 		<Flex
@@ -59,23 +28,20 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 			alignItems="center"
 			px={3}
 			py={0}
-			bg={isActive ? tokens.colors.bg.app : tokens.colors.bg.overlay}
-			borderRight={`1px solid ${tokens.colors.border.activitybar}`}
+			bg={isActive ? tokens.colors.bg.app : 'transparent'}
+			borderRight={`1px solid ${tokens.colors.border.subtle}`}
 			fontSize="13px"
 			cursor="pointer"
 			onClick={onClick}
 			position="relative"
 			overflow="hidden"
 			_hover={{
-				bg: isActive ? tokens.colors.bg.app : tokens.colors.bg.tabHover,
-				_before: {
-					opacity: isActive ? 0 : 0.5,
-				},
+				bg: isActive ? tokens.colors.bg.app : tokens.colors.bg.hoverSubtle,
 				'& .tab-close': {
 					opacity: 1
 				}
 			}}
-			transition="all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+			transition={`all ${tokens.transition.normal}`}
 			role="tab"
 			aria-selected={isActive}
 			data-path={path}
@@ -84,66 +50,64 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 			height="35px"
 			minW="0"
 			maxW="240px"
-			color={isActive ? tokens.colors.text.inverse : tokens.colors.text.dimmed}
-			borderTop={isActive ? `2px solid ${tokens.colors.accent.blue}` : '2px solid transparent'}
-			boxShadow={isActive ? tokens.shadow.tabActiveInset : 'none'}
-			_before={{
-				content: '""',
-				position: 'absolute',
-				top: 0,
-				left: 0,
-				right: 0,
-				bottom: 0,
-				bg: tokens.gradient.tabHoverOverlay,
-				opacity: 0,
-				transition: 'opacity 0.3s',
-				pointerEvents: 'none',
-			}}
+			color={isActive ? tokens.colors.text.primary : tokens.colors.text.muted}
+			/* Bottom accent line for active tab */
 			_after={{
 				content: '""',
 				position: 'absolute',
 				bottom: 0,
-				left: 0,
-				right: 0,
-				height: '1px',
-				bg: isActive ? tokens.gradient.tabActiveBottom : 'transparent',
+				left: '10%',
+				right: '10%',
+				height: '2px',
+				bg: isActive ? tokens.colors.accent.primary : 'transparent',
+				borderRadius: '2px 2px 0 0',
+				transition: `all ${tokens.transition.normal}`,
+				boxShadow: isActive ? `0 0 8px ${tokens.colors.accent.primaryGlow}` : 'none',
 			}}
 		>
 			<HStack gap={2} align="center" minW="0">
-				{(() => {
-					const ext = name.split('.').pop()?.toLowerCase()
-					const url = getFileIconByExtension(ext, name)
-					if (url) {
-						return (
-							<img
-								src={url}
-								alt={name}
-								style={{ width: 16, height: 16 }}
-							/>
-						)
-					}
-					const { icon: IconComponent, color } = getFileIconComponent(name)
-					return <IconComponent size={16} color={color} />
-				})()}
+				{iconUrl ? (
+					<img
+						src={iconUrl}
+						alt={name}
+						style={{
+							width: 16,
+							height: 16,
+							opacity: isActive ? 1 : 0.75,
+							transition: 'opacity 0.2s',
+							flexShrink: 0,
+						}}
+					/>
+				) : (
+					<Box
+						w="16px"
+						h="16px"
+						borderRadius="3px"
+						bg={tokens.colors.bg.hoverSubtle}
+						flexShrink={0}
+					/>
+				)}
 				<Text
-					fontSize="13px"
-					fontWeight="400"
+					fontSize="12px"
+					fontWeight={isActive ? '500' : '400'}
 					maxW="160px"
 					whiteSpace="nowrap"
 					overflow="hidden"
 					textOverflow="ellipsis"
 					fontFamily={tokens.fontFamily.ui}
+					letterSpacing="-0.01em"
 				>
 					{name}
 				</Text>
 				{isDirty && (
 					<Box
-						w="8px"
-						h="8px"
+						w="7px"
+						h="7px"
 						borderRadius="full"
-						bg={isActive ? tokens.colors.text.inverse : tokens.colors.text.dimmed}
+						bg={tokens.colors.accent.primary}
 						flexShrink={0}
-						ml={1}
+						ml={0.5}
+						boxShadow={`0 0 4px ${tokens.colors.accent.primaryGlow}`}
 					/>
 				)}
 				<IconButton
@@ -151,21 +115,21 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 					aria-label={`Close ${name}`}
 					onClick={handleClose}
 					variant="ghost"
-					color={isActive ? tokens.colors.text.inverse : tokens.colors.text.dimmed}
+					color={tokens.colors.text.muted}
 					size="xs"
 					_hover={{
 						bg: tokens.colors.bg.whiteOverlay,
 						color: tokens.colors.text.inverse
 					}}
-					opacity={isActive ? 1 : 0}
-					_groupHover={{ opacity: 1 }}
-					transition="opacity 0.1s ease"
-					borderRadius="3px"
-					width="22px"
-					height="22px"
-					minW="22px"
+					opacity={isActive ? 0.7 : 0}
+					_groupHover={{ opacity: 0.7 }}
+					transition={`opacity ${tokens.transition.fast}`}
+					borderRadius="4px"
+					width="20px"
+					height="20px"
+					minW="20px"
 				>
-					<FiX size={14} />
+					<FiX size={13} />
 				</IconButton>
 			</HStack>
 		</Flex>

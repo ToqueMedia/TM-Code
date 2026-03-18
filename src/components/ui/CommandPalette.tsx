@@ -128,7 +128,7 @@ function CommandPalette(): React.ReactElement | null {
               bg={tokens.colors.bg.statusbar}
               borderColor={tokens.colors.border.inputAlt}
               color={tokens.colors.text.statusbar}
-              _focus={{ borderColor: tokens.colors.accent.blueBright, boxShadow: '0 0 0 2px rgba(96,165,250,0.35)' }}
+              _focus={{ borderColor: tokens.colors.accent.primaryBorder, boxShadow: `0 0 0 2px ${tokens.colors.accent.primarySubtle}` }}
             />
           </Box>
           <VStack align="stretch" maxH="50vh" overflowY="auto">

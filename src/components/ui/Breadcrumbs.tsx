@@ -7,11 +7,10 @@ import {
 } from '@chakra-ui/react'
 import {
   FiChevronRight,
-  FiFolder,
-  FiFile,
   FiHome
 } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { getFileIconByExtension, getFolderIconByName } from '../../utils/iconMapper'
 
 interface BreadcrumbsProps {
   filePath?: string
@@ -23,40 +22,6 @@ interface BreadcrumbItem {
   name: string
   path: string
   isFile: boolean
-}
-
-const getFileIcon = (fileName: string) => {
-  const ext = fileName.split('.').pop()?.toLowerCase()
-  const fe = tokens.colors.fileExtension
-
-  const iconColors: { [key: string]: string } = {
-    'tsx': tokens.colors.accent.primary,
-    'ts': tokens.colors.accent.primary,
-    'jsx': fe.jsx,
-    'js': fe.js,
-    'json': fe.js,
-    'md': tokens.colors.accent.primary,
-    'css': fe.css,
-    'scss': fe.scss,
-    'html': fe.html,
-    'vue': fe.vue,
-    'py': fe.py,
-    'rs': fe.rs,
-    'go': fe.go,
-    'java': fe.java,
-    'php': fe.php,
-    'rb': fe.rb,
-    'swift': fe.swift,
-    'kt': fe.kt,
-    'dart': fe.dart,
-    'yaml': fe.yaml,
-    'yml': fe.yml,
-    'toml': fe.toml,
-    'xml': fe.xml,
-    'svg': fe.svg,
-  }
-
-  return iconColors[ext || ''] || tokens.colors.text.secondary
 }
 
 function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
@@ -100,16 +65,14 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
   if (breadcrumbs.length === 0) {
     return (
       <Flex
-        height="28px"
+        height="26px"
         align="center"
         px={3}
-        borderBottom="1px solid"
-        borderColor="border.glass"
-        bg={tokens.colors.bg.whiteMicro}
+        borderBottom={`1px solid ${tokens.colors.border.default}`}
       >
-        <HStack gap={1}>
-          <FiHome size={14} color={tokens.colors.text.secondary} />
-          <Text fontSize="xs" color="text.muted">
+        <HStack gap={1.5}>
+          <FiHome size={12} color={tokens.colors.text.disabled} />
+          <Text fontSize="11px" color={tokens.colors.text.disabled}>
             No file selected
           </Text>
         </HStack>
@@ -119,18 +82,28 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
 
   return (
     <Flex
-      height="28px"
+      height="26px"
       align="center"
       px={3}
-      borderBottom="1px solid"
-      borderColor="border.glass"
-      bg={tokens.colors.bg.whiteMicro}
+      borderBottom={`1px solid ${tokens.colors.border.default}`}
       overflow="hidden"
+      position="relative"
     >
-      <HStack gap={1} flex="1" minW="0">
+      <HStack gap={0.5} flex="1" minW="0">
         {breadcrumbs.map((item, index) => {
           const isLast = index === breadcrumbs.length - 1
           const isClickable = !isLast && onNavigate
+
+          // Resolve icon from assets
+          let iconSrc: string | undefined
+          if (index === 0) {
+            // Root project — use home icon (rendered below)
+          } else if (item.isFile) {
+            const ext = item.name.split('.').pop()?.toLowerCase()
+            iconSrc = getFileIconByExtension(ext, item.name)
+          } else {
+            iconSrc = getFolderIconByName(item.name, false)
+          }
 
           return (
             <React.Fragment key={item.path}>
@@ -138,26 +111,43 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
                 gap={1}
                 cursor={isClickable ? 'pointer' : 'default'}
                 onClick={isClickable ? () => handleNavigate(item.path) : undefined}
-                _hover={isClickable ? { color: 'text.primary' } : {}}
-                transition="color 0.2s"
+                _hover={isClickable ? {
+                  color: tokens.colors.text.primary,
+                  bg: tokens.colors.bg.hoverSubtle,
+                } : {}}
+                transition={`all ${tokens.transition.fast}`}
                 maxW="150px"
+                px={1}
+                py={0.5}
+                borderRadius="3px"
               >
                 {index === 0 ? (
-                  <FiHome size={12} color={tokens.colors.text.secondary} />
-                ) : item.isFile ? (
-                  <FiFile size={12} color={getFileIcon(item.name)} />
+                  <FiHome size={11} color={tokens.colors.text.disabled} style={{ flexShrink: 0 }} />
+                ) : iconSrc ? (
+                  <img
+                    src={iconSrc}
+                    alt={item.name}
+                    style={{ width: 14, height: 14, flexShrink: 0 }}
+                  />
                 ) : (
-                  <FiFolder size={12} color={tokens.colors.accent.primary} />
+                  <Box
+                    w="14px"
+                    h="14px"
+                    borderRadius="2px"
+                    bg={tokens.colors.bg.hoverSubtle}
+                    flexShrink={0}
+                  />
                 )}
 
                 <Text
-                  fontSize="xs"
-                  color={isLast ? 'text.primary' : 'text.secondary'}
+                  fontSize="11px"
+                  color={isLast ? tokens.colors.text.primary : tokens.colors.text.muted}
                   fontWeight={isLast ? '500' : '400'}
                   whiteSpace="nowrap"
                   overflow="hidden"
                   textOverflow="ellipsis"
                   maxW="120px"
+                  letterSpacing="-0.01em"
                 >
                   {item.name}
                 </Text>
@@ -165,8 +155,8 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
 
               {!isLast && (
                 <FiChevronRight
-                  size={10}
-                  color={tokens.colors.text.secondary}
+                  size={9}
+                  color={tokens.colors.text.disabled}
                   style={{ flexShrink: 0 }}
                 />
               )}
@@ -181,8 +171,8 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
         right="0"
         top="0"
         bottom="0"
-        width="20px"
-        bgGradient={tokens.gradient.breadcrumbFade}
+        width="24px"
+        bg={`linear-gradient(to right, transparent, ${tokens.colors.bg.app})`}
         pointerEvents="none"
       />
     </Flex>

@@ -2,7 +2,7 @@ import React, { memo } from 'react'
 import {
   VStack,
   IconButton,
-  Box
+  Box,
 } from '@chakra-ui/react'
 import {
   FiFolder,
@@ -41,54 +41,60 @@ const ActivityItem = memo<ActivityItemProps>(({
   badge
 }) => (
   <Box position="relative" width="100%">
+    {/* Active indicator — pink accent bar */}
     {isActive && (
       <Box
         position="absolute"
         left="0"
-        top="0"
-        bottom="0"
+        top="25%"
+        bottom="25%"
         width="2px"
-        bg={tokens.colors.accent.blueAlt}
+        bg={tokens.colors.accent.primary}
+        borderRadius="0 2px 2px 0"
         zIndex={1}
+        boxShadow={`0 0 8px ${tokens.colors.accent.primaryGlow}`}
       />
     )}
 
     <IconButton
       aria-label={label}
+      title={label}
       onClick={onClick}
       variant="ghost"
       size="lg"
-      color={isActive ? tokens.colors.text.inverse : tokens.colors.text.subtle}
-      bg="transparent"
+      color={isActive ? tokens.colors.text.inverse : tokens.colors.text.muted}
+      bg={isActive ? tokens.colors.accent.primarySubtle : 'transparent'}
       _hover={{
         color: tokens.colors.text.inverse,
-        bg: 'transparent'
+        bg: tokens.colors.bg.hoverSubtle,
       }}
       borderRadius="0"
       width="100%"
-      height="48px"
+      height="44px"
       border="none"
       position="relative"
       data-activity={id}
+      transition={`all ${tokens.transition.normal}`}
     >
-      <Icon size={24} />
-      {badge && badge > 0 && (
+      <Icon size={20} />
+      {badge !== undefined && badge > 0 && (
         <Box
           position="absolute"
           top="6px"
-          right="6px"
-          bg={tokens.colors.badge.notificationBg}
-          color={tokens.colors.badge.notificationText}
+          right="8px"
+          bg={tokens.colors.accent.primary}
+          color="#fff"
           borderRadius="full"
-          fontSize="10px"
+          fontSize="9px"
           fontWeight="bold"
-          minW="18px"
-          h="18px"
+          minW="16px"
+          h="16px"
           display="flex"
           alignItems="center"
           justifyContent="center"
-          px={1}
-          border={`2px solid ${tokens.colors.badge.notificationBorder}`}
+          px="4px"
+          lineHeight="1"
+          boxShadow={`0 0 6px ${tokens.colors.accent.primaryGlow}`}
         >
           {badge > 99 ? '99+' : badge}
         </Box>
@@ -125,7 +131,6 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
       id: 'source-control',
       icon: FiGitBranch,
       label: 'Source Control',
-      badge: 3
     },
     {
       id: 'run-debug',
@@ -136,7 +141,6 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
       id: 'extensions',
       icon: FiPackage,
       label: 'Extensions',
-      badge: 2
     }
   ]
 
@@ -144,7 +148,7 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
     {
       id: 'toggle-bottom-panel',
       icon: FiTerminal,
-      label: 'Toggle Panel',
+      label: 'Terminal',
     },
     {
       id: 'accounts',
@@ -154,7 +158,7 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
     {
       id: 'settings',
       icon: FiSettings,
-      label: 'Manage',
+      label: 'Settings',
     }
   ]
 
@@ -163,7 +167,6 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
       as="nav"
       role="navigation"
       aria-label="Activity Bar"
-      className="vscode-activitybar"
       width="48px"
       height="100%"
       bg={tokens.colors.bg.activitybar}
@@ -172,7 +175,7 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
       flexDirection="column"
       justifyContent="space-between"
     >
-      <VStack gap={0} pt={1}>
+      <VStack gap={0} pt={0.5}>
         {activities.map((activity) => (
           <ActivityItem
             key={activity.id}
@@ -181,12 +184,11 @@ function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
             label={activity.label}
             isActive={activeActivity === activity.id}
             onClick={() => onActivityChange(activity.id)}
-            badge={activity.badge}
           />
         ))}
       </VStack>
 
-      <VStack gap={0} pb={1}>
+      <VStack gap={0} pb={0.5}>
         {bottomActivities.map((activity) => (
           <ActivityItem
             key={activity.id}
