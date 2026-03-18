@@ -6,6 +6,7 @@ import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { useProblemsStore } from '../../stores/problemsStore'
 import { devServerManager } from '../../services/devServerManager'
 import AgentService from '../../services/agent/agentService'
 import ToolExecutor from '../../services/agent/toolExecutor'
@@ -201,6 +202,9 @@ export function usePromptBar() {
           flushBufferedDeltas()
           useChatStore.getState().finalizeAssistantMessage()
           agentStore.setStatus('idle')
+
+          // Re-scan project diagnostics after agent finishes
+          useProblemsStore.getState().scanProject().catch(() => {})
 
           const layoutStore = useLayoutStore.getState()
 

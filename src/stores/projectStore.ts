@@ -12,6 +12,7 @@ import RecoveryService from '../services/recoveryService';
 import WindowService from '../services/windowService';
 import { sessionService } from '../services/agent/sessionService';
 import { useChatStore } from './chatStore';
+import { useProblemsStore } from './problemsStore';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
 
@@ -138,10 +139,11 @@ export const useProjectStore = create<ProjectStore>()(
             loading: false
           });
 
-          // Clear editor open files when opening a new project
+          // Clear editor open files and diagnostics when opening a new project
           try { useEditorRepository.getState().closeAllFiles() } catch (e) {
             logger.error('project', 'Failed to close editor files during project switch:', e)
           }
+          useProblemsStore.getState().clear()
 
           // Check for recovery state before loading project state
           const hasRecovery = await recoveryService.hasRecoveryState(projectInfo.id);

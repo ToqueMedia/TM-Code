@@ -363,6 +363,11 @@ class TypeScriptLspService {
     });
   }
 
+  /** Whether the service has been initialized with a project root. */
+  get ready(): boolean {
+    return this.isInitialized;
+  }
+
   getFileContent(filePath: string): string | undefined {
     return this.projectFiles.get(filePath);
   }
