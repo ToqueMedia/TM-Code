@@ -29,6 +29,7 @@ pub struct CheckpointFileMeta {
 /// Baseline entry: points to the checkpoint that holds the original content.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct BaselineEntry {
     pub checkpoint_id: String,
     pub file_path_hash: String,
@@ -38,6 +39,7 @@ pub struct BaselineEntry {
 /// Full index stored per session.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct CheckpointIndex {
     pub checkpoints: Vec<CheckpointMeta>,
     /// Session baseline: filePath → pointer to the checkpoint snapshot.

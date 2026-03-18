@@ -28,6 +28,7 @@ struct McpServerInner {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
 pub enum McpServerStatus {
     Starting,
     Running,
