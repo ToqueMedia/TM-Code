@@ -70,6 +70,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   
   // Refs for editor instance
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const pendingRevealRef = useRef<{ file: string; line: number; column: number } | null>(null);
   const [monacoInstance, setMonacoInstance] = useState<Monaco | null>(null);
   
   // Use the custom theme management hook
@@ -302,6 +303,14 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       }
     );
 
+    // Apply pending reveal position (e.g. from Problems panel click before editor mounted)
+    if (pendingRevealRef.current && pendingRevealRef.current.file === path) {
+      const { line, column } = pendingRevealRef.current;
+      editor.setPosition({ lineNumber: line, column });
+      editor.revealLineInCenter(line);
+      pendingRevealRef.current = null;
+    }
+
     // Focus the editor
     editor.focus();
   }, [path, language, handleContentChange, handleCursorChange, handleSave, onCursorPositionChange]);
@@ -319,6 +328,25 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       MonacoBridge.getInstance().setCurrentEditor(editorRef.current)
       editorRef.current.focus();
     }
+  }, [path]);
+
+  // Listen for external "go to line" requests (e.g. from Problems panel).
+  // Stores the latest pending request so it can be applied after mount.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { file: string; line: number; column: number } | undefined;
+      if (!detail || detail.file !== path) return;
+      if (editorRef.current) {
+        editorRef.current.setPosition({ lineNumber: detail.line, column: detail.column });
+        editorRef.current.revealLineInCenter(detail.line);
+        editorRef.current.focus();
+      } else {
+        // Editor not mounted yet — store for when it mounts
+        pendingRevealRef.current = detail;
+      }
+    };
+    window.addEventListener('monaco:revealPosition', handler);
+    return () => window.removeEventListener('monaco:revealPosition', handler);
   }, [path]);
   
   // Show loading state for files that don't exist yet

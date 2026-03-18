@@ -28,6 +28,7 @@ struct McpServerInner {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
 pub enum McpServerStatus {
     Starting,
     Running,
@@ -331,7 +332,12 @@ pub async fn mcp_send_notification(
     stdin
         .write_all(notification_str.as_bytes())
         .await
-        .map_err(|e| format!("Failed to write notification to MCP server '{}': {}", name, e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to write notification to MCP server '{}': {}",
+                name, e
+            )
+        })?;
     stdin
         .flush()
         .await

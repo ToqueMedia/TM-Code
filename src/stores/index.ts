@@ -24,3 +24,6 @@ export type { EditorIndentationSettings } from './settingsStore'
 export { useFileTreeRepository } from './fileTreeStore'
 
 export { useEditorRepository } from './editorStore'
+
+export { useProblemsStore } from './problemsStore'
+export type { Diagnostic } from './problemsStore'

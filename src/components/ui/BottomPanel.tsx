@@ -18,6 +18,7 @@ import TerminalV3 from './TerminalV3'
 import ProblemsContent from './ProblemsContent'
 import OutputContent from './OutputContent'
 import DebugConsoleContent from './DebugConsoleContent'
+import { useProblemsStore, selectErrorCount, selectWarningCount } from '@/stores/problemsStore'
 
 interface BottomPanelProps {
   isVisible: boolean
@@ -72,14 +73,17 @@ TerminalContent.displayName = 'TerminalContent'
 
 function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
   const [activePanel, setActivePanel] = useState('terminal')
+  const errorCount = useProblemsStore(selectErrorCount)
+  const warningCount = useProblemsStore(selectWarningCount)
+  const totalProblems = errorCount + warningCount
 
   const panels = [
     {
       id: 'problems',
       label: 'Problems',
       icon: FiList,
-      badge: 3,
-      badgeVariant: 'error' as const
+      badge: totalProblems > 0 ? totalProblems : undefined,
+      badgeVariant: errorCount > 0 ? 'error' as const : 'warning' as const
     },
     {
       id: 'output',

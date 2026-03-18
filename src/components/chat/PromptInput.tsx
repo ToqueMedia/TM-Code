@@ -7,6 +7,7 @@ import { useProjectStore } from '../../stores/projectStore'
 import { useAuthStore } from '../../stores/authStore'
 import AgentService from '../../services/agent/agentService'
 import ContextBuilder from '../../services/agent/contextBuilder'
+import { useProblemsStore } from '../../stores/problemsStore'
 import { tokens } from '@/theme/tokens'
 
 function PromptInput() {
@@ -81,6 +82,7 @@ function PromptInput() {
         flushBufferedDeltas()
         useChatStore.getState().finalizeAssistantMessage()
         agentStore.setStatus('idle')
+        useProblemsStore.getState().scanProject().catch(() => {})
       },
       onError: (error) => {
         flushBufferedDeltas()

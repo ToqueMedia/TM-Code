@@ -215,10 +215,7 @@ pub async fn list_skills_bundled(app: tauri::AppHandle) -> Result<Vec<SkillEntry
         if path.is_dir() {
             let skill_file = path.join("SKILL.md");
             if skill_file.exists() {
-                let name = entry
-                    .file_name()
-                    .to_string_lossy()
-                    .to_string();
+                let name = entry.file_name().to_string_lossy().to_string();
                 entries.push(SkillEntry {
                     name,
                     path: path.to_string_lossy().to_string(),
@@ -248,7 +245,7 @@ pub async fn read_skill_content(skill_path: String) -> Result<SkillContent, Stri
         if let Ok(read_dir) = std::fs::read_dir(&refs_dir) {
             for entry in read_dir.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "md") {
+                if path.extension().is_some_and(|e| e == "md") {
                     if let Ok(ref_content) = std::fs::read_to_string(&path) {
                         references.push(ref_content);
                     }
