@@ -5,14 +5,9 @@
 
 ---
 
-## 1. Undo/Rollback de alterações do agente
+## ~~1. Undo/Rollback de alterações do agente~~ ✓
 
-O agente pode modificar 10 ficheiros numa sessão. Se algo correu mal, **não há forma de voltar atrás** além de `Cmd+Z` ficheiro a ficheiro no editor (se estiver aberto). Não existe:
-- "Desfazer última acção do agente" (volta todos os ficheiros ao estado anterior)
-- Checkpoint antes de cada tool call do agente
-- Histórico visual de alterações por sessão
-
-**Porquê crítico**: Num IDE onde o agente escreve a maior parte do código, o developer precisa de confiança para dizer "vai em frente" — e essa confiança vem de saber que pode reverter. Sem isto, o developer hesita em aprovar diffs.
+Implementado: Checkpoint system com snapshots automáticos antes de cada tool call que modifica ficheiros. Painel visual no chat com botão "Undo" e revert por checkpoint.
 
 ---
 
@@ -29,11 +24,28 @@ O agente tem `get_diagnostics` para ficheiros individuais, mas o developer não 
 
 ---
 
-## 4. Histórico de versões por sessão (Session Snapshots)
+## 3. `execute_command` sem timeout — pode bloquear indefinidamente
 
-O agente altera ficheiros ao longo de uma sessão. Não existe:
-- "Antes da sessão" vs "depois da sessão" diff
-- Snapshot do projecto no início de cada sessão
-- Capacidade de comparar o estado do projecto entre sessões
+O Rust `Command::new().output()` não tem limite de tempo. Se o agente correr `npm test` num projecto com testes que hangam, ou `npm install` com network lento, **o agent loop fica preso para sempre**. O user tem de cancelar manualmente sem saber porquê.
 
-**Porquê crítico**: O developer quer saber "o que mudou desde que comecei a trabalhar com o agente hoje?" — especialmente quando houve 20+ turns com múltiplos ficheiros alterados.
+**Porquê crítico**: Num IDE agent-first, o agente corre comandos autonomamente. Um hang silencioso é a pior experiência possível — o developer fica a olhar para "Applying changes..." indefinidamente.
+
+---
+
+## ~~4. Histórico de versões por sessão (Session Snapshots)~~ ✓
+
+Implementado: Session baseline tracking com lazy snapshots. O sistema captura o conteúdo original dos ficheiros no primeiro acesso e permite comparar "antes da sessão" vs "agora" via `getSessionDiff()`.
+
+---
+
+## 5. Custom instructions por projecto (`.tmcode` ou similar)
+
+Não existe forma do developer configurar o agente per-projecto:
+- "Usa Tailwind, não CSS puro"
+- "Segue o padrão de componentes em `/src/components`"
+- "Os testes estão em `__tests__/` com Jest"
+- "Usa português nas mensagens de UI"
+
+O Claude Code tem `CLAUDE.md`, o Cursor tem `.cursorrules`, o Codex tem `AGENTS.md`. O TM Code não tem equivalente.
+
+**Porquê crítico**: Sem isto, o developer repete as mesmas instruções em cada sessão. A qualidade do output do agente degrada porque não conhece as convenções do projecto.

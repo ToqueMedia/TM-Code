@@ -4,9 +4,11 @@ import { useEditorRepository } from '../../stores/editorStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useLayoutStore } from '../../stores/layoutStore'
+import { useCheckpointStore } from '../../stores/checkpointStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { devServerManager } from '../devServerManager'
 import TypeScriptLspService from '../typescriptLspService'
+import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
 
 // === Types ===
@@ -54,6 +56,13 @@ class ToolExecutor {
       ToolExecutor.instance = new ToolExecutor()
     }
     return ToolExecutor.instance
+  }
+
+  /** Optional context for the current tool execution (set by agent service). */
+  private currentToolCallId: string | null = null
+
+  setCurrentToolCallId(id: string | null): void {
+    this.currentToolCallId = id
   }
 
   async execute(toolName: string, input: Record<string, unknown>): Promise<string> {
@@ -450,7 +459,7 @@ class ToolExecutor {
     this.tools.set('delete_file', {
       definition: {
         name: 'delete_file',
-        description: 'Delete a file or directory permanently. There is no undo. Only use when the user explicitly asks to delete, or when removing a file you just created in error.',
+        description: 'Delete a file or directory. A checkpoint is created automatically so the user can undo if needed. Only use when the user explicitly asks to delete, or when removing a file you just created in error.',
         input_schema: {
           type: 'object',
           properties: {
@@ -461,6 +470,22 @@ class ToolExecutor {
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.path as string)
+
+        // Capture checkpoint before deleting
+        if (this.currentToolCallId) {
+          try {
+            const content = await invoke<string>('read_file', { path: input.path as string })
+            await CheckpointService.getInstance().captureBeforeDelete(
+              input.path as string,
+              content,
+              this.currentToolCallId,
+            )
+            useCheckpointStore.getState().syncFromService()
+          } catch {
+            // File might be a directory or unreadable — skip checkpoint
+          }
+        }
+
         this.closeEditorIfOpen(input.path as string)
         await invoke('delete_file_or_directory', { path: input.path })
         this.refreshFileTree()
@@ -489,6 +514,27 @@ class ToolExecutor {
         if (newName.includes('/') || newName.includes('\\') || newName.includes('..')) {
           throw new Error('Access denied: new name cannot contain path separators or "..".')
         }
+
+        // Capture checkpoint before renaming
+        if (this.currentToolCallId) {
+          try {
+            const content = await invoke<string>('read_file', { path: input.oldPath as string })
+            // Build the new path: same parent directory + new name
+            const oldPathStr = input.oldPath as string
+            const parentDir = oldPathStr.substring(0, oldPathStr.lastIndexOf('/'))
+            const newPath = `${parentDir}/${newName}`
+            await CheckpointService.getInstance().captureBeforeRename(
+              oldPathStr,
+              newPath,
+              content,
+              this.currentToolCallId,
+            )
+            useCheckpointStore.getState().syncFromService()
+          } catch {
+            // File might be a directory — skip checkpoint
+          }
+        }
+
         await invoke('rename_file_or_directory', {
           oldPath: input.oldPath,
           newName
