@@ -38,12 +38,16 @@ export default function TerminalSession({ sessionId, isActive }: TerminalSession
 
     const terminal = new XTerm({
       cursorBlink: true,
-      fontFamily: '"Cascadia Code", "SF Mono", "Monaco", "Roboto Mono", monospace',
-      fontSize: 14,
-      lineHeight: 1.2,
+      cursorStyle: 'bar',
+      cursorWidth: 1,
+      fontFamily: '"JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code", monospace',
+      fontSize: 13,
+      fontWeight: '300',
+      fontWeightBold: '500',
+      lineHeight: 1.35,
       letterSpacing: 0,
       theme: terminalTheme,
-      scrollback: 1000,
+      scrollback: 5000,
       allowProposedApi: true,
     });
 

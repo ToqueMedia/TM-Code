@@ -26,11 +26,11 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 		<Flex
 			className={`vscode-tab ${isActive ? 'active' : ''}`}
 			alignItems="center"
-			px={3}
+			px={2.5}
 			py={0}
 			bg={isActive ? tokens.colors.bg.app : 'transparent'}
 			borderRight={`1px solid ${tokens.colors.border.subtle}`}
-			fontSize="13px"
+			fontSize="12px"
 			cursor="pointer"
 			onClick={onClick}
 			position="relative"
@@ -38,31 +38,28 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 			_hover={{
 				bg: isActive ? tokens.colors.bg.app : tokens.colors.bg.hoverSubtle,
 				'& .tab-close': {
-					opacity: 1
+					opacity: 0.7
 				}
 			}}
-			transition={`all ${tokens.transition.normal}`}
+			transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}`}
 			role="tab"
 			aria-selected={isActive}
 			data-path={path}
 			data-group
 			borderRadius="0"
-			height="35px"
+			height="30px"
 			minW="0"
-			maxW="240px"
+			maxW="200px"
 			color={isActive ? tokens.colors.text.primary : tokens.colors.text.muted}
-			/* Bottom accent line for active tab */
 			_after={{
 				content: '""',
 				position: 'absolute',
 				bottom: 0,
-				left: '10%',
-				right: '10%',
+				left: 0,
+				right: 0,
 				height: '2px',
 				bg: isActive ? tokens.colors.accent.primary : 'transparent',
-				borderRadius: '2px 2px 0 0',
-				transition: `all ${tokens.transition.normal}`,
-				boxShadow: isActive ? `0 0 8px ${tokens.colors.accent.primaryGlow}` : 'none',
+				transition: `background ${tokens.transition.fast}`,
 			}}
 		>
 			<HStack gap={2} align="center" minW="0">
@@ -71,10 +68,9 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 						src={iconUrl}
 						alt={name}
 						style={{
-							width: 16,
-							height: 16,
-							opacity: isActive ? 1 : 0.75,
-							transition: 'opacity 0.2s',
+							width: 14,
+							height: 14,
+							opacity: isActive ? 1 : 0.6,
 							flexShrink: 0,
 						}}
 					/>
@@ -88,9 +84,9 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 					/>
 				)}
 				<Text
-					fontSize="12px"
+					fontSize="11.5px"
 					fontWeight={isActive ? '500' : '400'}
-					maxW="160px"
+					maxW="140px"
 					whiteSpace="nowrap"
 					overflow="hidden"
 					textOverflow="ellipsis"
@@ -101,13 +97,11 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 				</Text>
 				{isDirty && (
 					<Box
-						w="7px"
-						h="7px"
+						w="6px"
+						h="6px"
 						borderRadius="full"
 						bg={tokens.colors.accent.primary}
 						flexShrink={0}
-						ml={0.5}
-						boxShadow={`0 0 4px ${tokens.colors.accent.primaryGlow}`}
 					/>
 				)}
 				<IconButton
@@ -117,19 +111,15 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 					variant="ghost"
 					color={tokens.colors.text.muted}
 					size="xs"
-					_hover={{
-						bg: tokens.colors.bg.whiteOverlay,
-						color: tokens.colors.text.inverse
-					}}
-					opacity={isActive ? 0.7 : 0}
-					_groupHover={{ opacity: 0.7 }}
+					_hover={{ bg: tokens.colors.bg.whiteOverlay, color: tokens.colors.text.inverse }}
+					opacity={isActive ? 0.5 : 0}
 					transition={`opacity ${tokens.transition.fast}`}
-					borderRadius="4px"
-					width="20px"
-					height="20px"
-					minW="20px"
+					borderRadius="3px"
+					width="18px"
+					height="18px"
+					minW="18px"
 				>
-					<FiX size={13} />
+					<FiX size={11} />
 				</IconButton>
 			</HStack>
 		</Flex>

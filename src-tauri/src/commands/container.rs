@@ -733,20 +733,30 @@ pub struct RunningContainer {
 }
 
 /// List all running Docker containers (for the "Attach" picker UI).
-/// Excludes `tmcode-*` containers managed by Container Code.
+/// Includes all containers — the UI tags `tmcode-*` as managed.
+/// Uses spawn_blocking to avoid blocking the Tauri async runtime.
 #[tauri::command]
 pub async fn list_running_containers() -> Result<Vec<RunningContainer>, String> {
-    let output = Command::new("docker")
-        .args([
-            "ps",
-            "--format",
-            "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.CreatedAt}}",
-        ])
-        .output()
-        .map_err(|e| format!("Failed to list containers: {}", e))?;
+    let result = tokio::task::spawn_blocking(|| {
+        Command::new("docker")
+            .args([
+                "ps",
+                "--format",
+                "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.CreatedAt}}",
+            ])
+            .output()
+    })
+    .await;
+
+    let output = match result {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(format!("Failed to list containers: {}", e)),
+        Err(e) => return Err(format!("Task join error: {}", e)),
+    };
 
     if !output.status.success() {
-        return Err("Docker daemon not available".to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Docker daemon not available: {}", stderr));
     }
 
     let mut containers = Vec::new();
@@ -756,10 +766,6 @@ pub async fn list_running_containers() -> Result<Vec<RunningContainer>, String> 
             continue;
         }
         let name = parts[1].to_string();
-        // Skip tmcode-managed containers
-        if name.starts_with("tmcode-") {
-            continue;
-        }
         containers.push(RunningContainer {
             id: parts[0][..12.min(parts[0].len())].to_string(),
             name,

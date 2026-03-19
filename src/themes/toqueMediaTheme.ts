@@ -105,60 +105,120 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     { token: 'invalid.deprecated', foreground: '#ffb86c', background: '#44475a' },
   ],
   colors: {
-    // Editor background
-    'editor.background': '#24262c',
-    'editor.foreground': '#f8f8f2',
-    
-    // Line numbers
-    'editorLineNumber.foreground': '#6272a4',
-    'editorLineNumber.activeForeground': '#f8f8f2',
-    
+    // Editor background — matches app bg for seamless look
+    'editor.background': '#0f0f0f',
+    'editor.foreground': '#e6edf3',
+
+    // Gutter / line numbers
+    'editorLineNumber.foreground': '#3d4450',
+    'editorLineNumber.activeForeground': '#8b949e',
+    'editorGutter.background': '#0f0f0f',
+    'editorGutter.addedBackground': '#2ea04380',
+    'editorGutter.modifiedBackground': '#a371f780',
+    'editorGutter.deletedBackground': '#f8514980',
+
     // Cursor
-    'editorCursor.foreground': '#f8f8f2',
-    
+    'editorCursor.foreground': '#FE1063',
+
     // Selection
-    'editor.selectionBackground': '#44475a',
-    'editor.selectionHighlightBackground': '#44475a75',
-    
+    'editor.selectionBackground': '#FE106330',
+    'editor.selectionHighlightBackground': '#FE106318',
+    'editor.inactiveSelectionBackground': '#FE106315',
+
+    // Word highlight
+    'editor.wordHighlightBackground': '#a371f720',
+    'editor.wordHighlightStrongBackground': '#a371f730',
+
     // Find/search
-    'editor.findMatchBackground': '#ffb86c',
-    'editor.findMatchHighlightBackground': '#f1fa8c50',
-    
+    'editor.findMatchBackground': '#FE106340',
+    'editor.findMatchHighlightBackground': '#FE106320',
+    'editor.findMatchBorder': '#FE1063',
+
     // Current line
-    'editor.lineHighlightBackground': '#44475a50',
-    
+    'editor.lineHighlightBackground': '#ffffff06',
+    'editor.lineHighlightBorder': '#00000000',
+
     // Brackets
-    'editorBracketMatch.background': '#8be9fd50',
-    'editorBracketMatch.border': '#8be9fd',
-    
+    'editorBracketMatch.background': '#a371f730',
+    'editorBracketMatch.border': '#a371f7',
+    'editorBracketHighlight.foreground1': '#FE1063',
+    'editorBracketHighlight.foreground2': '#a371f7',
+    'editorBracketHighlight.foreground3': '#50fa7b',
+    'editorBracketHighlight.foreground4': '#ffd166',
+    'editorBracketHighlight.foreground5': '#61dafb',
+    'editorBracketHighlight.foreground6': '#ff79c6',
+
     // Indentation guides
-    'editorIndentGuide.background': '#44475a',
-    'editorIndentGuide.activeBackground': '#6272a4',
-    
-    // Scrollbar
-    'scrollbarSlider.background': '#44475a75',
-    'scrollbarSlider.hoverBackground': '#44475a',
-    'scrollbarSlider.activeBackground': '#6272a4',
-    
+    'editorIndentGuide.background': '#ffffff08',
+    'editorIndentGuide.activeBackground': '#ffffff18',
+
+    // Scrollbar — thin, subtle
+    'scrollbar.shadow': '#00000000',
+    'scrollbarSlider.background': '#ffffff12',
+    'scrollbarSlider.hoverBackground': '#ffffff20',
+    'scrollbarSlider.activeBackground': '#ffffff30',
+
     // Minimap
-    'minimap.background': '#282a36',
-    
+    'minimap.background': '#0a0a0a',
+    'minimap.selectionHighlight': '#FE106340',
+    'minimap.findMatchHighlight': '#FE106360',
+    'minimapSlider.background': '#ffffff10',
+    'minimapSlider.hoverBackground': '#ffffff18',
+    'minimapSlider.activeBackground': '#ffffff25',
+    'minimapGutter.addedBackground': '#2ea04380',
+    'minimapGutter.modifiedBackground': '#a371f780',
+    'minimapGutter.deletedBackground': '#f8514980',
+
+    // Overview ruler (right edge)
+    'editorOverviewRuler.background': '#0a0a0a',
+    'editorOverviewRuler.border': '#00000000',
+    'editorOverviewRuler.addedForeground': '#2ea04380',
+    'editorOverviewRuler.modifiedForeground': '#a371f780',
+    'editorOverviewRuler.deletedForeground': '#f8514980',
+    'editorOverviewRuler.errorForeground': '#f85149',
+    'editorOverviewRuler.warningForeground': '#f77f00',
+
     // Suggestions/IntelliSense
-    'editorSuggestWidget.background': '#282a36',
-    'editorSuggestWidget.border': '#44475a',
-    'editorSuggestWidget.foreground': '#f8f8f2',
-    'editorSuggestWidget.selectedBackground': '#44475a',
-    'editorSuggestWidget.highlightForeground': '#61dafb',
-    
+    'editorSuggestWidget.background': '#161616',
+    'editorSuggestWidget.border': '#262626',
+    'editorSuggestWidget.foreground': '#e6edf3',
+    'editorSuggestWidget.selectedBackground': '#FE106320',
+    'editorSuggestWidget.selectedForeground': '#ffffff',
+    'editorSuggestWidget.highlightForeground': '#FE1063',
+    'editorSuggestWidget.focusHighlightForeground': '#FE1063',
+
     // Hover widget
-    'editorHoverWidget.background': '#282a36',
-    'editorHoverWidget.border': '#44475a',
-    'editorHoverWidget.foreground': '#f8f8f2',
-    
+    'editorHoverWidget.background': '#161616',
+    'editorHoverWidget.border': '#262626',
+    'editorHoverWidget.foreground': '#e6edf3',
+    'editorHoverWidget.statusBarBackground': '#111111',
+
     // Error/warning squiggles
-    'editorError.foreground': '#ff5555',
-    'editorWarning.foreground': '#ffb86c',
-    'editorInfo.foreground': '#8be9fd',
+    'editorError.foreground': '#f85149',
+    'editorWarning.foreground': '#f77f00',
+    'editorInfo.foreground': '#61dafb',
+
+    // Widget (find/replace bar)
+    'editorWidget.background': '#161616',
+    'editorWidget.border': '#262626',
+    'editorWidget.foreground': '#e6edf3',
+
+    // Folding
+    'editor.foldBackground': '#ffffff06',
+
+    // Whitespace
+    'editorWhitespace.foreground': '#ffffff12',
+
+    // Code lens
+    'editorCodeLens.foreground': '#3d4450',
+
+    // Peek view
+    'peekView.border': '#FE106350',
+    'peekViewEditor.background': '#111111',
+    'peekViewResult.background': '#0f0f0f',
+    'peekViewTitle.background': '#161616',
+    'peekViewResult.matchHighlightBackground': '#FE106330',
+    'peekViewEditor.matchHighlightBackground': '#FE106330',
   }
 };
 
@@ -193,10 +253,16 @@ export const toqueMediaSoftTheme: editor.IStandaloneThemeData = {
     { token: 'comment', foreground: '#94a3b8', fontStyle: 'italic' },
   ],
   colors: {
-    'editor.background': '#1e2030', // Slate 900 (lighter)
-    'editor.foreground': '#f1f5f9', // Slate 100
-    'editor.lineHighlightBackground': '#1e293b50', // Slate 800 with opacity
-    'editorLineNumber.foreground': '#64748b', // Slate 500
+    'editor.background': '#131313',
+    'editor.foreground': '#f1f5f9',
+    'editor.lineHighlightBackground': '#ffffff06',
+    'editorLineNumber.foreground': '#3d4450',
+    'editorLineNumber.activeForeground': '#8b949e',
+    'editorCursor.foreground': '#a371f7',
+    'editor.selectionBackground': '#a371f728',
+    'scrollbarSlider.background': '#ffffff12',
+    'scrollbarSlider.hoverBackground': '#ffffff20',
+    'minimap.background': '#0f0f0f',
   }
 };
 

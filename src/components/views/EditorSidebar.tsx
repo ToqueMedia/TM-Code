@@ -4,18 +4,20 @@ import ExplorerPanel from '../ui/ExplorerPanel'
 import { tokens } from '@/theme/tokens'
 
 const STORAGE_KEY_EXPLORER_WIDTH = 'panel-size-explorer-panel'
+const CLOSE_THRESHOLD = 80
 
 interface EditorSidebarProps {
   onFileSelect: (path: string) => void
+  onClose?: () => void
 }
 
-function EditorSidebar({ onFileSelect }: EditorSidebarProps) {
+function EditorSidebar({ onFileSelect, onClose }: EditorSidebarProps) {
   const [explorerWidth, setExplorerWidth] = useState<number>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_EXPLORER_WIDTH)
       const screen = window.innerWidth
-      const min = 40
-      const max = Math.max(100, screen - 360)
+      const min = 120
+      const max = Math.max(200, screen - 360)
       const def = Math.min(250, Math.max(Math.floor(screen * 0.2), min))
       return saved ? Math.min(Math.max(parseInt(saved, 10), min), max) : def
     } catch { return 250 }
@@ -23,12 +25,11 @@ function EditorSidebar({ onFileSelect }: EditorSidebarProps) {
 
   const sidebarRef = useRef<HTMLDivElement>(null)
   const sidebarHandleRef = useRef<HTMLDivElement>(null)
-  const [, setIsResizingExplorer] = useState(false)
 
   useEffect(() => {
     function handleResize() {
-      const min = 40
-      const max = Math.max(100, window.innerWidth - 360)
+      const min = 120
+      const max = Math.max(200, window.innerWidth - 360)
       setExplorerWidth(prev => Math.min(Math.max(prev, min), max))
     }
     window.addEventListener('resize', handleResize)
@@ -48,31 +49,41 @@ function EditorSidebar({ onFileSelect }: EditorSidebarProps) {
     const prevUserSelect = body.style.userSelect
     body.style.cursor = 'col-resize'
     body.style.userSelect = 'none'
-    setIsResizingExplorer(true)
 
-    function onPointerMove(pe: PointerEvent) {
-      const min = 40
-      const max = Math.max(100, window.innerWidth - 360)
-      let next = pe.clientX - sidebarLeft
-      if (next < min) next = min
-      if (next > max) next = max
-      current = next
-      setExplorerWidth(next)
-    }
-
-    function onPointerUp() {
-      try { localStorage.setItem(STORAGE_KEY_EXPLORER_WIDTH, String(current)) } catch {}
+    function cleanup() {
       try { handleEl?.releasePointerCapture(pid) } catch {}
       handleEl?.removeEventListener('pointermove', onPointerMove)
       handleEl?.removeEventListener('pointerup', onPointerUp)
       body.style.cursor = prevCursor
       body.style.userSelect = prevUserSelect
-      setIsResizingExplorer(false)
+    }
+
+    function onPointerMove(pe: PointerEvent) {
+      const max = Math.max(200, window.innerWidth - 360)
+      let next = pe.clientX - sidebarLeft
+      if (next > max) next = max
+      current = next
+
+      // Close immediately when dragged below threshold
+      if (next < CLOSE_THRESHOLD && onClose) {
+        cleanup()
+        onClose()
+        return
+      }
+
+      setExplorerWidth(Math.max(next, 120))
+    }
+
+    function onPointerUp() {
+      cleanup()
+      const clamped = Math.max(current, 120)
+      setExplorerWidth(clamped)
+      try { localStorage.setItem(STORAGE_KEY_EXPLORER_WIDTH, String(clamped)) } catch {}
     }
 
     handleEl?.addEventListener('pointermove', onPointerMove)
     handleEl?.addEventListener('pointerup', onPointerUp)
-  }, [explorerWidth])
+  }, [explorerWidth, onClose])
 
   return (
     <Box
@@ -82,6 +93,7 @@ function EditorSidebar({ onFileSelect }: EditorSidebarProps) {
       position="relative"
       borderRight={`1px solid ${tokens.colors.border.sidebarPanel}`}
       ref={sidebarRef}
+      transition="width 0.05s ease"
     >
       <ExplorerPanel onFileSelect={onFileSelect} />
       <Box

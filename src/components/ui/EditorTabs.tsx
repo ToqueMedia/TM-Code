@@ -52,10 +52,10 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 								flex="1"
 								color={tokens.colors.text.muted}
 								fontSize="12px"
-								height="35px"
+								height="30px"
 							>
-								<FiCode size={12} />
-								<Text>No open tabs</Text>
+								<FiCode size={11} />
+								<Text fontSize="11px">No open tabs</Text>
 							</Flex>
 						)}
 					</Flex>

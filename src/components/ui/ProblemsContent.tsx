@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo } from 'react'
 import { Flex, Text, Box, ScrollArea, HStack, Spinner } from '@chakra-ui/react'
-import { FiAlertTriangle, FiXCircle, FiInfo, FiRefreshCw, FiFile, FiChevronRight } from 'react-icons/fi'
+import { FiAlertTriangle, FiXCircle, FiInfo, FiRefreshCw, FiFile } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import {
   useProblemsStore,
@@ -85,34 +85,33 @@ const ProblemsContent = memo(() => {
         align="center"
         justify="space-between"
         px={3}
-        py={1.5}
-        borderBottom="1px solid"
-        borderColor={tokens.colors.border.glass}
+        py={1}
+        borderBottom={`1px solid ${tokens.colors.border.glass}`}
         bg={tokens.colors.bg.panel}
         flexShrink={0}
       >
-        <HStack gap={4}>
-          <HStack gap={1.5}>
-            <FiXCircle size={12} color={tokens.colors.accent.red} />
-            <Text fontSize="xs" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
+        <HStack gap={3}>
+          <HStack gap={1}>
+            <FiXCircle size={11} color={tokens.colors.accent.red} />
+            <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={`"JetBrains Mono", ${tokens.fontFamily.mono}`} fontWeight="400">
               {errorCount}
             </Text>
           </HStack>
-          <HStack gap={1.5}>
-            <FiAlertTriangle size={12} color={tokens.colors.accent.orange} />
-            <Text fontSize="xs" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
+          <HStack gap={1}>
+            <FiAlertTriangle size={11} color={tokens.colors.accent.orange} />
+            <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={`"JetBrains Mono", ${tokens.fontFamily.mono}`} fontWeight="400">
               {warningCount}
             </Text>
           </HStack>
-          <HStack gap={1.5}>
-            <FiInfo size={12} color={tokens.colors.accent.blueBright} />
-            <Text fontSize="xs" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
+          <HStack gap={1}>
+            <FiInfo size={11} color={tokens.colors.accent.blueBright} />
+            <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={`"JetBrains Mono", ${tokens.fontFamily.mono}`} fontWeight="400">
               {infoCount}
             </Text>
           </HStack>
         </HStack>
 
-        <HStack gap={2}>
+        <HStack gap={1.5}>
           {isScanning && (
             <Spinner size="xs" color={tokens.colors.accent.primary} />
           )}
@@ -123,10 +122,10 @@ const ProblemsContent = memo(() => {
             color={tokens.colors.text.muted}
             _hover={{ color: tokens.colors.text.primary }}
             transition={tokens.transition.fast}
-            p={1}
-            borderRadius={tokens.radius.sm}
+            p={0.5}
+            borderRadius="3px"
           >
-            <FiRefreshCw size={13} />
+            <FiRefreshCw size={12} />
           </Box>
         </HStack>
       </Flex>
@@ -157,16 +156,15 @@ const ProblemsContent = memo(() => {
                   align="center"
                   gap={2}
                   px={3}
-                  py={1.5}
+                  py="4px"
                   bg={tokens.colors.bg.panelAlt}
-                  borderBottom="1px solid"
-                  borderColor={tokens.colors.border.glass}
+                  borderBottom={`1px solid ${tokens.colors.border.glass}`}
                 >
-                  <FiFile size={12} color={tokens.colors.text.muted} />
+                  <FiFile size={11} color={tokens.colors.text.muted} />
                   <Text
-                    fontSize="xs"
+                    fontSize="11px"
                     color={tokens.colors.text.primary}
-                    fontFamily={tokens.fontFamily.mono}
+                    fontFamily={`"JetBrains Mono", ${tokens.fontFamily.mono}`}
                     fontWeight="500"
                     flex="1"
                     truncate
@@ -174,9 +172,9 @@ const ProblemsContent = memo(() => {
                     {relativePath(filePath, projectRoot)}
                   </Text>
                   <Text
-                    fontSize="xs"
+                    fontSize="10px"
                     color={tokens.colors.text.disabled}
-                    fontFamily={tokens.fontFamily.mono}
+                    fontFamily={`"JetBrains Mono", ${tokens.fontFamily.mono}`}
                   >
                     {diags.length}
                   </Text>
@@ -193,18 +191,19 @@ const ProblemsContent = memo(() => {
                       align="center"
                       px={3}
                       pl={6}
-                      py={1.5}
+                      py="3px"
                       gap={2}
                       cursor="pointer"
-                      borderBottom="1px solid"
-                      borderColor={tokens.colors.border.glass}
-                      _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+                      borderBottom={`1px solid ${tokens.colors.border.glass}`}
+                      _hover={{ bg: 'rgba(255,255,255,0.02)' }}
                       transition={tokens.transition.fast}
                       onClick={() => handleNavigate(diag)}
+                      fontFamily={`"JetBrains Mono", ${tokens.fontFamily.mono}`}
                     >
-                      <Icon size={13} color={color} style={{ flexShrink: 0 }} />
+                      <Icon size={12} color={color} style={{ flexShrink: 0 }} />
                       <Text
-                        fontSize="xs"
+                        fontSize="12px"
+                        fontWeight="300"
                         color={tokens.colors.text.primary}
                         flex="1"
                         truncate
@@ -212,23 +211,14 @@ const ProblemsContent = memo(() => {
                         {diag.message}
                       </Text>
                       <HStack gap={1} flexShrink={0}>
-                        <Text
-                          fontSize="xs"
-                          color={tokens.colors.text.disabled}
-                          fontFamily={tokens.fontFamily.mono}
-                        >
-                          [{diag.line},{diag.column}]
+                        <Text fontSize="10px" color={tokens.colors.text.disabled}>
+                          {diag.line}:{diag.column}
                         </Text>
                         {diag.code > 0 && (
-                          <Text
-                            fontSize="xs"
-                            color={tokens.colors.text.disabled}
-                            fontFamily={tokens.fontFamily.mono}
-                          >
+                          <Text fontSize="10px" color={tokens.colors.text.disabled}>
                             TS{diag.code}
                           </Text>
                         )}
-                        <FiChevronRight size={10} color={tokens.colors.text.disabled} />
                       </HStack>
                     </Flex>
                   )

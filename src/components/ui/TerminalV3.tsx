@@ -9,6 +9,7 @@ import { FiTerminal } from 'react-icons/fi';
 
 import { tokens } from '@/theme/tokens';
 import { useTerminalStore } from '../../stores/terminalStore';
+import { useProjectStore } from '../../stores/projectStore';
 import TerminalSession from './terminal/TerminalSession';
 import TerminalTabBar from './terminal/TerminalTabBar';
 
@@ -18,10 +19,11 @@ export default function TerminalV3() {
   const createSession = useTerminalStore(state => state.createSession);
   const removeSession = useTerminalStore(state => state.removeSession);
   const setActiveSession = useTerminalStore(state => state.setActiveSession);
+  const projectName = useProjectStore(s => s.currentProject?.path?.split('/').pop() ?? 'terminal');
 
   const handleNewTerminal = useCallback(() => {
-    createSession();
-  }, [createSession]);
+    createSession(projectName);
+  }, [createSession, projectName]);
 
   const handleCloseTerminal = useCallback((sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -34,13 +36,13 @@ export default function TerminalV3() {
 
   useEffect(() => {
     if (sessions.length === 0) {
-      createSession('Terminal', undefined);
+      createSession(projectName, undefined);
     }
-  }, [sessions.length, createSession]);
+  }, [sessions.length, createSession, projectName]);
 
   return (
-    <Flex height="100%" direction="column" bg={tokens.colors.terminal.background}>
-      {/* Terminal Tabs */}
+    <Flex height="100%" direction="row" bg={tokens.colors.terminal.background}>
+      {/* Terminal sidebar tabs (vertical) */}
       <TerminalTabBar
         sessions={sessions}
         activeSessionId={activeSessionId}

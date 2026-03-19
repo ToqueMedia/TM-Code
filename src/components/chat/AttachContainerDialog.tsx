@@ -136,8 +136,8 @@ function AttachContainerDialog({ isOpen, onClose }: AttachContainerDialogProps) 
           </Flex>
         </Flex>
 
-        {/* Currently attached indicator + detach */}
-        {isAttached && containerInfo && (
+        {/* Currently active container indicator */}
+        {containerInfo && (
           <Flex
             align="center"
             justify="space-between"
@@ -149,28 +149,31 @@ function AttachContainerDialog({ isOpen, onClose }: AttachContainerDialogProps) 
             <Flex align="center" gap={2}>
               <Box w="6px" h="6px" borderRadius="full" bg={tokens.colors.accent.green} />
               <Text fontSize="11px" color={tokens.colors.accent.greenBright} fontWeight="500">
-                Ligado a {containerInfo.containerName}
+                {isAttached ? 'Attached to' : 'Active'}: {containerInfo.containerName}
               </Text>
             </Flex>
-            <Box
-              as="button"
-              display="flex"
-              alignItems="center"
-              gap="4px"
-              px={2}
-              py="3px"
-              borderRadius="4px"
-              fontSize="10px"
-              fontWeight="600"
-              color={tokens.colors.accent.red}
-              cursor="pointer"
-              transition={`all ${tokens.transition.fast}`}
-              _hover={{ bg: 'rgba(248, 81, 73, 0.1)' }}
-              onClick={handleDetach}
-            >
-              <FiMinusCircle size={10} />
-              Desligar
-            </Box>
+            {/* Only allow disconnect for externally attached containers, not managed ones */}
+            {isAttached && (
+              <Box
+                as="button"
+                display="flex"
+                alignItems="center"
+                gap="4px"
+                px={2}
+                py="3px"
+                borderRadius="4px"
+                fontSize="10px"
+                fontWeight="600"
+                color={tokens.colors.accent.red}
+                cursor="pointer"
+                transition={`all ${tokens.transition.fast}`}
+                _hover={{ bg: 'rgba(248, 81, 73, 0.1)' }}
+                onClick={handleDetach}
+              >
+                <FiMinusCircle size={10} />
+                Disconnect
+              </Box>
+            )}
           </Flex>
         )}
 
@@ -193,55 +196,74 @@ function AttachContainerDialog({ isOpen, onClose }: AttachContainerDialogProps) 
             </VStack>
           )}
 
-          {containers.map(container => (
-            <Flex
-              key={container.id}
-              w="100%"
-              align="center"
-              gap={3}
-              px={4}
-              py="10px"
-              cursor="pointer"
-              transition={`all ${tokens.transition.fast}`}
-              _hover={{ bg: 'rgba(255, 255, 255, 0.04)' }}
-              onClick={() => handleAttach(container)}
-              opacity={attaching && attaching !== container.id ? 0.4 : 1}
-            >
-              <Box
-                w="8px"
-                h="8px"
-                borderRadius="full"
-                bg={tokens.colors.accent.green}
-                flexShrink={0}
-              />
-              <Box flex={1} minW={0}>
-                <Text
-                  fontSize="12px"
-                  fontWeight="600"
-                  color={tokens.colors.text.primary}
-                  truncate
-                >
-                  {container.name}
+          {containers.map(container => {
+            const isActive = containerInfo?.containerName === container.name
+            const isManaged = container.name.startsWith('tmcode-')
+            const canAttach = !isActive && !isManaged
+
+            return (
+              <Flex
+                key={container.id}
+                w="100%"
+                align="center"
+                gap={3}
+                px={4}
+                py="10px"
+                cursor={canAttach ? 'pointer' : 'default'}
+                transition={`all ${tokens.transition.fast}`}
+                _hover={canAttach ? { bg: 'rgba(255, 255, 255, 0.04)' } : {}}
+                onClick={canAttach ? () => handleAttach(container) : undefined}
+                opacity={attaching && attaching !== container.id ? 0.4 : isManaged && !isActive ? 0.5 : 1}
+                bg={isActive ? 'rgba(46, 160, 67, 0.04)' : 'transparent'}
+              >
+                <Box
+                  w="8px"
+                  h="8px"
+                  borderRadius="full"
+                  bg={isActive ? tokens.colors.accent.green : tokens.colors.accent.purple}
+                  flexShrink={0}
+                />
+                <Box flex={1} minW={0}>
+                  <Flex align="center" gap={2}>
+                    <Text
+                      fontSize="12px"
+                      fontWeight="600"
+                      color={isManaged && !isActive ? tokens.colors.text.muted : tokens.colors.text.primary}
+                      truncate
+                    >
+                      {container.name}
+                    </Text>
+                    {isActive && (
+                      <Text fontSize="9px" color={tokens.colors.accent.greenBright} fontWeight="600" flexShrink={0}>
+                        ACTIVE
+                      </Text>
+                    )}
+                    {isManaged && !isActive && (
+                      <Text fontSize="9px" color={tokens.colors.text.disabled} fontWeight="500" flexShrink={0}>
+                        managed
+                      </Text>
+                    )}
+                  </Flex>
+                  <Flex gap={2} mt="2px">
+                    <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
+                      {container.image}
+                    </Text>
+                    <Text fontSize="10px" color={tokens.colors.text.disabled}>
+                      {container.status}
+                    </Text>
+                  </Flex>
+                </Box>
+                <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+                  {container.id}
                 </Text>
-                <Flex gap={2} mt="2px">
-                  <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
-                    {container.image}
+                {attaching === container.id && (
+                  <Text fontSize="10px" color={tokens.colors.accent.primary}>
+                    Connecting...
                   </Text>
-                  <Text fontSize="10px" color={tokens.colors.text.disabled}>
-                    {container.status}
-                  </Text>
-                </Flex>
-              </Box>
-              <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-                {container.id}
-              </Text>
-              {attaching === container.id && (
-                <Text fontSize="10px" color={tokens.colors.accent.primary}>
-                  A ligar...
-                </Text>
-              )}
-            </Flex>
-          ))}
+                )}
+              </Flex>
+            )
+          })}
         </VStack>
       </Box>
     </Box>

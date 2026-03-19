@@ -134,7 +134,7 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
       <Flex
         align="center"
         justify="space-between"
-        height="32px"
+        height="28px"
         flexShrink={0}
         borderBottom={`1px solid ${tokens.colors.border.default}`}
         bg={tokens.colors.bg.panel}
