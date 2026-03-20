@@ -17,7 +17,7 @@ interface EditorWorkspaceProps {
 	onSetActiveFile: (file: string) => void
 	onCloseFile: (file: string) => void
 	onCursorPositionChange: (line: number, column: number) => void
-	onReorderFiles?: (fromIndex: number, toIndex: number) => void
+	onReorderFiles?: (newOrder: string[]) => void
 }
 
 const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({

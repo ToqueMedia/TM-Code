@@ -383,7 +383,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyG, () => {});
     ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyO, () => {});
 
-    // Content change — autosave directly to disk
+    // Content change — autosave directly to disk, then refresh git gutter
     disposablesRef.current.push(
       ed.onDidChangeModelContent(() => {
         dirtyRef.current = true;
@@ -398,6 +398,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
             pendingRef.current = { path: boundPath, content };
             FileService.writeFile(boundPath, content).then(() => {
               dirtyRef.current = false;
+              // Refresh git gutter after autosave writes to disk
+              if (editorRef.current) updateGitGutter(editorRef.current);
             }).catch(e =>
               logger.error('editor', 'Autosave failed', e)
             );
@@ -509,6 +511,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
 
     // Load git gutter decorations
     updateGitGutter(ed);
+
+    // Pre-load Prettier project config (best-effort, non-blocking)
+    const projectDir = boundPath.substring(0, boundPath.lastIndexOf('/'));
+    FormatterService.getInstance().loadProjectConfig(projectDir).catch(() => {});
   }, [updateGitGutter]);
 
   // Cleanup — save cursor + content before tab switch

@@ -31,8 +31,23 @@ const languageToParser: Record<string, string> = {
   markdown: 'markdown',
 };
 
+// Fallback defaults when no .prettierrc is found
+const DEFAULT_OPTIONS: Record<string, unknown> = {
+  singleQuote: true,
+  semi: true,
+  trailingComma: 'all',
+  printWidth: 100,
+  tabWidth: 2,
+  useTabs: false,
+};
+
+// Config file names to search (in priority order)
+const CONFIG_FILES = ['.prettierrc', '.prettierrc.json', '.prettierrc.js', 'prettier.config.js'];
+
 export class FormatterService {
   private static instance: FormatterService;
+  private projectConfig: Record<string, unknown> | null = null;
+  private projectConfigPath: string | null = null;
 
   static getInstance(): FormatterService {
     if (!FormatterService.instance) {
@@ -49,6 +64,39 @@ export class FormatterService {
     return languageToParser[languageId] || null;
   }
 
+  /**
+   * Load .prettierrc from the project root. Caches until project changes.
+   */
+  async loadProjectConfig(projectPath: string): Promise<Record<string, unknown>> {
+    if (this.projectConfig && this.projectConfigPath === projectPath) {
+      return this.projectConfig;
+    }
+
+    this.projectConfigPath = projectPath;
+    this.projectConfig = {};
+
+    for (const configFile of CONFIG_FILES) {
+      try {
+        const raw = await FileService.readFile(`${projectPath}/${configFile}`);
+        // Only parse JSON configs (.js configs are not supported in standalone)
+        if (configFile.endsWith('.json') || configFile === '.prettierrc') {
+          this.projectConfig = JSON.parse(raw);
+          break;
+        }
+      } catch {
+        // File not found — try next
+      }
+    }
+
+    return this.projectConfig ?? {};
+  }
+
+  /** Clear cached config (call when project changes) */
+  clearConfigCache(): void {
+    this.projectConfig = null;
+    this.projectConfigPath = null;
+  }
+
   async formatCode(code: string, languageId: string, options?: Record<string, unknown>): Promise<string | null> {
     const parser = this.getParser(languageId);
     if (!parser) return null;
@@ -57,13 +105,9 @@ export class FormatterService {
       const formatted = await format(code, {
         parser,
         plugins,
-        singleQuote: true,
-        semi: true,
-        trailingComma: 'all',
-        printWidth: 100,
-        tabWidth: 2,
-        useTabs: false,
-        ...options,
+        ...DEFAULT_OPTIONS,
+        ...this.projectConfig,  // Project config overrides defaults
+        ...options,             // Explicit options override everything
       });
       return formatted;
     } catch (err) {

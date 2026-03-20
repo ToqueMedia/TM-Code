@@ -45,7 +45,7 @@ interface EditorActions {
   refreshFileContent: (path: string) => Promise<void>;
   renameOpenFile: (oldPath: string, newPath: string) => void;
   closeAllFiles: () => void;
-  reorderFiles: (fromIndex: number, toIndex: number) => void;
+  reorderFiles: (newOrder: string[]) => void;
   // Split editor actions
   splitEditor: () => void;
   unsplitEditor: () => void;
@@ -298,7 +298,16 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
       },
 
       setActiveFile: (path: string | null) => {
-        set({ activeFile: path });
+        set(state => {
+          if (!path) return { activeFile: null };
+          // Ensure the file is in the active group (safety for legacy state migration)
+          const groups = state.editorGroups.map(g => {
+            if (g.id !== state.activeGroupId) return g;
+            if (g.files.includes(path)) return { ...g, activeFile: path };
+            return { ...g, files: [...g.files, path], activeFile: path };
+          });
+          return { activeFile: path, editorGroups: groups };
+        });
       },
 
       updateFileContent: (path: string, content: string) => {
@@ -609,17 +618,11 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         }))
       },
 
-      reorderFiles: (fromIndex: number, toIndex: number) => {
+      reorderFiles: (newOrder: string[]) => {
         set(state => {
-          if (fromIndex === toIndex) return state;
-          // Reorder within the active group's file list (controls tab order)
           const groups = state.editorGroups.map(g => {
             if (g.id !== state.activeGroupId) return g;
-            if (fromIndex < 0 || toIndex < 0 || fromIndex >= g.files.length || toIndex >= g.files.length) return g;
-            const files = [...g.files];
-            const [moved] = files.splice(fromIndex, 1);
-            files.splice(toIndex, 0, moved);
-            return { ...g, files };
+            return { ...g, files: newOrder };
           });
           return { editorGroups: groups };
         });
@@ -846,25 +849,52 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             const validPaths = new Set(validFiles.map(f => f.path));
             const activePath = state.activeFile;
             const activeExists = validFiles.some(f => f.path === activePath);
+            const resolvedActive = activeExists ? activePath : (validFiles[0]?.path ?? null);
 
-            // Filter groups to only include valid files
-            let groups = (state.editorGroups || [{ id: 'main', files: [], activeFile: null }]).map(g => ({
+            // Build groups from persisted state, falling back to a single group with all files
+            const rawGroups = state.editorGroups && state.editorGroups.length > 0
+              ? state.editorGroups
+              : [{ id: 'main' as string, files: [] as string[], activeFile: null as string | null }];
+
+            let groups = rawGroups.map(g => ({
               ...g,
-              files: g.files.filter(p => validPaths.has(p)),
+              files: (g.files || []).filter((p: string) => validPaths.has(p)),
               activeFile: g.activeFile && validPaths.has(g.activeFile) ? g.activeFile : null,
             }));
-            // Ensure at least one group
-            if (groups.length === 0) {
-              groups = [{ id: 'main', files: validFiles.map(f => f.path), activeFile: activeExists ? activePath : (validFiles[0]?.path ?? null) }];
+
+            // If all groups are empty but we have files, populate main group
+            // This handles migration from pre-groups state
+            const allGroupFiles = new Set(groups.flatMap(g => g.files));
+            if (allGroupFiles.size === 0 && validFiles.length > 0) {
+              groups = [{ id: 'main', files: validFiles.map(f => f.path), activeFile: resolvedActive }];
+            } else {
+              // Ensure every valid file is in at least one group (migration safety)
+              const orphans = validFiles.filter(f => !allGroupFiles.has(f.path));
+              if (orphans.length > 0) {
+                const mainIdx = groups.findIndex(g => g.id === 'main');
+                if (mainIdx >= 0) {
+                  groups[mainIdx] = {
+                    ...groups[mainIdx],
+                    files: [...groups[mainIdx].files, ...orphans.map(f => f.path)],
+                    activeFile: groups[mainIdx].activeFile || orphans[0].path,
+                  };
+                }
+              }
+              // Set active file for any group that has files but no activeFile
+              groups = groups.map(g => ({
+                ...g,
+                activeFile: g.activeFile || (g.files.length > 0 ? g.files[0] : null),
+              }));
             }
-            // Ensure main group has files if no groups have them
-            if (groups.every(g => g.files.length === 0) && validFiles.length > 0) {
-              groups[0] = { ...groups[0], files: validFiles.map(f => f.path), activeFile: validFiles[0]?.path ?? null };
+
+            // Ensure at least one group exists
+            if (groups.length === 0) {
+              groups = [{ id: 'main', files: [], activeFile: null }];
             }
 
             useEditorRepository.setState({
               openFiles: validFiles,
-              activeFile: activeExists ? activePath : (validFiles[0]?.path ?? null),
+              activeFile: resolvedActive,
               editorGroups: groups,
               activeGroupId: state.activeGroupId || 'main',
             });

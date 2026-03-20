@@ -282,22 +282,35 @@ input:focus {
 /* ═══ Git Gutter Decorations ═══ */
 
 .monaco-editor .git-gutter-added {
-  border-left: 3px solid #2ea043 !important;
-  margin-left: 3px;
+  width: 3px !important;
+  min-width: 3px !important;
+  margin-left: 4px;
+  background-color: #2ea043 !important;
+  border-radius: 1px;
 }
 .monaco-editor .git-gutter-modified {
-  border-left: 3px solid #007acc !important;
-  margin-left: 3px;
+  width: 3px !important;
+  min-width: 3px !important;
+  margin-left: 4px;
+  background-color: #007acc !important;
+  border-radius: 1px;
 }
 .monaco-editor .git-gutter-removed {
-  border-left: 3px solid #f85149 !important;
-  margin-left: 3px;
+  width: 3px !important;
+  min-width: 3px !important;
+  margin-left: 4px;
+  background-color: #f85149 !important;
+  border-radius: 1px;
+  /* Removed lines only show a small triangle indicator */
+  max-height: 6px !important;
+  align-self: center;
 }
 
 .monaco-editor .git-glyph-added,
 .monaco-editor .git-glyph-modified,
 .monaco-editor .git-glyph-removed {
-  opacity: 0;
+  /* Hide glyph margin icons — we only use line decorations */
+  display: none;
 }
 
 /* ═══ StatusBar Animations ═══ */

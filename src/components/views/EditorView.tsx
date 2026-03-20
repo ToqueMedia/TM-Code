@@ -34,7 +34,8 @@ function EditorView() {
   const setDetectIndentationSetting = useSettingsStore(s => s.setDetectIndentation)
 
   const editorGroups = useEditorRepository(s => s.editorGroups)
-  const hasOpenFilesInAnyGroup = editorGroups.some(g => g.files.length > 0)
+  // Check both groups and openFiles — during rehydration, groups may be empty while openFiles isn't yet
+  const hasOpenFilesInAnyGroup = editorGroups.some(g => g.files.length > 0) || openFiles.length > 0
 
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 })
   const cursorUpdateRef = useRef<ReturnType<typeof setTimeout> | null>(null)
