@@ -2,16 +2,19 @@ import { memo, useState, useCallback, useEffect } from 'react'
 import {
   Box,
   Button,
+  Field,
   Flex,
   HStack,
   Input,
   NativeSelect,
+  Switch,
   Text,
   Textarea,
   VStack,
 } from '@chakra-ui/react'
 import { FiArrowLeft, FiPlus, FiTrash2, FiSquare, FiRefreshCw, FiServer } from 'react-icons/fi'
 import { useLayoutStore } from '../../stores/layoutStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore, McpServerState } from '../../stores/mcpStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -20,15 +23,16 @@ import MCPService from '../../services/mcp/mcpService'
 import { invoke } from '@tauri-apps/api/core'
 import { tokens } from '@/theme/tokens'
 
-type SectionId = 'skills' | 'mcp'
+type SectionId = 'editor' | 'skills' | 'mcp'
 
 const NAV_ITEMS: { id: SectionId; label: string }[] = [
+  { id: 'editor', label: 'Editor' },
   { id: 'skills', label: 'Skills' },
   { id: 'mcp', label: 'MCP Servers' },
 ]
 
 function SettingsView() {
-  const [activeSection, setActiveSection] = useState<SectionId>('skills')
+  const [activeSection, setActiveSection] = useState<SectionId>('editor')
 
   return (
     <Flex flex="1" overflow="hidden">
@@ -105,12 +109,129 @@ function SettingsView() {
 
         <Box flex="1" overflowY="auto" px={8} py={6}>
           <Box maxW="640px">
+            {activeSection === 'editor' && <EditorSection />}
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
           </Box>
         </Box>
       </Flex>
     </Flex>
+  )
+}
+
+// ━━━ Editor Section ━━━
+
+function EditorSection() {
+  const autocompleteEnabled = useSettingsStore(function (s) { return s.autocomplete.enabled })
+  const tabSize = useSettingsStore(function (s) { return s.editor.tabSize })
+  const insertSpaces = useSettingsStore(function (s) { return s.editor.insertSpaces })
+  const detectIndentation = useSettingsStore(function (s) { return s.editor.detectIndentation })
+  const formatOnSave = useSettingsStore(function (s) { return s.formatOnSave })
+
+  const setAutocompleteEnabled = useSettingsStore(function (s) { return s.setAutocompleteEnabled })
+  const setTabSize = useSettingsStore(function (s) { return s.setTabSize })
+  const setInsertSpaces = useSettingsStore(function (s) { return s.setInsertSpaces })
+  const setDetectIndentation = useSettingsStore(function (s) { return s.setDetectIndentation })
+  const setFormatOnSave = useSettingsStore(function (s) { return s.setFormatOnSave })
+
+  return (
+    <VStack align="stretch" gap={6}>
+      <SettingsGroup title="AI Autocomplete">
+        <Field.Root>
+          <HStack justify="space-between">
+            <Box>
+              <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                Enable Autocomplete
+              </Text>
+              <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                Show inline AI code suggestions while typing
+              </Text>
+            </Box>
+            <Switch.Root checked={autocompleteEnabled} onCheckedChange={function (e) { setAutocompleteEnabled(e.checked) }} colorPalette="pink">
+              <Switch.HiddenInput />
+              <Switch.Control />
+            </Switch.Root>
+          </HStack>
+        </Field.Root>
+      </SettingsGroup>
+
+      <SettingsGroup title="Formatting">
+        <Field.Root>
+          <HStack justify="space-between">
+            <Box>
+              <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                Format on Save
+              </Text>
+              <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                Automatically format files with Prettier when saving
+              </Text>
+            </Box>
+            <Switch.Root checked={formatOnSave} onCheckedChange={function (e) { setFormatOnSave(e.checked) }} colorPalette="pink">
+              <Switch.HiddenInput />
+              <Switch.Control />
+            </Switch.Root>
+          </HStack>
+        </Field.Root>
+      </SettingsGroup>
+
+      <SettingsGroup title="Indentation">
+        <VStack align="stretch" gap={4}>
+          <Field.Root>
+            <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px" mb={1}>
+              Tab Size
+            </Text>
+            <NativeSelect.Root size="sm" width="120px">
+              <NativeSelect.Field
+                bg={tokens.colors.bg.input}
+                borderColor={tokens.colors.border.input}
+                color={tokens.colors.text.primary}
+                value={String(tabSize)}
+                onChange={function (e) { const v = parseInt(e.target.value, 10); if (!Number.isNaN(v)) setTabSize(v) }}
+              >
+                <option value="2">2</option>
+                <option value="4">4</option>
+                <option value="8">8</option>
+              </NativeSelect.Field>
+              <NativeSelect.Indicator />
+            </NativeSelect.Root>
+          </Field.Root>
+
+          <Field.Root>
+            <HStack justify="space-between">
+              <Box>
+                <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                  Insert Spaces
+                </Text>
+                <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                  Use spaces instead of tabs
+                </Text>
+              </Box>
+              <Switch.Root checked={insertSpaces} onCheckedChange={function (e) { setInsertSpaces(e.checked) }} colorPalette="blue">
+                <Switch.HiddenInput />
+                <Switch.Control />
+              </Switch.Root>
+            </HStack>
+          </Field.Root>
+
+          <Field.Root>
+            <HStack justify="space-between">
+              <Box>
+                <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                  Detect Indentation
+                </Text>
+                <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                  Infer indentation from file content
+                </Text>
+              </Box>
+              <Switch.Root checked={detectIndentation} onCheckedChange={function (e) { setDetectIndentation(e.checked) }} colorPalette="blue">
+                <Switch.HiddenInput />
+                <Switch.Control />
+              </Switch.Root>
+            </HStack>
+          </Field.Root>
+        </VStack>
+      </SettingsGroup>
+    </VStack>
   )
 }
 

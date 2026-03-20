@@ -1,37 +1,29 @@
-import { memo, useState, useEffect, useCallback, useRef, Suspense, lazy } from 'react'
+import { memo, useState, useEffect, useCallback, useRef } from 'react'
 import { Flex, Box } from '@chakra-ui/react'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useCurrentProject } from '../../hooks/useProjectState'
 import { useCodeEditorState } from '../../hooks/useEditorState'
+import { useEditorRepository } from '../../stores/editorStore'
+import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import EditorTabs from '../ui/EditorTabs'
-import Breadcrumbs from '../ui/Breadcrumbs'
 import BottomPanel from '../ui/BottomPanel'
 import CommandPalette from '../ui/CommandPalette'
+import GoToLineDialog from '../ui/GoToLineDialog'
 import StatusBar from '../ui/StatusBar'
 import EditorSidebar from './EditorSidebar'
 import EditorToolbar, { type SidebarPanel } from './EditorToolbar'
 import EmptyEditorState from './EmptyEditorState'
 import ContainersPanel from './ContainersPanel'
-import { LoadingSpinner } from '../ui/LoadingSpinner'
-import { logger } from '../../utils/logger'
+import SplitEditorLayout from '../editor/SplitEditorLayout'
 import { tokens } from '@/theme/tokens'
-
-const MonacoEditor = lazy(() => import('../ui/MonacoEditor'))
 
 const STORAGE_KEY_BOTTOM_VISIBLE = 'panel-visible-bottom-panel'
 const STORAGE_KEY_SIDEBAR_PANEL = 'editor-sidebar-panel'
 
-const EditorSkeleton = () => (
-  <Flex flex={1} align="center" justify="center">
-    <LoadingSpinner size="lg" label="Loading editor..." />
-  </Flex>
-)
-
 function EditorView() {
   const currentProject = useCurrentProject()
   const {
-    openFiles, activeFile, handleFileSelect, handleCloseFile, handleSetActiveFile
+    openFiles, activeFile, handleFileSelect
   } = useCodeEditorState()
 
   const tabSizeSetting = useSettingsStore(s => s.editor.tabSize)
@@ -41,7 +33,11 @@ function EditorView() {
   const detectIndentationSetting = useSettingsStore(s => s.editor.detectIndentation)
   const setDetectIndentationSetting = useSettingsStore(s => s.setDetectIndentation)
 
+  const editorGroups = useEditorRepository(s => s.editorGroups)
+  const hasOpenFilesInAnyGroup = editorGroups.some(g => g.files.length > 0)
+
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 })
+  const cursorUpdateRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [languages, setLanguages] = useState<string[]>([])
 
   const [isBottomPanelVisible, setIsBottomPanelVisible] = useState<boolean>(() => {
@@ -61,8 +57,14 @@ function EditorView() {
   })
 
   const handleCursorPositionChange = useCallback((line: number, column: number) => {
-    setCursorPosition({ line, column })
-  }, [])
+    if (cursorUpdateRef.current) clearTimeout(cursorUpdateRef.current)
+    cursorUpdateRef.current = setTimeout(() => {
+      setCursorPosition({ line, column })
+      if (activeFile) {
+        useEditorRepository.getState().setCursorPosition(activeFile, line, column)
+      }
+    }, 150)
+  }, [activeFile])
 
   const toggleBottomPanel = useCallback(() => {
     setIsBottomPanelVisible(prev => {
@@ -82,17 +84,42 @@ function EditorView() {
     try { localStorage.setItem(STORAGE_KEY_SIDEBAR_PANEL, String(panel ?? '')) } catch {}
   }, [])
 
+  // Sync Explorer selection with active file
+  useEffect(() => {
+    if (activeFile) {
+      useFileTreeRepository.getState().selectNode(activeFile)
+    }
+  }, [activeFile])
+
   useEffect(() => {
     const onLangs = (e: Event) => { const d = (e as CustomEvent<string[]>).detail; if (Array.isArray(d)) setLanguages(d) }
     const onToggle = () => toggleBottomPanel()
     const onOpen = (e: Event) => { const p = (e as CustomEvent<string>).detail; if (p) handleFileSelect(p) }
+    const onSidebarToggle = () => setActiveSidebarPanel(prev => {
+      const next: SidebarPanel = prev ? null : 'explorer'
+      try { localStorage.setItem(STORAGE_KEY_SIDEBAR_PANEL, String(next ?? '')) } catch {}
+      return next
+    })
+    // Split editor event
+    const onSplit = () => {
+      const store = useEditorRepository.getState()
+      if (store.editorGroups.length >= 2) {
+        store.unsplitEditor()
+      } else {
+        store.splitEditor()
+      }
+    }
     window.addEventListener('monaco:languages', onLangs)
     window.addEventListener('panel:toggle-bottom', onToggle)
     window.addEventListener('editor:open-file', onOpen)
+    window.addEventListener('sidebar:toggle', onSidebarToggle)
+    window.addEventListener('editor:split', onSplit)
     return () => {
       window.removeEventListener('monaco:languages', onLangs)
       window.removeEventListener('panel:toggle-bottom', onToggle)
       window.removeEventListener('editor:open-file', onOpen)
+      window.removeEventListener('sidebar:toggle', onSidebarToggle)
+      window.removeEventListener('editor:split', onSplit)
     }
   }, [toggleBottomPanel, handleFileSelect])
 
@@ -135,37 +162,15 @@ function EditorView() {
           </Box>
         )}
 
-        {/* Right column: Tabs + Breadcrumbs + Editor + Terminal */}
+        {/* Right column: Editor (with split support) + Terminal */}
         <Flex flex="1" direction="column" minW={0}>
-          {/* Tabs + Breadcrumbs — only when files are open */}
-          {openFiles.length > 0 && (
-            <>
-              <Box flexShrink={0} borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}>
-                <EditorTabs
-                  openFiles={openFiles}
-                  activeFile={activeFile}
-                  onSetActiveFile={handleSetActiveFile}
-                  onCloseFile={handleCloseFile}
-                />
-              </Box>
-              <Breadcrumbs
-                filePath={activeFile || undefined}
-                projectRoot={currentProject.path}
-                onNavigate={(path) => logger.debug('editor', 'Navigate to:', path)}
-              />
-            </>
-          )}
-
-          {/* Editor */}
+          {/* Editor area — uses SplitEditorLayout which handles tabs, breadcrumbs, and split panes */}
           <Flex flex="1" overflow="hidden">
-            {activeFile ? (
-              <Suspense fallback={<EditorSkeleton />}>
-                <MonacoEditor
-                  key={activeFile}
-                  path={activeFile}
-                  onCursorPositionChange={handleCursorPositionChange}
-                />
-              </Suspense>
+            {hasOpenFilesInAnyGroup ? (
+              <SplitEditorLayout
+                projectPath={currentProject.path}
+                onCursorPositionChange={handleCursorPositionChange}
+              />
             ) : (
               <EmptyEditorState
                 onBackToChat={() => useLayoutStore.getState().goBack()}
@@ -217,7 +222,6 @@ function EditorView() {
                     const delta = startY - pe.clientY
                     const next = startH + delta
                     if (next < 60) {
-                      // Close immediately when dragged below threshold
                       try { handle?.releasePointerCapture(pid) } catch {}
                       handle?.removeEventListener('pointermove', onMove)
                       handle?.removeEventListener('pointerup', onUp)
@@ -267,6 +271,7 @@ function EditorView() {
       />
 
       <CommandPalette />
+      <GoToLineDialog />
     </Flex>
   )
 }

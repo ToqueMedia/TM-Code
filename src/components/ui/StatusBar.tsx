@@ -1,9 +1,12 @@
-import React, { memo, Suspense } from 'react'
+import React, { memo, Suspense, useState, useEffect } from 'react'
 import { Flex, Text, Box, HStack } from '@chakra-ui/react'
-import { FiGitBranch, FiAlertCircle, FiZap, FiBox, FiShield } from 'react-icons/fi'
+import { FiGitBranch, FiAlertCircle, FiZap, FiBox, FiShield, FiCode } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { useMcpStore } from '@/stores/mcpStore'
 import { useContainerStore } from '@/stores/containerStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { useAiCompletionStore } from '@/stores/aiCompletionStore'
+import { GitService } from '@/services/gitService'
 import LanguageSelector from './LanguageSelector'
 import IndentationMenu from './IndentationMenu'
 
@@ -140,6 +143,72 @@ const ContainerStatusPill = memo(() => {
 
 ContainerStatusPill.displayName = 'ContainerStatusPill'
 
+// ─── AI Completion Status Pill ───────────────────────────────────────────────
+
+const AiCompletionPill = memo(() => {
+	const enabled = useSettingsStore(s => s.autocomplete.enabled)
+	const model = useSettingsStore(s => s.autocomplete.model)
+	const status = useAiCompletionStore(s => s.status)
+
+	if (!enabled) return null
+
+	let color: string
+	let label: string
+	let tooltip: string
+
+	switch (status) {
+		case 'loading':
+			color = tokens.colors.accent.orange
+			label = 'AI'
+			tooltip = `Generating completion... (${model})`
+			break
+		case 'error':
+			color = tokens.colors.accent.red
+			label = 'AI'
+			tooltip = 'Ollama unavailable — check if it is running'
+			break
+		default:
+			color = tokens.colors.accent.green
+			label = 'AI'
+			tooltip = `AI autocomplete active (${model})`
+	}
+
+	return (
+		<>
+			<StatusBarDivider />
+			<HStack
+				gap={1}
+				px={2}
+				py="2px"
+				borderRadius={tokens.radius.full}
+				bg="rgba(255, 255, 255, 0.04)"
+				cursor="default"
+				title={tooltip}
+			>
+				<Box position="relative" display="flex" alignItems="center">
+					<FiCode size={10} color={color} />
+					{status === 'loading' && (
+						<Box
+							position="absolute"
+							inset="-2px"
+							borderRadius="full"
+							border="1px solid"
+							borderColor={color}
+							opacity={0.5}
+							animation="pulse 1.5s ease-in-out infinite"
+						/>
+					)}
+				</Box>
+				<Text fontSize="10px" color={color} fontWeight="600" fontFamily={tokens.fontFamily.mono}>
+					{label}
+				</Text>
+			</HStack>
+		</>
+	)
+})
+
+AiCompletionPill.displayName = 'AiCompletionPill'
+
 // ─── StatusBar ──────────────────────────────────────────────────────────────
 
 interface StatusBarProps {
@@ -169,6 +238,13 @@ const StatusBar = memo<StatusBarProps>(({
 	setInsertSpacesSetting,
 	setDetectIndentationSetting
 }) => {
+	const [branch, setBranch] = useState('main')
+
+	useEffect(() => {
+		if (!currentProject?.path) return
+		GitService.getCurrentBranch(currentProject.path).then(b => setBranch(b))
+	}, [currentProject?.path])
+
 	return (
 		<Flex
 			role="status"
@@ -188,7 +264,7 @@ const StatusBar = memo<StatusBarProps>(({
 			<HStack gap={0} height="100%">
 				<StatusBarItem tooltip="Git branch">
 					<FiGitBranch size={12} />
-					<Text fontFamily={tokens.fontFamily.mono} fontSize="11px">main</Text>
+					<Text fontFamily={tokens.fontFamily.mono} fontSize="11px">{branch}</Text>
 				</StatusBarItem>
 
 				<StatusBarDivider />
@@ -222,6 +298,9 @@ const StatusBar = memo<StatusBarProps>(({
 			</HStack>
 
 			<HStack gap={0} height="100%" marginLeft="auto">
+				{/* AI autocomplete indicator */}
+				<AiCompletionPill />
+
 				{/* Container isolation indicator */}
 				<ContainerStatusPill />
 

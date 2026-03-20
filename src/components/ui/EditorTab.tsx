@@ -1,4 +1,4 @@
-import React, { memo, useCallback } from 'react'
+import React, { memo, useCallback, useState } from 'react'
 import { Flex, Text, Box, IconButton, HStack } from '@chakra-ui/react'
 import { FiX } from 'react-icons/fi'
 import { getFileIconByExtension } from '../../utils/iconMapper'
@@ -9,15 +9,50 @@ export interface EditorTabProps {
 	name: string
 	isDirty: boolean
 	isActive: boolean
+	index: number
 	onClick: () => void
 	onClose: (e: React.MouseEvent) => void
+	onReorder: (fromIndex: number, toIndex: number) => void
 }
 
-const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick, onClose }) => {
+const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, index, onClick, onClose, onReorder }) => {
+	const [dragOver, setDragOver] = useState<'left' | 'right' | null>(null)
+	const [isDragging, setIsDragging] = useState(false)
+
 	const handleClose = useCallback((e: React.MouseEvent) => {
 		e.stopPropagation()
 		onClose(e)
 	}, [onClose])
+
+	const handleDragStart = useCallback((e: React.DragEvent) => {
+		e.dataTransfer.setData('tab-index', String(index))
+		e.dataTransfer.effectAllowed = 'move'
+		setIsDragging(true)
+	}, [index])
+
+	const handleDragEnd = useCallback(() => {
+		setIsDragging(false)
+	}, [])
+
+	const handleDragOver = useCallback((e: React.DragEvent) => {
+		e.preventDefault()
+		e.dataTransfer.dropEffect = 'move'
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+		const midX = rect.left + rect.width / 2
+		setDragOver(e.clientX < midX ? 'left' : 'right')
+	}, [])
+
+	const handleDragLeave = useCallback(() => {
+		setDragOver(null)
+	}, [])
+
+	const handleDrop = useCallback((e: React.DragEvent) => {
+		e.preventDefault()
+		setDragOver(null)
+		const from = parseInt(e.dataTransfer.getData('tab-index'), 10)
+		if (isNaN(from) || from === index) return
+		onReorder(from, index)
+	}, [index, onReorder])
 
 	const ext = name.split('.').pop()?.toLowerCase()
 	const iconUrl = getFileIconByExtension(ext, name)
@@ -34,14 +69,14 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 			cursor="pointer"
 			onClick={onClick}
 			position="relative"
-			overflow="hidden"
+			overflow="visible"
 			_hover={{
 				bg: isActive ? tokens.colors.bg.app : tokens.colors.bg.hoverSubtle,
 				'& .tab-close': {
 					opacity: 0.7
 				}
 			}}
-			transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}`}
+			transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}, opacity ${tokens.transition.fast}`}
 			role="tab"
 			aria-selected={isActive}
 			data-path={path}
@@ -51,6 +86,13 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 			minW="0"
 			maxW="200px"
 			color={isActive ? tokens.colors.text.primary : tokens.colors.text.muted}
+			opacity={isDragging ? 0.4 : 1}
+			draggable
+			onDragStart={handleDragStart}
+			onDragEnd={handleDragEnd}
+			onDragOver={handleDragOver}
+			onDragLeave={handleDragLeave}
+			onDrop={handleDrop}
 			_after={{
 				content: '""',
 				position: 'absolute',
@@ -62,6 +104,33 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 				transition: `background ${tokens.transition.fast}`,
 			}}
 		>
+			{/* Drop indicator — left */}
+			{dragOver === 'left' && (
+				<Box
+					position="absolute"
+					left="-1px"
+					top="4px"
+					bottom="4px"
+					width="2px"
+					bg={tokens.colors.accent.primary}
+					borderRadius="1px"
+					zIndex={10}
+				/>
+			)}
+			{/* Drop indicator — right */}
+			{dragOver === 'right' && (
+				<Box
+					position="absolute"
+					right="-1px"
+					top="4px"
+					bottom="4px"
+					width="2px"
+					bg={tokens.colors.accent.primary}
+					borderRadius="1px"
+					zIndex={10}
+				/>
+			)}
+
 			<HStack gap={2} align="center" minW="0">
 				{iconUrl ? (
 					<img
@@ -129,7 +198,8 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 		prevProps.path === nextProps.path &&
 		prevProps.name === nextProps.name &&
 		prevProps.isDirty === nextProps.isDirty &&
-		prevProps.isActive === nextProps.isActive
+		prevProps.isActive === nextProps.isActive &&
+		prevProps.index === nextProps.index
 	)
 })
 

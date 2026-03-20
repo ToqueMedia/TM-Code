@@ -9,9 +9,10 @@ interface EditorTabsProps {
 	activeFile: string | null
 	onSetActiveFile: (path: string) => void
 	onCloseFile: (path: string, e: React.MouseEvent) => void
+	onReorderFiles: (fromIndex: number, toIndex: number) => void
 }
 
-const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFile, onCloseFile }) => {
+const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFile, onCloseFile, onReorderFiles }) => {
 	return (
 		<ScrollArea.Root
 			bg={tokens.colors.bg.panel}
@@ -32,15 +33,17 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 							window.dispatchEvent(new CustomEvent('tabs:contextmenu:open', { detail: { x: e.clientX, y: e.clientY, path } }))
 						}}
 					>
-						{openFiles.map((file) => (
+						{openFiles.map((file, index) => (
 							<EditorTab
 								key={file.path}
 								path={file.path}
 								name={file.path.split('/').pop() || 'Untitled'}
 								isDirty={file.isDirty}
 								isActive={activeFile === file.path}
+								index={index}
 								onClick={() => onSetActiveFile(file.path)}
 								onClose={(e) => onCloseFile(file.path, e)}
+								onReorder={onReorderFiles}
 							/>
 						))}
 

@@ -1,10 +1,12 @@
 mod commands;
+use commands::ai_completion::*;
 use commands::checkpoint::*;
 use commands::container::*;
 use commands::debugger::*;
 use commands::devcontainer::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
+use commands::git::*;
 use commands::mcp::*;
 use commands::project::*;
 use commands::search::*;
@@ -29,6 +31,12 @@ pub fn run() {
     let debugger_state = commands::debugger::DebuggerState::new();
     let mcp_state = commands::mcp::McpState::new();
 
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .expect("Failed to create HTTP client");
+    let fim_state = commands::ai_completion::FimState::new();
+
     tauri::Builder::default()
         .manage(command_history)
         .manage(process_map)
@@ -36,6 +44,8 @@ pub fn run() {
         .manage(active_container)
         .manage(debugger_state)
         .manage(mcp_state)
+        .manage(http_client)
+        .manage(fim_state)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -141,7 +151,10 @@ pub fn run() {
             detect_devcontainer,
             list_running_containers,
             attach_to_container,
-            is_attached_container
+            is_attached_container,
+            fim_completion,
+            git_diff_lines,
+            git_current_branch
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

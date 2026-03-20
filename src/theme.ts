@@ -26,9 +26,16 @@ export const theme = createSystem(defaultConfig, {
       WebkitTapHighlightColor: 'transparent',
     },
     // Allow selection where needed
-    'input, textarea, [contenteditable="true"], .monaco-editor, .xterm-rows, .xterm-viewport, .xterm-screen': {
+    'input, textarea, [contenteditable="true"], .monaco-editor, .monaco-editor *, .xterm-rows, .xterm-viewport, .xterm-screen': {
       userSelect: 'text',
       WebkitUserSelect: 'text',
+    },
+    // Monaco context menu — cursor fix
+    '.monaco-editor .monaco-menu, .monaco-editor .monaco-menu *': {
+      cursor: 'default !important',
+    },
+    '.monaco-editor .monaco-menu .action-item': {
+      cursor: 'pointer !important',
     },
 
     // Desktop-like cursor behavior in top bars

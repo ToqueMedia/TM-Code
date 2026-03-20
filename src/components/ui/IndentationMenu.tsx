@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import { Box, Text, Menu } from '@chakra-ui/react'
-import { FiChevronDown } from 'react-icons/fi'
-import MonacoBridge from '../../utils/monacoBridge'
+import { FiChevronDown, FiCheck } from 'react-icons/fi'
+import { useEditorRepository } from '../../stores/editorStore'
 import { tokens } from '@/theme/tokens'
 
 interface IndentationMenuProps {
@@ -13,84 +13,40 @@ interface IndentationMenuProps {
   setDetectIndentationSetting: (value: boolean) => void
 }
 
-function applyIndentationNow(tabSize: number, insertSpaces: boolean, detect: boolean): void {
-  try {
-    const editor = MonacoBridge.getInstance().getCurrentEditor()
-    if (!editor) return
-    editor.updateOptions({ tabSize, insertSpaces })
-    const model = editor.getModel?.()
-    if (model) {
-      if (detect) {
-        ;(model as unknown as { detectIndentation(insertSpaces: boolean, tabSize: number): void })
-          .detectIndentation(insertSpaces, tabSize)
-      } else {
-        model.updateOptions({ tabSize, indentSize: tabSize, insertSpaces })
-      }
-    }
-  } catch { }
+function convertIndentation(tabSize: number, toSpaces: boolean): void {
+  const state = useEditorRepository.getState()
+  const path = state.activeFile
+  if (!path) return
+  const file = state.openFiles.find(f => f.path === path)
+  if (!file || !file.content) return
+
+  const spaces = ' '.repeat(tabSize)
+  const lines = file.content.split('\n')
+  const converted = lines.map(line => {
+    const match = line.match(/^(\s*)/)
+    if (!match || !match[1]) return line
+    const indent = match[1]
+    const rest = line.slice(indent.length)
+    const newIndent = toSpaces
+      ? indent.replace(/\t/g, spaces)
+      : indent.replace(new RegExp(spaces, 'g'), '\t')
+    return newIndent + rest
+  }).join('\n')
+
+  if (converted !== file.content) {
+    state.updateFileContent(path, converted)
+  }
 }
 
-function convertToSpaces(tabSize: number): void {
-  try {
-    const editor = MonacoBridge.getInstance().getCurrentEditor()
-    if (!editor) return
-    const model = editor.getModel?.()
-    if (!model) return
-    const edits: Array<{ range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }; text: string }> = []
-    const lineCount = model.getLineCount()
-    for (let i = 1; i <= lineCount; i++) {
-      const content = model.getLineContent(i)
-      let firstCol = model.getLineFirstNonWhitespaceColumn(i)
-      if (firstCol === 0) firstCol = content.length + 1
-      const indent = content.slice(0, Math.max(0, firstCol - 1))
-      const desired = indent.replace(/\t/g, ' '.repeat(tabSize))
-      if (indent !== desired) {
-        edits.push({
-          range: { startLineNumber: i, startColumn: 1, endLineNumber: i, endColumn: firstCol },
-          text: desired,
-        })
-      }
-    }
-    if (edits.length > 0) {
-      editor.pushUndoStop()
-      editor.executeEdits('indent-convert-spaces', edits)
-      editor.pushUndoStop()
-    }
-  } catch { }
-}
-
-function convertToTabs(tabSize: number): void {
-  try {
-    const editor = MonacoBridge.getInstance().getCurrentEditor()
-    if (!editor) return
-    const model = editor.getModel?.()
-    if (!model) return
-    const edits: Array<{ range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }; text: string }> = []
-    const lineCount = model.getLineCount()
-    const spaces = ' '.repeat(tabSize)
-    for (let i = 1; i <= lineCount; i++) {
-      const content = model.getLineContent(i)
-      let firstCol = model.getLineFirstNonWhitespaceColumn(i)
-      if (firstCol === 0) firstCol = content.length + 1
-      const indent = content.slice(0, Math.max(0, firstCol - 1))
-      let desired = indent
-      if (spaces.length > 0) {
-        const re = new RegExp(spaces, 'g')
-        desired = indent.replace(re, '\t')
-      }
-      if (indent !== desired) {
-        edits.push({
-          range: { startLineNumber: i, startColumn: 1, endLineNumber: i, endColumn: firstCol },
-          text: desired,
-        })
-      }
-    }
-    if (edits.length > 0) {
-      editor.pushUndoStop()
-      editor.executeEdits('indent-convert-tabs', edits)
-      editor.pushUndoStop()
-    }
-  } catch { }
+const menuItemStyle = {
+  fontSize: '12px',
+  py: '6px',
+  px: 3,
+  cursor: 'pointer',
+  color: tokens.colors.text.secondary,
+  _hover: { bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary },
+  transition: `all ${tokens.transition.fast}`,
+  borderRadius: '4px',
 }
 
 const IndentationMenu = memo<IndentationMenuProps>(({
@@ -106,70 +62,104 @@ const IndentationMenu = memo<IndentationMenuProps>(({
       <Menu.Root>
         <Menu.Trigger asChild>
           <Box as="button"
-            px={3}
-            py={1}
-            fontSize="xs"
+            px={2}
+            py={0.5}
+            fontSize="11px"
             display="flex"
             alignItems="center"
             gap={1}
-            _hover={{ bg: 'whiteAlpha.100' }}
-            borderRadius="4px"
-            title="Change indentation"
+            _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+            borderRadius="3px"
             cursor="pointer"
+            color={tokens.colors.text.secondary}
+            transition={`all ${tokens.transition.fast}`}
           >
-            <Text>{insertSpacesSetting ? 'Spaces' : 'Tabs'}: {tabSizeSetting}</Text>
-            <FiChevronDown size={12} />
+            <Text fontFamily={tokens.fontFamily.mono} fontWeight="400">
+              {insertSpacesSetting ? 'Spaces' : 'Tabs'}: {tabSizeSetting}
+            </Text>
+            <FiChevronDown size={10} />
           </Box>
         </Menu.Trigger>
         <Menu.Positioner>
-          <Menu.Content bg={tokens.colors.bg.app} border={`1px solid ${tokens.colors.border.subtle}`}>
-            <Menu.Item value="indent-spaces" onClick={function () {
+          <Menu.Content
+            bg={tokens.colors.bg.overlay}
+            border={`1px solid ${tokens.colors.border.subtle}`}
+            borderRadius="8px"
+            py={1}
+            px={1}
+            boxShadow="0 8px 32px rgba(0,0,0,0.5)"
+            minW="220px"
+          >
+            {/* Indent mode */}
+            <Menu.Item value="indent-spaces" {...menuItemStyle} onClick={() => {
               setDetectIndentationSetting(false)
               setInsertSpacesSetting(true)
-              applyIndentationNow(tabSizeSetting, true, false)
-            }}>Indent Using Spaces</Menu.Item>
-            <Menu.Item value="indent-tabs" onClick={function () {
-              setDetectIndentationSetting(false)
-              setInsertSpacesSetting(false)
-              applyIndentationNow(tabSizeSetting, false, false)
-            }}>Indent Using Tabs</Menu.Item>
-            <Menu.Separator />
-            <Menu.Item value="tab-2" onClick={function () {
-              setDetectIndentationSetting(false)
-              setTabSizeSetting(2)
-              applyIndentationNow(2, insertSpacesSetting, false)
-            }}>Tab Size: 2</Menu.Item>
-            <Menu.Item value="tab-4" onClick={function () {
-              setDetectIndentationSetting(false)
-              setTabSizeSetting(4)
-              applyIndentationNow(4, insertSpacesSetting, false)
-            }}>Tab Size: 4</Menu.Item>
-            <Menu.Item value="tab-8" onClick={function () {
-              setDetectIndentationSetting(false)
-              setTabSizeSetting(8)
-              applyIndentationNow(8, insertSpacesSetting, false)
-            }}>Tab Size: 8</Menu.Item>
-            <Menu.Separator />
-            <Menu.Item value="detect-toggle" onClick={function () {
-              const next = !detectIndentationSetting
-              setDetectIndentationSetting(next)
-              applyIndentationNow(tabSizeSetting, insertSpacesSetting, next)
             }}>
-              {detectIndentationSetting ? '✓ Detect Indentation' : 'Detect Indentation (Off)'}
+              <Box display="flex" alignItems="center" gap={2} flex="1">
+                <Box w="14px">{insertSpacesSetting && !detectIndentationSetting && <FiCheck size={12} color={tokens.colors.accent.primary} />}</Box>
+                Indent Using Spaces
+              </Box>
             </Menu.Item>
-            <Menu.Separator />
-            <Menu.Item value="convert-spaces" onClick={function () {
-              convertToSpaces(tabSizeSetting)
-              setDetectIndentationSetting(false)
-              setInsertSpacesSetting(true)
-              applyIndentationNow(tabSizeSetting, true, false)
-            }}>Convert Indentation to Spaces</Menu.Item>
-            <Menu.Item value="convert-tabs" onClick={function () {
-              convertToTabs(tabSizeSetting)
+            <Menu.Item value="indent-tabs" {...menuItemStyle} onClick={() => {
               setDetectIndentationSetting(false)
               setInsertSpacesSetting(false)
-              applyIndentationNow(tabSizeSetting, false, false)
-            }}>Convert Indentation to Tabs</Menu.Item>
+            }}>
+              <Box display="flex" alignItems="center" gap={2} flex="1">
+                <Box w="14px">{!insertSpacesSetting && !detectIndentationSetting && <FiCheck size={12} color={tokens.colors.accent.primary} />}</Box>
+                Indent Using Tabs
+              </Box>
+            </Menu.Item>
+
+            <Box h="1px" bg={tokens.colors.border.subtle} my={1} mx={2} />
+
+            {/* Tab sizes */}
+            {[2, 4, 8].map(size => (
+              <Menu.Item key={size} value={`tab-${size}`} {...menuItemStyle} onClick={() => {
+                setDetectIndentationSetting(false)
+                setTabSizeSetting(size)
+              }}>
+                <Box display="flex" alignItems="center" gap={2} flex="1">
+                  <Box w="14px">{tabSizeSetting === size && <FiCheck size={12} color={tokens.colors.accent.primary} />}</Box>
+                  Tab Size: {size}
+                </Box>
+              </Menu.Item>
+            ))}
+
+            <Box h="1px" bg={tokens.colors.border.subtle} my={1} mx={2} />
+
+            {/* Detect */}
+            <Menu.Item value="detect-toggle" {...menuItemStyle} onClick={() => {
+              setDetectIndentationSetting(!detectIndentationSetting)
+            }}>
+              <Box display="flex" alignItems="center" gap={2} flex="1">
+                <Box w="14px">{detectIndentationSetting && <FiCheck size={12} color={tokens.colors.accent.primary} />}</Box>
+                Detect Indentation
+              </Box>
+            </Menu.Item>
+
+            <Box h="1px" bg={tokens.colors.border.subtle} my={1} mx={2} />
+
+            {/* Convert */}
+            <Menu.Item value="convert-spaces" {...menuItemStyle} onClick={() => {
+              convertIndentation(tabSizeSetting, true)
+              setDetectIndentationSetting(false)
+              setInsertSpacesSetting(true)
+            }}>
+              <Box display="flex" alignItems="center" gap={2} flex="1">
+                <Box w="14px" />
+                Convert Indentation to Spaces
+              </Box>
+            </Menu.Item>
+            <Menu.Item value="convert-tabs" {...menuItemStyle} onClick={() => {
+              convertIndentation(tabSizeSetting, false)
+              setDetectIndentationSetting(false)
+              setInsertSpacesSetting(false)
+            }}>
+              <Box display="flex" alignItems="center" gap={2} flex="1">
+                <Box w="14px" />
+                Convert Indentation to Tabs
+              </Box>
+            </Menu.Item>
           </Menu.Content>
         </Menu.Positioner>
       </Menu.Root>

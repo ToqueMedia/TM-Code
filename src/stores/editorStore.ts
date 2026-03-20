@@ -14,12 +14,20 @@ interface EditorFile {
   cursorPosition?: { line: number; column: number };
 }
 
+export interface EditorGroup {
+  id: string;
+  files: string[];      // ordered file paths in this group's tab bar
+  activeFile: string | null;
+}
+
 interface EditorState {
   openFiles: EditorFile[];
   activeFile: string | null;
   cursorPositions: Record<string, [number, number]>; // line, column
   undoStack: Record<string, string[]>;
   redoStack: Record<string, string[]>;
+  editorGroups: EditorGroup[];
+  activeGroupId: string;
 }
 
 interface EditorActions {
@@ -37,48 +45,66 @@ interface EditorActions {
   refreshFileContent: (path: string) => Promise<void>;
   renameOpenFile: (oldPath: string, newPath: string) => void;
   closeAllFiles: () => void;
+  reorderFiles: (fromIndex: number, toIndex: number) => void;
+  // Split editor actions
+  splitEditor: () => void;
+  unsplitEditor: () => void;
+  setActiveGroup: (groupId: string) => void;
+  openFileInGroup: (path: string, groupId: string) => Promise<void>;
+  closeFileInGroup: (path: string, groupId: string) => void;
+  moveFileToGroup: (path: string, fromGroupId: string, toGroupId: string) => void;
 }
 
-// Get language from file extension
+// Get language from file extension — comprehensive mapping
 const getLanguageFromExtension = (filePath: string): string => {
-  const extension = filePath.split('.').pop()?.toLowerCase() || '';
-  switch (extension) {
-    case 'js':
-    case 'jsx':
-      return 'javascript';
-    case 'ts':
-    case 'tsx':
-      return 'typescript';
-    case 'json':
-      return 'json';
-    case 'html':
-      return 'html';
-    case 'css':
-      return 'css';
-    case 'scss':
-      return 'scss';
-    case 'md':
-      return 'markdown';
-    case 'py':
-      return 'python';
-    case 'java':
-      return 'java';
-    case 'cpp':
-    case 'cc':
-    case 'cxx':
-      return 'cpp';
-    case 'c':
-      return 'c';
-    case 'rs':
-      return 'rust';
-    case 'go':
-      return 'go';
-    case 'php':
-      return 'php';
-    case 'sql':
-      return 'sql';
-    default:
-      return 'plaintext';
+  const name = filePath.split('/').pop()?.toLowerCase() || '';
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+
+  // Special filenames first
+  if (name === 'dockerfile' || name.startsWith('dockerfile.')) return 'dockerfile';
+  if (name === '.gitignore' || name === '.gitattributes') return 'ini';
+  if (name === '.env' || name.startsWith('.env.')) return 'ini';
+  if (name === 'makefile' || name === 'gnumakefile') return 'makefile';
+
+  switch (ext) {
+    case 'js': case 'mjs': case 'cjs': case 'jsx': return 'javascript';
+    case 'ts': case 'mts': case 'cts': case 'tsx': return 'typescript';
+    case 'json': case 'jsonc': case 'json5': return 'json';
+    case 'html': case 'htm': return 'html';
+    case 'css': return 'css';
+    case 'scss': return 'scss';
+    case 'less': return 'less';
+    case 'md': case 'mdx': return 'markdown';
+    case 'py': case 'pyw': return 'python';
+    case 'java': return 'java';
+    case 'cpp': case 'cc': case 'cxx': case 'hpp': case 'hxx': return 'cpp';
+    case 'c': case 'h': return 'c';
+    case 'rs': return 'rust';
+    case 'go': return 'go';
+    case 'php': return 'php';
+    case 'sql': return 'sql';
+    case 'yaml': case 'yml': return 'yaml';
+    case 'toml': return 'ini';
+    case 'xml': case 'svg': case 'plist': return 'xml';
+    case 'graphql': case 'gql': return 'graphql';
+    case 'sh': case 'bash': case 'zsh': return 'shell';
+    case 'ps1': return 'powershell';
+    case 'rb': return 'ruby';
+    case 'lua': return 'lua';
+    case 'swift': return 'swift';
+    case 'kt': case 'kts': return 'kotlin';
+    case 'dart': return 'dart';
+    case 'r': return 'r';
+    case 'perl': case 'pl': return 'perl';
+    case 'ini': case 'cfg': case 'conf': return 'ini';
+    case 'log': return 'plaintext';
+    case 'vue': return 'html';
+    case 'svelte': return 'html';
+    case 'prisma': return 'graphql';
+    case 'hbs': case 'handlebars': return 'handlebars';
+    case 'bat': case 'cmd': return 'bat';
+    case 'dockerfile': return 'dockerfile';
+    default: return 'plaintext';
   }
 };
 
@@ -94,13 +120,32 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
       cursorPositions: {},
       undoStack: {},
       redoStack: {},
+      editorGroups: [{ id: 'main', files: [], activeFile: null }],
+      activeGroupId: 'main',
 
       openFile: async (path: string) => {
         logger.debug('editor', 'Opening file:', path);
         // Concurrency guard: skip if this file is already being opened
         if (openingFiles.has(path)) return;
 
-        set({ activeFile: path });
+        // Add to active group's files
+        set(state => {
+          const groups = state.editorGroups.map(g => {
+            if (g.id !== state.activeGroupId) return g;
+            if (g.files.includes(path)) return { ...g, activeFile: path };
+            return { ...g, files: [...g.files, path], activeFile: path };
+          });
+          return { activeFile: path, editorGroups: groups };
+        });
+
+        // Sync explorer selection (deferred to avoid circular import issues)
+        setTimeout(() => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { useFileTreeRepository } = require('./fileTreeStore');
+            useFileTreeRepository.getState().selectNode(path);
+          } catch {}
+        }, 0);
 
         // Check if file is already open
         const existingFile = get().openFiles.find(f => f.path === path);
@@ -170,23 +215,64 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
       closeFile: (path: string) => {
         const removeFile = () => {
           set(state => {
-            const updated = state.openFiles.filter(ff => ff.path !== path);
-            const cursorPositions = { ...state.cursorPositions };
-            delete cursorPositions[path];
-            // Clean undo/redo stacks for closed file
-            const undoStack = { ...state.undoStack };
-            const redoStack = { ...state.redoStack };
-            delete undoStack[path];
-            delete redoStack[path];
-            unsavedChangesService.markFileAsClean(path);
-            let activeFile = state.activeFile;
-            if (activeFile === path) {
-              // Select adjacent tab instead of first tab
-              const closedIndex = state.openFiles.findIndex(ff => ff.path === path);
-              const adjacentIndex = Math.min(closedIndex, updated.length - 1);
-              activeFile = updated.length > 0 ? updated[Math.max(0, adjacentIndex)].path : null;
+            // Only remove from the ACTIVE group (not all groups)
+            const groups = state.editorGroups.map(g => {
+              if (g.id !== state.activeGroupId) return g;
+              if (!g.files.includes(path)) return g;
+              const files = g.files.filter(f => f !== path);
+              let groupActive = g.activeFile;
+              if (groupActive === path) {
+                const closedIdx = g.files.indexOf(path);
+                const adjIdx = Math.min(closedIdx, files.length - 1);
+                groupActive = files.length > 0 ? files[Math.max(0, adjIdx)] : null;
+              }
+              return { ...g, files, activeFile: groupActive };
+            });
+
+            // Remove empty split groups (keep main always)
+            const filteredGroups = groups.filter(g => g.id === 'main' || g.files.length > 0);
+            if (filteredGroups.length === 0) {
+              filteredGroups.push({ id: 'main', files: [], activeFile: null });
             }
-            return { openFiles: updated, activeFile, cursorPositions, undoStack, redoStack };
+
+            // Check if file is still in any group
+            const stillInGroup = filteredGroups.some(g => g.files.includes(path));
+
+            // If no group has it, remove from openFiles entirely
+            const updated = stillInGroup
+              ? state.openFiles
+              : state.openFiles.filter(ff => ff.path !== path);
+
+            const cursorPositions = stillInGroup ? state.cursorPositions : { ...state.cursorPositions };
+            const undoStack = stillInGroup ? state.undoStack : { ...state.undoStack };
+            const redoStack = stillInGroup ? state.redoStack : { ...state.redoStack };
+            if (!stillInGroup) {
+              delete cursorPositions[path];
+              delete undoStack[path];
+              delete redoStack[path];
+              unsavedChangesService.markFileAsClean(path);
+            }
+
+            // Update activeGroupId if current group was removed
+            let activeGroupId = state.activeGroupId;
+            if (!filteredGroups.some(g => g.id === activeGroupId)) {
+              activeGroupId = filteredGroups[0].id;
+            }
+
+            // Update activeFile from active group
+            const activeGroup = filteredGroups.find(g => g.id === activeGroupId);
+            let activeFile = activeGroup?.activeFile ?? null;
+
+            // If active group is empty, try switching to another group
+            if (!activeFile) {
+              const otherGroup = filteredGroups.find(g => g.id !== activeGroupId && g.files.length > 0);
+              if (otherGroup) {
+                activeFile = otherGroup.activeFile;
+                activeGroupId = otherGroup.id;
+              }
+            }
+
+            return { openFiles: updated, activeFile, cursorPositions, undoStack, redoStack, editorGroups: filteredGroups, activeGroupId };
           });
         };
 
@@ -506,11 +592,224 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           const undoStack = remapStack(state.undoStack);
           const redoStack = remapStack(state.redoStack);
 
-          return { openFiles, activeFile, cursorPositions, undoStack, redoStack };
+          // Remap paths inside editorGroups
+          const editorGroups = state.editorGroups.map(g => ({
+            ...g,
+            files: g.files.map(f => f === oldPath ? newPath : f),
+            activeFile: g.activeFile === oldPath ? newPath : g.activeFile,
+          }));
+
+          return { openFiles, activeFile, cursorPositions, undoStack, redoStack, editorGroups };
         });
       },
       closeAllFiles: () => {
-        set(() => ({ openFiles: [], activeFile: null, cursorPositions: {}, undoStack: {}, redoStack: {} }))
+        set(() => ({
+          openFiles: [], activeFile: null, cursorPositions: {}, undoStack: {}, redoStack: {},
+          editorGroups: [{ id: 'main', files: [], activeFile: null }], activeGroupId: 'main',
+        }))
+      },
+
+      reorderFiles: (fromIndex: number, toIndex: number) => {
+        set(state => {
+          if (fromIndex === toIndex) return state;
+          // Reorder within the active group's file list (controls tab order)
+          const groups = state.editorGroups.map(g => {
+            if (g.id !== state.activeGroupId) return g;
+            if (fromIndex < 0 || toIndex < 0 || fromIndex >= g.files.length || toIndex >= g.files.length) return g;
+            const files = [...g.files];
+            const [moved] = files.splice(fromIndex, 1);
+            files.splice(toIndex, 0, moved);
+            return { ...g, files };
+          });
+          return { editorGroups: groups };
+        });
+      },
+
+      // ── Split Editor ──────────────────────────────────────────────────
+
+      splitEditor: () => {
+        set(state => {
+          // Already split — do nothing
+          if (state.editorGroups.length >= 2) return state;
+          // Nothing to split if no active file
+          const mainGroup = state.editorGroups[0];
+          if (!mainGroup || !mainGroup.activeFile) return state;
+
+          const currentFile = mainGroup.activeFile;
+          // Create second group with the current file
+          const newGroup: EditorGroup = {
+            id: 'split',
+            files: [currentFile],
+            activeFile: currentFile,
+          };
+
+          return {
+            editorGroups: [mainGroup, newGroup],
+            activeGroupId: 'split',
+          };
+        });
+      },
+
+      unsplitEditor: () => {
+        set(state => {
+          if (state.editorGroups.length <= 1) return state;
+          // Merge all files into main group, preserving order
+          const allFiles: string[] = [];
+          const seen = new Set<string>();
+          for (const g of state.editorGroups) {
+            for (const f of g.files) {
+              if (!seen.has(f)) { allFiles.push(f); seen.add(f); }
+            }
+          }
+          const activeGroup = state.editorGroups.find(g => g.id === state.activeGroupId);
+          const activeFile = activeGroup?.activeFile ?? allFiles[0] ?? null;
+
+          return {
+            editorGroups: [{ id: 'main', files: allFiles, activeFile }],
+            activeGroupId: 'main',
+            activeFile,
+          };
+        });
+      },
+
+      setActiveGroup: (groupId: string) => {
+        set(state => {
+          const group = state.editorGroups.find(g => g.id === groupId);
+          if (!group) return state;
+          return {
+            activeGroupId: groupId,
+            activeFile: group.activeFile,
+          };
+        });
+      },
+
+      openFileInGroup: async (path: string, groupId: string) => {
+        // First ensure the file data is loaded
+        const store = get();
+        if (!store.openFiles.some(f => f.path === path)) {
+          // Load file content
+          openingFiles.add(path);
+          try {
+            const content = await FileService.readFile(path);
+            const language = getLanguageFromExtension(path);
+            if (!get().openFiles.some(f => f.path === path)) {
+              set(state => ({
+                openFiles: [...state.openFiles, { path, content, language, isDirty: false }],
+              }));
+            }
+          } catch (error) {
+            logger.error('editor', `Failed to open file ${path}:`, error);
+            openingFiles.delete(path);
+            return;
+          } finally {
+            openingFiles.delete(path);
+          }
+        }
+
+        // Add to group
+        set(state => {
+          const groups = state.editorGroups.map(g => {
+            if (g.id !== groupId) return g;
+            if (g.files.includes(path)) return { ...g, activeFile: path };
+            return { ...g, files: [...g.files, path], activeFile: path };
+          });
+          return {
+            editorGroups: groups,
+            activeGroupId: groupId,
+            activeFile: path,
+          };
+        });
+      },
+
+      closeFileInGroup: (path: string, groupId: string) => {
+        const doRemove = () => {
+          set(state => {
+            const groups = state.editorGroups.map(g => {
+              if (g.id !== groupId || !g.files.includes(path)) return g;
+              const files = g.files.filter(f => f !== path);
+              let groupActive = g.activeFile;
+              if (groupActive === path) {
+                const idx = g.files.indexOf(path);
+                const adjIdx = Math.min(idx, files.length - 1);
+                groupActive = files.length > 0 ? files[Math.max(0, adjIdx)] : null;
+              }
+              return { ...g, files, activeFile: groupActive };
+            });
+
+            // If file is not in any group, remove from openFiles
+            const stillInGroup = groups.some(g => g.files.includes(path));
+            const openFiles = stillInGroup ? state.openFiles : state.openFiles.filter(f => f.path !== path);
+
+            if (!stillInGroup) {
+              unsavedChangesService.markFileAsClean(path);
+            }
+
+            // Remove empty split groups
+            const filteredGroups = groups.filter(g => g.id === 'main' || g.files.length > 0);
+            if (filteredGroups.length === 0) {
+              filteredGroups.push({ id: 'main', files: [], activeFile: null });
+            }
+
+            const activeGroup = filteredGroups.find(g => g.id === state.activeGroupId) || filteredGroups[0];
+            return {
+              openFiles,
+              editorGroups: filteredGroups,
+              activeGroupId: activeGroup.id,
+              activeFile: activeGroup.activeFile,
+            };
+          });
+        };
+
+        // Check isDirty — prompt if unsaved
+        const f = get().openFiles.find(f => f.path === path);
+        // Only prompt if file is dirty AND no other group has it (i.e., closing last reference)
+        const otherGroupHasIt = get().editorGroups.some(g => g.id !== groupId && g.files.includes(path));
+        if (f?.isDirty && !otherGroupHasIt) {
+          Promise.resolve().then(async () => {
+            const current = get().openFiles.find(ff => ff.path === path);
+            if (!current || !current.isDirty) { doRemove(); return; }
+            const ok = await tauriConfirm(`Close "${path}" without saving?`, { title: 'Unsaved changes', kind: 'warning' });
+            if (!ok) return;
+            doRemove();
+          });
+          return;
+        }
+        doRemove();
+      },
+
+      moveFileToGroup: (path: string, fromGroupId: string, toGroupId: string) => {
+        set(state => {
+          if (fromGroupId === toGroupId) return state;
+          const groups = state.editorGroups.map(g => {
+            if (g.id === fromGroupId) {
+              const files = g.files.filter(f => f !== path);
+              let groupActive = g.activeFile;
+              if (groupActive === path) {
+                const idx = g.files.indexOf(path);
+                const adjIdx = Math.min(idx, files.length - 1);
+                groupActive = files.length > 0 ? files[Math.max(0, adjIdx)] : null;
+              }
+              return { ...g, files, activeFile: groupActive };
+            }
+            if (g.id === toGroupId) {
+              if (g.files.includes(path)) return { ...g, activeFile: path };
+              return { ...g, files: [...g.files, path], activeFile: path };
+            }
+            return g;
+          });
+
+          // Remove empty split groups
+          const filteredGroups = groups.filter(g => g.id === 'main' || g.files.length > 0);
+          if (filteredGroups.length === 0) {
+            filteredGroups.push({ id: 'main', files: [], activeFile: null });
+          }
+
+          return {
+            editorGroups: filteredGroups,
+            activeGroupId: toGroupId,
+            activeFile: path,
+          };
+        });
       }
     }),
     {
@@ -519,11 +818,59 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         openFiles: state.openFiles.map(f => ({
           path: f.path,
           language: f.language,
-          isDirty: f.isDirty
+          isDirty: false
         })),
         activeFile: state.activeFile,
-        cursorPositions: state.cursorPositions
+        cursorPositions: state.cursorPositions,
+        editorGroups: state.editorGroups,
+        activeGroupId: state.activeGroupId,
       }),
+      onRehydrateStorage: () => {
+        return (state) => {
+          if (!state) return;
+          // Reload file contents from disk for persisted open files
+          const files = state.openFiles;
+          if (files.length === 0) return;
+          Promise.all(
+            files.map(async (f) => {
+              try {
+                const content = await FileService.readFile(f.path);
+                return { ...f, content, isDirty: false };
+              } catch {
+                // File no longer exists — skip it
+                return null;
+              }
+            })
+          ).then((results) => {
+            const validFiles = results.filter(Boolean) as EditorFile[];
+            const validPaths = new Set(validFiles.map(f => f.path));
+            const activePath = state.activeFile;
+            const activeExists = validFiles.some(f => f.path === activePath);
+
+            // Filter groups to only include valid files
+            let groups = (state.editorGroups || [{ id: 'main', files: [], activeFile: null }]).map(g => ({
+              ...g,
+              files: g.files.filter(p => validPaths.has(p)),
+              activeFile: g.activeFile && validPaths.has(g.activeFile) ? g.activeFile : null,
+            }));
+            // Ensure at least one group
+            if (groups.length === 0) {
+              groups = [{ id: 'main', files: validFiles.map(f => f.path), activeFile: activeExists ? activePath : (validFiles[0]?.path ?? null) }];
+            }
+            // Ensure main group has files if no groups have them
+            if (groups.every(g => g.files.length === 0) && validFiles.length > 0) {
+              groups[0] = { ...groups[0], files: validFiles.map(f => f.path), activeFile: validFiles[0]?.path ?? null };
+            }
+
+            useEditorRepository.setState({
+              openFiles: validFiles,
+              activeFile: activeExists ? activePath : (validFiles[0]?.path ?? null),
+              editorGroups: groups,
+              activeGroupId: state.activeGroupId || 'main',
+            });
+          });
+        };
+      },
     }
   )
 );

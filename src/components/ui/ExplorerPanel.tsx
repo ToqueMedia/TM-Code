@@ -22,6 +22,7 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 	const currentProject = useCurrentProject()
 	useFileTreeRepository()
 
+
 	if (!currentProject) {
 		return (
 			<VStack

@@ -5,109 +5,186 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
   base: 'vs-dark',
   inherit: true,
   rules: [
-    // JavaScript/TypeScript Keywords - Roxo vibrante
-    { token: 'keyword.js', foreground: '#c547f7', },
-    { token: 'keyword.ts', foreground: '#c43eb4',  },
-    { token: 'keyword.control.js', foreground: '#8b5cf6', fontStyle: 'bold' },
-    { token: 'keyword.control.ts', foreground: '#8b5cf6', fontStyle: 'bold' },
-    { token: 'keyword.operator.js', foreground: '#c084fc', fontStyle: 'bold' },
-    { token: 'keyword.operator.ts', foreground: '#c084fc', fontStyle: 'bold' },
-    
-    // Palavras-reservadas gerais - Roxo negrito
-    { token: 'keyword', foreground: '#c547f7', fontStyle: 'bold' },
-    { token: 'keyword.control', foreground: '#8b5cf6', fontStyle: 'bold' },
-    { token: 'keyword.operator', foreground: '#c084fc', fontStyle: 'bold' },
-    { token: 'keyword.other', foreground: '#7c3aed', fontStyle: 'bold' },
-    { token: 'storage.type', foreground: '#c547f7', fontStyle: 'bold' }, // var, let, const, function
-    { token: 'storage.modifier', foreground: '#8b5cf6', fontStyle: 'bold' }, // public, private, static
-    
-    // Tipos e classes - Roxo elegante
-    { token: 'type', foreground: '#a78bfa', fontStyle: 'bold' },
-    { token: 'type.identifier', foreground: '#c084fc' },
-    { token: 'entity.name.type', foreground: '#8b5cf6' },
-    { token: 'entity.name.class', foreground: '#7c3aed', fontStyle: 'bold' },
-    { token: 'support.type', foreground: '#a78bfa', fontStyle: 'bold' }, // built-in types
-    
-    // Strings - Verde vibrante
-    { token: 'string', foreground: '#50fa7b' }, // Bright green
-    { token: 'string.quoted', foreground: '#50fa7b' },
-    { token: 'string.template', foreground: '#8be9fd' }, // Cyan for template strings
-    
-    // Números - Laranja brilhante
-    { token: 'number', foreground: '#ffb86c' }, // Orange
-    { token: 'number.hex', foreground: '#ff9f43' },
-    { token: 'number.binary', foreground: '#feca57' },
-    
-    // Comentários - Cinza azulado suave
-    { token: 'comment', foreground: '#6272a4', fontStyle: 'italic' },
-    { token: 'comment.line', foreground: '#6272a4', fontStyle: 'italic' },
-    { token: 'comment.block', foreground: '#6272a4', fontStyle: 'italic' },
-    
-    // Funções - Amarelo dourado
-    { token: 'entity.name.function', foreground: '#f1fa8c', fontStyle: 'bold' },
-    { token: 'support.function', foreground: '#f1fa8c' },
-    { token: 'meta.function-call', foreground: '#f1fa8c' },
-    
-    // Variáveis - Branco puro
-    { token: 'variable', foreground: '#f8f8f2' },
-    { token: 'variable.parameter', foreground: '#ffb86c', fontStyle: 'italic' },
-    { token: 'variable.other', foreground: '#f8f8f2' },
-    
-    // Constantes - Rosa vibrante
-    { token: 'constant', foreground: '#ff79c6', fontStyle: 'bold' },
-    { token: 'constant.language', foreground: '#ff79c6', fontStyle: 'bold' },
-    { token: 'constant.numeric', foreground: '#bd93f9' },
-    
-    // Operadores - Ciano
-    { token: 'operator', foreground: '#8be9fd' },
-    { token: 'delimiter', foreground: '#8be9fd' },
-    { token: 'punctuation', foreground: '#8be9fd' },
-    
-    // Tags HTML/JSX - Verde limão
-    { token: 'tag', foreground: '#50fa7b', fontStyle: 'bold' },
-    { token: 'tag.name', foreground: '#50fa7b', fontStyle: 'bold' },
-    { token: 'tag.attribute.name', foreground: '#f1fa8c' },
-    { token: 'tag.attribute.value', foreground: '#50fa7b' },
-    
-    // CSS/SCSS - Cores específicas
-    { token: 'attribute.name.css', foreground: '#8be9fd' },
-    { token: 'attribute.value.css', foreground: '#50fa7b' },
-    { token: 'property.css', foreground: '#f1fa8c' },
-    { token: 'value.css', foreground: '#50fa7b' },
-    
-    // JSON - Cores diferenciadas
-    { token: 'key.json', foreground: '#8be9fd', fontStyle: 'bold' },
-    { token: 'value.json', foreground: '#50fa7b' },
-    
-    // TypeScript específico - Keywords fundamentais
-    { token: 'keyword.typescript', foreground: '#c547f7', fontStyle: 'bold' },
-    { token: 'type.typescript', foreground: '#c084fc', fontStyle: 'bold' },
-    { token: 'interface.typescript', foreground: '#8b5cf6', fontStyle: 'bold' },
-    { token: 'storage.type.ts', foreground: '#c547f7', fontStyle: 'bold' }, // var, let, const
-    { token: 'storage.type.function.ts', foreground: '#c547f7', fontStyle: 'bold' },
-    { token: 'keyword.control.import.ts', foreground: '#c547f7', fontStyle: 'bold' },
-    { token: 'keyword.control.export.ts', foreground: '#c547f7', fontStyle: 'bold' },
-    
-    // JavaScript específico - Keywords fundamentais
-    { token: 'keyword.javascript', foreground: '#c547f7', fontStyle: 'bold' },
-    { token: 'this.javascript', foreground: '#c084fc', fontStyle: 'bold' },
-    { token: 'variable.language.this.js', foreground: '#c084fc', fontStyle: 'bold' },
-    { token: 'storage.type.js', foreground: '#c547f7', fontStyle: 'bold' }, // var, let, const
-    { token: 'storage.type.function.js', foreground: '#c547f7', fontStyle: 'bold' },
-    
+    // ═══ TM Code Theme — VS Code Dark+ inspired, brand pink keywords ═══
+
+    // Keywords — brand pink (#c2185b)
+    // import, export, const, let, var, function, class, return, if, else, try, catch, async, await, from, new, throw
+    { token: 'keyword', foreground: '#c2185b' },
+    { token: 'keyword.control', foreground: '#c2185b' },
+    { token: 'keyword.operator', foreground: '#c2185b' },
+    { token: 'keyword.other', foreground: '#c2185b' },
+    { token: 'keyword.control.flow', foreground: '#c2185b' },
+    { token: 'keyword.js', foreground: '#c2185b' },
+    { token: 'keyword.ts', foreground: '#c2185b' },
+    { token: 'keyword.control.js', foreground: '#c2185b' },
+    { token: 'keyword.control.ts', foreground: '#c2185b' },
+    { token: 'keyword.typescript', foreground: '#c2185b' },
+    { token: 'keyword.javascript', foreground: '#c2185b' },
+    { token: 'keyword.control.import.ts', foreground: '#c2185b' },
+    { token: 'keyword.control.export.ts', foreground: '#c2185b' },
+    { token: 'storage.type', foreground: '#c2185b' },
+    { token: 'storage.modifier', foreground: '#c2185b' },
+    { token: 'storage.type.ts', foreground: '#c2185b' },
+    { token: 'storage.type.js', foreground: '#c2185b' },
+    { token: 'storage.type.function.ts', foreground: '#c2185b' },
+    { token: 'storage.type.function.js', foreground: '#c2185b' },
+
+    // Types & classes — teal (#4ec9b0) like VS Code
+    // Request, Response, Promise, void, string, number, boolean, interface, type, enum
+    { token: 'type', foreground: '#4ec9b0' },
+    { token: 'type.identifier', foreground: '#4ec9b0' },
+    { token: 'type.identifier.ts', foreground: '#4ec9b0' },
+    { token: 'type.identifier.tsx', foreground: '#4ec9b0' },
+    { token: 'type.typescript', foreground: '#4ec9b0' },
+    { token: 'entity.name.type', foreground: '#4ec9b0' },
+    { token: 'entity.name.class', foreground: '#4ec9b0' },
+    { token: 'entity.name.namespace', foreground: '#4ec9b0' },
+    { token: 'support.type', foreground: '#4ec9b0' },
+    { token: 'interface.typescript', foreground: '#4ec9b0' },
+    { token: 'variable.other.enummember', foreground: '#4ec9b0' },
+
+    // Functions — soft yellow (#dcdcaa) like VS Code
+    // handleGenerateCodeConverter, generateContent, json, status
+    { token: 'entity.name.function', foreground: '#dcdcaa' },
+    { token: 'support.function', foreground: '#dcdcaa' },
+    { token: 'meta.function-call', foreground: '#dcdcaa' },
+    { token: 'function', foreground: '#dcdcaa' },
+    { token: 'function.call', foreground: '#dcdcaa' },
+
+    // Variables & parameters — light blue (#9cdcfe) like VS Code
+    { token: 'variable', foreground: '#9cdcfe' },
+    { token: 'variable.parameter', foreground: '#9cdcfe' },
+    { token: 'variable.other', foreground: '#9cdcfe' },
+    { token: 'variable.shell', foreground: '#9cdcfe' },
+
+    // Identifiers — light blue (tags + attributes + variables all use this in TS mode)
+    { token: 'identifier', foreground: '#9cdcfe' },
+    { token: 'identifier.js', foreground: '#9cdcfe' },
+    { token: 'identifier.ts', foreground: '#9cdcfe' },
+
+    // this — pink italic
+    { token: 'variable.language.this.js', foreground: '#c2185b', fontStyle: 'italic' },
+    { token: 'this.javascript', foreground: '#c2185b', fontStyle: 'italic' },
+
+    // Properties — light blue (#9cdcfe)
+    // .body, .text, .systemInstruction, .temperature
+    { token: 'variable.property', foreground: '#9cdcfe' },
+    { token: 'property', foreground: '#9cdcfe' },
+    { token: 'member', foreground: '#9cdcfe' },
+
+    // Strings — warm salmon (#ce9178) like VS Code
+    // "express", "./config/genAi", 'Erro ao converter código'
+    { token: 'string', foreground: '#ce9178' },
+    { token: 'string.quoted', foreground: '#ce9178' },
+    { token: 'string.template', foreground: '#ce9178' },
+    { token: 'string.escape', foreground: '#d7ba7d' },
+
+    // Numbers — light green (#b5cea8) like VS Code
+    // 0.1, 0.3, 1, 500
+    { token: 'number', foreground: '#b5cea8' },
+    { token: 'number.hex', foreground: '#b5cea8' },
+    { token: 'number.binary', foreground: '#b5cea8' },
+    { token: 'constant.numeric', foreground: '#b5cea8' },
+
+    // Comments — green (#6a9955) like VS Code
+    { token: 'comment', foreground: '#6a9955', fontStyle: 'italic' },
+    { token: 'comment.line', foreground: '#6a9955', fontStyle: 'italic' },
+    { token: 'comment.block', foreground: '#6a9955', fontStyle: 'italic' },
+
+    // Constants — pink
+    { token: 'constant', foreground: '#c2185b' },
+    { token: 'constant.language', foreground: '#c2185b' },
+
+    // Operators & delimiters
+    { token: 'operator', foreground: '#d4d4d4' },
+    { token: 'operator.ts', foreground: '#d4d4d4' },
+    { token: 'delimiter', foreground: '#d4d4d4' },
+    { token: 'delimiter.ts', foreground: '#d4d4d4' },
+    { token: 'delimiter.bracket.ts', foreground: '#ffd700' },
+    { token: 'delimiter.parenthesis.ts', foreground: '#d4d4d4' },
+    { token: 'delimiter.square.ts', foreground: '#d4d4d4' },
+    { token: 'delimiter.angle.ts', foreground: '#808080' },
+    { token: 'punctuation', foreground: '#d4d4d4' },
+    { token: 'delimiter.bracket.embed', foreground: '#c2185b' },
+
+    // TS-specific tokens (actual Monaco tokenizer output)
+    { token: 'string.ts', foreground: '#ce9178' },
+    { token: 'number.ts', foreground: '#b5cea8' },
+    { token: 'keyword.ts', foreground: '#c2185b' },
+    { token: 'comment.ts', foreground: '#6a9955', fontStyle: 'italic' },
+    { token: 'type.ts', foreground: '#4ec9b0' },
+    { token: 'regexp.ts', foreground: '#d16969' },
+
+    // Tags HTML/JSX — blue for tags, light blue for attributes
+    { token: 'tag', foreground: '#569cd6' },
+    { token: 'tag.ts', foreground: '#569cd6' },
+    { token: 'tag.tsx', foreground: '#569cd6' },
+    { token: 'tag.js', foreground: '#569cd6' },
+    { token: 'tag.jsx', foreground: '#569cd6' },
+    { token: 'tag.html', foreground: '#569cd6' },
+    { token: 'tag.name', foreground: '#4ec9b0' },
+    { token: 'metatag', foreground: '#569cd6' },
+    { token: 'metatag.ts', foreground: '#569cd6' },
+    { token: 'metatag.html', foreground: '#569cd6' },
+    { token: 'delimiter.html', foreground: '#808080' },
+    { token: 'delimiter.html.ts', foreground: '#808080' },
+    { token: 'delimiter.html.tsx', foreground: '#808080' },
+    { token: 'delimiter.html.js', foreground: '#808080' },
+    { token: 'tag.attribute.name', foreground: '#9cdcfe' },
+    { token: 'tag.attribute.value', foreground: '#ce9178' },
+    { token: 'attribute.name.html', foreground: '#9cdcfe' },
+    { token: 'attribute.name.html.ts', foreground: '#9cdcfe' },
+    { token: 'attribute.value.html', foreground: '#ce9178' },
+    { token: 'attribute.value.html.ts', foreground: '#ce9178' },
+
+    // CSS
+    { token: 'attribute.name.css', foreground: '#9cdcfe' },
+    { token: 'attribute.value.css', foreground: '#ce9178' },
+    { token: 'attribute.value.unit.css', foreground: '#b5cea8' },
+    { token: 'attribute.value.number.css', foreground: '#b5cea8' },
+    { token: 'property.css', foreground: '#9cdcfe' },
+    { token: 'value.css', foreground: '#ce9178' },
+    { token: 'tag.css', foreground: '#d7ba7d' },
+
+    // JSON
+    { token: 'key.json', foreground: '#9cdcfe' },
+    { token: 'value.json', foreground: '#ce9178' },
+
+    // Regex
+    { token: 'regexp', foreground: '#d16969' },
+    { token: 'regexp.escape', foreground: '#d7ba7d' },
+
+    // Decorator
+    { token: 'annotation', foreground: '#dcdcaa' },
+
+    // YAML
+    { token: 'type.yaml', foreground: '#9cdcfe' },
+    { token: 'string.yaml', foreground: '#ce9178' },
+    { token: 'number.yaml', foreground: '#b5cea8' },
+    { token: 'keyword.yaml', foreground: '#c2185b' },
+
+    // Shell
+    { token: 'keyword.shell', foreground: '#c2185b' },
+
     // Markdown
-    { token: 'emphasis.markdown', foreground: '#f1fa8c', fontStyle: 'italic' },
-    { token: 'strong.markdown', foreground: '#ff79c6', fontStyle: 'bold' },
-    { token: 'heading.markdown', foreground: '#61dafb', fontStyle: 'bold' },
-    
-    // Errors e warnings
-    { token: 'invalid', foreground: '#ff5555', background: '#44475a' },
-    { token: 'invalid.deprecated', foreground: '#ffb86c', background: '#44475a' },
+    { token: 'emphasis.markdown', foreground: '#e6edf3', fontStyle: 'italic' },
+    { token: 'strong.markdown', foreground: '#e6edf3', fontStyle: 'bold' },
+    { token: 'heading.markdown', foreground: '#c2185b', fontStyle: 'bold' },
+    { token: 'string.link.markdown', foreground: '#9cdcfe' },
+    { token: 'markup.list.markdown', foreground: '#c2185b' },
+    { token: 'markup.quote.markdown', foreground: '#6a9955', fontStyle: 'italic' },
+
+    // Errors
+    { token: 'invalid', foreground: '#f85149' },
+    { token: 'invalid.deprecated', foreground: '#d7ba7d' },
   ],
   colors: {
     // Editor background — matches app bg for seamless look
     'editor.background': '#0f0f0f',
     'editor.foreground': '#e6edf3',
+
+    // Definition link (Cmd+hover)
+    'editorLink.activeForeground': '#60a5fa',
 
     // Gutter / line numbers
     'editorLineNumber.foreground': '#3d4450',
@@ -118,21 +195,21 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'editorGutter.deletedBackground': '#f8514980',
 
     // Cursor
-    'editorCursor.foreground': '#FE1063',
+    'editorCursor.foreground': '#c2185b',
 
     // Selection
-    'editor.selectionBackground': '#FE106330',
-    'editor.selectionHighlightBackground': '#FE106318',
-    'editor.inactiveSelectionBackground': '#FE106315',
+    'editor.selectionBackground': '#c2185b30',
+    'editor.selectionHighlightBackground': '#c2185b18',
+    'editor.inactiveSelectionBackground': '#c2185b15',
 
     // Word highlight
     'editor.wordHighlightBackground': '#a371f720',
     'editor.wordHighlightStrongBackground': '#a371f730',
 
     // Find/search
-    'editor.findMatchBackground': '#FE106340',
-    'editor.findMatchHighlightBackground': '#FE106320',
-    'editor.findMatchBorder': '#FE1063',
+    'editor.findMatchBackground': '#c2185b40',
+    'editor.findMatchHighlightBackground': '#c2185b20',
+    'editor.findMatchBorder': '#c2185b',
 
     // Current line
     'editor.lineHighlightBackground': '#ffffff06',
@@ -141,7 +218,7 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     // Brackets
     'editorBracketMatch.background': '#a371f730',
     'editorBracketMatch.border': '#a371f7',
-    'editorBracketHighlight.foreground1': '#FE1063',
+    'editorBracketHighlight.foreground1': '#c2185b',
     'editorBracketHighlight.foreground2': '#a371f7',
     'editorBracketHighlight.foreground3': '#50fa7b',
     'editorBracketHighlight.foreground4': '#ffd166',
@@ -160,8 +237,8 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
 
     // Minimap
     'minimap.background': '#0a0a0a',
-    'minimap.selectionHighlight': '#FE106340',
-    'minimap.findMatchHighlight': '#FE106360',
+    'minimap.selectionHighlight': '#c2185b40',
+    'minimap.findMatchHighlight': '#c2185b60',
     'minimapSlider.background': '#ffffff10',
     'minimapSlider.hoverBackground': '#ffffff18',
     'minimapSlider.activeBackground': '#ffffff25',
@@ -182,10 +259,10 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'editorSuggestWidget.background': '#161616',
     'editorSuggestWidget.border': '#262626',
     'editorSuggestWidget.foreground': '#e6edf3',
-    'editorSuggestWidget.selectedBackground': '#FE106320',
+    'editorSuggestWidget.selectedBackground': '#c2185b20',
     'editorSuggestWidget.selectedForeground': '#ffffff',
-    'editorSuggestWidget.highlightForeground': '#FE1063',
-    'editorSuggestWidget.focusHighlightForeground': '#FE1063',
+    'editorSuggestWidget.highlightForeground': '#c2185b',
+    'editorSuggestWidget.focusHighlightForeground': '#c2185b',
 
     // Hover widget
     'editorHoverWidget.background': '#161616',
@@ -213,12 +290,58 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'editorCodeLens.foreground': '#3d4450',
 
     // Peek view
-    'peekView.border': '#FE106350',
+    'peekView.border': '#c2185b50',
     'peekViewEditor.background': '#111111',
     'peekViewResult.background': '#0f0f0f',
     'peekViewTitle.background': '#161616',
-    'peekViewResult.matchHighlightBackground': '#FE106330',
-    'peekViewEditor.matchHighlightBackground': '#FE106330',
+    'peekViewResult.matchHighlightBackground': '#c2185b30',
+    'peekViewEditor.matchHighlightBackground': '#c2185b30',
+
+    // Sticky scroll
+    'editorStickyScroll.background': '#0f0f0f',
+    'editorStickyScrollHover.background': '#161616',
+
+    // Inlay hints (type annotations, parameter names)
+    'editorInlayHint.foreground': '#5c6370',
+    'editorInlayHint.background': '#ffffff08',
+    'editorInlayHint.typeForeground': '#5c6370',
+    'editorInlayHint.typeBackground': '#ffffff06',
+    'editorInlayHint.parameterForeground': '#5c6370',
+    'editorInlayHint.parameterBackground': '#ffffff06',
+
+    // Parameter hints widget
+    'editorParameterHint.background': '#161616',
+    'editorParameterHint.border': '#262626',
+    'editorParameterHint.foreground': '#e6edf3',
+
+    // Linked editing (rename tag pairs)
+    'editor.linkedEditingBackground': '#c2185b15',
+
+    // Ghost text (inline suggestions)
+    'editorGhostText.foreground': '#3d4450',
+
+    // Menu / context menu
+    'menu.background': '#161616',
+    'menu.foreground': '#e6edf3',
+    'menu.selectionBackground': '#c2185b20',
+    'menu.selectionForeground': '#ffffff',
+    'menu.separatorBackground': '#262626',
+    'menu.border': '#262626',
+
+    // Glyph margin (breakpoints, etc.)
+    'editorGutter.foldingControlForeground': '#3d4450',
+
+    // Breadcrumb
+    'breadcrumb.foreground': '#8b949e',
+    'breadcrumb.background': '#0f0f0f',
+    'breadcrumb.focusForeground': '#e6edf3',
+    'breadcrumb.activeSelectionForeground': '#e6edf3',
+
+    // List/Tree
+    'list.activeSelectionBackground': '#c2185b20',
+    'list.activeSelectionForeground': '#ffffff',
+    'list.hoverBackground': '#ffffff06',
+    'list.inactiveSelectionBackground': '#ffffff08',
   }
 };
 
@@ -256,6 +379,7 @@ export const toqueMediaSoftTheme: editor.IStandaloneThemeData = {
     'editor.background': '#131313',
     'editor.foreground': '#f1f5f9',
     'editor.lineHighlightBackground': '#ffffff06',
+    'editorLink.activeForeground': '#60a5fa',
     'editorLineNumber.foreground': '#3d4450',
     'editorLineNumber.activeForeground': '#8b949e',
     'editorCursor.foreground': '#a371f7',

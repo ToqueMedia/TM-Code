@@ -4,7 +4,6 @@ import EditorTabs from '../ui/EditorTabs'
 import Breadcrumbs from '../ui/Breadcrumbs'
 import EditorSkeleton from './EditorSkeleton'
 import EditorEmptyState from './EditorEmptyState'
-import { showEditorContextMenu } from './EditorContextMenu'
 import { logger } from '../../utils/logger'
 
 // Lazy load componentes pesados
@@ -18,6 +17,7 @@ interface EditorWorkspaceProps {
 	onSetActiveFile: (file: string) => void
 	onCloseFile: (file: string) => void
 	onCursorPositionChange: (line: number, column: number) => void
+	onReorderFiles?: (fromIndex: number, toIndex: number) => void
 }
 
 const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
@@ -28,6 +28,7 @@ const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 	onSetActiveFile,
 	onCloseFile,
 	onCursorPositionChange,
+	onReorderFiles = () => {},
 }) => (
 	<Flex
 		flex="1"
@@ -41,6 +42,7 @@ const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 			activeFile={activeFile}
 			onSetActiveFile={onSetActiveFile}
 			onCloseFile={onCloseFile}
+			onReorderFiles={onReorderFiles}
 		/>
 
 		<Breadcrumbs
@@ -49,12 +51,7 @@ const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 			onNavigate={(path) => logger.debug('editor', 'Navigate to:', path)}
 		/>
 
-		<Flex flex="1" overflow="hidden" onContextMenu={(e) => {
-			showEditorContextMenu(e, {
-				activeFile,
-				projectPath,
-			})
-		}}>
+		<Flex flex="1" overflow="hidden">
 			{activeFile ? (
 				<Suspense fallback={<EditorSkeleton />}>
 					<MonacoEditor

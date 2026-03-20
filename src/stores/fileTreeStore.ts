@@ -131,7 +131,17 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>()(
       },
 
       selectNode: (path: string) => {
-        set({ selectedPath: path });
+        // Expand all ancestor folders so the file is visible in the tree
+        set(state => {
+          const newExpanded = new Set(state.expandedPaths);
+          const parts = path.split('/');
+          // Build each ancestor path and expand it
+          for (let i = 1; i < parts.length; i++) {
+            const ancestor = parts.slice(0, i).join('/');
+            if (ancestor) newExpanded.add(ancestor);
+          }
+          return { selectedPath: path, expandedPaths: newExpanded };
+        });
       },
 
       createFileOrDirectory: async (parentPath: string, name: string, isDirectory: boolean) => {

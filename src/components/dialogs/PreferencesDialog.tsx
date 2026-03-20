@@ -138,13 +138,36 @@ function EditorTab(): React.ReactElement {
   const tabSize = useSettingsStore(function (s) { return s.editor.tabSize })
   const insertSpaces = useSettingsStore(function (s) { return s.editor.insertSpaces })
   const detectIndentation = useSettingsStore(function (s) { return s.editor.detectIndentation })
+  const autocompleteEnabled = useSettingsStore(function (s) { return s.autocomplete.enabled })
 
   const setTabSize = useSettingsStore(function (s) { return s.setTabSize })
   const setInsertSpaces = useSettingsStore(function (s) { return s.setInsertSpaces })
   const setDetectIndentation = useSettingsStore(function (s) { return s.setDetectIndentation })
+  const setAutocompleteEnabled = useSettingsStore(function (s) { return s.setAutocompleteEnabled })
 
   return (
     <>
+      <Text fontSize="sm" color={tokens.colors.text.primary} mb={3} fontWeight="600">
+        AI Autocomplete
+      </Text>
+
+      <Field.Root mb={6}>
+        <Field.Label color={tokens.colors.text.primary} fontWeight="600" fontSize="14px">
+          Enable Autocomplete
+        </Field.Label>
+        <HStack justify="space-between" mt={1}>
+          <Text color={tokens.colors.text.secondary} fontSize="sm">
+            Show inline AI code suggestions while typing
+          </Text>
+          <Switch.Root checked={autocompleteEnabled} onCheckedChange={function (e) { setAutocompleteEnabled(e.checked) }} colorPalette="pink">
+            <Switch.HiddenInput />
+            <Switch.Control />
+          </Switch.Root>
+        </HStack>
+      </Field.Root>
+
+      <Box mb={6} h="1px" bg={tokens.colors.border.default} />
+
       <Text fontSize="sm" color={tokens.colors.text.primary} mb={3} fontWeight="600">
         Indentation
       </Text>

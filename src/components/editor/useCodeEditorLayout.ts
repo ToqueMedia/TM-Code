@@ -81,7 +81,11 @@ export function useCodeEditorLayout() {
 	// Handlers memoizados
 	const handleCursorPositionChange = useCallback((line: number, column: number) => {
 		setCursorPosition({ line, column })
-	}, [])
+		// Persist to store for cursor restoration on tab switch
+		if (activeFile) {
+			useEditorRepository.getState().setCursorPosition(activeFile, line, column)
+		}
+	}, [activeFile])
 
 	// Toggle bottom panel visibility
 	const toggleBottomPanel = useCallback(() => {

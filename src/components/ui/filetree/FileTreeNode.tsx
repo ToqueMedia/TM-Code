@@ -94,7 +94,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
     }
   }
 
-  const selectedBg = tokens.colors.bg.hover + '4f'; // ~31% opacity to match rgba(9,71,113,0.31)
+  const selectedBg = tokens.colors.bg.activeItem;
   const hoverBg = tokens.colors.bg.whiteHover;
 
   return (
