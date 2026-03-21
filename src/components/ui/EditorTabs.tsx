@@ -1,12 +1,13 @@
-import React, { memo, useCallback, useState, useRef, useEffect } from 'react'
+import React, { memo, useCallback, useState, useRef, useEffect, useMemo } from 'react'
 import { Flex, Text } from '@chakra-ui/react'
-import { FiCode } from 'react-icons/fi'
+import { VscSymbolFile } from 'react-icons/vsc'
 import { Reorder } from 'framer-motion'
 import EditorTab from './EditorTab'
+import { useEditorRepository } from '../../stores/editorStore'
 import { tokens } from '@/theme/tokens'
 
 interface EditorTabsProps {
-	openFiles: Array<{ path: string; isDirty: boolean }>
+	openFiles: Array<{ path: string; isDirty: boolean; isPreview?: boolean }>
 	activeFile: string | null
 	onSetActiveFile: (path: string) => void
 	onCloseFile: (path: string, e: React.MouseEvent) => void
@@ -39,10 +40,30 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 		isDraggingRef.current = false
 		// Commit the final order to the store
 		onReorderFiles(localOrderRef.current)
-	}, [onReorderFiles])
+		// Force sync back from store after a tick (handles validation rejection)
+		requestAnimationFrame(() => {
+			if (!isDraggingRef.current) {
+				setLocalOrder(openFiles.map(f => f.path))
+			}
+		})
+	}, [onReorderFiles, openFiles])
 
 	// Build file map for quick lookup
 	const fileMap = new Map(openFiles.map(f => [f.path, f]))
+
+	// Derive render order: localOrder filtered to valid paths + any new external paths appended
+	// useMemo with stable deps so Reorder.Group doesn't reset animations on every render
+	const externalKey = externalPaths.join('\n')
+	const localKey = localOrder.join('\n')
+	const renderOrder = useMemo(() => {
+		const validSet = new Set(externalPaths)
+		const valid = localOrder.filter(p => validSet.has(p))
+		const resultSet = new Set(valid)
+		for (const p of externalPaths) {
+			if (!resultSet.has(p)) { valid.push(p); resultSet.add(p) }
+		}
+		return valid
+	}, [externalKey, localKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
 	return (
 		<Flex
@@ -65,7 +86,7 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 			{openFiles.length > 0 ? (
 				<Reorder.Group
 					axis="x"
-					values={localOrder}
+					values={renderOrder}
 					onReorder={setLocalOrder}
 					style={{
 						display: 'flex',
@@ -75,9 +96,8 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 						alignItems: 'center',
 					}}
 				>
-					{localOrder.map((path) => {
-						const file = fileMap.get(path)
-						if (!file) return null
+					{renderOrder.map((path) => {
+						const file = fileMap.get(path)!
 						return (
 							<EditorTab
 								key={path}
@@ -85,7 +105,12 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 								name={path.split('/').pop() || 'Untitled'}
 								isDirty={file.isDirty}
 								isActive={activeFile === path}
+								isPreview={file.isPreview}
 								onClick={() => onSetActiveFile(path)}
+								onDoubleClick={() => {
+									const { pinFile } = useEditorRepository.getState()
+									pinFile(path)
+								}}
 								onClose={(e) => onCloseFile(path, e)}
 								onDragStart={handleDragStart}
 								onDragEnd={handleDragEnd}
@@ -103,7 +128,7 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 					fontSize="12px"
 					height="30px"
 				>
-					<FiCode size={11} />
+					<VscSymbolFile size={11} />
 					<Text fontSize="11px">No open tabs</Text>
 				</Flex>
 			)}

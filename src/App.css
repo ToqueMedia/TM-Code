@@ -279,39 +279,8 @@ input:focus {
   opacity: 0.8;
 }
 
-/* ═══ Git Gutter Decorations ═══ */
-
-.monaco-editor .git-gutter-added {
-  width: 3px !important;
-  min-width: 3px !important;
-  margin-left: 4px;
-  background-color: #2ea043 !important;
-  border-radius: 1px;
-}
-.monaco-editor .git-gutter-modified {
-  width: 3px !important;
-  min-width: 3px !important;
-  margin-left: 4px;
-  background-color: #007acc !important;
-  border-radius: 1px;
-}
-.monaco-editor .git-gutter-removed {
-  width: 3px !important;
-  min-width: 3px !important;
-  margin-left: 4px;
-  background-color: #f85149 !important;
-  border-radius: 1px;
-  /* Removed lines only show a small triangle indicator */
-  max-height: 6px !important;
-  align-self: center;
-}
-
-.monaco-editor .git-glyph-added,
-.monaco-editor .git-glyph-modified,
-.monaco-editor .git-glyph-removed {
-  /* Hide glyph margin icons — we only use line decorations */
-  display: none;
-}
+/* Git gutter styles are injected dynamically via MonacoEditor.tsx
+   because Vite CSS loading order conflicts with Monaco's inline styles */
 
 /* ═══ StatusBar Animations ═══ */
 @keyframes pulse {

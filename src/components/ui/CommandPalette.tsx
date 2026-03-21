@@ -223,7 +223,7 @@ function CommandPalette(): React.ReactElement | null {
     // ── Preferences ─────────────────────────────────────────────
     cmds.push(
       { id: 'pref.settings', label: 'Open Settings', category: 'Preferences', hint: '⌘,', run() { useLayoutStore.getState().setViewMode('settings'); close() } },
-      { id: 'pref.formatOnSave', label: `Format on Save: ${useSettingsStore.getState().formatOnSave ? 'ON' : 'OFF'}`, category: 'Preferences', run() {
+      { id: 'pref.formatOnSave', label: 'Toggle Format on Save', category: 'Preferences', hint: useSettingsStore.getState().formatOnSave ? 'ON' : 'OFF', run() {
         const { formatOnSave, setFormatOnSave } = useSettingsStore.getState()
         setFormatOnSave(!formatOnSave)
         close()
@@ -238,7 +238,8 @@ function CommandPalette(): React.ReactElement | null {
     return cmds
   }
 
-  const allCommands = useMemo(getCommands, [editorRepo.activeFile, editorRepo.openFiles.length, editorRepo.editorGroups.length, currentProject])
+  const formatOnSave = useSettingsStore(s => s.formatOnSave)
+  const allCommands = useMemo(getCommands, [editorRepo.activeFile, editorRepo.openFiles.length, editorRepo.editorGroups.length, currentProject, formatOnSave])
 
   const filtered = useMemo(function filter() {
     const q = query.trim().toLowerCase()

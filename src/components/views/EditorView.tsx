@@ -13,8 +13,12 @@ import StatusBar from '../ui/StatusBar'
 import EditorSidebar from './EditorSidebar'
 import EditorToolbar, { type SidebarPanel } from './EditorToolbar'
 import EmptyEditorState from './EmptyEditorState'
+import ExplorerPanel from '../ui/ExplorerPanel'
 import ContainersPanel from './ContainersPanel'
+import SourceControlPanel from './SourceControlPanel'
+import SearchPanel from './SearchPanel'
 import SplitEditorLayout from '../editor/SplitEditorLayout'
+import { GitService } from '../../services/gitService'
 import { tokens } from '@/theme/tokens'
 
 const STORAGE_KEY_BOTTOM_VISIBLE = 'panel-visible-bottom-panel'
@@ -34,8 +38,9 @@ function EditorView() {
   const setDetectIndentationSetting = useSettingsStore(s => s.setDetectIndentation)
 
   const editorGroups = useEditorRepository(s => s.editorGroups)
+  const isRehydrating = useEditorRepository(s => s.isRehydrating)
   // Check both groups and openFiles — during rehydration, groups may be empty while openFiles isn't yet
-  const hasOpenFilesInAnyGroup = editorGroups.some(g => g.files.length > 0) || openFiles.length > 0
+  const hasOpenFilesInAnyGroup = editorGroups.some(g => g.files.length > 0) || openFiles.length > 0 || isRehydrating
 
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 })
   const cursorUpdateRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -52,6 +57,8 @@ function EditorView() {
     try {
       const v = localStorage.getItem(STORAGE_KEY_SIDEBAR_PANEL)
       if (v === 'containers') return 'containers'
+      if (v === 'sourceControl') return 'sourceControl'
+      if (v === 'search') return 'search'
       if (v === 'null' || v === '') return null
       return 'explorer'
     } catch { return 'explorer' }
@@ -110,17 +117,39 @@ function EditorView() {
         store.splitEditor()
       }
     }
+    // Open diff view as a tab from Source Control
+    const onOpenDiff = async (e: Event) => {
+      const { relPath, projectPath: pp } = (e as CustomEvent<{ relPath: string; projectPath: string }>).detail
+      if (!relPath || !pp) return
+      const fullPath = `${pp}/${relPath}`
+      try {
+        const originalContent = await GitService.showFile(pp, relPath)
+        // Open the file normally first (loads content from disk)
+        await useEditorRepository.getState().openFile(fullPath)
+        // Then mark it as diff mode
+        useEditorRepository.setState(state => {
+          const idx = state.openFiles.findIndex(f => f.path === fullPath)
+          if (idx === -1) return state
+          const files = [...state.openFiles]
+          files[idx] = { ...files[idx], diff: { originalContent, relPath } }
+          return { openFiles: files }
+        })
+      } catch {}
+    }
+
     window.addEventListener('monaco:languages', onLangs)
     window.addEventListener('panel:toggle-bottom', onToggle)
     window.addEventListener('editor:open-file', onOpen)
     window.addEventListener('sidebar:toggle', onSidebarToggle)
     window.addEventListener('editor:split', onSplit)
+    window.addEventListener('editor:open-diff', onOpenDiff as EventListener)
     return () => {
       window.removeEventListener('monaco:languages', onLangs)
       window.removeEventListener('panel:toggle-bottom', onToggle)
       window.removeEventListener('editor:open-file', onOpen)
       window.removeEventListener('sidebar:toggle', onSidebarToggle)
       window.removeEventListener('editor:split', onSplit)
+      window.removeEventListener('editor:open-diff', onOpenDiff as EventListener)
     }
   }, [toggleBottomPanel, handleFileSelect])
 
@@ -128,6 +157,12 @@ function EditorView() {
     Math.min(250, Math.max(Math.floor(window.innerHeight * 0.15), Math.floor(window.innerHeight * 0.25)))
   )
   const bottomHandleRef = useRef<HTMLDivElement>(null)
+  const bottomDragCleanupRef = useRef<(() => void) | null>(null)
+
+  // Cleanup bottom panel drag on unmount
+  useEffect(() => {
+    return () => { bottomDragCleanupRef.current?.() }
+  }, [])
 
   if (!currentProject) return null
 
@@ -144,28 +179,27 @@ function EditorView() {
           onBackToChat={() => useLayoutStore.getState().goBack()}
         />
 
-        {/* Sidebar — full height, never overlapped by terminal */}
-        {activeSidebarPanel === 'explorer' && (
-          <EditorSidebar
-            onFileSelect={handleFileSelect}
-            onClose={() => handleSelectPanel(null)}
-          />
-        )}
-        {activeSidebarPanel === 'containers' && (
-          <Box
-            width="280px"
-            bg={tokens.colors.bg.mainLayout}
-            borderRight={`1px solid ${tokens.colors.border.sidebarPanel}`}
-            overflow="hidden"
-            flexShrink={0}
-          >
-            <ContainersPanel />
-          </Box>
+        {/* Sidebar — single resizable container for all panels */}
+        {activeSidebarPanel && (
+          <EditorSidebar onClose={() => handleSelectPanel(null)}>
+            {activeSidebarPanel === 'explorer' && (
+              <ExplorerPanel onFileSelect={handleFileSelect} />
+            )}
+            {activeSidebarPanel === 'search' && (
+              <SearchPanel />
+            )}
+            {activeSidebarPanel === 'sourceControl' && (
+              <SourceControlPanel />
+            )}
+            {activeSidebarPanel === 'containers' && (
+              <ContainersPanel />
+            )}
+          </EditorSidebar>
         )}
 
         {/* Right column: Editor (with split support) + Terminal */}
         <Flex flex="1" direction="column" minW={0}>
-          {/* Editor area — uses SplitEditorLayout which handles tabs, breadcrumbs, and split panes */}
+          {/* Editor area */}
           <Flex flex="1" overflow="hidden">
             {hasOpenFilesInAnyGroup ? (
               <SplitEditorLayout
@@ -219,28 +253,27 @@ function EditorView() {
                   body.style.cursor = 'row-resize'
                   body.style.userSelect = 'none'
 
+                  function cleanup() {
+                    try { handle?.releasePointerCapture(pid) } catch {}
+                    handle?.removeEventListener('pointermove', onMove)
+                    handle?.removeEventListener('pointerup', onUp)
+                    body.style.cursor = prevCursor
+                    body.style.userSelect = prevSelect
+                    bottomDragCleanupRef.current = null
+                  }
                   function onMove(pe: PointerEvent) {
                     const delta = startY - pe.clientY
                     const next = startH + delta
                     if (next < 60) {
-                      try { handle?.releasePointerCapture(pid) } catch {}
-                      handle?.removeEventListener('pointermove', onMove)
-                      handle?.removeEventListener('pointerup', onUp)
-                      body.style.cursor = prevCursor
-                      body.style.userSelect = prevSelect
+                      cleanup()
                       closeBottomPanel()
                       return
                     }
                     const max = Math.floor(window.innerHeight * 0.7)
                     setBottomSize(Math.min(next, max))
                   }
-                  function onUp() {
-                    try { handle?.releasePointerCapture(pid) } catch {}
-                    handle?.removeEventListener('pointermove', onMove)
-                    handle?.removeEventListener('pointerup', onUp)
-                    body.style.cursor = prevCursor
-                    body.style.userSelect = prevSelect
-                  }
+                  function onUp() { cleanup() }
+                  bottomDragCleanupRef.current = cleanup
                   handle.addEventListener('pointermove', onMove)
                   handle.addEventListener('pointerup', onUp)
                 }}

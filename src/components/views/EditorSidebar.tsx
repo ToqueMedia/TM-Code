@@ -1,20 +1,19 @@
 import { memo, useRef, useState, useEffect, useCallback } from 'react'
 import { Box } from '@chakra-ui/react'
-import ExplorerPanel from '../ui/ExplorerPanel'
 import { tokens } from '@/theme/tokens'
 
-const STORAGE_KEY_EXPLORER_WIDTH = 'panel-size-explorer-panel'
+const STORAGE_KEY_SIDEBAR_WIDTH = 'panel-size-sidebar'
 const CLOSE_THRESHOLD = 80
 
 interface EditorSidebarProps {
-  onFileSelect: (path: string) => void
+  children: React.ReactNode
   onClose?: () => void
 }
 
-function EditorSidebar({ onFileSelect, onClose }: EditorSidebarProps) {
-  const [explorerWidth, setExplorerWidth] = useState<number>(() => {
+function EditorSidebar({ children, onClose }: EditorSidebarProps) {
+  const [width, setWidth] = useState<number>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY_EXPLORER_WIDTH)
+      const saved = localStorage.getItem(STORAGE_KEY_SIDEBAR_WIDTH)
       const screen = window.innerWidth
       const min = 120
       const max = Math.max(200, screen - 360)
@@ -24,25 +23,40 @@ function EditorSidebar({ onFileSelect, onClose }: EditorSidebarProps) {
   })
 
   const sidebarRef = useRef<HTMLDivElement>(null)
-  const sidebarHandleRef = useRef<HTMLDivElement>(null)
+  const handleRef = useRef<HTMLDivElement>(null)
+  const cleanupRef = useRef<(() => void) | null>(null)
+  const isDraggingRef = useRef(false)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
+  // Cleanup drag on unmount
+  useEffect(() => {
+    return () => { cleanupRef.current?.() }
+  }, [])
+
+  // Clamp width on window resize
   useEffect(() => {
     function handleResize() {
+      if (isDraggingRef.current) return
       const min = 120
       const max = Math.max(200, window.innerWidth - 360)
-      setExplorerWidth(prev => Math.min(Math.max(prev, min), max))
+      setWidth(prev => Math.min(Math.max(prev, min), max))
     }
     window.addEventListener('resize', handleResize)
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
-  const handleExplorerResizeStart = useCallback((e: React.PointerEvent) => {
+  const handleResizeStart = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
-    const handleEl = sidebarHandleRef.current
-    const sidebarLeft = sidebarRef.current ? sidebarRef.current.getBoundingClientRect().left : 0
-    let current = explorerWidth
+    const handleEl = handleRef.current
+    const sidebar = sidebarRef.current
+    if (!handleEl || !sidebar) return
+
+    const sidebarLeft = sidebar.getBoundingClientRect().left
+    let current = sidebar.offsetWidth
     const pid = e.pointerId
-    try { handleEl?.setPointerCapture(pid) } catch {}
+    try { handleEl.setPointerCapture(pid) } catch {}
+    isDraggingRef.current = true
 
     const body = document.body
     const prevCursor = body.style.cursor
@@ -50,12 +64,18 @@ function EditorSidebar({ onFileSelect, onClose }: EditorSidebarProps) {
     body.style.cursor = 'col-resize'
     body.style.userSelect = 'none'
 
+    // Remove CSS transition during drag for instant response
+    sidebar.style.transition = 'none'
+
     function cleanup() {
+      isDraggingRef.current = false
       try { handleEl?.releasePointerCapture(pid) } catch {}
       handleEl?.removeEventListener('pointermove', onPointerMove)
       handleEl?.removeEventListener('pointerup', onPointerUp)
       body.style.cursor = prevCursor
       body.style.userSelect = prevUserSelect
+      if (sidebar) sidebar.style.transition = ''
+      cleanupRef.current = null
     }
 
     function onPointerMove(pe: PointerEvent) {
@@ -65,37 +85,46 @@ function EditorSidebar({ onFileSelect, onClose }: EditorSidebarProps) {
       current = next
 
       // Close immediately when dragged below threshold
-      if (next < CLOSE_THRESHOLD && onClose) {
+      if (next < CLOSE_THRESHOLD && onCloseRef.current) {
         cleanup()
-        onClose()
+        onCloseRef.current()
         return
       }
 
-      setExplorerWidth(Math.max(next, 120))
+      // Direct DOM update — no React re-render
+      const clamped = Math.max(next, 120)
+      if (sidebar) sidebar.style.width = `${clamped}px`
     }
 
     function onPointerUp() {
       cleanup()
+      // Commit final width to React state (single re-render)
       const clamped = Math.max(current, 120)
-      setExplorerWidth(clamped)
-      try { localStorage.setItem(STORAGE_KEY_EXPLORER_WIDTH, String(clamped)) } catch {}
+      setWidth(clamped)
+      try { localStorage.setItem(STORAGE_KEY_SIDEBAR_WIDTH, String(clamped)) } catch {}
     }
 
-    handleEl?.addEventListener('pointermove', onPointerMove)
-    handleEl?.addEventListener('pointerup', onPointerUp)
-  }, [explorerWidth, onClose])
+    cleanupRef.current = cleanup
+    handleEl.addEventListener('pointermove', onPointerMove)
+    handleEl.addEventListener('pointerup', onPointerUp)
+  }, [])
 
   return (
     <Box
-      width={`${explorerWidth}px`}
+      width={`${width}px`}
       bg={tokens.colors.bg.mainLayout}
       height="100%"
       position="relative"
       borderRight={`1px solid ${tokens.colors.border.sidebarPanel}`}
       ref={sidebarRef}
       transition="width 0.05s ease"
+      flexShrink={0}
+      overflow="hidden"
+      display="flex"
+      flexDirection="column"
     >
-      <ExplorerPanel onFileSelect={onFileSelect} />
+      {children}
+      {/* Resize handle */}
       <Box
         position="absolute"
         right="0"
@@ -105,9 +134,9 @@ function EditorSidebar({ onFileSelect, onClose }: EditorSidebarProps) {
         cursor="col-resize"
         bg="transparent"
         _hover={{ bg: tokens.colors.accent.primaryGlow }}
-        onPointerDown={handleExplorerResizeStart}
+        onPointerDown={handleResizeStart}
         zIndex={10}
-        ref={sidebarHandleRef}
+        ref={handleRef}
         style={{ touchAction: 'none' }}
       />
     </Box>

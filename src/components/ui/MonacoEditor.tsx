@@ -10,6 +10,7 @@ import { logger } from '../../utils/logger';
 import MonacoBridge from '../../utils/monacoBridge';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useEditorRepository } from '../../stores/editorStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { FileService } from '../../services/fileService';
 import { GitService, type GitLineChange } from '../../services/gitService';
 import { FormatterService } from '../../services/formatterService';
@@ -41,10 +42,11 @@ if (typeof window !== 'undefined' && !window.MonacoEnvironment) {
   };
 }
 
-let themesRegistered = false;
+// Formatting provider registered once globally
 let formattingProviderRegistered = false;
 
 // Per-file cursor position cache — survives tab switches without Zustand
+// Uses composite key "groupId::path" to isolate split panes
 const cursorCache = new Map<string, { line: number; col: number }>();
 
 function pushContentToStore(path: string, content: string) {
@@ -84,10 +86,11 @@ function registerFormattingProvider(monaco: Monaco) {
 
 interface MonacoEditorProps {
   path: string;
+  groupId?: string;
   onCursorPositionChange?: (line: number, column: number) => void;
 }
 
-const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChange }) => {
+const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onCursorPositionChange }) => {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const pathRef = useRef(path);
   const dirtyRef = useRef(false);
@@ -95,7 +98,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
   const disposablesRef = useRef<IDisposable[]>([]);
   const cursorCbRef = useRef(onCursorPositionChange);
   const pendingRef = useRef<{ path: string; content: string } | null>(null);
-  const gutterDecorationsRef = useRef<string[]>([]);
+  const gutterCollectionRef = useRef<editor.IEditorDecorationsCollection | null>(null);
 
   cursorCbRef.current = onCursorPositionChange;
   pathRef.current = path;
@@ -181,26 +184,19 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       const changes = await GitService.getDiffLines(pathRef.current);
       const model = ed.getModel();
       if (!model) return;
+      if (changes.length === 0) {
+        // Clear decorations if no changes
+        if (gutterCollectionRef.current) gutterCollectionRef.current.set([]);
+        return;
+      }
 
       const decorations: editor.IModelDeltaDecoration[] = changes.map((change: GitLineChange) => {
         let className: string;
-        let glyphClassName: string;
         switch (change.kind) {
-          case 'added':
-            className = 'git-gutter-added';
-            glyphClassName = 'git-glyph-added';
-            break;
-          case 'modified':
-            className = 'git-gutter-modified';
-            glyphClassName = 'git-glyph-modified';
-            break;
-          case 'removed':
-            className = 'git-gutter-removed';
-            glyphClassName = 'git-glyph-removed';
-            break;
-          default:
-            className = '';
-            glyphClassName = '';
+          case 'added': className = 'git-gutter-added'; break;
+          case 'modified': className = 'git-gutter-modified'; break;
+          case 'removed': className = 'git-gutter-removed'; break;
+          default: className = '';
         }
 
         const endLine = Math.min(change.start_line + change.line_count - 1, model.getLineCount());
@@ -210,7 +206,6 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
           options: {
             isWholeLine: true,
             linesDecorationsClassName: className,
-            glyphMarginClassName: glyphClassName,
             overviewRuler: {
               color: change.kind === 'added' ? tokens.colors.accent.green
                 : change.kind === 'modified' ? tokens.colors.accent.blue
@@ -221,20 +216,35 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         };
       });
 
-      gutterDecorationsRef.current = ed.deltaDecorations(gutterDecorationsRef.current, decorations);
-    } catch {
-      // Silently fail — git may not be available
+      // Inject CSS rule dynamically (ensures it exists in the document)
+      if (!document.getElementById('git-gutter-styles')) {
+        const style = document.createElement('style');
+        style.id = 'git-gutter-styles';
+        style.textContent = `
+          .cldr.git-gutter-added { border-left: 3px solid #2ea043 !important; }
+          .cldr.git-gutter-modified { border-left: 3px solid #007acc !important; }
+          .cldr.git-gutter-removed { border-left: 3px solid #f85149 !important; }
+        `;
+        document.head.appendChild(style);
+      }
+
+      // Use createDecorationsCollection (Monaco 0.55+)
+      if (gutterCollectionRef.current) {
+        gutterCollectionRef.current.set(decorations);
+      } else {
+        gutterCollectionRef.current = ed.createDecorationsCollection(decorations);
+      }
+    } catch (err) {
+      logger.debug('editor', 'Git gutter update failed:', err);
     }
   }, []);
 
   // ── Editor Mount ─────────────────────────────────────────────────────────
 
   const handleBeforeMount = useCallback((monaco: Monaco) => {
-    if (!themesRegistered) {
-      themesRegistered = true;
-      monaco.editor.defineTheme('toquemedia-vibrant', toqueMediaTheme);
-      monaco.editor.defineTheme('toquemedia-soft', toqueMediaSoftTheme);
-    }
+    // Always re-define themes so theme switching works
+    monaco.editor.defineTheme('toquemedia-vibrant', toqueMediaTheme);
+    monaco.editor.defineTheme('toquemedia-soft', toqueMediaSoftTheme);
 
     // Register Prettier formatting provider
     registerFormattingProvider(monaco);
@@ -244,7 +254,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
       monaco.languages.registerLinkProvider(langId, {
         provideLinks: (model: monacoEditor.editor.ITextModel) => {
           const links: monacoEditor.languages.ILink[] = [];
-          const lineCount = Math.min(model.getLineCount(), 2000);
+          const lineCount = model.getLineCount();
           for (let i = 1; i <= lineCount; i++) {
             const line = model.getLineContent(i);
             const patterns = [
@@ -279,7 +289,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     editorRef.current = ed;
     dirtyRef.current = false;
     pendingRef.current = null;
-    gutterDecorationsRef.current = [];
+    gutterCollectionRef.current = null;
     MonacoBridge.getInstance().setCurrentEditor(ed);
 
     try {
@@ -367,10 +377,11 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         const content = inst.getValue();
         pendingRef.current = { path: pathRef.current, content };
         await FileService.writeFile(pathRef.current, content);
+        dirtyRef.current = false;
       } catch (e) {
         logger.error('editor', 'Save failed', e);
+        pendingRef.current = null; // Clear stale pending on failure
       }
-      dirtyRef.current = false;
 
       // Refresh git gutter after save
       updateGitGutter(inst);
@@ -496,7 +507,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     });
 
     // Restore cursor position from local cache (no Zustand)
-    const cached = cursorCache.get(boundPath);
+    const cached = cursorCache.get(`${groupId}::${boundPath}`);
     if (cached) {
       setTimeout(() => {
         const inst = editorRef.current;
@@ -512,9 +523,11 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     // Load git gutter decorations
     updateGitGutter(ed);
 
-    // Pre-load Prettier project config (best-effort, non-blocking)
-    const projectDir = boundPath.substring(0, boundPath.lastIndexOf('/'));
-    FormatterService.getInstance().loadProjectConfig(projectDir).catch(() => {});
+    // Pre-load Prettier project config from project root
+    const projectRoot = useProjectStore.getState().currentProject?.path;
+    if (projectRoot) {
+      FormatterService.getInstance().loadProjectConfig(projectRoot).catch(() => {});
+    }
   }, [updateGitGutter]);
 
   // Cleanup — save cursor + content before tab switch
@@ -526,7 +539,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         if (inst) {
           const pos = inst.getPosition();
           if (pos) {
-            cursorCache.set(effectPath, { line: pos.lineNumber, col: pos.column });
+            cursorCache.set(`${groupId}::${effectPath}`, { line: pos.lineNumber, col: pos.column });
           }
         }
       } catch {}
@@ -584,6 +597,36 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     return () => window.removeEventListener('monaco:claimBridge', handler);
   }, []);
 
+  // Clear cursor cache when file is closed/deleted
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const closedPath = (e as CustomEvent<string>).detail;
+      if (!closedPath) return;
+      // Remove all cache entries for this path across all groups
+      // Keys are in format "groupId::path"
+      for (const key of Array.from(cursorCache.keys())) {
+        if (key.endsWith(`::${closedPath}`)) {
+          cursorCache.delete(key);
+        }
+      }
+    };
+    window.addEventListener('editor:clearCursorCache', handler);
+    return () => window.removeEventListener('editor:clearCursorCache', handler);
+  }, []);
+
+  // Refresh git gutter when file is saved externally (e.g. by store, AI agent, or source control)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const savedPath = (e as CustomEvent<string>).detail;
+      // Refresh if path matches OR if no specific path (refresh all)
+      if ((!savedPath || savedPath === pathRef.current) && editorRef.current) {
+        updateGitGutter(editorRef.current);
+      }
+    };
+    window.addEventListener('git:refreshGutter', handler);
+    return () => window.removeEventListener('git:refreshGutter', handler);
+  }, [updateGitGutter]);
+
   const store = useEditorRepository.getState();
   const file = store.openFiles.find(f => f.path === path);
   if (!file) {
@@ -592,6 +635,25 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
         <div>File not found</div>
         <div style={{ fontSize: '12px', opacity: 0.7 }}>{path}</div>
       </div>
+    );
+  }
+
+  // Diff mode — render side-by-side diff editor
+  if (file.diff) {
+    return (
+      <React.Suspense fallback={
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: tokens.colors.text.secondary, fontSize: '14px' }}>
+          Loading diff...
+        </div>
+      }>
+        <MonacoDiffEditorLazy
+          originalContent={file.diff.originalContent}
+          modifiedContent={file.content}
+          language={file.language}
+          originalPath={`HEAD: ${file.diff.relPath}`}
+          modifiedPath={file.diff.relPath}
+        />
+      </React.Suspense>
     );
   }
 
@@ -615,5 +677,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, onCursorPositionChang
     </div>
   );
 };
+
+const MonacoDiffEditorLazy = React.lazy(() => import('./MonacoDiffEditor'));
 
 export default MonacoEditor;

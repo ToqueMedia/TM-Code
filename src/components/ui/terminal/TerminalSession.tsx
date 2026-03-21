@@ -44,7 +44,7 @@ export default function TerminalSession({ sessionId, isActive }: TerminalSession
       fontSize: 13,
       fontWeight: '300',
       fontWeightBold: '500',
-      lineHeight: 1.35,
+      lineHeight: 1.0,
       letterSpacing: 0,
       theme: terminalTheme,
       scrollback: 5000,

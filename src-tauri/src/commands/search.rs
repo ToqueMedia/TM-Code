@@ -71,6 +71,13 @@ pub async fn search_in_files(
         .map_err(|e| format!("Failed to resolve directory path: {}", e))?;
     let directory = directory_path.to_string_lossy().to_string();
 
+    // Check if ripgrep is available, fall back to grep
+    let has_rg = Command::new("rg").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+
+    if !has_rg {
+        return search_with_grep(&query, &directory, &options, start_time);
+    }
+
     // Build ripgrep command
     let mut cmd = Command::new("rg");
 
@@ -274,6 +281,100 @@ pub async fn search_in_files(
 
     Ok(SearchResult {
         query,
+        total_files: files.len(),
+        total_matches,
+        files,
+        duration_ms: duration.as_millis() as u64,
+        truncated,
+    })
+}
+
+/// Fallback search using grep when ripgrep is not installed
+fn search_with_grep(
+    query: &str,
+    directory: &str,
+    options: &SearchOptions,
+    start_time: std::time::Instant,
+) -> Result<SearchResult, String> {
+    let mut cmd = Command::new("grep");
+    cmd.arg("-rn"); // recursive + line numbers
+
+    if !options.case_sensitive {
+        cmd.arg("-i");
+    }
+    if options.whole_word {
+        cmd.arg("-w");
+    }
+    if options.use_regex {
+        cmd.arg("-E");
+    } else {
+        cmd.arg("-F"); // fixed string
+    }
+
+    // Exclusions
+    cmd.arg("--exclude-dir=node_modules")
+        .arg("--exclude-dir=.git")
+        .arg("--exclude-dir=dist")
+        .arg("--exclude-dir=build")
+        .arg("--exclude-dir=target")
+        .arg("--exclude-dir=.next")
+        .arg("--exclude-dir=coverage")
+        .arg("--exclude=*.min.js")
+        .arg("--exclude=*.map");
+
+    for pattern in &options.exclude_patterns {
+        if !pattern.trim().is_empty() {
+            let clean = pattern.replace("**/", "").replace("/**", "");
+            cmd.arg(format!("--exclude-dir={}", clean));
+        }
+    }
+
+    // Max results
+    if let Some(max) = options.max_results {
+        cmd.arg("-m").arg(max.to_string());
+    }
+
+    cmd.arg("--").arg(query).arg(directory);
+
+    let output = cmd.output().map_err(|e| format!("grep failed: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut file_map: std::collections::HashMap<String, FileSearchResult> = std::collections::HashMap::new();
+    let mut total_matches = 0;
+
+    for line in stdout.lines() {
+        // grep output: "filepath:linenumber:text"
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() < 3 { continue; }
+
+        let file_path = parts[0].to_string();
+        let line_number = parts[1].parse::<u32>().unwrap_or(0);
+        let text = parts[2].to_string();
+
+        let entry = file_map.entry(file_path.clone()).or_insert_with(|| FileSearchResult {
+            file_path,
+            matches: vec![],
+            total_matches: 0,
+        });
+
+        entry.matches.push(SearchMatch {
+            line_number,
+            column: 1,
+            text: text.clone(),
+            match_text: query.to_string(),
+            context_before: vec![],
+            context_after: vec![],
+        });
+        entry.total_matches += 1;
+        total_matches += 1;
+    }
+
+    let files: Vec<FileSearchResult> = file_map.into_values().collect();
+    let duration = start_time.elapsed();
+    let truncated = options.max_results.map(|m| total_matches >= m).unwrap_or(false);
+
+    Ok(SearchResult {
+        query: query.to_string(),
         total_files: files.len(),
         total_matches,
         files,

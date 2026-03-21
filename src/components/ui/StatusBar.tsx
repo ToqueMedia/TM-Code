@@ -1,6 +1,6 @@
 import React, { memo, Suspense, useState, useEffect } from 'react'
 import { Flex, Text, Box, HStack } from '@chakra-ui/react'
-import { FiGitBranch, FiAlertCircle, FiZap, FiBox, FiShield, FiCode } from 'react-icons/fi'
+import { VscSourceControl, VscError, VscSparkle, VscRemoteExplorer, VscShield, VscSymbolFile } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
 import { useMcpStore } from '@/stores/mcpStore'
 import { useContainerStore } from '@/stores/containerStore'
@@ -94,7 +94,7 @@ const McpStatusPill = memo(() => {
 				cursor="default"
 				title={`${running.length} server(s) running, ${totalTools} tools`}
 			>
-				<FiZap size={10} color={color} />
+				<VscSparkle size={10} color={color} />
 				<Text fontSize="10px" color={color} fontWeight="600" fontFamily={tokens.fontFamily.mono}>
 					{label}
 				</Text>
@@ -114,7 +114,7 @@ const ContainerStatusPill = memo(() => {
 	if (isolationMode === 'none') return null
 
 	const isDocker = isolationMode === 'docker'
-	const Icon = isDocker ? FiBox : FiShield
+	const Icon = isDocker ? VscRemoteExplorer : VscShield
 	const color = isDocker ? tokens.colors.accent.greenBright : '#58a6ff'
 	const label = isDocker
 		? (devcontainerName ? `${devcontainerName}` : 'Docker')
@@ -186,7 +186,7 @@ const AiCompletionPill = memo(() => {
 				title={tooltip}
 			>
 				<Box position="relative" display="flex" alignItems="center">
-					<FiCode size={10} color={color} />
+					<VscSymbolFile size={10} color={color} />
 					{status === 'loading' && (
 						<Box
 							position="absolute"
@@ -242,7 +242,10 @@ const StatusBar = memo<StatusBarProps>(({
 
 	useEffect(() => {
 		if (!currentProject?.path) return
-		GitService.getCurrentBranch(currentProject.path).then(b => setBranch(b))
+		const fetchBranch = () => GitService.getCurrentBranch(currentProject.path).then(b => setBranch(b))
+		fetchBranch()
+		const id = setInterval(fetchBranch, 10000)
+		return () => clearInterval(id)
 	}, [currentProject?.path])
 
 	return (
@@ -263,7 +266,7 @@ const StatusBar = memo<StatusBarProps>(({
 		>
 			<HStack gap={0} height="100%">
 				<StatusBarItem tooltip="Git branch">
-					<FiGitBranch size={12} />
+					<VscSourceControl size={11} />
 					<Text fontFamily={tokens.fontFamily.mono} fontSize="11px">{branch}</Text>
 				</StatusBarItem>
 
@@ -316,7 +319,7 @@ const StatusBar = memo<StatusBarProps>(({
 				<StatusBarDivider />
 
 				<StatusBarItem tooltip="Diagnostics">
-					<FiAlertCircle size={11} />
+					<VscError size={11} />
 					<Text fontFamily={tokens.fontFamily.mono} fontSize="11px">0</Text>
 				</StatusBarItem>
 

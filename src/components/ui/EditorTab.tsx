@@ -1,6 +1,6 @@
 import React, { memo, useCallback } from 'react'
 import { Flex, Text, Box, IconButton, HStack } from '@chakra-ui/react'
-import { FiX } from 'react-icons/fi'
+import { VscClose } from 'react-icons/vsc'
 import { Reorder } from 'framer-motion'
 import { getFileIconByExtension } from '../../utils/iconMapper'
 import { tokens } from '@/theme/tokens'
@@ -10,13 +10,15 @@ export interface EditorTabProps {
 	name: string
 	isDirty: boolean
 	isActive: boolean
+	isPreview?: boolean
 	onClick: () => void
+	onDoubleClick: () => void
 	onClose: (e: React.MouseEvent) => void
 	onDragStart: () => void
 	onDragEnd: () => void
 }
 
-const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick, onClose, onDragStart, onDragEnd }) => {
+const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, isPreview, onClick, onDoubleClick, onClose, onDragStart, onDragEnd }) => {
 	const handleClose = useCallback((e: React.MouseEvent) => {
 		e.stopPropagation()
 		onClose(e)
@@ -48,7 +50,6 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 				scale: 1.03,
 				boxShadow: '0 4px 16px rgba(0, 0, 0, 0.5)',
 				zIndex: 50,
-				cursor: 'grabbing',
 			}}
 		>
 			<Flex
@@ -59,8 +60,9 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 				bg={isActive ? tokens.colors.bg.app : 'transparent'}
 				borderRight={`1px solid ${tokens.colors.border.subtle}`}
 				fontSize="12px"
-				cursor="grab"
+				cursor="pointer"
 				onClick={onClick}
+				onDoubleClick={onDoubleClick}
 				position="relative"
 				overflow="hidden"
 				_hover={{
@@ -113,6 +115,7 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 					<Text
 						fontSize="11.5px"
 						fontWeight={isActive ? '500' : '400'}
+						fontStyle={isPreview ? 'italic' : 'normal'}
 						maxW="140px"
 						whiteSpace="nowrap"
 						overflow="hidden"
@@ -147,7 +150,7 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 						height="18px"
 						minW="18px"
 					>
-						<FiX size={11} />
+						<VscClose size={11} />
 					</IconButton>
 				</HStack>
 			</Flex>
@@ -158,7 +161,8 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, onClick
 		prevProps.path === nextProps.path &&
 		prevProps.name === nextProps.name &&
 		prevProps.isDirty === nextProps.isDirty &&
-		prevProps.isActive === nextProps.isActive
+		prevProps.isActive === nextProps.isActive &&
+		prevProps.isPreview === nextProps.isPreview
 	)
 })
 

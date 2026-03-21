@@ -4,25 +4,6 @@ Features em falta comparado com Cursor/VS Code (sem IA). Organizadas por priorid
 
 ---
 
-## Prioridade Alta
-
-### Split Editor / Side-by-Side
-Permitir abrir dois ficheiros lado a lado (ex: componente + teste, tipo + consumidor). O user deve poder arrastar um tab para a metade direita do editor, ou usar Cmd+\ para dividir. O Monaco suporta múltiplas instâncias de editor — o trabalho é no layout manager para gerir editor groups (esquerda/direita), resize handle, e sincronização de tabs.
-
-### Git Gutter + Source Control Panel
-Mostrar barras coloridas no gutter do editor para linhas adicionadas (verde), modificadas (azul) e removidas (vermelho) comparado com o último commit. Requer um comando Rust backend que execute `git diff` e retorne os ranges de linhas alteradas. Aplicar decorações Monaco no gutter. Num segundo passo, adicionar um painel Source Control na sidebar com: lista de ficheiros alterados, staging/unstaging, input de commit message, e botão de commit.
-
-### Rename Symbol (F2)
-Ao pressionar F2 num símbolo, abrir um inline input para renomear. O rename deve propagar para todas as referências no projecto. Para TypeScript/JavaScript, o Monaco language worker fornece rename via `registerRenameProvider`. O desafio é fazer rename cross-file — requer que os modelos dos ficheiros referenciados estejam carregados.
-
-### Code Formatting (Prettier)
-Formatar o documento activo com Prettier ao pressionar Shift+Alt+F ou ao salvar (opção configurável). Requer integrar Prettier como dependência ou chamar o binário via Rust backend. Adicionar setting `formatOnSave: boolean` ao settingsStore. Registar a acção no Command Palette como "Format Document".
-
-### Tab Drag-and-Drop
-Permitir reordenar tabs arrastando-os. Usar HTML5 drag-and-drop nativo ou uma biblioteca leve. Ao soltar, actualizar a ordem do array `openFiles` no editorStore. Visual feedback durante o drag (indicador de drop position).
-
----
-
 ## Prioridade Média
 
 ### Peek Definition (Alt+F12)
@@ -61,9 +42,6 @@ Adicionar opções ao menu de contexto dos tabs: "Close to the Right", "Close Sa
 
 ### Word Wrap Toggle
 Adicionar um comando "Toggle Word Wrap" no Command Palette e um atalho (Alt+Z, como VS Code). Actualmente word wrap está sempre ligado sem forma de desligar.
-
-### Preview Mode Tabs
-Single-click num ficheiro no Explorer abre em modo preview (título em itálico, substituído pelo próximo single-click). Double-click abre permanentemente. Adicionar `isPreview: boolean` ao EditorFile. Preview tab é substituído quando outro ficheiro é previewed.
 
 ---
 

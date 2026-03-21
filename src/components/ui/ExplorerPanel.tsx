@@ -1,13 +1,16 @@
-import React, { memo, Suspense } from 'react'
+import React, { memo, Suspense, useState, useCallback, useRef } from 'react'
 import {
 	VStack,
 	Text,
 	Box,
+	Flex,
+	HStack,
+	Input,
 	ScrollArea,
 } from '@chakra-ui/react'
+import { VscNewFile, VscNewFolder, VscRefresh, VscCollapseAll } from 'react-icons/vsc'
 import { FiFolder } from 'react-icons/fi'
 import { useCurrentProject } from '../../hooks/useProjectState'
-import { PanelHeader } from './PanelHeader'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import FileTreeSkeleton from './FileTreeSkeleton'
 import { tokens } from '@/theme/tokens'
@@ -22,6 +25,60 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 	const currentProject = useCurrentProject()
 	useFileTreeRepository()
 
+	const refresh = useFileTreeRepository(s => s.refresh)
+	const collapseAll = useFileTreeRepository(s => s.collapseAll)
+	const createFileOrDirectory = useFileTreeRepository(s => s.createFileOrDirectory)
+	const selectedPath = useFileTreeRepository(s => s.selectedPath)
+
+	const [creating, setCreating] = useState<'file' | 'folder' | null>(null)
+	const [newName, setNewName] = useState('')
+	const inputRef = useRef<HTMLInputElement>(null)
+
+	// Determine parent path for new file/folder
+	const getParentPath = useCallback(() => {
+		if (selectedPath) {
+			// If selected is a file, use its parent dir
+			const parts = selectedPath.split('/')
+			// Check if selected is a directory by looking at expandedPaths
+			const expanded = useFileTreeRepository.getState().expandedPaths
+			if (expanded.has(selectedPath)) return selectedPath
+			parts.pop()
+			return parts.join('/')
+		}
+		return currentProject?.path ?? ''
+	}, [selectedPath, currentProject?.path])
+
+	const handleStartCreate = useCallback((type: 'file' | 'folder') => {
+		setCreating(type)
+		setNewName('')
+		requestAnimationFrame(() => inputRef.current?.focus())
+	}, [])
+
+	const handleConfirmCreate = useCallback(async () => {
+		if (!newName.trim() || !creating) return
+		const parentPath = getParentPath()
+		const result = await createFileOrDirectory(parentPath, newName.trim(), creating === 'folder')
+		if (result && creating === 'file') {
+			onFileSelect(result)
+		}
+		setCreating(null)
+		setNewName('')
+	}, [newName, creating, getParentPath, createFileOrDirectory, onFileSelect])
+
+	const handleCancelCreate = useCallback(() => {
+		setCreating(null)
+		setNewName('')
+	}, [])
+
+	const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+		if (e.key === 'Enter') {
+			e.preventDefault()
+			handleConfirmCreate()
+		} else if (e.key === 'Escape') {
+			e.preventDefault()
+			handleCancelCreate()
+		}
+	}, [handleConfirmCreate, handleCancelCreate])
 
 	if (!currentProject) {
 		return (
@@ -60,7 +117,91 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 			align="stretch"
 			gap={0}
 		>
-			<PanelHeader title="Explorer" />
+			{/* Header with action buttons */}
+			<Flex
+				align="center"
+				justify="space-between"
+				px={3}
+				height="34px"
+				flexShrink={0}
+				borderBottom={`1px solid ${tokens.colors.border.default}`}
+				bg={tokens.colors.bg.panel}
+			>
+				<Text
+					fontSize="11px"
+					fontWeight="600"
+					textTransform="uppercase"
+					letterSpacing="0.06em"
+					color={tokens.colors.text.muted}
+				>
+					Explorer
+				</Text>
+				<HStack gap={0}>
+					<HeaderAction
+						icon={<VscNewFile size={14} />}
+						label="New File"
+						onClick={() => handleStartCreate('file')}
+					/>
+					<HeaderAction
+						icon={<VscNewFolder size={14} />}
+						label="New Folder"
+						onClick={() => handleStartCreate('folder')}
+					/>
+					<HeaderAction
+						icon={<VscRefresh size={14} />}
+						label="Refresh Explorer"
+						onClick={refresh}
+					/>
+					<HeaderAction
+						icon={<VscCollapseAll size={14} />}
+						label="Collapse Folders in Explorer"
+						onClick={collapseAll}
+					/>
+				</HStack>
+			</Flex>
+
+			{/* Inline create input */}
+			{creating && (
+				<Flex
+					px={3}
+					py={1.5}
+					gap={2}
+					align="center"
+					bg={tokens.colors.bg.panelAlt}
+					borderBottom={`1px solid ${tokens.colors.border.glass}`}
+					flexShrink={0}
+				>
+					{creating === 'folder'
+						? <VscNewFolder size={13} color={tokens.colors.accent.primary} />
+						: <VscNewFile size={13} color={tokens.colors.accent.primary} />
+					}
+					<Input
+						ref={inputRef}
+						value={newName}
+						onChange={e => setNewName(e.target.value)}
+						onKeyDown={handleKeyDown}
+						onBlur={handleCancelCreate}
+						placeholder={creating === 'folder' ? 'Folder name' : 'File name'}
+						autoComplete="off"
+						autoCorrect="off"
+						spellCheck={false}
+						fontSize="12px"
+						fontFamily={tokens.fontFamily.ui}
+						bg={tokens.colors.bg.input}
+						border={`1px solid ${tokens.colors.border.input}`}
+						borderRadius="3px"
+						color={tokens.colors.text.primary}
+						_placeholder={{ color: tokens.colors.text.disabled }}
+						_focus={{
+							borderColor: tokens.colors.accent.primaryBorder,
+							boxShadow: `0 0 0 1px ${tokens.colors.accent.primarySubtle}`,
+						}}
+						height="22px"
+						px={1.5}
+						flex={1}
+					/>
+				</Flex>
+			)}
 
 			{/* File Tree */}
 			<ScrollArea.Root flex="1">
@@ -118,5 +259,37 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 		</VStack>
 	)
 }
+
+// ── Header Action Button ─────────────────────────────────────────────────
+
+const HeaderAction = memo<{
+	icon: React.ReactNode
+	label: string
+	onClick: () => void
+}>(({ icon, label, onClick }) => (
+	<Box
+		as="button"
+		display="flex"
+		alignItems="center"
+		justifyContent="center"
+		w="22px"
+		h="22px"
+		borderRadius="3px"
+		color={tokens.colors.text.muted}
+		cursor="pointer"
+		transition={`all ${tokens.transition.fast}`}
+		_hover={{
+			color: tokens.colors.text.primary,
+			bg: tokens.colors.bg.hoverSubtle,
+		}}
+		onClick={onClick}
+		title={label}
+		flexShrink={0}
+	>
+		{icon}
+	</Box>
+))
+
+HeaderAction.displayName = 'HeaderAction'
 
 export default memo(ExplorerPanel)

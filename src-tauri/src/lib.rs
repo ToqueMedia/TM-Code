@@ -154,6 +154,15 @@ pub fn run() {
             is_attached_container,
             fim_completion,
             git_diff_lines,
+            git_status_files,
+            git_stage_file,
+            git_stage_all,
+            git_unstage_file,
+            git_unstage_all,
+            git_discard_file,
+            git_discard_all,
+            git_commit,
+            git_show_file,
             git_current_branch
         ])
         .run(tauri::generate_context!())

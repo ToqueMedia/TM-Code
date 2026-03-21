@@ -314,6 +314,22 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'editorParameterHint.border': '#262626',
     'editorParameterHint.foreground': '#e6edf3',
 
+    // Input fields (rename input, find input, etc.)
+    'input.background': '#1a1a1a',
+    'input.foreground': '#e6edf3',
+    'input.border': '#333333',
+    'input.placeholderForeground': '#5c6370',
+    'inputOption.activeBackground': '#c2185b30',
+    'inputOption.activeBorder': '#c2185b',
+    'inputOption.activeForeground': '#e6edf3',
+    'inputValidation.errorBackground': '#1a1a1a',
+    'inputValidation.errorBorder': '#f85149',
+    'inputValidation.warningBackground': '#1a1a1a',
+    'inputValidation.warningBorder': '#f77f00',
+    'inputValidation.infoBackground': '#1a1a1a',
+    'inputValidation.infoBorder': '#61dafb',
+    'focusBorder': '#c2185b80',
+
     // Linked editing (rename tag pairs)
     'editor.linkedEditingBackground': '#c2185b15',
 

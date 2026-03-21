@@ -48,6 +48,7 @@ export class FormatterService {
   private static instance: FormatterService;
   private projectConfig: Record<string, unknown> | null = null;
   private projectConfigPath: string | null = null;
+  private configLoadedAt: number = 0;
 
   static getInstance(): FormatterService {
     if (!FormatterService.instance) {
@@ -65,22 +66,29 @@ export class FormatterService {
   }
 
   /**
-   * Load .prettierrc from the project root. Caches until project changes.
+   * Load .prettierrc from the project root.
+   * Caches for 30s then re-reads on next format.
    */
   async loadProjectConfig(projectPath: string): Promise<Record<string, unknown>> {
-    if (this.projectConfig && this.projectConfigPath === projectPath) {
+    const now = Date.now();
+    if (this.projectConfig && this.projectConfigPath === projectPath && now - this.configLoadedAt < 30000) {
       return this.projectConfig;
     }
 
     this.projectConfigPath = projectPath;
     this.projectConfig = {};
+    this.configLoadedAt = now;
 
     for (const configFile of CONFIG_FILES) {
       try {
         const raw = await FileService.readFile(`${projectPath}/${configFile}`);
-        // Only parse JSON configs (.js configs are not supported in standalone)
         if (configFile.endsWith('.json') || configFile === '.prettierrc') {
-          this.projectConfig = JSON.parse(raw);
+          try {
+            this.projectConfig = JSON.parse(raw);
+          } catch (parseErr) {
+            logger.warn('formatter', `Invalid JSON in ${configFile}:`, parseErr);
+            continue; // Try next config file
+          }
           break;
         }
       } catch {

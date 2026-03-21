@@ -1,6 +1,6 @@
 import { memo, Suspense, lazy, useRef, useCallback, useState, useEffect } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
-import { FiColumns, FiAlignLeft, FiX, FiMaximize2 } from 'react-icons/fi'
+import { VscSplitHorizontal, VscIndent, VscClose, VscEditorLayout } from 'react-icons/vsc'
 import EditorTabs from '../ui/EditorTabs'
 import Breadcrumbs from '../ui/Breadcrumbs'
 import MonacoBridge from '../../utils/monacoBridge'
@@ -46,9 +46,9 @@ const PaneAction = memo<{
     display="flex"
     alignItems="center"
     justifyContent="center"
-    width="26px"
-    height="26px"
-    borderRadius="4px"
+    width="22px"
+    height="22px"
+    borderRadius="3px"
     color={tokens.colors.text.muted}
     bg="transparent"
     cursor="pointer"
@@ -93,7 +93,7 @@ const EditorPane = memo<EditorPaneProps>(({
   const groupFiles = group.files
     .map(path => openFiles.find(f => f.path === path))
     .filter(Boolean)
-    .map(f => ({ path: f!.path, isDirty: f!.isDirty }))
+    .map(f => ({ path: f!.path, isDirty: f!.isDirty, isPreview: f!.isPreview }))
 
   const handleSetActiveFile = useCallback((path: string) => {
     openFileInGroup(path, group.id)
@@ -166,26 +166,26 @@ const EditorPane = memo<EditorPaneProps>(({
             height="30px"
           >
             <PaneAction
-              icon={<FiAlignLeft size={13} />}
+              icon={<VscIndent size={13} />}
               label="Format Document (Shift+Alt+F)"
               onClick={onFormat}
             />
             {isSplit ? (
               <>
                 <PaneAction
-                  icon={<FiMaximize2 size={13} />}
+                  icon={<VscEditorLayout size={13} />}
                   label="Unsplit Editor"
                   onClick={onUnsplit}
                 />
                 <PaneAction
-                  icon={<FiX size={13} />}
+                  icon={<VscClose size={13} />}
                   label="Close Split Pane"
                   onClick={onClosePane}
                 />
               </>
             ) : (
               <PaneAction
-                icon={<FiColumns size={14} />}
+                icon={<VscSplitHorizontal size={14} />}
                 label="Split Editor Right (Cmd+\\)"
                 onClick={onSplit}
               />
@@ -210,6 +210,7 @@ const EditorPane = memo<EditorPaneProps>(({
             <MonacoEditor
               key={`${group.id}-${group.activeFile}`}
               path={group.activeFile}
+              groupId={group.id}
               onCursorPositionChange={onCursorPositionChange}
             />
           </Suspense>
@@ -230,6 +231,12 @@ const SplitResizeHandle = memo<{
   onSetRatio: (ratio: number) => void
 }>(({ containerRef, onSetRatio }) => {
   const handleRef = useRef<HTMLDivElement>(null)
+  const cleanupRef = useRef<(() => void) | null>(null)
+
+  // Cleanup on unmount to prevent leaked listeners
+  useEffect(() => {
+    return () => { cleanupRef.current?.() }
+  }, [])
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
@@ -239,7 +246,6 @@ const SplitResizeHandle = memo<{
     const pid = e.pointerId
     try { handle.setPointerCapture(pid) } catch {}
 
-    const containerRect = container.getBoundingClientRect()
     const body = document.body
     const prevCursor = body.style.cursor
     const prevSelect = body.style.userSelect
@@ -247,19 +253,26 @@ const SplitResizeHandle = memo<{
     body.style.userSelect = 'none'
 
     function onMove(pe: PointerEvent) {
-      const relX = pe.clientX - containerRect.left
-      const ratio = relX / containerRect.width
+      // Recalculate rect each frame — handles window resize during drag
+      const rect = container!.getBoundingClientRect()
+      if (rect.width === 0) return
+      const relX = pe.clientX - rect.left
+      const ratio = relX / rect.width
       onSetRatio(Math.max(0.2, Math.min(0.8, ratio)))
     }
 
-    function onUp() {
+    function cleanup() {
       try { handle?.releasePointerCapture(pid) } catch {}
       handle?.removeEventListener('pointermove', onMove)
       handle?.removeEventListener('pointerup', onUp)
       body.style.cursor = prevCursor
       body.style.userSelect = prevSelect
+      cleanupRef.current = null
     }
 
+    function onUp() { cleanup() }
+
+    cleanupRef.current = cleanup
     handle.addEventListener('pointermove', onMove)
     handle.addEventListener('pointerup', onUp)
   }, [containerRef, onSetRatio])
@@ -334,16 +347,13 @@ function SplitEditorLayout({ projectPath, onCursorPositionChange }: SplitEditorL
   }, [])
 
   const handleClosePane = useCallback((groupId: string) => {
-    // Close all files in this group, merge into the other
     const store = useEditorRepository.getState()
     const group = store.editorGroups.find(g => g.id === groupId)
     if (!group) return
-    // Move all files to the other group
-    const otherId = store.editorGroups.find(g => g.id !== groupId)?.id
-    if (otherId) {
-      for (const f of group.files) {
-        store.moveFileToGroup(f, groupId, otherId)
-      }
+    const otherGroup = store.editorGroups.find(g => g.id !== groupId)
+    if (!otherGroup) { unsplitEditor(); return }
+    for (const f of group.files) {
+      store.moveFileToGroup(f, groupId, otherGroup.id)
     }
     unsplitEditor()
   }, [unsplitEditor])

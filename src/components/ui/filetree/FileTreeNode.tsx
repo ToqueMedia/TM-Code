@@ -38,14 +38,42 @@ const TreeNode: React.FC<TreeNodeProps> = ({
     }
   };
 
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+    };
+  }, []);
+
   const handleSelect = () => {
     selectNode(node.path);
     if (node.type === 'directory') {
       toggleNode(node.path);
       return;
     }
-    if (node.type === 'file' && onFileSelect) {
-      onFileSelect(node.path);
+    // Delay preview to distinguish from double click
+    if (node.type === 'file') {
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = setTimeout(() => {
+        clickTimerRef.current = null;
+        useEditorRepository.getState().previewFile(node.path);
+      }, 200);
+    }
+  };
+
+  const handleDoubleClick = () => {
+    if (node.type === 'file') {
+      // Cancel pending single-click preview
+      if (clickTimerRef.current) {
+        clearTimeout(clickTimerRef.current);
+        clickTimerRef.current = null;
+      }
+      // Open permanently (pin)
+      useEditorRepository.getState().openFile(node.path);
+      useEditorRepository.getState().pinFile(node.path);
+      if (onFileSelect) onFileSelect(node.path);
     }
   };
 
@@ -108,6 +136,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
         _hover={{ bg: isSelected ? selectedBg : hoverBg }}
         cursor="pointer"
         onClick={handleSelect}
+        onDoubleClick={handleDoubleClick}
         onContextMenu={handleRowContextMenu}
         onKeyDown={handleRowKeyDown}
         tabIndex={0}

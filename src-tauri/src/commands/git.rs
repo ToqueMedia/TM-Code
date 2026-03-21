@@ -38,14 +38,13 @@ fn parse_range(s: &str) -> Option<(u32, u32)> {
 
 #[tauri::command]
 pub async fn git_diff_lines(file_path: String) -> Result<Vec<GitLineChange>, String> {
+    let abs_path = std::path::Path::new(&file_path);
+    let parent = abs_path.parent().unwrap_or(std::path::Path::new("/"));
+
     // Find the git repo root
     let repo_root = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(
-            std::path::Path::new(&file_path)
-                .parent()
-                .unwrap_or(std::path::Path::new("/")),
-        )
+        .current_dir(parent)
         .output()
         .map_err(|e| format!("Failed to find git root: {}", e))?;
 
@@ -55,9 +54,15 @@ pub async fn git_diff_lines(file_path: String) -> Result<Vec<GitLineChange>, Str
 
     let root = String::from_utf8_lossy(&repo_root.stdout).trim().to_string();
 
+    // Convert absolute path to relative path from git root
+    let rel_path = abs_path
+        .strip_prefix(&root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| file_path.clone());
+
     // Run git diff with no context (-U0) for precise line ranges
     let output = Command::new("git")
-        .args(["diff", "-U0", "HEAD", "--", &file_path])
+        .args(["diff", "-U0", "HEAD", "--", &rel_path])
         .current_dir(&root)
         .output()
         .map_err(|e| format!("Failed to run git diff: {}", e))?;
@@ -66,7 +71,7 @@ pub async fn git_diff_lines(file_path: String) -> Result<Vec<GitLineChange>, Str
     if !output.status.success() || output.stdout.is_empty() {
         // Check if file is untracked (new file)
         let status = Command::new("git")
-            .args(["status", "--porcelain", "--", &file_path])
+            .args(["status", "--porcelain", "--", &rel_path])
             .current_dir(&root)
             .output()
             .map_err(|e| format!("Failed to run git status: {}", e))?;
@@ -125,7 +130,217 @@ pub async fn git_diff_lines(file_path: String) -> Result<Vec<GitLineChange>, Str
     Ok(changes)
 }
 
-/// Get the current git branch name
+#[derive(Debug, Serialize, Clone)]
+pub struct GitFileStatus {
+    pub path: String,
+    pub status: String, // "added", "modified", "deleted", "renamed", "untracked"
+    pub staged: bool,
+}
+
+/// Get list of changed files via `git status --porcelain`
+#[tauri::command]
+pub async fn git_status_files(project_path: String) -> Result<Vec<GitFileStatus>, String> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "-uall"])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("Failed to run git status: {}", e))?;
+
+    if !output.status.success() {
+        return Err("Not a git repository".to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut files = Vec::new();
+
+    for line in stdout.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let index_status = line.chars().nth(0).unwrap_or(' ');
+        let worktree_status = line.chars().nth(1).unwrap_or(' ');
+        let file_path = line[3..].to_string();
+
+        // Skip empty paths
+        if file_path.trim().is_empty() {
+            continue;
+        }
+
+        // Handle renames: "R  old -> new"
+        let display_path = if file_path.contains(" -> ") {
+            file_path.split(" -> ").last().unwrap_or(&file_path).to_string()
+        } else {
+            file_path
+        };
+
+        let (status, staged) = match (index_status, worktree_status) {
+            ('?', '?') => ("untracked", false),
+            ('A', _) => ("added", true),
+            ('M', ' ') => ("modified", true),
+            (' ', 'M') | ('M', 'M') => ("modified", false),
+            ('D', _) => ("deleted", true),
+            (' ', 'D') => ("deleted", false),
+            ('R', _) => ("renamed", true),
+            _ => ("modified", false),
+        };
+
+        files.push(GitFileStatus {
+            path: display_path,
+            status: status.to_string(),
+            staged,
+        });
+    }
+
+    Ok(files)
+}
+
+/// Stage a file
+#[tauri::command]
+pub async fn git_stage_file(project_path: String, file_path: String) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["add", "--", &file_path])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("git add failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// Stage all files
+#[tauri::command]
+pub async fn git_stage_all(project_path: String) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("git add -A failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// Unstage a file
+#[tauri::command]
+pub async fn git_unstage_file(project_path: String, file_path: String) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["reset", "HEAD", "--", &file_path])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("git reset failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// Unstage all files
+#[tauri::command]
+pub async fn git_unstage_all(project_path: String) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["reset", "HEAD"])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("git reset failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// Discard changes in a file (checkout from HEAD)
+#[tauri::command]
+pub async fn git_discard_file(project_path: String, file_path: String) -> Result<(), String> {
+    // Check if the file is untracked
+    let status = Command::new("git")
+        .args(["status", "--porcelain", "--", &file_path])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("git status failed: {}", e))?;
+
+    let status_str = String::from_utf8_lossy(&status.stdout);
+    if status_str.starts_with("??") {
+        // Untracked file — delete it
+        let full_path = std::path::Path::new(&project_path).join(&file_path);
+        std::fs::remove_file(full_path).map_err(|e| format!("Failed to delete: {}", e))?;
+    } else {
+        // Tracked file — restore from HEAD
+        let output = Command::new("git")
+            .args(["checkout", "HEAD", "--", &file_path])
+            .current_dir(&project_path)
+            .output()
+            .map_err(|e| format!("git checkout failed: {}", e))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Discard all unstaged changes (tracked files restored, untracked deleted)
+#[tauri::command]
+pub async fn git_discard_all(project_path: String) -> Result<(), String> {
+    // Restore all tracked files
+    let output = Command::new("git")
+        .args(["checkout", "HEAD", "--", "."])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("git checkout failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    // Remove untracked files
+    let output2 = Command::new("git")
+        .args(["clean", "-fd"])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("git clean failed: {}", e))?;
+    if !output2.status.success() {
+        return Err(String::from_utf8_lossy(&output2.stderr).to_string());
+    }
+
+    Ok(())
+}
+
+/// Commit staged changes
+#[tauri::command]
+pub async fn git_commit(project_path: String, message: String) -> Result<String, String> {
+    if message.trim().is_empty() {
+        return Err("Commit message cannot be empty".to_string());
+    }
+    let output = Command::new("git")
+        .args(["commit", "-m", &message])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("git commit failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Get file content from the last commit (HEAD)
+#[tauri::command]
+pub async fn git_show_file(project_path: String, file_path: String) -> Result<String, String> {
+    // file_path is relative to project root
+    let output = Command::new("git")
+        .args(["show", &format!("HEAD:{}", file_path)])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("git show failed: {}", e))?;
+
+    if !output.status.success() {
+        // File doesn't exist in HEAD (new file)
+        return Ok(String::new());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Get the current git branch name (handles detached HEAD)
 #[tauri::command]
 pub async fn git_current_branch(project_path: String) -> Result<String, String> {
     let output = Command::new("git")
@@ -138,5 +353,25 @@ pub async fn git_current_branch(project_path: String) -> Result<String, String> 
         return Err("Not a git repository".to_string());
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Detached HEAD returns "HEAD" — get short commit hash instead
+    if branch == "HEAD" {
+        let hash = Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(&project_path)
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "HEAD".to_string());
+        return Ok(format!("HEAD ({})", hash));
+    }
+
+    Ok(branch)
 }

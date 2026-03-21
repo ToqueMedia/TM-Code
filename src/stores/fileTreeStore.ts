@@ -29,6 +29,7 @@ interface FileTreeActions {
   renameNode: (oldPath: string, newName: string) => Promise<boolean>;
   copyNode: (sourcePath: string, destinationPath: string) => Promise<boolean>;
   refresh: () => Promise<void>;
+  collapseAll: () => void;
   // Real-time update methods
   addNode: (parentPath: string, node: FileTreeNode) => void;
   removeNode: (path: string) => void;
@@ -261,7 +262,11 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>()(
           await get().loadFileTree(root.path, { showHidden: true });
         }
       },
-      
+
+      collapseAll: () => {
+        set({ expandedPaths: new Set() });
+      },
+
       // Real-time update methods - targeted tree patching (no full rebuild)
       addNode: (parentPath: string, node: FileTreeNode) => {
         set(state => {

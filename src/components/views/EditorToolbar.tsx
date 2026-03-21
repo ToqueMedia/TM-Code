@@ -1,18 +1,21 @@
-import { memo } from 'react'
-import { Flex, Box } from '@chakra-ui/react'
-import { FiMessageSquare, FiFolder, FiTerminal, FiBox } from 'react-icons/fi'
+import { memo, useState, useEffect } from 'react'
+import { Flex, Box, Text } from '@chakra-ui/react'
+import { VscComment, VscFiles, VscTerminal, VscRemoteExplorer, VscSourceControl, VscSearch } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
+import { GitService } from '@/services/gitService'
+import { useCurrentProject } from '@/hooks/useProjectState'
 
-export type SidebarPanel = 'explorer' | 'containers' | null
+export type SidebarPanel = 'explorer' | 'search' | 'sourceControl' | 'containers' | null
 
 interface ToolbarButtonProps {
   icon: React.ReactNode
   label: string
   isActive?: boolean
+  badge?: number
   onClick: () => void
 }
 
-function ToolbarButton({ icon, label, isActive, onClick }: ToolbarButtonProps) {
+function ToolbarButton({ icon, label, isActive, badge, onClick }: ToolbarButtonProps) {
   return (
     <Box
       as="button"
@@ -46,6 +49,31 @@ function ToolbarButton({ icon, label, isActive, onClick }: ToolbarButtonProps) {
           borderRadius="0 2px 2px 0"
         />
       )}
+      {badge != null && badge > 0 && (
+        <Box
+          position="absolute"
+          bottom="3px"
+          right="3px"
+          minW="14px"
+          h="14px"
+          borderRadius={tokens.radius.full}
+          bg={tokens.colors.accent.primary}
+          display="flex"
+          alignItems="center"
+          justifyContent="center"
+          px="3px"
+        >
+          <Text
+            fontSize="9px"
+            fontWeight="700"
+            color="#fff"
+            fontFamily={tokens.fontFamily.mono}
+            lineHeight="1"
+          >
+            {badge > 99 ? '99+' : badge}
+          </Text>
+        </Box>
+      )}
     </Box>
   )
 }
@@ -65,9 +93,20 @@ function EditorToolbar({
   onToggleBottomPanel,
   onBackToChat,
 }: EditorToolbarProps) {
-  const toggle = (panel: 'explorer' | 'containers') => {
+  const toggle = (panel: 'explorer' | 'search' | 'sourceControl' | 'containers') => {
     onSelectPanel(activePanel === panel ? null : panel)
   }
+
+  const currentProject = useCurrentProject()
+  const [gitCount, setGitCount] = useState(0)
+
+  useEffect(() => {
+    if (!currentProject?.path) { setGitCount(0); return }
+    const fetch = () => GitService.getStatusFiles(currentProject.path).then(f => setGitCount(f.length)).catch(() => {})
+    fetch()
+    const id = setInterval(fetch, 6000)
+    return () => clearInterval(id)
+  }, [currentProject?.path])
 
   return (
     <Flex
@@ -85,19 +124,32 @@ function EditorToolbar({
       <Flex direction="column" gap={0.5} align="center">
         {/* Back to Chat — top icon */}
         <ToolbarButton
-          icon={<FiMessageSquare size={17} />}
+          icon={<VscComment size={16} />}
           label="Back to Chat"
           onClick={onBackToChat}
         />
         <Box w="20px" h="1px" bg={tokens.colors.border.subtle} my={0.5} />
         <ToolbarButton
-          icon={<FiFolder size={17} />}
+          icon={<VscFiles size={16} />}
           label="Explorer"
           isActive={activePanel === 'explorer'}
           onClick={() => toggle('explorer')}
         />
         <ToolbarButton
-          icon={<FiBox size={17} />}
+          icon={<VscSearch size={16} />}
+          label="Search"
+          isActive={activePanel === 'search'}
+          onClick={() => toggle('search')}
+        />
+        <ToolbarButton
+          icon={<VscSourceControl size={16} />}
+          label="Source Control"
+          isActive={activePanel === 'sourceControl'}
+          badge={gitCount}
+          onClick={() => toggle('sourceControl')}
+        />
+        <ToolbarButton
+          icon={<VscRemoteExplorer size={16} />}
           label="Containers"
           isActive={activePanel === 'containers'}
           onClick={() => toggle('containers')}
@@ -106,7 +158,7 @@ function EditorToolbar({
 
       <Flex direction="column" gap={0.5} align="center" pb={1}>
         <ToolbarButton
-          icon={<FiTerminal size={17} />}
+          icon={<VscTerminal size={16} />}
           label="Terminal"
           isActive={isBottomPanelVisible}
           onClick={onToggleBottomPanel}
