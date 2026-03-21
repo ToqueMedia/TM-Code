@@ -283,6 +283,17 @@ class SessionService {
       }))
     }
 
+    // Persist contentBlocks for interleaved text + tool call rendering
+    if (msg.contentBlocks?.length) {
+      sanitized.contentBlocks = msg.contentBlocks
+    }
+
+    // Persist reasoning content if present
+    if (msg.reasoningContent) {
+      sanitized.reasoningContent = msg.reasoningContent
+      if (msg.reasoningDurationMs) sanitized.reasoningDurationMs = msg.reasoningDurationMs
+    }
+
     // Don't persist isStreaming
     return sanitized
   }

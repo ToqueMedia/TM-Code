@@ -1033,6 +1033,23 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // (e.g. "Installing dependencies...") that shouldn't reappear.
         session.messages = session.messages.filter(m => m.role !== 'system')
 
+        // Rebuild contentBlocks for legacy messages that don't have them
+        for (const msg of session.messages) {
+          if (msg.role === 'assistant' && !msg.contentBlocks?.length && msg.toolCalls?.length) {
+            // Message has tool calls but no contentBlocks — reconstruct
+            const blocks: Array<{ type: 'text'; text: string } | { type: 'tool_call'; toolCallId: string }> = []
+            // Put all text as a single block before tool calls
+            if (msg.content) {
+              blocks.push({ type: 'text', text: msg.content })
+            }
+            // Then all tool calls
+            for (const tc of msg.toolCalls) {
+              blocks.push({ type: 'tool_call', toolCallId: tc.id })
+            }
+            msg.contentBlocks = blocks
+          }
+        }
+
         const conversationHistory = rebuildConversationHistory(session.messages)
 
         // Initialize checkpoints for the loaded session

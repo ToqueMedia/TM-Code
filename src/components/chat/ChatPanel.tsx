@@ -2,6 +2,7 @@ import { memo, useRef, useEffect, useCallback, useState, lazy, Suspense } from '
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiMessageSquare } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
+import { useLayoutStore } from '../../stores/layoutStore'
 import MessageBubble from './MessageBubble'
 import ChatSkeleton from './ChatSkeleton'
 import AgentStatusBar from './AgentStatusBar'
@@ -16,39 +17,69 @@ function ChatPanel() {
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
   const isStreaming = useChatStore(s => s.isStreaming)
+  const viewMode = useLayoutStore(s => s.viewMode)
   // Subscribe to streaming version changes to trigger re-renders during streaming
-  useChatStore(s => s.streamingVersion)
+  const streamingVersion = useChatStore(s => s.streamingVersion)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
-  const lastMessage = messages[messages.length - 1]
 
-  // Auto-scroll: smooth scroll to bottom during streaming (unless user scrolled up)
-  useEffect(() => {
+  // Scroll to bottom helper
+  const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current
     if (!el) return
+    requestAnimationFrame(() => {
+      if (smooth) {
+        el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+      } else {
+        el.scrollTop = el.scrollHeight
+      }
+    })
+  }, [])
 
+  // Auto-scroll on new messages or streaming content
+  useEffect(() => {
     if (!isStreaming) {
       // When not streaming, always scroll to bottom on new messages
-      const rafId = requestAnimationFrame(() => {
-        el.scrollTop = el.scrollHeight
-      })
+      scrollToBottom()
       setUserScrolledUp(false)
-      return () => cancelAnimationFrame(rafId)
+      return
     }
 
     if (!userScrolledUp) {
-      const rafId = requestAnimationFrame(() => {
-        el.scrollTo({
-          top: el.scrollHeight,
-          behavior: 'smooth',
-        })
-      })
-      return () => cancelAnimationFrame(rafId)
+      scrollToBottom(true)
     }
-  }, [messages, messages.length, lastMessage?.content, isStreaming, userScrolledUp])
+  }, [messages.length, streamingVersion, isStreaming, userScrolledUp, scrollToBottom])
+
+  // Scroll to bottom when returning to chat view (e.g. from editor)
+  useEffect(() => {
+    if (viewMode === 'chat') {
+      // Small delay to ensure DOM is rendered after view switch
+      const timer = setTimeout(() => scrollToBottom(), 50)
+      return () => clearTimeout(timer)
+    }
+  }, [viewMode, scrollToBottom])
+
+  // Scroll to bottom when session changes or messages load from disk
+  useEffect(() => {
+    if (messages.length > 0 && !isStreaming) {
+      const timer = setTimeout(() => scrollToBottom(), 100)
+      return () => clearTimeout(timer)
+    }
+  }, [activeSessionId, messages.length, isLoadingSession, scrollToBottom, isStreaming])
+
+  // Scroll to bottom when streaming ends (ensures final content is visible)
+  const prevStreamingRef = useRef(isStreaming)
+  useEffect(() => {
+    if (prevStreamingRef.current && !isStreaming) {
+      // Streaming just ended — scroll to show final content
+      scrollToBottom()
+      setUserScrolledUp(false)
+    }
+    prevStreamingRef.current = isStreaming
+  }, [isStreaming, scrollToBottom])
 
   // Detect user scroll
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
