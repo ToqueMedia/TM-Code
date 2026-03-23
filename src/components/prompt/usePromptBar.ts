@@ -12,6 +12,7 @@ import AgentService from '../../services/agent/agentService'
 import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
 import MCPService from '../../services/mcp/mcpService'
+import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 
 export function usePromptBar() {
   const input = useChatStore(s => s.draftInput)
@@ -19,6 +20,9 @@ export function usePromptBar() {
   const [devCommand, setDevCommand] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const runningRef = useRef(false)
+  const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const historyIndexRef = useRef(-1)
+  const savedDraftRef = useRef('')
   const isStreaming = useChatStore(s => s.isStreaming)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const currentProject = useProjectStore(s => s.currentProject)
@@ -27,6 +31,18 @@ export function usePromptBar() {
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const isDisabled = isStreaming || hasPendingPermission
   const hasPreview = isPreviewServerRunning || !!previewHtmlContent || !!devCommand
+
+  // Slash command menu state
+  const [showCommandMenu, setShowCommandMenu] = useState(false)
+  const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([])
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
+
+  // Cleanup blur timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (blurTimeoutRef.current) clearTimeout(blurTimeoutRef.current)
+    }
+  }, [])
 
   // Detect if project can run a dev server
   useEffect(() => {
@@ -93,6 +109,32 @@ export function usePromptBar() {
     }
   }, [])
 
+  // Slash command input handler — detect "/" prefix and filter commands
+  const handleInputChange = useCallback((value: string) => {
+    setInput(value)
+    // Reset history navigation when user types
+    historyIndexRef.current = -1
+    if (value.startsWith('/') && !value.includes(' ')) {
+      const commands = slashCommandRegistry.filterCommands(value.split(' ')[0])
+      setFilteredCommands(commands)
+      setShowCommandMenu(commands.length > 0)
+      setSelectedCommandIndex(0)
+    } else {
+      setShowCommandMenu(false)
+    }
+  }, [setInput])
+
+  const handleCommandSelect = useCallback((command: SlashCommand) => {
+    setInput(command.name + ' ')
+    setShowCommandMenu(false)
+    textareaRef.current?.focus()
+  }, [setInput])
+
+  const handleBlur = useCallback(() => {
+    if (blurTimeoutRef.current) clearTimeout(blurTimeoutRef.current)
+    blurTimeoutRef.current = setTimeout(() => setShowCommandMenu(false), 150)
+  }, [])
+
   // Listen for suggestion chip inserts
   useEffect(() => {
     function handleInsert(e: Event) {
@@ -118,8 +160,43 @@ export function usePromptBar() {
     try {
       // Check authentication
       const { isAuthenticated } = useAuthStore.getState()
-      if (!isAuthenticated) {
-        // User not logged in — cannot send
+      if (!isAuthenticated) return
+
+      // Reset prompt history navigation
+      historyIndexRef.current = -1
+      savedDraftRef.current = ''
+
+      // Close command menu
+      setShowCommandMenu(false)
+
+      // Check if it's a slash command
+      if (slashCommandRegistry.isSlashCommand(prompt)) {
+        const command = slashCommandRegistry.getCommand(prompt)
+        if (!command) return
+
+        if (!command.enabled) {
+          useChatStore.getState().setDraftInput('')
+          useChatStore.getState().addSystemMessage(`Command ${command.name} is not yet available.`)
+          return
+        }
+
+        const projectPath = currentProject?.path
+        if (!projectPath) {
+          useChatStore.getState().setDraftInput('')
+          useChatStore.getState().addSystemMessage('No project open. Open a project first.')
+          return
+        }
+
+        useChatStore.getState().setDraftInput('')
+
+        // Switch to chat so the user sees the agent working
+        const layout = useLayoutStore.getState()
+        if (layout.viewMode !== 'chat') {
+          layout.setViewMode('chat')
+        }
+
+        const args = slashCommandRegistry.getArgs(prompt)
+        await command.execute(args, projectPath)
         return
       }
 
@@ -257,7 +334,7 @@ export function usePromptBar() {
     } finally {
       runningRef.current = false
     }
-  }, [currentProject])
+  }, [currentProject, devCommand])
 
   const handleStop = useCallback(() => {
     // Clear any pending permission first — resolves the dangling Promise
@@ -271,12 +348,84 @@ export function usePromptBar() {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // Prompt history navigation (Up/Down when menu is NOT open)
+      // Only navigate history when input is empty or single-line (no newlines)
+      if (!showCommandMenu && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        const currentInput = useChatStore.getState().draftInput
+        // Only let textarea handle cursor if user is editing multi-line text (not navigating history)
+        if (currentInput.includes('\n') && historyIndexRef.current === -1) return
+
+        const session = useChatStore.getState().getActiveSession()
+        if (!session) return
+
+        // Get user messages as history (most recent last)
+        const history = session.messages
+          .filter(m => m.role === 'user' && m.content.trim())
+          .map(m => m.content)
+
+        if (history.length === 0) return
+
+        // Use raw setDraftInput to avoid triggering slash command detection
+        const rawSetInput = useChatStore.getState().setDraftInput
+
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          if (historyIndexRef.current === -1) {
+            savedDraftRef.current = useChatStore.getState().draftInput
+          }
+          if (historyIndexRef.current < history.length - 1) {
+            historyIndexRef.current++
+            rawSetInput(history[history.length - 1 - historyIndexRef.current])
+          }
+        } else if (e.key === 'ArrowDown') {
+          e.preventDefault()
+          if (historyIndexRef.current > 0) {
+            historyIndexRef.current--
+            rawSetInput(history[history.length - 1 - historyIndexRef.current])
+          } else if (historyIndexRef.current === 0) {
+            historyIndexRef.current = -1
+            rawSetInput(savedDraftRef.current)
+          }
+        }
+        setShowCommandMenu(false)
+        return
+      }
+
+      // Slash command menu navigation
+      if (showCommandMenu && filteredCommands.length > 0) {
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          setSelectedCommandIndex(prev =>
+            prev <= 0 ? filteredCommands.length - 1 : prev - 1
+          )
+          return
+        }
+        if (e.key === 'ArrowDown') {
+          e.preventDefault()
+          setSelectedCommandIndex(prev =>
+            prev >= filteredCommands.length - 1 ? 0 : prev + 1
+          )
+          return
+        }
+        if (e.key === 'Tab' || (e.key === 'Enter' && !e.metaKey && !e.ctrlKey)) {
+          e.preventDefault()
+          const selected = filteredCommands[selectedCommandIndex]
+          if (selected) handleCommandSelect(selected)
+          return
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          setShowCommandMenu(false)
+          return
+        }
+      }
+
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
         handleSend()
       }
     },
-    [handleSend]
+    [handleSend, showCommandMenu, filteredCommands, selectedCommandIndex, handleCommandSelect]
   )
 
   const toggleEditor = useCallback(() => {
@@ -302,6 +451,9 @@ export function usePromptBar() {
       return
     }
 
+    // If server is already starting, don't restart
+    if (devServerManager.isActive()) return
+
     // No server running — start one if we have a devCommand
     if (devCommand && currentProject?.path) {
       const layout = useLayoutStore.getState()
@@ -315,26 +467,9 @@ export function usePromptBar() {
     }
   }, [devCommand, currentProject?.path])
 
-  const closePreview = useCallback(async () => {
-    const layoutStore = useLayoutStore.getState()
-
-    // If currently viewing preview, go back first
-    if (layoutStore.viewMode === 'preview') {
-      layoutStore.goBack()
-    }
-
-    // Stop dev server if running
-    if (layoutStore.isPreviewServerRunning) {
-      await devServerManager.stop()
-    }
-
-    // Clear all preview state
-    layoutStore.clearPreviewServer()
-  }, [])
-
   return {
     input,
-    setInput,
+    setInput: handleInputChange,
     textareaRef,
     isStreaming,
     isDisabled,
@@ -343,8 +478,13 @@ export function usePromptBar() {
     handleSend,
     handleStop,
     handleKeyDown,
+    handleBlur,
     toggleEditor,
     togglePreview,
-    closePreview,
+    // Slash command menu
+    showCommandMenu,
+    filteredCommands,
+    selectedCommandIndex,
+    handleCommandSelect,
   }
 }

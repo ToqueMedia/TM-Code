@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { useLayoutStore } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'
+import { isContainerActive } from '../stores/containerStore'
 import { logger } from '../utils/logger'
 
 type ServerStatus = 'starting' | 'running' | 'stopped' | 'error'
@@ -25,7 +26,7 @@ const URL_REGEX = /https?:\/\/(?:localhost|127\.0\.0\.1):\d+\/?/
 const PORT_REGEX = /(?:listening on|running at|port)\s+(\d{4,5})/i
 
 /** Port used for project dev servers — avoids conflict with the IDE's own Vite (5173). */
-const DEV_SERVER_PORT = 5174
+const DEV_SERVER_PORT = 7773
 
 /** Max time (ms) to wait for the server to accept connections. */
 const READY_TIMEOUT = 12_000
@@ -39,6 +40,8 @@ class DevServerManager {
   private unlistenExit: UnlistenFn | null = null
   /** Incremented on each start() — lets us detect stale invoke returns. */
   private generation = 0
+  /** Incremented on each waitForServerReady call — cancels previous polling if URL changes. */
+  private pollGeneration = 0
 
   static getInstance(): DevServerManager {
     if (!DevServerManager.instance) {
@@ -53,18 +56,22 @@ class DevServerManager {
    */
   private injectPort(command: string): string {
     const port = DEV_SERVER_PORT
-    // npm run dev / yarn run dev / pnpm run dev → append "-- --port PORT"
+    // In Docker mode, dev servers must bind to 0.0.0.0 (not localhost)
+    // for the port mapping to work from the host.
+    const hostFlag = isContainerActive() ? ' --host 0.0.0.0' : ''
+    // npm run dev / yarn run dev / pnpm run dev → append "-- --port PORT [--host]"
     if (/^(npm|yarn|pnpm)\s+run\s+/.test(command)) {
-      return `${command} -- --port ${port}`
+      return `${command} -- --port ${port}${hostFlag}`
     }
     // npm start / yarn start → PORT env var is set on the Rust side
     return command
   }
 
-  /** Ensure URL ends with trailing slash (required by some servers). */
+  /** Ensure URL uses 127.0.0.1 (not localhost) and ends with trailing slash. */
   private normalizeUrl(url: string): string {
-    // Normalise host to localhost
-    let normalized = url.replace('127.0.0.1', 'localhost')
+    // Force IPv4 — Colima only binds forwarded ports to 127.0.0.1, not ::1.
+    // WKWebView resolves "localhost" to ::1 first and doesn't fall back to IPv4.
+    let normalized = url.replace('localhost', '127.0.0.1')
     // Ensure trailing slash
     if (!normalized.endsWith('/')) normalized += '/'
     return normalized
@@ -74,9 +81,23 @@ class DevServerManager {
     // Stop any existing server first
     await this.stop()
 
+    // Kill any process occupying our port before starting.
+    // Skip in Docker mode — the port is owned by Colima's SSH forwarding.
+    // Orphaned dev servers inside the container are cleaned by fuser in start_dev_server.
+    if (!isContainerActive()) {
+      try {
+        await invoke('kill_port', { port: DEV_SERVER_PORT })
+      } catch {
+        // Ignore — port may already be free
+      }
+    }
+
     const gen = ++this.generation
 
     const resolvedCommand = this.injectPort(devCommand)
+
+    // Signal loading state to the UI
+    useLayoutStore.getState().setPreviewServerLoading(true)
 
     this.currentServer = {
       pid: 0,
@@ -117,6 +138,7 @@ class DevServerManager {
       if (gen === this.generation) {
         this.currentServer = null
         this.cleanup()
+        useLayoutStore.getState().setPreviewServerLoading(false)
       }
       throw error
     }
@@ -144,6 +166,14 @@ class DevServerManager {
       layoutStore.addDevServerLog(line, level)
     }
 
+    // Detect common fatal errors and provide actionable feedback
+    if (/Cannot find module.*rollup|Error:.*optional dependencies/i.test(line)) {
+      layoutStore.addDevServerLog(
+        'Fix: Run "rm -rf node_modules package-lock.json && npm install" in the terminal to reinstall dependencies for this platform.',
+        'error'
+      )
+    }
+
     // Detect URL in output
     let detectedUrl: string | null = null
 
@@ -156,15 +186,24 @@ class DevServerManager {
       detectedUrl = `http://localhost:${portMatch[1]}`
     }
 
-    if (detectedUrl && !this.currentServer.url) {
+    if (detectedUrl) {
       const url = this.normalizeUrl(detectedUrl)
-      this.currentServer.url = url
-      this.currentServer.status = 'running'
 
-      layoutStore.addDevServerLog(`Server ready at ${url}`, 'info')
+      // Always update to the LATEST detected URL.
+      // Vite/Next.js may report an initial URL then switch ports if occupied.
+      if (this.currentServer.url !== url) {
+        const prevUrl = this.currentServer.url
+        this.currentServer.url = url
+        this.currentServer.status = 'running'
 
-      // Poll until the server actually accepts connections, then show preview
-      this.waitForServerReady(url)
+        if (prevUrl) {
+          layoutStore.addDevServerLog(`[debug] URL changed: ${prevUrl} → ${url}`, 'info')
+        }
+        layoutStore.addDevServerLog(`Server ready at ${url}`, 'info')
+
+        // Poll until the server actually accepts connections, then show preview
+        this.waitForServerReady(url)
+      }
     }
   }
 
@@ -180,19 +219,27 @@ class DevServerManager {
    */
   private async waitForServerReady(url: string): Promise<void> {
     const gen = this.generation
+    const pollGen = ++this.pollGeneration
     const start = Date.now()
+    const layoutStore = useLayoutStore.getState()
+    let attempts = 0
 
     while (Date.now() - start < READY_TIMEOUT) {
-      // If server was stopped/restarted while polling, bail out
-      if (gen !== this.generation || !this.currentServer) return
+      // If server was stopped/restarted, or URL changed (new poll started), bail out
+      if (gen !== this.generation || !this.currentServer || pollGen !== this.pollGeneration) {
+        logger.info('devServer', `Polling cancelled for ${url}`)
+        return
+      }
 
+      attempts++
       try {
-        // no-cors: succeeds if TCP connection accepted, throws if refused
-        await fetch(url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store' })
-        // If we reach here, the server is accepting connections
-        break
-      } catch {
-        // Connection refused — server not ready yet, keep polling
+        const reachable = await invoke<boolean>('check_server_health', { url })
+        if (reachable) {
+          logger.info('devServer', `Server reachable after ${attempts} attempts (${Date.now() - start}ms)`)
+          break
+        }
+      } catch (err) {
+        logger.warn('devServer', `Health check error (attempt ${attempts}):`, err)
       }
 
       await new Promise(r => setTimeout(r, READY_POLL_INTERVAL))
@@ -200,15 +247,15 @@ class DevServerManager {
 
     // Register the preview server URL so it's available
     if (gen === this.generation && this.currentServer) {
-      const layoutStore = useLayoutStore.getState()
       layoutStore.setPreviewServer(url, this.currentServer.pid)
+      logger.info('devServer', `Preview server registered: ${url}`)
 
       // Only auto-switch to preview if the agent isn't actively streaming.
-      // When the agent finishes (onDone), usePromptBar already handles the
-      // transition to preview mode, so we don't lose the user's context.
       if (!useChatStore.getState().isStreaming) {
         layoutStore.setViewMode('preview')
       }
+    } else {
+      logger.warn('devServer', `Polling finished but server no longer active (${attempts} attempts, ${Date.now() - start}ms)`)
     }
   }
 
@@ -218,12 +265,18 @@ class DevServerManager {
     if (this.currentServer.pid !== 0 && this.currentServer.pid !== pid) return
 
     const wasRunning = this.currentServer.status === 'running'
+    const wasStarting = this.currentServer.status === 'starting'
     this.currentServer.status = 'stopped'
     this.currentServer = null
     this.cleanup()
 
-    if (wasRunning) {
-      useLayoutStore.getState().addDevServerLog('Dev server stopped', 'warn')
+    const layoutStore = useLayoutStore.getState()
+    if (wasStarting) {
+      layoutStore.addDevServerLog('Dev server exited before becoming ready. Check your dev command and dependencies.', 'error')
+      layoutStore.clearPreviewServer()
+    } else if (wasRunning) {
+      layoutStore.addDevServerLog('Dev server stopped', 'warn')
+      layoutStore.clearPreviewServer()
     }
   }
 

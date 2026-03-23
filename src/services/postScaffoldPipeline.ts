@@ -5,13 +5,6 @@ import { devServerManager } from './devServerManager'
 import { templateService, Template } from './templateService'
 import { logger } from '../utils/logger'
 
-interface CommandResult {
-  stdout: string
-  stderr: string
-  exitCode: number
-  success: boolean
-}
-
 /**
  * Full scaffold flow: copy template → open project → create session → run pipeline.
  * Shared by WelcomeScreen and MainLayout to avoid duplication.
@@ -86,17 +79,41 @@ async function runInstall(
   const layoutStore = useLayoutStore.getState()
 
   try {
-    const result = await invoke<CommandResult>('execute_command', {
+    // Use streaming command to show npm install progress in real-time
+    const pid = await invoke<number>('run_streaming_command', {
       command: template.installCommand,
       cwd: projectPath,
     })
 
-    if (!result.success) {
+    // Stream output to the dev server log panel
+    const { listen } = await import('@tauri-apps/api/event')
+
+    const exitCode = await new Promise<number>(async (resolve) => {
+      const unOutput = await listen<{ pid: number; stream: string; data: string }>(
+        'cmd-output',
+        (event) => {
+          if (event.payload.pid !== pid) return
+          layoutStore.addDevServerLog(event.payload.data, 'info')
+        }
+      )
+
+      const unExit = await listen<{ pid: number; code: number }>(
+        'cmd-exit',
+        (event) => {
+          if (event.payload.pid !== pid) return
+          unOutput()
+          unExit()
+          resolve(event.payload.code)
+        }
+      )
+    })
+
+    if (exitCode !== 0) {
       layoutStore.addDevServerLog(
-        `Failed to install dependencies (exit code ${result.exitCode}). ${result.stderr?.slice(0, 300) || ''}`,
+        `Failed to install dependencies (exit code ${exitCode})`,
         'error',
       )
-      logger.error('postScaffold', 'Install failed:', result.stderr)
+      logger.error('postScaffold', `Install failed with exit code ${exitCode}`)
       return false
     }
 

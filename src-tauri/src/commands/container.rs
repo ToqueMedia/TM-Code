@@ -7,6 +7,109 @@ use tauri::{Emitter, State};
 
 use super::devcontainer::{self, DevcontainerConfig};
 
+/// Get the Colima socket path if available.
+fn colima_socket_path() -> Option<String> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let sock = format!("{}/.colima/default/docker.sock", home.to_string_lossy());
+        if Path::new(&sock).exists() {
+            return Some(sock);
+        }
+    }
+    None
+}
+
+/// Recover Colima from any broken state. Escalates through:
+/// 1. stop + start (fixes stale socket after sleep/wake)
+/// 2. kill residual processes + start (fixes zombie Lima processes)
+/// 3. delete -f + start (nuclear — destroys containers, fixes corrupted VM)
+pub fn recover_colima() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RECOVERING: AtomicBool = AtomicBool::new(false);
+
+    // Prevent concurrent recovery attempts
+    if RECOVERING.swap(true, Ordering::SeqCst) {
+        // Another thread is already recovering — wait for it
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if !RECOVERING.load(Ordering::SeqCst) {
+                return test_docker_connection();
+            }
+        }
+        return false;
+    }
+
+    let result = recover_colima_inner();
+    RECOVERING.store(false, Ordering::SeqCst);
+    result
+}
+
+fn recover_colima_inner() -> bool {
+    let has_colima = Command::new("which")
+        .arg("colima")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !has_colima { return false; }
+
+    // Attempt 1: gentle restart
+    let _ = Command::new("colima").args(["stop"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = Command::new("colima").args(["start"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    if test_docker_connection() { return true; }
+
+    // Attempt 2: kill stale Lima processes, clean state, then restart
+    let _ = Command::new("colima").args(["stop"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = Command::new("sh").args(["-c", "pkill -9 -f 'limactl hostagent.*colima' 2>/dev/null; pkill -9 -f 'colima daemon' 2>/dev/null"]).status();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = Command::new("colima").args(["start"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    if test_docker_connection() { return true; }
+
+    // Attempt 3: nuclear — delete VM and recreate (destroys containers)
+    let _ = Command::new("colima").args(["delete", "-f"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let _ = Command::new("colima").args(["start"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    test_docker_connection()
+}
+
+fn test_docker_connection() -> bool {
+    let mut test = Command::new("docker");
+    if let Some(sock) = colima_socket_path() {
+        test.arg("--host").arg(format!("unix://{}", sock));
+    }
+    test.args(["ps", "--format", "{{.ID}}"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn docker_cmd() -> Command {
+    let mut cmd = Command::new("docker");
+
+    // Docker Desktop: standard socket, no --host needed
+    if Path::new("/var/run/docker.sock").exists() {
+        return cmd;
+    }
+
+    // Colima: use --host with the Colima socket
+    if let Some(sock) = colima_socket_path() {
+        cmd.arg("--host");
+        cmd.arg(format!("unix://{}", sock));
+    }
+
+    cmd
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +143,7 @@ const DEFAULT_IMAGE: &str = "node:20-alpine";
 pub const WORKSPACE_PATH: &str = "/workspace";
 
 /// Common dev server ports to expose on the container.
-const EXPOSED_PORTS: &[u16] = &[3000, 3001, 4200, 5173, 5174, 8000, 8080, 8888];
+const EXPOSED_PORTS: &[u16] = &[7773, 3000, 3001, 4200, 5173, 8000, 8080, 8888];
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -93,7 +196,7 @@ fn container_name_for_project(project_id: &str) -> String {
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 fn get_container_id(name: &str) -> Result<String, String> {
-    let output = Command::new("docker")
+    let output = docker_cmd()
         .args(["inspect", "--format", "{{.Id}}", name])
         .output()
         .map_err(|e| format!("Failed to get container ID: {}", e))?;
@@ -138,19 +241,29 @@ fn clear_active_if_matches(state: &ActiveProjectState, project_id: &str) -> Resu
 /// Check if Docker CLI is installed AND the daemon is running.
 /// Uses `docker ps` as a lightweight probe — it fails fast if the
 /// daemon is down, unlike `docker info` which dumps system details.
+/// If Docker is unreachable but Colima is installed, automatically
+/// restarts Colima to recover from stale sockets after macOS sleep/wake.
 #[tauri::command]
 pub async fn check_docker_available() -> Result<bool, String> {
     let result = tokio::task::spawn_blocking(|| {
-        Command::new("docker")
+        // First try: is Docker reachable right now?
+        let ok = docker_cmd()
             .args(["ps", "--format", "{{.ID}}"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if ok { return true; }
+
+        // Docker unreachable — try Colima recovery (stale socket after macOS sleep/wake)
+        recover_colima()
     })
     .await;
 
     match result {
-        Ok(Ok(s)) => Ok(s.success()),
+        Ok(available) => Ok(available),
         _ => Ok(false),
     }
 }
@@ -270,7 +383,7 @@ pub async fn create_project_container(
     }
     args_with_ports.extend(tail_args.clone());
 
-    let create = Command::new("docker")
+    let create = docker_cmd()
         .args(&args_with_ports)
         .output()
         .map_err(|e| format!("Failed to create container: {}", e))?;
@@ -281,12 +394,12 @@ pub async fn create_project_container(
         if stderr.contains("port is already allocated")
             || stderr.contains("address already in use")
         {
-            let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+            let _ = docker_cmd().args(["rm", "-f", &name]).output();
 
             let mut args_no_ports = base_args;
             args_no_ports.extend(tail_args);
 
-            let retry = Command::new("docker")
+            let retry = docker_cmd()
                 .args(&args_no_ports)
                 .output()
                 .map_err(|e| format!("Failed to create container (retry): {}", e))?;
@@ -310,7 +423,7 @@ pub async fn create_project_container(
     let container_id = raw_id[..12.min(raw_id.len())].to_string();
 
     // ── Start container ──────────────────────────────────────────────────
-    let start = Command::new("docker")
+    let start = docker_cmd()
         .args(["start", &name])
         .output()
         .map_err(|e| format!("Failed to start container: {}", e))?;
@@ -338,7 +451,7 @@ pub async fn create_project_container(
                 let c = container.clone();
                 let cmd = install_cmd.to_string();
                 let result = tokio::task::spawn_blocking(move || {
-                    Command::new("docker")
+                    docker_cmd()
                         .args(["exec", &c, "sh", "-c", &cmd])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
@@ -361,7 +474,7 @@ pub async fn create_project_container(
                 let shell_cmd = cmd.to_shell_string();
                 let c = container.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    Command::new("docker")
+                    docker_cmd()
                         .args(["exec", &c, "sh", "-c", &shell_cmd])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
@@ -377,7 +490,7 @@ pub async fn create_project_container(
                 let shell_cmd = cmd.to_shell_string();
                 let c = container.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    Command::new("docker")
+                    docker_cmd()
                         .args(["exec", &c, "sh", "-c", &shell_cmd])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
@@ -463,7 +576,7 @@ async fn resolve_image(
             args.push(context.to_string_lossy().to_string());
 
             let build_result = tokio::task::spawn_blocking(move || {
-                Command::new("docker").args(&args).output()
+                docker_cmd().args(&args).output()
             })
             .await
             .map_err(|e| format!("Build task failed: {}", e))?
@@ -498,7 +611,7 @@ async fn resolve_image(
 
 /// Ensure a Docker image is available locally, pulling if needed.
 async fn ensure_image_available(image: &str) -> Result<String, String> {
-    let has_image = Command::new("docker")
+    let has_image = docker_cmd()
         .args(["image", "inspect", image])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -509,7 +622,7 @@ async fn ensure_image_available(image: &str) -> Result<String, String> {
     if !has_image {
         let img = image.to_string();
         let pull = tokio::task::spawn_blocking(move || {
-            Command::new("docker").args(["pull", &img]).output()
+            docker_cmd().args(["pull", &img]).output()
         })
         .await
         .map_err(|e| format!("Pull task failed: {}", e))?
@@ -536,7 +649,7 @@ fn try_adopt_existing(
     container_map: &State<'_, ContainerMap>,
     active_project: &State<'_, ActiveProjectState>,
 ) -> Result<Option<ContainerInfo>, String> {
-    let output = match Command::new("docker")
+    let output = match docker_cmd()
         .args(["inspect", "--format", "{{.State.Status}}", name])
         .output()
     {
@@ -565,7 +678,7 @@ fn try_adopt_existing(
     }
 
     if status == "exited" || status == "created" {
-        let start = Command::new("docker")
+        let start = docker_cmd()
             .args(["start", name])
             .output()
             .map_err(|e| format!("Failed to start container: {}", e))?;
@@ -590,7 +703,7 @@ fn try_adopt_existing(
     }
 
     // Any other state — remove so we can recreate
-    let _ = Command::new("docker").args(["rm", "-f", name]).output();
+    let _ = docker_cmd().args(["rm", "-f", name]).output();
     Ok(None)
 }
 
@@ -603,7 +716,7 @@ pub async fn stop_project_container(
 ) -> Result<bool, String> {
     let name = container_name_for_project(&project_id);
 
-    let stop = Command::new("docker")
+    let stop = docker_cmd()
         .args(["stop", "-t", "5", &name])
         .output()
         .map_err(|e| format!("Failed to stop container: {}", e))?;
@@ -628,7 +741,7 @@ pub async fn remove_project_container(
 ) -> Result<bool, String> {
     let name = container_name_for_project(&project_id);
 
-    let rm = Command::new("docker")
+    let rm = docker_cmd()
         .args(["rm", "-f", &name])
         .output()
         .map_err(|e| format!("Failed to remove container: {}", e))?;
@@ -677,7 +790,7 @@ pub async fn get_active_container_info(
 pub async fn cleanup_orphaned_containers(
     exclude_project_id: Option<String>,
 ) -> Result<u32, String> {
-    let output = Command::new("docker")
+    let output = docker_cmd()
         .args([
             "ps",
             "-a",
@@ -707,7 +820,7 @@ pub async fn cleanup_orphaned_containers(
                 continue;
             }
         }
-        let _ = Command::new("docker")
+        let _ = docker_cmd()
             .args(["rm", "-f", name])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -738,7 +851,7 @@ pub struct RunningContainer {
 #[tauri::command]
 pub async fn list_running_containers() -> Result<Vec<RunningContainer>, String> {
     let result = tokio::task::spawn_blocking(|| {
-        Command::new("docker")
+        docker_cmd()
             .args([
                 "ps",
                 "--format",
@@ -793,7 +906,7 @@ pub async fn attach_to_container(
     container_map: State<'_, ContainerMap>,
 ) -> Result<ContainerInfo, String> {
     // Verify container is running
-    let status_output = Command::new("docker")
+    let status_output = docker_cmd()
         .args(["inspect", "--format", "{{.State.Status}}", &container_name])
         .output()
         .map_err(|e| format!("Failed to inspect container: {}", e))?;
@@ -813,7 +926,7 @@ pub async fn attach_to_container(
     }
 
     // Get container ID, image, and working directory
-    let inspect = Command::new("docker")
+    let inspect = docker_cmd()
         .args([
             "inspect",
             "--format",
@@ -854,7 +967,7 @@ pub async fn attach_to_container(
     // Stop any previously managed tmcode-* container for this project
     let managed_name = container_name_for_project(&project_id);
     if managed_name != container_name {
-        let _ = Command::new("docker")
+        let _ = docker_cmd()
             .args(["rm", "-f", &managed_name])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

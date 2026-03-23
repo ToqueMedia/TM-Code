@@ -132,6 +132,7 @@ export const useProjectStore = create<ProjectStore>()(
           }
           const layout = useLayoutStore.getState();
           layout.clearPreviewServer();
+          layout.clearDevServerLogs();
           if (layout.viewMode === 'preview' || layout.viewMode === 'generating') {
             layout.setViewMode('chat');
           }
@@ -169,10 +170,13 @@ export const useProjectStore = create<ProjectStore>()(
           // Start managing window title
           windowTitleManager.startManaging();
 
-          // Initialize Container Code — run project inside Docker
-          useContainerStore.getState().initContainer(projectInfo.id, path).catch(err => {
+          // Initialize Container Code — run project inside Docker.
+          // MUST await so container is ready before dev server or terminal commands run.
+          try {
+            await useContainerStore.getState().initContainer(projectInfo.id, path);
+          } catch (err) {
             logger.warn('project', 'Container Code unavailable — running on host:', err);
-          });
+          }
 
           // Load project state if exists
           try {

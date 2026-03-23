@@ -10,6 +10,8 @@ import { devServerManager } from '../devServerManager'
 import TypeScriptLspService from '../typescriptLspService'
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
+import type { AgentCallbacks } from './agentService'
+import { useChatStore } from '../../stores/chatStore'
 
 // === Types ===
 
@@ -65,7 +67,7 @@ class ToolExecutor {
     this.currentToolCallId = id
   }
 
-  async execute(toolName: string, input: Record<string, unknown>): Promise<string> {
+  async execute(toolName: string, input: Record<string, unknown>, toolCallId?: string): Promise<string> {
     const tool = this.tools.get(toolName)
     if (!tool) {
       throw new Error(`Unknown tool: ${toolName}`)
@@ -79,8 +81,18 @@ class ToolExecutor {
       return 'Permission denied by user. The file may contain secrets — the developer chose not to share it.'
     }
 
-    const result = await tool.execute(input)
-    return this.truncateResult(result)
+    // Inject toolCallId for tools that need per-call context (parallel sub-agents)
+    const execInput = toolCallId ? { ...input, _toolCallId: toolCallId } : input
+
+    // Set tool call ID context just before execution (after async permission check)
+    // Tools capture this synchronously at the start of their execute function.
+    if (toolCallId) this.currentToolCallId = toolCallId
+    try {
+      const result = await tool.execute(execInput)
+      return this.truncateResult(result)
+    } finally {
+      if (toolCallId) this.currentToolCallId = null
+    }
   }
 
   getToolDefinitions(): OpenAIToolDefinition[] {
@@ -471,14 +483,15 @@ class ToolExecutor {
       execute: async (input) => {
         this.validatePathWithinProject(input.path as string)
 
-        // Capture checkpoint before deleting
-        if (this.currentToolCallId) {
+        // Capture checkpoint before deleting (capture ID locally for parallel safety)
+        const tcId = this.currentToolCallId
+        if (tcId) {
           try {
             const content = await invoke<string>('read_file', { path: input.path as string })
             await CheckpointService.getInstance().captureBeforeDelete(
               input.path as string,
               content,
-              this.currentToolCallId,
+              tcId,
             )
             useCheckpointStore.getState().syncFromService()
           } catch {
@@ -515,11 +528,11 @@ class ToolExecutor {
           throw new Error('Access denied: new name cannot contain path separators or "..".')
         }
 
-        // Capture checkpoint before renaming
-        if (this.currentToolCallId) {
+        // Capture checkpoint before renaming (capture ID locally for parallel safety)
+        const tcId = this.currentToolCallId
+        if (tcId) {
           try {
             const content = await invoke<string>('read_file', { path: input.oldPath as string })
-            // Build the new path: same parent directory + new name
             const oldPathStr = input.oldPath as string
             const parentDir = oldPathStr.substring(0, oldPathStr.lastIndexOf('/'))
             const newPath = `${parentDir}/${newName}`
@@ -527,7 +540,7 @@ class ToolExecutor {
               oldPathStr,
               newPath,
               content,
-              this.currentToolCallId,
+              tcId,
             )
             useCheckpointStore.getState().syncFromService()
           } catch {
@@ -766,7 +779,7 @@ class ToolExecutor {
           if (url) {
             return `Dev server started and running at ${url}. Preview panel opened automatically.`
           }
-          return `Dev server starting with command: ${command}. The preview panel will open automatically when the server is ready (port 5174).`
+          return `Dev server starting with command: ${command}. The preview panel will open automatically when the server is ready (port 7773).`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`
@@ -811,6 +824,103 @@ class ToolExecutor {
           const msg = error instanceof Error ? error.message : String(error)
           return `Could not get diagnostics: ${msg}. Try running "npx tsc --noEmit" via execute_command as a fallback.`
         }
+      }
+    })
+
+    // === research (sub-agent) ===
+    this.tools.set('research', {
+      definition: {
+        name: 'research',
+        description: 'Delegate a research question to a sub-agent that can read files, search, and browse the project. Use when you need to investigate multiple files or patterns before deciding what to do. The sub-agent returns a text summary. It cannot modify files.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: 'The research question to investigate' },
+            context: { type: 'string', description: 'Optional context to help the sub-agent (e.g., relevant file paths, what you already know)' }
+          },
+          required: ['question']
+        }
+      },
+      execute: async (input) => {
+        const question = input.question as string
+        const context = (input.context as string) || ''
+
+        // Lazy import to avoid circular dependency
+        const { default: AgentService } = await import('./agentService')
+
+        // Get read-only tool definitions (subset)
+        const readOnlyToolNames = new Set(['read_file', 'list_directory', 'search_files', 'glob', 'get_diagnostics'])
+        const readOnlyTools = this.getToolDefinitions().filter(t =>
+          readOnlyToolNames.has(t.function.name)
+        )
+
+        // Get the main agent's abort controller so sub-agent stops when parent stops
+        const mainAgent = AgentService.getInstance()
+        const subAgent = AgentService.createLightweight({
+          tools: readOnlyTools,
+          maxTurns: 5,
+          readOnly: true,
+          abortController: mainAgent.getAbortController() || undefined,
+        })
+
+        const projectRoot = this.getProjectRoot()
+        const systemPrompt = `You are a research assistant inside TM Code. Answer the question using tools to read files and search the project. DO NOT modify any files. Be thorough but concise.
+
+Project root: ${projectRoot}`
+
+        subAgent.setSystemPrompt(systemPrompt)
+
+        const prompt = context
+          ? `${question}\n\nContext: ${context}`
+          : question
+
+        let result = ''
+        let totalTokens = 0
+        let toolsCalled = 0
+        // Use injected ID for parallel execution, fall back to singleton for sequential
+        const toolCallId = (input._toolCallId as string) || this.currentToolCallId
+
+        const updateProgress = (status: string) => {
+          if (toolCallId) {
+            const tokenStr = totalTokens > 0 ? ` | ${Math.round(totalTokens / 1000)}K tokens` : ''
+            useChatStore.getState().updateToolCallProgress(toolCallId, `${status}${tokenStr}`)
+          }
+        }
+
+        updateProgress('Starting research...')
+
+        await subAgent.runAgentLoop(prompt, [], {
+          onTextDelta: (delta) => { result += delta },
+          onReasoningDelta: () => {
+            updateProgress('Thinking...')
+          },
+          onToolCallPending: (_toolId, toolName) => {
+            toolsCalled++
+            updateProgress(`Using ${toolName}...`)
+          },
+          onToolCallStart: (_toolId, toolName, args) => {
+            const target = (args.path as string)?.split('/').pop()
+              || (args.query as string)
+              || (args.pattern as string)
+              || ''
+            updateProgress(`${toolName}: ${target}`)
+          },
+          onToolResult: () => {},
+          onTurnComplete: () => {},
+          onDone: (finalText) => {
+            if (finalText && !result) result = finalText
+            updateProgress(`Done — ${toolsCalled} tool calls`)
+          },
+          onError: (error) => {
+            result = `Research error: ${error.message}`
+            updateProgress('Error')
+          },
+          onUsageUpdate: (inputTokens, outputTokens) => {
+            totalTokens += inputTokens + outputTokens
+          },
+        } satisfies AgentCallbacks)
+
+        return result || 'No results found.'
       }
     })
   }

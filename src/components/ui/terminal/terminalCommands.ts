@@ -11,7 +11,7 @@
 import { Terminal as XTerm } from '@xterm/xterm';
 import TerminalService from '@/services/terminalService';
 import { invoke } from '@tauri-apps/api/core';
-import { formatCommandOutput } from './terminalFormatting';
+import { listen } from '@tauri-apps/api/event';
 import {
   isProjectIsolated,
   isContainerActive,
@@ -61,24 +61,20 @@ export async function getDisplayPath(fullPath: string): Promise<string> {
 
 /**
  * Clamp a resolved path so it cannot escape the project root.
- *
- * Uses component-aware check: projectPath must match as a complete
- * directory prefix, not just a string prefix.
- * e.g. `/Users/me/project-evil` does NOT match `/Users/me/project`.
  */
 function clampToProject(resolvedPath: string, projectPath: string): string {
   if (resolvedPath === projectPath) return resolvedPath;
-  // Ensure component boundary: path must continue with '/'
   const prefix = projectPath.endsWith('/') ? projectPath : projectPath + '/';
   return resolvedPath.startsWith(prefix) ? resolvedPath : projectPath;
 }
 
+/** Safe terminal write — silently ignores disposed terminals. */
+function safeTermWrite(terminal: XTerm, data: string) {
+  try { terminal.write(data) } catch { /* terminal disposed */ }
+}
+
 /**
  * Write the shell prompt to the terminal.
- *
- * - Docker mode:    `[container] terminal:/src$`
- * - App-level mode: `terminal:/src$` (virtual path, no special badge)
- * - Normal:         `terminal:~/project/src$`
  */
 export async function displayPrompt(
   terminal: XTerm,
@@ -89,11 +85,11 @@ export async function displayPrompt(
   const name = session?.name || 'terminal';
 
   if (isContainerActive()) {
-    terminal.write(
+    safeTermWrite(terminal,
       `\x1b[35m\x1b[1m[container]\x1b[0m \x1b[32m\x1b[1m${name}\x1b[0m:\x1b[34m${displayPath}\x1b[0m$ `
     );
   } else {
-    terminal.write(
+    safeTermWrite(terminal,
       `\x1b[32m\x1b[1m${name}\x1b[0m:\x1b[34m${displayPath}\x1b[0m$ `
     );
   }
@@ -101,11 +97,6 @@ export async function displayPrompt(
 
 /**
  * Handle the `cd` command.
- *
- * When isolated (Docker OR app-level):
- *   - `cd /` and `cd ~` go to project root
- *   - `cd ..` above project root is clamped
- *   - absolute paths are relative to project root
  */
 export async function handleChangeDirectory(
   targetPath: string,
@@ -120,7 +111,6 @@ export async function handleChangeDirectory(
     let resolvedPath = targetPath;
 
     if (isolated && projectPath) {
-      // Isolated mode — all paths relative to project root
       if (targetPath === '~' || targetPath === '' || targetPath === '/') {
         resolvedPath = projectPath;
       } else if (targetPath === '..') {
@@ -135,13 +125,11 @@ export async function handleChangeDirectory(
       } else if (targetPath === '.') {
         resolvedPath = session.cwd;
       } else if (targetPath.startsWith('/')) {
-        // Absolute virtual path → map to host path
         resolvedPath = projectPath + targetPath;
       } else {
         resolvedPath = session.cwd + '/' + targetPath;
       }
     } else {
-      // Normal mode
       if (targetPath === '~' || targetPath === '') {
         resolvedPath = (await invoke('get_home_directory')) as string;
       } else if (targetPath === '..') {
@@ -159,34 +147,30 @@ export async function handleChangeDirectory(
       }
     }
 
-    // Normalize
     resolvedPath = resolvedPath.replace(/\/+/g, '/');
     if (resolvedPath.length > 1 && resolvedPath.endsWith('/')) {
       resolvedPath = resolvedPath.slice(0, -1);
     }
 
-    // Verify directory exists (backend handles routing transparently)
     const result = await TerminalService.shared.executeCommand('ls', resolvedPath);
 
     if (result.success) {
       updateSessionCwd(session.id, resolvedPath);
       await displayPrompt(terminal, { ...session, cwd: resolvedPath });
     } else {
-      terminal.write(`\x1b[31mcd: no such file or directory: ${targetPath}\x1b[0m\r\n`);
+      safeTermWrite(terminal, `\x1b[31mcd: no such file or directory: ${targetPath}\x1b[0m\r\n`);
       await displayPrompt(terminal, session);
     }
   } catch (error) {
-    terminal.write(`\x1b[31mcd: ${error}\x1b[0m\r\n`);
+    safeTermWrite(terminal, `\x1b[31mcd: ${error}\x1b[0m\r\n`);
     await displayPrompt(terminal, session);
   }
 }
 
 /**
- * Execute a command in the terminal: dispatches built-in commands
- * or delegates to the TerminalService for external execution.
- *
- * External commands are transparently routed by the Rust backend:
- *   Docker → docker exec, App-level → host with clamped cwd.
+ * Execute a command with real-time streaming output.
+ * Uses `run_streaming_command` which spawns the process and streams
+ * stdout/stderr via Tauri events, giving immediate feedback.
  */
 export async function executeCommand(
   command: string,
@@ -194,14 +178,14 @@ export async function executeCommand(
   session: TerminalSessionInfo,
   updateSessionCwd: (id: string, cwd: string) => void,
   commandLockRef: React.MutableRefObject<boolean>,
-  xtermRef: React.MutableRefObject<XTerm | null>
+  _xtermRef: React.MutableRefObject<XTerm | null>
 ): Promise<void> {
   if (commandLockRef.current || !session) return;
 
   commandLockRef.current = true;
 
   try {
-    terminal.write('\r\n');
+    safeTermWrite(terminal, '\r\n');
 
     // Built-in: clear
     if (command === 'clear') {
@@ -224,14 +208,14 @@ export async function executeCommand(
           const homeDir = (await invoke('get_home_directory')) as string;
           await handleChangeDirectory(homeDir, terminal, session, updateSessionCwd);
         } catch {
-          terminal.write(`\x1b[31mError: Could not get home directory\x1b[0m\r\n`);
+          safeTermWrite(terminal, `\x1b[31mError: Could not get home directory\x1b[0m\r\n`);
           await displayPrompt(terminal, session);
         }
       }
       return;
     }
 
-    // Built-in: pwd (virtual path when isolated)
+    // Built-in: pwd
     if (command === 'pwd') {
       const projectPath = getContainerProjectPath();
       if (isProjectIsolated() && projectPath) {
@@ -244,31 +228,114 @@ export async function executeCommand(
             virtualPath = '/' + session.cwd.slice(prefix.length);
           }
         }
-        terminal.write(`${virtualPath}\r\n`);
+        safeTermWrite(terminal, `${virtualPath}\r\n`);
       } else {
-        terminal.write(`${session.cwd}\r\n`);
+        safeTermWrite(terminal, `${session.cwd}\r\n`);
       }
       await displayPrompt(terminal, session);
       return;
     }
 
-    // External command — backend routes transparently
-    const result = await TerminalService.shared.executeCommand(command, session.cwd);
+    // External command — stream output in real-time
+    cancelledSessions.delete(session.id)
+    await runStreamingCommand(command, session.cwd, terminal, session.id);
 
-    if (result.success && result.stdout) {
-      const terminalCols = xtermRef.current?.cols || 80;
-      const formattedOutput = formatCommandOutput(command, result.stdout, terminalCols);
-      terminal.write(formattedOutput);
-    } else if (result.stderr) {
-      const formattedError = formatCommandOutput(command, result.stderr);
-      terminal.write(`\x1b[31m${formattedError}\x1b[0m`);
+    // Don't write prompt if Ctrl+C already handled it
+    if (!cancelledSessions.has(session.id)) {
+      safeTermWrite(terminal, '\r\n');
+      await displayPrompt(terminal, session);
     }
-
-    terminal.write('\r\n');
-    await displayPrompt(terminal, session);
+    cancelledSessions.delete(session.id)
   } catch (error) {
-    terminal.write(`\x1b[31mError: ${error}\x1b[0m\r\n$ `);
+    if (!cancelledSessions.has(session.id)) {
+      safeTermWrite(terminal, `\x1b[31mError: ${error}\x1b[0m\r\n`);
+      await displayPrompt(terminal, session);
+    }
+    cancelledSessions.delete(session.id)
   } finally {
     commandLockRef.current = false;
+  }
+}
+
+/** Per-session PID tracking for streaming commands — used by Ctrl+C to kill the right process. */
+const activeStreamingPids = new Map<string, number>()
+/** Per-session cancellation flag — prevents double prompt after Ctrl+C. */
+const cancelledSessions = new Set<string>()
+
+/**
+ * Kill the active streaming command (called by Ctrl+C handler).
+ */
+export async function killActiveStreamingCommand(sessionId?: string): Promise<void> {
+  // Find the PID for this session, or fall back to any active PID
+  let pid: number | undefined
+  if (sessionId && activeStreamingPids.has(sessionId)) {
+    pid = activeStreamingPids.get(sessionId)
+    activeStreamingPids.delete(sessionId)
+  } else if (activeStreamingPids.size > 0) {
+    // Fallback: kill the first (only matters for single-tab usage)
+    const [key, val] = activeStreamingPids.entries().next().value!
+    pid = val
+    activeStreamingPids.delete(key)
+  }
+
+  if (pid) {
+    if (sessionId) cancelledSessions.add(sessionId)
+    try {
+      await invoke('execute_command', {
+        command: `kill -TERM -- -${pid} 2>/dev/null; kill -TERM ${pid} 2>/dev/null`,
+        cwd: '/',
+        timeoutSecs: 3,
+      })
+    } catch { /* process may have already exited */ }
+  }
+}
+
+/**
+ * Spawn a command and stream its output line-by-line to the terminal.
+ * Returns a promise that resolves when the command exits.
+ */
+async function runStreamingCommand(
+  command: string,
+  cwd: string,
+  terminal: XTerm,
+  sessionId?: string
+): Promise<void> {
+  let pid = 0
+  let done!: () => void
+  const donePromise = new Promise<void>(resolve => { done = resolve })
+
+  // Set up listeners BEFORE spawning
+  const unOutput = await listen<{ pid: number; stream: string; data: string }>(
+    'cmd-output',
+    (event) => {
+      if (sessionId && cancelledSessions.has(sessionId)) return
+      if (pid !== 0 && event.payload.pid !== pid) return
+      safeTermWrite(terminal, `${event.payload.data}\r\n`)
+    }
+  )
+
+  const unExit = await listen<{ pid: number; code: number }>(
+    'cmd-exit',
+    (event) => {
+      if (pid !== 0 && event.payload.pid !== pid) return
+      // Don't show exit code after Ctrl+C (typically 143/SIGTERM) — user already saw ^C
+      if (event.payload.code !== 0 && !(sessionId && cancelledSessions.has(sessionId))) {
+        safeTermWrite(terminal, `\x1b[31mProcess exited with code ${event.payload.code}\x1b[0m\r\n`)
+      }
+      done()
+    }
+  )
+
+  try {
+    // Spawn the process — events will start flowing
+    pid = await invoke<number>('run_streaming_command', { command, cwd })
+    if (sessionId) activeStreamingPids.set(sessionId, pid)
+
+    // Wait for the command to finish
+    await donePromise
+  } finally {
+    if (sessionId) activeStreamingPids.delete(sessionId)
+    unOutput()
+    unExit()
   }
 }

@@ -3,6 +3,7 @@ import { Box, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import PromptTextarea from './prompt/PromptTextarea'
 import PromptActions from './prompt/PromptActions'
+import SlashCommandMenu from './chat/SlashCommandMenu'
 import { usePromptBar } from './prompt/usePromptBar'
 
 function PromptBar() {
@@ -17,9 +18,13 @@ function PromptBar() {
     handleSend,
     handleStop,
     handleKeyDown,
+    handleBlur,
     toggleEditor,
     togglePreview,
-    closePreview,
+    showCommandMenu,
+    filteredCommands,
+    selectedCommandIndex,
+    handleCommandSelect,
   } = usePromptBar()
 
   return (
@@ -28,8 +33,18 @@ function PromptBar() {
       py={3}
       bg={tokens.colors.bg.mainLayout}
       flexShrink={0}
+      position="relative"
     >
-      <Box maxW="900px" mx="auto">
+      <Box maxW="900px" mx="auto" position="relative">
+        {/* Slash command autocomplete menu */}
+        {showCommandMenu && (
+          <SlashCommandMenu
+            commands={filteredCommands}
+            selectedIndex={selectedCommandIndex}
+            onSelect={handleCommandSelect}
+          />
+        )}
+
         {/* Main input container */}
         <Box
           bg={tokens.colors.bg.panel}
@@ -46,6 +61,7 @@ function PromptBar() {
             value={input}
             onChange={setInput}
             onKeyDown={handleKeyDown}
+            onBlur={handleBlur}
             disabled={isDisabled}
           />
 
@@ -56,7 +72,6 @@ function PromptBar() {
             hasPreview={hasPreview}
             onToggleEditor={toggleEditor}
             onTogglePreview={togglePreview}
-            onClosePreview={closePreview}
             onSend={handleSend}
             onStop={handleStop}
           />

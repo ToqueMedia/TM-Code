@@ -31,6 +31,14 @@ export interface ToolCallDisplay {
   isNewFile?: boolean
   diffStatus?: 'pending' | 'approved' | 'denied'
   diffResultId?: string
+  /** Live progress text shown while tool is running (e.g., sub-agent status). */
+  progressText?: string
+}
+
+export interface ChatMessageCard {
+  type: 'plan_approval' | 'todo_list'
+  projectPath: string
+  status: 'pending' | 'approved' | 'changes_requested' | 'rejected'
 }
 
 export interface ChatMessage {
@@ -50,6 +58,8 @@ export interface ChatMessage {
   reasoningStartedAt?: number
   /** Duration in ms of the reasoning phase */
   reasoningDurationMs?: number
+  /** Inline card (plan approval, todo list) */
+  card?: ChatMessageCard
 }
 
 export interface CodeBlock {

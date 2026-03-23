@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, State};
+use super::container::{docker_cmd, recover_colima};
 
 use super::container::{clamp_to_project, host_to_container_path, ActiveProjectState, WORKSPACE_PATH};
 
@@ -59,9 +60,35 @@ fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
     cmd
 }
 
+/// Ensure a Docker container is running. If Docker is unreachable
+/// (Colima stale after sleep/wake), triggers automatic recovery.
+fn ensure_container_running(container_name: &str) {
+    let inspect = docker_cmd()
+        .args(["inspect", "-f", "{{.State.Running}}", container_name])
+        .output();
+
+    match inspect {
+        Ok(out) if out.status.success() => {
+            let running = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if running != "true" {
+                let _ = docker_cmd().args(["start", container_name]).output();
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        _ => {
+            // Docker unreachable — try Colima recovery
+            if recover_colima() {
+                // Docker recovered — try to start the container
+                let _ = docker_cmd().args(["start", container_name]).output();
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    }
+}
+
 /// Build a `docker exec` command that runs inside a container.
 fn build_container_command(command: &str, workdir: &str, container_name: &str) -> Command {
-    let mut cmd = Command::new("docker");
+    let mut cmd = docker_cmd();
     cmd.args(["exec", "-w", workdir, container_name, "sh", "-c", command])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -249,7 +276,8 @@ pub async fn execute_command(
 
     if let Some(ref ap) = project {
         if let Some(ref container_name) = ap.container_name {
-            // ── Docker mode: route through container ─────────────────
+            // ── Docker mode: ensure container is running, then route through it
+            ensure_container_running(container_name);
             let workdir = match &cwd {
                 Some(dir) => host_to_container_path(dir, &ap.project_path),
                 None => WORKSPACE_PATH.to_string(),
@@ -286,6 +314,93 @@ struct DevServerOutput {
     data: String,
 }
 
+/// Execute a command with streamed output. Unlike `execute_command` which blocks
+/// until the command finishes, this spawns the process and streams stdout/stderr
+/// line by line via `cmd-output` events. Emits `cmd-exit` with exit code when done.
+/// Used by the terminal for commands like `npm install` that produce progressive output.
+#[tauri::command]
+pub async fn run_streaming_command(
+    app: tauri::AppHandle,
+    command: String,
+    cwd: String,
+    active_project: State<'_, ActiveProjectState>,
+) -> Result<u32, String> {
+    if command.trim().is_empty() {
+        return Err("Empty command".to_string());
+    }
+
+    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+
+    let mut cmd = if let Some(ref ap) = project {
+        if let Some(ref container_name) = ap.container_name {
+            let workdir = host_to_container_path(&cwd, &ap.project_path);
+            build_container_command(&command, &workdir, container_name)
+        } else {
+            let working_dir = PathBuf::from(clamp_to_project(&cwd, &ap.project_path));
+            build_host_command(&command, &working_dir)
+        }
+    } else {
+        build_host_command(&command, &PathBuf::from(&cwd))
+    };
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start command: {}", e))?;
+
+    let pid = child.id();
+
+    // Stream stdout
+    if let Some(stdout) = child.stdout.take() {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stdout);
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        let _ = app_clone.emit("cmd-output", DevServerOutput {
+                            pid, stream: "stdout".into(), data: line,
+                        });
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    // Stream stderr
+    if let Some(stderr) = child.stderr.take() {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stderr);
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        let _ = app_clone.emit("cmd-output", DevServerOutput {
+                            pid, stream: "stderr".into(), data: line,
+                        });
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    // Wait for process exit and emit exit code
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        let code = child.wait()
+            .map(|s| s.code().unwrap_or(-1))
+            .unwrap_or(-1);
+        let _ = app_clone.emit("cmd-exit", serde_json::json!({ "pid": pid, "code": code }));
+    });
+
+    Ok(pid)
+}
+
 /// Spawn a long-running dev server process and stream its output back to the
 /// frontend via Tauri events (`dev-server-output` and `dev-server-exit`).
 ///
@@ -308,9 +423,17 @@ pub async fn start_dev_server(
 
     let mut cmd = if let Some(ref ap) = project {
         if let Some(ref container_name) = ap.container_name {
-            // Docker mode
+            // Docker mode — ensure container is running first
+            ensure_container_running(container_name);
+
             let workdir = host_to_container_path(&cwd, &ap.project_path);
-            let mut c = Command::new("docker");
+            let mut c = docker_cmd();
+            // Kill any orphaned dev server on port 7773 inside the container,
+            // then run the actual command. Use fuser (busybox-compatible) instead of lsof.
+            let wrapped = format!(
+                "fuser -k 7773/tcp 2>/dev/null; {}",
+                command
+            );
             c.args([
                 "exec",
                 "-w",
@@ -320,21 +443,23 @@ pub async fn start_dev_server(
                 "-e",
                 "NO_COLOR=1",
                 "-e",
+                "PORT=7773",
+                "-e",
                 "BROWSER=none",
                 container_name,
                 "sh",
                 "-c",
-                &command,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+                &wrapped,
+            ]);
 
+            // MUST set own process group so kill_process doesn't kill the IDE
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
                 c.process_group(0);
             }
 
+            c.stdout(Stdio::piped()).stderr(Stdio::piped());
             c
         } else {
             // App-level isolation: clamp cwd
@@ -351,7 +476,7 @@ pub async fn start_dev_server(
                 .current_dir(&clamped)
                 .env("FORCE_COLOR", "0")
                 .env("NO_COLOR", "1")
-                .env("PORT", "5174")
+                .env("PORT", "7773")
                 .env("BROWSER", "none")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -378,7 +503,7 @@ pub async fn start_dev_server(
             .current_dir(&cwd)
             .env("FORCE_COLOR", "0")
             .env("NO_COLOR", "1")
-            .env("PORT", "5174")
+            .env("PORT", "7773")
             .env("BROWSER", "none")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -398,50 +523,96 @@ pub async fn start_dev_server(
 
     let pid = child.id();
 
-    // Stream stdout to frontend
+    // Stream stdout to frontend (resilient to non-UTF-8 lines)
     if let Some(stdout) = child.stdout.take() {
         let app_clone = app.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                let _ = app_clone.emit(
-                    "dev-server-output",
-                    DevServerOutput {
-                        pid,
-                        stream: "stdout".into(),
-                        data: line,
-                    },
-                );
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        let _ = app_clone.emit(
+                            "dev-server-output",
+                            DevServerOutput {
+                                pid,
+                                stream: "stdout".into(),
+                                data: line,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::InvalidData {
+                            // Non-UTF-8 line — skip but don't stop reading
+                            continue;
+                        }
+                        // Real IO error (pipe closed, process exited) — stop
+                        break;
+                    }
+                }
             }
-            let _ = app_clone.emit("dev-server-exit", pid);
+            // Don't emit exit here — let the wait thread handle it
         });
     }
 
-    // Stream stderr to frontend
+    // Stream stderr to frontend (resilient to non-UTF-8 lines)
     if let Some(stderr) = child.stderr.take() {
         let app_clone = app.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                let _ = app_clone.emit(
-                    "dev-server-output",
-                    DevServerOutput {
-                        pid,
-                        stream: "stderr".into(),
-                        data: line,
-                    },
-                );
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        let _ = app_clone.emit(
+                            "dev-server-output",
+                            DevServerOutput {
+                                pid,
+                                stream: "stderr".into(),
+                                data: line,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::InvalidData {
+                            continue;
+                        }
+                        break;
+                    }
+                }
             }
         });
     }
 
+    // Wait for process exit in a dedicated thread — only source of dev-server-exit event
     {
+        // Take ownership of child for the wait thread
+        let app_clone = app.clone();
         let mut map = process_map
             .lock()
             .map_err(|_| "Failed to lock process map")?;
+        // We need to store the child in the map for kill_process, but also wait on it.
+        // Store a placeholder and spawn the wait thread with the actual child.
+        // Actually, we insert the child into the process map and wait on PID via kill -0 polling.
         map.insert(pid, child);
+
+        // Spawn a thread that waits for the process to actually exit
+        std::thread::spawn(move || {
+            loop {
+                // Check if process is still alive using kill -0
+                let alive = Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+                if !alive {
+                    let _ = app_clone.emit("dev-server-exit", pid);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        });
     }
 
     Ok(pid)
@@ -463,7 +634,7 @@ pub async fn start_interactive_shell(
                 None => WORKSPACE_PATH.to_string(),
             };
 
-            let has_bash = Command::new("docker")
+            let has_bash = docker_cmd()
                 .args(["exec", container_name, "which", "bash"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -473,7 +644,7 @@ pub async fn start_interactive_shell(
 
             let shell = if has_bash { "bash" } else { "sh" };
 
-            let child = Command::new("docker")
+            let child = docker_cmd()
                 .args([
                     "exec", "-i", "-w", &workdir, container_name, shell,
                 ])
@@ -571,6 +742,43 @@ pub async fn start_interactive_shell(
     })
 }
 
+/// Check if a URL is reachable (TCP connection accepted + HTTP response).
+/// Used to poll dev server readiness from the Rust side, bypassing WebView restrictions.
+#[tauri::command]
+pub async fn check_server_health(url: String) -> Result<bool, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Any HTTP response (even 404/405) means the server is accepting connections
+    match client.get(&url).send().await {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Kill any process listening on the given port.
+/// Used to free the dev server port before starting a new server.
+#[tauri::command]
+pub async fn kill_port(port: u16) -> Result<bool, String> {
+    if cfg!(unix) {
+        let cmd = format!("lsof -ti:{} | xargs kill -9 2>/dev/null", port);
+        let _ = Command::new("sh")
+            .args(["-c", &cmd])
+            .output();
+    } else {
+        let cmd = format!(
+            "for /f \"tokens=5\" %a in ('netstat -aon ^| findstr :{} ^| findstr LISTENING') do taskkill /F /PID %a",
+            port
+        );
+        let _ = Command::new("cmd")
+            .args(["/C", &cmd])
+            .output();
+    }
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Result<bool, String> {
     {
@@ -610,9 +818,8 @@ pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Resul
                 .output();
         }
 
-        let _ = Command::new("sh")
-            .args(["-c", "lsof -ti:5174 | xargs -r kill -9 2>/dev/null"])
-            .output();
+        // NOTE: removed port-based kill (lsof -ti:7773 | kill) — it was killing
+        // Colima's SSH port forwarding process, crashing the Docker VM.
     } else {
         let _ = Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
@@ -689,7 +896,7 @@ pub async fn command_exists(
     // Docker mode: check inside container (use which as separate arg, no shell interpolation)
     if let Some(ref ap) = project {
         if let Some(ref container_name) = ap.container_name {
-            let output = Command::new("docker")
+            let output = docker_cmd()
                 .args(["exec", container_name, "which", &command])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -743,7 +950,7 @@ pub async fn get_environment_variables(
     // Docker mode: read env from container
     if let Some(ref ap) = project {
         if let Some(ref container_name) = ap.container_name {
-            let output = Command::new("docker")
+            let output = docker_cmd()
                 .args(["exec", container_name, "env"])
                 .output()
                 .map_err(|e| format!("Failed to get container env: {}", e))?;
@@ -787,62 +994,120 @@ pub async fn get_completions(
 ) -> Result<Vec<String>, String> {
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
-    // Docker mode: list files inside container
+    // Resolve working directory
+    let working_dir = match (&cwd, &project) {
+        (Some(dir), Some(ap)) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+        (Some(dir), None) => PathBuf::from(dir),
+        (None, Some(ap)) => PathBuf::from(&ap.project_path),
+        (None, None) => {
+            env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?
+        }
+    };
+
+    // Docker mode: use compgen inside container
     if let Some(ref ap) = project {
         if let Some(ref container_name) = ap.container_name {
             let workdir = match &cwd {
                 Some(dir) => host_to_container_path(dir, &ap.project_path),
                 None => WORKSPACE_PATH.to_string(),
             };
-            let output = Command::new("docker")
-                .args([
-                    "exec",
-                    "-w",
-                    &workdir,
-                    container_name,
-                    "ls",
-                    "-1A",
-                ])
+            // Use bash compgen for smart completion inside container
+            let script = format!(
+                "cd '{}' 2>/dev/null; compgen -f -- '{}' 2>/dev/null | head -20",
+                workdir, partial
+            );
+            let output = docker_cmd()
+                .args(["exec", "-w", &workdir, container_name, "bash", "-c", &script])
                 .output()
-                .map_err(|e| format!("Failed to list files in container: {}", e))?;
+                .map_err(|e| format!("Docker completion failed: {}", e))?;
 
             if output.status.success() {
                 let mut completions: Vec<String> = String::from_utf8_lossy(&output.stdout)
                     .lines()
-                    .filter(|name| name.starts_with(&partial))
+                    .filter(|l| !l.is_empty())
                     .map(|s| s.to_string())
                     .collect();
-                completions.truncate(20);
                 completions.sort();
                 return Ok(completions);
             }
         }
     }
 
-    // Host mode: read filesystem (clamp cwd if isolated)
-    let working_dir = match (&cwd, &project) {
-        (Some(dir), Some(ap)) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
-        (Some(dir), None) => PathBuf::from(dir),
-        (None, Some(ap)) => PathBuf::from(&ap.project_path),
-        (None, None) => {
-            env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?
-        }
+    // Host mode: resolve path-aware completion
+    // The partial may be a bare name ("src") or a path ("src/comp")
+    let partial_path = PathBuf::from(&partial);
+    let (search_dir, prefix) = if partial.contains('/') {
+        // Path completion: "src/comp" → search in "src/", filter by "comp"
+        let parent = partial_path.parent().unwrap_or(std::path::Path::new(""));
+        let file_prefix = partial_path.file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+
+        let resolved = if parent.is_absolute() {
+            parent.to_path_buf()
+        } else {
+            working_dir.join(parent)
+        };
+        (resolved, file_prefix.to_string())
+    } else {
+        // Bare name: search in cwd
+        (working_dir.clone(), partial.clone())
     };
 
     let mut completions = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(&working_dir) {
+    if let Ok(entries) = std::fs::read_dir(&search_dir) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with(&partial) {
-                    completions.push(name.to_string());
+                // Skip hidden files unless the user is explicitly typing a dot
+                if name.starts_with('.') && !prefix.starts_with('.') {
+                    continue;
                 }
+                if name.starts_with(&prefix) {
+                    // Add trailing / for directories
+                    let display = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        if partial.contains('/') {
+                            // Reconstruct relative path: "src/" + "components/"
+                            let parent_str = partial_path.parent()
+                                .and_then(|p| p.to_str())
+                                .unwrap_or("");
+                            format!("{}/{}/", parent_str, name)
+                        } else {
+                            format!("{}/", name)
+                        }
+                    } else if partial.contains('/') {
+                        let parent_str = partial_path.parent()
+                            .and_then(|p| p.to_str())
+                            .unwrap_or("");
+                        format!("{}/{}", parent_str, name)
+                    } else {
+                        name.to_string()
+                    };
+                    completions.push(display);
+                }
+            }
+        }
+    }
+
+    // If no file matches and partial looks like a command (first word), try command completion
+    if completions.is_empty() && !partial.contains('/') {
+        if let Ok(output) = Command::new("bash")
+            .args(["-c", &format!("compgen -c -- '{}' 2>/dev/null | head -20", partial)])
+            .output()
+        {
+            if output.status.success() {
+                completions = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
             }
         }
     }
 
     completions.truncate(20);
     completions.sort();
+    completions.dedup();
 
     Ok(completions)
 }

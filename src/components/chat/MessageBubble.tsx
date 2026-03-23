@@ -9,6 +9,8 @@ import { useChatStore } from '../../stores/chatStore'
 import CodeBlockAction from './CodeBlockAction'
 import ToolCallDisplayComponent from './ToolCallDisplay'
 import ReasoningBlock from './ReasoningBlock'
+import PlanApprovalCard from './PlanApprovalCard'
+import TodoListCard from './TodoListCard'
 import { tokens } from '@/theme/tokens'
 
 interface MessageBubbleProps {
@@ -218,8 +220,18 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     navigator.clipboard.writeText(code).catch(() => {})
   }, [])
 
-  // System messages: compact status line
+  // System messages: compact status line or inline card
   if (isSystem) {
+    // Render inline cards
+    if (message.card) {
+      if (message.card.type === 'plan_approval') {
+        return <PlanApprovalCard messageId={message.id} card={message.card} />
+      }
+      if (message.card.type === 'todo_list') {
+        return <TodoListCard card={message.card} />
+      }
+    }
+
     return (
       <Flex
         py={1.5}

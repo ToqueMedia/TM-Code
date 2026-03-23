@@ -114,34 +114,31 @@ export const useContainerStore = create<ContainerState & ContainerActions>((set,
       return false;
     }
 
-    // ── Step 2: try Docker upgrade in background ─────────────────
+    // ── Step 2: try Docker upgrade — awaited so container is ready before dev server runs
     if (dockerAvailable) {
-      (async () => {
-        try {
-          // Cleanup orphans, but exclude the container for THIS project
-          const removed = await ContainerService.shared.cleanupOrphanedContainers(projectId);
-          if (removed > 0) {
-            logger.info('container', `Cleaned up ${removed} orphaned container(s)`);
-          }
-          if (isStale()) return;
-
-          const info = await ContainerService.shared.createContainer(projectId, projectPath);
-          if (isStale()) {
-            ContainerService.shared.stopContainer(projectId).catch(() => {});
-            return;
-          }
-
-          // Upgrade from app-level to Docker
-          set({
-            containerInfo: info,
-            isolationMode: 'docker',
-          });
-          logger.info('container', `Upgraded to Docker container ${info.containerName}`);
-        } catch (error) {
-          if (isStale()) return;
-          logger.warn('container', 'Docker upgrade failed, staying on app-level:', error);
+      try {
+        const removed = await ContainerService.shared.cleanupOrphanedContainers(projectId);
+        if (removed > 0) {
+          logger.info('container', `Cleaned up ${removed} orphaned container(s)`);
         }
-      })();
+        if (isStale()) return false;
+
+        const info = await ContainerService.shared.createContainer(projectId, projectPath);
+        if (isStale()) {
+          ContainerService.shared.stopContainer(projectId).catch(() => {});
+          return false;
+        }
+
+        // Upgrade from app-level to Docker
+        set({
+          containerInfo: info,
+          isolationMode: 'docker',
+        });
+        logger.info('container', `Upgraded to Docker container ${info.containerName}`);
+      } catch (error) {
+        if (isStale()) return false;
+        logger.warn('container', 'Docker upgrade failed, staying on app-level:', error);
+      }
     }
 
     return true;

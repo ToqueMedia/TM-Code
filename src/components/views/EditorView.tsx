@@ -225,20 +225,24 @@ function EditorView() {
             transition={isBottomPanelVisible ? 'none' : 'height 0.2s cubic-bezier(0.4, 0, 0.2, 1)'}
             flexShrink={0}
           >
-            {/* Drag handle */}
+            {/* Drag handle — wide hit area (12px) with thin visual line (2px) */}
             {isBottomPanelVisible && (
               <Box
                 ref={bottomHandleRef}
                 position="absolute"
-                top="0"
+                top="-6px"
                 left="0"
                 right="0"
-                height="6px"
+                height="12px"
                 cursor="row-resize"
                 zIndex={10}
-                bg="transparent"
-                _hover={{ bg: tokens.colors.accent.primaryGlow }}
+                display="flex"
+                alignItems="center"
+                justifyContent="center"
                 style={{ touchAction: 'none' }}
+                _hover={{
+                  '& > div': { bg: tokens.colors.accent.primary, opacity: 1 },
+                }}
                 onPointerDown={(e: React.PointerEvent) => {
                   e.preventDefault()
                   const handle = bottomHandleRef.current
@@ -253,12 +257,17 @@ function EditorView() {
                   body.style.cursor = 'row-resize'
                   body.style.userSelect = 'none'
 
+                  // Visual feedback during drag
+                  const line = handle.querySelector('[data-drag-line]') as HTMLElement | null
+                  if (line) { line.style.background = tokens.colors.accent.primary; line.style.opacity = '1' }
+
                   function cleanup() {
                     try { handle?.releasePointerCapture(pid) } catch {}
                     handle?.removeEventListener('pointermove', onMove)
                     handle?.removeEventListener('pointerup', onUp)
                     body.style.cursor = prevCursor
                     body.style.userSelect = prevSelect
+                    if (line) { line.style.background = ''; line.style.opacity = '' }
                     bottomDragCleanupRef.current = null
                   }
                   function onMove(pe: PointerEvent) {
@@ -277,7 +286,17 @@ function EditorView() {
                   handle.addEventListener('pointermove', onMove)
                   handle.addEventListener('pointerup', onUp)
                 }}
-              />
+              >
+                <Box
+                  data-drag-line
+                  w="100%"
+                  h="2px"
+                  bg="transparent"
+                  opacity={0}
+                  transition="background 0.15s, opacity 0.15s"
+                  borderRadius="1px"
+                />
+              </Box>
             )}
             {isBottomPanelVisible && (
               <BottomPanel

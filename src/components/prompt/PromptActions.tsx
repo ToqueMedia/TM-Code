@@ -1,6 +1,7 @@
 import { memo } from 'react'
-import { Flex, IconButton } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiMonitor, FiX } from 'react-icons/fi'
+import { Box, Flex, IconButton } from '@chakra-ui/react'
+import { FiSend, FiSquare, FiCode, FiMonitor } from 'react-icons/fi'
+import { useLayoutStore } from '../../stores/layoutStore'
 import { tokens } from '@/theme/tokens'
 
 interface PromptActionsProps {
@@ -10,7 +11,6 @@ interface PromptActionsProps {
   hasPreview: boolean
   onToggleEditor: () => void
   onTogglePreview: () => void
-  onClosePreview: () => void
   onSend: () => void
   onStop: () => void
 }
@@ -22,11 +22,11 @@ function PromptActions({
   hasPreview,
   onToggleEditor,
   onTogglePreview,
-  onClosePreview,
   onSend,
   onStop,
 }: PromptActionsProps) {
   const isPreviewActive = viewMode === 'preview'
+  const isPreviewLoading = useLayoutStore(s => s.isPreviewServerLoading)
 
   return (
     <Flex align="center" justify="space-between" px={3} py={2}>
@@ -48,7 +48,7 @@ function PromptActions({
         {hasPreview && (
           <Flex align="center" gap={0}>
             <IconButton
-              aria-label={isPreviewActive ? 'Hide preview' : 'Show preview'}
+              aria-label={isPreviewLoading ? 'Starting server...' : isPreviewActive ? 'Hide preview' : 'Show preview'}
               size="sm"
               variant="ghost"
               color={isPreviewActive ? tokens.colors.accent.primary : tokens.colors.text.secondary}
@@ -56,20 +56,24 @@ function PromptActions({
               borderRadius="8px"
               onClick={onTogglePreview}
             >
-              <FiMonitor size={15} />
-            </IconButton>
-
-            {/* Close preview (stop server / discard) */}
-            <IconButton
-              aria-label="Close preview"
-              size="sm"
-              variant="ghost"
-              color={tokens.colors.text.disabled}
-              _hover={{ bg: 'rgba(248, 81, 73, 0.1)', color: tokens.colors.accent.red }}
-              borderRadius="8px"
-              onClick={onClosePreview}
-            >
-              <FiX size={14} />
+              {isPreviewLoading ? (
+                <Box
+                  w="15px"
+                  h="15px"
+                  borderRadius="full"
+                  border="2px solid transparent"
+                  borderTopColor={tokens.colors.accent.primary}
+                  borderRightColor={tokens.colors.accent.primary}
+                  css={{
+                    animation: 'previewSpin 0.7s linear infinite',
+                    '@keyframes previewSpin': {
+                      to: { transform: 'rotate(360deg)' },
+                    },
+                  }}
+                />
+              ) : (
+                <FiMonitor size={15} />
+              )}
             </IconButton>
           </Flex>
         )}

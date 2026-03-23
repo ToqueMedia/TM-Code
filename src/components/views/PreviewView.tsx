@@ -427,7 +427,6 @@ function PreviewView() {
                 src={previewMode === 'server' ? previewUrl! : undefined}
                 srcDoc={previewMode === 'static' ? previewHtmlContent! : undefined}
                 title="Preview"
-                sandbox="allow-scripts allow-same-origin"
                 style={{
                   width: '100%',
                   height: '100%',
@@ -437,10 +436,21 @@ function PreviewView() {
               />
             </>
           ) : (
-            <Flex flex="1" align="center" justify="center">
-              <Text fontSize={tokens.fontSize.sm} color={tokens.colors.text.disabled}>
-                Waiting for preview server...
-              </Text>
+            <Flex flex="1" align="center" justify="center" direction="column" gap={2}>
+              {devServerLogs.some(l => l.level === 'error') ? (
+                <>
+                  <Text fontSize={tokens.fontSize.sm} color={tokens.colors.accent.red} fontWeight="500">
+                    Dev server failed to start
+                  </Text>
+                  <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
+                    Check the console below for details
+                  </Text>
+                </>
+              ) : (
+                <Text fontSize={tokens.fontSize.sm} color={tokens.colors.text.disabled}>
+                  Waiting for preview server...
+                </Text>
+              )}
             </Flex>
           )}
         </Box>
@@ -453,7 +463,10 @@ function PreviewView() {
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: consoleHeight + 4, opacity: 1 }}
               exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+              transition={isResizingConsole
+                ? { duration: 0 }
+                : { duration: 0.2, ease: [0.4, 0, 0.2, 1] }
+              }
               style={{ flexShrink: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
             >
               {/* Resize handle (vertical) */}

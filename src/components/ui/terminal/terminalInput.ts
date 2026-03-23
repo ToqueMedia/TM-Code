@@ -4,7 +4,7 @@
  */
 import { Terminal as XTerm } from '@xterm/xterm';
 import TerminalService from '@/services/terminalService';
-import { displayPrompt, executeCommand as execCmd, type TerminalSessionInfo } from './terminalCommands';
+import { displayPrompt, executeCommand as execCmd, killActiveStreamingCommand, type TerminalSessionInfo } from './terminalCommands';
 
 interface SetupInputParams {
   terminal: XTerm;
@@ -13,6 +13,19 @@ interface SetupInputParams {
   commandLockRef: React.MutableRefObject<boolean>;
   xtermRef: React.MutableRefObject<XTerm | null>;
   updateSessionCwd: (id: string, cwd: string) => void;
+}
+
+/** Find the longest common prefix among an array of strings. */
+function findCommonPrefix(strings: string[]): string {
+  if (strings.length === 0) return '';
+  let prefix = strings[0];
+  for (let i = 1; i < strings.length; i++) {
+    while (!strings[i].startsWith(prefix)) {
+      prefix = prefix.slice(0, -1);
+      if (!prefix) return '';
+    }
+  }
+  return prefix;
 }
 
 /** Helper to clear N characters from the terminal line. */
@@ -117,8 +130,10 @@ export function setupTerminalInput({
       return;
     }
     if (ev.ctrlKey && ev.code === 'KeyC') { // Cancel
+      const s = getSession();
+      await killActiveStreamingCommand(s?.id);
       terminal.write('\r\n^C\r\n');
-      await displayPrompt(terminal, getSession());
+      await displayPrompt(terminal, s);
       currentLine = ''; historyIndex = -1; commandLockRef.current = false;
       return;
     }
@@ -154,15 +169,29 @@ export function setupTerminalInput({
       if (!currentLine.trim()) return;
       try {
         const s = getSession();
-        const completions = await TerminalService.shared.getCompletions(currentLine.trim(), s?.cwd);
+        const words = currentLine.split(' ');
+        const lastWord = words[words.length - 1];
+        const completions = await TerminalService.shared.getCompletions(lastWord, s?.cwd);
+
         if (completions.length === 1) {
-          const words = currentLine.trim().split(' ');
+          // Single match — replace last word with completion
           words[words.length - 1] = completions[0];
-          currentLine = replaceCurrentLine(terminal, currentLine, words.join(' '));
+          // Add space after non-directory completions
+          const completed = words.join(' ') + (completions[0].endsWith('/') ? '' : ' ');
+          currentLine = replaceCurrentLine(terminal, currentLine, completed);
         } else if (completions.length > 1) {
-          terminal.write('\r\n' + completions.join('  ') + '\r\n');
-          await displayPrompt(terminal, s);
-          terminal.write(currentLine);
+          // Multiple matches — find common prefix and apply it
+          const commonPrefix = findCommonPrefix(completions);
+          if (commonPrefix.length > lastWord.length) {
+            // Extend to common prefix
+            words[words.length - 1] = commonPrefix;
+            currentLine = replaceCurrentLine(terminal, currentLine, words.join(' '));
+          } else {
+            // Show all options
+            terminal.write('\r\n' + completions.join('  ') + '\r\n');
+            await displayPrompt(terminal, s);
+            terminal.write(currentLine);
+          }
         }
       } catch { /* Silent fail */ }
       return;

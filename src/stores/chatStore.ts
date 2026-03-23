@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { ChatMessage, ChatSession, CodeBlock, ConversationMessage, SessionSummary, ToolCallDisplay } from '../types/chat'
+import { ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ConversationMessage, SessionSummary, ToolCallDisplay } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
@@ -46,6 +46,7 @@ interface ChatActions {
   addPendingToolCall: (toolId: string, toolName: string) => void
   updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>) => void
   updateToolCallWithResult: (toolId: string, result: string, isError: boolean) => void
+  updateToolCallProgress: (toolId: string, progressText: string) => void
   // Inline diff actions (centralized — handle DiffService + store + agent unblock atomically)
   approveDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => Promise<void>
   rejectDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => void
@@ -72,6 +73,9 @@ interface ChatActions {
   cleanupOnExit: (projectPath: string) => Promise<void>
   setDraftInput: (value: string) => void
   clearAllSessions: () => void
+  // Card messages (plan approval, todo list)
+  addCardMessage: (type: ChatMessageCard['type'], projectPath: string) => void
+  updateCardStatus: (messageId: string, status: ChatMessageCard['status']) => void
 }
 
 let idCounter = 0
@@ -573,6 +577,26 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       set({ sessions: updatedSessions })
     },
 
+    updateToolCallProgress: (toolId: string, progressText: string) => {
+      const { activeSessionId, streamingMessageId, sessions } = get()
+      if (!activeSessionId || !streamingMessageId) return
+
+      const session = sessions.get(activeSessionId)
+      if (!session) return
+
+      const msg = session.messages.find(m => m.id === streamingMessageId)
+      if (!msg) return
+
+      const tc = msg.toolCalls?.find(t => t.id === toolId)
+      if (tc) {
+        // Mutate in place (same pattern as streaming text deltas for performance)
+        tc.progressText = progressText
+        session.updatedAt = Date.now()
+      }
+
+      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+    },
+
     updateToolCallWithResult: (toolId: string, result: string, isError: boolean) => {
       const { activeSessionId, streamingMessageId, sessions } = get()
       if (!activeSessionId || !streamingMessageId) return
@@ -1029,9 +1053,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const session = await sessionService.loadSession(projectPath, sessionId)
         if (!session) return
 
-        // Strip system messages — they're ephemeral status updates
-        // (e.g. "Installing dependencies...") that shouldn't reappear.
-        session.messages = session.messages.filter(m => m.role !== 'system')
+        // Strip ephemeral system messages (e.g. "Installing dependencies...")
+        // but KEEP card messages (plan_approval, todo_list) which carry actionable state.
+        session.messages = session.messages.filter(m => m.role !== 'system' || m.card)
 
         // Rebuild contentBlocks for legacy messages that don't have them
         for (const msg of session.messages) {
@@ -1086,8 +1110,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const session = await sessionService.loadSession(projectPath, activeId)
         if (!session || session.messages.length === 0) return false
 
-        // Strip system messages — they're ephemeral status updates
-        session.messages = session.messages.filter(m => m.role !== 'system')
+        // Strip ephemeral system messages but keep card messages
+        session.messages = session.messages.filter(m => m.role !== 'system' || m.card)
         if (session.messages.length === 0) return false
 
         const conversationHistory = rebuildConversationHistory(session.messages)
@@ -1268,6 +1292,62 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         pendingDiffs: [],
         draftInput: '',
       })
+    },
+
+    // === Card messages (plan approval, todo list) ===
+
+    addCardMessage: (type: ChatMessageCard['type'], projectPath: string) => {
+      const messageId = generateId('msg')
+      const message: ChatMessage = {
+        id: messageId,
+        role: 'system',
+        content: '',
+        timestamp: Date.now(),
+        card: { type, projectPath, status: 'pending' },
+      }
+
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const updatedSession: ChatSession = {
+          ...session,
+          messages: [...session.messages, message],
+          updatedAt: Date.now(),
+        }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, updatedSession)
+
+        return { sessions: updatedSessions }
+      })
+
+      debouncedSave()
+    },
+
+    updateCardStatus: (messageId: string, status: ChatMessageCard['status']) => {
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const messages = session.messages.map(msg => {
+          if (msg.id !== messageId || !msg.card) return msg
+          return { ...msg, card: { ...msg.card, status } }
+        })
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+
+        return { sessions: updatedSessions }
+      })
+
+      debouncedSave()
     },
   }
 })

@@ -18,6 +18,7 @@ interface LayoutState {
   isProjectsSidebarVisible: boolean
   showTemplateSelector: boolean
   isPreviewServerRunning: boolean
+  isPreviewServerLoading: boolean
   previewUrl: string | null
   previewServerPid: number | null
   previewMode: PreviewMode
@@ -35,6 +36,7 @@ interface LayoutActions {
   toggleSidebar: () => void
   toggleProjectsSidebar: () => void
   setShowTemplateSelector: (show: boolean) => void
+  setPreviewServerLoading: (loading: boolean) => void
   setPreviewServer: (url: string, pid: number) => void
   setStaticPreview: (html: string, sourcePath: string) => void
   clearPreviewServer: () => void
@@ -52,6 +54,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   isProjectsSidebarVisible: false,
   showTemplateSelector: false,
   isPreviewServerRunning: false,
+  isPreviewServerLoading: false,
   previewUrl: null,
   previewServerPid: null,
   previewMode: 'server',
@@ -82,9 +85,14 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set({ showTemplateSelector: show })
   },
 
+  setPreviewServerLoading: (loading: boolean) => {
+    set({ isPreviewServerLoading: loading })
+  },
+
   setPreviewServer: (url: string, pid: number) => {
     set({
       isPreviewServerRunning: true,
+      isPreviewServerLoading: false,
       previewUrl: url,
       previewServerPid: pid,
       previewMode: 'server',
@@ -107,17 +115,17 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   },
 
   clearPreviewServer: () => {
-    // Resets ALL preview UI state. Killing the process is devServerManager's job.
+    // Resets preview UI state but preserves logs so crash messages stay visible.
+    // Killing the process is devServerManager's job.
     set({
       isPreviewServerRunning: false,
+      isPreviewServerLoading: false,
       previewUrl: null,
       previewServerPid: null,
       previewMode: 'server',
       previewHtmlContent: null,
       previewSourcePath: null,
       previewReloadKey: 0,
-      devServerLogs: [],
-      isConsoleVisible: false,
     })
   },
 

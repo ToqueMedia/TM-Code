@@ -3,7 +3,7 @@ import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import {
   FiFolder, FiSearch, FiTerminal,
   FiGlobe, FiTool, FiChevronRight, FiChevronDown,
-  FiCheck, FiX, FiLoader,
+  FiCheck, FiX, FiLoader, FiCpu,
 } from 'react-icons/fi'
 import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import InlineDiff from './InlineDiff'
@@ -24,6 +24,7 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>
   execute_command: FiTerminal,
   create_directory: FiFolder,
   web_fetch: FiGlobe,
+  research: FiCpu,
 }
 
 /** Tools where we show a file-extension icon instead of the generic tool icon. */
@@ -49,6 +50,8 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       return String(input.pattern || '')
     case 'web_fetch':
       return String(input.url || '')
+    case 'research':
+      return String(input.question || '')
     default:
       return JSON.stringify(input)
   }
@@ -232,23 +235,53 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
         )}
       </Flex>
 
-      {/* Running progress bar */}
+      {/* Running: progress bar + live status for sub-agents */}
       {isRunning && (
-        <Box h="1.5px" overflow="hidden" bg="rgba(240, 192, 0, 0.08)">
-          <Box
-            h="100%"
-            bg={tokens.colors.toolCall.runningText}
-            opacity={0.5}
-            animation="toolProgress 1.8s ease-in-out infinite"
-            css={{
-              '@keyframes toolProgress': {
-                '0%': { transform: 'translateX(-100%)', width: '40%' },
-                '50%': { transform: 'translateX(150%)', width: '40%' },
-                '100%': { transform: 'translateX(-100%)', width: '40%' },
-              },
-            }}
-          />
-        </Box>
+        <>
+          {toolCall.progressText && (
+            <Flex px={3} py="5px" gap={2} align="center" borderTop="1px solid rgba(255,255,255,0.03)">
+              <Box
+                w="4px"
+                h="4px"
+                borderRadius="full"
+                bg={tokens.colors.accent.purple}
+                flexShrink={0}
+                animation="subAgentPulse 1s ease-in-out infinite"
+                css={{
+                  '@keyframes subAgentPulse': {
+                    '0%, 100%': { opacity: 1 },
+                    '50%': { opacity: 0.3 },
+                  },
+                }}
+              />
+              <Text
+                fontSize="11px"
+                color={tokens.colors.text.muted}
+                fontFamily={tokens.fontFamily.mono}
+                overflow="hidden"
+                textOverflow="ellipsis"
+                whiteSpace="nowrap"
+              >
+                {toolCall.progressText}
+              </Text>
+            </Flex>
+          )}
+          <Box h="1.5px" overflow="hidden" bg="rgba(240, 192, 0, 0.08)">
+            <Box
+              h="100%"
+              bg={tokens.colors.toolCall.runningText}
+              opacity={0.5}
+              animation="toolProgress 1.8s ease-in-out infinite"
+              css={{
+                '@keyframes toolProgress': {
+                  '0%': { transform: 'translateX(-100%)', width: '40%' },
+                  '50%': { transform: 'translateX(150%)', width: '40%' },
+                  '100%': { transform: 'translateX(-100%)', width: '40%' },
+                },
+              }}
+            />
+          </Box>
+        </>
       )}
 
       {/* Expanded output */}

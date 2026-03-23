@@ -27,12 +27,15 @@ class ContextBuilder {
   }
 
   async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[]): Promise<string> {
-    // Gather context in parallel for speed — includes template manifest
-    const [treeString, pkgSummary, readme, templateManifest] = await Promise.all([
+    // Gather context in parallel for speed — includes template manifest + project memory files
+    const [treeString, pkgSummary, readme, templateManifest, tmsContent, planContent, todoContent] = await Promise.all([
       this.buildFileTree(projectPath),
       this.extractPackageSummary(projectPath),
       this.safeReadFile(`${projectPath}/README.md`),
       this.readTemplateManifest(projectPath),
+      this.safeReadFile(`${projectPath}/TMS.md`),
+      this.safeReadFile(`${projectPath}/PLAN.md`),
+      this.safeReadFile(`${projectPath}/TODO.md`),
     ])
 
     // Detect package manager from lock files
@@ -74,7 +77,40 @@ Respond in the same language the developer writes in.
       sections.push(`<readme_summary>\n${readme.slice(0, 400)}\n</readme_summary>`)
     }
 
-    // ── 3b. SKILLS (between context data and constraints — long data zone) ──
+    // ── 3b. PROJECT MEMORY — TMS.md, PLAN.md, TODO.md (long data zone — after environment, before constraints) ──
+    if (tmsContent) {
+      // Truncate to 6K — TMS.md can grow as milestones accumulate
+      const truncatedTms = tmsContent.length > 6000
+        ? tmsContent.slice(0, 6000) + '\n\n[... truncated — read TMS.md for full content]'
+        : tmsContent
+      sections.push(`<project_memory>\n${truncatedTms}\n</project_memory>`)
+    }
+    if (planContent) {
+      // Truncate to 4K to avoid bloating context
+      const truncatedPlan = planContent.length > 4000
+        ? planContent.slice(0, 4000) + '\n\n[... plan truncated — read PLAN.md for full content]'
+        : planContent
+      sections.push(`<active_plan>\n${truncatedPlan}\n</active_plan>`)
+    }
+    if (todoContent) {
+      // Truncate to 2K
+      const truncatedTodo = todoContent.length > 2000
+        ? todoContent.slice(0, 2000) + '\n\n[... task list truncated — read TODO.md for full content]'
+        : todoContent
+      sections.push(`<task_list>\n${truncatedTodo}\n</task_list>`)
+    }
+    if (tmsContent) {
+      sections.push(`<memory_instructions>
+When you complete significant work, update the Memory section of TMS.md:
+- Add completed milestones under "### Milestones" with date
+- Record architectural decisions under "### Decisions" with rationale
+- Track pending tasks under "### Pending Tasks"
+- NEVER overwrite the "Project Analysis" or "Custom Instructions" sections
+- Use edit_file to surgically update only the Memory section
+</memory_instructions>`)
+    }
+
+    // ── 3c. SKILLS (between context data and constraints — long data zone) ──
     try {
       const detectedType = this.detectProjectType(pkgSummary)
         ?? await this.detectProjectTypeFromFiles(projectPath)
@@ -110,7 +146,7 @@ Judgment:
 
     // ── 4b. TOOL ROUTING (decision matrix — models know tools, but not THIS tool set's semantics) ──
     const activeMcpTools = mcpTools || []
-    const totalTools = 14 + activeMcpTools.length
+    const totalTools = 15 + activeMcpTools.length
     const mcpSection = activeMcpTools.length > 0
       ? `\n\nMCP (external tools — require developer approval):\n${activeMcpTools.map(t => `- mcp__${t.serverName}__${t.name} → ${t.description}`).join('\n')}`
       : ''
@@ -138,7 +174,10 @@ Manage:
 Execute:
 - execute_command(command, cwd?) → run shell command. Blocks until exit — never use for dev servers or watchers. Good for: npm install, npm test, npx, git, lint, build.
 - start_dev_server(command) → start a dev server in the background. Returns immediately. Preview opens automatically. Use for: npm run dev, yarn dev, npx vite. Only one server at a time.
-- web_fetch(url) → fetch URL content. Use to check docs, npm packages, or API references. Cannot access localhost.${mcpSection}
+- web_fetch(url) → fetch URL content. Use to check docs, npm packages, or API references. Cannot access localhost.
+
+Research:
+- research(question, context?) → delegate a research question to a sub-agent that can read files and search. Use when you need to investigate multiple files or patterns before deciding what to do. The sub-agent returns a text summary. It cannot modify files. You can call multiple research tools in the same turn — they run in PARALLEL for speed.${mcpSection}
 
 Decision flow:
 1. Don't know what files exist? → list_directory or glob
@@ -150,6 +189,7 @@ Decision flow:
 7. Run a CLI tool? → execute_command (must exit on its own)
 8. Start a dev server? → start_dev_server (runs in background)
 9. Check for type errors? → get_diagnostics
+10. Need to investigate multiple files before deciding? → research
 </tool_routing>`)
 
     // ── 4c. SAFETY CONTRACT (cognitive layer — complements mechanical blocking in toolExecutor) ──

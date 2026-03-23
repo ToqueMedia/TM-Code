@@ -7,10 +7,11 @@ interface PromptTextareaProps {
   value: string
   onChange: (value: string) => void
   onKeyDown: (e: React.KeyboardEvent) => void
+  onBlur?: () => void
   disabled: boolean
 }
 
-function PromptTextarea({ textareaRef, value, onChange, onKeyDown, disabled }: PromptTextareaProps) {
+function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, disabled }: PromptTextareaProps) {
   return (
     <Box px={4} pt={3} pb={1}>
       <textarea
@@ -18,7 +19,8 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, disabled }: P
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={onKeyDown}
-        placeholder="Ask anything..."
+        onBlur={onBlur}
+        placeholder="Ask anything... (type / for commands)"
         aria-label="Message prompt"
         disabled={disabled}
         rows={1}

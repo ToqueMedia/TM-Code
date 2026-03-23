@@ -28,6 +28,7 @@ import { Template } from '../services/templateService'
 import { verifyRequirements, CheckResult } from '../services/environmentCheck'
 import { setupScaffoldedProject } from '../services/postScaffoldPipeline'
 import { devServerManager } from '../services/devServerManager'
+import DevServerStatus from './chat/DevServerStatus'
 import { message as tauriMessage } from '@tauri-apps/plugin-dialog'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
@@ -353,6 +354,9 @@ function MainLayout() {
           isLoading={isScaffolding}
         />
       )}
+
+      {/* Floating dev server status panel */}
+      <DevServerStatus />
 
       {/* Requirements check dialog */}
       {requirementsResults && (

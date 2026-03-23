@@ -110,6 +110,18 @@ interface TurnResult {
 
 // === Service ===
 
+/** Options for creating a lightweight sub-agent. */
+export interface LightweightAgentOptions {
+  /** Custom tool definitions (subset of tools). If omitted, uses all tools. */
+  tools?: OpenAIToolDefinition[]
+  /** Maximum turns before stopping. Default: 50. */
+  maxTurns?: number
+  /** If true, skip diff approval — tool results go directly to LLM. */
+  readOnly?: boolean
+  /** Parent's abort controller — sub-agent aborts when parent does. */
+  abortController?: AbortController
+}
+
 class AgentService {
   private static instance: AgentService
   private abortController: AbortController | null = null
@@ -125,10 +137,20 @@ class AgentService {
   private fileAccessLog: Array<{ path: string; action: 'read' | 'modified'; timestamp: number }> = []
   /** Circuit breaker: consecutive LLM summarization failures. After 3, skip LLM and go straight to mechanical. */
   private summarizationFailures = 0
+  /** Options for lightweight sub-agents (null for the main singleton). */
+  private lightweightOptions: LightweightAgentOptions | null = null
 
-  private constructor() {
+  private constructor(options?: LightweightAgentOptions) {
     this.toolExecutor = ToolExecutor.getInstance()
-    this.tools = this.toolExecutor.getToolDefinitions()
+    if (options) {
+      this.lightweightOptions = options
+      this.tools = options.tools || this.toolExecutor.getToolDefinitions()
+      if (options.abortController) {
+        this.abortController = options.abortController
+      }
+    } else {
+      this.tools = this.toolExecutor.getToolDefinitions()
+    }
   }
 
   static getInstance(): AgentService {
@@ -136,6 +158,14 @@ class AgentService {
       AgentService.instance = new AgentService()
     }
     return AgentService.instance
+  }
+
+  /**
+   * Creates a lightweight sub-agent for parallel research tasks.
+   * Not a singleton — each call creates a new instance.
+   */
+  static createLightweight(options: LightweightAgentOptions): AgentService {
+    return new AgentService(options)
   }
 
   setSystemPrompt(prompt: string) {
@@ -179,11 +209,15 @@ class AgentService {
     conversationHistory: Array<{ role: string; content: string | null; tool_calls?: OpenAIToolCall[]; tool_call_id?: string }>,
     callbacks: AgentCallbacks
   ): Promise<void> {
-    if (this.isRunning) {
+    if (this.isRunning && !this.lightweightOptions) {
       this.cancelLoop()
     }
     this.isRunning = true
-    this.abortController = new AbortController()
+    if (!this.lightweightOptions) {
+      this.abortController = new AbortController()
+    } else if (!this.abortController) {
+      this.abortController = new AbortController()
+    }
 
     // Reset stale compression state for fresh conversations (new session)
     if (conversationHistory.length === 0) {
@@ -210,7 +244,8 @@ class AgentService {
     let continuationCount = 0
 
     try {
-      while (turnCount < 50) {
+      const maxTurns = this.lightweightOptions?.maxTurns ?? 50
+      while (turnCount < maxTurns) {
         if (this.abortController?.signal.aborted) return
 
         turnCount++
@@ -300,27 +335,23 @@ class AgentService {
           return
         }
 
-        // Execute tools and add results to history.
-        // Tool calls are added to the UI ONE AT A TIME right before execution,
-        // AFTER text narration is complete (stream fully parsed above).
-        for (const toolCall of turnResult.toolCalls) {
-          if (this.abortController?.signal.aborted) return
+        // Execute ALL tool calls in parallel (like Claude Code).
+        // Each tool gets its own toolCallId for checkpoint tracking and progress.
+        // Diff approvals are per-tool — multiple InlineDiffs can appear simultaneously.
 
-          // Add tool call to UI (flushes remaining text deltas first)
-          callbacks.onToolCallPending(toolCall.id, toolCall.name)
-          callbacks.onToolCallStart(toolCall.id, toolCall.name, toolCall.args)
+        // Show all tool calls as pending simultaneously
+        for (const tc of turnResult.toolCalls) {
+          callbacks.onToolCallPending(tc.id, tc.name)
+          callbacks.onToolCallStart(tc.id, tc.name, tc.args)
+        }
+
+        // Execute all in parallel
+        const toolResults = await Promise.all(turnResult.toolCalls.map(async (toolCall) => {
+          if (this.abortController?.signal.aborted) return null
 
           try {
-            // Set tool call context for checkpoint tracking (delete_file, rename_file)
-            let result: string
-            this.toolExecutor.setCurrentToolCallId(toolCall.id)
-            try {
-              result = await this.toolExecutor.execute(toolCall.name, toolCall.args)
-            } finally {
-              this.toolExecutor.setCurrentToolCallId(null)
-            }
-
-            if (this.abortController?.signal.aborted) return
+            const result = await this.toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id)
+            if (this.abortController?.signal.aborted) return null
 
             // Check if the result is a diff (from write_file / edit_file / create_file)
             let parsedDiff: { type: string; path: string; isNewFile: boolean } | null = null
@@ -331,45 +362,51 @@ class AgentService {
               // Not JSON
             }
 
-            // Notify UI first (renders InlineDiff for diffs)
+            // Notify UI (renders InlineDiff for diffs)
             callbacks.onToolResult(toolCall.id, toolCall.name, result, false)
 
             let llmResult: string
-            if (parsedDiff) {
-              // Wait for user to approve/reject the file change before continuing
+            if (parsedDiff && !this.lightweightOptions?.readOnly) {
+              // Wait for user to approve/reject the file change
               const approved = await createDiffApprovalPromise(toolCall.id)
-              if (this.abortController?.signal.aborted) return
+              if (this.abortController?.signal.aborted) return null
               llmResult = approved
                 ? `File ${parsedDiff.isNewFile ? 'created' : 'updated'}: ${parsedDiff.path}`
                 : `User rejected the file change: ${parsedDiff.path}. Ask the user what they want instead.`
+            } else if (parsedDiff) {
+              llmResult = `File ${parsedDiff.isNewFile ? 'created' : 'updated'}: ${parsedDiff.path}`
             } else {
               llmResult = result
             }
 
-            messages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id,
-              content: llmResult,
-            })
-
             // Track file access for post-compaction re-reading
             this.trackFileAccess(toolCall.name, toolCall.args)
+
+            return { toolCall, content: llmResult, isError: false }
           } catch (error) {
-            if (this.abortController?.signal.aborted) return
+            if (this.abortController?.signal.aborted) return null
             const errorMsg = error instanceof Error ? error.message : String(error)
             callbacks.onToolResult(toolCall.id, toolCall.name, errorMsg, true)
-            messages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id,
-              content: `Error: ${errorMsg}`,
-            })
+            return { toolCall, content: `Error: ${errorMsg}`, isError: true }
           }
+        }))
+
+        // Add all results to messages (order doesn't matter — API matches by tool_call_id)
+        for (const entry of toolResults) {
+          if (!entry) continue
+          messages.push({
+            role: 'tool',
+            tool_call_id: entry.toolCall.id,
+            content: entry.content,
+          })
         }
+
+        if (this.abortController?.signal.aborted) return
 
         callbacks.onTurnComplete(turnCount)
       }
 
-      callbacks.onError(new Error(`Agent exceeded maximum turns (50)`))
+      callbacks.onError(new Error(`Agent exceeded maximum turns (${maxTurns})`))
     } catch (error) {
       // Clean exit on abort — don't treat as error
       if (this.abortController?.signal.aborted) return
@@ -827,6 +864,11 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       role: 'user',
       content: parts.join('\n'),
     })
+  }
+
+  /** Returns the current abort controller (for sub-agent abort propagation). */
+  getAbortController(): AbortController | null {
+    return this.abortController
   }
 
   cancelLoop(): void {

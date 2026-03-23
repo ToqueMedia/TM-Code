@@ -7,6 +7,7 @@ import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useContainerStore } from '../../stores/containerStore'
 import MessageBubble from '../chat/MessageBubble'
+import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
 import AttachContainerDialog from '../chat/AttachContainerDialog'
 import SessionDropdown from './SessionDropdown'
@@ -156,6 +157,7 @@ function ChatView() {
                   isStreaming={msg.id === streamingMessageId}
                 />
               ))}
+              <AgentActivityIndicator />
             </Box>
           )}
         </Box>
