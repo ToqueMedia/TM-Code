@@ -1,86 +1,123 @@
-# Diamond IDE
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" width="120" alt="TM Code" />
+</p>
 
-The ultimate development environment designed for modern developers.
+<h1 align="center">TM Code</h1>
 
-## Project Structure
+<p align="center">
+  <strong>The Agent-First IDE by Toque Media</strong>
+</p>
+
+<p align="center">
+  Chat with AI. Watch it code. Ship faster.
+</p>
+
+<p align="center">
+  <a href="https://github.com/ToqueMedia/TM-Code/releases/latest"><img src="https://img.shields.io/github/v/release/ToqueMedia/TM-Code?style=flat-square&color=FE1063" alt="Release" /></a>
+  <a href="https://github.com/ToqueMedia/TM-Code/releases"><img src="https://img.shields.io/github/downloads/ToqueMedia/TM-Code/total?style=flat-square&color=a371f7" alt="Downloads" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-333?style=flat-square" alt="Platforms" />
+  <img src="https://img.shields.io/badge/license-proprietary-555?style=flat-square" alt="License" />
+</p>
+
+---
+
+<!-- Replace with real screenshots when available -->
+<!-- ![TM Code Screenshot](docs/screenshots/chat-view.png) -->
+
+## What is TM Code?
+
+TM Code is a **chat-first desktop IDE** where the AI agent is the primary interface. Unlike traditional IDEs with AI sidebars, TM Code starts with a conversational interface where the agent writes code, shows diffs inline, runs terminal commands, and opens live previews — all without leaving the chat.
+
+**The developer drives. The agent builds.**
+
+## Key Features
+
+- **Chat-First UX** — Start in chat, the agent writes code, you review. Switch to editor mode when needed.
+- **Live Preview** — See your app running in real-time as the agent builds it.
+- **Inline Diffs** — Accept or reject code changes one by one, directly in the chat.
+- **Multi-Model Support** — DeepSeek V3.2, GLM-5, Kimi K2.5, Qwen3 Coder, MiniMax M2.5, Gemini 3 Flash, and more.
+- **MCP Integration** — Connect external tools via Model Context Protocol servers.
+- **Built-in Terminal** — xterm.js v6 with full PTY support.
+- **Monaco Editor** — Full VS Code editing experience with split panes, breadcrumbs, and formatting.
+- **Project Templates** — React, Next.js, Vue, Svelte, Angular, Express, NestJS, and more.
+- **Docker Isolation** — Run projects in isolated containers with Colima support.
+- **Slash Commands** — `/plan` for architecture docs, `/init` for project setup.
+- **Auto-Updates** — Seamless in-app updates via GitHub Releases.
+
+## Architecture
 
 ```
-src/
-├── app/
-│   ├── database/          # DAOs - Abstração da base de dados
-│   ├── hooks/             # Repositórios (Zustand) - Lógica de negócio
-│   ├── services/          # Abstração de APIs externas e serviços internos
-│   ├── types/             # Types do projeto (um arquivo por type)
-│   ├── ui/                # Views e componentes específicos
-│   │   ├── components/    # Componentes compartilhados
-│   │   └── [feature]/     # Cada feature em sua pasta
-│   ├── configs/           # Configurações singleton
-│   └── utils/             # Utilitários
+Frontend (React 19 + TypeScript)  ──Tauri IPC──>  Backend (Rust)  ──>  OS/Filesystem
+         │                                              │
+         └── Agent Service ── SSE ──> Cloudflare Worker ──> AI Providers (DashScope, Google, OpenRouter)
 ```
 
-## Design System
+Built with:
+- **Tauri 2** — Native desktop shell (macOS, Windows, Linux)
+- **React 19** + **Chakra UI v3** — Frontend UI
+- **Zustand** — State management (19 stores)
+- **Monaco Editor** — Code editing
+- **xterm.js v6** — Terminal emulator
+- **Cloudflare Workers** — API proxy with billing, rate limiting, and queue
 
-### Color Palette
+## Download
 
-- Primary Colors:
-  - Blue: `#58a6ff`
-  - Purple: `#a371f7`
-  - Green: `#2ea043`
-  - Orange: `#f77f00`
-  
-- Backgrounds:
-  - Welcome Screen: `#0a0e13`
-  - Editor: `#0d1117`
-  - Glassmorphism: `rgba(13, 17, 23, 0.8)`
-  
-- Text:
-  - Primary: `#e6edf3`
-  - Secondary: `#8b949e`
-  - Muted: `#7d8590`
-  
-- Borders: `rgba(48, 54, 61, 0.8)`
+| Platform | Download |
+|----------|----------|
+| macOS (Apple Silicon) | [Download .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
+| macOS (Intel) | [Download .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
+| Windows | [Download .exe](https://github.com/ToqueMedia/TM-Code/releases/latest) |
+| Linux (Ubuntu/Debian) | [Download .deb](https://github.com/ToqueMedia/TM-Code/releases/latest) |
 
-### Typography
+## Plans
 
-- Font Family: `-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif`
-- Font Sizes:
-  - Welcome Title: 48px (800 weight)
-  - Card Titles: 20px (600 weight)
-  - Body Text: 14px
-  - Labels: 12px
+| | Free | Pro | Business |
+|---|---|---|---|
+| **Models** | MiMo V2 Flash | All models | All models |
+| **Credits** | 10/day | Monthly pool | Monthly pool (4x/8x) |
+| **Queue** | Max 5 concurrent | Unlimited | Unlimited |
+| **Price** | $0 | Coming soon | Coming soon |
 
-### UI Components
+## Development
 
-#### Welcome Screen
-- Animated background with particle effects
-- Glassmorphism sidebar with gradient accents
-- Gradient text for headings
-- Project action cards with hover animations
-- Recent projects list with path information
+```bash
+# Prerequisites: Node >= 20, Rust, Yarn
 
-#### Modals
-- Backdrop blur effect (8px)
-- Glassmorphism content panels
-- Gradient buttons with hover effects
-- Consistent input styling with focus states
+# Install dependencies
+yarn install
 
-#### Editor Interface
-- Project-specific top bar with name display
-- Activity bar with project-related icons
-- File tree with project root
-- Status bar showing project information
+# Run in development mode
+npm run tauri dev
 
-## Project Management System
+# Build for production
+npm run tauri build
 
-For details on the project management system implementation, see [project-management-prompt.md](./project-management-prompt.md).
+# Run tests
+npm test
+```
 
-## Development Guidelines
+## Screenshots
 
-1. Follow the established project structure
-2. Use TypeScript for all frontend code
-3. Implement proper error handling
-4. Write tests for critical functionality
-5. Follow accessibility best practices (WCAG AA)
-6. Maintain consistent design language
-7. Use Chakra UI v3 for UI components
-8. Implement proper state management with Zustand# exodus-ide
+<!-- Add screenshots here -->
+<!--
+<p align="center">
+  <img src="docs/screenshots/chat.png" width="800" alt="Chat View" />
+  <br/><em>Chat-first interface — the agent writes code while you watch</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/editor.png" width="800" alt="Editor View" />
+  <br/><em>Full Monaco editor with split panes and inline diffs</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/preview.png" width="800" alt="Live Preview" />
+  <br/><em>Live preview alongside the chat</em>
+</p>
+-->
+
+---
+
+<p align="center">
+  Built by <a href="https://toquemedia.com">Toque Media</a>
+</p>
