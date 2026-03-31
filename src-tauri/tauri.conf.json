@@ -30,7 +30,15 @@
       "resources/templates/**/*",
       "resources/skills/**/*"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "signingIdentity": "Developer ID Application: TOQUE MEDIA - PRESTACAO DE SERVICOS, LDA (D39GPSWXDH)"
+    },
+    "windows": {
+      "certificateThumbprint": "362CFA7356BFAC4CF0E66EAEC9E8F7622FA623D0",
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.comodoca.com"
+    }
   },
   "plugins": {
     "updater": {
