@@ -191,7 +191,7 @@ function SourceControlPanel() {
       if (!token) throw new Error('Not authenticated — try signing out and back in')
 
       const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
-      const response = await fetch(`${workerUrl}/v1/chat/completions`, {
+      const response = await fetch(`${workerUrl}/v1/commit-message`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -200,7 +200,19 @@ function SourceControlPanel() {
         body: JSON.stringify({
           messages: [{
             role: 'user',
-            content: `Generate a concise git commit message for these changes. Use conventional commits format (feat/fix/refactor/chore/docs). One line only, max 72 characters. No quotes, no explanation, just the message.
+            content: `Generate a git commit message for these changes using conventional commits format.
+
+Format:
+<type>(<scope>): <subject line, max 72 chars>
+
+<body: 2-4 bullet points explaining what changed and why>
+
+Rules:
+- type: feat, fix, refactor, chore, docs, style, perf, test
+- scope: the main area affected (component name, service, etc.)
+- subject: imperative mood, lowercase, no period
+- body: each line starts with "- ", explain what not how
+- Output ONLY the commit message, no quotes, no markdown, no explanation
 
 Files changed:
 ${fileList}
@@ -209,16 +221,15 @@ Diff stat:
 ${diffStat}
 
 Diff detail:
-${diffDetail.slice(0, 3000)}`,
+${diffDetail.slice(0, 4000)}`,
           }],
-          stream: false,
         }),
       })
 
       if (!response.ok) throw new Error(`API ${response.status}`)
 
       const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
-      const aiMsg = data.choices?.[0]?.message?.content?.trim()
+      let aiMsg = data.choices?.[0]?.message?.content?.trim() || ''
 
       if (aiMsg) {
         // Clean up: remove quotes, backticks, "commit message:" prefixes
@@ -230,7 +241,7 @@ ${diffDetail.slice(0, 3000)}`,
         setCommitMsg(cleaned)
         if (textareaRef.current) {
           textareaRef.current.style.height = '26px'
-          textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 104)}px`
+          textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 208)}px`
         }
       } else {
         showFeedback('error', 'AI returned empty message')
@@ -242,20 +253,35 @@ ${diffDetail.slice(0, 3000)}`,
     }
   }, [files, staged, unstaged, projectPath, generating, showFeedback])
 
+  const [pushing, setPushing] = useState(false)
+  const [pulling, setPulling] = useState(false)
+
   const handlePush = useCallback(async () => {
+    if (!projectPath || pushing) return
+    setPushing(true)
     try {
       const result = await GitService.push(projectPath)
       showFeedback('success', result || `Pushed to ${branch}`)
-    } catch (e) { showFeedback('error', String(e)) }
-  }, [projectPath, branch, showFeedback])
+    } catch (e) {
+      showFeedback('error', `Push: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setPushing(false)
+    }
+  }, [projectPath, branch, showFeedback, pushing])
 
   const handlePull = useCallback(async () => {
+    if (!projectPath || pulling) return
+    setPulling(true)
     try {
       const result = await GitService.pull(projectPath)
       showFeedback('success', result || `Pulled from ${branch}`)
       await loadStatus()
-    } catch (e) { showFeedback('error', String(e)) }
-  }, [projectPath, branch, showFeedback, loadStatus])
+    } catch (e) {
+      showFeedback('error', `Pull: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setPulling(false)
+    }
+  }, [projectPath, branch, showFeedback, loadStatus, pulling])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -302,8 +328,8 @@ ${diffDetail.slice(0, 3000)}`,
         </HStack>
         <HStack gap={0}>
           <ActionIcon icon={<VscCheck size={13} />} label={t("view.commit")} onClick={handleCommit} />
-          <ActionIcon icon={<VscCloudDownload size={12} />} label="Pull" onClick={handlePull} />
-          <ActionIcon icon={<VscCloudUpload size={12} />} label="Push" onClick={handlePush} />
+          <ActionIcon icon={<VscCloudDownload size={12} />} label="Pull" onClick={handlePull} spinning={pulling} />
+          <ActionIcon icon={<VscCloudUpload size={12} />} label="Push" onClick={handlePush} spinning={pushing} />
           <ActionIcon icon={<VscRefresh size={12} />} label={t("view.refresh")} onClick={() => loadStatus(true)} spinning={loading} />
         </HStack>
       </Flex>
@@ -315,10 +341,12 @@ ${diffDetail.slice(0, 3000)}`,
           value={commitMsg}
           onChange={e => {
             setCommitMsg(e.target.value)
-            const el = e.target
-            el.style.height = '26px'
-            const maxH = 26 * 4
-            el.style.height = `${Math.min(el.scrollHeight, maxH)}px`
+            // Auto-resize: use ref to ensure we target the real textarea element
+            const el = textareaRef.current
+            if (el) {
+              el.style.height = '26px'
+              el.style.height = `${Math.min(el.scrollHeight, 208)}px`
+            }
           }}
           onKeyDown={handleKeyDown}
           placeholder={`Message (${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Enter to commit on "${branch}")`}
@@ -342,8 +370,8 @@ ${diffDetail.slice(0, 3000)}`,
           px={2}
           py="4px"
           minH="26px"
-          maxH="104px"
-          overflow="hidden"
+          maxH="208px"
+          overflowY="auto"
           lineHeight="18px"
           pr="28px"
         />
@@ -360,15 +388,26 @@ ${diffDetail.slice(0, 3000)}`,
             w="20px"
             h="20px"
             borderRadius="4px"
-            color={tokens.colors.text.disabled}
+            color={generating ? tokens.colors.accent.primary : tokens.colors.text.disabled}
             bg="transparent"
-            cursor="pointer"
+            cursor={generating ? 'default' : 'pointer'}
             transition={`all ${tokens.transition.fast}`}
-            _hover={{ color: tokens.colors.accent.primary, bg: tokens.colors.accent.primarySubtle }}
+            _hover={generating ? {} : { color: tokens.colors.accent.primary, bg: tokens.colors.accent.primarySubtle }}
             onClick={handleGenerateCommitMsg}
             title="Generate commit message"
           >
-            <VscSparkle size={13} />
+            {generating ? (
+              <Box
+                w="12px"
+                h="12px"
+                borderRadius="full"
+                border="2px solid transparent"
+                borderTopColor={tokens.colors.accent.primary}
+                css={{ animation: 'spin 0.7s linear infinite', '@keyframes spin': { to: { transform: 'rotate(360deg)' } } }}
+              />
+            ) : (
+              <VscSparkle size={13} />
+            )}
           </Box>
         )}
       </Box>

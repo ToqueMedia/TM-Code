@@ -973,7 +973,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
   private async callAPI(messages: OpenAIMessage[]): Promise<Response> {
     const MAX_RETRIES = 3
-    const RETRY_DELAYS = [20000, 20000, 25000] // 20s retry for rate limits (Free: 10 req/min)
+    const RETRY_DELAYS = [3000, 5000, 10000] // default backoff for network errors
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (this.abortController?.signal.aborted) throw new DOMException('Aborted', 'AbortError')
@@ -989,8 +989,9 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
         if (!isRetryable || isLastAttempt) throw err
 
-        // Wait before retrying (respect abort during wait)
-        const delay = RETRY_DELAYS[attempt] || 10000
+        // Wait before retrying — 20s for rate limits, normal backoff for others
+        const isRateLimit = err instanceof ServiceError && err.code === 'RATE_LIMIT'
+        const delay = isRateLimit ? 20000 : (RETRY_DELAYS[attempt] || 10000)
         logger.warn('agent', `API call failed (${(err as ServiceError).code}), retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`)
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(resolve, delay)

@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { isProjectIsolated, getContainerProjectPath } from './containerStore';
-import { logger } from '../utils/logger';
 
 interface TerminalSession {
   id: string;
@@ -48,12 +47,17 @@ export const useTerminalStore = create<TerminalState & TerminalActions>((set, ge
       if (isProjectIsolated() && projectPath) {
         workingDir = projectPath;
       } else {
-        try {
-          const { invoke } = await import('@tauri-apps/api/core');
-          workingDir = await invoke('get_current_directory') as string;
-        } catch (error) {
-          logger.warn('terminal', 'Failed to get current directory from Tauri, using fallback');
-          workingDir = '/';
+        // Use project path if available, otherwise user's home directory
+        const project = (await import('./projectStore')).useProjectStore.getState().currentProject
+        if (project?.path) {
+          workingDir = project.path
+        } else {
+          try {
+            const { homeDir } = await import('@tauri-apps/api/path')
+            workingDir = await homeDir()
+          } catch {
+            workingDir = '/'
+          }
         }
       }
     }
