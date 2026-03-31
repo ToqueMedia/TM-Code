@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { t } from '@/i18n'
 import { Box, Text, Menu } from '@chakra-ui/react'
 import { FiCode } from 'react-icons/fi'
 import { useEditorRepository } from '../../stores/editorStore'
@@ -32,7 +33,7 @@ const LanguageSelector = memo<LanguageSelectorProps>(({ activeFile, openFiles })
             gap={1}
             _hover={{ bg: 'whiteAlpha.100' }}
             borderRadius="4px"
-            title="Change language"
+            title={t("explorer.changeLanguage")}
           >
             <FiCode size={12} />
             <Text>{currentLanguage}</Text>

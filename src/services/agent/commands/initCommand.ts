@@ -46,7 +46,8 @@ Do the following:
 4. PRESERVE the "Custom Instructions" section
 5. Write the updated TMS.md using write_file
 
-Use tools to read the project files before updating.`
+Use tools to read the project files before updating.
+Do NOT include or echo the TMS.md content in your text response. Just write the file and confirm briefly what was updated.`
   }
 
   return `Analyze this project and create a TMS.md file at ${projectPath}/TMS.md.
@@ -120,5 +121,6 @@ IMPORTANT:
 - If a command doesn't exist (no test script, no lint script), write "not configured"
 - The Memory section MUST start empty
 - The Custom Instructions section MUST start with the placeholder text
-- Write the file using the write_file tool`
+- Write the file using the write_file tool
+- Do NOT include or echo the TMS.md content in your text response. Just write the file and confirm briefly what was analyzed.`
 }

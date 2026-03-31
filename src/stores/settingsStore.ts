@@ -13,10 +13,64 @@ export interface AutocompleteSettings {
   ollamaUrl: string
 }
 
+export type AgentModelId = 'mimo-v2-flash' | 'deepseek-v3.2' | 'glm-5' | 'kimi-k2.5' | 'qwen3-coder-next' | 'minimax-m2.5' | 'gemini-3-flash'
+
+export type AppLanguage = 'en' | 'pt'
+export type AgentLanguage = 'en' | 'pt' | 'zh' | 'es' | 'fr' | 'de' | 'ja'
+
+export interface KeyBinding {
+  key: string           // e.g. 'Enter', 'Escape', 'p'
+  meta?: boolean        // Cmd (Mac) / Ctrl (Win)
+  shift?: boolean
+  alt?: boolean
+}
+
+export type ShortcutId =
+  | 'toggleTerminal'
+  | 'openFile'
+  | 'newProject'
+  | 'closeFile'
+  | 'quickOpen'
+  | 'commandPalette'
+  | 'settings'
+  | 'splitEditor'
+  | 'toggleSidebar'
+  | 'goToLine'
+  | 'searchInProject'
+  | 'diffAccept'
+  | 'diffAcceptAll'
+  | 'diffReject'
+  | 'diffRejectAll'
+
+export type ShortcutMap = Record<ShortcutId, KeyBinding | null>
+
+export const DEFAULT_SHORTCUTS: ShortcutMap = {
+  toggleTerminal:   { key: '`', meta: true },
+  openFile:         { key: 'o', meta: true },
+  newProject:       { key: 'N', meta: true, shift: true },
+  closeFile:        { key: 'w', meta: true },
+  quickOpen:        { key: 'p', meta: true },
+  commandPalette:   { key: 'p', meta: true, shift: true },
+  settings:         { key: ',', meta: true },
+  splitEditor:      { key: '\\', meta: true },
+  toggleSidebar:    { key: 'b', meta: true },
+  goToLine:         { key: 'g', meta: true },
+  searchInProject:  { key: 'F', meta: true, shift: true },
+  diffAccept:       { key: 'Enter', meta: true },
+  diffAcceptAll:    { key: 'Enter', meta: true, shift: true },
+  diffReject:       { key: 'Escape' },
+  diffRejectAll:    { key: 'Escape', meta: true, shift: true },
+}
+
 interface SettingsState {
   editor: EditorIndentationSettings
   autocomplete: AutocompleteSettings
+  agentModel: AgentModelId
   formatOnSave: boolean
+  appLanguage: AppLanguage
+  agentLanguage: AgentLanguage
+  shortcuts: ShortcutMap
+  hasCompletedOnboarding: boolean
 }
 
 interface SettingsActions {
@@ -26,7 +80,13 @@ interface SettingsActions {
   setAutocompleteEnabled: (enabled: boolean) => void
   setAutocompleteModel: (model: string) => void
   setAutocompleteOllamaUrl: (url: string) => void
+  setAgentModel: (model: AgentModelId) => void
   setFormatOnSave: (value: boolean) => void
+  setAppLanguage: (lang: AppLanguage) => void
+  setAgentLanguage: (lang: AgentLanguage) => void
+  setShortcut: (id: ShortcutId, binding: KeyBinding) => void
+  resetShortcuts: () => void
+  completeOnboarding: () => void
 }
 
 const DEFAULTS: SettingsState = {
@@ -40,7 +100,12 @@ const DEFAULTS: SettingsState = {
     model: 'qwen2.5-coder:7b',
     ollamaUrl: 'http://localhost:11434',
   },
+  agentModel: 'deepseek-v3.2' as AgentModelId,
   formatOnSave: false,
+  appLanguage: 'en',
+  agentLanguage: 'en',
+  shortcuts: { ...DEFAULT_SHORTCUTS },
+  hasCompletedOnboarding: false,
 }
 
 export const useSettingsStore = create<SettingsState & SettingsActions>()(
@@ -86,19 +151,62 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
       },
 
       setAutocompleteOllamaUrl: (url: string) => {
+        // Only allow localhost URLs to prevent exfiltration of code context
+        try {
+          const parsed = new URL(url)
+          if (!['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(parsed.hostname)) {
+            return // reject non-localhost URLs silently
+          }
+        } catch {
+          return // reject invalid URLs
+        }
         set((state) => ({
           autocomplete: { ...state.autocomplete, ollamaUrl: url }
         }))
       },
 
+      setAgentModel: (model: AgentModelId) => {
+        set(() => ({ agentModel: model }))
+      },
+
       setFormatOnSave: (value: boolean) => {
         set(() => ({ formatOnSave: !!value }))
+      },
+
+      setAppLanguage: (lang: AppLanguage) => {
+        set(() => ({ appLanguage: lang }))
+      },
+
+      setAgentLanguage: (lang: AgentLanguage) => {
+        set(() => ({ agentLanguage: lang }))
+      },
+
+      setShortcut: (id: ShortcutId, binding: KeyBinding) => {
+        set(state => {
+          // Clear any conflicting shortcut (other action with the same binding)
+          const updated = { ...state.shortcuts }
+          for (const [otherId, otherBinding] of Object.entries(updated)) {
+            if (otherId !== id && otherBinding && bindingsEqual(otherBinding, binding)) {
+              updated[otherId as ShortcutId] = null
+            }
+          }
+          updated[id] = binding
+          return { shortcuts: updated }
+        })
+      },
+
+      resetShortcuts: () => {
+        set(() => ({ shortcuts: { ...DEFAULT_SHORTCUTS } }))
+      },
+
+      completeOnboarding: () => {
+        set(() => ({ hasCompletedOnboarding: true }))
       },
     }),
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave }
+        return { editor: state.editor, autocomplete: state.autocomplete, agentModel: state.agentModel, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -107,9 +215,74 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           ...current,
           editor: { ...DEFAULTS.editor, ...p.editor },
           autocomplete: { ...DEFAULTS.autocomplete, ...p.autocomplete },
+          agentModel: p.agentModel ?? DEFAULTS.agentModel,
           formatOnSave: p.formatOnSave ?? DEFAULTS.formatOnSave,
+          appLanguage: p.appLanguage ?? DEFAULTS.appLanguage,
+          agentLanguage: p.agentLanguage ?? DEFAULTS.agentLanguage,
+          hasCompletedOnboarding: p.hasCompletedOnboarding ?? DEFAULTS.hasCompletedOnboarding,
+          // Merge shortcuts: defaults for new keys, but preserve null (cleared by conflict)
+          shortcuts: Object.fromEntries(
+            Object.keys(DEFAULT_SHORTCUTS).map(k => [
+              k,
+              p.shortcuts && k in p.shortcuts ? p.shortcuts[k as ShortcutId] : DEFAULT_SHORTCUTS[k as ShortcutId],
+            ])
+          ) as ShortcutMap,
         }
       },
     }
   )
 )
+
+const IS_MAC = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || '')
+
+/** Check if two KeyBindings are equivalent */
+function bindingsEqual(a: KeyBinding, b: KeyBinding): boolean {
+  return a.key === b.key
+    && !!a.meta === !!b.meta
+    && !!a.shift === !!b.shift
+    && !!a.alt === !!b.alt
+}
+
+/** Check if a KeyboardEvent matches a KeyBinding. Returns false if binding is null/undefined (cleared by conflict). */
+export function matchesBinding(e: KeyboardEvent, binding: KeyBinding | null | undefined): boolean {
+  if (!binding) return false
+  const meta = !!(binding.meta)
+  const shift = !!(binding.shift)
+  const alt = !!(binding.alt)
+
+  if (meta !== (e.metaKey || e.ctrlKey)) return false
+  if (shift !== e.shiftKey) return false
+  if (alt !== e.altKey) return false
+
+  // Match key (case-insensitive for letters, exact for special keys)
+  const bKey = binding.key
+  if (bKey.length === 1) {
+    return e.key.toLowerCase() === bKey.toLowerCase() || e.code === `Key${bKey.toUpperCase()}`
+  }
+  return e.key === bKey || e.code === bKey
+}
+
+/** Format a KeyBinding for display (e.g. "⌘⇧↩") */
+export function formatBinding(binding: KeyBinding | null | undefined): string {
+  if (!binding) return '—'
+  const isMac = IS_MAC
+  const parts: string[] = []
+
+  if (binding.meta) parts.push(isMac ? '⌘' : 'Ctrl')
+  if (binding.shift) parts.push(isMac ? '⇧' : 'Shift')
+  if (binding.alt) parts.push(isMac ? '⌥' : 'Alt')
+
+  const keyMap: Record<string, string> = {
+    Enter: isMac ? '↩' : 'Enter',
+    Escape: 'Esc',
+    Backquote: '`',
+    Backslash: '\\',
+    ArrowUp: '↑',
+    ArrowDown: '↓',
+    ArrowLeft: '←',
+    ArrowRight: '→',
+  }
+  parts.push(keyMap[binding.key] || binding.key.toUpperCase())
+
+  return isMac ? parts.join('') : parts.join('+')
+}

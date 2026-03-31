@@ -460,9 +460,9 @@ pub fn rename_file_or_directory(old_path: String, new_name: String) -> Result<Fi
         .map_err(FileTreeError::from)
 }
 
-// Read file content
+// Read file content (async — does not block the Tauri command queue)
 #[tauri::command]
-pub fn read_file(path: String) -> Result<String> {
+pub async fn read_file(path: String) -> Result<String> {
     let file_path = Path::new(&path);
     let canonical = validate_path_safe(file_path)?;
 
@@ -477,7 +477,7 @@ pub fn read_file(path: String) -> Result<String> {
     }
 
     // Prevent reading excessively large files into memory
-    let metadata = std::fs::metadata(&canonical)?;
+    let metadata = tokio::fs::metadata(&canonical).await?;
     if metadata.len() > MAX_READ_FILE_SIZE {
         return Err(FileTreeError::InvalidOperation(format!(
             "File too large ({:.1} MB). Maximum allowed: {:.0} MB",
@@ -486,7 +486,7 @@ pub fn read_file(path: String) -> Result<String> {
         )));
     }
 
-    std::fs::read_to_string(&canonical).map_err(|e| {
+    tokio::fs::read_to_string(&canonical).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::InvalidData {
             FileTreeError::InvalidOperation("Cannot read binary file as text".to_string())
         } else {
@@ -495,18 +495,18 @@ pub fn read_file(path: String) -> Result<String> {
     })
 }
 
-// Write file content
+// Write file content (async — does not block the Tauri command queue)
 #[tauri::command]
-pub fn write_file(path: String, content: String) -> Result<()> {
+pub async fn write_file(path: String, content: String) -> Result<()> {
     let file_path = Path::new(&path);
     let canonical = validate_path_safe(file_path)?;
 
     // Create parent directories if they don't exist
     if let Some(parent) = canonical.parent() {
-        std::fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
 
-    std::fs::write(&canonical, content).map_err(FileTreeError::from)
+    tokio::fs::write(&canonical, content).await.map_err(FileTreeError::from)
 }
 
 // Create a new file

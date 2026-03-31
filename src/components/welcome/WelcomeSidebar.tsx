@@ -16,6 +16,7 @@ import {
   LuFolder,
   LuClock,
   LuChevronRight,
+  LuSettings,
 } from 'react-icons/lu'
 import { tokens } from '@/theme/tokens'
 
@@ -33,6 +34,7 @@ interface WelcomeSidebarProps {
   onOpenFolder: () => void
   onCloneRepository: () => void
   onOpenProject: (path?: string) => void
+  onSettings?: () => void
 }
 
 const actionItems = [
@@ -49,6 +51,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   onOpenFolder,
   onCloneRepository,
   onOpenProject,
+  onSettings,
 }) => {
   const handleAction = (id: string) => {
     if (id === 'new') onNewProject()
@@ -255,12 +258,27 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
         </VStack>
       </VStack>
 
-      {/* Version footer */}
-      <Box pt={4} mt={4} borderTop="1px solid rgba(255,255,255,0.05)">
-        <Text fontSize="10px" color={tokens.colors.text.muted} textAlign="center" opacity={0.5}>
-          TM Code v0.1.0
+      {/* Footer — settings + version */}
+      <Flex pt={4} mt={4} borderTop="1px solid rgba(255,255,255,0.05)" alignItems="center" justifyContent="space-between" px={2}>
+        <Flex
+          width="28px"
+          height="28px"
+          alignItems="center"
+          justifyContent="center"
+          borderRadius="6px"
+          cursor="pointer"
+          transition="all 0.2s ease"
+          _hover={{ bg: 'rgba(255, 255, 255, 0.06)' }}
+          onClick={onSettings}
+        >
+          <Icon color={tokens.colors.text.muted} fontSize="15px">
+            <LuSettings />
+          </Icon>
+        </Flex>
+        <Text fontSize="10px" color={tokens.colors.text.muted} opacity={0.5}>
+          v0.1.0
         </Text>
-      </Box>
+      </Flex>
     </Box>
   )
 }

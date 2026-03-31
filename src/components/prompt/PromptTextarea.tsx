@@ -1,6 +1,7 @@
 import React, { memo } from 'react'
 import { Box } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface PromptTextareaProps {
   textareaRef: React.RefObject<HTMLTextAreaElement | null>
@@ -8,10 +9,11 @@ interface PromptTextareaProps {
   onChange: (value: string) => void
   onKeyDown: (e: React.KeyboardEvent) => void
   onBlur?: () => void
+  onPaste?: (e: React.ClipboardEvent) => void
   disabled: boolean
 }
 
-function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, disabled }: PromptTextareaProps) {
+function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPaste, disabled }: PromptTextareaProps) {
   return (
     <Box px={4} pt={3} pb={1}>
       <textarea
@@ -20,10 +22,15 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, disab
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={onKeyDown}
         onBlur={onBlur}
-        placeholder="Ask anything... (type / for commands)"
-        aria-label="Message prompt"
+        onPaste={onPaste}
+        placeholder={t('prompt.placeholder')}
+        aria-label={t('prompt.ariaLabel')}
         disabled={disabled}
         rows={1}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
         style={{
           width: '100%',
           background: 'transparent',

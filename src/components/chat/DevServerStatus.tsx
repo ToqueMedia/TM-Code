@@ -3,6 +3,7 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiMonitor, FiX } from 'react-icons/fi'
 import { useLayoutStore, type DevServerLogEntry } from '../../stores/layoutStore'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 const LOG_COLORS: Record<string, string> = {
   info: tokens.colors.text.secondary,
@@ -77,7 +78,7 @@ function DevServerStatus() {
           <FiMonitor size={12} color={hasErrors ? tokens.colors.accent.red : tokens.colors.accent.green} />
         )}
         <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary} flex={1}>
-          {isLoading ? 'Starting dev server...' : 'Dev server'}
+          {isLoading ? t('devserver.starting') : t('devserver.title')}
         </Text>
         <Box
           as="button"

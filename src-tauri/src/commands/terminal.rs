@@ -32,24 +32,83 @@ pub struct ProcessInfo {
 
 // Estado global para manter histórico de comandos
 type CommandHistory = Mutex<Vec<String>>;
-type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
+pub type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
 
 // ─── Shared execution engine ─────────────────────────────────────────────────
 
 /// Build a host-local shell command.
-fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
-    let (shell, flag) = if cfg!(target_os = "windows") {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
+/// Cached full PATH from the user's login shell.
+/// Extracted once (lazily) via `$SHELL -l -c 'printf $PATH'` so that tools
+/// installed via brew, nvm, volta, corepack are visible without the side
+/// effects of a full login shell (motd, starship prompt, etc.)
+///
+/// Initialized eagerly at app startup via `init_user_path()` on a background
+/// thread so it doesn't block the first command.
+static USER_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
-    let mut cmd = Command::new(shell);
-    cmd.arg(flag)
+/// Call once at app startup (from lib.rs setup) to pre-warm the PATH cache
+/// on a background thread. Non-blocking.
+pub fn init_user_path() {
+    std::thread::spawn(|| { get_user_path(); });
+}
+
+pub fn get_user_path() -> Option<&'static str> {
+    USER_PATH.get_or_init(|| {
+        let user_shell = std::env::var("SHELL").unwrap_or_default();
+
+        // fish has incompatible syntax ($PATH is a list, not colon-delimited).
+        // Use zsh or bash as a POSIX fallback for PATH extraction.
+        let shells: Vec<String> = if user_shell.ends_with("/fish") {
+            vec!["/bin/zsh".into(), "/bin/bash".into()]
+        } else if user_shell.is_empty() {
+            vec!["/bin/zsh".into()]
+        } else {
+            vec![user_shell, "/bin/zsh".into()]
+        };
+
+        for shell in &shells {
+            if let Ok(output) = std::process::Command::new(shell)
+                .args(["-l", "-c", "printf '%s' \"$PATH\""])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+            {
+                if output.status.success() {
+                    if let Ok(path) = String::from_utf8(output.stdout) {
+                        if !path.is_empty() {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }).as_deref()
+}
+
+fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
+    if cfg!(target_os = "windows") {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C")
+            .arg(command)
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        return cmd;
+    }
+
+    // macOS/Linux: use plain sh -c (no login shell side effects) but with the
+    // user's full PATH so tools from brew, nvm, volta, corepack are found.
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    if let Some(path) = get_user_path() {
+        cmd.env("PATH", path);
+    }
 
     #[cfg(unix)]
     {
@@ -89,7 +148,8 @@ fn ensure_container_running(container_name: &str) {
 /// Build a `docker exec` command that runs inside a container.
 fn build_container_command(command: &str, workdir: &str, container_name: &str) -> Command {
     let mut cmd = docker_cmd();
-    cmd.args(["exec", "-w", workdir, container_name, "sh", "-c", command])
+    let home_env = format!("HOME={}", workdir);
+    cmd.args(["exec", "-e", &home_env, "-w", workdir, container_name, "sh", "-c", command])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -314,6 +374,95 @@ struct DevServerOutput {
     data: String,
 }
 
+/// Validate a byte slice as UTF-8, emit the valid portion, and handle errors:
+/// - Incomplete sequence at the end → save to `leftover` for the next read
+/// - Genuinely invalid bytes → replace with U+FFFD and continue
+fn emit_utf8_validated(
+    data: &[u8],
+    leftover: &mut Vec<u8>,
+    emit: &dyn Fn(&str),
+) {
+    let mut pos = 0;
+    while pos < data.len() {
+        match std::str::from_utf8(&data[pos..]) {
+            Ok(text) => {
+                if !text.is_empty() {
+                    emit(text);
+                }
+                leftover.clear();
+                return;
+            }
+            Err(e) => {
+                let valid_end = pos + e.valid_up_to();
+                // Emit valid portion before the error
+                if valid_end > pos {
+                    // Safety: from_utf8 confirmed bytes [pos..valid_end] are valid
+                    let text = unsafe { std::str::from_utf8_unchecked(&data[pos..valid_end]) };
+                    emit(text);
+                }
+                match e.error_len() {
+                    Some(invalid_len) => {
+                        // Genuinely invalid sequence — replace with U+FFFD and skip
+                        emit("\u{FFFD}");
+                        pos = valid_end + invalid_len;
+                    }
+                    None => {
+                        // Incomplete sequence at the end — save for next read
+                        *leftover = data[valid_end..].to_vec();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Read from a pipe in raw chunks, emit each chunk as a Tauri event.
+/// Handles incomplete UTF-8 sequences at 4KB read boundaries by carrying
+/// leftover bytes to the next read, so multi-byte characters are never split.
+/// Genuinely invalid bytes are replaced with U+FFFD and emitted immediately.
+fn stream_pipe_to_events(
+    pipe: &mut dyn Read,
+    pid: u32,
+    stream_name: &str,
+    app: &tauri::AppHandle,
+) {
+    let mut buf = [0u8; 4096];
+    let mut leftover: Vec<u8> = Vec::new();
+
+    let emit = |text: &str| {
+        let _ = app.emit("cmd-output", DevServerOutput {
+            pid, stream: stream_name.into(), data: text.to_string(),
+        });
+    };
+
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => {
+                // EOF — flush any remaining bytes (possibly invalid)
+                if !leftover.is_empty() {
+                    emit(&String::from_utf8_lossy(&leftover));
+                }
+                break;
+            }
+            Ok(n) => {
+                if leftover.is_empty() {
+                    // Fast path: no leftover — validate directly from stack buffer,
+                    // zero allocation when UTF-8 is valid (the common case).
+                    emit_utf8_validated(&buf[..n], &mut leftover, &emit);
+                } else {
+                    // Slow path: prepend leftover bytes
+                    let mut combined = std::mem::take(&mut leftover);
+                    combined.extend_from_slice(&buf[..n]);
+                    emit_utf8_validated(&combined, &mut leftover, &emit);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+            Err(_) => break,
+        }
+    }
+}
+
 /// Execute a command with streamed output. Unlike `execute_command` which blocks
 /// until the command finishes, this spawns the process and streams stdout/stderr
 /// line by line via `cmd-output` events. Emits `cmd-exit` with exit code when done.
@@ -349,43 +498,21 @@ pub async fn run_streaming_command(
 
     let pid = child.id();
 
-    // Stream stdout
-    if let Some(stdout) = child.stdout.take() {
+    // Stream stdout — chunk-based to capture progress bars (\r without \n).
+    // Reads raw from pipe (no BufReader) for minimal latency on small writes.
+    // Handles incomplete UTF-8 sequences at chunk boundaries.
+    if let Some(mut stdout) = child.stdout.take() {
         let app_clone = app.clone();
         std::thread::spawn(move || {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(stdout);
-            for line_result in reader.lines() {
-                match line_result {
-                    Ok(line) => {
-                        let _ = app_clone.emit("cmd-output", DevServerOutput {
-                            pid, stream: "stdout".into(), data: line,
-                        });
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
-                    Err(_) => break,
-                }
-            }
+            stream_pipe_to_events(&mut stdout, pid, "stdout", &app_clone);
         });
     }
 
-    // Stream stderr
-    if let Some(stderr) = child.stderr.take() {
+    // Stream stderr — same chunk-based approach.
+    if let Some(mut stderr) = child.stderr.take() {
         let app_clone = app.clone();
         std::thread::spawn(move || {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(stderr);
-            for line_result in reader.lines() {
-                match line_result {
-                    Ok(line) => {
-                        let _ = app_clone.emit("cmd-output", DevServerOutput {
-                            pid, stream: "stderr".into(), data: line,
-                        });
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
-                    Err(_) => break,
-                }
-            }
+            stream_pipe_to_events(&mut stderr, pid, "stderr", &app_clone);
         });
     }
 
@@ -412,12 +539,16 @@ pub async fn start_dev_server(
     app: tauri::AppHandle,
     command: String,
     cwd: String,
+    port: Option<u16>,
     process_map: State<'_, ProcessMap>,
     active_project: State<'_, ActiveProjectState>,
 ) -> Result<u32, String> {
     if command.trim().is_empty() {
         return Err("Empty command".to_string());
     }
+
+    let server_port = port.unwrap_or(7773);
+    let port_str = server_port.to_string();
 
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
@@ -428,12 +559,13 @@ pub async fn start_dev_server(
 
             let workdir = host_to_container_path(&cwd, &ap.project_path);
             let mut c = docker_cmd();
-            // Kill any orphaned dev server on port 7773 inside the container,
+            // Kill any orphaned dev server on the target port inside the container,
             // then run the actual command. Use fuser (busybox-compatible) instead of lsof.
             let wrapped = format!(
-                "fuser -k 7773/tcp 2>/dev/null; {}",
-                command
+                "fuser -k {}/tcp 2>/dev/null; {}",
+                server_port, command
             );
+            let port_env = format!("PORT={}", server_port);
             c.args([
                 "exec",
                 "-w",
@@ -443,9 +575,15 @@ pub async fn start_dev_server(
                 "-e",
                 "NO_COLOR=1",
                 "-e",
-                "PORT=7773",
+                &port_env,
                 "-e",
                 "BROWSER=none",
+                // Bind to 0.0.0.0 so port mapping works from host.
+                // Different frameworks read different vars (Vite: HOST, Next: HOSTNAME).
+                "-e",
+                "HOST=0.0.0.0",
+                "-e",
+                "HOSTNAME=0.0.0.0",
                 container_name,
                 "sh",
                 "-c",
@@ -476,7 +614,7 @@ pub async fn start_dev_server(
                 .current_dir(&clamped)
                 .env("FORCE_COLOR", "0")
                 .env("NO_COLOR", "1")
-                .env("PORT", "7773")
+                .env("PORT", &port_str)
                 .env("BROWSER", "none")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -503,7 +641,7 @@ pub async fn start_dev_server(
             .current_dir(&cwd)
             .env("FORCE_COLOR", "0")
             .env("NO_COLOR", "1")
-            .env("PORT", "7773")
+            .env("PORT", &port_str)
             .env("BROWSER", "none")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -776,6 +914,26 @@ pub async fn kill_port(port: u16) -> Result<bool, String> {
             .args(["/C", &cmd])
             .output();
     }
+
+    // Wait until the OS actually frees the port (up to 3s).
+    // kill -9 is async — the kernel may take a moment to release the socket.
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let check = format!("lsof -ti:{}", port);
+        if let Ok(output) = Command::new("sh").args(["-c", &check]).output() {
+            if output.stdout.is_empty() {
+                return Ok(true);
+            }
+        }
+    }
+
+    // Port still occupied after 3s — try one more kill
+    if cfg!(unix) {
+        let cmd = format!("lsof -ti:{} | xargs kill -9 2>/dev/null", port);
+        let _ = Command::new("sh").args(["-c", &cmd]).output();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
     Ok(true)
 }
 
@@ -1012,9 +1170,12 @@ pub async fn get_completions(
                 None => WORKSPACE_PATH.to_string(),
             };
             // Use bash compgen for smart completion inside container
+            // Shell-escape partial to prevent command injection
+            let safe_partial = partial.replace('\'', "'\\''");
+            let safe_workdir = workdir.replace('\'', "'\\''");
             let script = format!(
                 "cd '{}' 2>/dev/null; compgen -f -- '{}' 2>/dev/null | head -20",
-                workdir, partial
+                safe_workdir, safe_partial
             );
             let output = docker_cmd()
                 .args(["exec", "-w", &workdir, container_name, "bash", "-c", &script])
@@ -1091,8 +1252,10 @@ pub async fn get_completions(
 
     // If no file matches and partial looks like a command (first word), try command completion
     if completions.is_empty() && !partial.contains('/') {
+        // Shell-escape partial to prevent command injection
+        let safe_partial = partial.replace('\'', "'\\''");
         if let Ok(output) = Command::new("bash")
-            .args(["-c", &format!("compgen -c -- '{}' 2>/dev/null | head -20", partial)])
+            .args(["-c", &format!("compgen -c -- '{}' 2>/dev/null | head -20", safe_partial)])
             .output()
         {
             if output.status.success() {

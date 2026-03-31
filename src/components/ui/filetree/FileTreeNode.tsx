@@ -59,7 +59,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
       clickTimerRef.current = setTimeout(() => {
         clickTimerRef.current = null;
         useEditorRepository.getState().previewFile(node.path);
-      }, 200);
+      }, 80);
     }
   };
 

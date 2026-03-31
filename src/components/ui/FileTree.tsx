@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Box, Alert } from '@chakra-ui/react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { tokens } from '@/theme/tokens';
+import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n';
 import { useFileTreeRepository } from '@/stores/fileTreeStore';
 import type { FileTreeNode } from '@/types/fileTree';
 import FileWatcherService from '@/services/fileWatcherService';
@@ -97,7 +98,7 @@ const FileTree: React.FC<FileTreeProps> = ({ rootPath, onFileSelect, onRefresh }
         </Alert.Root>
       )}
 
-      <Box ref={parentRef} role="tree" aria-label="File explorer" flex={1} overflowY="auto" overflowX="hidden" pt={1} minW="100%" position="relative">
+      <Box ref={parentRef} role="tree" aria-label={t("explorer.fileExplorer")} flex={1} overflowY="auto" overflowX="hidden" pt={1} minW="100%" position="relative">
         <Box position="relative" height={`${virtualizer.getTotalSize()}px`}>
           {virtualizer.getVirtualItems().map((item) => {
             const flat = flatNodes[item.index];
@@ -114,6 +115,10 @@ const FileTree: React.FC<FileTreeProps> = ({ rootPath, onFileSelect, onRefresh }
         open={actions.menuOpen} onOpenChange={actions.setMenuOpen} position={actions.menuPos} node={actions.menuNode}
         onNewFile={actions.handleNewFile} onNewFolder={actions.handleNewFolder} onCopy={actions.beginCopy}
         onRename={actions.beginRename} onDelete={actions.handleDeleteFromMenu} onReveal={actions.handleReveal} onCopyPath={actions.handleCopyPath}
+        onCopyRelativePath={actions.handleCopyRelativePath}
+        onOpenToSide={actions.handleOpenToSide}
+        onOpenInTerminal={actions.handleOpenInTerminal}
+        onFindInFolder={actions.handleFindInFolder}
       />
 
       <RenameDialog

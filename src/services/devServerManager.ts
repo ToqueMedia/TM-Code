@@ -21,12 +21,14 @@ interface DevServerOutputPayload {
   data: string
 }
 
-// URL patterns emitted by common dev servers
-const URL_REGEX = /https?:\/\/(?:localhost|127\.0\.0\.1):\d+\/?/
-const PORT_REGEX = /(?:listening on|running at|port)\s+(\d{4,5})/i
+// URL patterns emitted by common dev servers (including IPv6 variants)
+const URL_REGEX = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\[0:0:0:0:0:0:0:1\]):\d+\/?/
+const PORT_REGEX = /(?:listening on|running (?:on|at)|started on|port|server at)\s+(\d{4,5})/i
 
-/** Port used for project dev servers — avoids conflict with the IDE's own Vite (5173). */
+/** Port used for frontend dev servers — avoids conflict with the IDE's own Vite (5173). */
 const DEV_SERVER_PORT = 7773
+/** Port used for backend/API dev servers. */
+const BACKEND_SERVER_PORT = 7777
 
 /** Max time (ms) to wait for the server to accept connections. */
 const READY_TIMEOUT = 12_000
@@ -42,6 +44,14 @@ class DevServerManager {
   private generation = 0
   /** Incremented on each waitForServerReady call — cancels previous polling if URL changes. */
   private pollGeneration = 0
+  /** Optional hint from the agent about the server type — skips auto-detection. */
+  private serverTypeHint: 'frontend' | 'backend' | null = null
+  /** Resolved port for the current server (7773 for frontend, 7777 for backend). */
+  private serverPort: number = DEV_SERVER_PORT
+  /** Guards against infinite EADDRINUSE retry loops — at most one auto-recovery per start(). */
+  private eaddrinuseRetried = false
+  /** Pending preview-switch subscription — cleaned up on stop(). */
+  private unsubPreviewDefer: (() => void) | null = null
 
   static getInstance(): DevServerManager {
     if (!DevServerManager.instance) {
@@ -51,19 +61,17 @@ class DevServerManager {
   }
 
   /**
-   * Inject --port into the command so the dev server binds to our chosen port.
-   * Works with npm/yarn/pnpm run (via -- separator) and direct CLI invocations.
+   * Inject --port CLI flag for frontend dev servers.
+   * Host binding (0.0.0.0 for Docker) is handled via HOST/HOSTNAME env vars
+   * on the Rust side — NOT via CLI flags, since each framework uses different
+   * flags (Vite: --host, Next: --hostname, Nuxt: --host without value).
    */
-  private injectPort(command: string): string {
-    const port = DEV_SERVER_PORT
-    // In Docker mode, dev servers must bind to 0.0.0.0 (not localhost)
-    // for the port mapping to work from the host.
-    const hostFlag = isContainerActive() ? ' --host 0.0.0.0' : ''
-    // npm run dev / yarn run dev / pnpm run dev → append "-- --port PORT [--host]"
+  private injectPort(command: string, port: number, isBackend: boolean): string {
+    if (isBackend) return command
+
     if (/^(npm|yarn|pnpm)\s+run\s+/.test(command)) {
-      return `${command} -- --port ${port}${hostFlag}`
+      return `${command} -- --port ${port}`
     }
-    // npm start / yarn start → PORT env var is set on the Rust side
     return command
   }
 
@@ -71,22 +79,33 @@ class DevServerManager {
   private normalizeUrl(url: string): string {
     // Force IPv4 — Colima only binds forwarded ports to 127.0.0.1, not ::1.
     // WKWebView resolves "localhost" to ::1 first and doesn't fall back to IPv4.
-    let normalized = url.replace('localhost', '127.0.0.1')
+    let normalized = url
+      .replace('localhost', '127.0.0.1')
+      .replace('0.0.0.0', '127.0.0.1')
+      .replace('[::1]', '127.0.0.1')
+      .replace('[::1:]', '127.0.0.1')
+      .replace('[0:0:0:0:0:0:0:1]', '127.0.0.1')
     // Ensure trailing slash
     if (!normalized.endsWith('/')) normalized += '/'
     return normalized
   }
 
-  async start(projectPath: string, devCommand: string): Promise<void> {
+  async start(projectPath: string, devCommand: string, serverTypeHint?: 'frontend' | 'backend'): Promise<void> {
     // Stop any existing server first
     await this.stop()
+
+    this.serverTypeHint = serverTypeHint || null
+    this.serverPort = serverTypeHint === 'backend' ? BACKEND_SERVER_PORT : DEV_SERVER_PORT
+    this.eaddrinuseRetried = false
 
     // Kill any process occupying our port before starting.
     // Skip in Docker mode — the port is owned by Colima's SSH forwarding.
     // Orphaned dev servers inside the container are cleaned by fuser in start_dev_server.
+    // The Rust kill_port command polls until the port is actually free (up to 3s).
     if (!isContainerActive()) {
       try {
-        await invoke('kill_port', { port: DEV_SERVER_PORT })
+        await invoke('kill_port', { port: this.serverPort })
+        logger.info('devServer', `Port ${this.serverPort} cleared`)
       } catch {
         // Ignore — port may already be free
       }
@@ -94,7 +113,7 @@ class DevServerManager {
 
     const gen = ++this.generation
 
-    const resolvedCommand = this.injectPort(devCommand)
+    const resolvedCommand = this.injectPort(devCommand, this.serverPort, this.serverTypeHint === 'backend')
 
     // Signal loading state to the UI
     useLayoutStore.getState().setPreviewServerLoading(true)
@@ -122,6 +141,7 @@ class DevServerManager {
       const pid = await invoke<number>('start_dev_server', {
         command: resolvedCommand,
         cwd: projectPath,
+        port: this.serverPort,
       })
 
       // If stop() or another start() was called while we awaited invoke,
@@ -154,11 +174,16 @@ class DevServerManager {
     const line = payload.data
     const layoutStore = useLayoutStore.getState()
 
-    // Classify line level for the console panel
-    const isError = payload.stream === 'stderr'
-      || /\berror\b/i.test(line)
+    // Classify line level for the console panel.
+    // Many tools (npm, next, tsc) send warnings and info to stderr,
+    // so we classify by content, not by stream.
+    const isWarn = /\bwarn(ing)?\b/i.test(line) || /\bnpm warn\b/i.test(line)
+    const isError = !isWarn && (
+      /\berror\b/i.test(line)
       || /\bERR[!_]/i.test(line)
-    const isWarn = !isError && /\bwarn(ing)?\b/i.test(line)
+      || /\bfailed\b/i.test(line)
+      || /\bEADDRINUSE\b/.test(line)
+    )
     const level = isError ? 'error' : isWarn ? 'warn' : 'info'
 
     // Push to dev console log store
@@ -174,6 +199,34 @@ class DevServerManager {
       )
     }
 
+    // Auto-recovery: detect EADDRINUSE, kill the port, and restart (once)
+    const eaddrinuse = line.match(/EADDRINUSE.*(?:port|address)[:\s]*(\d+)/i)
+      || line.match(/EADDRINUSE.*:::(\d+)/i)
+      || line.match(/address already in use\s+(?:::)?(\d+)/i)
+    if (eaddrinuse && !this.eaddrinuseRetried && this.currentServer) {
+      const blockedPort = parseInt(eaddrinuse[1], 10)
+      if (blockedPort > 0) {
+        this.eaddrinuseRetried = true
+        const { projectPath, command } = this.currentServer
+        const hint = this.serverPort === BACKEND_SERVER_PORT ? 'backend' as const : undefined
+        layoutStore.addDevServerLog(
+          `Port ${blockedPort} in use — killing and restarting...`,
+          'warn'
+        )
+        // Fire-and-forget: stop current, kill port, restart
+        this.stop().then(async () => {
+          try {
+            await invoke('kill_port', { port: blockedPort })
+          } catch { /* port may already be free */ }
+          await new Promise(r => setTimeout(r, 500))
+          // Re-set the flag AFTER start() resets it, to prevent infinite loops
+          await this.start(projectPath, command, hint).catch(() => {})
+          this.eaddrinuseRetried = true
+        })
+        return
+      }
+    }
+
     // Detect URL in output
     let detectedUrl: string | null = null
 
@@ -186,7 +239,7 @@ class DevServerManager {
       detectedUrl = `http://localhost:${portMatch[1]}`
     }
 
-    if (detectedUrl) {
+    if (detectedUrl && this.currentServer) {
       const url = this.normalizeUrl(detectedUrl)
 
       // Always update to the LATEST detected URL.
@@ -245,17 +298,69 @@ class DevServerManager {
       await new Promise(r => setTimeout(r, READY_POLL_INTERVAL))
     }
 
-    // Register the preview server URL so it's available
+    // Detect whether this is a frontend SPA or backend API server
     if (gen === this.generation && this.currentServer) {
-      layoutStore.setPreviewServer(url, this.currentServer.pid)
-      logger.info('devServer', `Preview server registered: ${url}`)
+      const serverType = this.serverTypeHint === 'frontend' ? 'server'
+        : this.serverTypeHint === 'backend' ? 'api'
+        : await this.detectServerType(url)
+      this.serverTypeHint = null
+      layoutStore.setPreviewServer(url, this.currentServer.pid, serverType)
+      logger.info('devServer', `Preview server registered: ${url} (type: ${serverType})`)
 
-      // Only auto-switch to preview if the agent isn't actively streaming.
+      // Auto-switch to preview. If the agent is streaming, defer until
+      // streaming ends so we don't yank the user out of the chat mid-response.
       if (!useChatStore.getState().isStreaming) {
         layoutStore.setViewMode('preview')
+      } else {
+        // Clean up any previous deferred subscription
+        this.unsubPreviewDefer?.()
+        const unsub = useChatStore.subscribe((state, prev) => {
+          if (prev.isStreaming && !state.isStreaming) {
+            unsub()
+            this.unsubPreviewDefer = null
+            useLayoutStore.getState().setViewMode('preview')
+          }
+        })
+        this.unsubPreviewDefer = unsub
       }
     } else {
       logger.warn('devServer', `Polling finished but server no longer active (${attempts} attempts, ${Date.now() - start}ms)`)
+    }
+  }
+
+  /**
+   * Detect whether the running server is a backend API via HTTP probe.
+   * Only called when no serverTypeHint was provided (callers should use
+   * detectProjectCategory before start() to set the hint when possible).
+   * The user can always toggle manually via the toolbar button.
+   */
+  private async detectServerType(url: string): Promise<'server' | 'api'> {
+    try {
+      const result = await invoke<{
+        status: number
+        headers: [string, string][]
+        body: string
+      }>('http_client_request', {
+        input: {
+          method: 'GET',
+          url,
+          headers: {},
+          body: null,
+          timeoutSecs: 5,
+        },
+      })
+
+      const contentType = (
+        result.headers?.find(([k]) => k.toLowerCase() === 'content-type')?.[1] || ''
+      ).toLowerCase()
+
+      if (contentType.includes('json')) {
+        return 'api'
+      }
+
+      return 'server'
+    } catch {
+      return 'server'
     }
   }
 
@@ -301,13 +406,17 @@ class DevServerManager {
     this.unlistenOutput = null
     this.unlistenExit?.()
     this.unlistenExit = null
+    this.unsubPreviewDefer?.()
+    this.unsubPreviewDefer = null
   }
 
   async restart(): Promise<void> {
     if (!this.currentServer) return
     const { projectPath, command } = this.currentServer
+    // Preserve server type across restart by deriving from current port
+    const hint = this.serverPort === BACKEND_SERVER_PORT ? 'backend' as const : undefined
     await this.stop()
-    await this.start(projectPath, command)
+    await this.start(projectPath, command, hint)
   }
 
   getUrl(): string | null {

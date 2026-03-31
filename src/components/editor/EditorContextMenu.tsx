@@ -1,99 +1,130 @@
-import { tokens } from '@/theme/tokens'
+import { useEffect, useMemo, useState } from 'react'
+import ContextMenuOverlay, { type ContextMenuItem } from '../ui/ContextMenuOverlay'
 import MonacoBridge from '../../utils/monacoBridge'
+import { useEditorRepository } from '@/stores/editorStore'
+import { useProjectStore } from '@/stores/projectStore'
+import { t } from '@/i18n'
 
-interface ContextMenuOptions {
-	activeFile: string | null
-	projectPath?: string
+function sep(): ContextMenuItem {
+	return { label: '', separator: true }
 }
 
-export function showEditorContextMenu(e: React.MouseEvent, options: ContextMenuOptions) {
-	e.preventDefault()
-	const { activeFile, projectPath } = options
-
-	const items: { label: string; action: () => void }[] = []
-
-	// Edit actions (Monaco)
-	const bridge = MonacoBridge.getInstance()
-	items.push({ label: 'Copy', action: () => bridge.trigger('editor.action.clipboardCopyAction') })
-	items.push({ label: 'Cut', action: () => bridge.trigger('editor.action.clipboardCutAction') })
-	items.push({ label: 'Paste', action: () => bridge.trigger('editor.action.clipboardPasteAction') })
-	items.push({ label: 'Select All', action: () => bridge.trigger('editor.action.selectAll') })
-	items.push({
-		label: 'Format Document', action: () => {
-			try { MonacoBridge.getInstance().trigger('editor.action.formatDocument') } catch { }
-		}
-	})
-	items.push({ label: '\u2014', action: () => { } })
-	items.push({ label: 'Command Palette\u2026', action: () => window.dispatchEvent(new CustomEvent('command:palette')) })
-	items.push({ label: 'Quick Open', action: () => window.dispatchEvent(new CustomEvent('quickopen:toggle')) })
-	items.push({ label: 'Toggle Bottom Panel', action: () => window.dispatchEvent(new CustomEvent('panel:toggle-bottom')) })
-
-	if (activeFile) {
-		const filePath = activeFile
-		items.push({ label: '\u2014', action: () => { } })
-		items.push({
-			label: 'Reveal in Finder', action: async () => {
-				try {
-					const dir = filePath.substring(0, Math.max(0, filePath.lastIndexOf('/')))
-					const opener = await import('@tauri-apps/plugin-opener')
-					try { await opener.revealItemInDir(filePath) } catch {
-						await opener.openPath(dir)
-					}
-				} catch { }
-			}
-		})
-		items.push({
-			label: 'Copy Path', action: async () => {
-				try { await navigator.clipboard.writeText(filePath) } catch { }
-			}
-		})
-		if (projectPath) {
-			const rel = filePath.startsWith(projectPath) ? filePath.slice(projectPath.length + 1) : filePath
-			items.push({ label: 'Copy Relative Path', action: async () => { try { await navigator.clipboard.writeText(rel) } catch { } } })
-		}
-	}
-
-	// Render menu overlay
-	const menu = document.createElement('div')
-	Object.assign(menu.style, {
-		position: 'fixed',
-		left: e.clientX + 'px',
-		top: e.clientY + 'px',
-		zIndex: '3000',
-		background: tokens.colors.menu.bg,
-		border: `1px solid ${tokens.colors.menu.border}`,
-		borderRadius: '8px',
-		minWidth: '220px',
-		boxShadow: tokens.shadow.overlay
-	} as CSSStyleDeclaration)
-
-	items.forEach(it => {
-		const row = document.createElement('div')
-		if (it.label === '\u2014') {
-			Object.assign(row.style, {
-				height: '1px',
-				background: tokens.colors.menu.separator,
-				margin: '4px 0'
-			} as CSSStyleDeclaration)
-		} else {
-			row.textContent = it.label
-			Object.assign(row.style, {
-				padding: '8px 12px',
-				color: tokens.colors.menu.text,
-				cursor: 'default'
-			} as CSSStyleDeclaration)
-			row.onmouseenter = () => { row.style.background = tokens.colors.menu.hover }
-			row.onmouseleave = () => { row.style.background = 'transparent' }
-			row.onclick = () => { try { it.action() } finally { cleanup() } }
-		}
-		menu.appendChild(row)
-	})
-
-	const cleanup = () => {
-		if (menu.parentNode) document.body.removeChild(menu)
-		document.removeEventListener('mousedown', dismiss)
-	}
-	const dismiss = () => cleanup()
-	document.addEventListener('mousedown', dismiss)
-	document.body.appendChild(menu)
+interface MenuEventDetail {
+	x: number
+	y: number
 }
+
+/**
+ * React component that listens for a custom event to open the editor context menu.
+ * Replaces the old raw-DOM approach with the shared ContextMenuOverlay.
+ */
+export default function EditorContextMenu() {
+	const [isOpen, setIsOpen] = useState(false)
+	const [pos, setPos] = useState({ x: 0, y: 0 })
+
+	useEffect(function listen() {
+		function onOpen(e: Event) {
+			const detail = (e as CustomEvent<MenuEventDetail>).detail
+			if (!detail) return
+			setPos({ x: detail.x, y: detail.y })
+			setIsOpen(true)
+		}
+		window.addEventListener('editor:contextmenu', onOpen)
+		return () => window.removeEventListener('editor:contextmenu', onOpen)
+	}, [])
+
+	const activeFile = useEditorRepository(s => s.activeFile)
+	const projectPath = useProjectStore(s => s.currentProject?.path)
+
+	const items = useMemo(function buildItems(): ContextMenuItem[] {
+		const bridge = MonacoBridge.getInstance()
+		const editorActive = !!bridge.getCurrentEditor()
+		const result: ContextMenuItem[] = []
+
+		// ── Navigation ───────────────────────────────────────────────
+		if (editorActive) {
+			result.push({ label: t('ctx.goToDefinition'), hint: 'F12', action: () => bridge.runAction('editor.action.revealDefinition') })
+			result.push({ label: t('ctx.goToTypeDefinition'), action: () => bridge.runAction('editor.action.goToTypeDefinition') })
+			result.push({ label: t('ctx.goToImplementation'), hint: '⌘F12', action: () => bridge.runAction('editor.action.goToImplementation') })
+			result.push({ label: t('ctx.goToReferences'), hint: '⇧F12', action: () => bridge.runAction('editor.action.goToReferences') })
+			result.push(sep())
+			result.push({ label: t('ctx.peekDefinition'), hint: '⌥F12', action: () => bridge.runAction('editor.action.peekDefinition') })
+			result.push({ label: t('ctx.peekReferences'), action: () => bridge.runAction('editor.action.referenceSearch.trigger') })
+			result.push(sep())
+		}
+
+		// ── Refactoring ──────────────────────────────────────────────
+		if (editorActive) {
+			result.push({ label: t('ctx.renameSymbol'), hint: 'F2', action: () => bridge.runAction('editor.action.rename') })
+			result.push({ label: t('ctx.quickFix'), hint: '⌘.', action: () => bridge.runAction('editor.action.quickFix') })
+			result.push({ label: t('ctx.refactor'), hint: '⌃⇧R', action: () => bridge.runAction('editor.action.refactor') })
+			result.push({ label: t('ctx.sourceAction'), action: () => bridge.runAction('editor.action.sourceAction') })
+			result.push(sep())
+		}
+
+		// ── Edit actions ─────────────────────────────────────────────
+		result.push({ label: t('ctx.cut'), hint: '⌘X', action: () => MonacoBridge.getInstance().trigger('editor.action.clipboardCutAction') })
+		result.push({ label: t('ctx.copy'), hint: '⌘C', action: () => MonacoBridge.getInstance().trigger('editor.action.clipboardCopyAction') })
+		result.push({ label: t('ctx.paste'), hint: '⌘V', action: () => MonacoBridge.getInstance().trigger('editor.action.clipboardPasteAction') })
+		result.push(sep())
+
+		// ── Selection ────────────────────────────────────────────────
+		if (editorActive) {
+			result.push({ label: t('ctx.selectAll'), hint: '⌘A', action: () => bridge.trigger('editor.action.selectAll') })
+			result.push({ label: t('ctx.addNextOccurrence'), hint: '⌘D', action: () => bridge.runAction('editor.action.addSelectionToNextFindMatch') })
+			result.push({ label: t('ctx.selectAllOccurrences'), hint: '⌘⇧L', action: () => bridge.runAction('editor.action.selectHighlights') })
+			result.push(sep())
+		}
+
+		// ── Editor ───────────────────────────────────────────────────
+		if (editorActive) {
+			result.push({ label: t('ctx.formatDocument'), hint: '⇧⌥F', action: () => { try { bridge.trigger('editor.action.formatDocument') } catch {} } })
+			result.push({ label: t('ctx.toggleLineComment'), hint: '⌘/', action: () => bridge.runAction('editor.action.commentLine') })
+			result.push(sep())
+		}
+
+		// ── Tools ────────────────────────────────────────────────────
+		result.push({ label: t('ctx.commandPalette'), hint: '⌘⇧P', action: () => window.dispatchEvent(new CustomEvent('command:palette')) })
+		result.push({ label: t('ctx.quickOpen'), hint: '⌘P', action: () => window.dispatchEvent(new CustomEvent('quickopen:toggle')) })
+
+		// ── File actions ─────────────────────────────────────────────
+		if (activeFile) {
+			const filePath = activeFile
+			result.push(sep())
+			result.push({
+				label: t('ctx.revealInFinder'), async action() {
+					try {
+						const dir = filePath.substring(0, Math.max(0, filePath.lastIndexOf('/')))
+						const opener = await import('@tauri-apps/plugin-opener')
+						try { await opener.revealItemInDir(filePath) } catch {
+							await opener.openPath(dir)
+						}
+					} catch {}
+				}
+			})
+			result.push({
+				label: t('ctx.copyPath'), async action() {
+					try { await navigator.clipboard.writeText(filePath) } catch {}
+				}
+			})
+			if (projectPath) {
+				const rel = filePath.startsWith(projectPath) ? filePath.slice(projectPath.length + 1) : filePath
+				result.push({ label: t('ctx.copyRelativePath'), async action() { try { await navigator.clipboard.writeText(rel) } catch {} } })
+			}
+		}
+
+		return result
+	}, [activeFile, projectPath])
+
+	if (!isOpen) return null
+
+	return (
+		<ContextMenuOverlay
+			items={items}
+			x={pos.x}
+			y={pos.y}
+			onClose={() => setIsOpen(false)}
+		/>
+	)
+}
+

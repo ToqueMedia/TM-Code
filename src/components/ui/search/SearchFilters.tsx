@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import { VStack, Input, Box } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface SearchFiltersProps {
   includePatterns: string
@@ -19,7 +20,7 @@ function SearchFilters({
     <Box px={3} pb={2}>
       <VStack gap={2} align="stretch">
         <Input
-          placeholder="Files to include (e.g., *.tsx, *.ts)"
+          placeholder={t("search.filesToInclude")}
           value={includePatterns}
           onChange={(e) => onIncludeChange(e.target.value)}
           bg={tokens.colors.bg.input}
@@ -35,7 +36,7 @@ function SearchFilters({
           transition={`all ${tokens.transition.normal}`}
         />
         <Input
-          placeholder="Files to exclude (e.g., node_modules/**)"
+          placeholder={t("search.filesToExclude")}
           value={excludePatterns}
           onChange={(e) => onExcludeChange(e.target.value)}
           bg={tokens.colors.bg.input}

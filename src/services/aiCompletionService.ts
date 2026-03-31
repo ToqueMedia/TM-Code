@@ -3,6 +3,11 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { useAiCompletionStore } from '../stores/aiCompletionStore';
 import { logger } from '../utils/logger';
 
+const DASHSCOPE_FIM_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
+const DASHSCOPE_FIM_MODEL = 'qwen2.5-coder-7b-instruct'
+const DASHSCOPE_API_KEY = import.meta.env.VITE_DASHSCOPE_API_KEY || ''
+const USE_CLOUD_FIM = import.meta.env.VITE_USE_EMULATORS === 'false' && !!DASHSCOPE_API_KEY
+
 class AICompletionService {
   private static instance: AICompletionService;
   private cache = new Map<string, string>();
@@ -11,6 +16,7 @@ class AICompletionService {
   private lastErrorTime = 0;
   private errorCooldownMs = 10_000;
   private pendingStatus: 'idle' | 'loading' | 'error' | null = null;
+  private abortController: AbortController | null = null;
 
   static getInstance(): AICompletionService {
     if (!this.instance) this.instance = new AICompletionService();
@@ -38,12 +44,14 @@ class AICompletionService {
     logger.info('ai-completion', `[req #${requestId}] ${autocomplete.model} | prefix: ${prefix.length} chars | suffix: ${suffix.length} chars`);
 
     try {
-      const result = await invoke<string>('fim_completion', {
-        ollamaUrl: autocomplete.ollamaUrl,
-        model: autocomplete.model,
-        prefix,
-        suffix,
-      });
+      const result = USE_CLOUD_FIM
+        ? await this.cloudFimCompletion(prefix, suffix)
+        : await invoke<string>('fim_completion', {
+            ollamaUrl: autocomplete.ollamaUrl,
+            model: autocomplete.model,
+            prefix,
+            suffix,
+          });
 
       const elapsed = Math.round(performance.now() - startTime);
 
@@ -68,7 +76,7 @@ class AICompletionService {
         return null;
       }
       const msg = e instanceof Error ? e.message : String(e);
-      if (msg === 'cancelled' || msg.includes('cancelled')) {
+      if (msg === 'cancelled' || msg.includes('cancelled') || msg.includes('aborted')) {
         logger.info('ai-completion', `[req #${requestId}] cancelled after ${elapsed}ms`);
         return null;
       }
@@ -81,7 +89,42 @@ class AICompletionService {
 
   cancel() {
     this.currentRequestId++;
+    this.abortController?.abort();
+    this.abortController = null;
     this.setStatus('idle');
+  }
+
+  /** FIM completion via DashScope cloud (production) */
+  private async cloudFimCompletion(prefix: string, suffix: string): Promise<string> {
+    this.abortController?.abort()
+    this.abortController = new AbortController()
+
+    const res = await fetch(DASHSCOPE_FIM_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${DASHSCOPE_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: DASHSCOPE_FIM_MODEL,
+        messages: [{
+          role: 'user',
+          content: `<|fim_prefix|>${prefix}<|fim_suffix|>${suffix}<|fim_middle|>`,
+        }],
+        stream: false,
+        temperature: 0.01,
+        max_tokens: 128,
+        stop: ['\n\n\n', '<|fim_pad|>', '<|endoftext|>'],
+      }),
+      signal: this.abortController.signal,
+    })
+
+    if (!res.ok) {
+      throw new Error(`DashScope FIM ${res.status}`)
+    }
+
+    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> }
+    return data.choices?.[0]?.message?.content || ''
   }
 
   resetCooldown() {

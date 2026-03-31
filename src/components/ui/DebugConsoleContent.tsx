@@ -2,6 +2,7 @@ import { memo, useState, useCallback, useRef, useEffect } from 'react'
 import { Flex, Text, Box, ScrollArea, Input } from '@chakra-ui/react'
 import { FiChevronRight, FiTrash2 } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface ConsoleEntry {
   id: number
@@ -78,7 +79,7 @@ const DebugConsoleContent = memo(() => {
         <ScrollArea.Viewport ref={scrollRef}>
           {entries.length === 0 ? (
             <Flex align="center" justify="center" py={8}>
-              <Text fontSize="11px" color={tokens.colors.text.disabled}>No debug output</Text>
+              <Text fontSize="11px" color={tokens.colors.text.disabled}>{t("explorer.noDebugOutput")}</Text>
             </Flex>
           ) : (
             entries.map(entry => (
@@ -126,7 +127,7 @@ const DebugConsoleContent = memo(() => {
           value={inputValue}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) => setInputValue(e.target.value)}
           onKeyDown={(e: React.KeyboardEvent) => { if (e.key === 'Enter') handleEvaluate() }}
-          placeholder="Evaluate expression..."
+          placeholder={t("explorer.evaluateExpr")}
           variant="outline"
           border="none"
           fontSize="12px"

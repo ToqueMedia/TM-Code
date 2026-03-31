@@ -2,11 +2,13 @@ import { memo, useState, useEffect, useCallback, useRef } from 'react'
 import { Flex, Text, Box, HStack, Textarea } from '@chakra-ui/react'
 import {
   VscCheck, VscRefresh, VscAdd, VscRemove, VscDiscard,
-  VscChevronDown, VscChevronRight, VscCircleLarge, VscEllipsis,
+  VscChevronDown, VscChevronRight, VscSparkle,
+  VscCloudUpload, VscCloudDownload,
 } from 'react-icons/vsc'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import { GitService, type GitFileStatus } from '@/services/gitService'
 import { useCurrentProject } from '@/hooks/useProjectState'
 import { getFileIconByExtension } from '@/utils/iconMapper'
@@ -146,6 +148,115 @@ function SourceControlPanel() {
     if (mountedRef.current) setCommitting(false)
   }, [projectPath, commitMsg, staged.length, loadStatus, showFeedback, branch])
 
+  const [generating, setGenerating] = useState(false)
+
+  const handleGenerateCommitMsg = useCallback(async () => {
+    if (files.length === 0 || generating) return
+    setGenerating(true)
+    try {
+      const { invoke: inv } = await import('@tauri-apps/api/core')
+
+      // Get the actual diff for context
+      const diffResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
+        'execute_command',
+        {
+          command: staged.length > 0 ? 'git diff --cached --stat' : 'git diff --stat HEAD',
+          cwd: projectPath,
+          timeoutSecs: 5,
+        }
+      )
+      const diffStat = diffResult.success ? diffResult.stdout.trim() : ''
+
+      // Get detailed diff (limited to avoid huge payloads)
+      const detailResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
+        'execute_command',
+        {
+          command: staged.length > 0
+            ? 'git diff --cached --no-color -U2 | head -200'
+            : 'git diff --no-color -U2 HEAD | head -200',
+          cwd: projectPath,
+          timeoutSecs: 5,
+        }
+      )
+      const diffDetail = detailResult.success ? detailResult.stdout.trim() : ''
+
+      // File list with statuses
+      const targetFiles = staged.length > 0 ? staged : unstaged
+      const fileList = targetFiles.map(f => `${f.status}: ${f.path}`).join('\n')
+
+      // Call the AI via the backend
+      const FirebaseAuthService = (await import('../../services/auth/firebaseAuth')).default
+      let token = await FirebaseAuthService.getInstance().getIdToken()
+      if (!token) token = await FirebaseAuthService.getInstance().getIdToken(true)
+      if (!token) throw new Error('Not authenticated — try signing out and back in')
+
+      const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+      const response = await fetch(`${workerUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          messages: [{
+            role: 'user',
+            content: `Generate a concise git commit message for these changes. Use conventional commits format (feat/fix/refactor/chore/docs). One line only, max 72 characters. No quotes, no explanation, just the message.
+
+Files changed:
+${fileList}
+
+Diff stat:
+${diffStat}
+
+Diff detail:
+${diffDetail.slice(0, 3000)}`,
+          }],
+          stream: false,
+        }),
+      })
+
+      if (!response.ok) throw new Error(`API ${response.status}`)
+
+      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
+      const aiMsg = data.choices?.[0]?.message?.content?.trim()
+
+      if (aiMsg) {
+        // Clean up: remove quotes, backticks, "commit message:" prefixes
+        const cleaned = aiMsg
+          .replace(/^["'`]+|["'`]+$/g, '')
+          .replace(/^(commit message:?\s*)/i, '')
+          .split('\n')[0]
+          .trim()
+        setCommitMsg(cleaned)
+        if (textareaRef.current) {
+          textareaRef.current.style.height = '26px'
+          textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 104)}px`
+        }
+      } else {
+        showFeedback('error', 'AI returned empty message')
+      }
+    } catch (e) {
+      showFeedback('error', `Generate failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setGenerating(false)
+    }
+  }, [files, staged, unstaged, projectPath, generating, showFeedback])
+
+  const handlePush = useCallback(async () => {
+    try {
+      const result = await GitService.push(projectPath)
+      showFeedback('success', result || `Pushed to ${branch}`)
+    } catch (e) { showFeedback('error', String(e)) }
+  }, [projectPath, branch, showFeedback])
+
+  const handlePull = useCallback(async () => {
+    try {
+      const result = await GitService.pull(projectPath)
+      showFeedback('success', result || `Pulled from ${branch}`)
+      await loadStatus()
+    } catch (e) { showFeedback('error', String(e)) }
+  }, [projectPath, branch, showFeedback, loadStatus])
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault()
@@ -172,7 +283,6 @@ function SourceControlPanel() {
         <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.secondary} textTransform="uppercase" letterSpacing="0.05em">
           Source Control
         </Text>
-        <ActionIcon icon={<VscEllipsis size={13} />} label="More Actions" onClick={() => {}} />
       </Flex>
 
       {/* ── Sub-header ────────────────────────────────────────── */}
@@ -191,14 +301,15 @@ function SourceControlPanel() {
           </Text>
         </HStack>
         <HStack gap={0}>
-          <ActionIcon icon={<VscCheck size={13} />} label="Commit" onClick={handleCommit} />
-          <ActionIcon icon={<VscRefresh size={12} />} label="Refresh" onClick={() => loadStatus(true)} spinning={loading} />
-          <ActionIcon icon={<VscEllipsis size={13} />} label="More" onClick={() => {}} />
+          <ActionIcon icon={<VscCheck size={13} />} label={t("view.commit")} onClick={handleCommit} />
+          <ActionIcon icon={<VscCloudDownload size={12} />} label="Pull" onClick={handlePull} />
+          <ActionIcon icon={<VscCloudUpload size={12} />} label="Push" onClick={handlePush} />
+          <ActionIcon icon={<VscRefresh size={12} />} label={t("view.refresh")} onClick={() => loadStatus(true)} spinning={loading} />
         </HStack>
       </Flex>
 
       {/* ── Commit input ──────────────────────────────────────── */}
-      <Box px={2.5} pt={2} pb={1} flexShrink={0}>
+      <Box px={2.5} pt={2} pb={1} flexShrink={0} position="relative">
         <Textarea
           ref={textareaRef}
           value={commitMsg}
@@ -234,7 +345,32 @@ function SourceControlPanel() {
           maxH="104px"
           overflow="hidden"
           lineHeight="18px"
+          pr="28px"
         />
+        {/* AI generate commit message */}
+        {files.length > 0 && (
+          <Box
+            as="button"
+            position="absolute"
+            right="14px"
+            top="12px"
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            w="20px"
+            h="20px"
+            borderRadius="4px"
+            color={tokens.colors.text.disabled}
+            bg="transparent"
+            cursor="pointer"
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ color: tokens.colors.accent.primary, bg: tokens.colors.accent.primarySubtle }}
+            onClick={handleGenerateCommitMsg}
+            title="Generate commit message"
+          >
+            <VscSparkle size={13} />
+          </Box>
+        )}
       </Box>
 
       {/* ── Commit button ─────────────────────────────────────── */}
@@ -259,7 +395,7 @@ function SourceControlPanel() {
           opacity={committing ? 0.6 : 1}
         >
           <VscCheck size={13} />
-          <Text>Commit</Text>
+          <Text>{t("view.commit")}</Text>
         </Flex>
       </Box>
 
@@ -291,9 +427,9 @@ function SourceControlPanel() {
       <Box flex={1} overflow="hidden">
         {files.length === 0 && !loading && (
           <Flex direction="column" align="center" justify="center" py={8} gap={2}>
-            <VscCircleLarge size={14} color={tokens.colors.text.disabled} />
-            <Text fontSize="12px" color={tokens.colors.text.muted}>No changes</Text>
-            <Text fontSize="11px" color={tokens.colors.text.disabled}>Working tree clean</Text>
+            <VscCheck size={14} color={tokens.colors.text.disabled} />
+            <Text fontSize="12px" color={tokens.colors.text.muted}>{t("view.noChanges")}</Text>
+            <Text fontSize="11px" color={tokens.colors.text.disabled}>{t("view.workingTreeClean")}</Text>
           </Flex>
         )}
 
@@ -462,11 +598,11 @@ const SectionHeader = memo<{
         display="flex"
       >
         {section === 'staged' ? (
-          <ActionIcon icon={<VscRemove size={13} />} label="Unstage All" onClick={onUnstageAll} />
+          <ActionIcon icon={<VscRemove size={13} />} label={t("view.unstageAll")} onClick={onUnstageAll} />
         ) : (
           <HStack gap={0}>
-            <ActionIcon icon={<VscDiscard size={12} />} label="Discard All Changes" onClick={onDiscardAll} />
-            <ActionIcon icon={<VscAdd size={13} />} label="Stage All" onClick={onStageAll} />
+            <ActionIcon icon={<VscDiscard size={12} />} label={t("view.discardAllChanges")} onClick={onDiscardAll} />
+            <ActionIcon icon={<VscAdd size={13} />} label={t("view.stageAll")} onClick={onStageAll} />
           </HStack>
         )}
       </Box>
@@ -550,11 +686,11 @@ const FileRow = memo<{
         onClick={e => e.stopPropagation()}
       >
         {section === 'staged' ? (
-          <ActionIcon icon={<VscRemove size={12} />} label="Unstage" onClick={() => onUnstageFile(file.path)} />
+          <ActionIcon icon={<VscRemove size={12} />} label={t("view.unstage")} onClick={() => onUnstageFile(file.path)} />
         ) : (
           <>
-            <ActionIcon icon={<VscDiscard size={11} />} label="Discard Changes" onClick={() => onDiscardFile(file.path)} />
-            <ActionIcon icon={<VscAdd size={12} />} label="Stage" onClick={() => onStageFile(file.path)} />
+            <ActionIcon icon={<VscDiscard size={11} />} label={t("view.discardChanges")} onClick={() => onDiscardFile(file.path)} />
+            <ActionIcon icon={<VscAdd size={12} />} label={t("view.stage")} onClick={() => onStageFile(file.path)} />
           </>
         )}
       </div>

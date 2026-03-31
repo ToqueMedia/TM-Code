@@ -2,7 +2,9 @@ import { memo, useCallback } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiFolder, FiArrowRight } from 'react-icons/fi'
 import { useProjectStore } from '../../stores/projectStore'
+import AgentLogo from '../ui/AgentLogo'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 const suggestions = [
   { label: 'React + TypeScript app', prompt: 'Create a React application with TypeScript and Tailwind CSS' },
@@ -25,25 +27,14 @@ function ChatSuggestions() {
       direction="column"
       align="center"
       justify="center"
-      height="100%"
+      flex="1"
       px={8}
       pb={16}
     >
       {/* ToqueMedia icon */}
-      <Flex
-        w="48px"
-        h="48px"
-        borderRadius="14px"
-        bgGradient={tokens.gradient.accentPrimary}
-        align="center"
-        justify="center"
-        mb={5}
-        boxShadow="0 8px 32px rgba(254, 16, 99, 0.3)"
-      >
-        <Text fontSize="22px" color="white" fontWeight="800" lineHeight="1">
-          ◆
-        </Text>
-      </Flex>
+      <Box mb={5}>
+        <AgentLogo size={48} glow />
+      </Box>
 
       <Text
         fontSize="26px"
@@ -52,7 +43,7 @@ function ChatSuggestions() {
         letterSpacing="-0.03em"
         mb={1}
       >
-        What do you want to build?
+        {t("view.whatToBuild")}
       </Text>
 
       <Text
@@ -60,7 +51,7 @@ function ChatSuggestions() {
         color={tokens.colors.text.muted}
         mb={2}
       >
-        TM Code can help you code, debug, and ship faster.
+        {t("view.tmCodeHelp")}
       </Text>
 
       {projectPath && (

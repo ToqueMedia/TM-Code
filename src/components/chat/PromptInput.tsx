@@ -8,6 +8,7 @@ import { slashCommandRegistry, type SlashCommand } from '../../services/agent/sl
 import { runAgentWithCallbacks } from '../../services/agent/agentRunner'
 import SlashCommandMenu from './SlashCommandMenu'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 function PromptInput() {
   const [input, setInput] = useState('')
@@ -153,6 +154,8 @@ function PromptInput() {
         bg="rgba(255, 255, 255, 0.03)"
         overflow="hidden"
         transition="all 0.2s"
+        cursor="text"
+        onClick={() => textareaRef.current?.focus()}
         css={{
           '&:focus-within': {
             borderColor: 'rgba(254, 16, 99, 0.35)',
@@ -173,7 +176,7 @@ function PromptInput() {
                 blurTimeoutRef.current = setTimeout(() => setShowCommandMenu(false), 150)
               }}
               placeholder="Ask TM Code to help with your code... (type / for commands)"
-              aria-label="Message prompt"
+              aria-label={t("prompt.ariaLabel")}
               disabled={isStreaming}
               rows={1}
               style={{

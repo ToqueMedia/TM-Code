@@ -1,4 +1,5 @@
 import { HStack, Text, IconButton } from '@chakra-ui/react'
+import { t } from '@/i18n'
 import { FiTool, FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 
@@ -21,7 +22,7 @@ function DebuggerHeader({ onClose }: DebuggerHeaderProps) {
         </Text>
       </HStack>
       <IconButton
-        aria-label="Close debugger"
+        aria-label={t("misc.closeDebugger")}
         size="sm"
         variant="ghost"
         onClick={onClose}

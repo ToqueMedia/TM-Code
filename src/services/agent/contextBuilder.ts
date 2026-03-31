@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { TemplateManifest } from '../templateService'
+import { detectSystemPackageManager } from '../packageManagerDetector'
 import SkillService from './skillService'
 
 interface MCPToolSummary {
@@ -16,6 +17,17 @@ interface PackageSummary {
   packageManager: string
 }
 
+/**
+ * Sanitize user-controlled content before embedding in the system prompt.
+ * Prevents prompt injection via project files (README.md, TMS.md, etc.)
+ * by escaping XML-like tags that could confuse section boundaries.
+ */
+function sanitizeProjectContent(content: string): string {
+  return content
+    .replace(/</g, '＜')
+    .replace(/>/g, '＞')
+}
+
 class ContextBuilder {
   private static instance: ContextBuilder
 
@@ -26,8 +38,8 @@ class ContextBuilder {
     return ContextBuilder.instance
   }
 
-  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[]): Promise<string> {
-    // Gather context in parallel for speed — includes template manifest + project memory files
+  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number): Promise<string> {
+    // Gather context in parallel for speed
     const [treeString, pkgSummary, readme, templateManifest, tmsContent, planContent, todoContent] = await Promise.all([
       this.buildFileTree(projectPath),
       this.extractPackageSummary(projectPath),
@@ -38,26 +50,98 @@ class ContextBuilder {
       this.safeReadFile(`${projectPath}/TODO.md`),
     ])
 
-    // Detect package manager from lock files
     const pmDetected = pkgSummary?.packageManager || await this.detectPackageManager(projectPath)
+    const isTemplateProject = templateManifest !== null
+    const hasFrameworkDeps = pkgSummary
+      ? [...pkgSummary.dependencies, ...pkgSummary.devDependencies].some(d =>
+          ['react', 'next', 'vue', 'nuxt', 'svelte', '@angular/core', 'astro', 'solid-js', 'express', 'fastify', '@nestjs/core'].includes(d)
+        )
+      : false
+    const isVanillaWeb = !isTemplateProject && !hasFrameworkDeps
 
-    // === Build prompt following U-Curve (key_prompts.md): critical rules at START + REMINDER at END ===
+    // === U-Curve: critical constraints at START and END, context data in the middle ===
 
     const sections: string[] = []
 
-    // ── 1. COMPLETION RULE (primacy — U-Curve, principle 1+11) ──
+    // ── 1. COMPLETION CONTRACT (primacy) ──
     sections.push(`<completion_rule>
-Complete every file the task requires. Do not stop early. Do not skip files.
-Before finishing, verify: did you create or modify all files mentioned in your plan? If any are missing, continue.
+Complete every file the task requires. No placeholders — output goes to disk as-is. Omitted code is deleted code.
 </completion_rule>`)
 
-    // ── 2. ROLE (principle 4 — specific persona) ──
+    // ── 2. ROLE ──
+    const agentLangMap: Record<string, string> = {
+      en: 'English', pt: 'Portuguese', zh: '中文', es: 'Español', fr: 'Français', de: 'Deutsch', ja: '日本語'
+    }
+    let agentLang = 'en'
+    try {
+      const { useSettingsStore } = await import('../../stores/settingsStore')
+      agentLang = useSettingsStore.getState().agentLanguage || 'en'
+    } catch {}
+    const langInstruction = agentLang === 'en'
+      ? 'Respond in English.'
+      : `Always respond in ${agentLangMap[agentLang] || agentLangMap.en}. All explanations, comments, and messages must be in ${agentLangMap[agentLang] || agentLangMap.en}. Code identifiers remain in English.`
+
+    // Load model profile for model-specific behavior
+    let modelProfile: import('./modelProfiles').ModelProfile | null = null
+    try {
+      const { getModelProfile } = await import('./modelProfiles')
+      const { useSettingsStore } = await import('../../stores/settingsStore')
+      const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
+      modelProfile = getModelProfile(modelId)
+    } catch { /* fallback: no profile */ }
+
+    // Minimal system prompt for models that degrade with verbose system prompts (DeepSeek in thinking mode).
+    // Include only: role, environment (factual data the model needs), constraints, file tree.
+    // Skip: examples, standards, memory, skills, verbose role description.
+    const isMinimalPrompt = modelProfile?.skipSystemPromptInThinking && modelProfile?.supportsThinking
+    if (isMinimalPrompt) {
+      // U-Curve: completion rule at START
+      // (sections[0] is already <completion_rule> — pushed above)
+
+      sections.push(`<role>Senior software engineer. Autonomous coding agent in TM Code IDE. ${langInstruction}</role>`)
+
+      const minEnv = [`project_path: ${projectPath}`, `package_manager: ${pmDetected}`]
+      if (pkgSummary) {
+        if (pkgSummary.scripts.length) minEnv.push(`scripts: ${pkgSummary.scripts.join(', ')}`)
+        if (pkgSummary.dependencies.length) minEnv.push(`deps: ${pkgSummary.dependencies.join(', ')}`)
+      }
+      sections.push(`<environment>\n${minEnv.join('\n')}\n</environment>`)
+      sections.push(`<project_structure>\n${treeString}\n</project_structure>`)
+
+      sections.push(`<constraints>
+- All paths absolute under "${projectPath}". write_file replaces entire file. No placeholders.
+- Frontend port 7773, backend port 7777. Backend binds 0.0.0.0.
+- .env files blocked. Use ${pmDetected} for packages.
+</constraints>`)
+
+      // U-Curve: reminder at END
+      sections.push(`<reminder>Complete every file. No placeholders. .env blocked. Use ${pmDetected}.</reminder>`)
+      return sections.join('\n\n')
+    }
+
     sections.push(`<role>
-Senior software engineer. Autonomous coding agent inside TM Code.
-Respond in the same language the developer writes in.
+Senior software engineer. Autonomous coding agent inside TM Code — an agent-first IDE where the developer interacts through chat. Your code changes appear as diffs for the developer to approve or reject. You write complete, production-quality code.
+If a task is ambiguous or you lack information to proceed safely, ask the developer for clarification instead of guessing.
+${langInstruction}
 </role>`)
 
-    // ── 3. ENVIRONMENT (long data at top — principle 7, Context Engineering) ──
+    // ── 2b. MODEL-SPECIFIC INSTRUCTIONS ──
+    if (modelProfile?.modelSpecificPrompt) {
+      sections.push(`<model_instructions>\n${modelProfile.modelSpecificPrompt}\n</model_instructions>`)
+    }
+
+    // ── 3. TEMPLATE CONTEXT (before environment — sets the mental model for the project) ──
+    if (templateManifest) {
+      sections.push(`<template_context>
+This project was scaffolded from the "${templateManifest.name}" template.
+Framework: ${templateManifest.framework}
+Dev command: ${templateManifest.devCommand}
+Install command: ${templateManifest.installCommand}
+The base structure is in place. Build on top of it. Use the framework's entry points and conventions.
+</template_context>`)
+    }
+
+    // ── 4. ENVIRONMENT (long context data) ──
     const envLines = [
       `project_path: ${projectPath}`,
       `project_type: ${projectType}`,
@@ -73,44 +157,48 @@ Respond in the same language the developer writes in.
 
     sections.push(`<project_structure>\n${treeString}\n</project_structure>`)
 
+    // ── Git commit signature ──
+    sections.push(`<git_rules>
+When making git commits, ALWAYS append this co-author trailer to the commit message:
+
+Co-Authored-By: TM Code <tm.code@toquemedia.net>
+
+Example: git commit -m "feat: add user auth
+
+Co-Authored-By: TM Code <tm.code@toquemedia.net>"
+</git_rules>`)
+
     if (readme) {
-      sections.push(`<readme_summary>\n${readme.slice(0, 400)}\n</readme_summary>`)
+      sections.push(`<readme_summary>\n${sanitizeProjectContent(readme.slice(0, 400))}\n</readme_summary>`)
     }
 
-    // ── 3b. PROJECT MEMORY — TMS.md, PLAN.md, TODO.md (long data zone — after environment, before constraints) ──
+    // ── 5. PROJECT MEMORY — TMS.md, PLAN.md, TODO.md ──
+    // Content is sanitized to prevent prompt injection via project files.
     if (tmsContent) {
-      // Truncate to 6K — TMS.md can grow as milestones accumulate
       const truncatedTms = tmsContent.length > 6000
         ? tmsContent.slice(0, 6000) + '\n\n[... truncated — read TMS.md for full content]'
         : tmsContent
-      sections.push(`<project_memory>\n${truncatedTms}\n</project_memory>`)
+      sections.push(`<project_memory>\n${sanitizeProjectContent(truncatedTms)}\n</project_memory>`)
     }
     if (planContent) {
-      // Truncate to 4K to avoid bloating context
       const truncatedPlan = planContent.length > 4000
         ? planContent.slice(0, 4000) + '\n\n[... plan truncated — read PLAN.md for full content]'
         : planContent
-      sections.push(`<active_plan>\n${truncatedPlan}\n</active_plan>`)
+      sections.push(`<active_plan>\n${sanitizeProjectContent(truncatedPlan)}\n</active_plan>`)
     }
     if (todoContent) {
-      // Truncate to 2K
       const truncatedTodo = todoContent.length > 2000
         ? todoContent.slice(0, 2000) + '\n\n[... task list truncated — read TODO.md for full content]'
         : todoContent
-      sections.push(`<task_list>\n${truncatedTodo}\n</task_list>`)
+      sections.push(`<task_list>\n${sanitizeProjectContent(truncatedTodo)}\n</task_list>`)
     }
     if (tmsContent) {
       sections.push(`<memory_instructions>
-When you complete significant work, update the Memory section of TMS.md:
-- Add completed milestones under "### Milestones" with date
-- Record architectural decisions under "### Decisions" with rationale
-- Track pending tasks under "### Pending Tasks"
-- NEVER overwrite the "Project Analysis" or "Custom Instructions" sections
-- Use edit_file to surgically update only the Memory section
+Keep TMS.md updated with milestones (with dates) and architectural decisions (with rationale) as you complete work. Preserve the "Project Analysis" and "Custom Instructions" sections as-is.
 </memory_instructions>`)
     }
 
-    // ── 3c. SKILLS (between context data and constraints — long data zone) ──
+    // ── 6. SKILLS ──
     try {
       const detectedType = this.detectProjectType(pkgSummary)
         ?? await this.detectProjectTypeFromFiles(projectPath)
@@ -124,209 +212,158 @@ When you complete significant work, update the Memory section of TMS.md:
       // Skills are optional — don't break prompt building
     }
 
-    // ── 4. CONSTRAINTS (principle 6 — contract, not suggestions) ──
+    // ── 7. CONSTRAINTS (WHAT contract — boundaries the agent must respect) ──
     sections.push(`<constraints>
-Paths and files:
-- All paths absolute, starting with "${projectPath}".
-- read_file before editing existing files. Never modify unread files. For new files, write directly.
-- write_file replaces the entire file — there is no merge. Omitting code deletes it, so always emit the complete file content.
-- Do not use placeholders ("...", "// rest of code") because output is written directly to disk as-is. Placeholders become literal text in the developer's code.
-- File changes require developer approval via diff UI. Do not assume changes were applied — check the tool result.
+Files:
+- All paths absolute, starting with "${projectPath}". Operations outside this directory are blocked.
+- Read files before modifying them. For new files, write directly.
+- write_file replaces the entire file — omitted code is deleted. Use edit_file for small changes.
+- Output complete code — placeholders ("...", "// rest of code") become literal text on disk.
+- File changes require developer approval via diff UI. Wait for confirmation before assuming changes were applied.
+- create_file is for new files only. Use write_file to overwrite existing files.
 
-Execution:
-- Long-lived processes (dev servers, watchers): use start_dev_server, NOT execute_command (which blocks until exit).
-- Do not install dependencies unless the task requires it.
+Dev servers:
+- Frontend → port 7773, server_type: "frontend" (opens iframe preview).
+- Backend → port 7777, server_type: "backend" (opens HTTP Client panel).
+- server_type is required. The IDE sets the PORT env var automatically.
+- Backend servers bind to "0.0.0.0" because the project may run inside Docker where localhost is unreachable.
+- Use only ports 7773 and 7777 — these are the only mapped ports.
+
+Safety:
+- .env files are mechanically blocked by the IDE (all operations rejected) because they contain secrets. Ask the developer for env var values. You may create .env.example with placeholders.
+- .pem, .key, credentials.json, .npmrc, *_secret* files require explicit developer authorization.
+- Keep secrets out of text output and tool arguments.
+
+Commands:
+- Use the package_manager shown in <environment> for all install/run/add commands.
+- Install all dependencies in a single command. Add everything to package.json first, then run install once.
+- The system blocks duplicate install commands automatically — move on after a successful install.
 
 Judgment:
-- Modify only what the task requires. Do not refactor, rename, or reorganize untouched code.
-- If an approach fails, try a different strategy. Never retry the same failed action.
-- Prefer reversible actions. Warn before destructive operations (delete_file, overwriting large files).
-- If unsure about file contents or structure, verify with read_file or list_directory first.
+- Modify only what the task requires. Preserve untouched code as-is.
+- When an approach fails, try a different strategy. When a tool error occurs, read the message and adapt. After two failures, ask the developer.
 </constraints>`)
 
-    // ── 4b. TOOL ROUTING (decision matrix — models know tools, but not THIS tool set's semantics) ──
+    // ── 8. TOOL SEMANTICS (only non-obvious gotchas the model can't infer from schemas) ──
     const activeMcpTools = mcpTools || []
-    const totalTools = 15 + activeMcpTools.length
+    const totalTools = (coreToolCount ?? 15) + activeMcpTools.length
     const mcpSection = activeMcpTools.length > 0
-      ? `\n\nMCP (external tools — require developer approval):\n${activeMcpTools.map(t => `- mcp__${t.serverName}__${t.name} → ${t.description}`).join('\n')}`
+      ? `\nMCP tools (external — require developer approval):\n${activeMcpTools.map(t => `- mcp__${t.serverName}__${t.name} → ${t.description}`).join('\n')}`
       : ''
 
-    sections.push(`<tool_routing>
-Choose the right tool for the job. You have ${totalTools} tools — using the wrong one wastes tokens and turns.
+    sections.push(`<tool_semantics>
+${totalTools} tools available. Non-obvious behavior you cannot infer from tool schemas:
+- execute_command: blocks until the process exits. start_dev_server: returns immediately, runs in background.
+- edit_file: replaces a specific string in a file — safer for small changes (~20 lines).
+- research: parallel sub-agent with read+write access. Blocks your turn until complete.
+- spawn_background_agent: read-only sub-agent. Runs independently, does not block your turn. Results via check_background_agents.
+- Only one dev server at a time. Starting a new one stops the previous.${mcpSection}
+</tool_semantics>`)
 
-Discover (understand before acting):
-- read_file(path) → read a specific file you already know the path to
-- list_directory(path, maxDepth?) → browse folder structure. Use when you don't know what files exist.
-- glob(pattern) → find files by name pattern (e.g., "**/*.tsx", "**/package.json"). Use when you know the filename but not the location.
-- search_files(query, directory, includePatterns?) → ripgrep search across files. Use when you know a string/symbol but not which file contains it. Add includePatterns (e.g., ["*.ts"]) to narrow results.
-- get_diagnostics(path) → get TypeScript/JavaScript errors and warnings for a file. Use after writing code to verify it compiles.
+    // ── 8b. BACKGROUND AGENTS STATUS ──
+    try {
+      const { useBackgroundAgentStore } = await import('../../stores/backgroundAgentStore')
+      const bgAgents = useBackgroundAgentStore.getState().getAll()
+      if (bgAgents.length > 0) {
+        const statusLines = bgAgents.map(a => {
+          if (a.status === 'completed') return `- [DONE] "${a.question}": ${a.result?.slice(0, 500)}`
+          if (a.status === 'running') return `- [RUNNING] "${a.question}" (${a.progressText})`
+          return `- [${a.status.toUpperCase()}] "${a.question}"`
+        })
+        sections.push(`<background_agents>\n${statusLines.join('\n')}\n</background_agents>`)
+      }
+    } catch { /* store not loaded yet */ }
 
-Modify (change code):
-- edit_file(path, old_str, new_str) → replace a specific string. Best for 1–20 line changes. old_str must appear exactly once — include surrounding lines for uniqueness. Saves tokens vs write_file.
-- write_file(path, content) → replace entire file or create new. Use for new files or when changing >50%. Always emit complete content — omitting code deletes it.
-- create_file(path, content?) → create new file only. Fails if file exists. Use write_file to overwrite.
-- create_directory(path) → create directory and parents.
+    // ── 9. OUTPUT FORMAT ──
+    sections.push(`<output_format>
+- Lead with action: call the tool first, explain briefly after (1-2 sentences).
+- The developer reads diffs for details — do not narrate code changes line by line.
+- When creating multiple files: create all files first, then summarize what was built.
+- Code comments: only where logic is non-obvious. One line per comment block, no inline narration.
+</output_format>`)
 
-Manage:
-- delete_file(path) → permanent delete. No undo. Only when the developer asks or to fix your own mistake.
-- rename_file(oldPath, newName) → rename file/directory. newName is just the name, not full path.
-
-Execute:
-- execute_command(command, cwd?) → run shell command. Blocks until exit — never use for dev servers or watchers. Good for: npm install, npm test, npx, git, lint, build.
-- start_dev_server(command) → start a dev server in the background. Returns immediately. Preview opens automatically. Use for: npm run dev, yarn dev, npx vite. Only one server at a time.
-- web_fetch(url) → fetch URL content. Use to check docs, npm packages, or API references. Cannot access localhost.
-
-Research:
-- research(question, context?) → delegate a research question to a sub-agent that can read files and search. Use when you need to investigate multiple files or patterns before deciding what to do. The sub-agent returns a text summary. It cannot modify files. You can call multiple research tools in the same turn — they run in PARALLEL for speed.${mcpSection}
-
-Decision flow:
-1. Don't know what files exist? → list_directory or glob
-2. Know the filename but not location? → glob
-3. Know a string/symbol but not which file? → search_files
-4. Need to read a known file? → read_file
-5. Small edit to existing file? → edit_file
-6. New file or big rewrite? → write_file
-7. Run a CLI tool? → execute_command (must exit on its own)
-8. Start a dev server? → start_dev_server (runs in background)
-9. Check for type errors? → get_diagnostics
-10. Need to investigate multiple files before deciding? → research
-</tool_routing>`)
-
-    // ── 4c. SAFETY CONTRACT (cognitive layer — complements mechanical blocking in toolExecutor) ──
-    sections.push(`<safety>
-- Files containing secrets (.env, .pem, .key, credentials.json, .npmrc, *_secret*) require explicit developer authorization before reading. The developer will be prompted to approve or deny. If denied, do not retry — ask the developer what information they can provide instead.
-- Never include API keys, tokens, or passwords in text output or tool arguments.
-- Never run commands that escalate privileges, open network connections to external hosts, or exfiltrate data.
-- All file operations are sandboxed to "${projectPath}". Paths outside this directory are blocked.
-</safety>`)
-
-    // ── 5. FEW-SHOT EXAMPLES (principle 3 — highest ROI) ──
-    // Examples demonstrate the ACTUAL output format: narration → tool → narration → tool → summary.
+    // ── 10. FEW-SHOT EXAMPLES ──
     sections.push(`<examples>
 <example>
 <user_prompt>Cria uma calculadora com HTML e CSS</user_prompt>
 <assistant_output>
 Vou criar os ficheiros da calculadora.
-
-Vou criar o ficheiro HTML com a estrutura da calculadora:
-[calls write_file with path="${projectPath}/index.html"]
-
-Agora vou criar o ficheiro de estilos:
-[calls write_file with path="${projectPath}/style.css"]
-
-Pronto. Criei a calculadora com dois ficheiros: index.html com a estrutura e botões, e style.css com o layout em grid e tema escuro.
+[creates index.html — structure and buttons]
+[creates style.css — grid layout, dark theme]
+Pronto. Dois ficheiros: index.html com a estrutura e botões, style.css com layout em grid e tema escuro.
 </assistant_output>
 </example>
 
 <example>
 <user_prompt>Fix the bug in the login form</user_prompt>
 <assistant_output>
-Let me read the login component first:
-[calls read_file with path="${projectPath}/src/Login.tsx"]
-
-I can see the issue — the submit handler isn't preventing default. Let me fix it:
-[calls edit_file with path="${projectPath}/src/Login.tsx"]
-
-Fixed. The form was submitting and reloading the page because e.preventDefault() was missing in handleSubmit.
+Let me read the login component.
+[reads Login.tsx]
+The submit handler isn't preventing default — fixing it.
+[edits Login.tsx — adds e.preventDefault()]
+Fixed. The form was reloading because e.preventDefault() was missing in handleSubmit.
 </assistant_output>
 </example>
 
 <example>
 <user_prompt>Add a dark mode toggle to the header</user_prompt>
 <assistant_output>
-Let me check the current header structure:
-[calls read_file with path="${projectPath}/src/components/Header.tsx"]
+Let me check the header and styles.
+[reads Header.tsx]
+[searches for CSS files]
+[edits Header.tsx — adds toggle button and theme logic]
+[edits global.css — adds CSS variables for dark mode]
+Done. Dark mode toggle in Header, switches CSS variables on root. Light is default, persists in localStorage.
+</assistant_output>
+</example>
 
-I'll also look at how styles are organized:
-[calls glob with pattern="**/*.css"]
-
-Now I'll add the toggle button and the theme logic:
-[calls edit_file with path="${projectPath}/src/components/Header.tsx"]
-
-And the CSS variables for dark mode:
-[calls edit_file with path="${projectPath}/src/styles/global.css"]
-
-Done. Added a dark mode toggle to the Header that switches CSS variables on the root element. Light mode is the default, and the preference persists in localStorage.
+<example>
+<user_prompt>Cria uma API REST de tarefas com Express</user_prompt>
+<assistant_output>
+Vou criar a API com Express e TypeScript.
+[creates package.json — express, typescript, tsx; "dev": "tsx watch src/index.ts"]
+[creates src/index.ts — PORT from env var, binds 0.0.0.0]
+[creates src/routes/tasks.ts — CRUD endpoints]
+[installs dependencies]
+[starts dev server as backend]
+API criada: index.ts (Express, porta 7777, bind 0.0.0.0), routes/tasks.ts (CRUD), package.json. HTTP Client abriu — teste GET /api/tasks.
 </assistant_output>
 </example>
 </examples>`)
 
-    // ── 6. TASK RULES (principle 8 — Goldilocks, not too rigid) ──
-    sections.push(`<task_rules>
-Web projects (HTML/CSS/JS):
-- index.html as entry point
-- Link CSS/JS via relative paths (href="style.css", src="script.js") — IDE inlines them for preview
-- HTML must be functional and self-contained
+    // ── 11. ERROR RECOVERY ──
+    sections.push(`<error_recovery>
+When a tool call fails or code breaks after your edit:
+1. Read the error message — identify the specific violation.
+2. Fix only the broken part. Do not regenerate the entire file.
+3. Verify the fix addresses the specific error before moving on.
+</error_recovery>`)
 
-Frontend polish (applies to ALL new UI code — web projects and framework components):
-- The developer sees a live preview inside the IDE. First impressions matter — never ship unstyled or generic-looking UI.
-- Default to a modern dark theme with good contrast, consistent spacing, and subtle transitions.
-- Use system font stacks, responsive units (rem, %, vw/vh), and mobile-first layout.
-- Interactive elements must have visible hover/active states.
-- When the developer does not specify a design, make an opinionated choice that looks professional. Plain white backgrounds with unstyled buttons are not acceptable.
+    // ── 12. QUALITY STANDARDS (WHAT — outcomes, not implementation) ──
+    const vanillaWebRule = isVanillaWeb
+      ? `\nVanilla web projects (no framework/bundler):\n- Use index.html as entry point. Link CSS/JS via relative paths — the IDE inlines them for preview.\n`
+      : ''
+
+    sections.push(`<standards>
+${vanillaWebRule}UI quality:
+- The developer sees a live preview. Ship polished, styled UI.
+- Default to a modern dark theme with good contrast, spacing, and transitions.
+- Make opinionated design choices — professional look with intentional colors, typography, and layout.
 
 Existing projects:
-- Match existing code style. Do not refactor untouched code. Do not add comments unless asked.
+- Match existing code style. Preserve untouched code as-is.
 
 Debugging:
 - Diagnose before fixing. Fix only the broken part.
+</standards>`)
 
-Interaction pattern:
-- Narrate what you will do before each tool call (1 sentence).
-- When the task is done, write a brief summary of what changed (2-3 sentences).
-</task_rules>`)
-
-    // ── 7. ERROR RECOVERY (principle 15 — explicit protocol per tool type) ──
-    sections.push(`<error_recovery>
-When a tool call fails, read the error and apply the fix for that tool type:
-
-read_file / list_directory:
-- "not found" → check path. Use glob or list_directory to find the correct path.
-- "permission denied" → file is protected. Skip it, tell the developer.
-
-edit_file:
-- "old_str not found" → file content changed or old_str is wrong. Call read_file to see current content, then rebuild old_str.
-- "old_str appears N times" → not unique. Include more surrounding lines in old_str to disambiguate.
-
-write_file / create_file:
-- "directory not found" → call create_directory first, then retry.
-- "file already exists" (create_file) → use write_file instead if overwrite is intended.
-
-execute_command:
-- "command not found" → check spelling, verify the package is installed.
-- non-zero exit code → read stderr, fix the root cause (don't just retry).
-- timeout / hangs → the command is long-running. Use start_dev_server instead for servers and watchers.
-
-start_dev_server:
-- "Error starting dev server" → check dependencies are installed (run npm install first), try a different command.
-
-get_diagnostics:
-- "File not loaded" → the file may be outside the project or unsupported. Use execute_command with "npx tsc --noEmit" as fallback.
-
-search_files / glob:
-- no results → broaden the search: try different terms, remove includePatterns, check the directory path.
-
-General rules:
-- Fix only the failed step. Do not regenerate everything from scratch.
-- Never retry the exact same action that just failed. Change something first.
-- If second attempt also fails, explain the issue to the developer and ask for guidance.
-</error_recovery>`)
-
-    // ── 8. TEMPLATE CONTEXT (just-in-time — principle 7) ──
-    if (templateManifest) {
-      sections.push(`<template_context>
-This project was scaffolded from the "${templateManifest.name}" template.
-Framework: ${templateManifest.framework}
-Dev command: ${templateManifest.devCommand}
-Install command: ${templateManifest.installCommand}
-The base Hello World structure is in place. Build on top of it.
-</template_context>`)
-    }
-
-    // ── 9. REMINDER (recency — U-Curve, principle 1) ──
-    // Focused: only the 2 most critical rules. Overloading the reminder dilutes the U-Curve effect.
+    // ── 12. REMINDER (recency — U-Curve) ──
     sections.push(`<reminder>
-Complete every file. Do not stop early. No placeholders — output goes to disk as-is.
+1. Complete every file — output goes to disk as-is.
+2. Dev servers: server_type "frontend" → 7773, "backend" → 7777. Backend binds 0.0.0.0.
+3. .env files are blocked — ask the developer for values.
+4. Use ${pmDetected} for all package operations.
+5. Read the error, fix only the broken part, verify.
 </reminder>`)
 
     return sections.join('\n\n')
@@ -421,14 +458,14 @@ Complete every file. Do not stop early. No placeholders — output goes to disk 
   }
 
   private async detectPackageManager(projectPath: string): Promise<string> {
+    // 1. Check lock files for existing projects (respect user's choice)
     const checks = [
-      { file: 'yarn.lock', pm: 'yarn' },
       { file: 'pnpm-lock.yaml', pm: 'pnpm' },
       { file: 'bun.lockb', pm: 'bun' },
+      { file: 'yarn.lock', pm: 'yarn' },
       { file: 'package-lock.json', pm: 'npm' },
     ]
 
-    // Check all lock files in parallel for speed
     const results = await Promise.all(
       checks.map(async ({ file, pm }) => {
         const content = await this.safeReadFile(`${projectPath}/${file}`)
@@ -436,7 +473,11 @@ Complete every file. Do not stop early. No placeholders — output goes to disk 
       })
     )
 
-    return results.find(pm => pm !== null) ?? 'npm'
+    const fromLockFile = results.find(pm => pm !== null)
+    if (fromLockFile) return fromLockFile
+
+    // 2. No lock file (new/empty project) — use fastest PM available on system
+    return detectSystemPackageManager()
   }
 
   private async safeReadFile(path: string): Promise<string | null> {

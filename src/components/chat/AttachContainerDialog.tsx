@@ -5,6 +5,7 @@ import ContainerService, { RunningContainer } from '../../services/containerServ
 import { useContainerStore } from '../../stores/containerStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface AttachContainerDialogProps {
   isOpen: boolean
@@ -112,7 +113,7 @@ function AttachContainerDialog({ isOpen, onClose }: AttachContainerDialogProps) 
               transition={`all ${tokens.transition.fast}`}
               _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
               onClick={loadContainers}
-              aria-label="Refresh"
+              aria-label={t("view.refresh")}
             >
               <FiRefreshCw size={12} style={loading ? { animation: 'spin 1s linear infinite' } : undefined} />
             </Box>
@@ -129,7 +130,7 @@ function AttachContainerDialog({ isOpen, onClose }: AttachContainerDialogProps) 
               transition={`all ${tokens.transition.fast}`}
               _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
               onClick={onClose}
-              aria-label="Close"
+              aria-label={t("misc.close")}
             >
               <FiX size={13} />
             </Box>

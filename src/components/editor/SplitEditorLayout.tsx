@@ -6,6 +6,8 @@ import Breadcrumbs from '../ui/Breadcrumbs'
 import MonacoBridge from '../../utils/monacoBridge'
 import { LoadingSpinner } from '../ui/LoadingSpinner'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
+import { useShallow } from 'zustand/react/shallow'
 import { useEditorRepository, type EditorGroup } from '../../stores/editorStore'
 import { logger } from '../../utils/logger'
 
@@ -13,7 +15,7 @@ const MonacoEditor = lazy(() => import('../ui/MonacoEditor'))
 
 const EditorSkeleton = () => (
   <Flex flex={1} align="center" justify="center">
-    <LoadingSpinner size="lg" label="Loading editor..." />
+    <LoadingSpinner size="lg" label={t("explorer.loadingEditor")} />
   </Flex>
 )
 
@@ -27,9 +29,9 @@ const EmptyPane = () => (
     color={tokens.colors.text.muted}
     fontSize="13px"
   >
-    <Text>No file open</Text>
+    <Text>{t("explorer.noFolder")}</Text>
     <Text fontSize="11px" color={tokens.colors.text.disabled}>
-      Drag a tab here or open a file
+      {t("explorer.noFolder")}
     </Text>
   </Flex>
 )
@@ -167,26 +169,26 @@ const EditorPane = memo<EditorPaneProps>(({
           >
             <PaneAction
               icon={<VscIndent size={13} />}
-              label="Format Document (Shift+Alt+F)"
+              label={t("view.formatDocument")}
               onClick={onFormat}
             />
             {isSplit ? (
               <>
                 <PaneAction
                   icon={<VscEditorLayout size={13} />}
-                  label="Unsplit Editor"
+                  label={t("view.unsplitEditor")}
                   onClick={onUnsplit}
                 />
                 <PaneAction
                   icon={<VscClose size={13} />}
-                  label="Close Split Pane"
+                  label={t("view.closeSplitPane")}
                   onClick={onClosePane}
                 />
               </>
             ) : (
               <PaneAction
                 icon={<VscSplitHorizontal size={14} />}
-                label="Split Editor Right (Cmd+\\)"
+                label={t("view.splitEditorRight")}
                 onClick={onSplit}
               />
             )}
@@ -208,7 +210,7 @@ const EditorPane = memo<EditorPaneProps>(({
         {group.activeFile ? (
           <Suspense fallback={<EditorSkeleton />}>
             <MonacoEditor
-              key={`${group.id}-${group.activeFile}`}
+              key={group.id}
               path={group.activeFile}
               groupId={group.id}
               onCursorPositionChange={onCursorPositionChange}
@@ -313,10 +315,14 @@ interface SplitEditorLayoutProps {
 }
 
 function SplitEditorLayout({ projectPath, onCursorPositionChange }: SplitEditorLayoutProps) {
-  const editorGroups = useEditorRepository(s => s.editorGroups)
-  const openFiles = useEditorRepository(s => s.openFiles)
-  const activeFile = useEditorRepository(s => s.activeFile)
-  const activeGroupId = useEditorRepository(s => s.activeGroupId)
+  const { editorGroups, openFiles, activeFile, activeGroupId } = useEditorRepository(
+    useShallow(s => ({
+      editorGroups: s.editorGroups,
+      openFiles: s.openFiles,
+      activeFile: s.activeFile,
+      activeGroupId: s.activeGroupId,
+    }))
+  )
   const setActiveGroup = useEditorRepository(s => s.setActiveGroup)
   const splitEditor = useEditorRepository(s => s.splitEditor)
   const unsplitEditor = useEditorRepository(s => s.unsplitEditor)

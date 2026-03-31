@@ -5,7 +5,8 @@ import type { editor, IDisposable } from 'monaco-editor';
 
 // Use local monaco-editor instead of CDN
 loader.config({ monaco: monacoEditor });
-import { tokens } from '@/theme/tokens';
+import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n';
 import { logger } from '../../utils/logger';
 import MonacoBridge from '../../utils/monacoBridge';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -14,6 +15,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import { FileService } from '../../services/fileService';
 import { GitService, type GitLineChange } from '../../services/gitService';
 import { FormatterService } from '../../services/formatterService';
+import AICompletionService from '../../services/aiCompletionService';
 import { toqueMediaTheme, toqueMediaSoftTheme } from '../../themes/toqueMediaTheme';
 
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
@@ -44,10 +46,27 @@ if (typeof window !== 'undefined' && !window.MonacoEnvironment) {
 
 // Formatting provider registered once globally
 let formattingProviderRegistered = false;
+// Link providers + formatters registered once globally (not per file mount)
+let monacoProvidersRegistered = false;
+// TS/JS compiler config set once globally
+let tsConfigRegistered = false;
 
 // Per-file cursor position cache — survives tab switches without Zustand
 // Uses composite key "groupId::path" to isolate split panes
 const cursorCache = new Map<string, { line: number; col: number }>();
+
+const MAX_CURSOR_CACHE = 200;
+function setCursorCached(key: string, pos: { line: number; col: number }) {
+  cursorCache.set(key, pos);
+  if (cursorCache.size > MAX_CURSOR_CACHE) {
+    // Map iteration order is insertion order — delete oldest entries
+    const iter = cursorCache.keys();
+    while (cursorCache.size > MAX_CURSOR_CACHE) {
+      const oldest = iter.next().value;
+      if (oldest) cursorCache.delete(oldest);
+    }
+  }
+}
 
 function pushContentToStore(path: string, content: string) {
   try {
@@ -93,6 +112,7 @@ interface MonacoEditorProps {
 const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onCursorPositionChange }) => {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const pathRef = useRef(path);
+  const prevPathRef = useRef<string | null>(null);
   const dirtyRef = useRef(false);
   const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disposablesRef = useRef<IDisposable[]>([]);
@@ -167,7 +187,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     links: true,
     colorDecorators: true,
     codeLens: false,
-    contextmenu: true,
+    contextmenu: false,
     accessibilitySupport: 'auto',
     find: { addExtraSpaceOnTop: false, autoFindInSelection: 'multiline', seedSearchStringFromSelection: 'selection' },
     largeFileOptimizations: true,
@@ -242,46 +262,49 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
   // ── Editor Mount ─────────────────────────────────────────────────────────
 
   const handleBeforeMount = useCallback((monaco: Monaco) => {
-    // Always re-define themes so theme switching works
+    // Themes must be (re)defined each mount for theme switching
     monaco.editor.defineTheme('toquemedia-vibrant', toqueMediaTheme);
     monaco.editor.defineTheme('toquemedia-soft', toqueMediaSoftTheme);
 
-    // Register Prettier formatting provider
-    registerFormattingProvider(monaco);
+    // One-time global registrations (providers, formatters, link providers)
+    if (!monacoProvidersRegistered) {
+      monacoProvidersRegistered = true;
 
-    // Register LinkProvider for import paths
-    for (const langId of ['typescript', 'javascript']) {
-      monaco.languages.registerLinkProvider(langId, {
-        provideLinks: (model: monacoEditor.editor.ITextModel) => {
-          const links: monacoEditor.languages.ILink[] = [];
-          const lineCount = model.getLineCount();
-          for (let i = 1; i <= lineCount; i++) {
-            const line = model.getLineContent(i);
-            const patterns = [
-              /from\s+['"](\.[^'"]+)['"]/g,
-              /require\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g,
-              /import\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g,
-            ];
-            for (const pattern of patterns) {
-              let m;
-              while ((m = pattern.exec(line)) !== null) {
-                const pathStr = m[1];
-                const pathStart = line.indexOf(pathStr, m.index);
-                links.push({
-                  range: {
-                    startLineNumber: i,
-                    startColumn: pathStart + 1,
-                    endLineNumber: i,
-                    endColumn: pathStart + pathStr.length + 1,
-                  },
-                  url: monacoEditor.Uri.parse(`file://${pathStr}`),
-                });
+      registerFormattingProvider(monaco);
+
+      for (const langId of ['typescript', 'javascript']) {
+        monaco.languages.registerLinkProvider(langId, {
+          provideLinks: (model: monacoEditor.editor.ITextModel) => {
+            const links: monacoEditor.languages.ILink[] = [];
+            const lineCount = model.getLineCount();
+            for (let i = 1; i <= lineCount; i++) {
+              const line = model.getLineContent(i);
+              const patterns = [
+                /from\s+['"](\.[^'"]+)['"]/g,
+                /require\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g,
+                /import\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g,
+              ];
+              for (const pattern of patterns) {
+                let m;
+                while ((m = pattern.exec(line)) !== null) {
+                  const pathStr = m[1];
+                  const pathStart = line.indexOf(pathStr, m.index);
+                  links.push({
+                    range: {
+                      startLineNumber: i,
+                      startColumn: pathStart + 1,
+                      endLineNumber: i,
+                      endColumn: pathStart + pathStr.length + 1,
+                    },
+                    url: monacoEditor.Uri.parse(`file://${pathStr}`),
+                  });
+                }
               }
             }
-          }
-          return { links };
-        },
-      });
+            return { links };
+          },
+        });
+      }
     }
   }, []);
 
@@ -292,49 +315,53 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     gutterCollectionRef.current = null;
     MonacoBridge.getInstance().setCurrentEditor(ed);
 
-    try {
-      const tsDefaults = monaco.languages.typescript.typescriptDefaults;
-      const jsDefaults = monaco.languages.typescript.javascriptDefaults;
+    // TS/JS compiler config — set once, not per file mount
+    if (!tsConfigRegistered) {
+      tsConfigRegistered = true;
+      try {
+        const tsDefaults = monaco.languages.typescript.typescriptDefaults;
+        const jsDefaults = monaco.languages.typescript.javascriptDefaults;
 
-      tsDefaults.setCompilerOptions({
-        target: monaco.languages.typescript.ScriptTarget.ES2016,
-        module: monaco.languages.typescript.ModuleKind.ESNext,
-        moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
-        jsx: monaco.languages.typescript.JsxEmit.React,
-        allowNonTsExtensions: true,
-        noEmit: true,
-        esModuleInterop: true,
-        allowSyntheticDefaultImports: true,
-        skipLibCheck: true,
-      });
+        tsDefaults.setCompilerOptions({
+          target: monaco.languages.typescript.ScriptTarget.ES2016,
+          module: monaco.languages.typescript.ModuleKind.ESNext,
+          moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+          jsx: monaco.languages.typescript.JsxEmit.React,
+          allowNonTsExtensions: true,
+          noEmit: true,
+          esModuleInterop: true,
+          allowSyntheticDefaultImports: true,
+          skipLibCheck: true,
+        });
 
-      jsDefaults.setCompilerOptions({
-        target: monaco.languages.typescript.ScriptTarget.ES2016,
-        module: monaco.languages.typescript.ModuleKind.ESNext,
-        moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
-        jsx: monaco.languages.typescript.JsxEmit.React,
-        allowNonTsExtensions: true,
-        allowJs: true,
-        checkJs: false,
-        noEmit: true,
-        esModuleInterop: true,
-        allowSyntheticDefaultImports: true,
-      });
+        jsDefaults.setCompilerOptions({
+          target: monaco.languages.typescript.ScriptTarget.ES2016,
+          module: monaco.languages.typescript.ModuleKind.ESNext,
+          moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+          jsx: monaco.languages.typescript.JsxEmit.React,
+          allowNonTsExtensions: true,
+          allowJs: true,
+          checkJs: false,
+          noEmit: true,
+          esModuleInterop: true,
+          allowSyntheticDefaultImports: true,
+        });
 
-      tsDefaults.setDiagnosticsOptions({
-        noSemanticValidation: false,
-        noSyntaxValidation: false,
-        diagnosticCodesToIgnore: [1108, 2307, 2304, 7016],
-      });
-      jsDefaults.setDiagnosticsOptions({
-        noSemanticValidation: false,
-        noSyntaxValidation: false,
-        diagnosticCodesToIgnore: [1108, 2307, 2304, 7016, 8010],
-      });
+        tsDefaults.setDiagnosticsOptions({
+          noSemanticValidation: false,
+          noSyntaxValidation: false,
+          diagnosticCodesToIgnore: [1108, 2307, 2304, 7016],
+        });
+        jsDefaults.setDiagnosticsOptions({
+          noSemanticValidation: false,
+          noSyntaxValidation: false,
+          diagnosticCodesToIgnore: [1108, 2307, 2304, 7016, 8010],
+        });
 
-      tsDefaults.setEagerModelSync(true);
-      jsDefaults.setEagerModelSync(true);
-    } catch {}
+        tsDefaults.setEagerModelSync(true);
+        jsDefaults.setEagerModelSync(true);
+      } catch {}
+    }
 
     try {
       window.dispatchEvent(new CustomEvent('monaco:languages', {
@@ -344,6 +371,52 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
 
     disposablesRef.current.forEach(d => d.dispose());
     disposablesRef.current = [];
+
+    // Register AI inline completion provider (Ollama FIM)
+    const inlineProvider = monaco.languages.registerInlineCompletionsProvider(
+      { pattern: '**' }, // all languages
+      {
+        provideInlineCompletions: async (model: monacoEditor.editor.ITextModel, position: monacoEditor.Position, _context: monacoEditor.languages.InlineCompletionContext, token: monacoEditor.CancellationToken) => {
+          if (token.isCancellationRequested) return { items: [] };
+
+          const textUntilPosition = model.getValueInRange({
+            startLineNumber: 1,
+            startColumn: 1,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          });
+          const textAfterPosition = model.getValueInRange({
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: model.getLineCount(),
+            endColumn: model.getLineMaxColumn(model.getLineCount()),
+          });
+
+          // Limit context to ~2K chars each side
+          const prefix = textUntilPosition.slice(-2000);
+          const suffix = textAfterPosition.slice(0, 1000);
+
+          const result = await AICompletionService.getInstance().getCompletion(prefix, suffix);
+          if (!result || token.isCancellationRequested) return { items: [] };
+
+          return {
+            items: [{
+              insertText: result,
+              range: {
+                startLineNumber: position.lineNumber,
+                startColumn: position.column,
+                endLineNumber: position.lineNumber,
+                endColumn: position.column,
+              },
+            }],
+          };
+        },
+        freeInlineCompletions() {},
+        // Monaco 0.55+ calls disposeInlineCompletions when clearing suggestions
+        disposeInlineCompletions() {},
+      }
+    );
+    disposablesRef.current.push(inlineProvider);
 
     const boundPath = pathRef.current;
 
@@ -365,22 +438,27 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     const doSave = async () => {
       if (autoSaveRef.current) { clearTimeout(autoSaveRef.current); autoSaveRef.current = null; }
       const inst = editorRef.current;
-      if (!inst) return;
+      if (!inst) {
+        console.warn('[MonacoEditor:doSave] No editor instance');
+        return;
+      }
 
-      // Format on save if enabled
+      const savePath = pathRef.current;
+
+      // Format on save — best-effort, never blocks save
       const { formatOnSave } = useSettingsStore.getState();
       if (formatOnSave) {
-        await doFormat();
+        try { await doFormat(); } catch {}
       }
 
       try {
         const content = inst.getValue();
-        pendingRef.current = { path: pathRef.current, content };
-        await FileService.writeFile(pathRef.current, content);
+        pendingRef.current = { path: savePath, content };
+        await FileService.writeFile(savePath, content);
         dirtyRef.current = false;
       } catch (e) {
         logger.error('editor', 'Save failed', e);
-        pendingRef.current = null; // Clear stale pending on failure
+        pendingRef.current = null;
       }
 
       // Refresh git gutter after save
@@ -395,21 +473,26 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyO, () => {});
 
     // Content change — autosave directly to disk, then refresh git gutter
+    // Uses pathRef.current (not boundPath) so it works across model swaps
+    let saveGeneration = 0;
     disposablesRef.current.push(
       ed.onDidChangeModelContent(() => {
         dirtyRef.current = true;
+        saveGeneration++;
         if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
         autoSaveRef.current = setTimeout(() => {
           autoSaveRef.current = null;
-          if (pathRef.current !== boundPath) return;
+          const savePath = pathRef.current;
           const inst = editorRef.current;
-          if (!inst) return;
+          if (!inst || !savePath) return;
+          const gen = saveGeneration;
           try {
             const content = inst.getValue();
-            pendingRef.current = { path: boundPath, content };
-            FileService.writeFile(boundPath, content).then(() => {
-              dirtyRef.current = false;
-              // Refresh git gutter after autosave writes to disk
+            pendingRef.current = { path: savePath, content };
+            FileService.writeFile(savePath, content).then(() => {
+              if (gen === saveGeneration) {
+                dirtyRef.current = false;
+              }
               if (editorRef.current) updateGitGutter(editorRef.current);
             }).catch(e =>
               logger.error('editor', 'Autosave failed', e)
@@ -506,22 +589,47 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       run: (editor) => { editor.trigger('keyboard', 'editor.action.quickOutline', null); },
     });
 
-    // Restore cursor position from local cache (no Zustand)
+    // Initial model setup — create model for the initial file
+    // Dispose the empty placeholder model created by @monaco-editor/react
+    const placeholderModel = ed.getModel();
+    const initialFile = useEditorRepository.getState().openFiles.find(f => f.path === boundPath);
+    if (initialFile) {
+      const uri = monacoEditor.Uri.file(boundPath);
+      let model = monacoEditor.editor.getModel(uri);
+      if (!model) {
+        model = monacoEditor.editor.createModel(initialFile.content, initialFile.language, uri);
+      }
+      ed.setModel(model);
+    }
+    if (placeholderModel && placeholderModel !== ed.getModel()) {
+      placeholderModel.dispose();
+    }
+
+    // Restore cursor position
     const cached = cursorCache.get(`${groupId}::${boundPath}`);
     if (cached) {
-      setTimeout(() => {
-        const inst = editorRef.current;
-        if (!inst) return;
-        inst.setPosition({ lineNumber: cached.line, column: cached.col });
-        inst.revealLineInCenter(cached.line);
-        inst.focus();
-      }, 50);
-    } else {
-      ed.focus();
+      ed.setPosition({ lineNumber: cached.line, column: cached.col });
+      ed.revealLineInCenter(cached.line);
     }
+    ed.focus();
+    prevPathRef.current = boundPath;
 
     // Load git gutter decorations
     updateGitGutter(ed);
+
+    // Custom context menu — dispatch event for EditorContextMenu React component
+    const domNode = ed.getDomNode();
+    if (domNode) {
+      const onCtx = (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        window.dispatchEvent(new CustomEvent('editor:contextmenu', {
+          detail: { x: e.clientX, y: e.clientY }
+        }));
+      };
+      domNode.addEventListener('contextmenu', onCtx);
+      disposablesRef.current.push({ dispose: () => domNode.removeEventListener('contextmenu', onCtx) });
+    }
 
     // Pre-load Prettier project config from project root
     const projectRoot = useProjectStore.getState().currentProject?.path;
@@ -530,47 +638,105 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     }
   }, [updateGitGutter]);
 
-  // Cleanup — save cursor + content before tab switch
-  useEffect(() => {
-    const effectPath = path;
-    return () => {
-      try {
-        const inst = editorRef.current;
-        if (inst) {
-          const pos = inst.getPosition();
-          if (pos) {
-            cursorCache.set(`${groupId}::${effectPath}`, { line: pos.lineNumber, col: pos.column });
-          }
-        }
-      } catch {}
+  // ── Model swap on tab switch (VS Code-style) ────────────────────────
 
+  useEffect(() => {
+    const inst = editorRef.current;
+    if (!inst) return;
+
+    const prevPath = prevPathRef.current;
+    prevPathRef.current = path;
+
+    // Same file — nothing to do
+    if (prevPath === path) return;
+
+    // Save cursor from previous model
+    if (prevPath) {
+      try {
+        const pos = inst.getPosition();
+        if (pos) setCursorCached(`${groupId}::${prevPath}`, { line: pos.lineNumber, col: pos.column });
+      } catch {}
+      // Save content of previous model to store
+      try {
+        const prevModel = inst.getModel();
+        if (prevModel) pushContentToStore(prevPath, prevModel.getValue());
+      } catch {}
+    }
+
+    // Get or create model for the new file
+    const file = useEditorRepository.getState().openFiles.find(f => f.path === path);
+    if (!file) return;
+
+    const uri = monacoEditor.Uri.file(path);
+    let model = monacoEditor.editor.getModel(uri);
+    if (!model) {
+      model = monacoEditor.editor.createModel(file.content, file.language, uri);
+    }
+
+    // Swap model (near-instant — no parsing, no re-tokenizing if cached)
+    inst.setModel(model);
+
+    // Restore cursor
+    const cached = cursorCache.get(`${groupId}::${path}`);
+    if (cached) {
+      inst.setPosition({ lineNumber: cached.line, column: cached.col });
+      inst.revealLineInCenter(cached.line);
+    }
+
+    inst.focus();
+
+    // Update git gutter for the new file
+    updateGitGutter(inst);
+  }, [path, groupId, updateGitGutter]);
+
+  // Cleanup on unmount — save everything
+  useEffect(() => {
+    return () => {
+      const inst = editorRef.current;
+      const currentPath = pathRef.current;
+
+      // Save cursor
+      if (inst && currentPath) {
+        try {
+          const pos = inst.getPosition();
+          if (pos) setCursorCached(`${groupId}::${currentPath}`, { line: pos.lineNumber, col: pos.column });
+        } catch {}
+      }
+
+      // Flush autosave
       if (autoSaveRef.current) { clearTimeout(autoSaveRef.current); autoSaveRef.current = null; }
       disposablesRef.current.forEach(d => d.dispose());
       disposablesRef.current = [];
-      if (dirtyRef.current) {
+
+      // Save content on unmount
+      if (inst && currentPath) {
         let content: string | null = null;
-        try { content = editorRef.current?.getValue() ?? null; } catch {}
-        if (!content && pendingRef.current?.path === effectPath) {
-          content = pendingRef.current.content;
-        }
+        try { content = inst.getValue() ?? null; } catch {}
+        if (!content && pendingRef.current?.path === currentPath) content = pendingRef.current.content;
         if (content) {
-          FileService.writeFile(effectPath, content).catch(e =>
-            logger.error('editor', 'Save on tab switch failed', e)
+          FileService.writeFile(currentPath, content).catch(e =>
+            logger.error('editor', 'Save on unmount failed', e)
           );
-          pushContentToStore(effectPath, content);
+          pushContentToStore(currentPath, content);
         }
       }
+
+      // Dispose model if file is no longer open in any group
+      try {
+        const { openFiles } = useEditorRepository.getState();
+        if (currentPath && !openFiles.some(f => f.path === currentPath)) {
+          const uri = monacoEditor.Uri.file(currentPath);
+          const model = monacoEditor.editor.getModel(uri);
+          model?.dispose();
+        }
+      } catch {}
+
       dirtyRef.current = false;
       pendingRef.current = null;
       const bridge = MonacoBridge.getInstance();
-      if (editorRef.current && bridge.getCurrentEditor() === editorRef.current) {
-        bridge.setCurrentEditor(null);
-      }
+      if (inst && bridge.getCurrentEditor() === inst) bridge.setCurrentEditor(null);
     };
-  }, [path]);
-
-  // Focus editor when path changes
-  useEffect(() => { editorRef.current?.focus(); }, [path]);
+  }, []);
 
   // Reveal position
   useEffect(() => {
@@ -597,21 +763,56 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     return () => window.removeEventListener('monaco:claimBridge', handler);
   }, []);
 
-  // Clear cursor cache when file is closed/deleted
+  // Clear cursor cache + dispose model when file is closed
   useEffect(() => {
-    const handler = (e: Event) => {
-      const closedPath = (e as CustomEvent<string>).detail;
+    const onTabClosed = (e: Event) => {
+      const closedPath = (e as CustomEvent<{ path: string }>).detail?.path;
       if (!closedPath) return;
-      // Remove all cache entries for this path across all groups
-      // Keys are in format "groupId::path"
       for (const key of Array.from(cursorCache.keys())) {
-        if (key.endsWith(`::${closedPath}`)) {
-          cursorCache.delete(key);
-        }
+        if (key.endsWith(`::${closedPath}`)) cursorCache.delete(key);
+      }
+      // Dispose cached model to free memory (only if not currently active)
+      if (closedPath !== pathRef.current) {
+        const uri = monacoEditor.Uri.file(closedPath);
+        const model = monacoEditor.editor.getModel(uri);
+        if (model) model.dispose();
       }
     };
-    window.addEventListener('editor:clearCursorCache', handler);
-    return () => window.removeEventListener('editor:clearCursorCache', handler);
+    const onClearCursorCache = (e: Event) => {
+      const closedPath = (e as CustomEvent<string>).detail;
+      if (!closedPath) return;
+      for (const key of Array.from(cursorCache.keys())) {
+        if (key.endsWith(`::${closedPath}`)) cursorCache.delete(key);
+      }
+    };
+    window.addEventListener('tab:closed', onTabClosed);
+    window.addEventListener('editor:clearCursorCache', onClearCursorCache);
+    return () => {
+      window.removeEventListener('tab:closed', onTabClosed);
+      window.removeEventListener('editor:clearCursorCache', onClearCursorCache);
+    };
+  }, []);
+
+  // Sync model when file content is updated externally (agent, store, disk watcher)
+  useEffect(() => {
+    const unsubscribe = useEditorRepository.subscribe((state, prevState) => {
+      const currentPath = pathRef.current;
+      if (!currentPath || !editorRef.current) return;
+      const file = state.openFiles.find(f => f.path === currentPath);
+      const prevFile = prevState.openFiles.find(f => f.path === currentPath);
+      if (!file || !prevFile) return;
+      // Only sync if content changed in store and differs from model
+      if (file.content !== prevFile.content) {
+        const model = editorRef.current.getModel();
+        if (model && model.getValue() !== file.content) {
+          // Preserve cursor position across the update
+          const pos = editorRef.current.getPosition();
+          model.setValue(file.content);
+          if (pos) editorRef.current.setPosition(pos);
+        }
+      }
+    });
+    return unsubscribe;
   }, []);
 
   // Refresh git gutter when file is saved externally (e.g. by store, AI agent, or source control)
@@ -632,7 +833,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
   if (!file) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: tokens.colors.text.secondary, fontSize: '14px', flexDirection: 'column', gap: '8px' }}>
-        <div>File not found</div>
+        <div>{t("common.fileNotFound")}</div>
         <div style={{ fontSize: '12px', opacity: 0.7 }}>{path}</div>
       </div>
     );
@@ -661,16 +862,15 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     <div style={{ height: '100%', width: '100%' }}>
       <Editor
         height="100%"
-        path={path}
-        defaultLanguage={file.language}
-        defaultValue={file.content}
+        defaultLanguage="typescript"
+        defaultValue=""
         beforeMount={handleBeforeMount}
         onMount={handleMount}
         options={options}
         theme="toquemedia-vibrant"
         loading={
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: tokens.colors.text.secondary, fontSize: '14px' }}>
-            Loading editor...
+            {t("explorer.loadingEditor")}
           </div>
         }
       />

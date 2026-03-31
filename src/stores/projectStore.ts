@@ -16,6 +16,7 @@ import { useChatStore } from './chatStore';
 import { useProblemsStore } from './problemsStore';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
+import { t } from '../i18n';
 
 interface ProjectStore {
   currentProject: ProjectInfo | null;
@@ -25,7 +26,7 @@ interface ProjectStore {
   error: string | null;
 
   // Actions
-  openProject: (path: string) => Promise<void>;
+  openProject: (path: string, options?: { initGit?: boolean }) => Promise<void>;
   createProject: (path: string, template: string) => Promise<void>;
   loadRecentProjects: () => Promise<void>;
   closeProject: () => Promise<void>;
@@ -84,6 +85,22 @@ function tearDownProject() {
   // Clear all chat sessions and streaming state
   useChatStore.getState().clearAllSessions();
 
+  // Kill terminal processes and clear sessions
+  import('./terminalStore').then(m => {
+    m.default.getState().clearSessions();
+  }).catch(() => {});
+
+  // Clear file tree to free memory (will reload for next project)
+  import('./fileTreeStore').then(m => {
+    m.useFileTreeRepository.setState({ root: null, searchResults: [], error: null });
+  }).catch(() => {});
+
+  // Dispose all Monaco models for closed files
+  try {
+    const monaco = (window as unknown as Record<string, unknown>).monaco as { editor?: { getModels?: () => { dispose: () => void }[] } } | undefined;
+    monaco?.editor?.getModels?.().forEach(m => m.dispose());
+  } catch {}
+
   // Stop dev server and clear preview state
   devServerManager.stop().catch(() => {});
   const layout = useLayoutStore.getState();
@@ -118,7 +135,7 @@ export const useProjectStore = create<ProjectStore>()(
       loading: false,
       error: null,
 
-      openProject: async (path: string) => {
+      openProject: async (path: string, options?: { initGit?: boolean }) => {
         set({ loading: true, error: null });
 
         // Clean up previous project's state before loading the new one
@@ -133,13 +150,17 @@ export const useProjectStore = create<ProjectStore>()(
           const layout = useLayoutStore.getState();
           layout.clearPreviewServer();
           layout.clearDevServerLogs();
+          layout.setScaffoldPhase(null);
+          // Reset HTTP Client for the new project context
+          const { useHttpClientStore } = await import('./httpClientStore');
+          useHttpClientStore.getState().resetForNewProject();
           if (layout.viewMode === 'preview' || layout.viewMode === 'generating') {
             layout.setViewMode('chat');
           }
         }
 
         try {
-          const projectInfo: ProjectInfo = await invoke('open_project', { path });
+          const projectInfo: ProjectInfo = await invoke('open_project', { path, initGit: options?.initGit });
           // Reload recent projects so sidebar updates in real-time
           const recentProjects = await invoke<RecentProject[]>('get_recent_projects').catch(() => get().recentProjects);
           set({
@@ -183,6 +204,20 @@ export const useProjectStore = create<ProjectStore>()(
             await get().loadProjectState(projectInfo.id);
           } catch (error) {
             logger.warn('project', 'Failed to load project state:', error);
+          }
+
+          // Check for TMS.md — suggest /init if missing so the agent has project context
+          try {
+            await invoke('read_file', { path: `${path}/TMS.md` });
+          } catch {
+            // TMS.md doesn't exist — suggest initialization after a brief delay
+            // so the chat session is ready
+            setTimeout(() => {
+              const chatState = useChatStore.getState();
+              if (chatState.activeSessionId) {
+                chatState.addSystemMessage(t('common.noTmsFile'));
+              }
+            }, 600);
           }
         } catch (error: unknown) {
           set({

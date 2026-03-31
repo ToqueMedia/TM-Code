@@ -17,9 +17,11 @@ export interface FileResult {
 }
 
 export function convertToFileResults(result: SearchResult): FileResult[] {
-  return result.files.map(file => ({
+  // Collapse all by default to avoid rendering thousands of match nodes at once.
+  // Only expand the first 5 files for immediate visibility.
+  return result.files.map((file, idx) => ({
     file: file.file_path,
-    isExpanded: true,
+    isExpanded: idx < 5,
     matches: file.matches.map(match => ({
       id: `${file.file_path}-${match.line_number}-${match.column}`,
       file: file.file_path,

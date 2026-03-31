@@ -12,6 +12,7 @@ import {
 } from '@chakra-ui/react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import { templateService, Template } from '../services/templateService'
 import { LoadingSpinner } from './ui/LoadingSpinner'
 import WindowControls from './ui/WindowControls'
@@ -174,16 +175,16 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
       >
         <VStack gap={1} alignItems="flex-start">
           <Heading fontSize="20px" fontWeight="700" color={tokens.colors.text.primary}>
-            Choose a template
+            {t('misc.chooseTemplate')}
           </Heading>
           <Text fontSize="13px" color={tokens.colors.text.muted}>
-            Start with a Hello World boilerplate or create an empty project
+            {t('misc.chooseTemplateDesc')}
           </Text>
         </VStack>
 
         <HStack gap={3}>
           <Input
-            placeholder="Project name"
+            placeholder={t("misc.projectName")}
             value={projectName}
             onChange={(e) => setProjectName(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') handleConfirm() }}
@@ -209,7 +210,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
             onClick={onBack}
             disabled={isLoading}
           >
-            Cancel
+            {t('misc.cancel')}
           </Button>
           <Button
             size="sm"
@@ -220,7 +221,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
             opacity={selected && isNameValid && !isLoading ? 1 : 0.5}
             onClick={handleConfirm}
           >
-            Create Project
+            {t('misc.createProject')}
           </Button>
         </HStack>
       </Flex>
@@ -290,10 +291,10 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
               </Flex>
               <VStack gap={0} alignItems="flex-start">
                 <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
-                  Empty Project
+                  {t('misc.emptyProject')}
                 </Text>
                 <Text fontSize="11px" color={tokens.colors.text.muted}>
-                  Start from scratch — no template, no boilerplate
+                  {t('misc.emptyProjectDesc')}
                 </Text>
               </VStack>
             </HStack>
@@ -315,7 +316,7 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
           justifyContent="center"
           backdropFilter="blur(4px)"
         >
-          <LoadingSpinner size="lg" label="Creating project..." />
+          <LoadingSpinner size="lg" label={t('misc.creatingProject')} />
         </Flex>
       )}
     </Flex>

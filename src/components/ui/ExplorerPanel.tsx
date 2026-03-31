@@ -14,6 +14,7 @@ import { useCurrentProject } from '../../hooks/useProjectState'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import FileTreeSkeleton from './FileTreeSkeleton'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 const FileTree = React.lazy(() => import('./FileTree'))
 
@@ -101,10 +102,10 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 					/>
 				</Box>
 				<Text fontSize="sm" color={tokens.colors.text.primary} fontWeight="500" textAlign="center">
-					No folder opened
+					{t("explorer.noFolder")}
 				</Text>
 				<Text fontSize="xs" color={tokens.colors.text.muted} textAlign="center">
-					Open a folder to start exploring
+					{t("explorer.openFolder")}
 				</Text>
 			</VStack>
 		)

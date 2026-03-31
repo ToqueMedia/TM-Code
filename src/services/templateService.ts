@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { detectSystemPackageManager, adaptCommand } from './packageManagerDetector'
 
 export interface Requirement {
   name: string
@@ -34,44 +35,15 @@ const NODE_REQUIREMENTS: Requirement[] = [
     installHint: 'Download from nodejs.org or install via nvm',
   },
   {
-    name: 'npm',
-    command: 'npm',
+    name: 'pnpm',
+    command: 'pnpm',
     versionFlag: '--version',
-    minVersion: '9.0.0',
-    installUrl: 'https://nodejs.org',
-    installHint: 'Included with Node.js',
+    minVersion: '8.0.0',
+    installUrl: 'https://pnpm.io',
+    installHint: 'Run: npm install -g pnpm',
   },
 ]
 
-const GO_REQUIREMENTS: Requirement[] = [
-  {
-    name: 'Go',
-    command: 'go',
-    versionFlag: 'version',
-    minVersion: '1.21.0',
-    installUrl: 'https://go.dev/dl/',
-    installHint: 'Download from go.dev or use brew: brew install go',
-  },
-]
-
-const PYTHON_REQUIREMENTS: Requirement[] = [
-  {
-    name: 'Python',
-    command: 'python3',
-    versionFlag: '--version',
-    minVersion: '3.10.0',
-    installUrl: 'https://www.python.org/downloads/',
-    installHint: 'Download from python.org or use brew: brew install python3',
-  },
-  {
-    name: 'pip',
-    command: 'pip3',
-    versionFlag: '--version',
-    minVersion: '22.0.0',
-    installUrl: 'https://www.python.org/downloads/',
-    installHint: 'Included with Python 3',
-  },
-]
 
 /** Persisted to .toquemedia-template in project root after scaffold. */
 export interface TemplateManifest {
@@ -90,8 +62,8 @@ const TEMPLATES: Template[] = [
     description: 'React app with TypeScript and Vite bundler',
     category: 'frontend',
     framework: 'react',
-    installCommand: 'npm install',
-    devCommand: 'npm run dev',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
     tags: ['react', 'typescript', 'vite', 'frontend', 'web', 'spa'],
     requirements: NODE_REQUIREMENTS,
   },
@@ -101,8 +73,8 @@ const TEMPLATES: Template[] = [
     description: 'Full-stack React framework with SSR',
     category: 'frontend',
     framework: 'nextjs',
-    installCommand: 'npm install',
-    devCommand: 'npm run dev',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
     tags: ['next', 'nextjs', 'react', 'typescript', 'ssr', 'fullstack'],
     requirements: NODE_REQUIREMENTS,
   },
@@ -112,8 +84,8 @@ const TEMPLATES: Template[] = [
     description: 'Vue 3 app with TypeScript and Vite',
     category: 'frontend',
     framework: 'vue',
-    installCommand: 'npm install',
-    devCommand: 'npm run dev',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
     tags: ['vue', 'vuejs', 'typescript', 'vite', 'frontend'],
     requirements: NODE_REQUIREMENTS,
   },
@@ -123,8 +95,8 @@ const TEMPLATES: Template[] = [
     description: 'Full-stack Vue framework with SSR',
     category: 'frontend',
     framework: 'nuxt',
-    installCommand: 'npm install',
-    devCommand: 'npm run dev',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
     tags: ['nuxt', 'vue', 'typescript', 'ssr', 'fullstack'],
     requirements: NODE_REQUIREMENTS,
   },
@@ -134,8 +106,8 @@ const TEMPLATES: Template[] = [
     description: 'Svelte app with SvelteKit and TypeScript',
     category: 'frontend',
     framework: 'svelte',
-    installCommand: 'npm install',
-    devCommand: 'npm run dev',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
     tags: ['svelte', 'sveltekit', 'typescript', 'vite', 'frontend'],
     requirements: NODE_REQUIREMENTS,
   },
@@ -145,8 +117,8 @@ const TEMPLATES: Template[] = [
     description: 'Angular app with TypeScript',
     category: 'frontend',
     framework: 'angular',
-    installCommand: 'npm install',
-    devCommand: 'npm start',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm start',
     tags: ['angular', 'typescript', 'frontend', 'enterprise'],
     requirements: NODE_REQUIREMENTS,
   },
@@ -156,8 +128,8 @@ const TEMPLATES: Template[] = [
     description: 'Content-focused static site framework',
     category: 'frontend',
     framework: 'astro',
-    installCommand: 'npm install',
-    devCommand: 'npm run dev',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
     tags: ['astro', 'static', 'content', 'blog', 'website'],
     requirements: NODE_REQUIREMENTS,
   },
@@ -167,8 +139,8 @@ const TEMPLATES: Template[] = [
     description: 'Express.js REST API with TypeScript',
     category: 'backend',
     framework: 'express',
-    installCommand: 'npm install',
-    devCommand: 'npm run dev',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
     tags: ['express', 'api', 'rest', 'backend', 'node', 'typescript'],
     requirements: NODE_REQUIREMENTS,
   },
@@ -178,32 +150,21 @@ const TEMPLATES: Template[] = [
     description: 'High-performance Node.js server',
     category: 'backend',
     framework: 'fastify',
-    installCommand: 'npm install',
-    devCommand: 'npm run dev',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
     tags: ['fastify', 'api', 'rest', 'backend', 'node', 'typescript'],
     requirements: NODE_REQUIREMENTS,
   },
   {
-    id: 'go-gin',
-    name: 'Go + Gin',
-    description: 'Go REST API with Gin framework',
+    id: 'nestjs-ts',
+    name: 'NestJS + TypeScript',
+    description: 'Progressive Node.js framework for scalable APIs',
     category: 'backend',
-    framework: 'go',
-    installCommand: 'go mod tidy',
-    devCommand: 'go run main.go',
-    tags: ['go', 'golang', 'gin', 'api', 'rest', 'backend'],
-    requirements: GO_REQUIREMENTS,
-  },
-  {
-    id: 'python-fastapi',
-    name: 'Python + FastAPI',
-    description: 'Python REST API with FastAPI',
-    category: 'backend',
-    framework: 'python',
-    installCommand: 'pip install -r requirements.txt',
-    devCommand: 'uvicorn main:app --reload',
-    tags: ['python', 'fastapi', 'api', 'rest', 'backend'],
-    requirements: PYTHON_REQUIREMENTS,
+    framework: 'nestjs',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
+    tags: ['nestjs', 'nest', 'typescript', 'api', 'rest', 'backend', 'node'],
+    requirements: NODE_REQUIREMENTS,
   },
   {
     id: 'react-express-ts',
@@ -211,8 +172,8 @@ const TEMPLATES: Template[] = [
     description: 'Full-stack monorepo with React frontend and Express backend',
     category: 'fullstack',
     framework: 'react+express',
-    installCommand: 'npm install',
-    devCommand: 'npm run dev',
+    installCommand: 'pnpm install',
+    devCommand: 'pnpm run dev',
     tags: ['react', 'express', 'fullstack', 'monorepo', 'typescript'],
     workspaces: ['client', 'server'],
     requirements: NODE_REQUIREMENTS,
@@ -262,13 +223,14 @@ class TemplateService {
       destination: destinationPath,
     })
 
-    // Write manifest so context builder can detect the template later
+    // Write manifest with the actual PM available on the system
+    const pm = await detectSystemPackageManager()
     const manifest: TemplateManifest = {
       templateId: template.id,
       name: template.name,
       framework: template.framework,
-      installCommand: template.installCommand,
-      devCommand: template.devCommand,
+      installCommand: adaptCommand(template.installCommand, pm),
+      devCommand: adaptCommand(template.devCommand, pm),
       scaffoldedAt: new Date().toISOString(),
     }
 

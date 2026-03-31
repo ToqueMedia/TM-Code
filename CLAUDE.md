@@ -16,7 +16,7 @@ Unlike Cursor/VS Code (editor-first, AI in sidebar), TM Code is **chat-first**: 
 
 ```bash
 # Development
-yarn install              # Install dependencies (uses Yarn 1.22.19, NOT npm)
+yarn install              # Install dependencies (uses Yarn 1.22.22, NOT npm)
 npm run tauri dev         # Run full app in development mode (Vite + Tauri)
 npm run dev               # Frontend-only dev server (port 1420)
 
@@ -43,10 +43,46 @@ Frontend calls Rust functions via Tauri's `invoke()`. All backend commands are r
 
 ### Key Layers
 
-- **Components** (`src/components/`): React UI — `CodeEditorNew.tsx` is the main editor layout, `WelcomeScreen.tsx` is the landing page. Dialogs live in `components/dialogs/`, reusable UI in `components/ui/`.
-- **Stores** (`src/stores/`): Zustand state — `projectStore.ts` (workspace/project state), `editorStore.ts` (tabs/active file), `settingsStore.ts` (preferences), `fileTreeStore.ts`.
-- **Services** (`src/services/`): Tauri command wrappers — `fileService.ts`, `projectService.ts`, `terminalService.ts`, `searchService.ts`, `debuggerService.ts`.
-- **Rust Commands** (`src-tauri/src/commands/`): `project.rs`, `file_tree.rs`, `terminal.rs`, `search.rs`, `debugger.rs`. Module exports in `mod.rs`.
+- **Components** (`src/components/`): React UI organized by domain:
+  - `CodeEditorNew.tsx` — main IDE layout orchestrator (activity bar + sidebar + editor + chat + terminal)
+  - `WelcomeScreen.tsx` — landing/onboarding page
+  - `chat/` — chat panel, message bubbles, agent status, diff preview, tool call display, slash command menu, reasoning blocks, plan approval
+  - `editor/` — split editor layout with draggable reorderable tabs, editor workspace, context menu, Xcode-style navigation
+  - `views/` — main view containers (ChatView, EditorView, PreviewView, SettingsView), generation status, source control, containers panel
+  - `prompt/` — prompt textarea, actions, and `usePromptBar` hook
+  - `http-client/` — Postman-like HTTP testing panel (request builder, key-value editor, JSON body editor, response viewer)
+  - `ui/` — 50+ reusable components: title bar, status bar, activity bar, Monaco editors, file tree, search panel, terminal (xterm.js v6), command palette, quick open, breadcrumbs
+  - `dialogs/` — new/open project, preferences, requirements check
+  - `welcome/` — welcome screen, sidebar, hero, clone dialog
+  - `debugger/` — DAP debugger UI (breakpoints, call stack, variables, console)
+  - `auth/` — Firebase login screen
+
+- **Stores** (`src/stores/`): Zustand state (19 stores):
+  - Core: `projectStore.ts`, `editorStore.ts`, `settingsStore.ts`, `fileTreeStore.ts`, `fileTreeWorkerStore.ts`
+  - Chat/Agent: `chatStore.ts`, `agentStore.ts`, `skillStore.ts`, `mcpStore.ts`, `checkpointStore.ts`, `permissionStore.ts`
+  - Layout: `layoutStore.ts`, `terminalStore.ts`, `toastStore.ts`, `problemsStore.ts`
+  - Features: `containerStore.ts`, `authStore.ts`, `aiCompletionStore.ts`, `httpClientStore.ts`
+
+- **Services** (`src/services/`): Tauri command wrappers and business logic:
+  - File/Project: `fileService.ts`, `fileTreeService.ts`, `projectService.ts`, `templateService.ts`, `postScaffoldPipeline.ts`
+  - Editor: `formatterService.ts` (Prettier), `typescriptLspService.ts`, `searchService.ts`, `quickOpenService.ts`
+  - Runtime: `debuggerService.ts`, `terminalService.ts`, `devServerManager.ts`, `containerService.ts`
+  - Agent (`agent/`): `agentService.ts` (orchestration loop), `agentRunner.ts`, `toolExecutor.ts` (permissions + .env protection), `contextBuilder.ts`, `streamParser.ts` (SSE + reasoning blocks), `diffService.ts`, `sessionService.ts`, `checkpointService.ts`, `skillService.ts`, `slashCommandRegistry.ts`, `staticPreviewBuilder.ts`
+  - Agent commands (`agent/commands/`): `initCommand.ts` (`/init`), `planCommand.ts` (`/plan`), `paymentsCommand.ts` (`/payments`)
+  - AI: `aiCompletionService.ts` (Ollama FIM autocomplete)
+  - MCP: `mcp/mcpService.ts`, `mcp/remoteTransport.ts`
+  - Auth: `auth/firebaseAuth.ts`, `auth/emulatorConfig.ts`
+  - Utilities: `windowService.ts`, `fileWatcherService.ts`, `unsavedChangesService.ts`, `environmentCheck.ts`, `recoveryService.ts`, `gitService.ts`
+
+- **Rust Commands** (`src-tauri/src/commands/`): `project.rs`, `filesystem.rs`, `file_tree.rs`, `terminal.rs`, `search.rs`, `debugger.rs`, `checkpoint.rs`, `container.rs`, `devcontainer.rs`, `mcp.rs`, `git.rs`, `ai_completion.rs`, `http_client.rs`. Module exports in `mod.rs`.
+
+### Rust State Management (`lib.rs`)
+Tauri manages shared state via `app.manage()`:
+- `HttpClientState` — reqwest client with 4s timeout
+- `TerminalState` — command history + process map
+- `ContainerState` — container map + active container
+- `DebuggerState`, `McpState`, `FimState`
+- OAuth domain whitelist for CSP
 
 ### Data Persistence
 - Project metadata: `~/.config/toquemedia-studio/projects/{project-id}/meta.json`
@@ -54,12 +90,24 @@ Frontend calls Rust functions via Tauri's `invoke()`. All backend commands are r
 - Chat sessions: `~/.toquemedia-studio/sessions/{project-hash}/session_*.json`
 - Project ID file: `.toquemedia-id` in project root
 
+### Dev Server Ports
+- Frontend servers (Vite, Next, Nuxt, etc.): port `7773`
+- Backend servers (Express, Fastify, NestJS, etc.): port `7777`
+- Always use `127.0.0.1` (not `localhost`) due to WKWebView IPv6 issues
+
 ## Tech Stack
 
-- **Frontend**: React 19, TypeScript 5.9, Chakra UI v3, Monaco Editor, Zustand, xterm.js, Framer Motion
-- **Backend**: Rust (edition 2021), Tauri 2, tokio, serde
-- **Build**: Vite 8, ts-jest for testing
+- **Frontend**: React 19.2, TypeScript ~5.9, Chakra UI v3, Monaco Editor 0.55, Zustand 5, xterm.js 6, Framer Motion 12, TanStack Query 5, React Markdown, Firebase 12
+- **Backend**: Rust (edition 2021), Tauri 2 (macOS private API), tokio, serde, reqwest 0.12
+- **Build**: Vite 8, Jest 30 + ts-jest for testing
 - **Package Manager**: Yarn 1.22.22 (Node >= 20.19.0)
+
+## Project Templates
+
+Available in `src-tauri/resources/templates/`:
+- **Frontend**: `react-ts-vite`, `nextjs-ts`, `nuxt-ts`, `vue-ts-vite`, `svelte-ts-vite`, `astro`, `angular-ts`
+- **Fullstack**: `react-express-ts`
+- **Backend**: `express-ts`, `fastify-ts`, `nestjs-ts`
 
 ## Design System
 
@@ -77,6 +125,7 @@ Dark theme with pink/magenta brand accent (`src/theme/tokens.ts` is the single s
 - Chakra UI v3 for UI components
 - Zustand for state management (with persist middleware where needed)
 - Service layer pattern: components → stores → services → Tauri invoke
-- Lazy loading for heavy components (Monaco, Debugger)
+- Lazy loading for heavy components (Monaco, Debugger, Checkpoint)
 - Web Workers for expensive operations (file tree indexing)
+- SSE streaming for agent responses with reasoning block detection
 - **UI quality is not over-engineering.** Components should always be visually polished, using `tokens.ts` design tokens, proper spacing, transitions, and glassmorphism effects. "Avoid over-engineering" means no unnecessary abstractions or extra features — not skipping visual polish.

@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import {
   Box,
   Flex,
@@ -7,6 +7,7 @@ import {
   Text,
   VStack,
 } from '@chakra-ui/react'
+import type { IconType } from 'react-icons'
 import {
   LuRocket,
   LuFolderOpen,
@@ -14,6 +15,7 @@ import {
   LuFileCode,
 } from 'react-icons/lu'
 import { tokens } from '@/theme/tokens'
+import { useSettingsStore, matchesBinding, type ShortcutId } from '@/stores/settingsStore'
 import WelcomeFeatureCard from './WelcomeFeatureCard'
 
 interface WelcomeHeroProps {
@@ -23,13 +25,20 @@ interface WelcomeHeroProps {
   onCloneRepository: () => void
 }
 
-const featureCards = [
+const featureCards: {
+  id: string
+  icon: IconType
+  title: string
+  description: string
+  shortcutId: ShortcutId | null
+  color: string
+}[] = [
   {
     id: 'new',
     icon: LuRocket,
     title: 'New Project',
     description: 'Start fresh with templates and boilerplates for any framework.',
-    shortcut: '⌘ Shift N',
+    shortcutId: 'newProject',
     color: tokens.colors.accent.primary,
   },
   {
@@ -37,7 +46,7 @@ const featureCards = [
     icon: LuFileCode,
     title: 'Project from Scratch',
     description: 'Pick an empty folder and start building from zero.',
-    shortcut: '⌘ Shift S',
+    shortcutId: null,
     color: tokens.colors.accent.orange,
   },
   {
@@ -45,7 +54,7 @@ const featureCards = [
     icon: LuFolderOpen,
     title: 'Open Folder',
     description: 'Open an existing project and start coding immediately.',
-    shortcut: '⌘ K ⌘ O',
+    shortcutId: 'openFile',
     color: tokens.colors.accent.greenBright,
   },
   {
@@ -53,18 +62,39 @@ const featureCards = [
     icon: LuGitBranch,
     title: 'Clone Repository',
     description: 'Clone from GitHub, GitLab, or any Git remote server.',
-    shortcut: '⌘ Shift P',
+    shortcutId: null,
     color: tokens.colors.accent.purple,
   },
 ]
 
 const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onProjectFromScratch, onCloneRepository }) => {
+  const shortcuts = useSettingsStore(s => s.shortcuts)
+
   const cardActions: Record<string, () => void> = {
     new: onNewProject,
     scratch: onProjectFromScratch,
     open: onOpenFolder,
     clone: onCloneRepository,
   }
+
+  // Keyboard shortcuts active on WelcomeScreen (no project open, useKeyboardShortcuts won't handle these)
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      const sc = useSettingsStore.getState().shortcuts
+      if (matchesBinding(e, sc.newProject)) {
+        e.preventDefault()
+        onNewProject()
+      } else if (matchesBinding(e, sc.openFile)) {
+        e.preventDefault()
+        onOpenFolder()
+      } else if (matchesBinding(e, sc.commandPalette)) {
+        e.preventDefault()
+        onCloneRepository()
+      }
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onNewProject, onOpenFolder, onCloneRepository])
 
   return (
     <Flex
@@ -137,11 +167,11 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, o
       >
         {featureCards.map((card) => (
           <WelcomeFeatureCard
-            key={card.title}
+            key={card.id}
             icon={card.icon}
             title={card.title}
             description={card.description}
-            shortcut={card.shortcut}
+            binding={card.shortcutId ? shortcuts[card.shortcutId] : null}
             color={card.color}
             onClick={cardActions[card.id]}
           />

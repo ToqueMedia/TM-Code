@@ -169,38 +169,9 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             } catch {}
           }, 0);
 
-          // Check if file is already open
+          // Check if file is already open — just activate, skip disk read
           const existingFile = get().openFiles.find(f => f.path === path);
           if (existingFile) {
-            logger.debug('editor', 'File already open:', path);
-            // If file has unsaved edits, do NOT overwrite from disk — just activate
-            if (existingFile.isDirty) {
-              return;
-            }
-            // Refresh content from file system to ensure we have the latest version
-            try {
-              logger.debug('editor', 'Refreshing content for:', path);
-              const content = await FileService.readFile(path);
-              if (content !== existingFile.content) {
-                logger.debug('editor', 'Content changed for:', path);
-                set(state => {
-                  const fileIndex = state.openFiles.findIndex(f => f.path === path);
-                  if (fileIndex === -1) return state;
-                  if (state.openFiles[fileIndex].isDirty) return state;
-
-                  const updatedFiles = [...state.openFiles];
-                  updatedFiles[fileIndex] = {
-                    ...updatedFiles[fileIndex],
-                    content,
-                    isDirty: false
-                  };
-
-                  return { openFiles: updatedFiles };
-                });
-              }
-            } catch (error) {
-              logger.error('editor', `Failed to refresh file content ${path}:`, error);
-            }
             return;
           }
 
@@ -234,6 +205,8 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
 
       closeFile: (path: string) => {
         const removeFile = () => {
+          // Notify listeners (e.g. closed-tabs stack for Reopen Closed Tab)
+          try { window.dispatchEvent(new CustomEvent('tab:closed', { detail: { path } })) } catch {}
           set(state => {
             // Only remove from the ACTIVE group (not all groups)
             const groups = state.editorGroups.map(g => {
@@ -449,10 +422,11 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           const updatedFiles = [...state.openFiles];
           updatedFiles[fileIndex] = {
             ...updatedFiles[fileIndex],
-            content: previousContent
+            content: previousContent,
+            isDirty: true,
           };
-          
-          return { 
+
+          return {
             openFiles: updatedFiles,
             undoStack,
             redoStack
@@ -464,30 +438,31 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         set(state => {
           const undoStack = { ...state.undoStack };
           const redoStack = { ...state.redoStack };
-          
+
           if (!redoStack[path] || redoStack[path].length === 0) {
             return state;
           }
-          
+
           const fileIndex = state.openFiles.findIndex(f => f.path === path);
           if (fileIndex === -1) return state;
-          
+
           const currentContent = state.openFiles[fileIndex].content;
           const nextContent = redoStack[path].pop()!;
-          
+
           // Add current content to undo stack
           if (!undoStack[path]) {
             undoStack[path] = [];
           }
           undoStack[path].push(currentContent);
-          
+
           const updatedFiles = [...state.openFiles];
           updatedFiles[fileIndex] = {
             ...updatedFiles[fileIndex],
-            content: nextContent
+            content: nextContent,
+            isDirty: true,
           };
-          
-          return { 
+
+          return {
             openFiles: updatedFiles,
             undoStack,
             redoStack
@@ -544,11 +519,16 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           dirtyFiles.forEach(file => autoSaveQueue.removeFromQueue(file.path));
           
           // Save all dirty files em batches de 5 para evitar sobrecarga
+          // Read fresh content before each write to avoid TOCTOU (user may edit during save)
           const batchSize = 5;
           for (let i = 0; i < dirtyFiles.length; i += batchSize) {
             const batch = dirtyFiles.slice(i, i + batchSize);
+            const currentFiles = get().openFiles;
             await Promise.all(
-              batch.map(file => FileService.writeFile(file.path, file.content))
+              batch.map(file => {
+                const fresh = currentFiles.find(f => f.path === file.path);
+                return FileService.writeFile(file.path, fresh?.content ?? file.content);
+              })
             );
             
             // Pequena pausa entre batches
@@ -642,6 +622,11 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         });
       },
       closeAllFiles: () => {
+        // Notify listeners for each closed file
+        const files = get().openFiles
+        for (const f of files) {
+          try { window.dispatchEvent(new CustomEvent('tab:closed', { detail: { path: f.path } })) } catch {}
+        }
         set(() => ({
           openFiles: [], activeFile: null, cursorPositions: {}, undoStack: {}, redoStack: {},
           editorGroups: [{ id: 'main', files: [], activeFile: null }], activeGroupId: 'main',
@@ -654,14 +639,14 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         // If this file is already open (preview or not), just activate it
         const existing = get().openFiles.find(f => f.path === path);
         if (existing) {
-          set({ activeFile: path });
+          // Single atomic set to avoid race between activeFile and editorGroups
           set(state => {
             const groups = state.editorGroups.map(g => {
               if (g.id !== state.activeGroupId) return g;
               if (g.files.includes(path)) return { ...g, activeFile: path };
               return { ...g, files: [...g.files, path], activeFile: path };
             });
-            return { editorGroups: groups };
+            return { activeFile: path, editorGroups: groups };
           });
           return;
         }
@@ -692,12 +677,17 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
 
         // Now open the new file as preview
         await get().openFile(path);
-        // Mark as preview
+        // Mark as preview and ensure activeFile + group are set atomically
         set(st => {
           const openFiles = st.openFiles.map(f =>
             f.path === path ? { ...f, isPreview: true } : f
           );
-          return { openFiles };
+          const groups = st.editorGroups.map(g => {
+            if (g.id !== st.activeGroupId) return g;
+            if (g.files.includes(path)) return { ...g, activeFile: path };
+            return { ...g, files: [...g.files, path], activeFile: path };
+          });
+          return { openFiles, activeFile: path, editorGroups: groups };
         });
       },
 

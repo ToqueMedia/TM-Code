@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background base gradient -->
+    <radialGradient id="bgBase" cx="50%" cy="40%" r="70%" fx="50%" fy="35%">
+      <stop offset="0%" stop-color="#141414"/>
+      <stop offset="100%" stop-color="#0a0a0a"/>
+    </radialGradient>
+
+    <!-- Pink glow (top-right) -->
+    <radialGradient id="glowPink" cx="65%" cy="25%" r="45%">
+      <stop offset="0%" stop-color="#FE1063" stop-opacity="0.18"/>
+      <stop offset="60%" stop-color="#FE1063" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#FE1063" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Purple glow (bottom-left) -->
+    <radialGradient id="glowPurple" cx="30%" cy="75%" r="40%">
+      <stop offset="0%" stop-color="#a371f7" stop-opacity="0.12"/>
+      <stop offset="60%" stop-color="#a371f7" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#a371f7" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Warm glow behind logo -->
+    <radialGradient id="glowCenter" cx="50%" cy="45%" r="30%">
+      <stop offset="0%" stop-color="#FE1063" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#FE1063" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Rounded rect clip for macOS-style icon -->
+    <clipPath id="roundedClip">
+      <rect width="1024" height="1024" rx="228" ry="228"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#roundedClip)">
+    <!-- Background layers -->
+    <rect width="1024" height="1024" fill="url(#bgBase)"/>
+    <rect width="1024" height="1024" fill="url(#glowPink)"/>
+    <rect width="1024" height="1024" fill="url(#glowPurple)"/>
+    <rect width="1024" height="1024" fill="url(#glowCenter)"/>
+
+    <!-- Subtle border -->
+    <rect x="1" y="1" width="1022" height="1022" rx="227" ry="227"
+          fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="2"/>
+
+    <!--
+      TM Logo — original bounding box after translate:
+        X: 439..4567  (w=4128)
+        Y: 209..5465  (h=5256)
+
+      Scale to fit 680px tall (with padding):
+        scale = 680/5256 = 0.1294
+        Logo width after scale: 4128 * 0.1294 = 534
+        Offset X: (1024 - 534) / 2 = 245
+        Offset Y: (1024 - 680) / 2 = 172
+
+      Transform:
+        translate(245, 172) scale(0.1294)
+        Then undo internal translate: translate(-439, -209)
+        Combined: translate(245 - 439*0.1294, 172 - 209*0.1294) scale(0.1294)
+                = translate(245 - 56.8, 172 - 27.0) scale(0.1294)
+                = translate(188.2, 145.0) scale(0.1294)
+    -->
+    <g transform="translate(188.2, 145.0) scale(0.1294)">
+      <g transform="translate(-34104, -8123.9)">
+        <!-- Orange-red top bar -->
+        <polygon fill="#FF624C" points="34578 8756.3 38671 8756.3 38671 8333 34578 8333"/>
+
+        <!-- Red connectors -->
+        <polygon fill="#FF2D5A" points="36977 10270 37436 10270 37436 9955.8 38177 9955.8 38177 10270 38671 10270 38671 9497.2 36977 9497.2"/>
+        <polygon fill="#FF2D5A" points="34543 10077 35037 10077 35037 9955.8 35778 9955.8 35778 10077 36236 10077 36236 9497.2 34543 9497.2"/>
+
+        <!-- Pink vertical pillars -->
+        <polygon fill="#FE1063" points="34543 12216 35037 12216 35037 10077 34543 10077"/>
+        <polygon fill="#FE1063" points="35778 12216 36236 12216 36236 10077 35778 10077"/>
+        <polygon fill="#FE1063" points="38177 12216 38671 12216 38671 10270 38177 10270"/>
+        <polygon fill="#FE1063" points="36977 12216 37436 12216 37436 10270 36977 10270"/>
+
+        <!-- Dark pink bridge + sides -->
+        <polygon fill="#C10A69" points="35778 13152 37436 13152 37436 12216 36977 12216 36977 13131 36236 13131 36236 12216 35778 12216"/>
+        <polygon fill="#C10A69" points="35037 12216 34543 12216 34543 13166 35037 13166"/>
+        <polygon fill="#C10A69" points="38671 12216 38177 12216 38177 13166 38671 13166"/>
+
+        <!-- Deep magenta base -->
+        <polygon fill="#900A6A" points="37436 13152 35778 13152 35778 13589 37436 13589"/>
+      </g>
+    </g>
+  </g>
+</svg>

@@ -6,6 +6,10 @@ export interface FileContent {
   content: string;
 }
 
+// Per-file write lock — prevents concurrent writes to the same file
+// (auto-save + manual save + formatter racing).
+const writeLocks = new Map<string, Promise<void>>();
+
 export class FileService {
   static async readFile(path: string): Promise<string> {
     try {
@@ -18,12 +22,21 @@ export class FileService {
   }
 
   static async writeFile(path: string, content: string): Promise<void> {
-    try {
+    // Wait for any in-flight write to the same path to complete
+    const existing = writeLocks.get(path);
+    const doWrite = async () => {
+      if (existing) await existing.catch(() => {});
       await invoke<void>('write_file', { path, content });
-    } catch (error) {
+    };
+    const writePromise = doWrite().catch(error => {
       logger.error('file', 'Error writing file:', error);
       throw error;
-    }
+    }).finally(() => {
+      // Only clean up if this is still the latest write
+      if (writeLocks.get(path) === writePromise) writeLocks.delete(path);
+    });
+    writeLocks.set(path, writePromise);
+    return writePromise;
   }
 
   static async createFile(path: string, content: string = ''): Promise<void> {

@@ -2,6 +2,7 @@ import { memo, useState, useEffect } from 'react'
 import { Box, Text, VStack, Flex } from '@chakra-ui/react'
 import { FiGitBranch, FiPlay, FiPackage } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import DebuggerPanel from '../DebuggerPanel'
 
 const PlaceholderPanel = memo<{ icon: React.ElementType; title: string; description: string }>(
@@ -38,8 +39,8 @@ PlaceholderPanel.displayName = 'PlaceholderPanel'
 export const SourceControlPanel = memo(() => (
 	<PlaceholderPanel
 		icon={FiGitBranch}
-		title="Source Control"
-		description="Git integration coming soon"
+		title={t("view.sourceControl")}
+		description={t("view.gitComingSoon")}
 	/>
 ))
 
@@ -127,8 +128,8 @@ RunDebugPanel.displayName = 'RunDebugPanel'
 export const ExtensionsPanel = memo(() => (
 	<PlaceholderPanel
 		icon={FiPackage}
-		title="Extensions"
-		description="Extension marketplace coming soon"
+		title={t("view.extensionsComingSoon")}
+		description={t("view.extensionsComingSoon")}
 	/>
 ))
 

@@ -5,7 +5,6 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signInWithPopup,
-  getAdditionalUserInfo,
   GoogleAuthProvider,
   signOut,
   onAuthStateChanged,
@@ -21,24 +20,49 @@ import {
   Timestamp,
 } from 'firebase/firestore'
 import { useAuthStore } from '../../stores/authStore'
+import { useBillingStore } from '../../stores/billingStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
 
+// Firebase config from environment variables — no hardcoded fallbacks.
+// Lazy initialization: validated on first use (not at import time) so tests
+// and CI that don't set env vars don't crash when importing other modules.
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyBaWQpRaCobIHsqSlJ7Aba1qhEZAlqnUJc",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "maiplayer-ac56d.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "maiplayer-ac56d",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "maiplayer-ac56d.firebasestorage.app",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "113004896685",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:113004896685:web:fbc83072c4f870d92e0124",
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || "G-S6V1T01G96"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 }
 
-const app = initializeApp(firebaseConfig)
-const auth = getAuth(app)
+let _app: ReturnType<typeof initializeApp> | null = null
+let _auth: ReturnType<typeof getAuth> | null = null
+let _db: ReturnType<typeof getFirestore> | null = null
 
-// Initialize Firestore
-initializeFirestore(app, { ignoreUndefinedProperties: true })
-export const db = getFirestore(app)
+function ensureFirebase() {
+  if (_app) return
+  if (!firebaseConfig.apiKey) {
+    throw new Error(
+      'Missing Firebase config. Set VITE_FIREBASE_API_KEY and related env vars in .env or .env.local. '
+      + 'See .env.example for the required variables.'
+    )
+  }
+  _app = initializeApp(firebaseConfig)
+  _auth = getAuth(_app)
+  initializeFirestore(_app, { ignoreUndefinedProperties: true })
+  _db = getFirestore(_app)
+}
+
+function getFirebaseAuth() { ensureFirebase(); return _auth! }
+function getFirebaseDb() { ensureFirebase(); return _db! }
+
+// For backward-compat — lazy getter
+export const db = new Proxy({} as ReturnType<typeof getFirestore>, {
+  get(_target, prop) {
+    return Reflect.get(getFirebaseDb(), prop)
+  },
+})
 
 // Collections (aligned with web project)
 export const COLLECTIONS = {
@@ -47,16 +71,18 @@ export const COLLECTIONS = {
   DEV_STUDIO_PROJECTS: 'devStudioProjects',
 } as const
 
-// Connect to emulators in development
-if (shouldUseEmulators()) {
+// Connect to emulators in development (deferred until Firebase is initialized)
+let emulatorsConnected = false
+function connectEmulatorsIfNeeded() {
+  if (emulatorsConnected || !shouldUseEmulators()) return
+  emulatorsConnected = true
   try {
-    connectAuthEmulator(auth, `http://${EMULATOR_CONFIG.AUTH.HOST}:${EMULATOR_CONFIG.AUTH.PORT}`, {
+    connectAuthEmulator(getFirebaseAuth(), `http://${EMULATOR_CONFIG.AUTH.HOST}:${EMULATOR_CONFIG.AUTH.PORT}`, {
       disableWarnings: true,
     })
-    connectFirestoreEmulator(db, EMULATOR_CONFIG.FIRESTORE.HOST, EMULATOR_CONFIG.FIRESTORE.PORT)
-    console.log('[Firebase] Connected to emulators (Auth + Firestore)')
-  } catch (error) {
-    console.warn('[Firebase] Failed to connect to emulators:', error)
+    connectFirestoreEmulator(getFirebaseDb(), EMULATOR_CONFIG.FIRESTORE.HOST, EMULATOR_CONFIG.FIRESTORE.PORT)
+  } catch {
+    // Emulator connection failed — non-fatal, will use production services
   }
 }
 
@@ -72,6 +98,7 @@ class FirebaseAuthService {
   private static instance: FirebaseAuthService
   private currentUser: User | null = null
   private unsubscribeAuth: (() => void) | null = null
+  private lastBillingFetchMs = 0
   private authGeneration = 0
 
   static getInstance(): FirebaseAuthService {
@@ -86,12 +113,15 @@ class FirebaseAuthService {
       this.unsubscribeAuth()
     }
 
-    this.unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+    connectEmulatorsIfNeeded()
+    this.unsubscribeAuth = onAuthStateChanged(getFirebaseAuth(), (user) => {
       this.currentUser = user
       const store = useAuthStore.getState()
 
       if (!user) {
         store.setUser(null)
+        useBillingStore.getState().reset()
+        this.lastBillingFetchMs = 0 // allow immediate fetch on next login
         return
       }
 
@@ -104,21 +134,29 @@ class FirebaseAuthService {
       }
       store.setUser(authData)
 
-      // Then enrich with Firestore profile (non-blocking)
+      // Enrich with Firestore profile (for displayName/photoURL) — non-blocking
       const gen = ++this.authGeneration
       this.loadProfile(user.uid).then(profile => {
-        // Discard if a newer auth event already fired
         if (gen !== this.authGeneration) return
         if (!profile) return
-
         store.setUser({
           ...authData,
-          displayName: profile.displayName || authData.displayName,
+          displayName: profile.displayName || profile.fullName || authData.displayName,
           photoURL: profile.photoURL || authData.photoURL,
         })
-      }).catch(() => {
-        // Firestore unavailable — Firebase Auth data is already set
-      })
+      }).catch(() => {})
+
+      // Load billing data from backend API.
+      // Always fetch if not yet loaded (first login, after logout).
+      // Throttle to 5 min for subsequent auth events (token refresh, tab focus).
+      const billingState = useBillingStore.getState()
+      const BILLING_THROTTLE_MS = 5 * 60 * 1000
+      const now = Date.now()
+      const shouldFetch = !billingState.isLoaded || (now - this.lastBillingFetchMs > BILLING_THROTTLE_MS)
+      if (shouldFetch) {
+        this.lastBillingFetchMs = now
+        this.fetchBillingInfo(gen)
+      }
     })
   }
 
@@ -135,7 +173,7 @@ class FirebaseAuthService {
   }
 
   async signIn(email: string, password: string): Promise<User> {
-    const result = await signInWithEmailAndPassword(auth, email, password)
+    const result = await signInWithEmailAndPassword(getFirebaseAuth(), email, password)
 
     // Update lastLogin (best-effort, aligned with web project)
     this.syncProfile(result.user.uid, {
@@ -147,7 +185,7 @@ class FirebaseAuthService {
   }
 
   async signUp(email: string, password: string, displayName?: string): Promise<User> {
-    const result = await createUserWithEmailAndPassword(auth, email, password)
+    const result = await createUserWithEmailAndPassword(getFirebaseAuth(), email, password)
     const user = result.user
 
     // Create Firestore user profile (best-effort)
@@ -177,49 +215,110 @@ class FirebaseAuthService {
     provider.addScope('email')
     provider.addScope('profile')
 
-    const result = await signInWithPopup(auth, provider)
-    const additionalInfo = getAdditionalUserInfo(result)
+    const result = await signInWithPopup(getFirebaseAuth(), provider)
     const user = result.user
 
-    // setDoc with merge: true — works for both new and existing users,
-    // avoids updateDoc crash when document doesn't exist yet
+    // Single setDoc with merge: true — creates doc if missing, merges if exists.
+    // Includes ALL fields needed for a new user. merge:true means existing fields
+    // (like userPlan set by subscription) won't be overwritten.
     try {
-      if (additionalInfo?.isNewUser) {
-        await setDoc(doc(db, COLLECTIONS.USERS, user.uid), {
-          uid: user.uid,
-          email: user.email,
-          fullName: user.displayName || '',
-          displayName: user.displayName || '',
-          photoURL: user.photoURL || null,
-          provider: 'google',
-          emailVerified: user.emailVerified,
+      await setDoc(doc(db, COLLECTIONS.USERS, user.uid), {
+        uid: user.uid,
+        email: user.email,
+        fullName: user.displayName || '',
+        displayName: user.displayName || '',
+        photoURL: user.photoURL || null,
+        provider: 'google',
+        emailVerified: user.emailVerified,
+        lastLogin: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+      }, { merge: true })
+
+      // Set defaults for new users only (fields that shouldn't exist yet).
+      // merge:true won't overwrite existing userPlan/tmsQuota if present.
+      const userDoc = doc(db, COLLECTIONS.USERS, user.uid)
+      const snap = await getDoc(userDoc)
+      const data = snap.data()
+      if (data && !data.userPlan) {
+        await setDoc(userDoc, {
+          userPlan: 'explorer',
           onboarding: DEFAULT_ONBOARDING,
           createdAt: Timestamp.now(),
-          updatedAt: Timestamp.now(),
-          userPlan: 'explorer',
-        })
-      } else {
-        await setDoc(doc(db, COLLECTIONS.USERS, user.uid), {
-          displayName: user.displayName || '',
-          photoURL: user.photoURL || null,
-          lastLogin: Timestamp.now(),
-          updatedAt: Timestamp.now(),
         }, { merge: true })
       }
-    } catch {
-      // Profile sync is best-effort
+    } catch (err) {
+      console.warn('[auth] Google profile sync failed:', err)
     }
 
     return user
   }
 
   async signOut(): Promise<void> {
-    await signOut(auth)
+    await signOut(getFirebaseAuth())
   }
 
-  async getIdToken(): Promise<string | null> {
-    if (!this.currentUser) return null
-    return this.currentUser.getIdToken(false)
+  /** Fetch billing info from backend /v1/me endpoint. Retries once on failure. */
+  private async fetchBillingInfo(gen: number): Promise<void> {
+    const MAX_ATTEMPTS = 2
+    const RETRY_DELAY = 3000
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const token = await this.getIdToken(attempt > 1) // force refresh on retry
+        if (!token) {
+          console.warn('[billing] No token available — user not authenticated')
+          return
+        }
+        if (gen !== this.authGeneration) return
+
+        const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+        const res = await fetch(`${workerUrl}/v1/me`, {
+          headers: { 'Authorization': `Bearer ${token}` },
+        })
+
+        if (!res.ok) {
+          console.warn(`[billing] /v1/me returned ${res.status} (attempt ${attempt}/${MAX_ATTEMPTS})`)
+          if (attempt < MAX_ATTEMPTS) {
+            await new Promise(r => setTimeout(r, RETRY_DELAY))
+            continue
+          }
+          return
+        }
+        if (gen !== this.authGeneration) return
+
+        const data = await res.json() as {
+          plan: string
+          creditsRemaining: number
+          planCapacity: number
+          isActive: boolean
+        }
+
+        console.info(`[billing] Plan: ${data.plan}, Credits: ${data.creditsRemaining}/${data.planCapacity}, Active: ${data.isActive}`)
+
+        useBillingStore.setState({
+          plan: (data.plan || 'explorer') as import('../../stores/billingStore').UserPlanName,
+          isActive: data.isActive,
+          isLoaded: true,
+          creditsRemaining: data.creditsRemaining,
+          planCapacity: data.planCapacity || 10,
+          noCredits: data.creditsRemaining <= 0,
+        })
+        return // success
+      } catch (err) {
+        console.warn(`[billing] Fetch failed (attempt ${attempt}/${MAX_ATTEMPTS}):`, err)
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise(r => setTimeout(r, RETRY_DELAY))
+        }
+      }
+    }
+  }
+
+  async getIdToken(forceRefresh = false): Promise<string | null> {
+    if (!this.currentUser) {
+      console.warn('[auth] getIdToken: currentUser is null')
+      return null
+    }
+    return this.currentUser.getIdToken(forceRefresh)
   }
 
   isAuthenticated(): boolean {

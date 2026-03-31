@@ -15,6 +15,7 @@ import {
   FiArrowUp
 } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import type { DebuggerControlsProps } from './types'
 
 function DebuggerControls({
@@ -54,7 +55,7 @@ function DebuggerControls({
             </IconButton>
 
             <IconButton
-              aria-label="Stop debugging"
+              aria-label={t("misc.stopDebugging")}
               size="sm"
               onClick={onStopDebug}
               disabled={loading}
@@ -65,7 +66,7 @@ function DebuggerControls({
             </IconButton>
 
             <IconButton
-              aria-label="Step over"
+              aria-label={t("misc.stepOver")}
               size="sm"
               onClick={() => onDebugAction('step-over')}
               disabled={isDebugging || loading}
@@ -74,7 +75,7 @@ function DebuggerControls({
             </IconButton>
 
             <IconButton
-              aria-label="Step into"
+              aria-label={t("misc.stepInto")}
               size="sm"
               onClick={() => onDebugAction('step-into')}
               disabled={isDebugging || loading}
@@ -83,7 +84,7 @@ function DebuggerControls({
             </IconButton>
 
             <IconButton
-              aria-label="Step out"
+              aria-label={t("misc.stepOut")}
               size="sm"
               onClick={() => onDebugAction('step-out')}
               disabled={isDebugging || loading}

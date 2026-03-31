@@ -1,7 +1,7 @@
 import { memo, useRef, useEffect, useCallback, useState } from 'react'
 import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2 } from 'react-icons/fi'
+import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiMonitor, FiServer } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { useLayoutStore, type DevServerLogEntry } from '../../stores/layoutStore'
 import { usePermissionStore } from '../../stores/permissionStore'
@@ -10,7 +10,10 @@ import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
 import MessageBubble from '../chat/MessageBubble'
 import PromptBar from '../PromptBar'
 import PermissionDialog from '../chat/PermissionDialog'
+import HttpClientPanel from '../http-client/HttpClientPanel'
+import AgentLogo from '../ui/AgentLogo'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 const STORAGE_KEY = 'preview-chat-width'
 const CONSOLE_STORAGE_KEY = 'preview-console-height'
@@ -230,7 +233,9 @@ function PreviewView() {
 
   const displayLabel = previewMode === 'static'
     ? (previewSourcePath?.split('/').pop() || 'Static Preview')
-    : (previewUrl || 'Loading...')
+    : previewMode === 'api'
+      ? (previewUrl || 'HTTP Client')
+      : (previewUrl || 'Loading...')
 
   return (
     <Flex flex="1" overflow="hidden">
@@ -245,8 +250,9 @@ function PreviewView() {
         flexShrink={0}
       >
         {/* Chat messages */}
-        <Box
+        <Flex
           ref={chatScrollRef}
+          direction="column"
           flex="1"
           overflowY="auto"
           py={3}
@@ -260,16 +266,36 @@ function PreviewView() {
             },
           }}
         >
-          <Box maxW="600px" mx="auto" w="100%">
-            {messages.map(msg => (
-              <MessageBubble
-                key={msg.id}
-                message={msg}
-                isStreaming={msg.id === streamingMessageId}
-              />
-            ))}
-          </Box>
-        </Box>
+          {messages.length === 0 ? (
+            <Flex
+              flex="1"
+              direction="column"
+              align="center"
+              justify="center"
+              gap={3}
+            >
+              <AgentLogo size={36} glow />
+              <Flex direction="column" align="center" gap={1}>
+                <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.muted} fontWeight={500}>
+                  Ask the agent to iterate
+                </Text>
+                <Text fontSize="10px" color={tokens.colors.text.disabled} textAlign="center" px={3} lineHeight="1.4">
+                  Describe changes and see them live
+                </Text>
+              </Flex>
+            </Flex>
+          ) : (
+            <Box maxW="600px" mx="auto" w="100%">
+              {messages.map(msg => (
+                <MessageBubble
+                  key={msg.id}
+                  message={msg}
+                  isStreaming={msg.id === streamingMessageId}
+                />
+              ))}
+            </Box>
+          )}
+        </Flex>
 
         {/* Permission dialog above prompt */}
         {pendingPermission && (
@@ -335,16 +361,34 @@ function PreviewView() {
                 Static Preview
               </Text>
             )}
+            {previewMode === 'api' && (
+              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.accent.purple} fontWeight={500}>
+                HTTP Client
+              </Text>
+            )}
+            {previewMode !== 'static' && previewUrl && (
+              <IconButton
+                aria-label={previewMode === 'api' ? t('view.switchToPreview') : t('view.switchToHttpClient')}
+                size="xs"
+                variant="ghost"
+                color={tokens.colors.text.disabled}
+                _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                borderRadius="4px"
+                onClick={() => useLayoutStore.getState().togglePreviewMode()}
+              >
+                {previewMode === 'api' ? <FiMonitor size={13} /> : <FiServer size={13} />}
+              </IconButton>
+            )}
           </HStack>
 
           <HStack gap={1}>
             {/* Console toggle */}
             <IconButton
-              aria-label="Toggle console"
+              aria-label={t("view.toggleConsole")}
               size="sm"
               variant="ghost"
               color={isConsoleVisible ? tokens.colors.accent.primary : tokens.colors.text.secondary}
-              _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
               borderRadius="6px"
               onClick={() => useLayoutStore.getState().toggleConsole()}
               position="relative"
@@ -375,32 +419,34 @@ function PreviewView() {
               )}
             </IconButton>
 
-            <IconButton
-              aria-label="Reload preview"
-              size="sm"
-              variant="ghost"
-              color={tokens.colors.text.secondary}
-              _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
-              borderRadius="6px"
-              onClick={handleReload}
-            >
-              <FiRefreshCw size={14} />
-            </IconButton>
-            {previewMode === 'server' && previewUrl && (
+            {previewMode !== 'api' && (
+              <IconButton
+                aria-label={t("view.reloadPreview")}
+                size="sm"
+                variant="ghost"
+                color={tokens.colors.text.secondary}
+                _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                borderRadius="6px"
+                onClick={handleReload}
+              >
+                <FiRefreshCw size={14} />
+              </IconButton>
+            )}
+            {(previewMode === 'server' || previewMode === 'api') && previewUrl && (
               <>
                 <IconButton
-                  aria-label="Open in browser"
+                  aria-label={t("view.openInBrowser")}
                   size="sm"
                   variant="ghost"
                   color={tokens.colors.text.secondary}
-                  _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
+                  _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
                   borderRadius="6px"
                   onClick={handleOpenExternal}
                 >
                   <FiExternalLink size={14} />
                 </IconButton>
                 <IconButton
-                  aria-label="Stop server"
+                  aria-label={t("misc.stopServer")}
                   size="sm"
                   variant="ghost"
                   color={tokens.colors.text.secondary}
@@ -415,45 +461,51 @@ function PreviewView() {
           </HStack>
         </Flex>
 
-        {/* iframe — disable pointer events while resizing */}
-        <Box flex="1" bg={tokens.colors.text.inverse} position="relative">
-          {hasPreview ? (
-            <>
-              {(isResizing || isResizingConsole) && (
-                <Box position="absolute" inset={0} zIndex={1} />
-              )}
-              <iframe
-                ref={iframeRef}
-                src={previewMode === 'server' ? previewUrl! : undefined}
-                srcDoc={previewMode === 'static' ? previewHtmlContent! : undefined}
-                title="Preview"
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  border: 'none',
-                  pointerEvents: (isResizing || isResizingConsole) ? 'none' : 'auto',
-                }}
-              />
-            </>
-          ) : (
-            <Flex flex="1" align="center" justify="center" direction="column" gap={2}>
-              {devServerLogs.some(l => l.level === 'error') ? (
-                <>
-                  <Text fontSize={tokens.fontSize.sm} color={tokens.colors.accent.red} fontWeight="500">
-                    Dev server failed to start
+        {/* Content area — iframe (server/static) or HTTP Client (api) */}
+        {previewMode === 'api' ? (
+          <Flex flex="1" direction="column" overflow="hidden">
+            <HttpClientPanel />
+          </Flex>
+        ) : (
+          <Box flex="1" bg={tokens.colors.text.inverse} position="relative">
+            {hasPreview ? (
+              <>
+                {(isResizing || isResizingConsole) && (
+                  <Box position="absolute" inset={0} zIndex={1} />
+                )}
+                <iframe
+                  ref={iframeRef}
+                  src={previewMode === 'server' ? previewUrl! : undefined}
+                  srcDoc={previewMode === 'static' ? previewHtmlContent! : undefined}
+                  title={t("misc.preview")}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    border: 'none',
+                    pointerEvents: (isResizing || isResizingConsole) ? 'none' : 'auto',
+                  }}
+                />
+              </>
+            ) : (
+              <Flex flex="1" align="center" justify="center" direction="column" gap={2}>
+                {devServerLogs.some(l => l.level === 'error') ? (
+                  <>
+                    <Text fontSize={tokens.fontSize.sm} color={tokens.colors.accent.red} fontWeight="500">
+                      {t("view.devServerFailed")}
+                    </Text>
+                    <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
+                      Check the console below for details
+                    </Text>
+                  </>
+                ) : (
+                  <Text fontSize={tokens.fontSize.sm} color={tokens.colors.text.disabled}>
+                    Waiting for preview server...
                   </Text>
-                  <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
-                    Check the console below for details
-                  </Text>
-                </>
-              ) : (
-                <Text fontSize={tokens.fontSize.sm} color={tokens.colors.text.disabled}>
-                  Waiting for preview server...
-                </Text>
-              )}
-            </Flex>
-          )}
-        </Box>
+                )}
+              </Flex>
+            )}
+          </Box>
+        )}
 
         {/* Console panel (DevTools-style) with slide animation */}
         <AnimatePresence>
@@ -518,22 +570,22 @@ function PreviewView() {
                   </HStack>
                   <HStack gap={0}>
                     <IconButton
-                      aria-label="Clear console"
+                      aria-label={t("misc.clearConsole")}
                       size="xs"
                       variant="ghost"
                       color={tokens.colors.text.disabled}
-                      _hover={{ color: tokens.colors.text.secondary }}
+                      _hover={{ color: tokens.colors.text.secondary, bg: tokens.colors.bg.hoverSubtle }}
                       borderRadius="4px"
                       onClick={() => useLayoutStore.getState().clearDevServerLogs()}
                     >
                       <FiTrash2 size={12} />
                     </IconButton>
                     <IconButton
-                      aria-label="Close console"
+                      aria-label={t("misc.closeConsole")}
                       size="xs"
                       variant="ghost"
                       color={tokens.colors.text.disabled}
-                      _hover={{ color: tokens.colors.text.secondary }}
+                      _hover={{ color: tokens.colors.text.secondary, bg: tokens.colors.bg.hoverSubtle }}
                       borderRadius="4px"
                       onClick={() => useLayoutStore.getState().toggleConsole()}
                     >
@@ -560,7 +612,7 @@ function PreviewView() {
                 >
                   {devServerLogs.length === 0 ? (
                     <Text fontSize="11px" color={tokens.colors.text.disabled} py={2}>
-                      No output yet...
+                      {t("view.noOutputYet")}
                     </Text>
                   ) : (
                     devServerLogs.map((entry: DevServerLogEntry) => (

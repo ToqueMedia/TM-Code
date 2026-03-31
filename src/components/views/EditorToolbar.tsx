@@ -2,6 +2,7 @@ import { memo, useState, useEffect } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { VscComment, VscFiles, VscTerminal, VscRemoteExplorer, VscSourceControl, VscSearch } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import { GitService } from '@/services/gitService'
 import { useCurrentProject } from '@/hooks/useProjectState'
 
@@ -125,32 +126,32 @@ function EditorToolbar({
         {/* Back to Chat — top icon */}
         <ToolbarButton
           icon={<VscComment size={16} />}
-          label="Back to Chat"
+          label={t("view.backToChat")}
           onClick={onBackToChat}
         />
         <Box w="20px" h="1px" bg={tokens.colors.border.subtle} my={0.5} />
         <ToolbarButton
           icon={<VscFiles size={16} />}
-          label="Explorer"
+          label={t("view.explorer")}
           isActive={activePanel === 'explorer'}
           onClick={() => toggle('explorer')}
         />
         <ToolbarButton
           icon={<VscSearch size={16} />}
-          label="Search"
+          label={t("search.title")}
           isActive={activePanel === 'search'}
           onClick={() => toggle('search')}
         />
         <ToolbarButton
           icon={<VscSourceControl size={16} />}
-          label="Source Control"
+          label={t("view.sourceControl")}
           isActive={activePanel === 'sourceControl'}
           badge={gitCount}
           onClick={() => toggle('sourceControl')}
         />
         <ToolbarButton
           icon={<VscRemoteExplorer size={16} />}
-          label="Containers"
+          label={t("view.containers")}
           isActive={activePanel === 'containers'}
           onClick={() => toggle('containers')}
         />
@@ -159,7 +160,7 @@ function EditorToolbar({
       <Flex direction="column" gap={0.5} align="center" pb={1}>
         <ToolbarButton
           icon={<VscTerminal size={16} />}
-          label="Terminal"
+          label={t("view.terminal")}
           isActive={isBottomPanelVisible}
           onClick={onToggleBottomPanel}
         />

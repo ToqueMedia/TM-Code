@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ConversationMessage, SessionSummary, ToolCallDisplay } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ConversationMessage, SessionSummary, ToolCallDisplay } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
@@ -22,13 +22,15 @@ interface ChatState {
   pendingDiffs: DiffResult[]
   /** Draft prompt text — shared across PromptBar instances (chat + preview) */
   draftInput: string
+  /** Draft attachments for the current message */
+  draftAttachments: Attachment[]
 }
 
 interface ChatActions {
   createSession: (projectPath: string) => string
   getActiveSession: () => ChatSession | null
   setActiveSession: (sessionId: string) => void
-  addUserMessage: (content: string) => string
+  addUserMessage: (content: string, attachments?: Attachment[]) => string
   addSystemMessage: (content: string) => void
   startAssistantMessage: () => string
   finalizeAssistantMessage: () => void
@@ -51,6 +53,7 @@ interface ChatActions {
   approveDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => Promise<void>
   rejectDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => void
   approveAllPendingDiffs: () => Promise<void>
+  rejectAllAndStop: () => Promise<void>
   // Low-level diff status (used internally / by GeneratingView)
   updateToolCallDiffStatus: (messageId: string, toolCallId: string, status: 'approved' | 'denied') => void
   syncDiffStatusByResultId: (diffResultId: string, status: 'approved' | 'denied') => void
@@ -72,6 +75,9 @@ interface ChatActions {
   initPersistence: (projectPath: string) => Promise<void>
   cleanupOnExit: (projectPath: string) => Promise<void>
   setDraftInput: (value: string) => void
+  addDraftAttachment: (attachment: Attachment) => void
+  removeDraftAttachment: (id: string) => void
+  clearDraftAttachments: () => void
   clearAllSessions: () => void
   // Card messages (plan approval, todo list)
   addCardMessage: (type: ChatMessageCard['type'], projectPath: string) => void
@@ -209,10 +215,11 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
       history.push({ role: 'user', content: msg.content })
     } else if (msg.role === 'assistant') {
       if (msg.toolCalls?.length) {
-        // Assistant message with tool calls
+        // Assistant message with tool calls (preserve reasoning for multi-turn)
         history.push({
           role: 'assistant',
           content: msg.content || null,
+          ...(msg.reasoningContent && { reasoning_content: msg.reasoningContent }),
           tool_calls: msg.toolCalls.map(tc => ({
             id: tc.id,
             type: 'function' as const,
@@ -257,7 +264,11 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
           })
         }
       } else {
-        history.push({ role: 'assistant', content: msg.content })
+        history.push({
+          role: 'assistant',
+          content: msg.content,
+          ...(msg.reasoningContent && { reasoning_content: msg.reasoningContent }),
+        })
       }
     } else {
       history.push({ role: msg.role, content: msg.content })
@@ -289,8 +300,22 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     totalTokensUsed: { input: 0, output: 0 },
     pendingDiffs: [],
     draftInput: '',
+    draftAttachments: [],
 
     setDraftInput: (value: string) => set({ draftInput: value }),
+
+    addDraftAttachment: (attachment: Attachment) => set(state => {
+      if (state.draftAttachments.length >= 10) return state
+      // Deduplicate by path (skip for pasted images which have no path)
+      if (attachment.path && state.draftAttachments.some(a => a.path === attachment.path)) return state
+      return { draftAttachments: [...state.draftAttachments, attachment] }
+    }),
+
+    removeDraftAttachment: (id: string) => set(state => ({
+      draftAttachments: state.draftAttachments.filter(a => a.id !== id)
+    })),
+
+    clearDraftAttachments: () => set({ draftAttachments: [] }),
 
     createSession: (projectPath: string) => {
       const sessionId = generateId('session')
@@ -329,13 +354,14 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       set({ activeSessionId: sessionId })
     },
 
-    addUserMessage: (content: string) => {
+    addUserMessage: (content: string, attachments?: Attachment[]) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
         role: 'user',
         content,
         timestamp: Date.now(),
+        attachments: attachments?.length ? attachments.map(a => ({ ...a, base64: undefined })) : undefined,
       }
 
       set(state => {
@@ -667,12 +693,16 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // If a diff was created, register with DiffService and add to pendingDiffs
       if (newDiff) {
         DiffService.getInstance().registerDiff(newDiff)
-        set({
+        set(s => ({
           sessions: updatedSessions,
-          pendingDiffs: [...get().pendingDiffs, newDiff],
-        })
+          pendingDiffs: [...s.pendingDiffs, newDiff!],
+          streamingVersion: s.streamingVersion + 1,
+        }))
       } else {
-        set({ sessions: updatedSessions })
+        set(s => ({
+          sessions: updatedSessions,
+          streamingVersion: s.streamingVersion + 1,
+        }))
       }
     },
 
@@ -751,6 +781,48 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       // 3. Unblock agent (rejected)
       resolveDiffApproval(toolCallId, false)
+    },
+
+    rejectAllAndStop: async () => {
+      const { activeSessionId, sessions, pendingDiffs } = get()
+      if (!activeSessionId) return
+
+      const session = sessions.get(activeSessionId)
+      if (!session) return
+
+      // 1. Cancel the agent loop FIRST (lazy imports to avoid circular dependency)
+      const [agentMod, agentStoreMod] = await Promise.all([
+        import('../services/agent/agentService'),
+        import('./agentStore'),
+      ])
+      agentMod.default.getInstance().cancelLoop()
+      agentStoreMod.useAgentStore.getState().setStatus('idle')
+
+      // 2. Reject all pending diffs in DiffService
+      const diffService = DiffService.getInstance()
+      for (const diff of pendingDiffs) {
+        diffService.rejectDiff(diff.id)
+      }
+
+      // 3. Mark all pending tool call diffs as denied in the store
+      const messages = session.messages.map(msg => {
+        if (!msg.toolCalls) return msg
+        const toolCalls = msg.toolCalls.map(tc =>
+          tc.diffStatus === 'pending' ? { ...tc, diffStatus: 'denied' as const } : tc
+        )
+        return { ...msg, toolCalls }
+      })
+
+      const updatedSessions = new Map(sessions)
+      updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+      set({ sessions: updatedSessions, pendingDiffs: [] })
+
+      // 4. Reject all pending diff approval promises
+      resolveAllPendingDiffApprovals(false)
+
+      // 5. Clear pending permission + finalize
+      usePermissionStore.getState().clearPending()
+      get().finalizeAssistantMessage()
     },
 
     updateToolCallDiffStatus: (messageId: string, toolCallId: string, status: 'approved' | 'denied') => {
@@ -991,11 +1063,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // 1b. Resolve all pending approval promises (unblocks agent)
       resolveAllPendingDiffApprovals(true)
 
-      // 1c. Enable auto-approve for ALL future approvals in this session
-      // (both tool permissions and file diffs — user expects single "Accept All")
+      // 1c. Enable auto-approve for core tools and diffs in this session
       const permStore = usePermissionStore.getState()
       permStore.setAutoApproveDiffs(true)
-      usePermissionStore.setState({ autoApproveAll: true })
+      const scopes = new Set(permStore.approvedScopes)
+      scopes.add('core')
+      usePermissionStore.setState({ approvedScopes: scopes })
 
       // 2. Update ALL pending tool calls in a single state update
       set(state => {

@@ -25,6 +25,8 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>
   create_directory: FiFolder,
   web_fetch: FiGlobe,
   research: FiCpu,
+  spawn_background_agent: FiCpu,
+  check_background_agents: FiSearch,
 }
 
 /** Tools where we show a file-extension icon instead of the generic tool icon. */
@@ -51,7 +53,10 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
     case 'web_fetch':
       return String(input.url || '')
     case 'research':
+    case 'spawn_background_agent':
       return String(input.question || '')
+    case 'check_background_agents':
+      return 'Checking status...'
     default:
       return JSON.stringify(input)
   }
@@ -94,6 +99,10 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   const handleDeny = useCallback(() => {
     useChatStore.getState().rejectDiff(messageId, toolCall.id, toolCall.diffResultId)
   }, [messageId, toolCall.id, toolCall.diffResultId])
+
+  const handleRejectAll = useCallback(() => {
+    useChatStore.getState().rejectAllAndStop()
+  }, [])
 
   // Render inline diff for write tools
   if (isCompleted && hasDiff) {
@@ -138,6 +147,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
           onApprove={handleApprove}
           onApproveAll={handleApproveAll}
           onDeny={handleDeny}
+          onRejectAll={handleRejectAll}
         />
       </Box>
     )
@@ -174,8 +184,8 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
           <Box
             color={tokens.colors.toolCall.runningText}
             flexShrink={0}
-            animation="toolSpin 1s linear infinite"
             css={{
+              animation: 'toolSpin 1s linear infinite',
               '@keyframes toolSpin': {
                 from: { transform: 'rotate(0deg)' },
                 to: { transform: 'rotate(360deg)' },
@@ -246,8 +256,8 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
                 borderRadius="full"
                 bg={tokens.colors.accent.purple}
                 flexShrink={0}
-                animation="subAgentPulse 1s ease-in-out infinite"
                 css={{
+                  animation: 'subAgentPulse 1s ease-in-out infinite',
                   '@keyframes subAgentPulse': {
                     '0%, 100%': { opacity: 1 },
                     '50%': { opacity: 0.3 },
@@ -271,8 +281,8 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
               h="100%"
               bg={tokens.colors.toolCall.runningText}
               opacity={0.5}
-              animation="toolProgress 1.8s ease-in-out infinite"
               css={{
+                animation: 'toolProgress 1.8s ease-in-out infinite',
                 '@keyframes toolProgress': {
                   '0%': { transform: 'translateX(-100%)', width: '40%' },
                   '50%': { transform: 'translateX(150%)', width: '40%' },
@@ -302,7 +312,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
           {highlightedOutput ? (
             <>
               {(showExpand ? highlightedOutput.slice(0, 4) : highlightedOutput).map((lineTokens, li) => (
-                <Flex key={li} align="center" minH="18px">
+                <Flex key={`tcl-${li}-${lineTokens[0]?.text?.slice(0, 16) ?? ''}`} align="center" minH="18px">
                   <Text
                     w="36px"
                     flexShrink={0}

@@ -73,13 +73,7 @@ function ReasoningBlock({ content, isVisible, isStreaming, durationMs, onToggle 
                 h="4px"
                 borderRadius="full"
                 bg={tokens.colors.accent.primary}
-                animation={`reasonDot 1.2s ease-in-out ${i * 0.15}s infinite`}
-                css={{
-                  '@keyframes reasonDot': {
-                    '0%, 80%, 100%': { opacity: 0.2, transform: 'scale(0.8)' },
-                    '40%': { opacity: 1, transform: 'scale(1)' },
-                  },
-                }}
+                animation={`pulseDot 1.4s ease-in-out ${i * 0.2}s infinite`}
               />
             ))}
           </Flex>

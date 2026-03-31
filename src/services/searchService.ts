@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { logger } from '../utils/logger';
+import QuickOpenService from './quickOpenService';
 
 export interface SearchOptions {
   case_sensitive: boolean;
@@ -25,11 +26,17 @@ export interface FileSearchResult {
   total_matches: number;
 }
 
+export interface FileNameMatch {
+  file_path: string;
+  file_name: string;
+}
+
 export interface SearchResult {
   query: string;
   total_files: number;
   total_matches: number;
   files: FileSearchResult[];
+  file_name_matches: FileNameMatch[];
   duration_ms: number;
   truncated: boolean;
 }
@@ -61,6 +68,7 @@ export default class SearchService {
           total_files: 0,
           total_matches: 0,
           files: [],
+          file_name_matches: [],
           duration_ms: 0,
           truncated: false,
         };
@@ -71,6 +79,13 @@ export default class SearchService {
         directory,
         options,
       }) as SearchResult;
+
+      // File name search: use QuickOpenService's in-memory index (instant, no IPC)
+      const fileMatches = QuickOpenService.getInstance().search(query.trim(), 20);
+      result.file_name_matches = fileMatches.map(f => ({
+        file_path: f.path,
+        file_name: f.name,
+      }));
 
       return result;
     } catch (error) {
@@ -215,9 +230,16 @@ export default class SearchService {
       clearTimeout(this.searchTimeout);
     }
 
+    const capturedDirectory = directory;
     this.searchTimeout = setTimeout(async () => {
       try {
-        const result = await this.searchInFiles(query, directory, options);
+        // Validate the directory is still the current project (guards against stale closure
+        // if user switches project during the debounce delay)
+        const { useProjectStore } = await import('../stores/projectStore');
+        const currentPath = useProjectStore.getState().currentProject?.path;
+        if (currentPath && !capturedDirectory.startsWith(currentPath)) return;
+
+        const result = await this.searchInFiles(query, capturedDirectory, options);
         callback(result);
       } catch (error) {
         logger.error('search', 'Debounced search error:', error);
@@ -226,6 +248,7 @@ export default class SearchService {
           total_files: 0,
           total_matches: 0,
           files: [],
+          file_name_matches: [],
           duration_ms: 0,
           truncated: false,
         });

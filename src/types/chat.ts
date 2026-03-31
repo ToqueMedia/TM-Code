@@ -1,5 +1,18 @@
 // === Chat Types ===
 
+export type AttachmentType = 'image' | 'file' | 'folder'
+
+export interface Attachment {
+  id: string
+  type: AttachmentType
+  name: string
+  path: string
+  mimeType?: string
+  sizeBytes?: number
+  /** Base64 data URI — only for images (populated at attach-time for thumbnail preview) */
+  base64?: string
+}
+
 /** Ordered content block — tracks interleaving of text and tool calls */
 export type ContentBlock =
   | { type: 'text'; text: string }
@@ -9,6 +22,8 @@ export type ContentBlock =
 export interface ConversationMessage {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string | null
+  /** Reasoning/thinking content from reasoning models (Step 3.5 Flash, Qwen3, DeepSeek). Preserved across turns so the model can continue reasoning. */
+  reasoning_content?: string | null
   tool_calls?: Array<{
     id: string
     type: 'function'
@@ -60,6 +75,8 @@ export interface ChatMessage {
   reasoningDurationMs?: number
   /** Inline card (plan approval, todo list) */
   card?: ChatMessageCard
+  /** Attachments included with this message (metadata only — content is resolved into message.content at send-time) */
+  attachments?: Attachment[]
 }
 
 export interface CodeBlock {

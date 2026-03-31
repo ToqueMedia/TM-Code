@@ -7,13 +7,18 @@ use commands::devcontainer::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
 use commands::git::*;
+use commands::http_client::*;
+use commands::issue_reporter::*;
 use commands::mcp::*;
 use commands::project::*;
 use commands::search::*;
 use commands::terminal::*;
 
+use tauri::image::Image;
 use tauri::webview::NewWindowResponse;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::Manager;
+use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
 
 /// Domains allowed to open as popup windows (OAuth flows).
 fn is_oauth_domain(host: &str) -> bool {
@@ -26,6 +31,10 @@ fn is_oauth_domain(host: &str) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Pre-warm login shell PATH cache on a background thread (non-blocking).
+    // Must happen before any terminal commands so pnpm/node/etc. are found.
+    commands::terminal::init_user_path();
+
     let (command_history, process_map) = commands::terminal::init_terminal_state();
     let (container_map, active_container) = commands::container::init_container_state();
     let debugger_state = commands::debugger::DebuggerState::new();
@@ -49,10 +58,161 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Load app icon from embedded PNG
+            let icon = Image::from_bytes(include_bytes!("../icons/128x128@2x.png"))
+                .expect("Failed to load app icon");
+
+            // Set macOS Dock icon programmatically (works in dev mode)
+            #[cfg(target_os = "macos")]
+            {
+                use objc2::MainThreadMarker;
+                use objc2::AllocAnyThread;
+                use objc2_app_kit::{NSApplication, NSImage};
+                use objc2_foundation::NSData;
+
+                app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                let icon_data = include_bytes!("../icons/128x128@2x.png");
+
+                if let Some(mtm) = MainThreadMarker::new() {
+                    unsafe {
+                        let ns_app = NSApplication::sharedApplication(mtm);
+                        let data = NSData::with_bytes(icon_data);
+                        if let Some(ns_image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                            ns_app.setApplicationIconImage(Some(&ns_image));
+                        }
+                    }
+                }
+            }
+
+            // ── Native macOS menu bar ──────────────────────────────────
+            #[cfg(target_os = "macos")]
+            {
+                let handle = app.handle();
+
+                let app_menu = SubmenuBuilder::new(handle, "TM Code")
+                    .about(None)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("settings", "Settings…").accelerator("CmdOrCtrl+,").build(handle)?)
+                    .separator()
+                    .services()
+                    .separator()
+                    .hide()
+                    .hide_others()
+                    .show_all()
+                    .separator()
+                    .quit()
+                    .build()?;
+
+                let file_menu = SubmenuBuilder::new(handle, "File")
+                    .item(&MenuItemBuilder::with_id("open-folder", "Open Folder…").accelerator("CmdOrCtrl+O").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("save", "Save").accelerator("CmdOrCtrl+S").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("save-all", "Save All").accelerator("CmdOrCtrl+Alt+S").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("close-tab", "Close Tab").accelerator("CmdOrCtrl+W").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("close-all-tabs", "Close All Tabs").build(handle)?)
+                    .build()?;
+
+                let edit_menu = SubmenuBuilder::new(handle, "Edit")
+                    .undo()
+                    .redo()
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .select_all()
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("find", "Find").accelerator("CmdOrCtrl+F").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("replace", "Replace").accelerator("CmdOrCtrl+Alt+F").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("find-in-files", "Find in Files").accelerator("CmdOrCtrl+Shift+F").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("toggle-comment", "Toggle Line Comment").accelerator("CmdOrCtrl+/").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("format-document", "Format Document").accelerator("Shift+Alt+F").build(handle)?)
+                    .build()?;
+
+                let view_menu = SubmenuBuilder::new(handle, "View")
+                    .item(&MenuItemBuilder::with_id("command-palette", "Command Palette…").accelerator("CmdOrCtrl+Shift+P").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("quick-open", "Quick Open").accelerator("CmdOrCtrl+P").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("view-chat", "Chat").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("view-editor", "Editor").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("view-preview", "Preview").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("toggle-sidebar", "Toggle Sidebar").accelerator("CmdOrCtrl+B").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("toggle-bottom-panel", "Toggle Bottom Panel").accelerator("Ctrl+`").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("split-editor", "Split Editor").accelerator("CmdOrCtrl+\\").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("toggle-word-wrap", "Toggle Word Wrap").accelerator("Alt+Z").build(handle)?)
+                    .build()?;
+
+                let go_menu = SubmenuBuilder::new(handle, "Go")
+                    .item(&MenuItemBuilder::with_id("go-to-file", "Go to File…").accelerator("CmdOrCtrl+P").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("go-to-line", "Go to Line…").accelerator("CmdOrCtrl+G").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("go-to-definition", "Go to Definition").accelerator("F12").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("peek-definition", "Peek Definition").accelerator("Alt+F12").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("go-to-references", "Go to References").accelerator("Shift+F12").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("go-to-symbol", "Go to Symbol in Editor…").accelerator("CmdOrCtrl+Shift+O").build(handle)?)
+                    .build()?;
+
+                let terminal_menu = SubmenuBuilder::new(handle, "Terminal")
+                    .item(&MenuItemBuilder::with_id("toggle-terminal", "Toggle Terminal").accelerator("Ctrl+`").build(handle)?)
+                    .build()?;
+
+                let window_menu = SubmenuBuilder::new(handle, "Window")
+                    .minimize()
+                    .maximize()
+                    .separator()
+                    .fullscreen()
+                    .close_window()
+                    .build()?;
+
+                let help_menu = SubmenuBuilder::new(handle, "Help")
+                    .item(&MenuItemBuilder::with_id("open-command-palette", "Command Palette…").accelerator("CmdOrCtrl+Shift+P").build(handle)?)
+                    .separator()
+                    .item(&MenuItemBuilder::with_id("documentation", "Documentation").build(handle)?)
+                    .item(&MenuItemBuilder::with_id("report-issue", "Report Issue…").build(handle)?)
+                    .build()?;
+
+                let menu = Menu::with_items(handle, &[
+                    &app_menu,
+                    &file_menu,
+                    &edit_menu,
+                    &view_menu,
+                    &go_menu,
+                    &terminal_menu,
+                    &window_menu,
+                    &help_menu,
+                ])?;
+
+                app.set_menu(menu)?;
+
+                // Forward menu events to the frontend via window events
+                app.on_menu_event(move |app_handle, event| {
+                    let id = event.id().0.as_str();
+                    // Sanitize: only allow alphanumeric + hyphens (all our menu IDs are safe)
+                    let safe_id: String = id.chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                        .collect();
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _: std::result::Result<(), _> = window.eval(&format!(
+                            "window.dispatchEvent(new CustomEvent('native-menu', {{ detail: {{ id: '{}' }} }}))",
+                            safe_id
+                        ));
+                    }
+                });
+            }
+
             // Create main window programmatically so we can attach on_new_window
             WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("toquemedia-studio")
+                .icon(icon.clone())
+                .expect("Failed to set window icon")
                 .inner_size(1250.0, 850.0)
                 .decorations(false)
                 .transparent(true)
@@ -68,6 +228,23 @@ pub fn run() {
                 .build()?;
 
             Ok(())
+        })
+        // Kill all child processes on app exit to prevent orphaned processes
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                if window.label() == "main" {
+                    if let Some(pm) = window.try_state::<commands::terminal::ProcessMap>() {
+                        if let Ok(mut map) = pm.lock() {
+                            for (pid, child) in map.iter_mut() {
+                                // Best-effort kill — process may have already exited
+                                let _ = child.kill();
+                                eprintln!("[shutdown] Killed child process PID {}", pid);
+                            }
+                            map.clear();
+                        }
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             open_project,
@@ -166,7 +343,11 @@ pub fn run() {
             git_discard_all,
             git_commit,
             git_show_file,
-            git_current_branch
+            git_current_branch,
+            git_push,
+            git_pull,
+            http_client_request,
+            send_issue_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

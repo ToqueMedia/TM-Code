@@ -1,6 +1,7 @@
 import React from 'react';
 import { Button, Input, Dialog } from '@chakra-ui/react';
 import type { FileTreeNode } from '@/types/fileTree';
+import { t } from '@/i18n';
 
 interface RenameDialogProps {
   open: boolean;
@@ -44,7 +45,7 @@ export const RenameDialog: React.FC<RenameDialogProps> = ({
         <Dialog.Body py={4}>
           <Input
             ref={inputRef}
-            placeholder="Enter new name"
+            placeholder={t("explorer.enterNewName")}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={(e) => {
@@ -115,7 +116,7 @@ export const CopyDialog: React.FC<CopyDialogProps> = ({
         <Dialog.Body py={4}>
           <Input
             ref={inputRef}
-            placeholder="Enter new name"
+            placeholder={t("explorer.enterNewName")}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={(e) => {

@@ -1,6 +1,6 @@
-import { memo, useState, useRef, useEffect, useCallback } from 'react'
+import { memo, useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react'
 import { Box, Flex, Text, HStack, Portal } from '@chakra-ui/react'
-import { FiLogOut, FiSettings } from 'react-icons/fi'
+import { FiLogOut, FiSettings, FiAlertCircle } from 'react-icons/fi'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
 import { useProjectStore } from '../stores/projectStore'
@@ -11,6 +11,10 @@ import { useLayoutStore } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
 import WindowControls from './ui/WindowControls'
+import MenuBar from './ui/titlebar/MenuBar'
+import { useTranslation } from '@/i18n'
+
+const IssueReporterDialog = lazy(() => import('./dialogs/IssueReporterDialog'))
 
 function getInitials(email: string | null, displayName: string | null): string {
   if (displayName) {
@@ -37,6 +41,7 @@ function MinimalTitleBar() {
   const user = useAuthStore(s => s.user)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const [showUserMenu, setShowUserMenu] = useState(false)
+  const [showIssueReporter, setShowIssueReporter] = useState(false)
   const avatarRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 })
@@ -58,6 +63,13 @@ function MinimalTitleBar() {
     return () => window.removeEventListener('resize', recalcMenuPos)
   }, [showUserMenu, recalcMenuPos])
 
+  // Listen for issue reporter open event (from native menu or elsewhere)
+  useEffect(() => {
+    function handleOpen() { setShowIssueReporter(true) }
+    window.addEventListener('app:report-issue', handleOpen)
+    return () => window.removeEventListener('app:report-issue', handleOpen)
+  }, [])
+
   // Close menu on outside click
   useEffect(() => {
     if (!showUserMenu) return
@@ -74,16 +86,18 @@ function MinimalTitleBar() {
     return () => document.removeEventListener('mousedown', handleClick)
   }, [showUserMenu])
 
+  const t = useTranslation()
+
   const statusConfig: Record<string, { color: string; label: string }> = {
-    idle: { color: tokens.colors.accent.green, label: 'Ready' },
-    thinking: { color: tokens.colors.toolCall.runningText, label: 'Thinking...' },
-    generating: { color: tokens.colors.accent.primary, label: 'Generating...' },
-    applying: { color: tokens.colors.accent.purple, label: 'Applying...' },
-    error: { color: tokens.colors.accent.red, label: 'Error' },
+    idle: { color: tokens.colors.accent.green, label: t('titlebar.ready') },
+    thinking: { color: tokens.colors.toolCall.runningText, label: t('titlebar.thinking') },
+    generating: { color: tokens.colors.accent.primary, label: t('titlebar.generating') },
+    applying: { color: tokens.colors.accent.purple, label: t('titlebar.applying') },
+    error: { color: tokens.colors.accent.red, label: t('titlebar.error') },
   }
 
   const config = hasPendingPermission
-    ? { color: tokens.colors.toolCall.runningText, label: 'Awaiting permission...' }
+    ? { color: tokens.colors.toolCall.runningText, label: t('titlebar.awaitingPermission') }
     : (statusConfig[status] || statusConfig.idle)
 
   async function handleClose() {
@@ -155,37 +169,32 @@ function MinimalTitleBar() {
       data-tauri-drag-region
       onMouseDown={handleMouseDown}
     >
-      {/* Left: Window controls */}
-      <HStack gap={3} position="absolute" left={8}>
+      {/* Left: Window controls + menus */}
+      <HStack gap={2} flexShrink={0} pl={1} data-tauri-drag-region="false">
         <WindowControls
           onClose={handleClose}
           onMinimize={handleMinimize}
           onMaximize={handleFullToggle}
         />
-      </HStack>
-
-      {/* Center: App name + project */}
-      <Flex
-        flex={1}
-        justify="center"
-        align="center"
-        gap={2}
-      >
-        <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
+        <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary} whiteSpace="nowrap">
           TM Code
         </Text>
         {currentProject && (
           <>
             <Text fontSize="13px" color={tokens.colors.text.disabled}>—</Text>
-            <Text fontSize="13px" color={tokens.colors.text.secondary}>
+            <Text fontSize="13px" color={tokens.colors.text.secondary} whiteSpace="nowrap" maxW="120px" overflow="hidden" textOverflow="ellipsis">
               {currentProject.name}
             </Text>
           </>
         )}
-      </Flex>
+        <MenuBar />
+      </HStack>
+
+      {/* Center spacer */}
+      <Flex flex={1} />
 
       {/* Right: Agent status + User identity */}
-      <HStack gap={3} position="absolute" right={12}>
+      <HStack gap={3} flexShrink={0} pr={1}>
         {/* Agent status */}
         <HStack gap={1.5}>
           <Box
@@ -194,8 +203,8 @@ function MinimalTitleBar() {
             borderRadius="full"
             bg={config.color}
             boxShadow={`0 0 6px ${config.color}40`}
-            animation={status !== 'idle' && status !== 'error' ? 'pulse 1.5s ease-in-out infinite' : undefined}
             css={status !== 'idle' && status !== 'error' ? {
+              animation: 'pulse 1.5s ease-in-out infinite',
               '@keyframes pulse': {
                 '0%, 100%': { opacity: 1 },
                 '50%': { opacity: 0.4 },
@@ -305,16 +314,44 @@ function MinimalTitleBar() {
               role="button"
               transition={`background ${tokens.transition.fast}`}
               _hover={{ bg: tokens.colors.bg.whiteSubtle }}
+              onClick={() => {
+                setShowUserMenu(false)
+                setShowIssueReporter(true)
+              }}
+            >
+              <FiAlertCircle size={13} color={tokens.colors.text.secondary} />
+              <Text fontSize="12px" color={tokens.colors.text.secondary}>
+                {t('issueReporter.menuItem')}
+              </Text>
+            </Box>
+            <Box h="1px" bg={tokens.colors.border.panel} mx={2} my={0.5} />
+            <Box
+              px={3}
+              py={1.5}
+              cursor="pointer"
+              display="flex"
+              alignItems="center"
+              gap={2}
+              role="button"
+              transition={`background ${tokens.transition.fast}`}
+              _hover={{ bg: tokens.colors.bg.whiteSubtle }}
               onClick={handleSignOut}
             >
               <FiLogOut size={13} color={tokens.colors.text.secondary} />
               <Text fontSize="12px" color={tokens.colors.text.secondary}>
-                Sign Out
+                {t('common.signOut')}
               </Text>
             </Box>
           </Box>
         </Portal>
       )}
+      {/* Issue Reporter Dialog */}
+      <Suspense fallback={null}>
+        <IssueReporterDialog
+          isOpen={showIssueReporter}
+          onClose={() => setShowIssueReporter(false)}
+        />
+      </Suspense>
     </Box>
   )
 }

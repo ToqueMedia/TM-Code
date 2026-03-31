@@ -1,6 +1,8 @@
-import { Box, Flex, Text, IconButton } from '@chakra-ui/react';
+import { useRef, useState } from 'react';
+import { Box, Flex, Text, IconButton, Input } from '@chakra-ui/react';
 import { FiX, FiPlus } from 'react-icons/fi';
-import { tokens } from '@/theme/tokens';
+import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n';
 
 interface TerminalTab {
   id: string;
@@ -13,6 +15,7 @@ interface TerminalTabBarProps {
   onSelectSession: (sessionId: string) => void;
   onCloseSession: (sessionId: string, e: React.MouseEvent) => void;
   onNewSession: () => void;
+  onRenameSession?: (sessionId: string, name: string) => void;
 }
 
 export default function TerminalTabBar({
@@ -21,7 +24,36 @@ export default function TerminalTabBar({
   onSelectSession,
   onCloseSession,
   onNewSession,
+  onRenameSession,
 }: TerminalTabBarProps) {
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function startRename(session: TerminalTab) {
+    setRenamingId(session.id);
+    setRenameValue(session.name);
+    setTimeout(() => inputRef.current?.select(), 0);
+  }
+
+  function commitRename() {
+    if (renamingId && renameValue.trim() && onRenameSession) {
+      onRenameSession(renamingId, renameValue.trim());
+    }
+    setRenamingId(null);
+  }
+
+  function cancelRename() {
+    setRenamingId(null);
+  }
+
+  // Short label: first letter of each word or first 2 chars
+  function getShortLabel(name: string): string {
+    const words = name.trim().split(/\s+/);
+    if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+    return name.trim().substring(0, 2).toUpperCase();
+  }
+
   return (
     <Flex
       direction="column"
@@ -39,8 +71,42 @@ export default function TerminalTabBar({
       <Flex direction="column" gap={0.5} align="center" overflowY="auto" flex="1"
         css={{ '&::-webkit-scrollbar': { width: '0px' } }}
       >
-        {sessions.map((session, index) => {
+        {sessions.map((session) => {
           const isActive = activeSessionId === session.id;
+          const isRenaming = renamingId === session.id;
+
+          if (isRenaming) {
+            return (
+              <Box key={session.id} position="relative" zIndex={10}>
+                <Input
+                  ref={inputRef}
+                  value={renameValue}
+                  onChange={e => setRenameValue(e.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') commitRename();
+                    if (e.key === 'Escape') cancelRename();
+                  }}
+                  size="xs"
+                  fontSize="10px"
+                  width="100px"
+                  position="absolute"
+                  left="0"
+                  top="0"
+                  bg={tokens.colors.bg.input}
+                  border={`1px solid ${tokens.colors.accent.primary}`}
+                  borderRadius="4px"
+                  color={tokens.colors.text.primary}
+                  px={1}
+                  py={0.5}
+                  autoFocus
+                />
+                {/* Invisible placeholder to keep layout */}
+                <Box width="30px" height="30px" />
+              </Box>
+            );
+          }
+
           return (
             <Box
               key={session.id}
@@ -61,6 +127,7 @@ export default function TerminalTabBar({
                 '& .term-close': { opacity: 1 },
               }}
               onClick={() => onSelectSession(session.id)}
+              onDoubleClick={() => startRename(session)}
               title={session.name}
             >
               {/* Active indicator */}
@@ -76,13 +143,14 @@ export default function TerminalTabBar({
                 />
               )}
 
-              {/* Index number or icon */}
+              {/* Short label */}
               <Text
-                fontSize="11px"
+                fontSize="10px"
                 fontWeight={isActive ? '600' : '400'}
                 fontFamily={`"JetBrains Mono", ${tokens.fontFamily.mono}`}
+                lineHeight="1"
               >
-                {index + 1}
+                {getShortLabel(session.name)}
               </Text>
 
               {/* Close on hover — only if multiple sessions */}
@@ -119,8 +187,8 @@ export default function TerminalTabBar({
       <IconButton
         variant="ghost"
         size="xs"
-        aria-label="New terminal"
-        title="New terminal"
+        aria-label={t('common.newTerminal')}
+        title={t('common.newTerminal')}
         color={tokens.colors.text.muted}
         _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
         onClick={onNewSession}

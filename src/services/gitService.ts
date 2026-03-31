@@ -84,4 +84,12 @@ export class GitService {
       return 'main';
     }
   }
+
+  static async push(projectPath: string, remote?: string, branch?: string): Promise<string> {
+    return this.run('Push', () => invoke<string>('git_push', { projectPath, remote: remote ?? null, branch: branch ?? null }));
+  }
+
+  static async pull(projectPath: string, remote?: string, branch?: string): Promise<string> {
+    return this.run('Pull', () => invoke<string>('git_pull', { projectPath, remote: remote ?? null, branch: branch ?? null }));
+  }
 }

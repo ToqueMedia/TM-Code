@@ -2,6 +2,7 @@ import { memo, useEffect } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiAlertTriangle, FiShield } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface PermissionDialogProps {
   toolName: string
@@ -13,15 +14,15 @@ interface PermissionDialogProps {
 }
 
 function getToolLabel(toolName: string, sensitive?: boolean): string {
-  if (sensitive) return 'Read sensitive file'
+  if (sensitive) return t('perm.readSensitive')
   switch (toolName) {
-    case 'read_file': return 'Read file'
-    case 'write_file': return 'Write file'
-    case 'create_file': return 'Create file'
-    case 'create_directory': return 'Create directory'
-    case 'delete_file': return 'Delete file'
-    case 'rename_file': return 'Rename file'
-    case 'execute_command': return 'Execute command'
+    case 'read_file': return t('perm.readFile')
+    case 'write_file': return t('perm.writeFile')
+    case 'create_file': return t('perm.createFile')
+    case 'create_directory': return t('perm.createDir')
+    case 'delete_file': return t('perm.deleteFile')
+    case 'rename_file': return t('perm.renameFile')
+    case 'execute_command': return t('perm.executeCommand')
     default: return toolName
   }
 }
@@ -125,8 +126,8 @@ function PermissionDialog({ toolName, args, sensitive, onApprove, onApproveAll, 
             h="8px"
             borderRadius="full"
             bg={tokens.colors.toolCall.runningText}
-            animation="pulse 1.5s ease-in-out infinite"
             css={{
+              animation: 'pulse 1.5s ease-in-out infinite',
               '@keyframes pulse': {
                 '0%, 100%': { opacity: 1 },
                 '50%': { opacity: 0.4 },
@@ -135,7 +136,7 @@ function PermissionDialog({ toolName, args, sensitive, onApprove, onApproveAll, 
           />
         )}
         <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
-          The agent wants to: {getToolLabel(toolName, sensitive)}
+          {t("perm.agentWantsTo")} {getToolLabel(toolName, sensitive)}
         </Text>
       </Flex>
 
@@ -143,7 +144,7 @@ function PermissionDialog({ toolName, args, sensitive, onApprove, onApproveAll, 
       {sensitive && (
         <Box px={4} pb={2}>
           <Text fontSize="11px" color={tokens.colors.accent.orange}>
-            This file may contain secrets (API keys, tokens, passwords). The full content will be shared with the AI model.
+            {t("perm.sensitiveWarning")}
           </Text>
         </Box>
       )}

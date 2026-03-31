@@ -6,6 +6,7 @@ import {
 } from '@chakra-ui/react'
 import { FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface SearchInputProps {
   value: string
@@ -43,7 +44,7 @@ export const SearchInput: React.FC<SearchInputProps> = ({
 
       {value && onClear && (
         <IconButton
-          aria-label="Clear search"
+          aria-label={t("search.clearSearch")}
           variant="ghost"
           size={compact ? "xs" : "sm"}
           color={tokens.colors.text.muted}

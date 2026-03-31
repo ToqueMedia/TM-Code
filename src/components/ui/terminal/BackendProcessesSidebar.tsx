@@ -12,7 +12,8 @@ import {
   FiSquare,
 } from 'react-icons/fi';
 
-import { tokens } from '@/theme/tokens';
+import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n';
 
 interface BackendProcess {
   id: string;
@@ -108,10 +109,10 @@ export default function BackendProcessesSidebar() {
                   <IconButton
                     size="xs"
                     variant="ghost"
-                    aria-label="Stop"
+                    aria-label={t("misc.stop")}
                     color={tokens.colors.text.subtle}
                     _hover={{ color: tokens.colors.terminal.foreground }}
-                    title="Stop process"
+                    title={t("misc.stopProcess")}
                   >
                     <FiSquare size={10} />
                   </IconButton>

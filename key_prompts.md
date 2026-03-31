@@ -220,6 +220,30 @@ A granularidade do protocolo deve ser adaptada ao modelo e à tarefa. Para model
 
 ---
 
+## 16. WHAT vs HOW — Autonomous Models (Kimi K2.5)
+
+Modelos treinados para autonomia agentic (Kimi K2.5, MoE com PARL training) seguem instruções de **resultado** (WHAT) mas ignoram instruções de **implementação** (HOW). A documentação oficial do Moonshot confirma: *"There is no need to specify the tools or their usage instructions in the System Prompt — this may actually interfere with autonomous decision-making."*
+
+### Padrão observado
+
+| Tipo | Seguido? | Exemplo |
+|------|----------|---------|
+| WHAT (constraint/outcome) | Sim | "All payment calls MUST originate from paymentService.ts" |
+| WHAT (deadline) | Sim | "First edit MUST happen within 3 turns" |
+| HOW (tool usage) | Não | "Call web_fetch({ url: '...' })" |
+| HOW (implementation) | Não | "import { payWithMCX } from '../lib/paymentService'" |
+
+### Como aplicar
+
+- **Escreve constraints** ("payment calls originate ONLY from paymentService.ts"), não instruções ("import payWithMCX from paymentService")
+- **Mostra exemplos contrastivos** (CORRECT vs WRONG) em vez de passos prescritivos
+- **Define deadlines** ("first edit within 3 turns") em vez de workflows ("call plan_tasks first")
+- **Remove tool names** do system prompt — o modelo já tem as tool definitions via API
+- **Budget awareness** funciona porque é WHAT ("you have 5 reads remaining"), não HOW
+
+
+---
+
 ## Resumo Visual — Estrutura de um System Prompt
 
 Ordem recomendada de secções num system prompt optimizado:
@@ -249,3 +273,4 @@ Ordem recomendada de secções num system prompt optimizado:
 - arxiv.org/abs/2507.13949
 - lakera.ai/blog/prompt-engineering-guide
 - palantir.com/docs/foundry/aip/best-practices-prompt-engineering
+

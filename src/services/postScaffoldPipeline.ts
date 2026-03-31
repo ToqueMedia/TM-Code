@@ -1,14 +1,15 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { useProjectStore } from '../stores/projectStore'
 import { useLayoutStore } from '../stores/layoutStore'
 import { devServerManager } from './devServerManager'
 import { templateService, Template } from './templateService'
+import { detectSystemPackageManager, adaptCommand } from './packageManagerDetector'
 import { logger } from '../utils/logger'
 
 /**
  * Full scaffold flow: copy template → open project → create session → run pipeline.
  * Shared by WelcomeScreen and MainLayout to avoid duplication.
- * Returns the project path on success, null if the user cancelled.
  */
 export async function setupScaffoldedProject(
   template: Template,
@@ -16,17 +17,15 @@ export async function setupScaffoldedProject(
 ): Promise<void> {
   await templateService.scaffold(template.id, projectPath)
   await useProjectStore.getState().openProject(projectPath)
-  // Session creation is handled by App.tsx's useEffect on currentProject change
 
-  // Post-scaffold pipeline runs in background (install + dev server)
   postScaffoldPipeline(projectPath, template)
     .catch(err => logger.error('scaffold', 'Post-scaffold pipeline failed:', err))
 }
 
 /**
  * Orchestrates the post-scaffold flow:
- * 1. Install dependencies (npm install / pip install / go mod tidy)
- * 2. Start dev server (npm run dev / uvicorn / go run)
+ * 1. Install dependencies
+ * 2. Start dev server
  * 3. Auto-transition to preview when URL is detected
  */
 async function postScaffoldPipeline(
@@ -35,78 +34,115 @@ async function postScaffoldPipeline(
 ): Promise<void> {
   const layoutStore = useLayoutStore.getState()
 
-  // === Phase 1: Install dependencies ===
-  layoutStore.addDevServerLog(
-    `Installing dependencies (${template.installCommand})...`,
-    'info',
-  )
+  // Detect the fastest available PM and adapt template commands
+  const pm = await detectSystemPackageManager()
+  const installCmd = adaptCommand(template.installCommand, pm)
+  const devCmd = adaptCommand(template.devCommand, pm)
 
-  const installSuccess = await runInstall(projectPath, template)
+  // === Phase 1: Install dependencies ===
+  layoutStore.setScaffoldPhase('installing', `Installing dependencies (${installCmd})...`)
+  layoutStore.addDevServerLog(`Installing dependencies (${installCmd})...`, 'info')
+
+  const installSuccess = await runInstall(projectPath, installCmd)
 
   if (!installSuccess) {
-    // Install failed — don't attempt to start the dev server
+    layoutStore.setScaffoldPhase('error', 'Failed to install dependencies')
     return
   }
 
   // === Phase 2: Start dev server ===
-  layoutStore.addDevServerLog(`Starting dev server (${template.devCommand})...`, 'info')
+  layoutStore.setScaffoldPhase('starting', `Starting dev server (${devCmd})...`)
+  layoutStore.addDevServerLog(`Starting dev server (${devCmd})...`, 'info')
 
   try {
-    await devServerManager.start(projectPath, template.devCommand)
-    // URL detection + preview transition happens inside devServerManager
+    const serverHint = template.category === 'backend' ? 'backend' as const : 'frontend' as const
+    await devServerManager.start(projectPath, devCmd, serverHint)
+    layoutStore.setScaffoldPhase('ready', 'Dev server is running')
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     layoutStore.addDevServerLog(
-      `Could not start dev server: ${msg}. You can start it manually: ${template.devCommand}`,
+      `Could not start dev server: ${msg}. You can start it manually: ${devCmd}`,
       'error',
     )
+    layoutStore.setScaffoldPhase('error', 'Dev server failed to start')
     logger.error('postScaffold', 'Dev server failed:', error)
   }
 }
 
 /**
- * Run the template's install command. Returns true on success.
- *
- * For monorepo templates that use npm workspaces (like react-express-ts),
- * the root `npm install` already handles all workspaces — no special logic
- * is needed. Templates that need custom install behaviour should encode it
- * in their installCommand (e.g. a script that installs sub-projects).
+ * Run the install command. Returns true on success.
+ * Uses a simple PID-tracking approach — events are buffered if they arrive
+ * before invoke returns, avoiding the async pidReady pattern that can lose events.
  */
 async function runInstall(
   projectPath: string,
-  template: Template,
+  installCommand: string,
 ): Promise<boolean> {
   const layoutStore = useLayoutStore.getState()
 
+  // Register listeners BEFORE spawning
+  let targetPid = 0
+  let finished = false
+  let resolveExit: (code: number) => void
+  const exitPromise = new Promise<number>((res) => {
+    resolveExit = res
+  })
+
+  // Buffer events that arrive before we know the PID
+  const bufferedOutput: { pid: number; data: string }[] = []
+  const bufferedExit: { pid: number; code: number }[] = []
+
+  const unOutput = await listen<{ pid: number; stream: string; data: string }>(
+    'cmd-output',
+    (event) => {
+      if (targetPid === 0) {
+        bufferedOutput.push({ pid: event.payload.pid, data: event.payload.data })
+      } else if (event.payload.pid === targetPid) {
+        layoutStore.addDevServerLog(event.payload.data, 'info')
+      }
+    }
+  )
+
+  const unExit = await listen<{ pid: number; code: number }>(
+    'cmd-exit',
+    (event) => {
+      if (targetPid === 0) {
+        bufferedExit.push({ pid: event.payload.pid, code: event.payload.code })
+      } else if (event.payload.pid === targetPid && !finished) {
+        finished = true
+        cleanup()
+        resolveExit(event.payload.code)
+      }
+    }
+  )
+
+  const cleanup = () => {
+    unOutput()
+    unExit()
+  }
+
   try {
-    // Use streaming command to show npm install progress in real-time
     const pid = await invoke<number>('run_streaming_command', {
-      command: template.installCommand,
+      command: installCommand,
       cwd: projectPath,
     })
+    targetPid = pid
 
-    // Stream output to the dev server log panel
-    const { listen } = await import('@tauri-apps/api/event')
+    // Flush buffered events that arrived before invoke returned
+    for (const ev of bufferedOutput) {
+      if (ev.pid === pid) {
+        layoutStore.addDevServerLog(ev.data, 'info')
+      }
+    }
+    for (const ev of bufferedExit) {
+      if (ev.pid === pid && !finished) {
+        finished = true
+        cleanup()
+        resolveExit!(ev.code)
+      }
+    }
 
-    const exitCode = await new Promise<number>(async (resolve) => {
-      const unOutput = await listen<{ pid: number; stream: string; data: string }>(
-        'cmd-output',
-        (event) => {
-          if (event.payload.pid !== pid) return
-          layoutStore.addDevServerLog(event.payload.data, 'info')
-        }
-      )
-
-      const unExit = await listen<{ pid: number; code: number }>(
-        'cmd-exit',
-        (event) => {
-          if (event.payload.pid !== pid) return
-          unOutput()
-          unExit()
-          resolve(event.payload.code)
-        }
-      )
-    })
+    const exitCode = await exitPromise
 
     if (exitCode !== 0) {
       layoutStore.addDevServerLog(
@@ -120,6 +156,7 @@ async function runInstall(
     layoutStore.addDevServerLog('Dependencies installed successfully', 'info')
     return true
   } catch (error) {
+    cleanup()
     const msg = error instanceof Error ? error.message : String(error)
     layoutStore.addDevServerLog(
       `Failed to install dependencies: ${msg}`,

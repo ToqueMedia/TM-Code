@@ -7,7 +7,8 @@ import {
 } from '@chakra-ui/react';
 import { FiTerminal } from 'react-icons/fi';
 
-import { tokens } from '@/theme/tokens';
+import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n';
 import { useTerminalStore } from '../../stores/terminalStore';
 import { useProjectStore } from '../../stores/projectStore';
 import TerminalSession from './terminal/TerminalSession';
@@ -19,6 +20,8 @@ export default function TerminalV3() {
   const createSession = useTerminalStore(state => state.createSession);
   const removeSession = useTerminalStore(state => state.removeSession);
   const setActiveSession = useTerminalStore(state => state.setActiveSession);
+  const renameSession = useTerminalStore(state => state.renameSession);
+  const t = useTranslation()
   const projectName = useProjectStore(s => s.currentProject?.path?.split('/').pop() ?? 'terminal');
 
   const handleNewTerminal = useCallback(() => {
@@ -33,6 +36,10 @@ export default function TerminalV3() {
   const handleSetActiveSession = useCallback((sessionId: string) => {
     setActiveSession(sessionId);
   }, [setActiveSession]);
+
+  const handleRenameSession = useCallback((sessionId: string, name: string) => {
+    renameSession(sessionId, name);
+  }, [renameSession]);
 
   useEffect(() => {
     if (sessions.length === 0) {
@@ -49,6 +56,7 @@ export default function TerminalV3() {
         onSelectSession={handleSetActiveSession}
         onCloseSession={handleCloseTerminal}
         onNewSession={handleNewTerminal}
+        onRenameSession={handleRenameSession}
       />
 
       {/* Terminal Content */}
@@ -83,10 +91,10 @@ export default function TerminalV3() {
             </Box>
             <VStack gap={1}>
               <Text fontSize="md" color={tokens.colors.text.primary} fontWeight="500">
-                No terminal sessions
+                {t('common.noTerminalSessions')}
               </Text>
               <Text fontSize="xs" color={tokens.colors.text.muted} textAlign="center">
-                Click + to create a new terminal
+                {t('common.clickToCreate')}
               </Text>
             </VStack>
           </VStack>

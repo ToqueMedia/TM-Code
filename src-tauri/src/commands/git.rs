@@ -1,6 +1,29 @@
 use serde::Serialize;
 use std::process::Command;
 
+use super::terminal::get_user_path;
+
+/// Create a git Command with the user's full PATH (so git installed
+/// via brew/xcode-select is found even without a login shell).
+fn git_cmd(cwd: &str) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd);
+    if let Some(path) = get_user_path() {
+        cmd.env("PATH", path);
+    }
+    cmd
+}
+
+/// Same as git_cmd but accepts a Path
+fn git_cmd_path(cwd: &std::path::Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd);
+    if let Some(path) = get_user_path() {
+        cmd.env("PATH", path);
+    }
+    cmd
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct GitLineChange {
     pub kind: String, // "added", "modified", "removed"
@@ -42,9 +65,8 @@ pub async fn git_diff_lines(file_path: String) -> Result<Vec<GitLineChange>, Str
     let parent = abs_path.parent().unwrap_or(std::path::Path::new("/"));
 
     // Find the git repo root
-    let repo_root = Command::new("git")
+    let repo_root = git_cmd_path(parent)
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(parent)
         .output()
         .map_err(|e| format!("Failed to find git root: {}", e))?;
 
@@ -61,18 +83,16 @@ pub async fn git_diff_lines(file_path: String) -> Result<Vec<GitLineChange>, Str
         .unwrap_or_else(|_| file_path.clone());
 
     // Run git diff with no context (-U0) for precise line ranges
-    let output = Command::new("git")
+    let output = git_cmd(&root)
         .args(["diff", "-U0", "HEAD", "--", &rel_path])
-        .current_dir(&root)
         .output()
         .map_err(|e| format!("Failed to run git diff: {}", e))?;
 
     // If file is untracked, check git status
     if !output.status.success() || output.stdout.is_empty() {
         // Check if file is untracked (new file)
-        let status = Command::new("git")
+        let status = git_cmd(&root)
             .args(["status", "--porcelain", "--", &rel_path])
-            .current_dir(&root)
             .output()
             .map_err(|e| format!("Failed to run git status: {}", e))?;
 
@@ -140,9 +160,8 @@ pub struct GitFileStatus {
 /// Get list of changed files via `git status --porcelain`
 #[tauri::command]
 pub async fn git_status_files(project_path: String) -> Result<Vec<GitFileStatus>, String> {
-    let output = Command::new("git")
+    let output = git_cmd(&project_path)
         .args(["status", "--porcelain", "-uall"])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("Failed to run git status: {}", e))?;
 
@@ -197,9 +216,8 @@ pub async fn git_status_files(project_path: String) -> Result<Vec<GitFileStatus>
 /// Stage a file
 #[tauri::command]
 pub async fn git_stage_file(project_path: String, file_path: String) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git_cmd(&project_path)
         .args(["add", "--", &file_path])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("git add failed: {}", e))?;
     if !output.status.success() {
@@ -211,9 +229,8 @@ pub async fn git_stage_file(project_path: String, file_path: String) -> Result<(
 /// Stage all files
 #[tauri::command]
 pub async fn git_stage_all(project_path: String) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git_cmd(&project_path)
         .args(["add", "-A"])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("git add -A failed: {}", e))?;
     if !output.status.success() {
@@ -225,9 +242,8 @@ pub async fn git_stage_all(project_path: String) -> Result<(), String> {
 /// Unstage a file
 #[tauri::command]
 pub async fn git_unstage_file(project_path: String, file_path: String) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git_cmd(&project_path)
         .args(["reset", "HEAD", "--", &file_path])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("git reset failed: {}", e))?;
     if !output.status.success() {
@@ -239,9 +255,8 @@ pub async fn git_unstage_file(project_path: String, file_path: String) -> Result
 /// Unstage all files
 #[tauri::command]
 pub async fn git_unstage_all(project_path: String) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git_cmd(&project_path)
         .args(["reset", "HEAD"])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("git reset failed: {}", e))?;
     if !output.status.success() {
@@ -254,9 +269,8 @@ pub async fn git_unstage_all(project_path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn git_discard_file(project_path: String, file_path: String) -> Result<(), String> {
     // Check if the file is untracked
-    let status = Command::new("git")
+    let status = git_cmd(&project_path)
         .args(["status", "--porcelain", "--", &file_path])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("git status failed: {}", e))?;
 
@@ -267,9 +281,8 @@ pub async fn git_discard_file(project_path: String, file_path: String) -> Result
         std::fs::remove_file(full_path).map_err(|e| format!("Failed to delete: {}", e))?;
     } else {
         // Tracked file — restore from HEAD
-        let output = Command::new("git")
+        let output = git_cmd(&project_path)
             .args(["checkout", "HEAD", "--", &file_path])
-            .current_dir(&project_path)
             .output()
             .map_err(|e| format!("git checkout failed: {}", e))?;
         if !output.status.success() {
@@ -283,9 +296,8 @@ pub async fn git_discard_file(project_path: String, file_path: String) -> Result
 #[tauri::command]
 pub async fn git_discard_all(project_path: String) -> Result<(), String> {
     // Restore all tracked files
-    let output = Command::new("git")
+    let output = git_cmd(&project_path)
         .args(["checkout", "HEAD", "--", "."])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("git checkout failed: {}", e))?;
     if !output.status.success() {
@@ -293,9 +305,8 @@ pub async fn git_discard_all(project_path: String) -> Result<(), String> {
     }
 
     // Remove untracked files
-    let output2 = Command::new("git")
+    let output2 = git_cmd(&project_path)
         .args(["clean", "-fd"])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("git clean failed: {}", e))?;
     if !output2.status.success() {
@@ -311,9 +322,16 @@ pub async fn git_commit(project_path: String, message: String) -> Result<String,
     if message.trim().is_empty() {
         return Err("Commit message cannot be empty".to_string());
     }
-    let output = Command::new("git")
-        .args(["commit", "-m", &message])
-        .current_dir(&project_path)
+
+    // Append TM Code co-author signature if not already present
+    let signed_message = if message.contains("Co-Authored-By:") {
+        message
+    } else {
+        format!("{}\n\nCo-Authored-By: TM Code <tm.code@toquemedia.net>", message.trim())
+    };
+
+    let output = git_cmd(&project_path)
+        .args(["commit", "-m", &signed_message])
         .output()
         .map_err(|e| format!("git commit failed: {}", e))?;
     if !output.status.success() {
@@ -326,9 +344,8 @@ pub async fn git_commit(project_path: String, message: String) -> Result<String,
 #[tauri::command]
 pub async fn git_show_file(project_path: String, file_path: String) -> Result<String, String> {
     // file_path is relative to project root
-    let output = Command::new("git")
+    let output = git_cmd(&project_path)
         .args(["show", &format!("HEAD:{}", file_path)])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("git show failed: {}", e))?;
 
@@ -343,9 +360,8 @@ pub async fn git_show_file(project_path: String, file_path: String) -> Result<St
 /// Get the current git branch name (handles detached HEAD)
 #[tauri::command]
 pub async fn git_current_branch(project_path: String) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = git_cmd(&project_path)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(&project_path)
         .output()
         .map_err(|e| format!("Failed to get git branch: {}", e))?;
 
@@ -357,9 +373,8 @@ pub async fn git_current_branch(project_path: String) -> Result<String, String> 
 
     // Detached HEAD returns "HEAD" — get short commit hash instead
     if branch == "HEAD" {
-        let hash = Command::new("git")
+        let hash = git_cmd(&project_path)
             .args(["rev-parse", "--short", "HEAD"])
-            .current_dir(&project_path)
             .output()
             .ok()
             .and_then(|o| {
@@ -374,4 +389,34 @@ pub async fn git_current_branch(project_path: String) -> Result<String, String> 
     }
 
     Ok(branch)
+}
+
+/// Push to remote
+#[tauri::command]
+pub async fn git_push(project_path: String, remote: Option<String>, branch: Option<String>) -> Result<String, String> {
+    let mut cmd = git_cmd(&project_path);
+    cmd.arg("push");
+    if let Some(r) = &remote { cmd.arg(r); }
+    if let Some(b) = &branch { cmd.arg(b); }
+
+    let output = cmd.output().map_err(|e| format!("git push failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Pull from remote
+#[tauri::command]
+pub async fn git_pull(project_path: String, remote: Option<String>, branch: Option<String>) -> Result<String, String> {
+    let mut cmd = git_cmd(&project_path);
+    cmd.arg("pull");
+    if let Some(r) = &remote { cmd.arg(r); }
+    if let Some(b) = &branch { cmd.arg(b); }
+
+    let output = cmd.output().map_err(|e| format!("git pull failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

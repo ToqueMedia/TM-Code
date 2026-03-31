@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useProjectStore } from '../stores/projectStore'
 import { useToastStore } from '../stores/toastStore'
 import { logger } from './logger'
+import { t } from '../i18n'
 
 export interface ProjectStatus {
   exists: boolean
@@ -9,15 +10,18 @@ export interface ProjectStatus {
   lastModified?: number
 }
 
+const POLL_INTERVAL_MS = 5_000
+
 /**
- * Checks project status only when the user returns to the app (visibility change).
- * Replaces the previous 5-second polling which was wasteful — directory deletion
- * and permission changes are rare events that only matter when the user is active.
+ * Monitors project directory health via two mechanisms:
+ * 1. Active polling every 5s — detects deletion while the IDE is focused
+ * 2. Visibility-change check — catches changes that happened while the app was in background
  */
 export class ProjectStatusMonitor {
   private static instance: ProjectStatusMonitor
   private listening = false
-  private handler: (() => void) | null = null
+  private visibilityHandler: (() => void) | null = null
+  private pollTimer: ReturnType<typeof setInterval> | null = null
 
   private constructor() {}
 
@@ -38,37 +42,51 @@ export class ProjectStatusMonitor {
     }
   }
 
+  private async runCheck() {
+    const { currentProject } = useProjectStore.getState()
+    if (!currentProject) return
+
+    const status = await this.checkProjectStatus(currentProject.path)
+
+    if (!status.exists) {
+      logger.warn('project', 'Project directory no longer exists')
+      this.stopMonitoring()
+      useToastStore.getState().addToast('error', t('project.directoryDeleted'))
+      useProjectStore.getState().closeProject()
+      return
+    }
+
+    if (status.permissionsChanged) {
+      logger.warn('project', 'Project permissions have changed')
+      useToastStore.getState().addToast('warning', t('project.permissionsChanged'))
+    }
+  }
+
   startMonitoring() {
     if (this.listening) return
 
-    this.handler = async () => {
-      if (document.visibilityState !== 'visible') return
+    // Active polling — detects deletion while IDE is focused
+    this.pollTimer = setInterval(() => this.runCheck(), POLL_INTERVAL_MS)
 
-      const { currentProject } = useProjectStore.getState()
-      if (!currentProject) return
-
-      const status = await this.checkProjectStatus(currentProject.path)
-
-      if (!status.exists) {
-        logger.warn('project', 'Project directory no longer exists')
-        useToastStore.getState().addToast('error', 'Project directory no longer exists. The project has been closed.')
-        useProjectStore.getState().closeProject()
-      }
-
-      if (status.permissionsChanged) {
-        logger.warn('project', 'Project permissions have changed')
-        useToastStore.getState().addToast('warning', 'Project directory permissions have changed. Some operations may fail.')
+    // Visibility change — immediate check when user returns to the app
+    this.visibilityHandler = () => {
+      if (document.visibilityState === 'visible') {
+        this.runCheck()
       }
     }
+    document.addEventListener('visibilitychange', this.visibilityHandler)
 
-    document.addEventListener('visibilitychange', this.handler)
     this.listening = true
   }
 
   stopMonitoring() {
-    if (this.handler) {
-      document.removeEventListener('visibilitychange', this.handler)
-      this.handler = null
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer)
+      this.pollTimer = null
+    }
+    if (this.visibilityHandler) {
+      document.removeEventListener('visibilitychange', this.visibilityHandler)
+      this.visibilityHandler = null
     }
     this.listening = false
   }

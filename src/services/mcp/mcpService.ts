@@ -37,7 +37,7 @@ class MCPService {
   private static instance: MCPService
   private tools: Map<string, MCPTool> = new Map()
   private serverUrls: Map<string, string> = new Map()
-  private initialized = false
+  private initPromise: Promise<void> | null = null
 
   static getInstance(): MCPService {
     if (!MCPService.instance) {
@@ -47,28 +47,57 @@ class MCPService {
   }
 
   /**
-   * Initialize MCP servers from project and global config.
+   * Initialize MCP servers from global config (and optionally project config).
+   * When called without projectPath, only global servers are loaded.
+   * Skips servers that are already running to avoid restarting on project switch.
+   * Serialized: concurrent calls wait for the previous one to finish.
    */
-  async initialize(projectPath: string): Promise<void> {
-    // Shutdown existing servers first
-    if (this.initialized) {
-      await this.shutdown()
+  async initialize(projectPath?: string): Promise<void> {
+    // Serialize: wait for any in-flight initialize to finish before starting
+    if (this.initPromise) {
+      await this.initPromise
     }
 
+    this.initPromise = this._doInitialize(projectPath)
+    try {
+      await this.initPromise
+    } finally {
+      this.initPromise = null
+    }
+  }
+
+  private async _doInitialize(projectPath?: string): Promise<void> {
     useMcpStore.getState().setInitializing(true)
 
     try {
       const config = await this.loadConfig(projectPath)
+      const desiredServers = new Set(Object.keys(config.mcpServers || {}))
 
-      if (!config.mcpServers || Object.keys(config.mcpServers).length === 0) {
-        useMcpStore.getState().setInitializing(false)
-        this.initialized = true
+      // Stop servers that were from a previous project but are not in the new config
+      if (projectPath) {
+        const running = useMcpStore.getState().servers.filter(s => s.status === 'running')
+        for (const server of running) {
+          if (!desiredServers.has(server.name)) {
+            await this.stopServer(server.name)
+            useMcpStore.getState().removeServer(server.name)
+          }
+        }
+      }
+
+      if (!config.mcpServers || desiredServers.size === 0) {
         return
       }
 
-      // Start servers concurrently — awaits all (including tool discovery)
-      const startPromises = Object.entries(config.mcpServers).map(
-        async ([name, serverConfig]) => {
+      // Start servers concurrently — skip servers that are already running
+      const runningServers = new Set(
+        useMcpStore.getState().servers
+          .filter(s => s.status === 'running')
+          .map(s => s.name)
+      )
+
+      const startPromises = Object.entries(config.mcpServers)
+        .filter(([name]) => !runningServers.has(name))
+        .map(async ([name, serverConfig]) => {
           try {
             await this.startServer(name, serverConfig)
           } catch (error) {
@@ -81,11 +110,9 @@ class MCPService {
               transport: inferTransport(serverConfig),
             })
           }
-        }
-      )
+        })
 
       await Promise.allSettled(startPromises)
-      this.initialized = true
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       useMcpStore.getState().setError(msg)
@@ -178,10 +205,12 @@ class MCPService {
       params: { name: toolName, arguments: args },
     })
 
-    // Extract text content from MCP response
-    const content = result as { content?: Array<{ type: string; text?: string }> }
-    if (content?.content) {
-      return content.content
+    // Extract text content from MCP response.
+    // Raw text is returned here — XSS prevention is handled at the React render
+    // layer (React escapes text by default; tool results use <pre> not innerHTML).
+    const mcpContent = result as { content?: Array<{ type: string; text?: string }> }
+    if (mcpContent?.content) {
+      return mcpContent.content
         .filter((c) => c.type === 'text' && c.text)
         .map((c) => c.text)
         .join('\n')
@@ -194,7 +223,7 @@ class MCPService {
    * Add and start a single server without restarting existing ones.
    * Reads config from disk, starts only the named server.
    */
-  async addSingleServer(projectPath: string, serverName: string): Promise<void> {
+  async addSingleServer(projectPath: string | undefined, serverName: string): Promise<void> {
     const config = await this.loadConfig(projectPath)
     const serverConfig = config.mcpServers?.[serverName]
     if (!serverConfig) {
@@ -220,34 +249,44 @@ class MCPService {
       })
     }
 
-    this.initialized = true
   }
 
   /**
    * Remove a server: stop it, remove from config file, clean up state.
    */
-  async removeServer(projectPath: string, serverName: string): Promise<void> {
-    // Stop if running
+  async removeServer(_projectPath: string | undefined, serverName: string): Promise<void> {
+    // 1. Remove from config file FIRST (so re-init won't resurrect it)
+    const configPaths: string[] = []
+    try {
+      const homeDir = await invoke<string>('get_home_directory')
+      configPaths.push(`${homeDir}/.toquemedia-studio/mcp.json`)
+    } catch { /* */ }
+    // Also check project config
+    if (_projectPath) {
+      configPaths.push(`${_projectPath}/.tms/mcp.json`)
+    }
+
+    for (const configPath of configPaths) {
+      try {
+        const raw = await invoke<string>('read_file', { path: configPath })
+        const config = JSON.parse(raw) as MCPConfigFile
+        if (config.mcpServers?.[serverName]) {
+          delete config.mcpServers[serverName]
+          await invoke('write_file', { path: configPath, content: JSON.stringify(config, null, 2) })
+        }
+      } catch {
+        // Config file may not exist
+      }
+    }
+
+    // 2. Stop the server process
     await this.stopServer(serverName)
 
-    // Remove from store
+    // 3. Remove from store (UI updates)
     useMcpStore.getState().removeServer(serverName)
 
-    // Remove URL if remote
+    // 4. Clean up internal state
     this.serverUrls.delete(serverName)
-
-    // Remove from config file
-    try {
-      const configPath = `${projectPath}/.tms/mcp.json`
-      const raw = await invoke<string>('read_file', { path: configPath })
-      const config = JSON.parse(raw) as MCPConfigFile
-      if (config.mcpServers?.[serverName]) {
-        delete config.mcpServers[serverName]
-        await invoke('write_file', { path: configPath, content: JSON.stringify(config, null, 2) })
-      }
-    } catch {
-      // Config file may not exist — server was only in global config or already removed
-    }
   }
 
   /**
@@ -269,7 +308,6 @@ class MCPService {
     this.tools.clear()
     this.serverUrls.clear()
     useMcpStore.getState().reset()
-    this.initialized = false
   }
 
   // === Private Methods ===
@@ -381,7 +419,7 @@ class MCPService {
     }
   }
 
-  private async loadConfig(projectPath: string): Promise<MCPConfigFile> {
+  private async loadConfig(projectPath?: string): Promise<MCPConfigFile> {
     const configs: MCPConfigFile[] = []
 
     // Load global config
@@ -394,13 +432,15 @@ class MCPService {
       // No global config
     }
 
-    // Load project config (overrides global)
-    try {
-      const projectConfigPath = `${projectPath}/.tms/mcp.json`
-      const projectRaw = await invoke<string>('read_file', { path: projectConfigPath })
-      configs.push(JSON.parse(projectRaw) as MCPConfigFile)
-    } catch {
-      // No project config
+    // Load project config (overrides global) — only when projectPath is provided
+    if (projectPath) {
+      try {
+        const projectConfigPath = `${projectPath}/.tms/mcp.json`
+        const projectRaw = await invoke<string>('read_file', { path: projectConfigPath })
+        configs.push(JSON.parse(projectRaw) as MCPConfigFile)
+      } catch {
+        // No project config
+      }
     }
 
     // Merge: project overrides global

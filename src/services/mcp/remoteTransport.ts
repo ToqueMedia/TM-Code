@@ -30,18 +30,33 @@ export async function sendRemoteMCPRequest(request: RemoteMCPRequest): Promise<u
     throw new Error('Not authenticated — cannot proxy MCP request')
   }
 
-  const response = await fetch(`${WORKER_URL}/v1/mcp-proxy`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-    },
-    body: JSON.stringify({
-      serverUrl: request.serverUrl,
-      method: request.method,
-      params: request.params,
-    }),
-  })
+  // 30s timeout to match stdio transport timeout in Rust backend
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 30_000)
+
+  let response: Response
+  try {
+    response = await fetch(`${WORKER_URL}/v1/mcp-proxy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        serverUrl: request.serverUrl,
+        method: request.method,
+        params: request.params,
+      }),
+      signal: controller.signal,
+    })
+  } catch (err) {
+    clearTimeout(timeout)
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(`MCP remote request timed out after 30s (method: ${request.method})`)
+    }
+    throw err
+  }
+  clearTimeout(timeout)
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => '')

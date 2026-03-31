@@ -1,4 +1,5 @@
 import { Box, HStack, Text, IconButton } from '@chakra-ui/react'
+import { t } from '@/i18n'
 import { FiTrash2, FiChevronDown } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import type { DebugConsoleProps } from './types'
@@ -25,7 +26,7 @@ function DebugConsole({
           />
         </HStack>
         <IconButton
-          aria-label="Clear console"
+          aria-label={t("misc.clearConsole")}
           size="xs"
           variant="ghost"
           onClick={onClear}

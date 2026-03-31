@@ -13,6 +13,9 @@ import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
 import MCPService from '../../services/mcp/mcpService'
 import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
+import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
+import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, extractAndResolveMentions } from '../../services/attachmentService'
+import { logger } from '../../utils/logger'
 
 export function usePromptBar() {
   const input = useChatStore(s => s.draftInput)
@@ -23,19 +26,39 @@ export function usePromptBar() {
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const historyIndexRef = useRef(-1)
   const savedDraftRef = useRef('')
+  const navigatingHistoryRef = useRef(false)
   const isStreaming = useChatStore(s => s.isStreaming)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewServerRunning = useLayoutStore(s => s.isPreviewServerRunning)
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
+  const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
+  const isScaffolding = scaffoldPhase === 'installing' || scaffoldPhase === 'starting'
   const isDisabled = isStreaming || hasPendingPermission
+  const isSendBlocked = isDisabled || isScaffolding
   const hasPreview = isPreviewServerRunning || !!previewHtmlContent || !!devCommand
 
   // Slash command menu state
   const [showCommandMenu, setShowCommandMenu] = useState(false)
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([])
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
+
+  // @mention menu state
+  const [showMentionMenu, setShowMentionMenu] = useState(false)
+  const [filteredMentions, setFilteredMentions] = useState<QuickOpenItem[]>([])
+  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0)
+  const mentionStartRef = useRef(-1)
+
+  // Drag-and-drop visual state (local, NOT in Zustand store)
+  const [isDragging, setIsDragging] = useState(false)
+  const dragCounterRef = useRef(0)
+
+  // Draft attachments from store
+  const draftAttachments = useChatStore(s => s.draftAttachments)
+  const addDraftAttachment = useChatStore(s => s.addDraftAttachment)
+  const removeDraftAttachment = useChatStore(s => s.removeDraftAttachment)
+  const clearDraftAttachments = useChatStore(s => s.clearDraftAttachments)
 
   // Cleanup blur timeout on unmount
   useEffect(() => {
@@ -112,16 +135,64 @@ export function usePromptBar() {
   // Slash command input handler — detect "/" prefix and filter commands
   const handleInputChange = useCallback((value: string) => {
     setInput(value)
-    // Reset history navigation when user types
-    historyIndexRef.current = -1
+
+    // Don't reset history index when the change came from history navigation
+    if (navigatingHistoryRef.current) {
+      navigatingHistoryRef.current = false
+    } else {
+      historyIndexRef.current = -1
+    }
+
+    // Slash commands: /command
     if (value.startsWith('/') && !value.includes(' ')) {
       const commands = slashCommandRegistry.filterCommands(value.split(' ')[0])
       setFilteredCommands(commands)
       setShowCommandMenu(commands.length > 0)
       setSelectedCommandIndex(0)
-    } else {
-      setShowCommandMenu(false)
+      setShowMentionMenu(false)
+      return
     }
+    setShowCommandMenu(false)
+
+    // @mention detection — scan backward from cursor to find '@' trigger
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (!textarea) return
+
+      const cursorPos = textarea.selectionStart
+      const val = textarea.value
+
+      // Scan backward from cursor to find '@'
+      let atIndex = -1
+      for (let i = cursorPos - 1; i >= 0; i--) {
+        const ch = val[i]
+        if (ch === '@') {
+          if (i === 0 || /\s/.test(val[i - 1])) {
+            atIndex = i
+          }
+          break
+        }
+        if (/\s/.test(ch)) break
+      }
+
+      if (atIndex === -1) {
+        setShowMentionMenu(false)
+        return
+      }
+
+      const query = val.slice(atIndex + 1, cursorPos)
+      const qs = QuickOpenService.getInstance()
+      const results = query.length === 0 ? qs.list(8) : qs.search(query, 8)
+
+      if (results.length > 0) {
+        setFilteredMentions(results)
+        setShowMentionMenu(true)
+        setSelectedMentionIndex(0)
+        mentionStartRef.current = atIndex
+      } else {
+        setShowMentionMenu(false)
+      }
+    })
   }, [setInput])
 
   const handleCommandSelect = useCallback((command: SlashCommand) => {
@@ -132,8 +203,139 @@ export function usePromptBar() {
 
   const handleBlur = useCallback(() => {
     if (blurTimeoutRef.current) clearTimeout(blurTimeoutRef.current)
-    blurTimeoutRef.current = setTimeout(() => setShowCommandMenu(false), 150)
+    blurTimeoutRef.current = setTimeout(() => {
+      setShowCommandMenu(false)
+      setShowMentionMenu(false)
+    }, 150)
   }, [])
+
+  // @mention selection: insert @path as text in the textarea (like reference impl)
+  const handleMentionSelect = useCallback((item: QuickOpenItem) => {
+    const currentInput = useChatStore.getState().draftInput
+    const start = mentionStartRef.current
+    if (start < 0) return
+
+    const cursorPos = textareaRef.current?.selectionStart ?? currentInput.length
+    const before = currentInput.slice(0, start)
+    const after = currentInput.slice(cursorPos)
+
+    // Get relative path from project root
+    const projectPath = useProjectStore.getState().currentProject?.path || ''
+    const relativePath = item.path.startsWith(projectPath + '/')
+      ? item.path.slice(projectPath.length + 1)
+      : item.path
+
+    const insertion = `@${relativePath} `
+    const newValue = before + insertion + after
+    const newCursor = before.length + insertion.length
+
+    // Update store directly (bypass handleInputChange to avoid re-triggering detection)
+    useChatStore.getState().setDraftInput(newValue)
+    mentionStartRef.current = -1
+    setShowMentionMenu(false)
+
+    // Set cursor position after React re-renders
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (textarea) {
+        textarea.selectionStart = newCursor
+        textarea.selectionEnd = newCursor
+        textarea.focus()
+      }
+    })
+  }, [])
+
+  // Attach files via file picker dialog
+  const handleAttachFiles = useCallback(async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        multiple: true,
+        title: 'Attach files',
+      })
+      if (!selected) return
+      const paths = Array.isArray(selected) ? selected : [selected]
+      for (const p of paths) {
+        try {
+          const attachment = await createAttachmentFromPath(p as string)
+          addDraftAttachment(attachment)
+        } catch (err) {
+          logger.error('prompt', 'Failed to attach file:', err)
+        }
+      }
+    } catch (err) {
+      logger.error('prompt', 'Failed to open file dialog:', err)
+    }
+    textareaRef.current?.focus()
+  }, [addDraftAttachment])
+
+  // Paste handler — intercept images from clipboard
+  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (item.type.startsWith('image/')) {
+        e.preventDefault()
+        const blob = item.getAsFile()
+        if (!blob) continue
+        try {
+          const attachment = await createImageAttachmentFromClipboard(blob)
+          addDraftAttachment(attachment)
+        } catch (err) {
+          logger.error('prompt', 'Failed to paste image:', err)
+        }
+        return // Only handle first image
+      }
+    }
+    // If no image, let default paste behavior (text) proceed
+  }, [addDraftAttachment])
+
+  // Drag-and-drop handlers — counter prevents flicker when dragging over child elements
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+  }, [])
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounterRef.current++
+    if (dragCounterRef.current === 1) setIsDragging(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounterRef.current--
+    if (dragCounterRef.current === 0) setIsDragging(false)
+  }, [])
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounterRef.current = 0
+    setIsDragging(false)
+
+    const files = e.dataTransfer?.files
+    if (!files || files.length === 0) return
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      if (file.type.startsWith('image/')) {
+        try {
+          const attachment = await createImageAttachmentFromClipboard(file)
+          addDraftAttachment(attachment)
+        } catch (err) {
+          logger.error('prompt', 'Failed to attach dropped image:', err)
+        }
+      }
+      // Note: In Tauri WebView, dropped non-image files may not have full paths.
+      // For file references, users should use @ mentions or the attach button.
+    }
+    textareaRef.current?.focus()
+  }, [addDraftAttachment])
+
+  const handleRemoveAttachment = useCallback((id: string) => {
+    removeDraftAttachment(id)
+  }, [removeDraftAttachment])
 
   // Listen for suggestion chip inserts
   useEffect(() => {
@@ -150,8 +352,11 @@ export function usePromptBar() {
 
   const handleSend = useCallback(async () => {
     const prompt = useChatStore.getState().draftInput.trim()
-    if (!prompt || useChatStore.getState().isStreaming) return
+    const hasAttachments = useChatStore.getState().draftAttachments.length > 0
+    if ((!prompt && !hasAttachments) || useChatStore.getState().isStreaming) return
     if (usePermissionStore.getState().pendingPermission) return
+    const phase = useLayoutStore.getState().scaffoldPhase
+    if (phase === 'installing' || phase === 'starting') return
 
     // Non-reentrant guard: prevent overlapping sends
     if (runningRef.current) return
@@ -176,6 +381,7 @@ export function usePromptBar() {
 
         if (!command.enabled) {
           useChatStore.getState().setDraftInput('')
+          clearDraftAttachments()
           useChatStore.getState().addSystemMessage(`Command ${command.name} is not yet available.`)
           return
         }
@@ -183,11 +389,13 @@ export function usePromptBar() {
         const projectPath = currentProject?.path
         if (!projectPath) {
           useChatStore.getState().setDraftInput('')
+          clearDraftAttachments()
           useChatStore.getState().addSystemMessage('No project open. Open a project first.')
           return
         }
 
         useChatStore.getState().setDraftInput('')
+        clearDraftAttachments()
 
         // Switch to chat so the user sees the agent working
         const layout = useLayoutStore.getState()
@@ -220,12 +428,28 @@ export function usePromptBar() {
         layoutStore.setViewMode('chat')
       }
 
-      chatStore.addUserMessage(prompt)
-      chatStore.startAssistantMessage()
-      agentStore.setStatus('thinking')
-
+      // Resolve @mentions from text + chip attachments
+      const attachments = useChatStore.getState().draftAttachments
       const projectPath = currentProject?.path || ''
       const projectType = currentProject?.projectType || 'unknown'
+      let augmentedPrompt = prompt || 'Analyze the attached files.'
+
+      // Extract inline @mentions from the prompt text
+      const mentionContext = await extractAndResolveMentions(augmentedPrompt, projectPath)
+      if (mentionContext) {
+        augmentedPrompt = augmentedPrompt + mentionContext
+      }
+
+      // Resolve chip attachments (images, files from paperclip button)
+      if (attachments.length > 0) {
+        const attachmentContext = await resolveAttachments(attachments)
+        augmentedPrompt = augmentedPrompt + attachmentContext
+        clearDraftAttachments()
+      }
+
+      chatStore.addUserMessage(augmentedPrompt, attachments)
+      chatStore.startAssistantMessage()
+      agentStore.setStatus('thinking')
 
       // Refresh MCP tools before building prompt (handles mid-session server changes)
       const mcpService = MCPService.getInstance()
@@ -245,7 +469,8 @@ export function usePromptBar() {
         description: t.description,
         serverName: t.serverName,
       }))
-      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries)
+      const coreToolCount = ToolExecutor.getInstance().getCoreToolCount()
+      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount)
 
       const history = useChatStore.getState().conversationHistory
       const agentService = AgentService.getInstance()
@@ -348,25 +573,63 @@ export function usePromptBar() {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // @mention menu navigation — takes priority when open
+      if (showMentionMenu && filteredMentions.length > 0) {
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          setSelectedMentionIndex(prev => prev <= 0 ? filteredMentions.length - 1 : prev - 1)
+          return
+        }
+        if (e.key === 'ArrowDown') {
+          e.preventDefault()
+          setSelectedMentionIndex(prev => prev >= filteredMentions.length - 1 ? 0 : prev + 1)
+          return
+        }
+        if (e.key === 'Tab' || (e.key === 'Enter' && !e.metaKey && !e.ctrlKey)) {
+          e.preventDefault()
+          const selected = filteredMentions[selectedMentionIndex]
+          if (selected) handleMentionSelect(selected)
+          return
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          setShowMentionMenu(false)
+          return
+        }
+      }
+
       // Prompt history navigation (Up/Down when menu is NOT open)
-      // Only navigate history when input is empty or single-line (no newlines)
-      if (!showCommandMenu && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-        const currentInput = useChatStore.getState().draftInput
-        // Only let textarea handle cursor if user is editing multi-line text (not navigating history)
-        if (currentInput.includes('\n') && historyIndexRef.current === -1) return
+      // ArrowUp: only navigate to previous history if cursor is at the START of text (position 0)
+      // ArrowDown: only navigate to next history if cursor is at the END of text
+      // Otherwise, let the arrow keys move the cursor normally within the text
+      if (!showCommandMenu && !showMentionMenu && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        const textarea = textareaRef.current
+        if (!textarea) return
+
+        const cursorPos = textarea.selectionStart
+        const textLen = textarea.value.length
+        const hasSelection = textarea.selectionStart !== textarea.selectionEnd
+
+        // Don't navigate history if there's a text selection — let arrow keys collapse it
+        if (hasSelection) return
+        if (e.key === 'ArrowUp' && cursorPos !== 0) return
+        if (e.key === 'ArrowDown' && cursorPos !== textLen) return
 
         const session = useChatStore.getState().getActiveSession()
         if (!session) return
 
-        // Get user messages as history (most recent last)
-        const history = session.messages
-          .filter(m => m.role === 'user' && m.content.trim())
-          .map(m => m.content)
+        // Get user messages as history (most recent last, deduplicated)
+        const history: string[] = []
+        for (const m of session.messages) {
+          if (m.role === 'user' && m.content.trim()) {
+            const text = m.content
+            if (history.length === 0 || history[history.length - 1] !== text) {
+              history.push(text)
+            }
+          }
+        }
 
         if (history.length === 0) return
-
-        // Use raw setDraftInput to avoid triggering slash command detection
-        const rawSetInput = useChatStore.getState().setDraftInput
 
         if (e.key === 'ArrowUp') {
           e.preventDefault()
@@ -375,16 +638,35 @@ export function usePromptBar() {
           }
           if (historyIndexRef.current < history.length - 1) {
             historyIndexRef.current++
-            rawSetInput(history[history.length - 1 - historyIndexRef.current])
+            navigatingHistoryRef.current = true
+            const entry = history[history.length - 1 - historyIndexRef.current]
+            setInput(entry)
+            // Place cursor at start so consecutive ArrowUp navigates immediately
+            requestAnimationFrame(() => {
+              if (textarea) { textarea.selectionStart = 0; textarea.selectionEnd = 0 }
+            })
           }
         } else if (e.key === 'ArrowDown') {
           e.preventDefault()
           if (historyIndexRef.current > 0) {
             historyIndexRef.current--
-            rawSetInput(history[history.length - 1 - historyIndexRef.current])
+            navigatingHistoryRef.current = true
+            const entry = history[history.length - 1 - historyIndexRef.current]
+            setInput(entry)
+            // Place cursor at end so consecutive ArrowDown navigates immediately
+            requestAnimationFrame(() => {
+              if (textarea) { textarea.selectionStart = entry.length; textarea.selectionEnd = entry.length }
+            })
           } else if (historyIndexRef.current === 0) {
             historyIndexRef.current = -1
-            rawSetInput(savedDraftRef.current)
+            navigatingHistoryRef.current = true
+            setInput(savedDraftRef.current)
+            requestAnimationFrame(() => {
+              if (textarea) {
+                const len = savedDraftRef.current.length
+                textarea.selectionStart = len; textarea.selectionEnd = len
+              }
+            })
           }
         }
         setShowCommandMenu(false)
@@ -425,7 +707,7 @@ export function usePromptBar() {
         handleSend()
       }
     },
-    [handleSend, showCommandMenu, filteredCommands, selectedCommandIndex, handleCommandSelect]
+    [handleSend, showCommandMenu, filteredCommands, selectedCommandIndex, handleCommandSelect, showMentionMenu, filteredMentions, selectedMentionIndex, handleMentionSelect]
   )
 
   const toggleEditor = useCallback(() => {
@@ -472,6 +754,8 @@ export function usePromptBar() {
     setInput: handleInputChange,
     textareaRef,
     isStreaming,
+    isScaffolding,
+    isSendBlocked,
     isDisabled,
     viewMode,
     hasPreview,
@@ -486,5 +770,20 @@ export function usePromptBar() {
     filteredCommands,
     selectedCommandIndex,
     handleCommandSelect,
+    // @mention menu
+    showMentionMenu,
+    filteredMentions,
+    selectedMentionIndex,
+    handleMentionSelect,
+    // Attachments
+    draftAttachments,
+    handleAttachFiles,
+    handlePaste,
+    handleDragOver,
+    handleDragEnter,
+    handleDragLeave,
+    handleDrop,
+    handleRemoveAttachment,
+    isDragging,
   }
 }

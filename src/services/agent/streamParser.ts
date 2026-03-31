@@ -11,6 +11,7 @@ export type StreamEvent =
   | { type: 'tool_call_args_delta'; index: number; argsDelta: string }
   | { type: 'finish'; reason: string }
   | { type: 'usage'; promptTokens: number; completionTokens: number }
+  | { type: 'billing'; creditsRemaining: number; creditsUsed: number; tokensUsed: number; plan: string; source: string }
   | { type: 'error'; message: string }
   | { type: 'done' }
 
@@ -40,6 +41,20 @@ function processSSELines(
       // Skip malformed JSON — don't swallow callback errors
       continue
     }
+
+    // Billing event from Worker (appended after provider stream ends)
+    if (json.type === 'billing') {
+      callbacks.onEvent({
+        type: 'billing',
+        creditsRemaining: json.credits_remaining ?? 0,
+        creditsUsed: json.credits_used ?? 0,
+        tokensUsed: json.tokens_used ?? 0,
+        plan: json.plan ?? '',
+        source: json.source ?? '',
+      })
+      continue
+    }
+
     processChunk(json, callbacks)
   }
   return false
@@ -47,13 +62,17 @@ function processSSELines(
 
 export async function parseSSEStream(
   response: Response,
-  callbacks: StreamParserCallbacks
+  callbacks: StreamParserCallbacks,
+  signal?: AbortSignal,
 ): Promise<void> {
   const reader = response.body!.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
   try {
     while (true) {
+      // Check abort before each read to prevent consuming data after cancel
+      if (signal?.aborted) return
+
       const { done, value } = await reader.read()
       if (done) break
 

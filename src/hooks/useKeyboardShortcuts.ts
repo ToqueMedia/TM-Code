@@ -1,9 +1,10 @@
 // src/hooks/useKeyboardShortcuts.ts
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useProjectStore } from '../stores/projectStore';
 import { useLayoutStore } from '../stores/layoutStore';
+import { useChatStore } from '../stores/chatStore';
+import { useSettingsStore, matchesBinding } from '../stores/settingsStore';
 import { useDialog } from './useDialog';
-import DebuggerService from '../services/debuggerService';
 import { useEditorRepository } from '../stores/editorStore';
 import MonacoBridge from '../utils/monacoBridge';
 
@@ -11,34 +12,49 @@ export function useKeyboardShortcuts() {
   const { currentProject, closeProject } = useProjectStore();
   const { open: openProject } = useDialog();
   const { open: newProject } = useDialog();
-  const debuggerService = DebuggerService.getInstance();
+
+  // Stable refs for unstable function identities — prevents useEffect
+  // from re-registering the listener on every render.
+  const openProjectRef = useRef(openProject);
+  const newProjectRef = useRef(newProject);
+  const closeProjectRef = useRef(closeProject);
+  openProjectRef.current = openProject;
+  newProjectRef.current = newProject;
+  closeProjectRef.current = closeProject;
 
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
-      if (currentProject && (e.ctrlKey || e.metaKey) && (e.key === '`' || e.code === 'Backquote')) {
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent('panel:toggle-bottom'));
-        return;
-      }
+      const sc = useSettingsStore.getState().shortcuts
+
+      // Skip shortcuts when user is typing in an input (except Escape and modifier combos)
+      const tag = (document.activeElement?.tagName || '').toLowerCase()
+      const isTyping = tag === 'input' || tag === 'select' || (tag === 'textarea' && !(e.metaKey || e.ctrlKey))
+      if (isTyping && !['Escape'].includes(e.key)) return
 
       // Go to Symbol: Cmd+Shift+O — disabled (Monaco QuickPick freezes in Tauri WebView)
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') {
         if (MonacoBridge.getInstance().getCurrentEditor()) { e.preventDefault(); return; }
       }
 
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'o') {
+      if (currentProject && matchesBinding(e, sc.toggleTerminal)) {
         e.preventDefault();
-        openProject();
+        window.dispatchEvent(new CustomEvent('panel:toggle-bottom'));
         return;
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'N') {
+      if (matchesBinding(e, sc.openFile)) {
         e.preventDefault();
-        newProject();
+        openProjectRef.current();
         return;
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w' && currentProject) {
+      if (matchesBinding(e, sc.newProject)) {
+        e.preventDefault();
+        newProjectRef.current();
+        return;
+      }
+
+      if (currentProject && matchesBinding(e, sc.closeFile)) {
         e.preventDefault();
         try {
           const { activeFile, closeFile } = useEditorRepository.getState();
@@ -47,26 +63,23 @@ export function useKeyboardShortcuts() {
             return;
           }
         } catch {}
-        closeProject();
+        closeProjectRef.current();
         return;
       }
 
-      // Quick Open: Cmd+P
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'p') {
+      if (matchesBinding(e, sc.quickOpen)) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('quickopen:toggle'));
         return;
       }
 
-      // Command Palette: Cmd+Shift+P
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+      if (matchesBinding(e, sc.commandPalette)) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('command:palette'));
         return;
       }
 
-      // Settings: Cmd+,
-      if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+      if (matchesBinding(e, sc.settings)) {
         e.preventDefault();
         const layout = useLayoutStore.getState();
         if (layout.viewMode === 'settings') {
@@ -77,74 +90,119 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      // Split Editor: Cmd+\
-      if (currentProject && (e.ctrlKey || e.metaKey) && (e.key === '\\' || e.code === 'Backslash')) {
+      if (currentProject && matchesBinding(e, sc.splitEditor)) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('editor:split'));
         return;
       }
 
-      // Toggle Sidebar: Cmd+B (only in editor view)
-      if (currentProject && (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'b') {
+      if (currentProject && matchesBinding(e, sc.toggleSidebar)) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('sidebar:toggle'));
         return;
       }
 
-      // Go to Line: Cmd+G
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'g' && MonacoBridge.getInstance().getCurrentEditor()) {
+      if (matchesBinding(e, sc.goToLine) && MonacoBridge.getInstance().getCurrentEditor()) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('editor:go-to-line'));
         return;
       }
 
+      if (currentProject && matchesBinding(e, sc.searchInProject)) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('search:open'));
+        return;
+      }
+
+      // Debugger shortcuts (F-keys, not customizable via settings)
       if (currentProject) {
         if (e.key === 'F5' && !e.shiftKey) {
           e.preventDefault();
           window.dispatchEvent(new CustomEvent('debugger:start'));
           return;
         }
-
         if (e.key === 'F5' && e.shiftKey) {
           e.preventDefault();
           window.dispatchEvent(new CustomEvent('debugger:stop'));
           return;
         }
-
         if (e.key === 'F9') {
           e.preventDefault();
           window.dispatchEvent(new CustomEvent('debugger:toggle-breakpoint'));
           return;
         }
-
         if (e.key === 'F10') {
           e.preventDefault();
           window.dispatchEvent(new CustomEvent('debugger:step-over'));
           return;
         }
-
         if (e.key === 'F11' && !e.shiftKey) {
           e.preventDefault();
           window.dispatchEvent(new CustomEvent('debugger:step-into'));
           return;
         }
-
         if (e.key === 'F11' && e.shiftKey) {
           e.preventDefault();
           window.dispatchEvent(new CustomEvent('debugger:step-out'));
           return;
         }
-
-        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'F') {
-          e.preventDefault();
-          window.dispatchEvent(new CustomEvent('search:open'));
-          return;
-        }
-
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'D') {
           e.preventDefault();
           window.dispatchEvent(new CustomEvent('debugger:open'));
           return;
+        }
+      }
+
+      // === Diff approval shortcuts (only when diffs are pending, prompt not focused, no dialogs open) ===
+      const activeEl = document.activeElement
+      const isPromptFocused = activeEl?.tagName === 'TEXTAREA'
+      const isInputFocused = activeEl?.tagName === 'INPUT' || activeEl?.tagName === 'SELECT'
+      const hasDialogOpen = !!document.querySelector('[role="dialog"], [data-command-palette]')
+      const hasPendingDiffs = useChatStore.getState().pendingDiffs.length > 0
+
+      if (hasPendingDiffs && !isPromptFocused && !isInputFocused && !hasDialogOpen) {
+        if (matchesBinding(e, sc.diffAccept)) {
+          e.preventDefault()
+          const state = useChatStore.getState()
+          const session = state.getActiveSession()
+          if (session) {
+            for (const msg of session.messages) {
+              const tc = msg.toolCalls?.find(t => t.diffStatus === 'pending')
+              if (tc) {
+                state.approveDiff(msg.id, tc.id, tc.diffResultId)
+                break
+              }
+            }
+          }
+          return
+        }
+
+        if (matchesBinding(e, sc.diffAcceptAll)) {
+          e.preventDefault()
+          useChatStore.getState().approveAllPendingDiffs()
+          return
+        }
+
+        if (matchesBinding(e, sc.diffReject)) {
+          e.preventDefault()
+          const state = useChatStore.getState()
+          const session = state.getActiveSession()
+          if (session) {
+            for (const msg of session.messages) {
+              const tc = msg.toolCalls?.find(t => t.diffStatus === 'pending')
+              if (tc) {
+                state.rejectDiff(msg.id, tc.id, tc.diffResultId)
+                break
+              }
+            }
+          }
+          return
+        }
+
+        if (matchesBinding(e, sc.diffRejectAll)) {
+          e.preventDefault()
+          useChatStore.getState().rejectAllAndStop()
+          return
         }
       }
     };
@@ -153,5 +211,7 @@ export function useKeyboardShortcuts() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [currentProject, closeProject, openProject, newProject, debuggerService]);
+  // Only re-register on project change — function refs are stable via useRef
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject]);
 }

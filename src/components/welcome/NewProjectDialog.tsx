@@ -11,6 +11,7 @@ import {
   VStack,
 } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 const templates = [
   { label: 'React TypeScript', value: 'react-ts' },
@@ -59,7 +60,7 @@ const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ dialog }) => {
             w="90%"
           >
             <Dialog.Header>
-              <Heading fontSize="24px" fontWeight="600">Create New Project</Heading>
+              <Heading fontSize="24px" fontWeight="600">{t("misc.createNewProject")}</Heading>
             </Dialog.Header>
             <Dialog.CloseTrigger asChild>
               <Button
@@ -86,9 +87,9 @@ const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ dialog }) => {
                 </Box>
 
                 <Box>
-                  <Text fontSize="14px" color={tokens.colors.text.primary} mb={2}>Template</Text>
+                  <Text fontSize="14px" color={tokens.colors.text.primary} mb={2}>{t("misc.template")}</Text>
                   <NativeSelect.Root size="sm">
-                    <NativeSelect.Field placeholder="Select template">
+                    <NativeSelect.Field placeholder={t("misc.selectTemplate")}>
                       {templates.map((template) => (
                         <option key={template.value} value={template.value}>
                           {template.label}
@@ -100,7 +101,7 @@ const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ dialog }) => {
                 </Box>
 
                 <Box>
-                  <Text fontSize="14px" color={tokens.colors.text.primary} mb={2}>Location</Text>
+                  <Text fontSize="14px" color={tokens.colors.text.primary} mb={2}>{t("misc.location")}</Text>
                   <Input placeholder="~/Projects" {...inputStyles} />
                 </Box>
               </VStack>

@@ -9,6 +9,7 @@ import BottomPanel from './ui/BottomPanel'
 import TitleBar from './ui/TitleBar'
 import CommandPalette from './ui/CommandPalette'
 import TabContextMenu from './ui/TabContextMenu'
+import { EditorContextMenu } from './editor'
 import PreferencesDialog from './dialogs/PreferencesDialog'
 import StatusBar from './ui/StatusBar'
 import ChatPanel from './chat/ChatPanel'
@@ -91,6 +92,7 @@ export function CodeEditorNew() {
 		>
 			<TitleBar />
 			<TabContextMenu />
+			<EditorContextMenu />
 			<PreferencesDialog />
 
 			{/* Main Content Area */}

@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
 import { useFileTreeRepository } from '@/stores/fileTreeStore';
+import { useProjectStore } from '@/stores/projectStore';
 import type { FileTreeNode } from '@/types/fileTree';
 import type { AlertState } from './types';
 
@@ -125,6 +126,42 @@ export function useFileTreeActions(
     closeContextMenu();
   }
 
+  async function handleCopyRelativePath(): Promise<void> {
+    if (!menuNode) return;
+    const projectPath = useProjectStore.getState().currentProject?.path;
+    if (projectPath && menuNode.path.startsWith(projectPath)) {
+      const rel = menuNode.path.slice(projectPath.length + 1);
+      try { await navigator.clipboard.writeText(rel); } catch { /* ignore */ }
+    } else {
+      try { await navigator.clipboard.writeText(menuNode.path); } catch { /* ignore */ }
+    }
+    closeContextMenu();
+  }
+
+  function handleOpenToSide(): void {
+    if (!menuNode || menuNode.type !== 'file') return;
+    const path = menuNode.path;
+    window.dispatchEvent(new CustomEvent('editor:split'));
+    // Delay file open to let the split event process first
+    setTimeout(() => {
+      if (onFileSelect) onFileSelect(path);
+    }, 50);
+    closeContextMenu();
+  }
+
+  function handleOpenInTerminal(): void {
+    if (!menuNode) return;
+    const dir = menuNode.type === 'directory' ? menuNode.path : menuNode.path.substring(0, menuNode.path.lastIndexOf('/'));
+    window.dispatchEvent(new CustomEvent('terminal:open-at', { detail: { path: dir } }));
+    closeContextMenu();
+  }
+
+  function handleFindInFolder(): void {
+    if (!menuNode || menuNode.type !== 'directory') return;
+    window.dispatchEvent(new CustomEvent('search:open', { detail: { folder: menuNode.path } }));
+    closeContextMenu();
+  }
+
   return {
     // Context menu state
     menuOpen,
@@ -156,7 +193,11 @@ export function useFileTreeActions(
     handleDeleteFromMenu,
     handleReveal,
     handleCopyPath,
+    handleCopyRelativePath,
     handleNewFile,
     handleNewFolder,
+    handleOpenToSide,
+    handleOpenInTerminal,
+    handleFindInFolder,
   };
 }

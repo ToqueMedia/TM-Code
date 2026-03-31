@@ -7,6 +7,7 @@ import {
   Input
 } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import type { DebuggerConfigProps } from './types'
 
 function DebuggerConfig({
@@ -37,7 +38,7 @@ function DebuggerConfig({
         )}
 
         <Input
-          placeholder="Configuration name"
+          placeholder={t("misc.configName")}
           value={configForm.name}
           onChange={(e) => onConfigChange({ ...configForm, name: e.target.value })}
           bg={tokens.colors.bg.overlay}
@@ -47,7 +48,7 @@ function DebuggerConfig({
         />
 
         <Input
-          placeholder="Program path (e.g., ./src/index.js)"
+          placeholder={t("misc.programPath")}
           value={configForm.program}
           onChange={(e) => onConfigChange({ ...configForm, program: e.target.value })}
           bg={tokens.colors.bg.overlay}
@@ -57,7 +58,7 @@ function DebuggerConfig({
         />
 
         <Input
-          placeholder="Arguments (space separated)"
+          placeholder={t("misc.arguments")}
           value={configForm.args}
           onChange={(e) => onConfigChange({ ...configForm, args: e.target.value })}
           bg={tokens.colors.bg.overlay}

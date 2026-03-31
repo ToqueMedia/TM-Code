@@ -2,11 +2,12 @@ import { memo } from 'react'
 import { HStack, IconButton } from '@chakra-ui/react'
 import { FiChevronLeft, FiChevronRight } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 const XcodeNavigation = memo(() => (
 	<HStack gap={1} ml={4}>
 		<IconButton
-			aria-label="Go back"
+			aria-label={t("view.goBack")}
 			variant="ghost"
 			size="sm"
 			color={tokens.colors.nav.icon}
@@ -40,7 +41,7 @@ const XcodeNavigation = memo(() => (
 			<FiChevronLeft size={16} />
 		</IconButton>
 		<IconButton
-			aria-label="Go forward"
+			aria-label={t("view.goForward")}
 			variant="ghost"
 			size="sm"
 			color={tokens.colors.nav.icon}

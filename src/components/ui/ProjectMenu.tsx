@@ -1,8 +1,10 @@
 import { Box, HStack, Text, Menu, Button } from '@chakra-ui/react'
-import { FiFolder, FiGitBranch, FiClock } from 'react-icons/fi'
+import { FiFolder, FiGitBranch, FiClock, FiHome } from 'react-icons/fi'
 import { VscChevronDown } from "react-icons/vsc";
 import type { RecentProject } from '../../types/project'
+import { useProjectStore } from '../../stores/projectStore'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface ProjectMenuProps {
 	currentProjectName: string | undefined
@@ -50,17 +52,26 @@ const ProjectMenu = ({
 				>
 					<Box px={3} py={2}>
 						<HStack gap={2}>
+							<Button
+								size="sm"
+								variant="outline"
+								onClick={() => useProjectStore.getState().closeProject()}
+								borderColor={tokens.colors.border.default}
+								_hover={{ bg: 'whiteAlpha.100' }}
+							>
+								<FiHome /><span>{t("explorer.home")}</span>
+							</Button>
 							<Button size="sm" variant="outline" onClick={onOpenFolder} borderColor={tokens.colors.border.default} _hover={{ bg: 'whiteAlpha.100' }}>
-								<FiFolder /><span>Open Folder…</span>
+								<FiFolder /><span>{t("menu.openFolder")}</span>
 							</Button>
 							<Button size="sm" variant="outline" onClick={onCloneRepo} borderColor={tokens.colors.border.default} _hover={{ bg: 'whiteAlpha.100' }}>
-								<FiGitBranch /><span>Clone Repository…</span>
+								<FiGitBranch /><span>{t("menu.openFolder")}</span>
 							</Button>
 						</HStack>
 					</Box>
 					<Menu.Separator />
 					<Box px={3} py={2} color={tokens.colors.text.muted} fontSize="12px" textTransform="uppercase" letterSpacing="0.08em">
-						<HStack gap={2}><FiClock /><Text>Recent Projects</Text></HStack>
+						<HStack gap={2}><FiClock /><Text>{t("explorer.recentProjects")}</Text></HStack>
 					</Box>
 					{recentProjects.slice(0, 8).map(function rp(item) {
 						const name = item.name || item.path.split('/').pop() || item.path
@@ -78,7 +89,7 @@ const ProjectMenu = ({
 						)
 					})}
 					{recentProjects.length === 0 && (
-						<Box px={3} py={3} color={tokens.colors.text.muted} fontSize="13px">No recent projects</Box>
+						<Box px={3} py={3} color={tokens.colors.text.muted} fontSize="13px">{t("explorer.noRecent")}</Box>
 					)}
 				</Menu.Content>
 			</Menu.Positioner>

@@ -2,12 +2,14 @@ import React from 'react'
 import { Box, Flex, Heading, Text, Icon } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { IconType } from 'react-icons'
+import type { KeyBinding } from '@/stores/settingsStore'
+import KeyBindingDisplay from '../ui/KeyBindingDisplay'
 
 interface WelcomeFeatureCardProps {
   icon: IconType
   title: string
   description: string
-  shortcut: string
+  binding: KeyBinding | null | undefined
   color: string
   onClick?: () => void
 }
@@ -16,7 +18,7 @@ const WelcomeFeatureCard: React.FC<WelcomeFeatureCardProps> = ({
   icon,
   title,
   description,
-  shortcut,
+  binding,
   color,
   onClick,
 }) => {
@@ -101,20 +103,7 @@ const WelcomeFeatureCard: React.FC<WelcomeFeatureCardProps> = ({
         {description}
       </Text>
 
-      <Text
-        fontSize="11px"
-        color={tokens.colors.text.muted}
-        bg="rgba(255, 255, 255, 0.05)"
-        border="1px solid rgba(255, 255, 255, 0.06)"
-        px={2}
-        py={0.5}
-        borderRadius="6px"
-        display="inline-block"
-        fontFamily={tokens.fontFamily.mono}
-        letterSpacing="0.5px"
-      >
-        {shortcut}
-      </Text>
+      <KeyBindingDisplay binding={binding} />
     </Box>
   )
 }

@@ -7,8 +7,11 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useContainerStore } from '../../stores/containerStore'
+import { useBillingStore } from '../../stores/billingStore'
+import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 function formatTokens(count: number): string {
   if (count === 0) return '0'
@@ -27,6 +30,12 @@ function AgentStatusBar() {
   const runningServers = useMcpStore(s => s.getRunningServers())
   const totalMcpTools = useMcpStore(s => s.getTotalToolCount())
   const isolationMode = useContainerStore(s => s.isolationMode)
+  const creditsRemaining = useBillingStore(s => s.creditsRemaining)
+  const billingPlan = useBillingStore(s => s.plan)
+  const noCredits = useBillingStore(s => s.noCredits)
+  const queuePosition = useAgentStore(s => s.queuePosition)
+  const bgRunning = useBackgroundAgentStore(s => s.getRunningCount())
+  const bgTotal = useBackgroundAgentStore(s => s.getAll().length)
 
   const handleStop = () => {
     usePermissionStore.getState().clearPending()
@@ -37,32 +46,51 @@ function AgentStatusBar() {
   }
 
   const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
-    idle: { color: tokens.colors.text.disabled, label: 'Ready', pulse: false },
-    thinking: { color: tokens.colors.toolCall.runningText, label: 'Thinking...', pulse: true },
-    generating: { color: tokens.colors.accent.primary, label: 'Generating...', pulse: true },
-    applying: { color: tokens.colors.accent.green, label: 'Applying changes...', pulse: true },
-    compressing: { color: tokens.colors.accent.orange, label: 'Compressing context...', pulse: true },
+    idle: { color: tokens.colors.text.disabled, label: t('chat.ready'), pulse: false },
+    thinking: { color: tokens.colors.toolCall.runningText, label: t('chat.thinking'), pulse: true },
+    generating: { color: tokens.colors.accent.primary, label: t('chat.generating'), pulse: true },
+    applying: { color: tokens.colors.accent.green, label: t('chat.applying'), pulse: true },
+    compressing: { color: tokens.colors.accent.orange, label: t('chat.compressing'), pulse: true },
     error: { color: tokens.colors.accent.red, label: error || 'Error', pulse: false },
   }
 
-  const config = statusConfig[status] || statusConfig.idle
+  // Queue position overrides thinking status
+  // "Sem créditos" only when idle
+  const config = queuePosition
+    ? { color: tokens.colors.accent.orange, label: `${t('chat.inQueue')}: ${queuePosition.position} / ${queuePosition.total}`, pulse: true }
+    : (noCredits && status === 'idle')
+    ? { color: tokens.colors.accent.red, label: t('chat.noCredits'), pulse: false }
+    : (statusConfig[status] || statusConfig.idle)
   const totalTokens = totalTokensUsed.input + totalTokensUsed.output
 
   // Build info segments
   const infoSegments: string[] = []
-  if (skillCount > 0) infoSegments.push(`${skillCount} skills`)
+  if (creditsRemaining !== null) {
+    infoSegments.push(`${creditsRemaining} ${t("chat.credits")}`)
+  }
+  if (billingPlan) {
+    infoSegments.push(billingPlan)
+  }
+  if (skillCount > 0) infoSegments.push(`${skillCount} ${t("chat.skills")}`)
   if (mcpIsInitializing) {
-    infoSegments.push('MCP starting...')
+    infoSegments.push(t('chat.mcpStarting'))
   } else if (runningServers.length > 0) {
     infoSegments.push(`${runningServers.length} MCP (${totalMcpTools} tools)`)
+  }
+  if (bgTotal > 0) {
+    const bgDone = bgTotal - bgRunning
+    const parts: string[] = []
+    if (bgRunning > 0) parts.push(`${bgRunning} running`)
+    if (bgDone > 0) parts.push(`${bgDone} done`)
+    infoSegments.push(`bg: ${parts.join(', ')}`)
   }
   infoSegments.push(`${formatTokens(totalTokens)} tokens`)
   infoSegments.push(`${currentTurnCount} turns`)
 
   const isolationBadge = isolationMode === 'docker'
-    ? { icon: FiBox, label: 'Ambiente isolado (Docker)', color: tokens.colors.accent.greenBright, bg: tokens.colors.accent.greenSubtle }
+    ? { icon: FiBox, label: t('chat.dockerIsolation'), color: tokens.colors.accent.greenBright, bg: tokens.colors.accent.greenSubtle }
     : isolationMode === 'app-level'
-    ? { icon: FiShield, label: 'Ambiente isolado', color: '#58a6ff', bg: 'rgba(56, 139, 253, 0.12)' }
+    ? { icon: FiShield, label: t('chat.appIsolation'), color: '#58a6ff', bg: 'rgba(56, 139, 253, 0.12)' }
     : null
 
   return (
@@ -84,8 +112,8 @@ function AgentStatusBar() {
           borderRadius="full"
           bg={config.color}
           flexShrink={0}
-          animation={config.pulse ? 'statusPulse 1.5s ease-in-out infinite' : undefined}
           css={config.pulse ? {
+            animation: 'statusPulse 1.5s ease-in-out infinite',
             '@keyframes statusPulse': {
               '0%, 100%': { opacity: 1 },
               '50%': { opacity: 0.3 },
@@ -106,8 +134,8 @@ function AgentStatusBar() {
             borderRadius="3px"
             bg={isolationBadge.bg}
             title={isolationMode === 'docker'
-              ? 'Projecto corre dentro de um container Docker isolado'
-              : 'Terminal e agente restritos ao directorio do projecto'
+              ? t('chat.dockerTooltip')
+              : t('chat.appTooltip')
             }
           >
             <isolationBadge.icon size={9} color={isolationBadge.color} />
@@ -139,7 +167,7 @@ function AgentStatusBar() {
             _hover={{ bg: 'rgba(248, 81, 73, 0.1)' }}
             _active={{ transform: 'scale(0.9)' }}
             onClick={handleStop}
-            aria-label="Stop generation"
+            aria-label={t("chat.stopGeneration")}
           >
             <FiSquare size={11} />
           </Box>

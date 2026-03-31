@@ -1,12 +1,13 @@
 import { memo, useEffect, useCallback } from 'react'
 import { Box, Flex, Text, VStack } from '@chakra-ui/react'
-import { FiPlus, FiFolder, FiCode, FiClock } from 'react-icons/fi'
+import { FiPlus, FiFolder, FiCode, FiClock, FiHome } from 'react-icons/fi'
 import { Menu, MenuItem, PredefinedMenuItem } from '@tauri-apps/api/menu'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useChatStore } from '../../stores/chatStore'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import type { RecentProject } from '../../types/project'
 
 function formatTimeAgo(dateStr: string): string {
@@ -29,7 +30,6 @@ function getProjectInitial(name: string): string {
 }
 
 const isMac = /Mac/.test(navigator.platform || '')
-const revealLabel = isMac ? 'Mostrar no Finder' : 'Mostrar no Explorador de Ficheiros'
 
 async function switchProject(projectPath: string) {
   const currentProject = useProjectStore.getState().currentProject
@@ -51,23 +51,23 @@ async function showProjectContextMenu(project: RecentProject) {
   const [openEditorItem, revealItem, separator1, removeItem, separator2, deleteItem] =
     await Promise.all([
       MenuItem.new({
-        text: 'Abrir no Editor',
+        text: t('misc.openInEditorMenu'),
         action: () => switchAndOpenEditor(project.path),
       }),
       MenuItem.new({
-        text: revealLabel,
+        text: isMac ? t('misc.revealInFinder') : t('misc.revealInExplorer'),
         action: () => { revealItemInDir(project.path).catch(() => {}) },
       }),
       PredefinedMenuItem.new({ item: 'Separator' }),
       MenuItem.new({
-        text: 'Remover dos Recentes',
+        text: t('misc.removeFromRecent'),
         action: () => {
           useProjectStore.getState().removeFromRecent(project.id).catch(() => {})
         },
       }),
       PredefinedMenuItem.new({ item: 'Separator' }),
       MenuItem.new({
-        text: 'Eliminar Projecto...',
+        text: t('misc.deleteProject'),
         action: () => {
           useProjectStore.getState().deleteProject(project.id, project.path).catch(() => {})
         },
@@ -131,31 +131,56 @@ function ProjectsSidebar() {
           letterSpacing="0.5px"
           color={tokens.colors.text.muted}
         >
-          Projects
+          {t('misc.projects')}
         </Text>
-        <Box
-          as="button"
-          display="flex"
-          alignItems="center"
-          justifyContent="center"
-          w="24px"
-          h="24px"
-          borderRadius="6px"
-          border={`1px solid ${tokens.colors.border.panel}`}
-          color={tokens.colors.text.secondary}
-          bg="transparent"
-          cursor="pointer"
-          transition={`all ${tokens.transition.fast}`}
-          _hover={{
-            bg: tokens.colors.accent.primarySubtle,
-            borderColor: tokens.colors.accent.primaryMuted,
-            color: tokens.colors.accent.primary,
-          }}
-          onClick={handleNewProject}
-          aria-label="New Project"
-        >
-          <FiPlus size={12} />
-        </Box>
+        <Flex gap={1}>
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            w="24px"
+            h="24px"
+            borderRadius="6px"
+            border={`1px solid ${tokens.colors.border.panel}`}
+            color={tokens.colors.text.secondary}
+            bg="transparent"
+            cursor="pointer"
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{
+              bg: tokens.colors.bg.hoverSubtle,
+              borderColor: tokens.colors.border.glass,
+              color: tokens.colors.text.primary,
+            }}
+            onClick={() => useProjectStore.getState().closeProject()}
+            aria-label={t("explorer.home")}
+          >
+            <FiHome size={12} />
+          </Box>
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            w="24px"
+            h="24px"
+            borderRadius="6px"
+            border={`1px solid ${tokens.colors.border.panel}`}
+            color={tokens.colors.text.secondary}
+            bg="transparent"
+            cursor="pointer"
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{
+              bg: tokens.colors.accent.primarySubtle,
+              borderColor: tokens.colors.accent.primaryMuted,
+              color: tokens.colors.accent.primary,
+            }}
+            onClick={handleNewProject}
+            aria-label={t("misc.newProject")}
+          >
+            <FiPlus size={12} />
+          </Box>
+        </Flex>
       </Flex>
 
       {/* Divider */}
@@ -200,10 +225,10 @@ function ProjectsSidebar() {
             </Flex>
             <VStack gap={1}>
               <Text fontSize={tokens.fontSize.sm} color={tokens.colors.text.muted} fontWeight="500">
-                No projects yet
+                {t('misc.noProjectsYet')}
               </Text>
               <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled} textAlign="center" px={4}>
-                Create your first project to get started
+                {t('misc.createFirstProject')}
               </Text>
             </VStack>
             <Box
@@ -229,7 +254,7 @@ function ProjectsSidebar() {
               onClick={handleNewProject}
             >
               <FiPlus size={12} />
-              New Project
+              {t('misc.newProjectBtn')}
             </Box>
           </Flex>
         ) : (
@@ -339,7 +364,7 @@ function ProjectsSidebar() {
                     }}
                     _groupHover={{ opacity: 1 }}
                     onClick={(e: React.MouseEvent) => handleOpenInEditor(e, project.path)}
-                    aria-label="Open in editor"
+                    aria-label={t("misc.openInEditor")}
                   >
                     <FiCode size={13} />
                   </Box>
@@ -359,7 +384,7 @@ function ProjectsSidebar() {
         flexShrink={0}
       >
         <Text fontSize="10px" color={tokens.colors.text.disabled}>
-          {recentProjects.length} project{recentProjects.length !== 1 ? 's' : ''}
+          {recentProjects.length} {recentProjects.length !== 1 ? t('misc.projectCountPlural') : t('misc.projectCount')}
         </Text>
       </Box>
     </Flex>

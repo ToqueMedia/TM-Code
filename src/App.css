@@ -288,3 +288,9 @@ input:focus {
   50% { opacity: 0.4; }
 }
 
+/* ═══ Shared dot animation (chat activity, reasoning) ═══ */
+@keyframes pulseDot {
+  0%, 80%, 100% { opacity: 0.15; transform: scale(0.7); }
+  40% { opacity: 1; transform: scale(1); }
+}
+

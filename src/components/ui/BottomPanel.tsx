@@ -20,6 +20,7 @@ import OutputContent from './OutputContent'
 import DebugConsoleContent from './DebugConsoleContent'
 import { useProblemsStore, selectErrorCount, selectWarningCount } from '@/stores/problemsStore'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n'
 
 interface BottomPanelProps {
   isVisible: boolean
@@ -77,30 +78,13 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
   const errorCount = useProblemsStore(selectErrorCount)
   const warningCount = useProblemsStore(selectWarningCount)
   const totalProblems = errorCount + warningCount
+  const t = useTranslation()
 
   const panels = [
-    {
-      id: 'terminal',
-      label: 'Terminal',
-      icon: FiTerminal,
-    },
-    {
-      id: 'problems',
-      label: 'Problems',
-      icon: FiList,
-      badge: totalProblems > 0 ? totalProblems : undefined,
-      badgeVariant: errorCount > 0 ? 'error' as const : 'warning' as const
-    },
-    {
-      id: 'output',
-      label: 'Output',
-      icon: FiRefreshCw,
-    },
-    {
-      id: 'debug-console',
-      label: 'Debug Console',
-      icon: FiCode,
-    },
+    { id: 'terminal', label: t('panel.terminal'), icon: FiTerminal },
+    { id: 'problems', label: t('panel.problems'), icon: FiList, badge: totalProblems > 0 ? totalProblems : undefined, badgeVariant: errorCount > 0 ? 'error' as const : 'warning' as const },
+    { id: 'output', label: t('panel.output'), icon: FiRefreshCw },
+    { id: 'debug-console', label: t('panel.debugConsole'), icon: FiCode },
   ]
 
   const handlePanelChange = useCallback((panelId: string) => {
@@ -157,8 +141,8 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
 
         <HStack gap={0.5} pr={1}>
           <IconButton
-            aria-label="Minimize panel"
-            title="Minimize panel"
+            aria-label={t("common.minimizePanel")}
+            title={t("common.minimizePanel")}
             variant="ghost"
             size="xs"
             color={tokens.colors.text.muted}
@@ -172,8 +156,8 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
             <FiMinus size={13} />
           </IconButton>
           <IconButton
-            aria-label="Close panel"
-            title="Close panel"
+            aria-label={t("common.closePanel")}
+            title={t("common.closePanel")}
             variant="ghost"
             size="xs"
             color={tokens.colors.text.muted}

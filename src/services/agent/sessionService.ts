@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDisplay } from '../../types/chat'
 import { logger } from '../../utils/logger'
-import { hashProjectPath } from '../../utils/crypto'
+import { hashProjectPath, encryptSession, decryptSession } from '../../utils/crypto'
 
 const MAX_SESSIONS_PER_PROJECT = 50
 const MAX_TOOL_RESULT_LENGTH = 2000
@@ -103,8 +103,15 @@ class SessionService {
   async loadSession(projectPath: string, sessionId: string): Promise<ChatSession | null> {
     try {
       const filePath = await this.getSessionFilePath(projectPath, sessionId)
-      const content = await invoke<string>('read_file', { path: filePath })
-      const persisted: PersistedSession = JSON.parse(content)
+      const raw = await invoke<string>('read_file', { path: filePath })
+
+      // Try decrypting first; fall back to plain JSON for legacy unencrypted sessions
+      let json = await decryptSession(raw, projectPath)
+      if (json === null) {
+        // Not encrypted (legacy) or decryption failed — try parsing as plain JSON
+        json = raw
+      }
+      const persisted: PersistedSession = JSON.parse(json)
 
       // Truncate tool results that may have been saved with full content
       const messages = persisted.messages.map(msg => this.sanitizeMessage(msg))
@@ -144,7 +151,14 @@ class SessionService {
         }
       }
 
-      await invoke('write_file', { path: filePath, content: JSON.stringify(persisted, null, 2) })
+      const json = JSON.stringify(persisted, null, 2)
+      const encrypted = await encryptSession(json, session.projectPath)
+      await invoke('write_file', { path: filePath, content: encrypted })
+      // Restrict file permissions to owner-only (600) to protect sensitive session data
+      try {
+        const safePath = filePath.replace(/'/g, "'\\''")
+        await invoke('execute_command', { command: `chmod 600 '${safePath}'`, cwd: '/' })
+      } catch { /* non-fatal on non-Unix or sandboxed environments */ }
       await this.updateIndex(session.projectPath, session)
     } catch (error) {
       logger.error('session', `Failed to save session ${session.id}:`, error)

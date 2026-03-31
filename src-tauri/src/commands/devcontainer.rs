@@ -75,9 +75,28 @@ pub enum LifecycleCommand {
 impl LifecycleCommand {
     /// Convert to a shell command string for `sh -c`.
     /// Exec form args are individually shell-escaped.
+    /// Shell form is sanitized to block dangerous metacharacters.
     pub fn to_shell_string(&self) -> String {
         match self {
-            LifecycleCommand::Shell(s) => s.clone(),
+            LifecycleCommand::Shell(s) => {
+                // Block dangerous shell patterns that indicate injection attempts.
+                // Legitimate lifecycle commands are simple (e.g. "npm install && npm run build").
+                let blocked = [
+                    "$(", "`",           // command substitution
+                    ">/dev/tcp",         // bash TCP redirect
+                    "| bash", "| sh",    // pipe to shell
+                    "curl ", "wget ",    // download + execute patterns
+                    "eval ", "exec ",    // dynamic execution
+                    "rm -rf /",          // destructive
+                ];
+                let lower = s.to_lowercase();
+                for pattern in &blocked {
+                    if lower.contains(pattern) {
+                        return format!("echo 'Blocked: devcontainer command contains disallowed pattern: {}'", pattern);
+                    }
+                }
+                s.clone()
+            }
             LifecycleCommand::Exec(parts) => parts
                 .iter()
                 .map(|p| {

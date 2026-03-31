@@ -42,8 +42,8 @@ function GeneratingStatusBar({ status, isStreaming, totalTokens, currentTurnCoun
           h="6px"
           borderRadius="full"
           bg={config.color}
-          animation={isStreaming ? 'genPulse 1.5s ease-in-out infinite' : undefined}
           css={isStreaming ? {
+            animation: 'genPulse 1.5s ease-in-out infinite',
             '@keyframes genPulse': {
               '0%, 100%': { opacity: 1 },
               '50%': { opacity: 0.3 },

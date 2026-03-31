@@ -14,6 +14,11 @@ const HAS_OWN_APPROVAL = new Set([
   'create_file',
 ])
 
+/** Determine the permission scope for a tool name. */
+function getToolScope(toolName: string): 'core' | 'mcp' {
+  return toolName.startsWith('mcp__') ? 'mcp' : 'core'
+}
+
 interface PendingPermission {
   id: string
   toolName: string
@@ -24,7 +29,8 @@ interface PendingPermission {
 }
 
 interface PermissionState {
-  autoApproveAll: boolean
+  /** Scopes where user clicked "Accept All" — 'core' and 'mcp' are independent */
+  approvedScopes: Set<'core' | 'mcp'>
   /** When true, file diffs (write_file/edit_file/create_file) are auto-accepted without user confirmation */
   autoApproveDiffs: boolean
   pendingPermission: PendingPermission | null
@@ -41,13 +47,15 @@ interface PermissionActions {
 }
 
 export const usePermissionStore = create<PermissionState & PermissionActions>()((set, get) => ({
-  autoApproveAll: false,
+  approvedScopes: new Set(),
   autoApproveDiffs: false,
   pendingPermission: null,
 
   requestPermission: (toolName, args, forcePrompt) => {
-    // User explicitly authorized everything — respect that even for sensitive files
-    if (get().autoApproveAll) return Promise.resolve(true)
+    const scope = getToolScope(toolName)
+
+    // User authorized all tools in this scope (core or mcp)
+    if (get().approvedScopes.has(scope)) return Promise.resolve(true)
 
     if (!forcePrompt) {
       if (SAFE_TOOLS.has(toolName)) return Promise.resolve(true)
@@ -79,8 +87,12 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     const { pendingPermission } = get()
     if (pendingPermission) {
       pendingPermission.resolve(true)
-      // Set BOTH flags — user expects "Accept All" to cover everything
-      set({ pendingPermission: null, autoApproveAll: true, autoApproveDiffs: true })
+      const scope = getToolScope(pendingPermission.toolName)
+      const scopes = new Set(get().approvedScopes)
+      scopes.add(scope)
+      // Auto-approve diffs when core tools are approved
+      const autoApproveDiffs = scope === 'core' ? true : get().autoApproveDiffs
+      set({ pendingPermission: null, approvedScopes: scopes, autoApproveDiffs })
     }
   },
 
@@ -97,7 +109,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   },
 
   resetAutoApprove: () => {
-    set({ autoApproveAll: false, autoApproveDiffs: false })
+    set({ approvedScopes: new Set(), autoApproveDiffs: false })
   },
 
   /** Force-clear any pending permission (e.g. when agent is cancelled). */

@@ -3,6 +3,7 @@ import {
   Portal,
 } from '@chakra-ui/react'
 import { useNewProjectDialog } from './useNewProjectDialog'
+import { t } from '@/i18n'
 import { NewProjectForm } from './NewProjectForm'
 import NewProjectActions from './NewProjectActions'
 
@@ -44,7 +45,7 @@ export function NewProjectDialog({ isOpen, onClose }: NewProjectDialogProps) {
               borderColor="border.default"
               color="text.primary"
             >
-              <Dialog.Title>Create New Project</Dialog.Title>
+              <Dialog.Title>{t("misc.createNewProject")}</Dialog.Title>
             </Dialog.Header>
 
             <Dialog.Body pb={6} bg="bg.editor">

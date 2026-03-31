@@ -2,6 +2,7 @@ import React, { memo, Suspense, useState, useEffect } from 'react'
 import { Flex, Text, Box, HStack } from '@chakra-ui/react'
 import { VscSourceControl, VscError, VscSparkle, VscRemoteExplorer, VscShield, VscSymbolFile } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n'
 import { useMcpStore } from '@/stores/mcpStore'
 import { useContainerStore } from '@/stores/containerStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -58,6 +59,7 @@ StatusBarItem.displayName = 'StatusBarItem'
 // ─── MCP Status Pill ────────────────────────────────────────────────────────
 
 const McpStatusPill = memo(() => {
+	const t = useTranslation()
 	const servers = useMcpStore(s => s.servers)
 	const isInitializing = useMcpStore(s => s.isInitializing)
 
@@ -92,7 +94,7 @@ const McpStatusPill = memo(() => {
 				borderRadius={tokens.radius.full}
 				bg="rgba(255, 255, 255, 0.04)"
 				cursor="default"
-				title={`${running.length} server(s) running, ${totalTools} tools`}
+				title={`${running.length} ${t('status.mcpRunning')}, ${totalTools} ${t('status.mcpTools')}`}
 			>
 				<VscSparkle size={10} color={color} />
 				<Text fontSize="10px" color={color} fontWeight="600" fontFamily={tokens.fontFamily.mono}>
@@ -108,6 +110,7 @@ McpStatusPill.displayName = 'McpStatusPill'
 // ─── Container Status Pill ──────────────────────────────────────────────────
 
 const ContainerStatusPill = memo(() => {
+	const t = useTranslation()
 	const isolationMode = useContainerStore(s => s.isolationMode)
 	const devcontainerName = useContainerStore(s => s.devcontainerName)
 
@@ -130,7 +133,7 @@ const ContainerStatusPill = memo(() => {
 				borderRadius={tokens.radius.full}
 				bg="rgba(255, 255, 255, 0.04)"
 				cursor="default"
-				title={isDocker ? 'Running in Docker container' : 'App-level isolation'}
+				title={isDocker ? t('status.dockerContainer') : t('status.appIsolation')}
 			>
 				<Icon size={10} color={color} />
 				<Text fontSize="10px" color={color} fontWeight="600" fontFamily={tokens.fontFamily.mono}>
@@ -146,6 +149,7 @@ ContainerStatusPill.displayName = 'ContainerStatusPill'
 // ─── AI Completion Status Pill ───────────────────────────────────────────────
 
 const AiCompletionPill = memo(() => {
+	const t = useTranslation()
 	const enabled = useSettingsStore(s => s.autocomplete.enabled)
 	const model = useSettingsStore(s => s.autocomplete.model)
 	const status = useAiCompletionStore(s => s.status)
@@ -160,17 +164,17 @@ const AiCompletionPill = memo(() => {
 		case 'loading':
 			color = tokens.colors.accent.orange
 			label = 'AI'
-			tooltip = `Generating completion... (${model})`
+			tooltip = `${t('status.aiGenerating')} (${model})`
 			break
 		case 'error':
 			color = tokens.colors.accent.red
 			label = 'AI'
-			tooltip = 'Ollama unavailable — check if it is running'
+			tooltip = t('status.ollamaUnavailable')
 			break
 		default:
 			color = tokens.colors.accent.green
 			label = 'AI'
-			tooltip = `AI autocomplete active (${model})`
+			tooltip = `${t('status.aiActive')} (${model})`
 	}
 
 	return (
@@ -238,6 +242,7 @@ const StatusBar = memo<StatusBarProps>(({
 	setInsertSpacesSetting,
 	setDetectIndentationSetting
 }) => {
+	const t = useTranslation()
 	const [branch, setBranch] = useState('main')
 
 	useEffect(() => {
@@ -265,7 +270,7 @@ const StatusBar = memo<StatusBarProps>(({
 			userSelect="none"
 		>
 			<HStack gap={0} height="100%">
-				<StatusBarItem tooltip="Git branch">
+				<StatusBarItem tooltip={t("status.gitBranch")}>
 					<VscSourceControl size={11} />
 					<Text fontFamily={tokens.fontFamily.mono} fontSize="11px">{branch}</Text>
 				</StatusBarItem>
@@ -276,9 +281,9 @@ const StatusBar = memo<StatusBarProps>(({
 
 				<StatusBarDivider />
 
-				<StatusBarItem tooltip="Cursor position">
+				<StatusBarItem tooltip={t("status.cursorPosition")}>
 					<Text fontFamily={tokens.fontFamily.mono} fontSize="11px">
-						Ln {cursorPosition.line}, Col {cursorPosition.column}
+						{t("status.ln")} {cursorPosition.line}, {t("status.col")} {cursorPosition.column}
 					</Text>
 				</StatusBarItem>
 
@@ -295,7 +300,7 @@ const StatusBar = memo<StatusBarProps>(({
 
 				<StatusBarDivider />
 
-				<StatusBarItem tooltip="File encoding">
+				<StatusBarItem tooltip={t("status.fileEncoding")}>
 					<Text fontFamily={tokens.fontFamily.mono} fontSize="11px">UTF-8</Text>
 				</StatusBarItem>
 			</HStack>
@@ -318,14 +323,14 @@ const StatusBar = memo<StatusBarProps>(({
 
 				<StatusBarDivider />
 
-				<StatusBarItem tooltip="Diagnostics">
+				<StatusBarItem tooltip={t("status.diagnostics")}>
 					<VscError size={11} />
 					<Text fontFamily={tokens.fontFamily.mono} fontSize="11px">0</Text>
 				</StatusBarItem>
 
 				<StatusBarDivider />
 
-				<StatusBarItem tooltip="Current project">
+				<StatusBarItem tooltip={t("status.currentProject")}>
 					<Box
 						w="5px"
 						h="5px"

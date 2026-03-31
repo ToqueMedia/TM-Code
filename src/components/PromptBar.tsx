@@ -1,10 +1,15 @@
 import { memo } from 'react'
-import { Box, Text } from '@chakra-ui/react'
+import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
+import { useProjectStore } from '@/stores/projectStore'
 import PromptTextarea from './prompt/PromptTextarea'
 import PromptActions from './prompt/PromptActions'
+import AttachmentChips from './prompt/AttachmentChips'
 import SlashCommandMenu from './chat/SlashCommandMenu'
+import MentionMenu from './prompt/MentionMenu'
 import { usePromptBar } from './prompt/usePromptBar'
+import KeyBindingDisplay from './ui/KeyBindingDisplay'
 
 function PromptBar() {
   const {
@@ -12,6 +17,8 @@ function PromptBar() {
     setInput,
     textareaRef,
     isStreaming,
+    isScaffolding,
+    isSendBlocked,
     isDisabled,
     viewMode,
     hasPreview,
@@ -25,7 +32,22 @@ function PromptBar() {
     filteredCommands,
     selectedCommandIndex,
     handleCommandSelect,
+    showMentionMenu,
+    filteredMentions,
+    selectedMentionIndex,
+    handleMentionSelect,
+    draftAttachments,
+    handleAttachFiles,
+    handlePaste,
+    handleDragOver,
+    handleDragEnter,
+    handleDragLeave,
+    handleDrop,
+    handleRemoveAttachment,
+    isDragging,
   } = usePromptBar()
+
+  const projectPath = useProjectStore(s => s.currentProject?.path || '')
 
   return (
     <Box
@@ -45,13 +67,31 @@ function PromptBar() {
           />
         )}
 
+        {/* @mention autocomplete menu */}
+        {showMentionMenu && (
+          <MentionMenu
+            items={filteredMentions}
+            selectedIndex={selectedMentionIndex}
+            onSelect={handleMentionSelect}
+            projectPath={projectPath}
+          />
+        )}
+
         {/* Main input container */}
         <Box
           bg={tokens.colors.bg.panel}
           borderRadius="14px"
-          border={`1px solid ${tokens.colors.border.panel}`}
-          overflow="hidden"
+          border={`1px solid ${isDragging ? tokens.colors.accent.primary : tokens.colors.border.panel}`}
+          outline={isDragging ? `1px dashed ${tokens.colors.accent.primary}` : 'none'}
+          outlineOffset="-2px"
+          overflow="visible"
           transition={`border-color ${tokens.transition.normal}, box-shadow ${tokens.transition.normal}`}
+          cursor="text"
+          onClick={() => textareaRef.current?.focus()}
+          onDragOver={handleDragOver}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
           _focusWithin={{
             borderColor: tokens.colors.accent.primary,
           }}
@@ -62,30 +102,46 @@ function PromptBar() {
             onChange={setInput}
             onKeyDown={handleKeyDown}
             onBlur={handleBlur}
+            onPaste={handlePaste}
             disabled={isDisabled}
           />
+
+          {draftAttachments.length > 0 && (
+            <AttachmentChips
+              attachments={draftAttachments}
+              onRemove={handleRemoveAttachment}
+            />
+          )}
 
           <PromptActions
             viewMode={viewMode}
             isStreaming={isStreaming}
-            hasInput={!!input.trim() && !isDisabled}
+            hasInput={!!(input.trim() || draftAttachments.length > 0) && !isSendBlocked}
             hasPreview={hasPreview}
             onToggleEditor={toggleEditor}
             onTogglePreview={togglePreview}
             onSend={handleSend}
             onStop={handleStop}
+            onAttach={handleAttachFiles}
+            attachmentCount={draftAttachments.length}
           />
         </Box>
 
-        {/* Hint text */}
-        <Text
-          fontSize={tokens.fontSize.xs}
-          color={tokens.colors.text.disabled}
-          textAlign="center"
-          mt={1.5}
-        >
-          {isStreaming ? 'Agent is working...' : isDisabled ? 'Awaiting permission...' : 'Cmd+Enter to send'}
-        </Text>
+        {/* Hint */}
+        <Flex justify="center" align="center" gap={1.5} mt={1.5}>
+          {isStreaming ? (
+            <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.working')}</Text>
+          ) : isScaffolding ? (
+            <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.settingUp')}</Text>
+          ) : isDisabled ? (
+            <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.awaitingPermission')}</Text>
+          ) : (
+            <>
+              <KeyBindingDisplay binding={{ key: 'Enter', meta: true }} size="sm" />
+              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.toSend')}</Text>
+            </>
+          )}
+        </Flex>
       </Box>
     </Box>
   )

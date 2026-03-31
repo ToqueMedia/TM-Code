@@ -20,6 +20,7 @@ interface TerminalActions {
   createSession: (name?: string, cwd?: string) => Promise<string>;
   removeSession: (sessionId: string) => Promise<void>;
   setActiveSession: (sessionId: string) => void;
+  renameSession: (sessionId: string, name: string) => void;
   updateSessionCwd: (sessionId: string, cwd: string) => void;
   toggleVisibility: () => void;
   setVisibility: (visible: boolean) => void;
@@ -98,6 +99,16 @@ export const useTerminalStore = create<TerminalState & TerminalActions>((set, ge
     }
   },
 
+  renameSession: (sessionId: string, name: string) => {
+    set(state => ({
+      sessions: state.sessions.map(session =>
+        session.id === sessionId
+          ? { ...session, name }
+          : session
+      ),
+    }));
+  },
+
   updateSessionCwd: (sessionId: string, cwd: string) => {
     set(state => ({
       sessions: state.sessions.map(session => 
@@ -121,6 +132,15 @@ export const useTerminalStore = create<TerminalState & TerminalActions>((set, ge
   },
 
   clearSessions: () => {
+    // Kill all running processes before clearing
+    const { sessions } = get();
+    for (const session of sessions) {
+      if (session.processId) {
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+          invoke('kill_process', { pid: session.processId }).catch(() => {});
+        }).catch(() => {});
+      }
+    }
     set({
       sessions: [],
       activeSessionId: null,

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Box, Flex, Input } from '@chakra-ui/react'
 import MonacoBridge from '../../utils/monacoBridge'
 import { tokens } from '../../theme/tokens'
+import { t } from '@/i18n'
 
 function GoToLineDialog(): React.ReactElement | null {
   const [isOpen, setIsOpen] = useState(false)
@@ -67,7 +68,7 @@ function GoToLineDialog(): React.ReactElement | null {
             min={1}
             max={maxLine}
             autoComplete="off"
-            placeholder={`Go to Line (1–${maxLine}, current: ${currentLine})`}
+            placeholder={`${t('explorer.goToLine')} (1–${maxLine}, current: ${currentLine})`}
             value={value}
             onChange={e => setValue(e.target.value)}
             onKeyDown={onKeyDown}

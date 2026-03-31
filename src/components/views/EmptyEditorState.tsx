@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent)
 
@@ -74,11 +75,11 @@ function ShortcutRow({ label, keys, onClick }: { label: string; keys: string[]; 
 function EmptyEditorState({ onBackToChat, onToggleExplorer, onToggleTerminal }: Props) {
   return (
     <Flex flex="1" align="center" justify="center" direction="column" gap={5} bg={tokens.colors.bg.app}>
-      <ShortcutRow label="Back to Chat" keys={[mod, 'L']} onClick={onBackToChat} />
-      <ShortcutRow label="Open File" keys={[mod, 'P']} onClick={() => window.dispatchEvent(new CustomEvent('quickopen:toggle'))} />
-      <ShortcutRow label="Toggle Explorer" keys={[mod, 'B']} onClick={onToggleExplorer} />
-      <ShortcutRow label="Toggle Terminal" keys={[mod, 'J']} onClick={onToggleTerminal} />
-      <ShortcutRow label="Show All Commands" keys={[shift, mod, 'P']} onClick={() => window.dispatchEvent(new CustomEvent('command:palette'))} />
+      <ShortcutRow label={t("view.backToChat")} keys={[mod, 'L']} onClick={onBackToChat} />
+      <ShortcutRow label={t("view.openFile")} keys={[mod, 'P']} onClick={() => window.dispatchEvent(new CustomEvent('quickopen:toggle'))} />
+      <ShortcutRow label={t("view.toggleExplorer")} keys={[mod, 'B']} onClick={onToggleExplorer} />
+      <ShortcutRow label={t("view.toggleTerminal")} keys={[mod, 'J']} onClick={onToggleTerminal} />
+      <ShortcutRow label={t("view.showAllCommands")} keys={[shift, mod, 'P']} onClick={() => window.dispatchEvent(new CustomEvent('command:palette'))} />
     </Flex>
   )
 }

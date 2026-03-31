@@ -2,6 +2,7 @@ import React, { memo, useState, useCallback, useRef, useEffect } from 'react'
 import { Flex, Text, Box, Input, VStack } from '@chakra-ui/react'
 import { VscSearch, VscChevronDown, VscChevronRight, VscCaseSensitive, VscRegex, VscWholeWord } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import SearchService, { type SearchResult, type FileSearchResult } from '@/services/searchService'
 import { useCurrentProject } from '@/hooks/useProjectState'
 import { useEditorRepository } from '@/stores/editorStore'
@@ -124,7 +125,7 @@ function SearchPanel() {
             value={query}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            placeholder="Search"
+            placeholder={t("search.placeholder")}
             autoComplete="off"
             autoCorrect="off"
             spellCheck={false}
@@ -140,13 +141,13 @@ function SearchPanel() {
             flex={1}
           />
           {/* Toggle buttons */}
-          <ToggleButton active={caseSensitive} onClick={() => setCaseSensitive(v => !v)} title="Match Case">
+          <ToggleButton active={caseSensitive} onClick={() => setCaseSensitive(v => !v)} title={t("search.matchCase")}>
             <VscCaseSensitive size={14} />
           </ToggleButton>
-          <ToggleButton active={wholeWord} onClick={() => setWholeWord(v => !v)} title="Match Whole Word">
+          <ToggleButton active={wholeWord} onClick={() => setWholeWord(v => !v)} title={t("search.matchWholeWord")}>
             <VscWholeWord size={14} />
           </ToggleButton>
-          <ToggleButton active={useRegex} onClick={() => setUseRegex(v => !v)} title="Use Regular Expression">
+          <ToggleButton active={useRegex} onClick={() => setUseRegex(v => !v)} title={t("search.useRegex")}>
             <VscRegex size={14} />
           </ToggleButton>
         </Flex>

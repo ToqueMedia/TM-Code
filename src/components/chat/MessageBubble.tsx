@@ -8,10 +8,12 @@ import { ChatMessage } from '../../types/chat'
 import { useChatStore } from '../../stores/chatStore'
 import CodeBlockAction from './CodeBlockAction'
 import ToolCallDisplayComponent from './ToolCallDisplay'
+import AgentLogo from '../ui/AgentLogo'
 import ReasoningBlock from './ReasoningBlock'
 import PlanApprovalCard from './PlanApprovalCard'
 import TodoListCard from './TodoListCard'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface MessageBubbleProps {
   message: ChatMessage
@@ -132,7 +134,41 @@ function CopyButton({ code }: { code: string }) {
       onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCopy() }}
     >
       {copied ? <FiCheck size={11} /> : <FiCopy size={11} />}
-      {copied ? 'Copied' : 'Copy'}
+      {copied ? t('chat.copied') : t('chat.copy')}
+    </Box>
+  )
+}
+
+function CopyMessageButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(text).catch(() => {})
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }, [text])
+
+  return (
+    <Box
+      as="button"
+      display="flex"
+      alignItems="center"
+      justifyContent="center"
+      w="22px"
+      h="22px"
+      borderRadius="5px"
+      bg="transparent"
+      color={copied ? tokens.colors.accent.green : tokens.colors.text.disabled}
+      cursor="pointer"
+      transition="all 0.15s"
+      opacity={copied ? 1 : 0}
+      ml="auto"
+      _groupHover={{ opacity: 1 }}
+      _hover={{ bg: 'rgba(255, 255, 255, 0.06)', color: tokens.colors.text.secondary }}
+      onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCopy() }}
+      aria-label={copied ? t('chat.copied') : t('chat.copy')}
+    >
+      {copied ? <FiCheck size={12} /> : <FiCopy size={12} />}
     </Box>
   )
 }
@@ -260,6 +296,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       bg={isUser ? 'rgba(255, 255, 255, 0.02)' : 'transparent'}
       borderRadius="12px"
       mb={1}
+      className="group"
     >
       {/* Role header */}
       <Flex align="center" gap={2.5} mb={isUser ? 1.5 : 2.5}>
@@ -276,20 +313,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             <FiUser size={11} color={tokens.colors.text.secondary} />
           </Flex>
         ) : (
-          <Flex
-            w="22px"
-            h="22px"
-            borderRadius="6px"
-            bgGradient={tokens.gradient.accentPrimary}
-            align="center"
-            justify="center"
-            flexShrink={0}
-            boxShadow="0 2px 8px rgba(254, 16, 99, 0.25)"
-          >
-            <Text fontSize="10px" color="white" fontWeight="800" lineHeight="1">
-              ◆
-            </Text>
-          </Flex>
+          <AgentLogo size={22} glow />
         )}
         <Text
           fontSize="13px"
@@ -305,8 +329,8 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             h="5px"
             borderRadius="full"
             bg={tokens.colors.accent.primary}
-            animation="msgPulse 1.5s ease-in-out infinite"
             css={{
+              animation: 'msgPulse 1.5s ease-in-out infinite',
               '@keyframes msgPulse': {
                 '0%, 100%': { opacity: 1 },
                 '50%': { opacity: 0.25 },
@@ -314,43 +338,35 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             }}
           />
         )}
+        {isUser && message.content && (
+          <CopyMessageButton text={message.content} />
+        )}
       </Flex>
 
       {/* Content area */}
       <Box pl="34px">
-        {/* Activity indicator — shown when streaming but no content yet */}
-        {isStreaming && !isUser && !message.content && !message.reasoningContent && (!message.toolCalls || message.toolCalls.length === 0) && (
-          <Flex align="center" gap={2} py={2}>
-            <Flex gap="4px" align="center">
-              {[0, 1, 2].map(i => (
-                <Box
-                  key={i}
-                  w="6px"
-                  h="6px"
-                  borderRadius="full"
-                  bg={tokens.colors.accent.primary}
-                  animation={`activityPulse 1.4s ease-in-out ${i * 0.2}s infinite`}
-                  css={{
-                    '@keyframes activityPulse': {
-                      '0%, 80%, 100%': { opacity: 0.15, transform: 'scale(0.7)' },
-                      '40%': { opacity: 1, transform: 'scale(1)' },
-                    },
-                  }}
-                />
-              ))}
-            </Flex>
-            <Text fontSize="12px" color={tokens.colors.text.muted} fontStyle="italic">
-              Processing...
-            </Text>
+        {/* Minimal activity dots — only when streaming with no visible content at all */}
+        {isStreaming && !isUser && !message.content && (!message.toolCalls || message.toolCalls.length === 0) && (
+          <Flex gap="4px" align="center" py={2}>
+            {[0, 1, 2].map(i => (
+              <Box
+                key={i}
+                w="5px"
+                h="5px"
+                borderRadius="full"
+                bg={tokens.colors.accent.primary}
+                animation={`pulseDot 1.4s ease-in-out ${i * 0.2}s infinite`}
+              />
+            ))}
           </Flex>
         )}
 
-        {/* Reasoning block */}
-        {message.reasoningContent && (
+        {/* Reasoning block — only show after streaming completes */}
+        {message.reasoningContent && !isStreaming && (
           <ReasoningBlock
             content={message.reasoningContent}
             isVisible={message.isReasoningVisible || false}
-            isStreaming={isStreaming || false}
+            isStreaming={false}
             durationMs={message.reasoningDurationMs}
             onToggle={() => toggleReasoning(message.id)}
           />
@@ -421,8 +437,8 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                   h="6px"
                   borderRadius="full"
                   bg={tokens.colors.accent.primary}
-                  animation={`activityPulse 1.4s ease-in-out ${i * 0.2}s infinite`}
                   css={{
+                    animation: `activityPulse 1.4s ease-in-out ${i * 0.2}s infinite`,
                     '@keyframes activityPulse': {
                       '0%, 80%, 100%': { opacity: 0.15, transform: 'scale(0.7)' },
                       '40%': { opacity: 1, transform: 'scale(1)' },

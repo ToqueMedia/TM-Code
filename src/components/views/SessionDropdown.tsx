@@ -4,6 +4,7 @@ import { FiPlus, FiClock, FiChevronDown, FiTrash2 } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { SessionSummary } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 function formatRelativeTime(timestamp: number): string {
   const diff = Math.max(0, Date.now() - timestamp)
@@ -76,7 +77,7 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
       {/* New Chat button */}
       <Box
         as="button"
-        aria-label="New Chat"
+        aria-label={t("view.newChat")}
         display="flex"
         alignItems="center"
         gap="6px"
@@ -97,15 +98,13 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
         } : {}}
         onClick={handleNewChat}
       >
-        <FiPlus size={13} />
-        New Chat
-      </Box>
+        <FiPlus size={13} />{t("view.newChat")}      </Box>
 
       {/* Sessions dropdown */}
       <Box position="relative" ref={sessionsRef}>
         <Box
           as="button"
-          aria-label="Toggle sessions list"
+          aria-label={t("view.toggleSessions")}
           aria-expanded={showSessions}
           aria-haspopup="listbox"
           display="flex"
@@ -135,7 +134,7 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
         {showSessions && (
           <Box
             role="listbox"
-            aria-label="Chat sessions"
+            aria-label={t("view.chatSessions")}
             position="absolute"
             top="100%"
             left={0}
@@ -217,7 +216,7 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
                       bg: 'rgba(248, 81, 73, 0.1)',
                     }}
                     onClick={(e: React.MouseEvent) => handleDeleteSession(e, s.id)}
-                    aria-label="Delete session"
+                    aria-label={t("view.deleteSession")}
                   >
                     <FiTrash2 size={13} />
                   </Box>

@@ -6,6 +6,7 @@ import { useEditorRepository } from '../../stores/editorStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { handlePlanApprove, handlePlanRequestChanges, handlePlanReject } from '../../services/agent/commands/planCommand'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import type { ChatMessageCard } from '../../types/chat'
 
 interface PlanApprovalCardProps {
@@ -70,7 +71,7 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
           color={tokens.colors.text.primary}
           letterSpacing="-0.01em"
         >
-          Plan Ready for Review
+          {t("plan.readyForReview")}
         </Text>
       </Flex>
 
@@ -80,7 +81,7 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
         mb={4}
         lineHeight="1.6"
       >
-        The architect has generated a complete development plan. Review PLAN.md and decide how to proceed.
+        {t("plan.description")}
       </Text>
 
       {/* View Plan button */}
@@ -101,7 +102,7 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
       >
         <FiFileText size={12} color={tokens.colors.text.secondary} />
         <Text fontSize="12px" color={tokens.colors.text.primary}>
-          View Full Plan
+          {t("plan.viewFull")}
         </Text>
       </Flex>
 
@@ -144,7 +145,7 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
           >
             <FiEdit2 size={11} color={tokens.colors.accent.orange} />
             <Text fontSize="12px" color={tokens.colors.accent.orange} fontWeight="500">
-              Request Changes
+              {t("plan.requestChanges")}
             </Text>
           </Flex>
 
@@ -171,13 +172,13 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
       )}
 
       {status === 'approved' && (
-        <StatusBadge color={tokens.colors.accent.greenBright} bg="rgba(46, 160, 67, 0.1)" label="Approved" />
+        <StatusBadge color={tokens.colors.accent.greenBright} bg="rgba(46, 160, 67, 0.1)" label={t('plan.approved')} />
       )}
       {status === 'changes_requested' && (
-        <StatusBadge color={tokens.colors.accent.orange} bg="rgba(247, 127, 0, 0.1)" label="Changes requested — reply in chat" />
+        <StatusBadge color={tokens.colors.accent.orange} bg="rgba(247, 127, 0, 0.1)" label={t('plan.changesRequested')} />
       )}
       {status === 'rejected' && (
-        <StatusBadge color={tokens.colors.accent.red} bg="rgba(248, 81, 73, 0.1)" label="Rejected" />
+        <StatusBadge color={tokens.colors.accent.red} bg="rgba(248, 81, 73, 0.1)" label={t('plan.rejected')} />
       )}
     </Box>
   )

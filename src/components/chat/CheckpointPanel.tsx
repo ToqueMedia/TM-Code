@@ -7,6 +7,7 @@ import {
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useChatStore } from '../../stores/chatStore'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 function timeAgo(timestamp: number): string {
   const diff = Date.now() - timestamp
@@ -126,7 +127,7 @@ function CheckpointPanel() {
         onClick={() => setIsExpanded(!isExpanded)}
         role="button"
         aria-expanded={isExpanded}
-        aria-label="Toggle checkpoints panel"
+        aria-label={t("checkpoint.toggle")}
       >
         <Flex align="center" gap={2}>
           {isExpanded ? (
@@ -161,7 +162,7 @@ function CheckpointPanel() {
               e.stopPropagation()
               handleToggleSessionDiff()
             }}
-            aria-label="View session diff"
+            aria-label={t("checkpoint.viewDiff")}
           >
             <FiGitCommit size={10} />
             Diff
@@ -191,7 +192,7 @@ function CheckpointPanel() {
               e.stopPropagation()
               handleRevertLast()
             }}
-            aria-label="Undo last agent action"
+            aria-label={t("checkpoint.undoLast")}
           >
             <FiRotateCcw size={10} />
             Undo
@@ -255,11 +256,11 @@ function CheckpointPanel() {
         <Box mx={2} mb={1}>
           {isLoadingDiff ? (
             <Flex align="center" justify="center" py={3}>
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Loading diff...</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t("checkpoint.loadingDiff")}</Text>
             </Flex>
           ) : sessionDiff.length === 0 ? (
             <Flex align="center" justify="center" py={3}>
-              <Text fontSize="10px" color={tokens.colors.text.disabled}>No changes in this session</Text>
+              <Text fontSize="10px" color={tokens.colors.text.disabled}>{t("checkpoint.noChanges")}</Text>
             </Flex>
           ) : (
             <Box
@@ -277,13 +278,13 @@ function CheckpointPanel() {
                 let label: string
                 let color: string
                 if (isNew) {
-                  label = 'created'
+                  label = t('checkpoint.created')
                   color = tokens.colors.accent.green
                 } else if (isDeleted) {
-                  label = 'deleted'
+                  label = t('checkpoint.deleted')
                   color = tokens.colors.accent.red
                 } else {
-                  label = 'modified'
+                  label = t('checkpoint.modified')
                   color = tokens.colors.accent.orange
                 }
 
@@ -415,7 +416,10 @@ function CheckpointPanel() {
                 h="4px"
                 borderRadius="full"
                 bg={tokens.colors.accent.primary}
-                animation="statusPulse 1s ease-in-out infinite"
+                css={{
+                  animation: 'cpPulse 1s ease-in-out infinite',
+                  '@keyframes cpPulse': { '0%, 100%': { opacity: 1 }, '50%': { opacity: 0.3 } },
+                }}
               />
               <Text fontSize="10px" color={tokens.colors.text.muted}>
                 Reverting...

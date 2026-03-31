@@ -3,6 +3,7 @@
 import { useCallback } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import { useToastStore, type ToastType } from '@/stores/toastStore'
 
 function getToastColors(type: ToastType) {
@@ -155,7 +156,7 @@ function ToastItem({ id, type, message, onDismiss }: ToastItemProps) {
       {/* Close button */}
       <Box
         as="button"
-        aria-label="Dismiss notification"
+        aria-label={t("misc.dismiss")}
         onClick={() => onDismiss(id)}
         cursor="pointer"
         color={tokens.colors.text.muted}

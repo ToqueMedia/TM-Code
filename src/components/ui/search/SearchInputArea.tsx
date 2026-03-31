@@ -13,6 +13,7 @@ import {
   FiType,
 } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface SearchInputAreaProps {
   searchTerm: string
@@ -53,7 +54,7 @@ function SearchInputArea({
     <Box p={3} borderBottom={`1px solid ${tokens.colors.border.default}`}>
       <VStack gap={2} align="stretch">
         <Input
-          placeholder="Search"
+          placeholder={t("search.placeholder")}
           value={searchTerm}
           onKeyPress={(e) => e.key === 'Enter' && onSearch()}
           onChange={(e) => onSearchTermChange(e.target.value)}
@@ -72,7 +73,7 @@ function SearchInputArea({
 
         {isReplaceVisible && (
           <Input
-            placeholder="Replace"
+            placeholder={t("search.replacePlaceholder")}
             value={replaceTerm}
             onChange={(e) => onReplaceTermChange(e.target.value)}
             bg={tokens.colors.bg.input}
@@ -92,8 +93,8 @@ function SearchInputArea({
         <HStack justify="space-between">
           <HStack gap={0.5}>
             <IconButton
-              aria-label="Match case"
-              title="Match case"
+              aria-label={t("search.matchCase")}
+              title={t("search.matchCase")}
               variant="ghost"
               size="xs"
               borderRadius="4px"
@@ -106,8 +107,8 @@ function SearchInputArea({
               <FiType size={12} />
             </IconButton>
             <IconButton
-              aria-label="Whole word"
-              title="Match whole word"
+              aria-label={t("search.matchWholeWord")}
+              title={t("search.matchWholeWord")}
               variant="ghost"
               size="xs"
               borderRadius="4px"
@@ -120,8 +121,8 @@ function SearchInputArea({
               <FiType size={12} />
             </IconButton>
             <IconButton
-              aria-label="Use regex"
-              title="Use regular expressions"
+              aria-label={t("search.useRegex")}
+              title={t("search.useRegex")}
               variant="ghost"
               size="xs"
               borderRadius="4px"

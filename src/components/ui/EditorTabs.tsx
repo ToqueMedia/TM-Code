@@ -5,6 +5,7 @@ import { Reorder } from 'framer-motion'
 import EditorTab from './EditorTab'
 import { useEditorRepository } from '../../stores/editorStore'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 interface EditorTabsProps {
 	openFiles: Array<{ path: string; isDirty: boolean; isPreview?: boolean }>
@@ -129,7 +130,7 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 					height="30px"
 				>
 					<VscSymbolFile size={11} />
-					<Text fontSize="11px">No open tabs</Text>
+					<Text fontSize="11px">{t("explorer.noOpenTabs")}</Text>
 				</Flex>
 			)}
 		</Flex>

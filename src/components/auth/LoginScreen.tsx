@@ -11,9 +11,10 @@ type AuthMode = 'signin' | 'signup'
 const ERROR_MESSAGES: Record<string, string> = {
   'auth/invalid-email': 'Email inválido.',
   'auth/user-disabled': 'Conta desactivada.',
-  'auth/user-not-found': 'Conta não encontrada.',
-  'auth/wrong-password': 'Password incorrecta.',
-  'auth/invalid-credential': 'Credenciais inválidas.',
+  // Generic message for credential errors to prevent user enumeration
+  'auth/user-not-found': 'Email ou password incorrectos.',
+  'auth/wrong-password': 'Email ou password incorrectos.',
+  'auth/invalid-credential': 'Email ou password incorrectos.',
   'auth/email-already-in-use': 'Este email já está registado.',
   'auth/weak-password': 'Password demasiado fraca (mín. 6 caracteres).',
   'auth/popup-closed-by-user': 'Login cancelado.',
@@ -39,11 +40,15 @@ function GoogleIcon() {
   )
 }
 
-function LoginScreen() {
+interface LoginScreenProps {
+  initialMode?: AuthMode
+}
+
+function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
-  const [mode, setMode] = useState<AuthMode>('signin')
+  const [mode, setMode] = useState<AuthMode>(initialMode)
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
   const error = useAuthStore(s => s.error)

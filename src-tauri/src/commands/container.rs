@@ -143,7 +143,7 @@ const DEFAULT_IMAGE: &str = "node:20-alpine";
 pub const WORKSPACE_PATH: &str = "/workspace";
 
 /// Common dev server ports to expose on the container.
-const EXPOSED_PORTS: &[u16] = &[7773, 3000, 3001, 4200, 5173, 8000, 8080, 8888];
+const EXPOSED_PORTS: &[u16] = &[7773, 7777, 3000, 3001, 4200, 5173, 8000, 8080, 8888];
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -333,12 +333,17 @@ pub async fn create_project_container(
         .unwrap_or_else(|| WORKSPACE_PATH.to_string());
 
     // ── Build docker create args ─────────────────────────────────────────
+    // Resolve symlinks in project_path to prevent mounting arbitrary host dirs
+    let resolved_project_path = std::fs::canonicalize(&project_path)
+        .map_err(|e| format!("Failed to resolve project path: {}", e))?;
+    let resolved_project_str = resolved_project_path.to_string_lossy().to_string();
+
     let mut base_args: Vec<String> = vec![
         "create".into(),
         "--name".into(),
         name.clone(),
         "-v".into(),
-        format!("{}:{}", project_path, workspace),
+        format!("{}:{}", resolved_project_str, workspace),
         "-w".into(),
         workspace.clone(),
         "-e".into(),
@@ -568,6 +573,14 @@ async fn resolve_image(
 
             if let Some(ref build_args) = build.args {
                 for (key, val) in build_args {
+                    // Validate key is a safe identifier (prevents injection via key)
+                    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        return Err(format!("Invalid build-arg key: {}", key));
+                    }
+                    // Reject values with shell metacharacters that could escape build context
+                    if val.contains(';') || val.contains('|') || val.contains('`') || val.contains("$(") {
+                        return Err(format!("Invalid build-arg value for {}: contains shell metacharacters", key));
+                    }
                     args.push("--build-arg".into());
                     args.push(format!("{}={}", key, val));
                 }

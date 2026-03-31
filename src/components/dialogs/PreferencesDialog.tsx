@@ -22,6 +22,7 @@ import { useProjectStore } from '../../stores/projectStore'
 import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 type TabId = 'editor' | 'skills' | 'mcp'
 
@@ -69,7 +70,7 @@ export default function PreferencesDialog(): React.ReactElement | null {
               pb={0}
             >
               <VStack align="stretch" gap={0} w="100%">
-                <Dialog.Title mb={3}>Settings</Dialog.Title>
+                <Dialog.Title mb={3}>{t("menu.settings")}</Dialog.Title>
                 <Flex gap={0}>
                   {tabs.map(function (tab) {
                     const isActive = activeTab === tab.id
@@ -303,7 +304,7 @@ function SkillsTab(): React.ReactElement {
         {isLoading ? (
           <Text fontSize="12px" color={tokens.colors.text.muted}>Loading skills...</Text>
         ) : bundledSkills.length === 0 ? (
-          <Text fontSize="12px" color={tokens.colors.text.muted}>No bundled skills active for this project type</Text>
+          <Text fontSize="12px" color={tokens.colors.text.muted}>{t("misc.noBundledSkills")}</Text>
         ) : (
           <VStack align="stretch" gap={1}>
             {bundledSkills.map(function (skill) {
@@ -321,7 +322,7 @@ function SkillsTab(): React.ReactElement {
           Global (~/.toquemedia-studio/skills/)
         </Text>
         {globalSkills.length === 0 ? (
-          <Text fontSize="12px" color={tokens.colors.text.muted}>No global skills</Text>
+          <Text fontSize="12px" color={tokens.colors.text.muted}>{t("misc.noGlobalSkills")}</Text>
         ) : (
           <VStack align="stretch" gap={1}>
             {globalSkills.map(function (skill) {
@@ -344,7 +345,7 @@ function SkillsTab(): React.ReactElement {
           Project (.tms/skills/)
         </Text>
         {projectSkills.length === 0 ? (
-          <Text fontSize="12px" color={tokens.colors.text.muted}>No project skills</Text>
+          <Text fontSize="12px" color={tokens.colors.text.muted}>{t("misc.noProjectSkills")}</Text>
         ) : (
           <VStack align="stretch" gap={1}>
             {projectSkills.map(function (skill) {
@@ -386,7 +387,7 @@ function SkillsTab(): React.ReactElement {
                 />
               </Box>
               <Box>
-                <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>Scope</Text>
+                <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>{t("misc.scope")}</Text>
                 <NativeSelect.Root size="sm" width="120px">
                   <NativeSelect.Field
                     bg={tokens.colors.bg.overlay}
@@ -395,8 +396,8 @@ function SkillsTab(): React.ReactElement {
                     value={newSkillScope}
                     onChange={function (e) { setNewSkillScope(e.target.value as 'project' | 'global') }}
                   >
-                    <option value="project">Project</option>
-                    <option value="global">Global</option>
+                    <option value="project">{t("settings.project")}</option>
+                    <option value="global">{t("settings.global")}</option>
                   </NativeSelect.Field>
                   <NativeSelect.Indicator />
                 </NativeSelect.Root>

@@ -6,7 +6,8 @@ import {
   Input,
   Portal,
 } from '@chakra-ui/react';
-import { tokens } from '@/theme/tokens';
+import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n';
 import { useProjectStore } from '../../stores/projectStore';
 import { open } from '@tauri-apps/plugin-dialog';
 import { ProjectValidator } from '../../utils/projectValidator';
@@ -85,7 +86,7 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
               borderColor="gray.600"
               color="white"
             >
-              <Dialog.Title>Open Project</Dialog.Title>
+              <Dialog.Title>{t("misc.openProject")}</Dialog.Title>
             </Dialog.Header>
             
             <Dialog.Body 

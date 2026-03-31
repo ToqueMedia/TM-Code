@@ -17,6 +17,7 @@ import {
   FiCode
 } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n'
 
 interface ActivityBarProps {
   activeActivity: string
@@ -106,60 +107,22 @@ const ActivityItem = memo<ActivityItemProps>(({
 ActivityItem.displayName = 'ActivityItem'
 
 function ActivityBar({ activeActivity, onActivityChange }: ActivityBarProps) {
+  const t = useTranslation()
+
   const activities = [
-    {
-      id: 'chat',
-      icon: FiMessageSquare,
-      label: 'Chat',
-    },
-    {
-      id: 'explorer',
-      icon: FiFolder,
-      label: 'Explorer',
-    },
-    {
-      id: 'search',
-      icon: FiSearch,
-      label: 'Search',
-    },
-    {
-      id: 'editor',
-      icon: FiCode,
-      label: 'Editor',
-    },
-    {
-      id: 'source-control',
-      icon: FiGitBranch,
-      label: 'Source Control',
-    },
-    {
-      id: 'run-debug',
-      icon: FiPlay,
-      label: 'Run and Debug',
-    },
-    {
-      id: 'extensions',
-      icon: FiPackage,
-      label: 'Extensions',
-    }
+    { id: 'chat', icon: FiMessageSquare, label: t('activity.chat') },
+    { id: 'explorer', icon: FiFolder, label: t('activity.explorer') },
+    { id: 'search', icon: FiSearch, label: t('activity.search') },
+    { id: 'editor', icon: FiCode, label: t('activity.editor') },
+    { id: 'source-control', icon: FiGitBranch, label: t('activity.sourceControl') },
+    { id: 'run-debug', icon: FiPlay, label: t('activity.runDebug') },
+    { id: 'extensions', icon: FiPackage, label: t('activity.extensions') },
   ]
 
   const bottomActivities = [
-    {
-      id: 'toggle-bottom-panel',
-      icon: FiTerminal,
-      label: 'Terminal',
-    },
-    {
-      id: 'accounts',
-      icon: FiUser,
-      label: 'Accounts',
-    },
-    {
-      id: 'settings',
-      icon: FiSettings,
-      label: 'Settings',
-    }
+    { id: 'toggle-bottom-panel', icon: FiTerminal, label: t('activity.terminal') },
+    { id: 'accounts', icon: FiUser, label: t('activity.accounts') },
+    { id: 'settings', icon: FiSettings, label: t('activity.settings') },
   ]
 
   return (

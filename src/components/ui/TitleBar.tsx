@@ -3,6 +3,7 @@ import { Box, HStack, Flex } from '@chakra-ui/react'
 import { useProjectStore } from '../../stores/projectStore'
 import WindowControls from './WindowControls'
 import ProjectMenu from './ProjectMenu'
+import MenuBar from './titlebar/MenuBar'
 import QuickOpen from './QuickOpen'
 import { tokens } from '@/theme/tokens'
 import { handleClose, handleMinimize, handleFullToggle, handleMouseDown } from './titlebar/useWindowControls'
@@ -46,24 +47,24 @@ function TitleBar() {
 	}
 
 	return (
-		<Box
+		<Flex
 			className="vscode-titlebar drag-region"
 			height="38px"
 			bg={tokens.colors.bg.titlebar}
 			borderBottom={`1px solid ${tokens.colors.border.default}`}
-			display="flex"
 			alignItems="center"
 			px={3}
-			position="relative"
 			userSelect="none"
 			backdropFilter="blur(12px)"
 			data-tauri-drag-region
 			onMouseDown={handleMouseDown}
 		>
+			{/* Left: traffic lights + project + menus */}
 			<HStack
-				gap={3}
-				position="absolute"
-				left={10}
+				gap={2}
+				flexShrink={0}
+				align="center"
+				data-tauri-drag-region="false"
 			>
 				<WindowControls
 					onClose={handleClose}
@@ -77,13 +78,16 @@ function TitleBar() {
 					onCloneRepo={handleCloneRepo}
 					onOpenRecent={handleOpenRecent}
 				/>
+				<MenuBar />
 			</HStack>
 
+			{/* Center: Quick Open — takes remaining space */}
 			<Flex
 				flex={1}
 				justifyContent="center"
 				alignItems="center"
 				px={2}
+				minW={0}
 			>
 				<QuickOpen
 					query={query}
@@ -99,8 +103,9 @@ function TitleBar() {
 				/>
 			</Flex>
 
-			<Box position="absolute" right={3} width="120px" />
-		</Box>
+			{/* Right spacer for symmetry */}
+			<Box width="70px" flexShrink={0} />
+		</Flex>
 	)
 }
 

@@ -1,8 +1,9 @@
 import { memo, useState, useMemo } from 'react'
-import { Box, Flex, Text, Image } from '@chakra-ui/react'
+import { Box, Flex, Text, Image, Kbd } from '@chakra-ui/react'
 import { FiCheck, FiCheckCircle, FiX } from 'react-icons/fi'
 import { diffLines } from 'diff'
 import { getFileIconUrl } from '@/utils/fileIcons'
+import { useSettingsStore, formatBinding } from '@/stores/settingsStore'
 import { tokens } from '@/theme/tokens'
 import { detectLanguage, highlightLines, type HighlightedLine } from '@/utils/syntaxHighlight'
 
@@ -15,6 +16,7 @@ interface InlineDiffProps {
   onApprove: () => void
   onApproveAll: () => void
   onDeny: () => void
+  onRejectAll: () => void
 }
 
 const MAX_LINES = 20
@@ -36,8 +38,10 @@ function InlineDiff({
   onApprove,
   onApproveAll,
   onDeny,
+  onRejectAll,
 }: InlineDiffProps) {
   const [showFull, setShowFull] = useState(false)
+  const sc = useSettingsStore(s => s.shortcuts)
   const fileName = filePath.split('/').pop() || filePath
   const language = useMemo(() => detectLanguage(filePath), [filePath])
 
@@ -175,7 +179,7 @@ function InlineDiff({
           '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.1)', borderRadius: '2px' },
         }}
       >
-        {displayLines.map((line, i) => {
+        {displayLines.map((line) => {
           let bg = 'transparent'
           let prefixChar = '\u00A0'
 
@@ -191,7 +195,7 @@ function InlineDiff({
           const lineTokens = getLineTokens(line)
 
           return (
-            <Flex key={i} bg={bg} align="stretch" minH="20px">
+            <Flex key={`${line.type}-${line.oldNum ?? 'n'}-${line.newNum ?? 'n'}`} bg={bg} align="stretch" minH="20px">
               {/* Old line number */}
               <Flex
                 w="38px"
@@ -278,6 +282,7 @@ function InlineDiff({
           py="8px"
           borderTop="1px solid rgba(255, 255, 255, 0.05)"
           bg="rgba(255, 255, 255, 0.02)"
+          flexWrap="wrap"
         >
           <Box
             as="button"
@@ -300,6 +305,7 @@ function InlineDiff({
           >
             <FiCheck size={12} />
             Accept
+            <Kbd fontSize="9px" color="inherit" opacity={0.5} ml="2px" bg="transparent" borderColor="transparent" p={0}>{formatBinding(sc.diffAccept)}</Kbd>
           </Box>
           <Box
             as="button"
@@ -322,6 +328,7 @@ function InlineDiff({
           >
             <FiCheckCircle size={12} />
             Accept all
+            <Kbd fontSize="9px" color="inherit" opacity={0.5} ml="2px" bg="transparent" borderColor="transparent" p={0}>{formatBinding(sc.diffAcceptAll)}</Kbd>
           </Box>
           <Box
             as="button"
@@ -344,6 +351,30 @@ function InlineDiff({
           >
             <FiX size={12} />
             Reject
+            <Kbd fontSize="9px" color="inherit" opacity={0.5} ml="2px" bg="transparent" borderColor="transparent" p={0}>{formatBinding(sc.diffReject)}</Kbd>
+          </Box>
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            gap="5px"
+            px="10px"
+            py="4px"
+            bg="rgba(248, 81, 73, 0.1)"
+            border="1px solid rgba(248, 81, 73, 0.2)"
+            borderRadius="6px"
+            color={tokens.colors.accent.red}
+            fontSize="11px"
+            fontWeight="500"
+            cursor="pointer"
+            transition="all 0.15s"
+            _hover={{ bg: 'rgba(248, 81, 73, 0.18)', borderColor: 'rgba(248, 81, 73, 0.35)' }}
+            _active={{ transform: 'scale(0.97)' }}
+            onClick={onRejectAll}
+          >
+            <FiX size={12} />
+            Reject all
+            <Kbd fontSize="9px" color="inherit" opacity={0.5} ml="2px" bg="transparent" borderColor="transparent" p={0}>{formatBinding(sc.diffRejectAll)}</Kbd>
           </Box>
         </Flex>
       )}

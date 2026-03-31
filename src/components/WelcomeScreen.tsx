@@ -8,19 +8,22 @@ import { verifyRequirements, CheckResult } from '../services/environmentCheck'
 import { setupScaffoldedProject } from '../services/postScaffoldPipeline'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import { WelcomeSidebar, WelcomeHero, CloneDialog } from './welcome'
 import { RequirementsDialog } from './dialogs'
 import TemplateSelector from './TemplateSelector'
+import SettingsView from './views/SettingsView'
 import WindowControls from './ui/WindowControls'
 
 interface WelcomeScreenProps {
-  onOpenProject: (path?: string) => void
+  onOpenProject: (path?: string, options?: { initGit?: boolean }) => void
 }
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   const cloneDialog = useDialog()
   const { recentProjects, loadRecentProjects } = useProjectStore()
   const [showTemplateSelector, setShowTemplateSelector] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [isScaffolding, setIsScaffolding] = useState(false)
 
   // Environment requirements check state
@@ -69,7 +72,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: 'Select project directory',
+        title: t('misc.selectProjectDir'),
       })
       if (selected) {
         onOpenProject(selected as string)
@@ -92,8 +95,8 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       const msg = error instanceof Error ? error.message : String(error)
       logger.error('ui', 'Failed to scaffold template:', error)
       await tauriMessage(
-        `Failed to create project: ${msg}`,
-        { title: 'Error', kind: 'error' }
+        `${t('misc.failedCreateProject')}: ${msg}`,
+        { title: t('misc.error'), kind: 'error' }
       ).catch(() => {})
     } finally {
       setIsScaffolding(false)
@@ -106,7 +109,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: 'Choose where to create the project',
+        title: t('misc.chooseCreateLocation'),
       })
       if (!selected) return
 
@@ -128,8 +131,8 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       const msg = error instanceof Error ? error.message : String(error)
       logger.error('ui', 'Failed to check requirements:', error)
       await tauriMessage(
-        `Failed to create project: ${msg}`,
-        { title: 'Error', kind: 'error' }
+        `${t('misc.failedCreateProject')}: ${msg}`,
+        { title: t('misc.error'), kind: 'error' }
       ).catch(() => {})
     }
   }
@@ -154,11 +157,11 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: 'Choose a folder for your new project',
+        title: t('misc.chooseFolder'),
       })
       if (selected) {
         setShowTemplateSelector(false)
-        onOpenProject(selected as string)
+        onOpenProject(selected as string, { initGit: true })
       }
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
@@ -210,16 +213,21 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         onOpenFolder={handleOpenFolder}
         onCloneRepository={() => cloneDialog.setOpen(true)}
         onOpenProject={onOpenProject}
+        onSettings={() => setShowSettings(true)}
       />
 
-      <WelcomeHero
-        onNewProject={handleNewProject}
-        onProjectFromScratch={handleSelectEmpty}
-        onOpenFolder={handleOpenFolder}
-        onCloneRepository={() => cloneDialog.setOpen(true)}
-      />
+      {showSettings ? (
+        <SettingsView onBack={() => setShowSettings(false)} />
+      ) : (
+        <WelcomeHero
+          onNewProject={handleNewProject}
+          onProjectFromScratch={handleSelectEmpty}
+          onOpenFolder={handleOpenFolder}
+          onCloneRepository={() => cloneDialog.setOpen(true)}
+        />
+      )}
 
-      <CloneDialog dialog={cloneDialog} />
+      <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} />
     </Flex>
   )
 }

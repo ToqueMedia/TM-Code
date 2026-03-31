@@ -6,6 +6,7 @@ import {
   IconButton
 } from '@chakra-ui/react'
 import { FiCircle, FiTrash2, FiChevronDown } from 'react-icons/fi'
+import { t } from '@/i18n'
 import { tokens } from '@/theme/tokens'
 import type { BreakpointsSectionProps } from './types'
 
@@ -68,7 +69,7 @@ function BreakpointsSection({
                   </VStack>
                 </HStack>
                 <IconButton
-                  aria-label="Remove breakpoint"
+                  aria-label={t("misc.removeBreakpoint")}
                   size="xs"
                   variant="ghost"
                   onClick={() => onRemoveBreakpoint(bp.id)}

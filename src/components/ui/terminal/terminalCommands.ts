@@ -310,7 +310,9 @@ async function runStreamingCommand(
     (event) => {
       if (sessionId && cancelledSessions.has(sessionId)) return
       if (pid !== 0 && event.payload.pid !== pid) return
-      safeTermWrite(terminal, `${event.payload.data}\r\n`)
+      // Write raw chunks directly — xterm handles \r (carriage return)
+      // and \n (line feed) natively, including progress bar redraws.
+      safeTermWrite(terminal, event.payload.data)
     }
   )
 

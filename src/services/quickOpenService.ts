@@ -52,9 +52,9 @@ export default class QuickOpenService {
         }
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[i]
-          const p: string = entry.path || ''
           const n: string = entry.name || ''
-          if (!p) continue
+          if (!n) continue
+          const p: string = `${current}/${n}`
           const lower = n.toLowerCase()
           if (n.startsWith('.')) {
             // skip hidden files/directories
@@ -77,6 +77,18 @@ export default class QuickOpenService {
     } finally {
       this.building = false
     }
+  }
+
+  /**
+   * Returns the first N files from the index (no filtering).
+   * Used for @mention when user types just '@' without a query.
+   */
+  list(limit: number = 20): QuickOpenItem[] {
+    return this.index.slice(0, limit).map(path => ({
+      path,
+      name: path.split('/').pop() as string,
+      score: 0,
+    }))
   }
 
   search(query: string, limit: number = 100): QuickOpenItem[] {

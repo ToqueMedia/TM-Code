@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview",
+    "preview": "yarn run build && wrangler dev",
     "tauri": "tauri",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -20,7 +20,8 @@
     "benchmark": "tsx src/testing/benchmarkCLI.ts",
     "benchmark:watch": "tsx watch src/testing/benchmarkCLI.ts",
     "test:performance": "npm run benchmark",
-    "test:regression": "npm run benchmark -- --regression"
+    "test:regression": "npm run benchmark -- --regression",
+    "deploy": "yarn run build && wrangler deploy"
   },
   "dependencies": {
     "@chakra-ui/react": "^3.34.0",
@@ -33,12 +34,15 @@
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.4.5",
     "@tauri-apps/plugin-opener": "^2.5.3",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/xterm": "^6.0.0",
     "diff": "^8.0.3",
     "firebase": "^12.10.0",
     "framer-motion": "^12.36.0",
+    "html2canvas": "^1.4.1",
     "monaco-editor": "^0.55.1",
     "prettier": "^3.8.1",
     "react": "^19.2.4",
@@ -46,9 +50,12 @@
     "react-icons": "^5.6.0",
     "react-markdown": "^10.1.0",
     "react-syntax-highlighter": "^16.1.1",
+    "use-stick-to-bottom": "^1.1.3",
     "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.30.2",
+    "@resvg/resvg-js": "^2.6.2",
     "@tauri-apps/cli": "^2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -68,6 +75,7 @@
     "tsx": "^4.21.0",
     "typescript": "~5.9.3",
     "vite": "^8.0.0",
-    "vite-tsconfig-paths": "^6.1.1"
+    "vite-tsconfig-paths": "^6.1.1",
+    "wrangler": "^4.78.0"
   }
 }

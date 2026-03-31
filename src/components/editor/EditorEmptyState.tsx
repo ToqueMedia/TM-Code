@@ -1,8 +1,11 @@
 import { Flex, Text, Box, VStack } from '@chakra-ui/react'
-import { FiCode } from 'react-icons/fi'
+import AgentLogo from '../ui/AgentLogo'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n'
 
-const EditorEmptyState = () => (
+const EditorEmptyState = () => {
+	const t = useTranslation()
+	return (
 	<Flex
 		flex="1"
 		alignItems="center"
@@ -15,23 +18,13 @@ const EditorEmptyState = () => (
 	>
 		<VStack gap={4}>
 			<Box
-				p={5}
-				borderRadius="16px"
-				bg={tokens.colors.accent.primarySubtle}
 				transform="translateY(0px)"
 				transition={`all ${tokens.transition.slow}`}
 				_hover={{
 					transform: 'translateY(-6px)',
-					boxShadow: `0 12px 32px ${tokens.colors.accent.primaryGlow}`,
 				}}
 			>
-				<FiCode
-					size={40}
-					color={tokens.colors.accent.primary}
-					style={{
-						filter: `drop-shadow(0 0 12px ${tokens.colors.accent.primaryGlow})`,
-					}}
-				/>
+				<AgentLogo size={56} glow />
 			</Box>
 			<VStack gap={1}>
 				<Text
@@ -49,7 +42,7 @@ const EditorEmptyState = () => (
 					maxW="340px"
 					lineHeight="1.6"
 				>
-					Open a file from the explorer to start editing
+					{t('editor.emptyMessage')}
 				</Text>
 			</VStack>
 		</VStack>
@@ -68,7 +61,8 @@ const EditorEmptyState = () => (
 			borderRadius="full"
 		/>
 	</Flex>
-)
+	)
+}
 
 EditorEmptyState.displayName = 'EditorEmptyState'
 

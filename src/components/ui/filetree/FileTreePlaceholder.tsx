@@ -1,7 +1,8 @@
 import React from 'react';
 import { Box, HStack, Text, Button } from '@chakra-ui/react';
 import { FiRefreshCw } from 'react-icons/fi';
-import { tokens } from '@/theme/tokens';
+import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n';
 
 interface FileTreePlaceholderProps {
   variant: 'loading' | 'error' | 'empty';
@@ -13,7 +14,7 @@ const FileTreePlaceholder: React.FC<FileTreePlaceholderProps> = ({ variant, erro
   return (
     <Box p={3} bg={tokens.colors.bg.sidebar} color={tokens.colors.text.primary}>
       {variant === 'loading' && (
-        <Text fontSize="sm" color={tokens.colors.text.secondary}>Loading file tree...</Text>
+        <Text fontSize="sm" color={tokens.colors.text.secondary}>{t("explorer.loadingFileTree")}</Text>
       )}
 
       {variant === 'error' && (
@@ -30,7 +31,7 @@ const FileTreePlaceholder: React.FC<FileTreePlaceholderProps> = ({ variant, erro
           >
             <HStack gap={2}>
               <FiRefreshCw size={12} />
-              <span>Retry</span>
+              <span>{t("explorer.retry")}</span>
             </HStack>
           </Button>
         </>
@@ -38,7 +39,7 @@ const FileTreePlaceholder: React.FC<FileTreePlaceholderProps> = ({ variant, erro
 
       {variant === 'empty' && (
         <>
-          <Text fontSize="sm" color={tokens.colors.text.secondary}>No file tree available</Text>
+          <Text fontSize="sm" color={tokens.colors.text.secondary}>{t("explorer.noFileTree")}</Text>
           <Button
             mt={2}
             size="xs"
@@ -50,7 +51,7 @@ const FileTreePlaceholder: React.FC<FileTreePlaceholderProps> = ({ variant, erro
           >
             <HStack gap={2}>
               <FiRefreshCw size={12} />
-              <span>Refresh</span>
+              <span>{t("view.refresh")}</span>
             </HStack>
           </Button>
         </>

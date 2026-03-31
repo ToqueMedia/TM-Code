@@ -4,17 +4,23 @@ import './utils/monacoEnv'
 import WelcomeScreen from './components/WelcomeScreen';
 import MainLayout from './components/MainLayout';
 import LoginScreen from './components/auth/LoginScreen';
+import OnboardingFlow from './components/onboarding/OnboardingFlow';
+import type { OnboardingDoneAction } from './components/onboarding/OnboardingFlow';
 import { useProjectStore } from './stores/projectStore';
 import { useAuthStore } from './stores/authStore';
+import { useSettingsStore } from './stores/settingsStore';
 import { useChatStore } from './stores/chatStore';
 import { useSkillStore } from './stores/skillStore';
 import FirebaseAuthService from './services/auth/firebaseAuth';
 import SkillService from './services/agent/skillService';
+import QuickOpenService from './services/quickOpenService';
 import MCPService from './services/mcp/mcpService';
 import ToolExecutor from './services/agent/toolExecutor';
 import AgentService from './services/agent/agentService';
+import { autoCheckForUpdate } from './services/updateService';
 import { logger } from './utils/logger';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { useNativeMenu } from './hooks/useNativeMenu';
 import { useEffect, useRef, useState } from 'react';
 import { Box, Flex } from '@chakra-ui/react';
 import { LoadingSpinner } from './components/ui/LoadingSpinner';
@@ -24,11 +30,14 @@ import { tokens } from '@/theme/tokens';
 function App() {
 	const { currentProject, openProject, recentProjects } = useProjectStore();
 	const { isAuthenticated, isLoading: authLoading } = useAuthStore();
+	const hasCompletedOnboarding = useSettingsStore(s => s.hasCompletedOnboarding);
 	const [initializing, setInitializing] = useState(true);
+	const [loginInitialMode, setLoginInitialMode] = useState<'signin' | 'signup'>('signin');
 	const prevProjectRef = useRef<string | null>(null);
 
-	// Set up keyboard shortcuts
+	// Set up keyboard shortcuts + native macOS menu handler
 	useKeyboardShortcuts();
+	useNativeMenu();
 
 	// Initialize Firebase Auth listener
 	useEffect(() => {
@@ -95,33 +104,24 @@ function App() {
 		});
 	}, [currentProject]);
 
-	// Initialize MCP servers and preload skills when project changes
+	// Check for app updates on startup (non-blocking, 5s delay)
 	useEffect(() => {
-		if (!currentProject?.path) return;
+		if (!isAuthenticated) return;
+		autoCheckForUpdate();
+	}, [isAuthenticated]);
 
-		const projectPath = currentProject.path;
+	// Initialize MCP servers once at app startup (global — persists across project switches)
+	useEffect(() => {
+		if (!isAuthenticated) return;
+
 		let cancelled = false;
 
-		async function initializeServices() {
-			// Load skills into store (for status bar display)
-			try {
-				const skillService = SkillService.getInstance();
-				skillService.invalidateCache();
-				const skills = await skillService.loadSkills(projectPath);
-				if (!cancelled) {
-					useSkillStore.getState().setSkills(skills);
-				}
-			} catch (error) {
-				logger.warn('app', 'Failed to preload skills:', error);
-			}
-
-			// Initialize MCP servers from config
+		async function initMcp() {
 			try {
 				const mcpService = MCPService.getInstance();
-				await mcpService.initialize(projectPath);
+				await mcpService.initialize();
 
 				if (!cancelled) {
-					// Register MCP tools with the agent's tool executor
 					const mcpTools = mcpService.getAllTools();
 					if (mcpTools.length > 0) {
 						const toolExecutor = ToolExecutor.getInstance();
@@ -136,7 +136,56 @@ function App() {
 			}
 		}
 
-		initializeServices();
+		initMcp();
+		return () => { cancelled = true; };
+	}, [isAuthenticated]);
+
+	// Preload skills + project-specific MCP overrides when project changes
+	useEffect(() => {
+		if (!currentProject?.path) return;
+
+		const projectPath = currentProject.path;
+		let cancelled = false;
+
+		async function initializeProjectServices() {
+			// Build file index for @mentions and Quick Open
+			QuickOpenService.getInstance().initialize(projectPath).catch(err => {
+				logger.warn('app', 'Failed to initialize QuickOpen index:', err);
+			});
+
+			// Load skills into store (for status bar display)
+			try {
+				const skillService = SkillService.getInstance();
+				skillService.invalidateCache();
+				const skills = await skillService.loadSkills(projectPath);
+				if (!cancelled) {
+					useSkillStore.getState().setSkills(skills);
+				}
+			} catch (error) {
+				logger.warn('app', 'Failed to preload skills:', error);
+			}
+
+			// Load project-specific MCP overrides (without restarting global servers)
+			try {
+				const mcpService = MCPService.getInstance();
+				await mcpService.initialize(projectPath);
+
+				if (!cancelled) {
+					const mcpTools = mcpService.getAllTools();
+					if (mcpTools.length > 0) {
+						const toolExecutor = ToolExecutor.getInstance();
+						toolExecutor.registerMCPTools(mcpTools, (serverName, toolName, args) =>
+							mcpService.callTool(serverName, toolName, args)
+						);
+						AgentService.getInstance().refreshTools();
+					}
+				}
+			} catch (error) {
+				logger.warn('app', 'Failed to load project MCP overrides:', error);
+			}
+		}
+
+		initializeProjectServices();
 
 		return () => {
 			cancelled = true;
@@ -158,10 +207,14 @@ function App() {
 		return () => window.removeEventListener('beforeunload', handleBeforeUnload);
 	}, []);
 
-	const handleOpenProject = (path?: string) => {
+	const handleOpenProject = (path?: string, options?: { initGit?: boolean }) => {
 		if (path) {
-			openProject(path);
+			openProject(path, options);
 		}
+	};
+
+	const handleOnboardingComplete = (action: OnboardingDoneAction) => {
+		setLoginInitialMode(action);
 	};
 
 	// Show loading state while auth or app is initializing
@@ -178,9 +231,14 @@ function App() {
 		);
 	}
 
+	// First-time install → show onboarding before login
+	if (!hasCompletedOnboarding) {
+		return <OnboardingFlow onComplete={handleOnboardingComplete} />;
+	}
+
 	// Not authenticated → show login
 	if (!isAuthenticated) {
-		return <LoginScreen />;
+		return <LoginScreen initialMode={loginInitialMode} />;
 	}
 
 	return (

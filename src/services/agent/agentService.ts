@@ -4,7 +4,8 @@ import { devServerManager } from '../devServerManager'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { ServiceError } from '../../utils/errors'
 import { parseSSEStream, createThinkingDetector } from './streamParser'
-import { createDiffApprovalPromise, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
+import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
+import { useBillingStore } from '../../stores/billingStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
 import type { StreamEvent } from './streamParser'
@@ -14,6 +15,7 @@ import type { StreamEvent } from './streamParser'
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content?: string | null
+  reasoning_content?: string | null
   tool_calls?: OpenAIToolCall[]
   tool_call_id?: string
 }
@@ -129,6 +131,10 @@ class AgentService {
   private toolExecutor: ToolExecutor
   private tools: OpenAIToolDefinition[]
   private systemPrompt: string = ''
+  /** Request type header — e.g. 'plan' for /plan command to use reasoning model.
+   *  Only sent on the FIRST API call of the loop, then auto-cleared.
+   *  Subsequent turns (tool results, follow-ups) use the normal model. */
+  private requestType: string | null = null
   /** Real prompt token count from the last API response (from usage event). */
   private lastPromptTokens = 0
   /** Context window size (tokens) — updated from API usage if available. */
@@ -172,6 +178,10 @@ class AgentService {
     this.systemPrompt = prompt
   }
 
+  setRequestType(type: string | null) {
+    this.requestType = type
+  }
+
   /**
    * Refreshes the tool definitions (call after MCP tools are registered/changed).
    */
@@ -204,6 +214,59 @@ class AgentService {
     this.contextWindowSize = DEFAULT_CONTEXT_WINDOW
   }
 
+  /**
+   * Build the JSON request body for the chat completion API,
+   * including model-specific sampling and thinking parameters.
+   */
+  private async buildRequestBody(messages: OpenAIMessage[]): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = {
+      messages,
+      tools: this.tools,
+      stream: true,
+      stream_options: { include_usage: true },
+    }
+
+    // Lightweight sub-agents inherit the active model but with defaults
+    if (this.lightweightOptions) {
+      try {
+        const { getModelProfile } = await import('./modelProfiles')
+        const { useSettingsStore } = await import('../../stores/settingsStore')
+        const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
+        const profile = getModelProfile(modelId)
+        body.model = profile.modelId
+      } catch { /* fallback: no model field */ }
+      body.max_tokens = MAX_OUTPUT_TOKENS
+      return body
+    }
+
+    try {
+      const { getModelProfile, buildSamplingParams, buildThinkingParam } = await import('./modelProfiles')
+      const { useSettingsStore } = await import('../../stores/settingsStore')
+      const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
+      const profile = getModelProfile(modelId)
+
+      // Model ID for DashScope routing
+      body.model = profile.modelId
+
+      // Context window from profile
+      this.contextWindowSize = profile.contextWindow
+
+      // Thinking: enable unless model doesn't support it
+      const isThinking = profile.supportsThinking
+      const sampling = buildSamplingParams(profile, isThinking)
+      Object.assign(body, sampling)
+
+      const thinking = buildThinkingParam(profile, isThinking)
+      if (thinking) {
+        Object.assign(body, thinking)
+      }
+    } catch {
+      body.max_tokens = MAX_OUTPUT_TOKENS
+    }
+
+    return body
+  }
+
   async runAgentLoop(
     userMessage: string,
     conversationHistory: Array<{ role: string; content: string | null; tool_calls?: OpenAIToolCall[]; tool_call_id?: string }>,
@@ -224,6 +287,18 @@ class AgentService {
       this.lastPromptTokens = 0
       this.fileAccessLog = []
       this.summarizationFailures = 0
+      this.toolExecutor.resetSessionState()
+    }
+
+    // Initialize context window from model profile BEFORE the turn loop
+    // so compression threshold is correct from the first turn.
+    if (!this.lightweightOptions) {
+      try {
+        const { getModelProfile } = await import('./modelProfiles')
+        const { useSettingsStore } = await import('../../stores/settingsStore')
+        const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
+        this.contextWindowSize = getModelProfile(modelId).contextWindow
+      } catch { /* keep default */ }
     }
 
     const messages: OpenAIMessage[] = [
@@ -244,7 +319,7 @@ class AgentService {
     let continuationCount = 0
 
     try {
-      const maxTurns = this.lightweightOptions?.maxTurns ?? 50
+      const maxTurns = this.lightweightOptions?.maxTurns ?? Infinity
       while (turnCount < maxTurns) {
         if (this.abortController?.signal.aborted) return
 
@@ -302,6 +377,7 @@ class AgentService {
           messages.push({
             role: 'assistant',
             content: turnResult.textContent || null,
+            ...(turnResult.reasoningContent && { reasoning_content: turnResult.reasoningContent }),
           })
           // Prompt continuation — the model will resume from where it stopped
           messages.push({
@@ -312,10 +388,11 @@ class AgentService {
           continue
         }
 
-        // Add assistant message to history
+        // Add assistant message to history (preserve reasoning for models that use it)
         const assistantMsg: OpenAIMessage = {
           role: 'assistant',
           content: turnResult.textContent || null,
+          ...(turnResult.reasoningContent && { reasoning_content: turnResult.reasoningContent }),
         }
         if (turnResult.toolCalls.length > 0) {
           assistantMsg.tool_calls = turnResult.toolCalls.map(tc => ({
@@ -350,7 +427,14 @@ class AgentService {
           if (this.abortController?.signal.aborted) return null
 
           try {
-            const result = await this.toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id)
+            const TOOL_TIMEOUT = 300_000 // 5 minutes max per tool execution
+            let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+            const result = await Promise.race([
+              this.toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id),
+              new Promise<never>((_, reject) => {
+                timeoutHandle = setTimeout(() => reject(new Error(`Tool "${toolCall.name}" timed out after 5 minutes`)), TOOL_TIMEOUT)
+              }),
+            ]).finally(() => clearTimeout(timeoutHandle))
             if (this.abortController?.signal.aborted) return null
 
             // Check if the result is a diff (from write_file / edit_file / create_file)
@@ -392,12 +476,13 @@ class AgentService {
         }))
 
         // Add all results to messages (order doesn't matter — API matches by tool_call_id)
+        // Wrap content with boundary markers to prevent tool result injection
         for (const entry of toolResults) {
           if (!entry) continue
           messages.push({
             role: 'tool',
             tool_call_id: entry.toolCall.id,
-            content: entry.content,
+            content: `[TOOL_RESULT:${entry.toolCall.name}]\n${entry.content}\n[/TOOL_RESULT]`,
           })
         }
 
@@ -794,6 +879,10 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
     this.fileAccessLog = this.fileAccessLog.filter(e => e.path !== path)
     this.fileAccessLog.push({ path, action: resolvedAction, timestamp: Date.now() })
+    // Prevent unbounded growth — keep only the most recent entries
+    if (this.fileAccessLog.length > 200) {
+      this.fileAccessLog = this.fileAccessLog.slice(-200)
+    }
   }
 
   /**
@@ -883,10 +972,48 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
   }
 
   private async callAPI(messages: OpenAIMessage[]): Promise<Response> {
+    const MAX_RETRIES = 3
+    const RETRY_DELAYS = [20000, 20000, 25000] // 20s retry for rate limits (Free: 10 req/min)
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (this.abortController?.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+
+      try {
+        const response = await this.callAPIOnce(messages)
+        return response
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') throw err
+
+        const isRetryable = err instanceof ServiceError && err.retryable
+        const isLastAttempt = attempt === MAX_RETRIES
+
+        if (!isRetryable || isLastAttempt) throw err
+
+        // Wait before retrying (respect abort during wait)
+        const delay = RETRY_DELAYS[attempt] || 10000
+        logger.warn('agent', `API call failed (${(err as ServiceError).code}), retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`)
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, delay)
+          this.abortController?.signal.addEventListener('abort', () => {
+            clearTimeout(timer)
+            reject(new DOMException('Aborted', 'AbortError'))
+          }, { once: true })
+        })
+      }
+    }
+
+    // Unreachable, but TypeScript needs it
+    throw new ServiceError('Max retries exceeded', 'NETWORK_ERROR', false)
+  }
+
+  private async callAPIOnce(messages: OpenAIMessage[]): Promise<Response> {
     const url = `${WORKER_URL}/v1/chat/completions`
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     }
+
+    // Clear stale noCredits before each request (may have been resolved server-side)
+    useBillingStore.getState().clearNoCredits()
 
     const firebaseToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!firebaseToken) {
@@ -898,18 +1025,29 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     }
     headers['Authorization'] = `Bearer ${firebaseToken}`
 
+    // Include session ID for billing conversation tracking
+    const activeSession = useChatStore.getState().getActiveSession?.()
+    if (activeSession?.id) {
+      headers['X-Conversation-Id'] = activeSession.id
+    }
+
+    // Request type override (e.g. 'plan' for /plan command → reasoning model).
+    // Sent only on the first call — auto-cleared so subsequent turns
+    // (tool results, follow-ups) use the normal plan model.
+    if (this.requestType) {
+      headers['X-Request-Type'] = this.requestType
+      this.requestType = null
+    }
+
+    // Cache request body to reuse on 401 retry (avoids re-encoding which could differ)
+    const requestBody = JSON.stringify(await this.buildRequestBody(messages))
+
     let response: Response
     try {
       response = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          max_tokens: MAX_OUTPUT_TOKENS,
-          messages,
-          tools: this.tools,
-          stream: true,
-          stream_options: { include_usage: true },
-        }),
+        body: requestBody,
         signal: this.abortController?.signal,
       })
     } catch (err) {
@@ -925,9 +1063,28 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
     if (!response.ok) {
       if (response.status === 401) {
+        // Try force-refreshing the token once before giving up
+        const refreshedToken = await FirebaseAuthService.getInstance().getIdToken(true)
+        if (refreshedToken) {
+          const retryResponse = await fetch(url, {
+            method: 'POST',
+            headers: { ...headers, Authorization: `Bearer ${refreshedToken}` },
+            body: requestBody,
+            signal: this.abortController?.signal,
+          })
+          if (retryResponse.ok) return retryResponse
+        }
         throw new ServiceError(
           'Sessão expirada. Faz login novamente.',
           'AUTH_EXPIRED',
+          false
+        )
+      }
+      if (response.status === 402) {
+        useBillingStore.getState().setNoCredits()
+        throw new ServiceError(
+          'Sem créditos disponíveis. Aguarda a renovação ou faz upgrade do plano.',
+          'NO_CREDITS',
           false
         )
       }
@@ -935,20 +1092,22 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
         throw new ServiceError(
           'Limite de requests atingido. Tenta daqui a pouco.',
           'RATE_LIMIT',
-          true
+          true  // Frontend retries — backend does NOT retry rate limits
         )
       }
       if (response.status >= 500) {
         throw new ServiceError(
           'Erro no servidor. Tenta novamente.',
           'SERVER_ERROR',
-          true
+          false  // Backend already retries network errors (11 attempts) — no frontend retry to avoid cascade
         )
       }
 
-      const errorBody = await response.text()
+      // Log full error for debugging but show sanitized message to user
+      const errorBody = await response.text().catch(() => '')
+      logger.error('agent', `API error ${response.status}: ${errorBody.slice(0, 500)}`)
       throw new ServiceError(
-        `Erro na API (${response.status}): ${errorBody}`,
+        `Erro na API (${response.status}). Tenta novamente.`,
         'API_ERROR',
         false
       )
@@ -964,6 +1123,9 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       const parsed = parseInt(contextWindow, 10)
       if (parsed > 0) this.contextWindowSize = parsed
     }
+
+    // Read billing info from response headers
+    useBillingStore.getState().updateFromHeaders(response.headers)
 
     return response
   }
@@ -992,6 +1154,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
         switch (event.type) {
           case 'text_delta': {
             const { reasoning, content } = thinkingDetector.process(event.content)
+
 
             if (reasoning) {
               reasoningContent += reasoning
@@ -1043,6 +1206,18 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
             break
           }
 
+          case 'billing': {
+            useBillingStore.getState().updateFromSSE({
+              type: 'billing',
+              credits_remaining: event.creditsRemaining,
+              credits_used: event.creditsUsed,
+              tokens_used: event.tokensUsed,
+              plan: event.plan,
+              source: event.source,
+            })
+            break
+          }
+
           case 'error': {
             callbacks.onError(new Error(event.message))
             break
@@ -1053,7 +1228,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
           }
         }
       },
-    })
+    }, this.abortController?.signal)
 
     // Parse tool call arguments (now JSON is complete)
     const toolCalls = Array.from(toolCallsMap.values()).map(tc => {

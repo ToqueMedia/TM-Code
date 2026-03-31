@@ -1,4 +1,4 @@
-import { Suspense, lazy } from 'react'
+import { Suspense, lazy, memo } from 'react'
 import { Flex } from '@chakra-ui/react'
 import EditorTabs from '../ui/EditorTabs'
 import Breadcrumbs from '../ui/Breadcrumbs'
@@ -55,7 +55,7 @@ const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 			{activeFile ? (
 				<Suspense fallback={<EditorSkeleton />}>
 					<MonacoEditor
-						key={activeFile || 'no-file'}
+						key="main-editor"
 						path={activeFile}
 						onCursorPositionChange={onCursorPositionChange}
 					/>
@@ -69,4 +69,4 @@ const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 
 EditorWorkspace.displayName = 'EditorWorkspace'
 
-export default EditorWorkspace
+export default memo(EditorWorkspace)

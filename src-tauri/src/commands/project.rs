@@ -178,17 +178,6 @@ pub fn validate_project_path(path: String) -> Result<ValidationResult> {
         });
     }
 
-    // Check for required files (package.json or .git)
-    let has_package_json = project_path.join("package.json").exists();
-    let has_git = project_path.join(".git").exists();
-
-    if !has_package_json && !has_git {
-        return Ok(ValidationResult {
-            valid: false,
-            error: Some("Project must have package.json or .git directory".to_string()),
-        });
-    }
-
     // Check permissions
     let metadata = fs::metadata(project_path)?;
     if metadata.permissions().readonly() {
@@ -279,7 +268,7 @@ pub fn validate_project_location(location: String) -> Result<ValidationResult> {
 
 // Project Commands
 #[tauri::command]
-pub fn open_project(path: String) -> Result<ProjectInfo> {
+pub fn open_project(path: String, init_git: Option<bool>) -> Result<ProjectInfo> {
     let project_path = Path::new(&path);
 
     // Validate path exists and is accessible
@@ -304,14 +293,30 @@ pub fn open_project(path: String) -> Result<ProjectInfo> {
         ));
     }
 
-    // Check for required files (package.json or .git)
     let has_package_json = project_path.join("package.json").exists();
-    let has_git = project_path.join(".git").exists();
 
-    if !has_package_json && !has_git {
-        return Err(ProjectError::InvalidPath(
-            "Project must have package.json or .git directory".to_string(),
-        ));
+    // Initialize git for empty projects (e.g. "New Empty Project" flow)
+    if init_git.unwrap_or(false) && !project_path.join(".git").exists() {
+        // Try common git paths — GUI apps on macOS may not inherit shell PATH
+        let git_candidates = ["git", "/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"];
+        let mut initialized = false;
+
+        for git_bin in &git_candidates {
+            if let Ok(output) = std::process::Command::new(git_bin)
+                .args(["init"])
+                .current_dir(project_path)
+                .output()
+            {
+                if output.status.success() {
+                    initialized = true;
+                    break;
+                }
+            }
+        }
+
+        if !initialized {
+            eprintln!("[open_project] git init failed for {:?} — none of the git candidates worked", project_path);
+        }
     }
 
     // Check permissions
@@ -1149,7 +1154,7 @@ fn is_valid_npm_name(name: &str) -> bool {
         return false;
     }
 
-    let first_char = name.chars().next().unwrap();
+    let Some(first_char) = name.chars().next() else { return false };
     if !first_char.is_ascii_lowercase() {
         return false;
     }
