@@ -8,6 +8,7 @@ import QuickOpen from './QuickOpen'
 import { tokens } from '@/theme/tokens'
 import { handleClose, handleMinimize, handleFullToggle, handleMouseDown } from './titlebar/useWindowControls'
 import { useQuickOpen } from './titlebar/useQuickOpen'
+import { IS_MAC } from '../../utils/platform'
 
 function TitleBar() {
 	const { currentProject, recentProjects, loadRecentProjects, openProject } = useProjectStore()
@@ -59,18 +60,20 @@ function TitleBar() {
 			data-tauri-drag-region
 			onMouseDown={handleMouseDown}
 		>
-			{/* Left: traffic lights + project + menus */}
+			{/* Left: traffic lights (macOS) + project + menus */}
 			<HStack
 				gap={2}
 				flexShrink={0}
 				align="center"
 				data-tauri-drag-region="false"
 			>
-				<WindowControls
-					onClose={handleClose}
-					onMinimize={handleMinimize}
-					onMaximize={handleFullToggle}
-				/>
+				{IS_MAC && (
+					<WindowControls
+						onClose={handleClose}
+						onMinimize={handleMinimize}
+						onMaximize={handleFullToggle}
+					/>
+				)}
 				<ProjectMenu
 					currentProjectName={currentProject?.name}
 					recentProjects={recentProjects}
@@ -103,8 +106,18 @@ function TitleBar() {
 				/>
 			</Flex>
 
-			{/* Right spacer for symmetry */}
-			<Box width="70px" flexShrink={0} />
+			{/* Right: window controls (Windows/Linux) or spacer (macOS) */}
+			{IS_MAC ? (
+				<Box width="70px" flexShrink={0} />
+			) : (
+				<HStack flexShrink={0} data-tauri-drag-region="false">
+					<WindowControls
+						onClose={handleClose}
+						onMinimize={handleMinimize}
+						onMaximize={handleFullToggle}
+					/>
+				</HStack>
+			)}
 		</Flex>
 	)
 }

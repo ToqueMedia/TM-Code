@@ -7,9 +7,10 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, State};
-use super::container::{docker_cmd, recover_colima};
-
-use super::container::{clamp_to_project, host_to_container_path, ActiveProjectState, WORKSPACE_PATH};
+use super::container::{
+    docker_cmd, recover_colima, clamp_to_project, host_to_container_path,
+    ActiveProjectState, WORKSPACE_PATH,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +56,7 @@ pub fn init_user_path() {
 pub fn get_user_path() -> Option<&'static str> {
     USER_PATH.get_or_init(|| {
         let user_shell = std::env::var("SHELL").unwrap_or_default();
+        eprintln!("[PATH] Extracting user PATH... SHELL={:?}", user_shell);
 
         // fish has incompatible syntax ($PATH is a list, not colon-delimited).
         // Use zsh or bash as a POSIX fallback for PATH extraction.
@@ -66,24 +68,65 @@ pub fn get_user_path() -> Option<&'static str> {
             vec![user_shell, "/bin/zsh".into()]
         };
 
-        for shell in &shells {
-            if let Ok(output) = std::process::Command::new(shell)
-                .args(["-l", "-c", "printf '%s' \"$PATH\""])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .output()
-            {
-                if output.status.success() {
-                    if let Ok(path) = String::from_utf8(output.stdout) {
-                        if !path.is_empty() {
-                            return Some(path);
+        // Try interactive-login first (-i -l) to pick up .zshrc/.bashrc (nvm, volta, brew on M1),
+        // then fall back to login-only (-l) which reads .zprofile/.bash_profile.
+        let flag_sets: &[&[&str]] = &[&["-i", "-l", "-c"], &["-l", "-c"]];
+        for flags in flag_sets {
+            for shell in &shells {
+                // Run in a thread with channel-based timeout to avoid hangs
+                // from complex shell configs (oh-my-zsh, compinit, starship, etc.)
+                let shell_for_thread = shell.clone();
+                let flags_vec: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
+                let flags_dbg = format!("{:?}", flags); // for logging
+                let shell_dbg = shell.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+
+                std::thread::spawn(move || {
+                    let result = std::process::Command::new(&shell_for_thread)
+                        .args(&flags_vec)
+                        .arg("printf '%s' \"$PATH\"")
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null())
+                        .stdin(Stdio::null())
+                        .output();
+                    let _ = tx.send(result);
+                });
+
+                match rx.recv_timeout(Duration::from_secs(5)) {
+                    Ok(Ok(output)) if output.status.success() => {
+                        if let Ok(path) = String::from_utf8(output.stdout) {
+                            if !path.is_empty() {
+                                eprintln!("[PATH] Success via {} {} ({} chars)", shell_dbg, flags_dbg, path.len());
+                                return Some(path);
+                            }
                         }
+                    }
+                    Ok(Ok(output)) => {
+                        eprintln!("[PATH] {} {} exited with {:?}", shell_dbg, flags_dbg, output.status.code());
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("[PATH] {} {} spawn error: {}", shell_dbg, flags_dbg, e);
+                    }
+                    Err(_) => {
+                        eprintln!("[PATH] {} {} timed out (5s)", shell_dbg, flags_dbg);
                     }
                 }
             }
         }
         None
     }).as_deref()
+}
+
+/// Prevent a visible CMD/console window from flashing on Windows.
+/// No-op on other platforms.
+#[allow(unused_variables)]
+fn hide_console_window(cmd: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 }
 
 fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
@@ -94,6 +137,8 @@ fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
             .current_dir(cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        hide_console_window(&mut cmd);
         return cmd;
     }
 
@@ -106,8 +151,39 @@ fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Inject user's full login-shell PATH so tools from brew, nvm, volta are found.
+    // If extraction failed, fall back: prepend common tool dirs to the inherited PATH.
     if let Some(path) = get_user_path() {
         cmd.env("PATH", path);
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        // Scan for nvm node binary — resolve the actual installed version
+        let nvm_bin = std::fs::read_dir(format!("{}/.nvm/versions/node", home))
+            .ok()
+            .and_then(|entries| {
+                entries.filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .max_by_key(|e| e.file_name())
+                    .map(|e| format!("{}/bin", e.path().display()))
+            })
+            .unwrap_or_default();
+
+        let extra_dirs = [
+            nvm_bin.as_str(),
+            &format!("{}/.local/share/pnpm", home),
+            &format!("{}/.bun/bin", home),
+            &format!("{}/.cargo/bin", home),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ];
+        let prepend: String = extra_dirs.iter()
+            .filter(|d| !d.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(":");
+
+        cmd.env("PATH", format!("{}:{}", prepend, inherited));
     }
 
     #[cfg(unix)]
@@ -619,6 +695,11 @@ pub async fn start_dev_server(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
 
+            // Inject user's full PATH so npm/pnpm/node are found
+            if let Some(path) = get_user_path() {
+                c.env("PATH", path);
+            }
+
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
@@ -645,6 +726,10 @@ pub async fn start_dev_server(
             .env("BROWSER", "none")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        if let Some(path) = get_user_path() {
+            c.env("PATH", path);
+        }
 
         #[cfg(unix)]
         {
@@ -734,15 +819,29 @@ pub async fn start_dev_server(
         // Actually, we insert the child into the process map and wait on PID via kill -0 polling.
         map.insert(pid, child);
 
-        // Spawn a thread that waits for the process to actually exit
+        // Spawn a thread that polls whether the process is still alive
         std::thread::spawn(move || {
             loop {
-                // Check if process is still alive using kill -0
-                let alive = Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
+                let alive = if cfg!(unix) {
+                    Command::new("kill")
+                        .args(["-0", &pid.to_string()])
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                } else {
+                    // Windows: check via tasklist
+                    let mut tc = Command::new("tasklist");
+                    tc.args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null());
+                    hide_console_window(&mut tc);
+                    tc.output()
+                        .map(|o| {
+                            let out = String::from_utf8_lossy(&o.stdout);
+                            out.contains(&pid.to_string())
+                        })
+                        .unwrap_or(false)
+                };
 
                 if !alive {
                     let _ = app_clone.emit("dev-server-exit", pid);
@@ -819,13 +918,16 @@ pub async fn start_interactive_shell(
             (shell, vec!["-i".to_string()])
         };
 
-        let child = Command::new(&shell_cmd)
-            .args(&shell_args)
+        let mut cmd = Command::new(&shell_cmd);
+        cmd.args(&shell_args)
             .current_dir(&working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+
+        hide_console_window(&mut cmd);
+
+        let child = cmd.spawn()
             .map_err(|e| format!("Failed to start interactive shell: {}", e))?;
 
         let pid = child.id();
@@ -857,13 +959,16 @@ pub async fn start_interactive_shell(
         (shell, vec!["-i".to_string()])
     };
 
-    let child = Command::new(&shell_cmd)
-        .args(&shell_args)
+    let mut cmd = Command::new(&shell_cmd);
+    cmd.args(&shell_args)
         .current_dir(&working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+
+    hide_console_window(&mut cmd);
+
+    let child = cmd.spawn()
         .map_err(|e| format!("Failed to start interactive shell: {}", e))?;
 
     let pid = child.id();
@@ -910,24 +1015,36 @@ pub async fn kill_port(port: u16) -> Result<bool, String> {
             "for /f \"tokens=5\" %a in ('netstat -aon ^| findstr :{} ^| findstr LISTENING') do taskkill /F /PID %a",
             port
         );
-        let _ = Command::new("cmd")
-            .args(["/C", &cmd])
-            .output();
+        let mut kill_cmd = Command::new("cmd");
+        kill_cmd.args(["/C", &cmd]);
+        hide_console_window(&mut kill_cmd);
+        let _ = kill_cmd.output();
     }
 
     // Wait until the OS actually frees the port (up to 3s).
     // kill -9 is async — the kernel may take a moment to release the socket.
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let check = format!("lsof -ti:{}", port);
-        if let Ok(output) = Command::new("sh").args(["-c", &check]).output() {
-            if output.stdout.is_empty() {
-                return Ok(true);
-            }
+        let port_free = if cfg!(unix) {
+            let check = format!("lsof -ti:{}", port);
+            Command::new("sh").args(["-c", &check]).output()
+                .map(|o| o.stdout.is_empty())
+                .unwrap_or(true)
+        } else {
+            let check = format!("netstat -aon | findstr :{} | findstr LISTENING", port);
+            let mut nc = Command::new("cmd");
+            nc.args(["/C", &check]);
+            hide_console_window(&mut nc);
+            nc.output()
+                .map(|o| o.stdout.is_empty())
+                .unwrap_or(true)
+        };
+        if port_free {
+            return Ok(true);
         }
     }
 
-    // Port still occupied after 3s — try one more kill
+    // Port still occupied after 3s — try one more kill (Unix only)
     if cfg!(unix) {
         let cmd = format!("lsof -ti:{} | xargs kill -9 2>/dev/null", port);
         let _ = Command::new("sh").args(["-c", &cmd]).output();
@@ -1065,18 +1182,25 @@ pub async fn command_exists(
     }
 
     // Host execution (app-level or no isolation)
-    let which_cmd = if cfg!(target_os = "windows") {
-        "where"
+    // Must use the user's full PATH (from login shell) so tools installed
+    // via brew, corepack, npm -g, volta, nvm are found.
+    if cfg!(target_os = "windows") {
+        let mut cmd = Command::new("where");
+        cmd.arg(&command);
+        hide_console_window(&mut cmd);
+        let output = cmd.output()
+            .map_err(|e| format!("Failed to check command existence: {}", e))?;
+        Ok(output.status.success())
     } else {
-        "which"
-    };
-
-    let output = Command::new(which_cmd)
-        .arg(&command)
-        .output()
-        .map_err(|e| format!("Failed to check command existence: {}", e))?;
-
-    Ok(output.status.success())
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &format!("which {}", command)]);
+        if let Some(path) = get_user_path() {
+            cmd.env("PATH", path);
+        }
+        let output = cmd.output()
+            .map_err(|e| format!("Failed to check command existence: {}", e))?;
+        Ok(output.status.success())
+    }
 }
 
 #[tauri::command]

@@ -2,8 +2,7 @@ import { memo } from 'react'
 import { Flex, Kbd, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import type { KeyBinding } from '@/stores/settingsStore'
-
-const IS_MAC = /Mac/.test(navigator.platform || '')
+import { IS_MAC } from '@/utils/platform'
 
 const KEY_LABELS: Record<string, string> = {
   Enter: IS_MAC ? '↩' : 'Enter',

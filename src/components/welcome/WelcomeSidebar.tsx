@@ -32,6 +32,7 @@ interface WelcomeSidebarProps {
   onNewProject: () => void
   onProjectFromScratch: () => void
   onOpenFolder: () => void
+  onOpenFile: () => void
   onCloneRepository: () => void
   onOpenProject: (path?: string) => void
   onSettings?: () => void
@@ -41,6 +42,7 @@ const actionItems = [
   { id: 'new', icon: LuFilePlus2, label: 'New Project', color: tokens.colors.accent.primary },
   { id: 'scratch', icon: LuFileCode, label: 'Project from Scratch', color: tokens.colors.accent.orange },
   { id: 'open', icon: LuFolderOpen, label: 'Open Folder', color: tokens.colors.accent.greenBright },
+  { id: 'file', icon: LuFileCode, label: 'Open File', color: tokens.colors.text.secondary },
   { id: 'clone', icon: LuGitBranch, label: 'Clone Repository', color: tokens.colors.accent.purple },
 ]
 
@@ -49,6 +51,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   onNewProject,
   onProjectFromScratch,
   onOpenFolder,
+  onOpenFile,
   onCloneRepository,
   onOpenProject,
   onSettings,
@@ -57,6 +60,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
     if (id === 'new') onNewProject()
     else if (id === 'scratch') onProjectFromScratch()
     else if (id === 'open') onOpenFolder()
+    else if (id === 'file') onOpenFile()
     else if (id === 'clone') onCloneRepository()
   }
 
@@ -276,7 +280,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
           </Icon>
         </Flex>
         <Text fontSize="10px" color={tokens.colors.text.muted} opacity={0.5}>
-          v0.1.0
+          v0.1.3
         </Text>
       </Flex>
     </Box>

@@ -13,6 +13,7 @@ import FirebaseAuthService from '../services/auth/firebaseAuth'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
 import { useTranslation } from '@/i18n'
+import { IS_MAC } from '@/utils/platform'
 
 const IssueReporterDialog = lazy(() => import('./dialogs/IssueReporterDialog'))
 
@@ -169,13 +170,15 @@ function MinimalTitleBar() {
       data-tauri-drag-region
       onMouseDown={handleMouseDown}
     >
-      {/* Left: Window controls + menus */}
+      {/* Left: Window controls (macOS) + menus */}
       <HStack gap={2} flexShrink={0} pl={1} data-tauri-drag-region="false">
-        <WindowControls
-          onClose={handleClose}
-          onMinimize={handleMinimize}
-          onMaximize={handleFullToggle}
-        />
+        {IS_MAC && (
+          <WindowControls
+            onClose={handleClose}
+            onMinimize={handleMinimize}
+            onMaximize={handleFullToggle}
+          />
+        )}
         <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary} whiteSpace="nowrap">
           TM Code
         </Text>
@@ -276,6 +279,17 @@ function MinimalTitleBar() {
           </Box>
         )}
       </HStack>
+
+      {/* Right: window controls (Windows/Linux) */}
+      {!IS_MAC && (
+        <HStack flexShrink={0} data-tauri-drag-region="false">
+          <WindowControls
+            onClose={handleClose}
+            onMinimize={handleMinimize}
+            onMaximize={handleFullToggle}
+          />
+        </HStack>
+      )}
 
       {/* Dropdown rendered in portal to escape overflow:hidden */}
       {showUserMenu && user && (

@@ -447,7 +447,9 @@ export function usePromptBar() {
         clearDraftAttachments()
       }
 
-      chatStore.addUserMessage(augmentedPrompt, attachments)
+      // Display the original prompt (without file contents) in the chat bubble.
+      // The augmented version (with file contents) is only sent to the model.
+      chatStore.addUserMessage(prompt, attachments)
       chatStore.startAssistantMessage()
       agentStore.setStatus('thinking')
 
@@ -476,7 +478,7 @@ export function usePromptBar() {
       const agentService = AgentService.getInstance()
       agentService.setSystemPrompt(systemPrompt)
 
-      await agentService.runAgentLoop(prompt, history, {
+      await agentService.runAgentLoop(augmentedPrompt, history, {
         onTextDelta: (delta) => {
           agentStore.setStatus('generating')
           appendTextDeltaBuffered(delta)

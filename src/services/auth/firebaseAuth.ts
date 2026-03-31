@@ -19,6 +19,11 @@ import {
   setDoc,
   Timestamp,
 } from 'firebase/firestore'
+import {
+  initializeAppCheck,
+  CustomProvider,
+  type AppCheckToken,
+} from 'firebase/app-check'
 import { useAuthStore } from '../../stores/authStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
@@ -52,6 +57,52 @@ function ensureFirebase() {
   _auth = getAuth(_app)
   initializeFirestore(_app, { ignoreUndefinedProperties: true })
   _db = getFirestore(_app)
+
+  // AppCheck — opt-in via VITE_APPCHECK_ENABLED=true.
+  // Requires backend /v1/appcheck-token endpoint to be deployed first.
+  if (import.meta.env.VITE_APPCHECK_ENABLED === 'true') {
+    try {
+      if (import.meta.env.DEV) {
+        // @ts-expect-error — Firebase debug token interface
+        self.FIREBASE_APPCHECK_DEBUG_TOKEN = true
+      }
+
+      const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+
+      const appCheckProvider = new CustomProvider({
+        getToken: async (): Promise<AppCheckToken> => {
+          const auth = getAuth(_app!)
+          const user = auth.currentUser
+          if (!user) {
+            return { token: '', expireTimeMillis: Date.now() + 5_000 }
+          }
+
+          const idToken = await user.getIdToken()
+          const res = await fetch(`${workerUrl}/v1/appcheck-token`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${idToken}`,
+              'Content-Type': 'application/json',
+            },
+          })
+
+          if (!res.ok) {
+            throw new Error(`AppCheck token exchange failed: ${res.status}`)
+          }
+
+          const data = await res.json() as { token: string; expireTimeMillis: number }
+          return { token: data.token, expireTimeMillis: data.expireTimeMillis }
+        },
+      })
+
+      initializeAppCheck(_app, {
+        provider: appCheckProvider,
+        isTokenAutoRefreshEnabled: true,
+      })
+    } catch {
+      // AppCheck init failed — non-fatal
+    }
+  }
 }
 
 function getFirebaseAuth() { ensureFirebase(); return _auth! }

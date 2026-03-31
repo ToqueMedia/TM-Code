@@ -4,7 +4,7 @@ import { FiSend, FiSquare, FiCode, FiMonitor, FiPaperclip, FiChevronUp } from 'r
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useSettingsStore, type AgentModelId } from '../../stores/settingsStore'
 import { useBillingStore } from '../../stores/billingStore'
-import { getModelsForPlan, getDefaultModelForPlan, type ModelProfile } from '../../services/agent/modelProfiles'
+import { getModelsForPlan, getDefaultModelForPlan, getModelProfile, type ModelProfile } from '../../services/agent/modelProfiles'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -38,20 +38,26 @@ function PromptActions({
   const agentModel = useSettingsStore(s => s.agentModel)
   const setAgentModel = useSettingsStore(s => s.setAgentModel)
   const billingPlan = useBillingStore(s => s.plan)
+  const billingLoaded = useBillingStore(s => s.isLoaded)
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const profiles = getModelsForPlan(billingPlan)
   const isAvailable = profiles.some(p => p.id === agentModel)
-  // Use the correct default immediately (no 1-frame fallback to profiles[0])
-  const effectiveModelId = isAvailable ? agentModel : getDefaultModelForPlan(billingPlan)
-  const activeProfile = profiles.find(p => p.id === effectiveModelId) || profiles[0]
 
-  // Persist the corrected model to settings (deferred to avoid render-time setState)
+  // While billing is loading, show the user's persisted model (don't filter by plan yet).
+  // After billing loads, enforce plan restrictions.
+  const activeProfile = !billingLoaded
+    ? getModelProfile(agentModel)
+    : (profiles.find(p => p.id === agentModel) || profiles.find(p => p.id === getDefaultModelForPlan(billingPlan)) || profiles[0])
+
+  // Persist the corrected model to settings — only AFTER billing data is loaded
+  // to avoid resetting a paid user's model to free before /v1/me returns.
   useEffect(() => {
+    if (!billingLoaded) return
     if (!isAvailable) {
       setAgentModel(getDefaultModelForPlan(billingPlan) as AgentModelId)
     }
-  }, [billingPlan, isAvailable, setAgentModel])
+  }, [billingPlan, billingLoaded, isAvailable, setAgentModel])
 
   useEffect(() => {
     if (!isModelMenuOpen) return
@@ -91,7 +97,7 @@ function PromptActions({
             onClick={() => { if (!isStreaming) setIsModelMenuOpen(!isModelMenuOpen) }}
           >
             <Text fontSize="11px" fontWeight={600} letterSpacing="0.02em">
-              {activeProfile.persona.name}
+              {activeProfile.persona.name.split(' ').pop() || activeProfile.persona.name}
             </Text>
             <FiChevronUp size={10} style={{
               transform: isModelMenuOpen ? 'rotate(180deg)' : 'none',

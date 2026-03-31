@@ -192,11 +192,26 @@ pub async fn git_status_files(project_path: String) -> Result<Vec<GitFileStatus>
             file_path
         };
 
+        // ('M','M') = both staged AND unstaged changes — emit TWO entries
+        if index_status == 'M' && worktree_status == 'M' {
+            files.push(GitFileStatus {
+                path: display_path.clone(),
+                status: "modified".to_string(),
+                staged: true,
+            });
+            files.push(GitFileStatus {
+                path: display_path,
+                status: "modified".to_string(),
+                staged: false,
+            });
+            continue;
+        }
+
         let (status, staged) = match (index_status, worktree_status) {
             ('?', '?') => ("untracked", false),
             ('A', _) => ("added", true),
             ('M', ' ') => ("modified", true),
-            (' ', 'M') | ('M', 'M') => ("modified", false),
+            (' ', 'M') => ("modified", false),
             ('D', _) => ("deleted", true),
             (' ', 'D') => ("deleted", false),
             ('R', _) => ("renamed", true),
@@ -403,7 +418,10 @@ pub async fn git_push(project_path: String, remote: Option<String>, branch: Opti
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    // git push/pull write progress to stderr — return whichever has content
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok(if stdout.is_empty() { stderr } else { stdout })
 }
 
 /// Pull from remote
@@ -418,5 +436,7 @@ pub async fn git_pull(project_path: String, remote: Option<String>, branch: Opti
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok(if stdout.is_empty() { stderr } else { stdout })
 }

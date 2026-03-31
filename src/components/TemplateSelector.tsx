@@ -16,6 +16,7 @@ import { t } from '@/i18n'
 import { templateService, Template } from '../services/templateService'
 import { LoadingSpinner } from './ui/LoadingSpinner'
 import WindowControls from './ui/WindowControls'
+import { IS_MAC } from '@/utils/platform'
 
 interface TemplateSelectorProps {
   onSelectTemplate: (template: Template, projectName: string) => void
@@ -154,14 +155,24 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
       data-tauri-drag-region
       onMouseDown={handleDrag}
     >
-      {/* Window controls */}
-      <Box position="absolute" top={3} left={4} zIndex={10}>
-        <WindowControls
-          onClose={handleClose}
-          onMinimize={handleMinimize}
-          onMaximize={handleFullToggle}
-        />
-      </Box>
+      {/* Window controls — macOS: top-left, Windows/Linux: top-right */}
+      {IS_MAC ? (
+        <Box position="absolute" top={3} left={4} zIndex={10}>
+          <WindowControls
+            onClose={handleClose}
+            onMinimize={handleMinimize}
+            onMaximize={handleFullToggle}
+          />
+        </Box>
+      ) : (
+        <Box position="absolute" top={0} right={0} zIndex={10}>
+          <WindowControls
+            onClose={handleClose}
+            onMinimize={handleMinimize}
+            onMaximize={handleFullToggle}
+          />
+        </Box>
+      )}
 
       {/* Header */}
       <Flex

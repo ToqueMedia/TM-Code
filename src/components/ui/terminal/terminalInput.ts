@@ -50,10 +50,32 @@ export function setupTerminalInput({
   // Use sessionRef if provided for always-fresh session, otherwise fall back to captured value
   const getSession = () => sessionRef?.current ?? session;
   let currentLine = '';
+  let cursorPos = 0; // position within currentLine
   let commandHistory: string[] = [];
   let historyIndex = -1;
   let searchMode = false;
   let searchTerm = '';
+
+  /** Redraw the current line from cursor to end (after insert/delete in middle) */
+  function redrawFromCursor() {
+    // Save cursor, write rest of line, clear to end, restore cursor
+    const rest = currentLine.slice(cursorPos);
+    terminal.write(rest + '\x1b[K'); // write rest + clear to end of line
+    // Move cursor back to cursorPos
+    for (let i = 0; i < rest.length; i++) terminal.write('\b');
+  }
+
+  /** Replace the entire current line and put cursor at end */
+  function setLine(newLine: string) {
+    // Move cursor to start of current line text
+    for (let i = 0; i < cursorPos; i++) terminal.write('\b');
+    // Clear from start to end
+    terminal.write('\x1b[K');
+    // Write new line
+    terminal.write(newLine);
+    currentLine = newLine;
+    cursorPos = newLine.length;
+  }
 
   terminal.onData(async (data) => {
     if (commandLockRef.current) return;
@@ -67,16 +89,20 @@ export function setupTerminalInput({
           const found = commandHistory.find(cmd => cmd.includes(searchTerm));
           if (found) {
             currentLine = found;
+            cursorPos = found.length;
             terminal.write(`\r\x1b[K`);
             await displayPrompt(terminal, currentSession);
             terminal.write(currentLine);
           } else {
+            currentLine = ''; cursorPos = 0;
             terminal.write('\r\x1b[Knot found');
             setTimeout(async () => {
               terminal.write('\r\x1b[K');
               await displayPrompt(terminal, getSession());
             }, 1000);
           }
+        } else {
+          cursorPos = 0;
         }
         searchTerm = '';
       } else if (currentLine.trim()) {
@@ -88,24 +114,36 @@ export function setupTerminalInput({
         if (currentSession) {
           await execCmd(currentLine.trim(), terminal, currentSession, updateSessionCwd, commandLockRef, xtermRef);
         }
-        currentLine = '';
+        currentLine = ''; cursorPos = 0;
       } else {
         terminal.write('\r\n');
         await displayPrompt(terminal, currentSession);
+        cursorPos = 0;
       }
     } else if (code === 127) { // Backspace
       if (searchMode && searchTerm.length > 0) {
         searchTerm = searchTerm.slice(0, -1);
         terminal.write('\b \b');
-      } else if (!searchMode && currentLine.length > 0) {
-        currentLine = currentLine.slice(0, -1);
-        terminal.write('\b \b');
+      } else if (!searchMode && cursorPos > 0) {
+        currentLine = currentLine.slice(0, cursorPos - 1) + currentLine.slice(cursorPos);
+        cursorPos--;
+        terminal.write('\b');
+        redrawFromCursor();
       }
-    } else if (code === 27) { // Escape
+    } else if (code === 27) { // Escape sequences (arrows etc.) — let onKey handle them
       return;
     } else if (code >= 32 && code < 127) {
-      if (searchMode) { searchTerm += data; } else { currentLine += data; }
+      if (searchMode) {
+        searchTerm += data;
+      } else {
+        // Insert at cursor position
+        currentLine = currentLine.slice(0, cursorPos) + data + currentLine.slice(cursorPos);
+        cursorPos++;
+      }
       terminal.write(data);
+      if (!searchMode && cursorPos < currentLine.length) {
+        redrawFromCursor();
+      }
     }
   });
 
@@ -114,7 +152,7 @@ export function setupTerminalInput({
       ev.preventDefault();
       if (commandHistory.length > 0 && historyIndex < commandHistory.length - 1) {
         historyIndex++;
-        currentLine = replaceCurrentLine(terminal, currentLine, commandHistory[commandHistory.length - 1 - historyIndex]);
+        setLine(commandHistory[commandHistory.length - 1 - historyIndex]);
       }
       return;
     }
@@ -122,10 +160,26 @@ export function setupTerminalInput({
       ev.preventDefault();
       if (historyIndex > 0) {
         historyIndex--;
-        currentLine = replaceCurrentLine(terminal, currentLine, commandHistory[commandHistory.length - 1 - historyIndex]);
+        setLine(commandHistory[commandHistory.length - 1 - historyIndex]);
       } else if (historyIndex === 0) {
         historyIndex = -1;
-        currentLine = replaceCurrentLine(terminal, currentLine, '');
+        setLine('');
+      }
+      return;
+    }
+    if (ev.code === 'ArrowLeft') { // Move cursor left
+      ev.preventDefault();
+      if (cursorPos > 0) {
+        cursorPos--;
+        terminal.write('\x1b[D'); // CSI cursor left
+      }
+      return;
+    }
+    if (ev.code === 'ArrowRight') { // Move cursor right
+      ev.preventDefault();
+      if (cursorPos < currentLine.length) {
+        cursorPos++;
+        terminal.write('\x1b[C'); // CSI cursor right
       }
       return;
     }
@@ -134,12 +188,12 @@ export function setupTerminalInput({
       await killActiveStreamingCommand(s?.id);
       terminal.write('\r\n^C\r\n');
       await displayPrompt(terminal, s);
-      currentLine = ''; historyIndex = -1; commandLockRef.current = false;
+      currentLine = ''; cursorPos = 0; historyIndex = -1; commandLockRef.current = false;
       return;
     }
     if (ev.ctrlKey && ev.code === 'KeyL') { // Clear screen
       terminal.clear(); await displayPrompt(terminal, getSession());
-      currentLine = ''; historyIndex = -1;
+      currentLine = ''; cursorPos = 0; historyIndex = -1;
       return;
     }
     if (ev.ctrlKey && ev.code === 'KeyR') { // Reverse search
@@ -147,21 +201,66 @@ export function setupTerminalInput({
       if (!searchMode) { searchMode = true; terminal.write('\r\x1b[K(reverse-i-search): '); }
       return;
     }
-    if (ev.ctrlKey && ev.code === 'KeyU') { // Clear line
-      ev.preventDefault(); clearChars(terminal, currentLine.length); currentLine = '';
+    if (ev.ctrlKey && ev.code === 'KeyU') { // Kill backward to beginning of line
+      ev.preventDefault();
+      if (cursorPos > 0) {
+        const afterCursor = currentLine.slice(cursorPos);
+        for (let i = 0; i < cursorPos; i++) terminal.write('\b');
+        terminal.write('\x1b[K');
+        if (afterCursor.length > 0) {
+          terminal.write(afterCursor + '\x1b[K');
+          for (let i = 0; i < afterCursor.length; i++) terminal.write('\b');
+        }
+        currentLine = afterCursor;
+        cursorPos = 0;
+      }
       return;
     }
     if (ev.ctrlKey && ev.code === 'KeyA') { // Beginning of line
       ev.preventDefault();
-      for (let i = 0; i < currentLine.length; i++) terminal.write('\b');
+      for (let i = 0; i < cursorPos; i++) terminal.write('\b');
+      cursorPos = 0;
       return;
     }
     if (ev.ctrlKey && ev.code === 'KeyE') { // End of line
-      ev.preventDefault(); terminal.write(currentLine);
+      ev.preventDefault();
+      const remaining = currentLine.slice(cursorPos);
+      terminal.write(remaining);
+      cursorPos = currentLine.length;
       return;
     }
-    if (ev.ctrlKey && (ev.code === 'ArrowLeft' || ev.code === 'ArrowRight')) { // Word nav
+    if (ev.ctrlKey && ev.code === 'ArrowLeft') { // Word nav left
       ev.preventDefault();
+      // Move to previous word boundary
+      while (cursorPos > 0 && currentLine[cursorPos - 1] === ' ') { cursorPos--; terminal.write('\x1b[D'); }
+      while (cursorPos > 0 && currentLine[cursorPos - 1] !== ' ') { cursorPos--; terminal.write('\x1b[D'); }
+      return;
+    }
+    if (ev.ctrlKey && ev.code === 'ArrowRight') { // Word nav right
+      ev.preventDefault();
+      while (cursorPos < currentLine.length && currentLine[cursorPos] !== ' ') { cursorPos++; terminal.write('\x1b[C'); }
+      while (cursorPos < currentLine.length && currentLine[cursorPos] === ' ') { cursorPos++; terminal.write('\x1b[C'); }
+      return;
+    }
+    if (ev.code === 'Delete') { // Delete key (forward delete)
+      ev.preventDefault();
+      if (cursorPos < currentLine.length) {
+        currentLine = currentLine.slice(0, cursorPos) + currentLine.slice(cursorPos + 1);
+        redrawFromCursor();
+      }
+      return;
+    }
+    if (ev.code === 'Home') { // Home key
+      ev.preventDefault();
+      for (let i = 0; i < cursorPos; i++) terminal.write('\b');
+      cursorPos = 0;
+      return;
+    }
+    if (ev.code === 'End') { // End key
+      ev.preventDefault();
+      const remaining = currentLine.slice(cursorPos);
+      terminal.write(remaining);
+      cursorPos = currentLine.length;
       return;
     }
     if (ev.code === 'Tab') { // Tab completion

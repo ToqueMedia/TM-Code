@@ -107,6 +107,7 @@ pub fn run() {
                     .build()?;
 
                 let file_menu = SubmenuBuilder::new(handle, "File")
+                    .item(&MenuItemBuilder::with_id("open-file", "Open File…").accelerator("CmdOrCtrl+Shift+O").build(handle)?)
                     .item(&MenuItemBuilder::with_id("open-folder", "Open Folder…").accelerator("CmdOrCtrl+O").build(handle)?)
                     .separator()
                     .item(&MenuItemBuilder::with_id("save", "Save").accelerator("CmdOrCtrl+S").build(handle)?)
@@ -209,18 +210,65 @@ pub fn run() {
             }
 
             // Create main window programmatically so we can attach on_new_window
+            let app_handle_for_popup = app.handle().clone();
+
             WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                .title("toquemedia-studio")
+                .title("TM Code")
                 .icon(icon.clone())
                 .expect("Failed to set window icon")
                 .inner_size(1250.0, 850.0)
                 .decorations(false)
                 .transparent(true)
                 .accept_first_mouse(true)
-                .on_new_window(|url, _features| {
+                .on_new_window(move |url, _features| {
                     let host = url.host_str().unwrap_or("");
                     if is_oauth_domain(host) {
-                        NewWindowResponse::Allow
+                        // Tauri WebViews can't create proper popup windows via window.open().
+                        // Create a real WebviewWindow for OAuth and bridge postMessage via events.
+                        let url_str = url.to_string();
+                        let handle = app_handle_for_popup.clone();
+                        std::thread::spawn(move || {
+                            // Close any existing OAuth popup first
+                            if let Some(w) = handle.get_webview_window("oauth-popup") {
+                                let _ = w.close();
+                            }
+
+                            let bridge_script = r#"
+                                // Bridge window.opener.postMessage → Tauri event
+                                Object.defineProperty(window, 'opener', {
+                                    value: {
+                                        postMessage: function(data, origin) {
+                                            if (window.__TAURI_INTERNALS__) {
+                                                window.__TAURI_INTERNALS__.invoke(
+                                                    'plugin:event|emit',
+                                                    { event: 'oauth-popup-message', payload: JSON.stringify(data) }
+                                                ).catch(function(){});
+                                            }
+                                        },
+                                        closed: false,
+                                        location: { href: '' }
+                                    },
+                                    writable: false,
+                                    configurable: false
+                                });
+                            "#;
+
+                            if let Ok(parsed_url) = url_str.parse::<tauri::Url>() {
+                                let _ = WebviewWindowBuilder::new(
+                                    &handle,
+                                    "oauth-popup",
+                                    WebviewUrl::External(parsed_url),
+                                )
+                                .title("Sign in with Google")
+                                .inner_size(500.0, 700.0)
+                                .center()
+                                .initialization_script(bridge_script)
+                                .build();
+                            }
+                        });
+
+                        // Deny the default behavior — we handle it ourselves
+                        NewWindowResponse::Deny
                     } else {
                         NewWindowResponse::Deny
                     }

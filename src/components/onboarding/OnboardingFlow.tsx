@@ -7,6 +7,7 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import { useTranslation, getOSLanguage } from '@/i18n'
 import { ONBOARDING_GLOBAL_STYLES } from './onboardingStyles'
 import WindowControls from '../ui/WindowControls'
+import { IS_MAC } from '@/utils/platform'
 import WelcomeStep from './steps/WelcomeStep'
 import ParadigmStep from './steps/ParadigmStep'
 import ConfigStep from './steps/ConfigStep'
@@ -154,14 +155,24 @@ function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
       {/* Single global style tag for all onboarding CSS */}
       <style>{ONBOARDING_GLOBAL_STYLES}</style>
 
-      {/* Window controls */}
-      <Box position="absolute" top={3} left={4} zIndex={10}>
-        <WindowControls
-          onClose={handleClose}
-          onMinimize={handleMinimize}
-          onMaximize={handleFullToggle}
-        />
-      </Box>
+      {/* Window controls — macOS: top-left, Windows/Linux: top-right */}
+      {IS_MAC ? (
+        <Box position="absolute" top={3} left={4} zIndex={10}>
+          <WindowControls
+            onClose={handleClose}
+            onMinimize={handleMinimize}
+            onMaximize={handleFullToggle}
+          />
+        </Box>
+      ) : (
+        <Box position="absolute" top={0} right={0} zIndex={10}>
+          <WindowControls
+            onClose={handleClose}
+            onMinimize={handleMinimize}
+            onMaximize={handleFullToggle}
+          />
+        </Box>
+      )}
 
       {/* Skip button */}
       {step < TOTAL_STEPS - 1 && (

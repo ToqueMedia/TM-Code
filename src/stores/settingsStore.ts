@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { IS_MAC } from '../utils/platform'
 
 export interface EditorIndentationSettings {
   tabSize: number
@@ -232,8 +233,6 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     }
   )
 )
-
-const IS_MAC = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || '')
 
 /** Check if two KeyBindings are equivalent */
 function bindingsEqual(a: KeyBinding, b: KeyBinding): boolean {

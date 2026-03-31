@@ -14,6 +14,7 @@ import { RequirementsDialog } from './dialogs'
 import TemplateSelector from './TemplateSelector'
 import SettingsView from './views/SettingsView'
 import WindowControls from './ui/WindowControls'
+import { IS_MAC, TEXT_FILE_EXTENSIONS } from '@/utils/platform'
 
 interface WelcomeScreenProps {
   onOpenProject: (path?: string, options?: { initGit?: boolean }) => void
@@ -79,6 +80,31 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       }
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
+    }
+  }
+
+  const handleOpenFile = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        title: 'Open File',
+        filters: [{ name: 'Text Files', extensions: TEXT_FILE_EXTENSIONS }],
+      })
+      if (selected) {
+        const filePath = String(selected)
+        const sep = filePath.includes('/') ? '/' : '\\'
+        const parentDir = filePath.substring(0, filePath.lastIndexOf(sep)) || sep
+        // Open parent dir as project, then open the file in editor
+        await useProjectStore.getState().openProject(parentDir)
+        const { useEditorRepository } = await import('../stores/editorStore')
+        const { useLayoutStore } = await import('../stores/layoutStore')
+        useEditorRepository.getState().openFile(filePath)
+        useLayoutStore.getState().setViewMode('editor')
+      }
+    } catch (error: unknown) {
+      logger.error('ui', 'Failed to open file dialog:', error)
     }
   }
 
@@ -197,20 +223,31 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       onMouseDown={handleDrag}
       position="relative"
     >
-      {/* Window controls */}
-      <Box position="absolute" top={3} left={4} zIndex={10}>
-        <WindowControls
-          onClose={handleClose}
-          onMinimize={handleMinimize}
-          onMaximize={handleFullToggle}
-        />
-      </Box>
+      {/* Window controls — macOS: top-left, Windows/Linux: top-right */}
+      {IS_MAC ? (
+        <Box position="absolute" top={3} left={4} zIndex={10}>
+          <WindowControls
+            onClose={handleClose}
+            onMinimize={handleMinimize}
+            onMaximize={handleFullToggle}
+          />
+        </Box>
+      ) : (
+        <Box position="absolute" top={0} right={0} zIndex={10}>
+          <WindowControls
+            onClose={handleClose}
+            onMinimize={handleMinimize}
+            onMaximize={handleFullToggle}
+          />
+        </Box>
+      )}
 
       <WelcomeSidebar
         recentProjects={recentProjects}
         onNewProject={handleNewProject}
         onProjectFromScratch={handleSelectEmpty}
         onOpenFolder={handleOpenFolder}
+        onOpenFile={handleOpenFile}
         onCloneRepository={() => cloneDialog.setOpen(true)}
         onOpenProject={onOpenProject}
         onSettings={() => setShowSettings(true)}

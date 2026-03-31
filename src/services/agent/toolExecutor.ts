@@ -260,7 +260,7 @@ class ToolExecutor {
         if (msg === 'aborted') {
           return `Install cancelled by user.\nExit code: 1`
         }
-        return `TIMEOUT: ${msg}\n${allOutput.join('')}\nThe install process was killed.`
+        return `TIMEOUT: ${msg}\n${allOutput.join('')}\nThe install process was killed.\n\nIMPORTANT: The install timed out. Tell the user to install dependencies manually by running the install command in the integrated terminal. Do NOT retry the install automatically.`
       }
 
       const fullOutput = allOutput.join('')

@@ -30,9 +30,13 @@ const cache = new Map<string, {
 
 async function checkSingle(req: Requirement): Promise<CheckResult> {
   try {
+    // Use home directory as cwd to avoid corepack interference.
+    // When cwd contains a package.json with "packageManager", corepack blocks
+    // other package managers (e.g. pnpm returns exit 1 in a yarn project).
+    const homeDir = await invoke<string>('get_home_directory').catch(() => null)
     const output = await invoke<CommandResult>('execute_command', {
       command: `${req.command} ${req.versionFlag}`,
-      cwd: null,
+      cwd: homeDir,
     })
 
     if (!output.success) {

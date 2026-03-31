@@ -15,8 +15,8 @@ const PM_COMMANDS: Record<PackageManager, PMCommands> = {
   npm:  { install: 'npm install',  run: 'npm run',  add: 'npm add' },
 }
 
-// Detection order: fastest first
-const PM_PRIORITY: PackageManager[] = ['pnpm', 'npm']
+// Detection order: npm first (universally available with Node.js)
+const PM_PRIORITY: PackageManager[] = ['npm', 'pnpm']
 
 let cachedPM: PackageManager | null = null
 let detecting: Promise<PackageManager> | null = null

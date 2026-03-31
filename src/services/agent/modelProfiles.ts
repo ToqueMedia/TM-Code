@@ -89,7 +89,7 @@ const MIMO_V2_FLASH: ModelProfile = {
 const DEEPSEEK_V3_2: ModelProfile = {
   id: 'deepseek-v3.2',
   name: 'DeepSeek V3.2',
-  persona: { name: 'N. Mbandi', tagline: 'Estratega profunda. Raciocina e orquestra com precisão.' },
+  persona: { name: 'Nzinga Mbandi', tagline: 'Estratega profunda. Raciocina e orquestra com precisão.' },
   modelId: 'deepseek-v3.2',
   contextWindow: 131_072,
   maxOutputTokens: 32_768,
@@ -112,7 +112,7 @@ const DEEPSEEK_V3_2: ModelProfile = {
 const GLM_5: ModelProfile = {
   id: 'glm-5',
   name: 'GLM-5',
-  persona: { name: 'M. Mandume', tagline: 'Resiliente em combate. Forte em terminal e debugging real.' },
+  persona: { name: 'Rei Mandume', tagline: 'Resiliente em combate. Forte em terminal e debugging real.' },
   modelId: 'glm-5',
   contextWindow: 131_072,
   maxOutputTokens: 16_384,
@@ -135,7 +135,7 @@ const GLM_5: ModelProfile = {
 const KIMI_K2_5: ModelProfile = {
   id: 'kimi-k2.5',
   name: 'Kimi K2.5',
-  persona: { name: 'A. Neto', tagline: 'Virtuoso do código. Melhor qualidade bruta e compreensão visual.' },
+  persona: { name: 'Agostinho Neto', tagline: 'Virtuoso do código. Melhor qualidade bruta e compreensão visual.' },
   modelId: 'kimi-k2.5',
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
@@ -158,7 +158,7 @@ const KIMI_K2_5: ModelProfile = {
 const QWEN3_CODER_NEXT: ModelProfile = {
   id: 'qwen3-coder-next',
   name: 'Qwen3 Coder Next',
-  persona: { name: 'N. Kiluanje', tagline: 'Ultra-rápido e eficiente. 358 linguagens com overhead mínimo.' },
+  persona: { name: 'Ngola Kiluange', tagline: 'Ultra-rápido e eficiente. 358 linguagens com overhead mínimo.' },
   modelId: 'qwen3-coder-next',
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
@@ -204,7 +204,7 @@ const MINIMAX_M2_5: ModelProfile = {
 const GEMINI_3_FLASH: ModelProfile = {
   id: 'gemini-3-flash',
   name: 'Gemini 3 Flash',
-  persona: { name: 'S. Mucune', tagline: 'Versátil e fiável. Adapta-se a qualquer contexto.' },
+  persona: { name: 'Simione Mucune', tagline: 'Versátil e fiável. Adapta-se a qualquer contexto.' },
   modelId: 'gemini-3-flash',
   contextWindow: 1_048_576,
   maxOutputTokens: 65_536,

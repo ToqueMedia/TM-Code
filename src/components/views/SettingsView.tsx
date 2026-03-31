@@ -147,6 +147,7 @@ function ProfileSection() {
   const t = useTranslation()
   const user = useAuthStore(s => s.user)
   const plan = useBillingStore(s => s.plan)
+  const billingLoaded = useBillingStore(s => s.isLoaded)
   const creditsRemaining = useBillingStore(s => s.creditsRemaining)
   const noCredits = useBillingStore(s => s.noCredits)
   const planCapacity = useBillingStore(s => s.planCapacity)
@@ -230,7 +231,9 @@ function ProfileSection() {
         <Flex justify="space-between" align="center">
           <HStack gap={2.5}>
             <Box w="8px" h="8px" borderRadius="full" bg={planInfo.color} boxShadow={`0 0 6px ${planInfo.color}40`} />
-            <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>{planInfo.labelKey}</Text>
+            <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
+              {billingLoaded ? planInfo.labelKey : '...'}
+            </Text>
             <Text fontSize="11px" color={tokens.colors.text.disabled}>{t(planInfo.creditsLabelKey as any)}</Text>
           </HStack>
           {!isTopPlan && (

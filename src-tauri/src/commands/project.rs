@@ -876,8 +876,19 @@ pub fn save_project_state(project_id: String, state: ProjectState) -> Result<()>
 
     fs::write(&meta_path, compressed_data)?;
 
-    // Update recent projects
-    update_recent_projects(&project_info)?;
+    // Update the project's last_opened time in recent projects — but only if
+    // the project is still in the list. Don't re-add it if the user removed it.
+    let settings_path = get_settings_path();
+    if settings_path.exists() {
+        if let Ok(content) = fs::read_to_string(&settings_path) {
+            if let Ok(settings) = serde_json::from_str::<GlobalSettings>(&content) {
+                let already_in_list = settings.recent_projects.iter().any(|p| p.id == project_info.id);
+                if already_in_list {
+                    update_recent_projects(&project_info)?;
+                }
+            }
+        }
+    }
 
     Ok(())
 }

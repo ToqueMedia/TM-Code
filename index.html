@@ -4,11 +4,54 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <title>TM Code</title>
   </head>
 
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      if (window.__TAURI_INTERNALS__) {
+        // Disable browser context menu in production only — keep Reload/Inspect in dev
+        if (!location.port) {
+          document.addEventListener('contextmenu', function(e) {
+            var el = e.target;
+            var tag = el.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable) return;
+            e.preventDefault();
+          });
+        }
+
+        // ── OAuth popup bridge ──────────────────────────────────────────
+        // Tauri WebViews can't create browser popups via window.open().
+        // Rust on_new_window creates a real WebviewWindow for OAuth domains
+        // and injects a bridge script that forwards postMessage via Tauri events.
+        // Here we: (a) return a proxy so Firebase doesn't throw "popup-blocked",
+        // (b) forward the event as a MessageEvent so signInWithPopup completes.
+        var _origOpen = window.open;
+        var _oauthProxy = null;
+
+        window.open = function(url, target, features) {
+          var result = _origOpen.call(window, url, target, features);
+          if (result === null && url) {
+            _oauthProxy = { closed: false, close: function() { this.closed = true; }, focus: function() {} };
+            return _oauthProxy;
+          }
+          return result;
+        };
+
+        // Listen for OAuth result forwarded from popup WebviewWindow
+        window.__TAURI_INTERNALS__.invoke('plugin:event|listen', {
+          event: 'oauth-popup-message',
+          handler: window.__TAURI_INTERNALS__.transformCallback(function(e) {
+            try {
+              var data = JSON.parse(e.payload);
+              window.dispatchEvent(new MessageEvent('message', { data: data }));
+              if (_oauthProxy) _oauthProxy.closed = true;
+            } catch(err) {}
+          })
+        }).catch(function(){});
+      }
+    </script>
   </body>
 </html>

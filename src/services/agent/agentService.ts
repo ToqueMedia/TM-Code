@@ -330,12 +330,17 @@ class AgentService {
         if (this.lastPromptTokens > compressionThreshold) {
           const before = this.lastPromptTokens
           callbacks.onContextCompression?.(before, 0) // signal start
-          const compressedMessages = await this.compressContext(messages)
-          messages.length = 0
-          messages.push(...compressedMessages)
+          try {
+            const compressedMessages = await this.compressContext(messages)
+            messages.length = 0
+            messages.push(...compressedMessages)
 
-          // Layer 2b: Re-read recent files to recover file content knowledge
-          await this.injectFileReReadings(messages)
+            // Layer 2b: Re-read recent files to recover file content knowledge
+            await this.injectFileReReadings(messages)
+          } catch (compErr) {
+            // Compression failed — continue with existing messages rather than stopping
+            logger.error('agent', 'Context compression failed, continuing with uncompressed context:', compErr)
+          }
 
           this.lastPromptTokens = 0 // reset — next API call will report the real new count
           callbacks.onContextCompression?.(before, -1) // signal done

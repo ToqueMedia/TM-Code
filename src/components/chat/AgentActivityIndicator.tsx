@@ -60,6 +60,7 @@ function AgentActivityIndicator() {
   if (!isStreaming) return null
 
   const label = STATUS_LABELS[status] || 'Working'
+  const inputTokens = totalTokensUsed.input
   const outputTokens = totalTokensUsed.output
 
   return (
@@ -116,7 +117,7 @@ function AgentActivityIndicator() {
         fontFamily={tokens.fontFamily.mono}
       >
         ({formatElapsed(elapsed)}
-        {outputTokens > 0 && ` · ${formatTokens(outputTokens)} tokens`})
+        {(inputTokens > 0 || outputTokens > 0) && ` · ↑${formatTokens(inputTokens)} ↓${formatTokens(outputTokens)}`})
       </Text>
     </Flex>
   )

@@ -74,6 +74,8 @@ async function postScaffoldPipeline(
  * Uses a simple PID-tracking approach — events are buffered if they arrive
  * before invoke returns, avoiding the async pidReady pattern that can lose events.
  */
+const INSTALL_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+
 async function runInstall(
   projectPath: string,
   installCommand: string,
@@ -142,11 +144,36 @@ async function runInstall(
       }
     }
 
-    const exitCode = await exitPromise
+    // Race between exit and timeout
+    let timeoutTimer: ReturnType<typeof setTimeout>
+    const timeoutPromise = new Promise<number>((_, reject) => {
+      timeoutTimer = setTimeout(() => reject(new Error('timeout')), INSTALL_TIMEOUT_MS)
+    })
+
+    let exitCode: number
+    try {
+      exitCode = await Promise.race([exitPromise, timeoutPromise]) as number
+      clearTimeout(timeoutTimer!)
+    } catch (err) {
+      clearTimeout(timeoutTimer!)
+      // Timeout — kill the process and suggest manual install
+      cleanup()
+      if (targetPid > 0) {
+        try { await invoke('kill_process', { pid: targetPid }) } catch {}
+      }
+      layoutStore.addDevServerLog(
+        `Install timed out after 5 minutes and was cancelled.\n` +
+        `Run manually in the terminal:\n  cd ${projectPath}\n  ${installCommand}`,
+        'error',
+      )
+      logger.error('postScaffold', 'Install timed out after 5 minutes')
+      return false
+    }
 
     if (exitCode !== 0) {
       layoutStore.addDevServerLog(
-        `Failed to install dependencies (exit code ${exitCode})`,
+        `Failed to install dependencies (exit code ${exitCode}).\n` +
+        `Run manually in the terminal:\n  cd ${projectPath}\n  ${installCommand}`,
         'error',
       )
       logger.error('postScaffold', `Install failed with exit code ${exitCode}`)
@@ -159,7 +186,8 @@ async function runInstall(
     cleanup()
     const msg = error instanceof Error ? error.message : String(error)
     layoutStore.addDevServerLog(
-      `Failed to install dependencies: ${msg}`,
+      `Failed to install dependencies: ${msg}\n` +
+      `Run manually in the terminal:\n  cd ${projectPath}\n  ${installCommand}`,
       'error',
     )
     logger.error('postScaffold', 'Install failed:', error)

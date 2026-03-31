@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useEditorRepository } from '@/stores/editorStore'
 import { useLayoutStore } from '@/stores/layoutStore'
 import MonacoBridge from '@/utils/monacoBridge'
+import { TEXT_FILE_EXTENSIONS } from '@/utils/platform'
 
 // Editor-only menu IDs — ignored when not in editor view
 const editorOnlyIds = new Set([
@@ -31,6 +32,27 @@ export function useNativeMenu() {
 
 			switch (id) {
 				// File
+				case 'open-file':
+					(async () => {
+						const { open } = await import('@tauri-apps/plugin-dialog')
+						const selected = await open({
+							directory: false,
+							multiple: false,
+							title: 'Open File',
+							filters: [{ name: 'Text Files', extensions: TEXT_FILE_EXTENSIONS }],
+						})
+						if (!selected) return
+						const filePath = String(selected)
+						const sep = filePath.includes('/') ? '/' : '\\'
+						const parentDir = filePath.substring(0, filePath.lastIndexOf(sep)) || sep
+						const { useProjectStore } = await import('@/stores/projectStore')
+						await useProjectStore.getState().openProject(parentDir)
+						const { useEditorRepository } = await import('@/stores/editorStore')
+						useEditorRepository.getState().openFile(filePath)
+						const { useLayoutStore } = await import('@/stores/layoutStore')
+						useLayoutStore.getState().setViewMode('editor')
+					})().catch(() => {})
+					break
 				case 'open-folder':
 					import('@tauri-apps/plugin-dialog').then(({ open }) => {
 						open({ directory: true, multiple: false, title: 'Select project directory' }).then(selected => {
