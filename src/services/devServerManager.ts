@@ -75,16 +75,18 @@ class DevServerManager {
     return command
   }
 
-  /** Ensure URL uses 127.0.0.1 (not localhost) and ends with trailing slash. */
+  /** Normalize dev server URL for iframe compatibility. */
   private normalizeUrl(url: string): string {
-    // Force IPv4 — Colima only binds forwarded ports to 127.0.0.1, not ::1.
-    // WKWebView resolves "localhost" to ::1 first and doesn't fall back to IPv4.
+    // Use "localhost" instead of "127.0.0.1" — WKWebView on macOS grants
+    // localhost ATS (App Transport Security) exemption for iframes, but
+    // treats raw IP addresses as untrusted origins.
+    // Docker/Colima port-forwarding also binds to localhost on the host.
     let normalized = url
-      .replace('localhost', '127.0.0.1')
-      .replace('0.0.0.0', '127.0.0.1')
-      .replace('[::1]', '127.0.0.1')
-      .replace('[::1:]', '127.0.0.1')
-      .replace('[0:0:0:0:0:0:0:1]', '127.0.0.1')
+      .replace('127.0.0.1', 'localhost')
+      .replace('0.0.0.0', 'localhost')
+      .replace('[::1]', 'localhost')
+      .replace('[::1:]', 'localhost')
+      .replace('[0:0:0:0:0:0:0:1]', 'localhost')
     // Ensure trailing slash
     if (!normalized.endsWith('/')) normalized += '/'
     return normalized
@@ -152,6 +154,7 @@ class DevServerManager {
       }
 
       this.currentServer.pid = pid
+      console.warn(`[dev-server] STARTED: PID=${pid}, command="${resolvedCommand}", port=${this.serverPort}`)
       logger.info('devServer', `Started dev server (PID ${pid}): ${devCommand}`)
     } catch (error) {
       // Only clean up if we're still the active generation
@@ -365,12 +368,13 @@ class DevServerManager {
   }
 
   private handleExit(pid: number): void {
+    console.warn(`[dev-server] EXIT event received: pid=${pid}, currentPid=${this.currentServer?.pid}, status=${this.currentServer?.status}`)
     if (!this.currentServer) return
-    // Same PID-0 tolerance as handleOutput
     if (this.currentServer.pid !== 0 && this.currentServer.pid !== pid) return
 
     const wasRunning = this.currentServer.status === 'running'
     const wasStarting = this.currentServer.status === 'starting'
+    console.warn(`[dev-server] Server exited: wasRunning=${wasRunning}, wasStarting=${wasStarting}`)
     this.currentServer.status = 'stopped'
     this.currentServer = null
     this.cleanup()

@@ -12,9 +12,8 @@
   "app": {
     "macOSPrivateApi": true,
     "windows": [],
-    "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: asset: blob: https://*.googleusercontent.com https://*.googleapis.com; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost http://127.0.0.1:9099 http://127.0.0.1:8081 http://127.0.0.1:5001 http://127.0.0.1:7773 http://127.0.0.1:7777 http://127.0.0.1:8787 http://127.0.0.1:11434 http://localhost:7773 http://localhost:7777 http://localhost:8787 http://localhost:11434 https://*.toquemedia.com https://*.workers.dev https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com wss://*.firebaseio.com ws://127.0.0.1:8787 ws://localhost:8787 wss://*.workers.dev wss://*.toquemedia.com wss://*.toquemedia.net https://*.toquemedia.net https://dashscope.aliyuncs.com https://accounts.google.com; frame-src http://127.0.0.1:7773 http://127.0.0.1:7777 http://localhost:7773 http://localhost:7777 https://*.firebaseapp.com https://accounts.google.com; worker-src 'self' blob:"
-    }
+    "security": {}
+
   },
   "bundle": {
     "active": true,

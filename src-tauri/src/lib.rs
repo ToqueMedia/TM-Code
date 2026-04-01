@@ -20,6 +20,216 @@ use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tauri::Manager;
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
 
+// ── Preview webview (separate window approach — reliable on all platforms) ────
+
+// ── Native preview via wry::build_as_child ──────────────────────────────────
+// Key insight from wry#1335: the WebView MUST be kept alive (not dropped).
+// We use a global static with ManuallyDrop to ensure it persists.
+
+use std::mem::ManuallyDrop;
+
+// WebView is !Send+!Sync (main-thread-only). Safe because Tauri sync
+// commands execute on the main thread where WKWebView was created.
+struct WvHolder(Option<ManuallyDrop<wry::WebView>>);
+unsafe impl Send for WvHolder {}
+unsafe impl Sync for WvHolder {}
+
+impl WvHolder {
+    fn set(&mut self, wv: wry::WebView) {
+        self.clear();
+        self.0 = Some(ManuallyDrop::new(wv));
+    }
+    fn clear(&mut self) {
+        if let Some(mut wv) = self.0.take() {
+            // Safety: we only drop once, on the main thread
+            unsafe { ManuallyDrop::drop(&mut wv); }
+        }
+    }
+    fn get(&self) -> Option<&wry::WebView> {
+        self.0.as_ref().map(|m| &**m)
+    }
+}
+
+static PREVIEW: std::sync::OnceLock<std::sync::Mutex<WvHolder>> = std::sync::OnceLock::new();
+fn preview() -> &'static std::sync::Mutex<WvHolder> {
+    PREVIEW.get_or_init(|| std::sync::Mutex::new(WvHolder(None)))
+}
+
+#[tauri::command]
+fn open_preview_webview(
+    app: tauri::AppHandle,
+    url: String,
+    x: f64, y: f64, width: f64, height: f64,
+) -> std::result::Result<(), String> {
+    // Close existing
+    preview().lock().map_err(|e| format!("{}", e))?.clear();
+
+    let win = app.get_webview_window("main").ok_or("No main window")?;
+
+    // WKWebView blocks HTTP URLs (ATS). Use a custom protocol "tmpreview://"
+    // that proxies requests to the dev server via Rust's reqwest.
+    // Keep "localhost" — Vite may bind to IPv6 [::1], and "localhost" resolves to both
+    let proxy_target = url.trim_end_matches('/').to_string();
+    let proxy_target_for_ws = proxy_target.clone();
+
+    let wv = wry::WebViewBuilder::new()
+        .with_asynchronous_custom_protocol("tmpreview".into(), move |_webview_id, request, responder| {
+            let target = proxy_target.clone();
+            std::thread::spawn(move || {
+                let path = request.uri().path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or("/");
+                let full_url = format!("{}{}", target, path);
+                let addr = target.replace("http://", "");
+
+                // Retry with backoff — dev server may still be starting
+                let mut result = Err("not attempted".to_string());
+                for attempt in 0..5 {
+                    result = raw_http_get(&addr, path);
+                    if result.is_ok() { break; }
+                    if attempt < 4 {
+                        let delay = std::time::Duration::from_millis(500 * (attempt as u64 + 1));
+                        eprintln!("[preview] Proxy retry {} for {} (waiting {:?})", attempt + 1, full_url, delay);
+                        std::thread::sleep(delay);
+                    }
+                }
+
+                match result {
+                    Ok((status, content_type, body)) => {
+                        let _ = responder.respond(
+                            wry::http::Response::builder()
+                                .status(status)
+                                .header("Content-Type", content_type)
+                                .header("Access-Control-Allow-Origin", "*")
+                                .body(body)
+                                .unwrap()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("[preview] Proxy error: {} -> {}", full_url, e);
+                        let _ = responder.respond(
+                            wry::http::Response::builder()
+                                .status(502)
+                                .header("Content-Type", "text/html")
+                                .body(format!(
+                                    "<html><body style='background:#1a1a2e;color:#fff;font-family:system-ui;padding:40px;text-align:center'>\
+                                    <h3>Dev server unreachable</h3><p style='color:#f85149'>{}</p><p>{}</p></body></html>",
+                                    e, full_url
+                                ).into_bytes())
+                                .unwrap()
+                        );
+                    }
+                }
+            });
+        })
+        .with_url("tmpreview://localhost/")
+        .with_devtools(true)
+        .with_bounds(wry::Rect {
+            position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(x, y)),
+            size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(width, height)),
+        })
+        .build_as_child(&win.as_ref().window())
+        .map_err(|e| format!("Preview failed: {}", e))?;
+
+    preview().lock().map_err(|e| format!("{}", e))?.set(wv);
+
+    // Bring ALL subviews except the first one (main Tauri webview) to the front.
+    // wry's build_as_child adds the preview WKWebView as a subview, but it may
+    // end up behind the main webview. Re-add every non-first subview on top.
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(ns_window_ptr) = win.as_ref().window().ns_window() {
+            unsafe {
+                let ns_win = &*(ns_window_ptr as *const objc2_app_kit::NSWindow);
+                if let Some(content_view) = ns_win.contentView() {
+                    let subviews = content_view.subviews();
+                    let count = subviews.count();
+                    // Move all non-first subviews (preview) to the top
+                    for i in 1..count {
+                        let sv = subviews.objectAtIndex_unchecked(i);
+                        sv.removeFromSuperview();
+                        content_view.addSubview_positioned_relativeTo(
+                            sv,
+                            objc2_app_kit::NSWindowOrderingMode::Above,
+                            None,
+                        );
+                    }
+                    eprintln!("[preview] Reordered to front");
+                }
+            }
+        }
+    }
+
+    eprintln!("[preview] Native webview created for {}", url);
+    Ok(())
+}
+
+#[tauri::command]
+fn close_preview_webview() -> std::result::Result<(), String> {
+    preview().lock().map_err(|e| format!("{}", e))?.clear();
+    eprintln!("[preview] Closed");
+    Ok(())
+}
+
+#[tauri::command]
+fn resize_preview_webview(
+    x: f64, y: f64, width: f64, height: f64,
+) -> std::result::Result<(), String> {
+    let store = preview().lock().map_err(|e| format!("{}", e))?;
+    if let Some(wv) = store.get() {
+        wv.set_bounds(wry::Rect {
+            position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(x, y)),
+            size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(width, height)),
+        }).map_err(|e| format!("{}", e))?;
+    }
+    Ok(())
+}
+
+/// Raw HTTP GET via TcpStream — bypasses reqwest issues with localhost.
+fn raw_http_get(host_port: &str, path: &str) -> std::result::Result<(u16, String, Vec<u8>), String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    // Use ToSocketAddrs to resolve "localhost" → [::1] or 127.0.0.1
+    let mut stream = TcpStream::connect(host_port)
+        .map_err(|e| format!("Connection refused: {}", e))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(3))).ok();
+
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        path, host_port
+    );
+    stream.write_all(request.as_bytes()).map_err(|e| format!("Write failed: {}", e))?;
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(|e| format!("Read failed: {}", e))?;
+
+    let response = String::from_utf8_lossy(&buf);
+
+    // Parse status line
+    let status_line = response.lines().next().unwrap_or("HTTP/1.1 502");
+    let status: u16 = status_line.split_whitespace().nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(502);
+
+    // Parse Content-Type header
+    let content_type = response.lines()
+        .find(|l| l.to_lowercase().starts_with("content-type:"))
+        .map(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default())
+        .unwrap_or_else(|| "text/html; charset=utf-8".to_string());
+
+    // Split headers from body (double CRLF)
+    let body = if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        buf[pos + 4..].to_vec()
+    } else {
+        buf
+    };
+
+    Ok((status, content_type, body))
+}
+
 /// Domains allowed to open as popup windows (OAuth flows).
 fn is_oauth_domain(host: &str) -> bool {
     host.contains("google.com")
@@ -60,7 +270,11 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(|app| {
+        // Serve app via HTTP localhost instead of tauri:// protocol.
+        // This allows iframes to load other HTTP origins (dev server previews)
+        // without cross-protocol security restrictions.
+        .plugin(tauri_plugin_localhost::Builder::new(1430).build())
+        .setup(move |app| {
             // Load app icon from embedded PNG
             let icon = Image::from_bytes(include_bytes!("../icons/128x128@2x.png"))
                 .expect("Failed to load app icon");
@@ -209,10 +423,18 @@ pub fn run() {
                 });
             }
 
-            // Create main window programmatically so we can attach on_new_window
+            // Create main window.
+            // Dev: WebviewUrl::default() → Vite dev server (http://localhost:1420)
+            // Prod: localhost plugin serves app via HTTP (port 1430) so iframes work
+            //       without cross-protocol (tauri:// vs http://) restrictions.
             let app_handle_for_popup = app.handle().clone();
 
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+            #[cfg(dev)]
+            let main_url = WebviewUrl::default();
+            #[cfg(not(dev))]
+            let main_url = WebviewUrl::External("http://localhost:1430".parse().unwrap());
+
+            WebviewWindowBuilder::new(app, "main", main_url)
                 .title("TM Code")
                 .icon(icon.clone())
                 .expect("Failed to set window icon")
@@ -220,6 +442,19 @@ pub fn run() {
                 .decorations(false)
                 .transparent(true)
                 .accept_first_mouse(true)
+                // Allow ALL navigations including iframes to localhost dev servers
+                .on_navigation(|url| {
+                    let host = url.host_str().unwrap_or("");
+                    // Allow localhost, 127.0.0.1, and app origins
+                    host == "localhost"
+                        || host == "127.0.0.1"
+                        || host == "[::1]"
+                        || host.ends_with(".localhost")
+                        || url.scheme() == "tauri"
+                        || url.scheme() == "data"
+                        || url.scheme() == "blob"
+                        || url.scheme() == "about"
+                })
                 .on_new_window(move |url, _features| {
                     let host = url.host_str().unwrap_or("");
                     if is_oauth_domain(host) {
@@ -395,7 +630,10 @@ pub fn run() {
             git_push,
             git_pull,
             http_client_request,
-            send_issue_report
+            send_issue_report,
+            open_preview_webview,
+            close_preview_webview,
+            resize_preview_webview
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -246,19 +246,15 @@ fn clear_active_if_matches(state: &ActiveProjectState, project_id: &str) -> Resu
 #[tauri::command]
 pub async fn check_docker_available() -> Result<bool, String> {
     let result = tokio::task::spawn_blocking(|| {
-        // First try: is Docker reachable right now?
-        let ok = docker_cmd()
+        // Only CHECK if Docker is available — don't auto-start Colima.
+        // The user should explicitly start Docker/Colima if they want container isolation.
+        docker_cmd()
             .args(["ps", "--format", "{{.ID}}"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
-            .unwrap_or(false);
-
-        if ok { return true; }
-
-        // Docker unreachable — try Colima recovery (stale socket after macOS sleep/wake)
-        recover_colima()
+            .unwrap_or(false)
     })
     .await;
 

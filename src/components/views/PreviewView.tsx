@@ -1,7 +1,8 @@
 import { memo, useRef, useEffect, useCallback, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiMonitor, FiServer } from 'react-icons/fi'
+import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiMonitor, FiServer, FiLock, FiGlobe } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { useLayoutStore, type DevServerLogEntry } from '../../stores/layoutStore'
 import { usePermissionStore } from '../../stores/permissionStore'
@@ -11,6 +12,7 @@ import MessageBubble from '../chat/MessageBubble'
 import PromptBar from '../PromptBar'
 import PermissionDialog from '../chat/PermissionDialog'
 import HttpClientPanel from '../http-client/HttpClientPanel'
+import TauriWebview, { closePreviewWebview } from '../ui/TauriWebview'
 import AgentLogo from '../ui/AgentLogo'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -44,7 +46,6 @@ function PreviewView() {
   const isConsoleVisible = useLayoutStore(s => s.isConsoleVisible)
 
   const chatScrollRef = useRef<HTMLDivElement>(null)
-  const iframeRef = useRef<HTMLIFrameElement>(null)
   const handleRef = useRef<HTMLDivElement>(null)
   const consoleHandleRef = useRef<HTMLDivElement>(null)
   const consoleScrollRef = useRef<HTMLDivElement>(null)
@@ -95,7 +96,7 @@ function PreviewView() {
     el.scrollTop = el.scrollHeight
   }, [devServerLogs.length, isConsoleVisible])
 
-  // Auto-reload iframe when reloadKey changes (agent finished editing files)
+  // Auto-reload when reloadKey changes (agent finished editing files)
   useEffect(() => {
     if (previewReloadKey === 0) return
     if (previewMode === 'static' && previewSourcePath) {
@@ -103,9 +104,8 @@ function PreviewView() {
         .buildPreview(previewSourcePath)
         .then(html => useLayoutStore.getState().setStaticPreview(html, previewSourcePath))
         .catch(() => {})
-    } else if (iframeRef.current) {
-      iframeRef.current.src = iframeRef.current.src
     }
+    // Server mode: reloadKey is passed to TauriWebview which recreates the webview
   }, [previewReloadKey, previewMode, previewSourcePath])
 
   // Auto-open console when errors appear
@@ -124,8 +124,9 @@ function PreviewView() {
       } catch {
         // Failed to rebuild
       }
-    } else if (iframeRef.current) {
-      iframeRef.current.src = iframeRef.current.src
+    } else {
+      // Trigger wry webview recreation via reloadKey
+      useLayoutStore.getState().reloadPreview()
     }
   }, [previewMode, previewSourcePath])
 
@@ -140,13 +141,18 @@ function PreviewView() {
   }
 
   const handleStopServer = useCallback(async () => {
+    closePreviewWebview()
+    const port = previewUrl?.match(/:(\d+)/)?.[1]
     await devServerManager.stop()
+    // Also kill the port to ensure no orphan process
+    if (port) {
+      try { await invoke('kill_port', { port: parseInt(port) }) } catch {}
+    }
     const layout = useLayoutStore.getState()
     layout.clearPreviewServer()
-    // Go back to previous view, but never to 'generating' (which could re-trigger preview)
     const prev = layout.previousViewMode
     layout.setViewMode(prev && prev !== 'generating' && prev !== 'preview' ? prev : 'chat')
-  }, [])
+  }, [previewUrl])
 
   // Horizontal resize (chat width)
   const handleResizeStart = useCallback((e: React.PointerEvent) => {
@@ -334,58 +340,83 @@ function PreviewView() {
         overflow="hidden"
         bg={tokens.colors.bg.mainLayout}
       >
-        {/* Preview toolbar */}
+        {/* ── Browser-style toolbar ──────────────────────────────── */}
         <Flex
           align="center"
-          justify="space-between"
-          px={4}
-          py={2}
+          gap={2}
+          px={2}
+          py={1.5}
           bg={tokens.colors.bg.panel}
           borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
           flexShrink={0}
         >
-          <HStack gap={2}>
-            <Box
-              px={3}
-              py={1}
-              bg={tokens.colors.bg.mainLayout}
-              borderRadius="6px"
-              border={`1px solid ${tokens.colors.border.panel}`}
+          {/* Navigation + reload */}
+          <HStack gap={0}>
+            {previewMode !== 'api' && (
+              <IconButton
+                aria-label={t("view.reloadPreview")}
+                size="xs"
+                variant="ghost"
+                color={tokens.colors.text.secondary}
+                _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                borderRadius="6px"
+                onClick={handleReload}
+              >
+                <FiRefreshCw size={13} />
+              </IconButton>
+            )}
+          </HStack>
+
+          {/* Address bar */}
+          <Flex
+            flex={1}
+            align="center"
+            gap="6px"
+            px={3}
+            py="5px"
+            bg={tokens.colors.bg.mainLayout}
+            borderRadius="8px"
+            border={`1px solid ${tokens.colors.border.panel}`}
+            minW={0}
+          >
+            {previewMode === 'static' ? (
+              <FiGlobe size={12} color={tokens.colors.text.disabled} style={{ flexShrink: 0 }} />
+            ) : (
+              <FiLock size={11} color={tokens.colors.accent.green} style={{ flexShrink: 0 }} />
+            )}
+            <Text
+              fontSize="12px"
+              color={tokens.colors.text.secondary}
+              fontFamily={tokens.fontFamily.mono}
+              lineClamp={1}
+              flex={1}
+              userSelect="all"
             >
-              <Text fontSize={tokens.fontSize.sm} color={tokens.colors.text.secondary} fontFamily="mono">
-                {displayLabel}
-              </Text>
-            </Box>
-            {previewMode === 'static' && (
-              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
-                Static Preview
-              </Text>
-            )}
-            {previewMode === 'api' && (
-              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.accent.purple} fontWeight={500}>
-                HTTP Client
-              </Text>
-            )}
+              {previewMode === 'api' ? 'HTTP Client' : displayLabel}
+            </Text>
+          </Flex>
+
+          {/* Right actions */}
+          <HStack gap={0}>
+            {/* Mode toggle (preview ↔ HTTP client) */}
             {previewMode !== 'static' && previewUrl && (
               <IconButton
                 aria-label={previewMode === 'api' ? t('view.switchToPreview') : t('view.switchToHttpClient')}
                 size="xs"
                 variant="ghost"
-                color={tokens.colors.text.disabled}
+                color={previewMode === 'api' ? tokens.colors.accent.purple : tokens.colors.text.secondary}
                 _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-                borderRadius="4px"
+                borderRadius="6px"
                 onClick={() => useLayoutStore.getState().togglePreviewMode()}
               >
                 {previewMode === 'api' ? <FiMonitor size={13} /> : <FiServer size={13} />}
               </IconButton>
             )}
-          </HStack>
 
-          <HStack gap={1}>
-            {/* Console toggle */}
+            {/* Console */}
             <IconButton
               aria-label={t("view.toggleConsole")}
-              size="sm"
+              size="xs"
               variant="ghost"
               color={isConsoleVisible ? tokens.colors.accent.primary : tokens.colors.text.secondary}
               _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
@@ -393,75 +424,48 @@ function PreviewView() {
               onClick={() => useLayoutStore.getState().toggleConsole()}
               position="relative"
             >
-              <FiTerminal size={14} />
-              {/* Error/warn badge */}
+              <FiTerminal size={13} />
               {errorCount > 0 && (
-                <Box
-                  position="absolute"
-                  top="2px"
-                  right="2px"
-                  w="8px"
-                  h="8px"
-                  borderRadius="full"
-                  bg="#f85149"
-                />
+                <Box position="absolute" top="1px" right="1px" w="6px" h="6px" borderRadius="full" bg="#f85149" />
               )}
               {errorCount === 0 && warnCount > 0 && (
-                <Box
-                  position="absolute"
-                  top="2px"
-                  right="2px"
-                  w="8px"
-                  h="8px"
-                  borderRadius="full"
-                  bg="#e3b341"
-                />
+                <Box position="absolute" top="1px" right="1px" w="6px" h="6px" borderRadius="full" bg="#e3b341" />
               )}
             </IconButton>
 
-            {previewMode !== 'api' && (
+            {/* Open in system browser */}
+            {previewUrl && (
               <IconButton
-                aria-label={t("view.reloadPreview")}
-                size="sm"
+                aria-label={t("view.openInBrowser")}
+                size="xs"
                 variant="ghost"
                 color={tokens.colors.text.secondary}
                 _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
                 borderRadius="6px"
-                onClick={handleReload}
+                onClick={handleOpenExternal}
               >
-                <FiRefreshCw size={14} />
+                <FiExternalLink size={13} />
               </IconButton>
             )}
+
+            {/* Stop server */}
             {(previewMode === 'server' || previewMode === 'api') && previewUrl && (
-              <>
-                <IconButton
-                  aria-label={t("view.openInBrowser")}
-                  size="sm"
-                  variant="ghost"
-                  color={tokens.colors.text.secondary}
-                  _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-                  borderRadius="6px"
-                  onClick={handleOpenExternal}
-                >
-                  <FiExternalLink size={14} />
-                </IconButton>
-                <IconButton
-                  aria-label={t("misc.stopServer")}
-                  size="sm"
-                  variant="ghost"
-                  color={tokens.colors.text.secondary}
-                  _hover={{ bg: 'rgba(248, 81, 73, 0.15)', color: '#f85149' }}
-                  borderRadius="6px"
-                  onClick={handleStopServer}
-                >
-                  <FiSquare size={14} />
-                </IconButton>
-              </>
+              <IconButton
+                aria-label={t("misc.stopServer")}
+                size="xs"
+                variant="ghost"
+                color={tokens.colors.text.secondary}
+                _hover={{ bg: 'rgba(248, 81, 73, 0.12)', color: '#f85149' }}
+                borderRadius="6px"
+                onClick={handleStopServer}
+              >
+                <FiSquare size={12} />
+              </IconButton>
             )}
           </HStack>
         </Flex>
 
-        {/* Content area — iframe (server/static) or HTTP Client (api) */}
+        {/* ── Content area ──────────────────────────────────── */}
         {previewMode === 'api' ? (
           <Flex flex="1" direction="column" overflow="hidden">
             <HttpClientPanel />
@@ -469,23 +473,12 @@ function PreviewView() {
         ) : (
           <Box flex="1" bg={tokens.colors.text.inverse} position="relative">
             {hasPreview ? (
-              <>
-                {(isResizing || isResizingConsole) && (
-                  <Box position="absolute" inset={0} zIndex={1} />
-                )}
-                <iframe
-                  ref={iframeRef}
-                  src={previewMode === 'server' ? previewUrl! : undefined}
-                  srcDoc={previewMode === 'static' ? previewHtmlContent! : undefined}
-                  title={t("misc.preview")}
-                  style={{
-                    width: '100%',
-                    height: '100%',
-                    border: 'none',
-                    pointerEvents: (isResizing || isResizingConsole) ? 'none' : 'auto',
-                  }}
-                />
-              </>
+              <TauriWebview
+                url={previewMode === 'server' ? previewUrl! : undefined}
+                html={previewMode === 'static' ? previewHtmlContent! : undefined}
+                reloadKey={previewReloadKey}
+                frozen={isResizing || isResizingConsole}
+              />
             ) : (
               <Flex flex="1" align="center" justify="center" direction="column" gap={2}>
                 {devServerLogs.some(l => l.level === 'error') ? (

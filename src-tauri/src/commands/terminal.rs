@@ -412,14 +412,25 @@ pub async fn execute_command(
 
     if let Some(ref ap) = project {
         if let Some(ref container_name) = ap.container_name {
-            // ── Docker mode: ensure container is running, then route through it
+            // ── Docker mode: try container, fall back to host if Docker is unavailable
             ensure_container_running(container_name);
             let workdir = match &cwd {
                 Some(dir) => host_to_container_path(dir, &ap.project_path),
                 None => WORKSPACE_PATH.to_string(),
             };
             let cmd = build_container_command(&command, &workdir, container_name);
-            return run_command_with_timeout(cmd, timeout).await;
+            match run_command_with_timeout(cmd, timeout).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    eprintln!("[exec] Docker exec failed ({}), falling back to host", e);
+                    let working_dir = match &cwd {
+                        Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+                        None => PathBuf::from(&ap.project_path),
+                    };
+                    let fallback = build_host_command(&command, &working_dir);
+                    return run_command_with_timeout(fallback, timeout).await;
+                }
+            }
         }
 
         // ── App-level isolation: clamp cwd to project ────────────────
@@ -568,9 +579,25 @@ pub async fn run_streaming_command(
         build_host_command(&command, &PathBuf::from(&cwd))
     };
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start command: {}", e))?;
+    // Try to spawn; if Docker mode fails (daemon not running), fall back to host
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(ref ap) = project {
+                if ap.container_name.is_some() {
+                    eprintln!("[cmd] Docker exec failed ({}), falling back to host execution", e);
+                    let working_dir = PathBuf::from(clamp_to_project(&cwd, &ap.project_path));
+                    build_host_command(&command, &working_dir)
+                        .spawn()
+                        .map_err(|e2| format!("Failed to start command (host fallback): {}", e2))?
+                } else {
+                    return Err(format!("Failed to start command: {}", e));
+                }
+            } else {
+                return Err(format!("Failed to start command: {}", e));
+            }
+        }
+    };
 
     let pid = child.id();
 
@@ -628,8 +655,33 @@ pub async fn start_dev_server(
 
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
+    // Quick Docker availability check — skip Docker entirely if daemon is unreachable.
+    // This prevents ensure_container_running from blocking for 30+ seconds
+    // trying to auto-start Colima when it's intentionally stopped.
+    let docker_reachable = docker_cmd()
+        .args(["info", "--format", "{{.ID}}"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
     let mut cmd = if let Some(ref ap) = project {
         if let Some(ref container_name) = ap.container_name {
+            if !docker_reachable {
+                eprintln!("[dev-server] Docker not reachable, using host mode");
+                let clamped = clamp_to_project(&cwd, &ap.project_path);
+                let (shell, flag) = if cfg!(target_os = "windows") { ("cmd", "/C") } else { ("sh", "-c") };
+                let mut c = Command::new(shell);
+                c.arg(flag).arg(&command).current_dir(&clamped)
+                    .env("FORCE_COLOR", "0").env("NO_COLOR", "1")
+                    .env("PORT", &port_str).env("BROWSER", "none")
+                    .stdout(Stdio::piped()).stderr(Stdio::piped());
+                if let Some(path) = get_user_path() { c.env("PATH", path); }
+                hide_console_window(&mut c);
+                #[cfg(unix)] { use std::os::unix::process::CommandExt; c.process_group(0); }
+                c
+            } else {
             // Docker mode — ensure container is running first
             ensure_container_running(container_name);
 
@@ -675,6 +727,7 @@ pub async fn start_dev_server(
 
             c.stdout(Stdio::piped()).stderr(Stdio::piped());
             c
+            } // end docker_reachable else
         } else {
             // App-level isolation: clamp cwd
             let clamped = clamp_to_project(&cwd, &ap.project_path);
@@ -740,9 +793,36 @@ pub async fn start_dev_server(
         c
     };
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start dev server: {}", e))?;
+    // Try to spawn; if Docker mode fails (daemon not running), fall back to host
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(ref ap) = project {
+                if ap.container_name.is_some() {
+                    eprintln!("[dev-server] Docker exec failed ({}), falling back to host", e);
+                    let (shell, flag) = if cfg!(target_os = "windows") { ("cmd", "/C") } else { ("sh", "-c") };
+                    let mut fallback = Command::new(shell);
+                    fallback.arg(flag)
+                        .arg(&command)
+                        .current_dir(&ap.project_path)
+                        .env("FORCE_COLOR", "0")
+                        .env("NO_COLOR", "1")
+                        .env("PORT", &port_str)
+                        .env("BROWSER", "none")
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped());
+                    if let Some(path) = get_user_path() { fallback.env("PATH", path); }
+                    hide_console_window(&mut fallback);
+                    #[cfg(unix)] { use std::os::unix::process::CommandExt; fallback.process_group(0); }
+                    fallback.spawn().map_err(|e2| format!("Failed to start dev server (host fallback): {}", e2))?
+                } else {
+                    return Err(format!("Failed to start dev server: {}", e));
+                }
+            } else {
+                return Err(format!("Failed to start dev server: {}", e));
+            }
+        }
+    };
 
     let pid = child.id();
 
