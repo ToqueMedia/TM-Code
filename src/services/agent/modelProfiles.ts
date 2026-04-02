@@ -117,9 +117,10 @@ const GLM_5: ModelProfile = {
   contextWindow: 131_072,
   maxOutputTokens: 16_384,
 
-  temperature: 0.7,
-  reasoningTemperature: 0.7,
-  topP: 0.95,
+  // Zhipu AI defaults: temp=0.95, top_p=0.7 (notably lower than industry standard)
+  temperature: 0.95,
+  reasoningTemperature: 0.95,
+  topP: 0.7,
   topK: null,
 
   supportsThinking: true,
@@ -140,11 +141,14 @@ const KIMI_K2_5: ModelProfile = {
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
 
+  // Moonshot docs: K2.5 temperature and top_p are immutable (API ignores overrides)
+  // Values set here for frontend display; DashScope endpoint ignores them.
   temperature: 0.6,
-  reasoningTemperature: 1.0,
+  reasoningTemperature: null,
   topP: 0.95,
   topK: null,
 
+  // Routed via DashScope (not native Moonshot API), so uses enable_thinking format
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
   thinkingBudget: null,
@@ -163,10 +167,11 @@ const QWEN3_CODER_NEXT: ModelProfile = {
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
 
-  temperature: 1.0,
+  // Qwen3 official: temp=0.7 non-thinking, top_p=0.8, top_k=20
+  temperature: 0.7,
   reasoningTemperature: null,
-  topP: 0.95,
-  topK: 40,
+  topP: 0.8,
+  topK: 20,
 
   supportsThinking: false,
   thinkingParam: null,
@@ -186,10 +191,11 @@ const MINIMAX_M2_5: ModelProfile = {
   contextWindow: 196_608,
   maxOutputTokens: 65_536,
 
-  temperature: 1.0,
+  // MiniMax default: temp=0.9, top_p=0.95
+  temperature: 0.9,
   reasoningTemperature: null,
   topP: 0.95,
-  topK: 40,
+  topK: null,
 
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
@@ -201,6 +207,30 @@ const MINIMAX_M2_5: ModelProfile = {
   modelSpecificPrompt: `Be concise. Output only the code changes needed. Do not add explanatory comments unless asked. Do not overthink simple tasks.`,
 }
 
+const QWEN3_6_PLUS: ModelProfile = {
+  id: 'qwen3.6-plus',
+  name: 'Qwen 3.6 Plus',
+  persona: { name: 'Hoji Ya Henda', tagline: 'Agente supremo. 1M de contexto, visão nativa e execução decisiva.' },
+  modelId: 'qwen3.6-plus',
+  contextWindow: 1_000_000,
+  maxOutputTokens: 65_536,
+
+  // Qwen3 official: temp=0.6 thinking / 0.7 non-thinking, top_p=0.95/0.8, top_k=20
+  temperature: 0.7,
+  reasoningTemperature: 0.6,
+  topP: 0.95,
+  topK: 20,
+
+  supportsThinking: true,
+  thinkingParam: 'enable_thinking',
+  thinkingBudget: null,
+  thinkingMandatory: false,
+
+  skipSystemPromptInThinking: false,
+  supportsAttachments: true, // native multimodal (text + vision)
+  modelSpecificPrompt: `Be decisive and direct. Reach conclusions quickly — do not overthink simple tasks. Output only changed code, never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
+}
+
 const GEMINI_3_FLASH: ModelProfile = {
   id: 'gemini-3-flash',
   name: 'Gemini 3 Flash',
@@ -209,8 +239,9 @@ const GEMINI_3_FLASH: ModelProfile = {
   contextWindow: 1_048_576,
   maxOutputTokens: 65_536,
 
-  temperature: 0.7,
-  reasoningTemperature: 0.7,
+  // Google docs: "strongly recommend keeping temperature at default 1.0"
+  temperature: 1.0,
+  reasoningTemperature: 1.0,
   topP: 0.95,
   topK: null,
   extraSamplingParams: { thinking_level: 'medium' },
@@ -236,6 +267,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'kimi-k2.5': KIMI_K2_5,
   'qwen3-coder-next': QWEN3_CODER_NEXT,
   'minimax-m2.5': MINIMAX_M2_5,
+  'qwen3.6-plus': QWEN3_6_PLUS,
   'gemini-3-flash': GEMINI_3_FLASH,
 }
 

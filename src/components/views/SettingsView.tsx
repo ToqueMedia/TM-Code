@@ -29,11 +29,12 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
 
-type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp'
+type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'sandbox'
 
 const NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'profile', key: 'settings.profilePlan' },
   { id: 'editor', key: 'settings.editor' },
+  { id: 'sandbox', key: 'settings.sandbox' as TranslationKey },
   { id: 'shortcuts', key: 'settings.shortcuts' },
   { id: 'skills', key: 'settings.skills' },
   { id: 'mcp', key: 'settings.mcpServers' },
@@ -124,6 +125,7 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
           <Box maxW="640px">
             {activeSection === 'profile' && <ProfileSection />}
             {activeSection === 'editor' && <EditorSection />}
+            {activeSection === 'sandbox' && <SandboxSection />}
             {activeSection === 'shortcuts' && <ShortcutsSection />}
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
@@ -368,6 +370,123 @@ function ProfileSection() {
 }
 
 // ━━━ Editor Section ━━━
+
+function SandboxSection() {
+  const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
+  const setSandboxEnabled = useSettingsStore(s => s.setSandboxEnabled)
+  const [sandboxAvailable, setSandboxAvailable] = useState(false)
+  const [platform, setPlatform] = useState('')
+  const [depsOk, setDepsOk] = useState(true)
+  const [depsMissing, setDepsMissing] = useState<string[]>([])
+  const [depsHints, setDepsHints] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(function () {
+    invoke<{ enabled: boolean; available: boolean; platform: string }>('sandbox_status').then(function (info) {
+      setSandboxAvailable(info.available)
+      setPlatform(info.platform)
+      setLoading(false)
+    })
+    invoke<{ ok: boolean; missing: string[]; hints: string[] }>('sandbox_check_deps').then(function (deps) {
+      setDepsOk(deps.ok)
+      setDepsMissing(deps.missing)
+      setDepsHints(deps.hints)
+    })
+  }, [])
+
+  function handleToggle(checked: boolean) {
+    setSandboxEnabled(checked) // persists to localStorage + syncs to Rust
+  }
+
+  const platformLabel = platform === 'macos' ? 'sandbox-exec (Seatbelt)'
+    : platform === 'linux' ? 'bubblewrap (bwrap)'
+    : platform === 'windows' ? 'WSL2 + bubblewrap'
+    : 'Not available'
+
+  return (
+    <VStack align="stretch" gap={6}>
+      <SettingsGroup title="Sandbox">
+        <Field.Root>
+          <HStack justify="space-between">
+            <Box>
+              <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                Sandbox
+              </Text>
+              <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                Isola os comandos do agente ao directório do projecto. Protege ficheiros do sistema, SSH keys, credentials e histórico.
+              </Text>
+            </Box>
+            {!loading && (
+              <Switch.Root
+                checked={sandboxEnabled}
+                onCheckedChange={function (e) { handleToggle(e.checked) }}
+                colorPalette="pink"
+                disabled={!sandboxAvailable}
+              >
+                <Switch.HiddenInput />
+                <Switch.Control />
+              </Switch.Root>
+            )}
+          </HStack>
+        </Field.Root>
+
+        <Box h="1px" bg={tokens.colors.border.subtle} />
+
+        <VStack align="stretch" gap={2} px={1}>
+          <HStack justify="space-between">
+            <Text fontSize="12px" color={tokens.colors.text.secondary}>Engine</Text>
+            <Text fontSize="12px" color={tokens.colors.text.primary} fontFamily={tokens.fontFamily.mono}>
+              {platformLabel}
+            </Text>
+          </HStack>
+          <HStack justify="space-between">
+            <Text fontSize="12px" color={tokens.colors.text.secondary}>Estado</Text>
+            <HStack gap={1.5}>
+              <Box
+                w="6px" h="6px" borderRadius="full"
+                bg={sandboxEnabled ? tokens.colors.accent.green : tokens.colors.text.disabled}
+              />
+              <Text fontSize="12px" color={sandboxEnabled ? tokens.colors.accent.green : tokens.colors.text.disabled}>
+                {sandboxEnabled ? 'Activo' : 'Inactivo'}
+              </Text>
+            </HStack>
+          </HStack>
+        </VStack>
+
+        {sandboxEnabled && (
+          <>
+            <Box h="1px" bg={tokens.colors.border.subtle} />
+            <VStack align="stretch" gap={1} px={1}>
+              <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.muted} textTransform="uppercase" letterSpacing="0.05em">
+                Protecções activas
+              </Text>
+              <Text fontSize="12px" color={tokens.colors.text.secondary}>
+                {platform === 'macos'
+                  ? 'Filesystem: apenas projecto + /tmp. Executáveis: /usr, /bin, /opt, tools. Network: sem restrição (npm/git). Bloqueado: ~/.ssh, ~/.aws, ~/.gnupg, keychains.'
+                  : 'Filesystem: / read-only, projecto read-write. Bloqueado: ~/.ssh, ~/.aws, ~/.gnupg, ~/.docker, .bash_history, .netrc, .npmrc, .git-credentials.'
+                }
+              </Text>
+            </VStack>
+          </>
+        )}
+
+        {!depsOk && !loading && (
+          <VStack align="stretch" gap={1} px={1}>
+            <Text fontSize="12px" color={tokens.colors.accent.orange} fontWeight="500">
+              Dependências em falta:
+            </Text>
+            {depsMissing.map(function (dep, i) {
+              return <Text key={i} fontSize="12px" color={tokens.colors.accent.red}>• {dep}</Text>
+            })}
+            {depsHints.map(function (hint, i) {
+              return <Text key={i} fontSize="11px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>{hint}</Text>
+            })}
+          </VStack>
+        )}
+      </SettingsGroup>
+    </VStack>
+  )
+}
 
 function EditorSection() {
   const t = useTranslation()

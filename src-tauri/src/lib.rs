@@ -12,6 +12,7 @@ use commands::issue_reporter::*;
 use commands::mcp::*;
 use commands::project::*;
 use commands::search::*;
+use commands::sandbox::*;
 use commands::terminal::*;
 
 use tauri::image::Image;
@@ -631,6 +632,9 @@ pub fn run() {
             git_pull,
             http_client_request,
             send_issue_report,
+            sandbox_set_enabled,
+            sandbox_status,
+            sandbox_check_deps,
             open_preview_webview,
             close_preview_webview,
             resize_preview_webview

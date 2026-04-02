@@ -11,4 +11,5 @@ pub mod issue_reporter;
 pub mod mcp;
 pub mod project;
 pub mod search;
+pub mod sandbox;
 pub mod terminal;

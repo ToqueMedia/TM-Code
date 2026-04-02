@@ -14,7 +14,7 @@ export interface AutocompleteSettings {
   ollamaUrl: string
 }
 
-export type AgentModelId = 'mimo-v2-flash' | 'deepseek-v3.2' | 'glm-5' | 'kimi-k2.5' | 'qwen3-coder-next' | 'minimax-m2.5' | 'gemini-3-flash'
+export type AgentModelId = 'mimo-v2-flash' | 'deepseek-v3.2' | 'glm-5' | 'kimi-k2.5' | 'qwen3-coder-next' | 'minimax-m2.5' | 'qwen3.6-plus' | 'gemini-3-flash'
 
 export type AppLanguage = 'en' | 'pt'
 export type AgentLanguage = 'en' | 'pt' | 'zh' | 'es' | 'fr' | 'de' | 'ja'
@@ -72,6 +72,7 @@ interface SettingsState {
   agentLanguage: AgentLanguage
   shortcuts: ShortcutMap
   hasCompletedOnboarding: boolean
+  sandboxEnabled: boolean
 }
 
 interface SettingsActions {
@@ -81,6 +82,7 @@ interface SettingsActions {
   setAutocompleteEnabled: (enabled: boolean) => void
   setAutocompleteModel: (model: string) => void
   setAutocompleteOllamaUrl: (url: string) => void
+  setSandboxEnabled: (enabled: boolean) => void
   setAgentModel: (model: AgentModelId) => void
   setFormatOnSave: (value: boolean) => void
   setAppLanguage: (lang: AppLanguage) => void
@@ -107,6 +109,7 @@ const DEFAULTS: SettingsState = {
   agentLanguage: 'en',
   shortcuts: { ...DEFAULT_SHORTCUTS },
   hasCompletedOnboarding: false,
+  sandboxEnabled: false,
 }
 
 export const useSettingsStore = create<SettingsState & SettingsActions>()(
@@ -166,6 +169,14 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         }))
       },
 
+      setSandboxEnabled: (enabled: boolean) => {
+        set(() => ({ sandboxEnabled: enabled }))
+        // Sync to Rust backend
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+          invoke('sandbox_set_enabled', { enabled }).catch(() => {})
+        })
+      },
+
       setAgentModel: (model: AgentModelId) => {
         set(() => ({ agentModel: model }))
       },
@@ -207,7 +218,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, agentModel: state.agentModel, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding }
+        return { editor: state.editor, autocomplete: state.autocomplete, agentModel: state.agentModel, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -221,6 +232,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           appLanguage: p.appLanguage ?? DEFAULTS.appLanguage,
           agentLanguage: p.agentLanguage ?? DEFAULTS.agentLanguage,
           hasCompletedOnboarding: p.hasCompletedOnboarding ?? DEFAULTS.hasCompletedOnboarding,
+          sandboxEnabled: p.sandboxEnabled ?? DEFAULTS.sandboxEnabled,
           // Merge shortcuts: defaults for new keys, but preserve null (cleared by conflict)
           shortcuts: Object.fromEntries(
             Object.keys(DEFAULT_SHORTCUTS).map(k => [

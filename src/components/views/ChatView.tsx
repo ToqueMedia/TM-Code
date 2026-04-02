@@ -1,13 +1,13 @@
 import { memo, useRef, useEffect, useState, useCallback } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSidebar, FiZap, FiBox, FiShield, FiChevronDown, FiCheck, FiAlertCircle } from 'react-icons/fi'
+import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle } from 'react-icons/fi'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
-import { useContainerStore } from '../../stores/containerStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, type UserPlanName } from '../../stores/billingStore'
 import MessageBubble from '../chat/MessageBubble'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
@@ -28,8 +28,7 @@ function ChatView() {
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
-  const isolationMode = useContainerStore(s => s.isolationMode)
-  const devcontainerName = useContainerStore(s => s.devcontainerName)
+  const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const scaffoldMessage = useLayoutStore(s => s.scaffoldMessage)
   const billingPlan = useBillingStore(s => s.plan)
@@ -143,28 +142,12 @@ function ChatView() {
             lastTokensUsed={lastTokensUsed}
             planCapacity={planCapacity}
           />
-          {isolationMode === 'docker' && (
-            <IsolationPill
-              icon={FiBox}
-              label={devcontainerName ? `${devcontainerName} (Docker)` : t('chat.dockerIsolation')}
-              color={tokens.colors.accent.greenBright}
-              onClick={() => setShowAttachDialog(true)}
-            />
-          )}
-          {isolationMode === 'app-level' && (
+          {sandboxEnabled && (
             <IsolationPill
               icon={FiShield}
-              label={devcontainerName || t('chat.appIsolation')}
-              color="#58a6ff"
-              onClick={() => setShowAttachDialog(true)}
-            />
-          )}
-          {isolationMode === 'none' && (
-            <IsolationPill
-              icon={FiBox}
-              label={t("view.attachContainer")}
-              color={tokens.colors.text.muted}
-              onClick={() => setShowAttachDialog(true)}
+              label="Modo Sandbox"
+              color={tokens.colors.accent.orange}
+              onClick={() => useLayoutStore.getState().setViewMode('settings')}
             />
           )}
           <McpIndicator

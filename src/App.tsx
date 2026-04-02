@@ -42,6 +42,15 @@ function App() {
 	// Initialize Firebase Auth listener
 	useEffect(() => {
 		FirebaseAuthService.getInstance().init();
+		// Restore persisted sandbox state to Rust backend
+		import('./stores/settingsStore').then(({ useSettingsStore }) => {
+			const sandboxEnabled = useSettingsStore.getState().sandboxEnabled;
+			if (sandboxEnabled) {
+				import('@tauri-apps/api/core').then(({ invoke }) => {
+					invoke('sandbox_set_enabled', { enabled: true }).catch(() => {});
+				});
+			}
+		});
 	}, []);
 
 	useEffect(() => {

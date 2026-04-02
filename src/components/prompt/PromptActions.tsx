@@ -97,7 +97,13 @@ function PromptActions({
             onClick={() => { if (!isStreaming) setIsModelMenuOpen(!isModelMenuOpen) }}
           >
             <Text fontSize="11px" fontWeight={600} letterSpacing="0.02em">
-              {activeProfile.persona.name.split(' ').pop() || activeProfile.persona.name}
+              {(() => {
+                const parts = activeProfile.persona.name.split(' ')
+                const last = parts[parts.length - 1]
+                // Roman numeral suffixes (II, III, IV) — include preceding word
+                if (parts.length > 1 && /^[IVX]+$/.test(last)) return parts.slice(-2).join(' ')
+                return last || activeProfile.persona.name
+              })()}
             </Text>
             <FiChevronUp size={10} style={{
               transform: isModelMenuOpen ? 'rotate(180deg)' : 'none',

@@ -1,10 +1,9 @@
 import React, { memo, Suspense, useState, useEffect } from 'react'
 import { Flex, Text, Box, HStack } from '@chakra-ui/react'
-import { VscSourceControl, VscError, VscSparkle, VscRemoteExplorer, VscShield, VscSymbolFile } from 'react-icons/vsc'
+import { VscSourceControl, VscError, VscSparkle, VscShield, VscSymbolFile } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import { useMcpStore } from '@/stores/mcpStore'
-import { useContainerStore } from '@/stores/containerStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useAiCompletionStore } from '@/stores/aiCompletionStore'
 import { GitService } from '@/services/gitService'
@@ -110,34 +109,23 @@ McpStatusPill.displayName = 'McpStatusPill'
 // ─── Container Status Pill ──────────────────────────────────────────────────
 
 const ContainerStatusPill = memo(() => {
-	const t = useTranslation()
-	const isolationMode = useContainerStore(s => s.isolationMode)
-	const devcontainerName = useContainerStore(s => s.devcontainerName)
+	const sandboxActive = useSettingsStore(s => s.sandboxEnabled)
 
-	if (isolationMode === 'none') return null
-
-	const isDocker = isolationMode === 'docker'
-	const Icon = isDocker ? VscRemoteExplorer : VscShield
-	const color = isDocker ? tokens.colors.accent.greenBright : '#58a6ff'
-	const label = isDocker
-		? (devcontainerName ? `${devcontainerName}` : 'Docker')
-		: (devcontainerName || 'Isolated')
+	if (!sandboxActive) return null
 
 	return (
 		<>
 			<StatusBarDivider />
 			<HStack
-				gap={1}
-				px={2}
-				py="2px"
+				gap={1} px={2} py="2px"
 				borderRadius={tokens.radius.full}
 				bg="rgba(255, 255, 255, 0.04)"
 				cursor="default"
-				title={isDocker ? t('status.dockerContainer') : t('status.appIsolation')}
+				title="Modo Sandbox activo — comandos isolados ao projecto"
 			>
-				<Icon size={10} color={color} />
-				<Text fontSize="10px" color={color} fontWeight="600" fontFamily={tokens.fontFamily.mono}>
-					{label}
+				<VscShield size={10} color={tokens.colors.accent.orange} />
+				<Text fontSize="10px" color={tokens.colors.accent.orange} fontWeight="600" fontFamily={tokens.fontFamily.mono}>
+					Modo Sandbox
 				</Text>
 			</HStack>
 		</>

@@ -129,6 +129,16 @@ fn hide_console_window(cmd: &mut Command) {
     }
 }
 
+/// Build a command with sandbox if enabled, otherwise plain host command.
+pub fn build_sandboxed_host_command(command: &str, project_path: &PathBuf) -> Command {
+    if let Some(cmd) = super::sandbox::sandboxed_command(command, project_path, &[]) {
+        eprintln!("[sandbox] Active: {}", &command[..command.len().min(60)]);
+        cmd
+    } else {
+        build_host_command(command, project_path)
+    }
+}
+
 fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
     if cfg!(target_os = "windows") {
         let mut cmd = Command::new("cmd");
@@ -433,12 +443,12 @@ pub async fn execute_command(
             }
         }
 
-        // ── App-level isolation: clamp cwd to project ────────────────
+        // ── App-level isolation: sandbox the command to the project directory
         let working_dir = match &cwd {
             Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
             None => PathBuf::from(&ap.project_path),
         };
-        let cmd = build_host_command(&command, &working_dir);
+        let cmd = build_sandboxed_host_command(&command, &working_dir);
         return run_command_with_timeout(cmd, timeout).await;
     }
 
@@ -573,7 +583,7 @@ pub async fn run_streaming_command(
             build_container_command(&command, &workdir, container_name)
         } else {
             let working_dir = PathBuf::from(clamp_to_project(&cwd, &ap.project_path));
-            build_host_command(&command, &working_dir)
+            build_sandboxed_host_command(&command, &working_dir)
         }
     } else {
         build_host_command(&command, &PathBuf::from(&cwd))
@@ -729,35 +739,13 @@ pub async fn start_dev_server(
             c
             } // end docker_reachable else
         } else {
-            // App-level isolation: clamp cwd
+            // App-level isolation: sandbox the dev server command
             let clamped = clamp_to_project(&cwd, &ap.project_path);
-            let (shell, flag) = if cfg!(target_os = "windows") {
-                ("cmd", "/C")
-            } else {
-                ("sh", "-c")
-            };
-
-            let mut c = Command::new(shell);
-            c.arg(flag)
-                .arg(&command)
-                .current_dir(&clamped)
-                .env("FORCE_COLOR", "0")
+            let mut c = build_sandboxed_host_command(&command, &PathBuf::from(&clamped));
+            c.env("FORCE_COLOR", "0")
                 .env("NO_COLOR", "1")
                 .env("PORT", &port_str)
-                .env("BROWSER", "none")
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-
-            // Inject user's full PATH so npm/pnpm/node are found
-            if let Some(path) = get_user_path() {
-                c.env("PATH", path);
-            }
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                c.process_group(0);
-            }
+                .env("BROWSER", "none");
 
             c
         }
