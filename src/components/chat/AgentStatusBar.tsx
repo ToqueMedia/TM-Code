@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import { Flex, Text, Box } from '@chakra-ui/react'
-import { FiSquare, FiBox, FiShield } from 'react-icons/fi'
-import { useAgentStore } from '../../stores/agentStore'
+import { FiSquare, FiBox, FiShield, FiCheckSquare, FiLoader } from 'react-icons/fi'
+import { useAgentStore, type AgentTask } from '../../stores/agentStore'
 import { useChatStore, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useSkillStore } from '../../stores/skillStore'
@@ -44,6 +44,7 @@ function AgentStatusBar() {
   const queuePosition = useAgentStore(s => s.queuePosition)
   const bgRunning = useBackgroundAgentStore(s => s.getRunningCount())
   const bgTotal = useBackgroundAgentStore(s => s.getAll().length)
+  const agentTasks = useAgentStore(s => s.tasks)
 
   const handleStop = () => {
     usePermissionStore.getState().clearPending()
@@ -116,17 +117,44 @@ function AgentStatusBar() {
     : null
 
   return (
-    <Flex
-      role="status"
-      aria-live="polite"
-      align="center"
-      justify="space-between"
-      px={3}
-      py="6px"
-      bg="rgba(255, 255, 255, 0.02)"
-      borderTop="1px solid rgba(255, 255, 255, 0.04)"
-      minH="28px"
-    >
+    <Box borderTop="1px solid rgba(255, 255, 255, 0.04)" bg="rgba(255, 255, 255, 0.02)">
+      {/* Agent task list — shows when agent has active tasks */}
+      {agentTasks.length > 0 && (
+        <Box px={3} pt="6px" pb="2px">
+          {agentTasks.map((task: AgentTask) => (
+            <Flex key={task.id} align="center" gap="6px" py="2px">
+              {task.status === 'completed' ? (
+                <FiCheckSquare size={11} color={tokens.colors.accent.greenBright} style={{ flexShrink: 0 }} />
+              ) : task.status === 'in_progress' ? (
+                <Box as={FiLoader} boxSize="11px" color={tokens.colors.accent.primary} flexShrink={0} css={{
+                  animation: 'taskSpin 1.5s linear infinite',
+                  '@keyframes taskSpin': { '0%': { transform: 'rotate(0deg)' }, '100%': { transform: 'rotate(360deg)' } },
+                }} />
+              ) : (
+                <FiSquare size={11} color={tokens.colors.text.disabled} style={{ flexShrink: 0 }} />
+              )}
+              <Text
+                fontSize="11px"
+                color={task.status === 'completed' ? tokens.colors.text.muted : tokens.colors.text.primary}
+                textDecoration={task.status === 'completed' ? 'line-through' : 'none'}
+                lineHeight="1.4"
+              >
+                {task.description}
+              </Text>
+            </Flex>
+          ))}
+        </Box>
+      )}
+      {/* Status bar */}
+      <Flex
+        role="status"
+        aria-live="polite"
+        align="center"
+        justify="space-between"
+        px={3}
+        py="6px"
+        minH="28px"
+      >
       <Flex align="center" gap={2}>
         <Box
           w="6px"
@@ -196,6 +224,7 @@ function AgentStatusBar() {
         )}
       </Flex>
     </Flex>
+    </Box>
   )
 }
 

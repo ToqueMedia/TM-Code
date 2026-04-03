@@ -51,6 +51,9 @@ class ToolExecutor {
   private tools: Map<string, ToolEntry> = new Map()
   /** Tracks install commands that completed successfully in this session. */
   private completedInstalls: Set<string> = new Set()
+  /** Tracks when files were last read by the model — for read-before-write enforcement.
+   *  Stores timestamp + a simple content hash to detect concurrent modifications. */
+  private readFileTimestamps: Map<string, { timestamp: number; hash: number }> = new Map()
 
   private constructor() {
     this.registerTools()
@@ -66,6 +69,11 @@ class ToolExecutor {
   /** Clears session-scoped state (e.g., install command cache). Call on new sessions. */
   resetSessionState(): void {
     this.completedInstalls.clear()
+    this.readFileTimestamps.clear()
+    this.largeResults.clear()
+    this.largeResultCounter = 0
+    this.readOnlyContexts.clear()
+    this._installedDepsCache = undefined
   }
 
   /** Optional context for the current tool execution (set by agent service). */
@@ -104,6 +112,12 @@ class ToolExecutor {
     if (toolCallId) this.currentToolCallId = toolCallId
     try {
       const result = await tool.execute(execInput)
+      // Diff results must never be truncated — the UI needs full JSON for InlineDiff,
+      // and agentService needs it for approval and readFileTimestamps updates.
+      try {
+        const parsed = JSON.parse(result)
+        if (parsed?.type === 'diff') return result
+      } catch { /* not JSON — proceed to truncation */ }
       return this.truncateResult(result)
     } finally {
       if (toolCallId) this.currentToolCallId = null
@@ -155,9 +169,36 @@ class ToolExecutor {
     }
   }
 
+  /** Large result storage — maps reference IDs to full content for later retrieval. */
+  private largeResults: Map<string, string> = new Map()
+  private largeResultCounter = 0
+
+  /**
+   * Handles large tool results: if the result exceeds the threshold,
+   * stores the full output in memory and returns a reference with a preview.
+   * The model can retrieve the full output via read_large_result tool.
+   * This prevents information loss from truncation (like Claude Code's disk persistence).
+   */
   private truncateResult(result: string, maxChars: number = 30000): string {
     if (result.length <= maxChars) return result
-    return result.slice(0, maxChars) + `\n\n[TRUNCATED - showing ${maxChars} of ${result.length} characters]`
+
+    // Store full result in memory for later retrieval
+    const refId = `large_result_${++this.largeResultCounter}`
+    this.largeResults.set(refId, result)
+
+    // Keep only the last 20 large results to prevent memory bloat
+    if (this.largeResults.size > 20) {
+      const firstKey = this.largeResults.keys().next().value
+      if (firstKey) this.largeResults.delete(firstKey)
+    }
+
+    const previewSize = 2000
+    const preview = result.slice(0, previewSize)
+    const totalSize = result.length > 1024
+      ? `${(result.length / 1024).toFixed(1)}KB`
+      : `${result.length} chars`
+
+    return `Output too large (${totalSize}). Full output stored as: ${refId}\n\nPreview (first ${previewSize} chars):\n${preview}\n...\n\nUse read_large_result("${refId}") to read a specific portion of the full output.`
   }
 
   /**
@@ -267,6 +308,7 @@ class ToolExecutor {
 
       if (exitCode === 0) {
         this.completedInstalls.add(installKey)
+        this.invalidateDepsCache() // New packages installed — refresh cache
         if (tcId) {
           useChatStore.getState().updateToolCallProgress(tcId, '')
         }
@@ -356,6 +398,53 @@ class ToolExecutor {
     return '/' + resolved.join('/')
   }
 
+  /**
+   * Suggests a similar file path when the requested path doesn't exist.
+   * Checks: same basename in project (different directory), same name with
+   * different extension, and basename as glob pattern.
+   */
+  private async suggestSimilarPath(requestedPath: string): Promise<string | null> {
+    try {
+      const projectRoot = this.getProjectRoot()
+      const basename = requestedPath.split('/').pop() || ''
+      if (!basename) return null
+
+      // Timeout: abort suggestion if glob takes too long (large projects)
+      const SUGGESTION_TIMEOUT = 2000
+      const withTimeout = <T>(promise: Promise<T>): Promise<T | null> =>
+        Promise.race([
+          promise,
+          new Promise<null>(resolve => setTimeout(() => resolve(null), SUGGESTION_TIMEOUT)),
+        ])
+
+      // Strategy 1: Glob for same filename anywhere in project
+      const exactMatches = await withTimeout(invoke<string[]>('glob_files', {
+        pattern: `**/${basename}`,
+        directory: projectRoot,
+      }))
+      if (exactMatches && exactMatches.length > 0 && exactMatches[0] !== requestedPath) {
+        return exactMatches[0]
+      }
+
+      // Strategy 2: Same name, different extension (e.g., .ts vs .tsx, .js vs .jsx)
+      const nameWithoutExt = basename.replace(/\.[^.]+$/, '')
+      const extVariants = await withTimeout(invoke<string[]>('glob_files', {
+        pattern: `**/${nameWithoutExt}.*`,
+        directory: projectRoot,
+      }))
+      if (extVariants) {
+        const filtered = extVariants.filter(p => p !== requestedPath)
+        if (filtered.length > 0) {
+          return filtered[0]
+        }
+      }
+
+      return null
+    } catch {
+      return null
+    }
+  }
+
   // Files that may contain secrets — require explicit user authorization
   private static readonly SENSITIVE_FILE_PATTERNS = [
     /^\.env($|\.)/, // .env, .env.local, .env.production, etc.
@@ -423,10 +512,197 @@ class ToolExecutor {
     /\bkillall\b/,
   ]
 
+  /**
+   * Patterns that indicate file-writing operations via shell.
+   * Used to enforce read-only mode for verification agents.
+   */
+  private static readonly WRITE_COMMAND_PATTERNS = [
+    />\s*(?!\/dev\/null|&)\S/,  // redirect to file (allow > /dev/null and >&)
+    />>\s*(?!\/dev\/null)\S/,   // append redirect (allow >> /dev/null)
+    /\bsed\s+(-[a-zA-Z]*i|--in-place)\b/, // sed in-place edit
+    /\bperl\s+(-[a-zA-Z]*i)\b/,           // perl in-place edit
+    /\bmv\s+/,          // move/rename files
+    /\bcp\s+/,          // copy files
+    /\brm\s+/,          // remove files
+    /\bmkdir\s+/,       // create directories
+    /\btouch\s+/,       // create/update files
+    /\btee\s+/,         // write to files via tee
+    /\bchmod\s+/,       // change permissions
+    /\bchown\s+/,       // change ownership
+    /\bln\s+/,          // create links
+    /\bcurl\s+.*-[a-zA-Z]*o\b/, // curl -o writes to file
+    /\bwget\s+/,        // wget downloads files
+    /\bgit\s+(add|commit|push|checkout|reset|merge|rebase|stash|tag\s+-d)\b/, // git write ops
+  ]
+
+  /**
+   * Set of active read-only execution contexts (by ID).
+   * When non-empty, execute_command blocks file-writing shell operations.
+   * Uses a Set instead of a boolean to support concurrent verification agents
+   * without one agent's cleanup disabling another's protection.
+   */
+  private readOnlyContexts: Set<string> = new Set()
+
+  /** Enter read-only mode for a specific execution context. Returns the context ID. */
+  enterReadOnlyMode(): string {
+    const id = `ro_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    this.readOnlyContexts.add(id)
+    return id
+  }
+
+  /** Exit read-only mode for a specific execution context. */
+  exitReadOnlyMode(id: string): void {
+    this.readOnlyContexts.delete(id)
+  }
+
+  /** Whether any read-only context is active. */
+  private get readOnlyMode(): boolean {
+    return this.readOnlyContexts.size > 0
+  }
+
+  /**
+   * Update the read state for a file after it has been written (diff approved).
+   * Prevents false "file modified since read" errors when the model edits
+   * a file it just wrote. Called by agentService after diff approval.
+   */
+  updateReadStateAfterWrite(path: string, newContent: string): void {
+    this.readFileTimestamps.set(path, {
+      timestamp: Date.now(),
+      hash: this.simpleHash(newContent),
+    })
+    // If package.json was written, invalidate the deps cache so
+    // checkMissingImports sees the new dependencies immediately.
+    if (path.endsWith('/package.json') || path === 'package.json') {
+      this.invalidateDepsCache()
+    }
+  }
+
+  /**
+   * Parses import/require statements and checks if the packages are installed.
+   * Returns a list of missing packages that need to be installed.
+   * Ignores: relative imports (./), Node built-ins, and packages already in package.json.
+   */
+  private async checkMissingImports(content: string, filePath: string): Promise<string[]> {
+    // Only check JS/TS files
+    const ext = filePath.split('.').pop()?.toLowerCase() || ''
+    if (!['ts', 'tsx', 'js', 'jsx', 'mts', 'mjs', 'cts', 'cjs'].includes(ext)) return []
+
+    // Extract package names from import/require/dynamic-import statements.
+    // Uses the string specifier in quotes rather than parsing full import syntax,
+    // so multiline imports are handled (we look for `from 'pkg'` or `require('pkg')`).
+    // Match `from 'pkg'` only at the start of a line or after import/export keywords
+    // to reduce false positives from strings/comments containing "from 'something'"
+    const fromPattern = /(?:^|;|\b(?:import|export))\s+(?:type\s+)?(?:\{[^}]*\}|[^;]*?)\s+from\s+['"]([^'"]+)['"]/gm
+    const requirePattern = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+    const dynamicImportPattern = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+
+    const packages = new Set<string>()
+    for (const pattern of [fromPattern, requirePattern, dynamicImportPattern]) {
+      let match
+      while ((match = pattern.exec(content)) !== null) {
+        const specifier = match[1]
+        if (!specifier) continue
+        // Skip: relative imports, absolute paths, path aliases (#, @/, ~/)
+        if (specifier.startsWith('.') || specifier.startsWith('/')) continue
+        if (specifier.startsWith('#')) continue        // TypeScript # path alias
+        if (/^@\//.test(specifier)) continue           // @/ path alias (Vite, Next.js)
+        if (specifier.startsWith('~/')) continue        // ~/ path alias (Nuxt)
+        // Extract package name (handle scoped packages like @tanstack/react-query)
+        const pkgName = specifier.startsWith('@')
+          ? specifier.split('/').slice(0, 2).join('/')
+          : specifier.split('/')[0]
+        if (pkgName) packages.add(pkgName)
+      }
+    }
+
+    if (packages.size === 0) return []
+
+    // Node built-ins to ignore
+    const nodeBuiltins = new Set([
+      'fs', 'path', 'os', 'url', 'http', 'https', 'crypto', 'stream', 'util',
+      'events', 'buffer', 'querystring', 'zlib', 'net', 'dns', 'tls', 'child_process',
+      'cluster', 'dgram', 'readline', 'repl', 'vm', 'assert', 'console', 'timers',
+      'string_decoder', 'perf_hooks', 'worker_threads', 'inspector',
+      'node:fs', 'node:path', 'node:os', 'node:url', 'node:http', 'node:https',
+      'node:crypto', 'node:stream', 'node:util', 'node:events', 'node:buffer',
+      'node:child_process', 'node:worker_threads', 'node:test', 'node:assert',
+    ])
+
+    // Read package.json deps (cached to avoid repeated IPC calls)
+    const installedDeps = await this.getInstalledDeps()
+    if (installedDeps === null) return [] // No package.json — skip check
+
+    // Find missing packages
+    const missing: string[] = []
+    for (const pkg of packages) {
+      if (nodeBuiltins.has(pkg)) continue
+      if (installedDeps.has(pkg)) continue
+      missing.push(pkg)
+    }
+
+    return missing
+  }
+
+  /** Cached installed deps from package.json. Invalidated when install commands run. */
+  private _installedDepsCache: Set<string> | null | undefined = undefined // undefined = not loaded, null = no package.json
+
+  /** Get installed deps (cached). Returns null if no package.json. */
+  private async getInstalledDeps(): Promise<Set<string> | null> {
+    if (this._installedDepsCache !== undefined) return this._installedDepsCache
+    try {
+      const projectRoot = this.getProjectRoot()
+      const pkgRaw = await invoke<string>('read_file', { path: `${projectRoot}/package.json` })
+      const pkg = JSON.parse(pkgRaw)
+      this._installedDepsCache = new Set([
+        ...Object.keys(pkg.dependencies || {}),
+        ...Object.keys(pkg.devDependencies || {}),
+        ...Object.keys(pkg.peerDependencies || {}),
+      ])
+      return this._installedDepsCache
+    } catch {
+      this._installedDepsCache = null
+      return null
+    }
+  }
+
+  /** Invalidate deps cache (called after install commands succeed). */
+  invalidateDepsCache(): void {
+    this._installedDepsCache = undefined
+  }
+
+  /** Detect package manager for error messages. Uses cached value from contextBuilder. */
+  private detectPm(): string {
+    return this._cachedPm || 'npm'
+  }
+  private _cachedPm: string | null = null
+
+  /** Set the detected package manager (called during prompt building). */
+  setCachedPackageManager(pm: string): void {
+    this._cachedPm = pm
+  }
+
+  /** Fast non-cryptographic hash for concurrent modification detection. */
+  private simpleHash(str: string): number {
+    let hash = 0
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0
+    }
+    return hash
+  }
+
   private validateCommand(command: string): void {
     for (const pattern of ToolExecutor.BLOCKED_COMMANDS) {
       if (pattern.test(command)) {
         throw new Error(`Command blocked for safety: "${command}" matches a destructive pattern.`)
+      }
+    }
+
+    // Read-only mode: block file-writing shell operations (verification agents)
+    if (this.readOnlyMode) {
+      for (const pattern of ToolExecutor.WRITE_COMMAND_PATTERNS) {
+        if (pattern.test(command)) {
+          throw new Error(`Command blocked: "${command}" would modify files, but you are running in read-only verification mode. Only diagnostic commands (tests, linters, type checkers, curl) are allowed.`)
+        }
       }
     }
   }
@@ -474,8 +750,27 @@ class ToolExecutor {
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.path as string)
-        return await invoke<string>('read_file', { path: input.path })
+        const filePath = input.path as string
+        this.validatePathWithinProject(filePath)
+        try {
+          const content = await invoke<string>('read_file', { path: filePath })
+          // Track read timestamp + content hash for read-before-write enforcement
+          this.readFileTimestamps.set(filePath, { timestamp: Date.now(), hash: this.simpleHash(content) })
+          return content
+        } catch (error) {
+          // Enrich file-not-found errors with path suggestions (like Claude Code)
+          const msg = error instanceof Error ? error.message : String(error)
+          if (/not found|no such file|does not exist/i.test(msg)) {
+            const suggestion = await this.suggestSimilarPath(filePath)
+            const projectRoot = this.getProjectRoot()
+            let enriched = `File not found: ${filePath}\nNote: your current working directory is ${projectRoot}`
+            if (suggestion) {
+              enriched += `\nDid you mean: ${suggestion}`
+            }
+            return enriched
+          }
+          throw error
+        }
       }
     })
 
@@ -566,6 +861,27 @@ class ToolExecutor {
           isNewFile = true
         }
 
+        // Enforce read-before-write for existing files (like Claude Code).
+        // The model must read a file before overwriting it to understand what it's replacing.
+        if (!isNewFile) {
+          const readState = this.readFileTimestamps.get(path)
+          if (!readState) {
+            return `Error: You must read_file("${path}") before overwriting it. Read the file first to understand its current content, then call write_file.`
+          }
+          // Concurrent modification detection: check if file changed on disk since the model read it
+          const currentHash = this.simpleHash(oldContent)
+          if (currentHash !== readState.hash) {
+            this.readFileTimestamps.delete(path)
+            return `Error: File "${path}" has been modified since you last read it (by the developer, a formatter, or another process). Read it again with read_file before writing.`
+          }
+        }
+
+        // Check for uninstalled package imports before generating diff
+        const missingPkgs = await this.checkMissingImports(newContent, path)
+        if (missingPkgs.length > 0) {
+          return `Error: The following packages are imported but NOT installed in package.json: ${missingPkgs.join(', ')}\n\nInstall them first with execute_command (e.g., "${this.detectPm()} add ${missingPkgs.join(' ')}"), then call write_file again.`
+        }
+
         // Return diff data as JSON for inline display
         // The file is NOT written yet — user approves via InlineDiff
         return JSON.stringify({
@@ -603,6 +919,12 @@ class ToolExecutor {
           return `Error: File already exists: ${path}. Use write_file to overwrite or edit_file for small changes.`
         } catch {
           // File doesn't exist — good, proceed
+        }
+
+        // Check for uninstalled package imports before generating diff
+        const missingPkgs = await this.checkMissingImports(content, path)
+        if (missingPkgs.length > 0) {
+          return `Error: The following packages are imported but NOT installed in package.json: ${missingPkgs.join(', ')}\n\nInstall them first with execute_command (e.g., "${this.detectPm()} add ${missingPkgs.join(' ')}"), then call create_file again.`
         }
 
         // Return diff data as JSON for inline display (consistent with write_file)
@@ -753,7 +1075,20 @@ class ToolExecutor {
 
         this.validatePathWithinProject(path)
 
+        // Enforce read-before-edit: the model must have read the file to know what to edit
+        const readState = this.readFileTimestamps.get(path)
+        if (!readState) {
+          return `Error: You must read_file("${path}") before editing it. Read the file first to see the current content, then call edit_file.`
+        }
+
         const content = await invoke<string>('read_file', { path })
+
+        // Concurrent modification detection
+        const currentHash = this.simpleHash(content)
+        if (currentHash !== readState.hash) {
+          this.readFileTimestamps.delete(path)
+          return `Error: File "${path}" has been modified since you last read it. Read it again with read_file before editing.`
+        }
 
         const occurrences = content.split(oldStr).length - 1
 
@@ -766,6 +1101,13 @@ class ToolExecutor {
         }
 
         const newContent = content.replace(oldStr, newStr)
+
+        // Check for uninstalled package imports in the NEW PART only (not the whole file).
+        // Checking the whole file would flag pre-existing imports that already work.
+        const missingPkgs = await this.checkMissingImports(newStr, path)
+        if (missingPkgs.length > 0) {
+          return `Error: The following packages are imported but NOT installed in package.json: ${missingPkgs.join(', ')}\n\nInstall them first with execute_command (e.g., "${this.detectPm()} add ${missingPkgs.join(' ')}"), then call edit_file again.`
+        }
 
         // Return diff data as JSON for inline display
         return JSON.stringify({
@@ -1038,6 +1380,95 @@ class ToolExecutor {
       }
     })
 
+    // === read_large_result ===
+    this.tools.set('read_large_result', {
+      definition: {
+        name: 'read_large_result',
+        description: 'Read a portion of a large tool result that was too big to return inline. Use the reference ID from the "Output too large" message. Specify offset and limit to read specific sections.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Reference ID (e.g., "large_result_1")' },
+            offset: { type: 'number', description: 'Character offset to start reading from. Default: 0.' },
+            limit: { type: 'number', description: 'Maximum characters to return. Default: 10000. Max: 30000.' }
+          },
+          required: ['id']
+        }
+      },
+      execute: async (input) => {
+        const id = input.id as string
+        const content = this.largeResults.get(id)
+        if (!content) {
+          return `Error: Large result "${id}" not found. It may have been cleared from memory. Available results: ${Array.from(this.largeResults.keys()).join(', ') || 'none'}`
+        }
+
+        const offset = Math.max(0, (input.offset as number) || 0)
+        const limit = Math.min((input.limit as number) || 10000, 30000)
+        const slice = content.slice(offset, offset + limit)
+        const hasMore = offset + limit < content.length
+        const remaining = content.length - offset - limit
+
+        let result = slice
+        if (hasMore) {
+          result += `\n\n[${remaining} more characters — use offset: ${offset + limit} to continue reading]`
+        }
+        return result
+      }
+    })
+
+    // === read_dev_server_logs ===
+    this.tools.set('read_dev_server_logs', {
+      definition: {
+        name: 'read_dev_server_logs',
+        description: 'Read recent output from the running dev server (stdout, stderr, errors, warnings). Use after file changes to check if the build broke, after start_dev_server to verify startup, or anytime you need to observe what the dev server is doing. Returns the last N log lines.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            lines: { type: 'number', description: 'Number of log lines to return. Default: 50. Max: 200.' },
+            level: { type: 'string', enum: ['all', 'error', 'warn'], description: 'Filter by log level. "error" shows only errors. "warn" shows errors and warnings. "all" shows everything. Default: all.' }
+          },
+          required: []
+        }
+      },
+      execute: async (input) => {
+        const { useLayoutStore } = await import('../../stores/layoutStore')
+        const logs = useLayoutStore.getState().devServerLogs
+
+        if (logs.length === 0) {
+          if (!devServerManager.isActive()) {
+            return 'No dev server is running. Start one with start_dev_server.'
+          }
+          return 'Dev server is running but has produced no output yet.'
+        }
+
+        const maxLines = Math.min((input.lines as number) || 50, 200)
+        const levelFilter = (input.level as string) || 'all'
+
+        let filtered = logs
+        if (levelFilter === 'error') {
+          filtered = logs.filter(l => l.level === 'error')
+        } else if (levelFilter === 'warn') {
+          filtered = logs.filter(l => l.level === 'warn' || l.level === 'error')
+        }
+
+        const recent = filtered.slice(-maxLines)
+
+        if (recent.length === 0) {
+          return `No ${levelFilter === 'all' ? '' : levelFilter + '-level '}logs found. Dev server appears healthy.`
+        }
+
+        const formatted = recent.map(l => {
+          const prefix = l.level === 'error' ? 'ERROR' : l.level === 'warn' ? 'WARN' : 'INFO'
+          return `[${prefix}] ${l.text}`
+        }).join('\n')
+
+        const errorCount = recent.filter(l => l.level === 'error').length
+        const warnCount = recent.filter(l => l.level === 'warn').length
+
+        return `Dev server logs (${recent.length} lines, ${errorCount} errors, ${warnCount} warnings):\n${formatted}`
+      }
+    })
+
     // === research (sub-agent) ===
     this.tools.set('research', {
       definition: {
@@ -1253,6 +1684,40 @@ Project root: ${projectRoot}`
       }
     })
 
+    // === update_tasks ===
+    this.tools.set('update_tasks', {
+      definition: {
+        name: 'update_tasks',
+        description: 'Create or update a task list visible to the developer in the chat UI. Use at the start of complex work to show what you plan to do, and update task statuses as you complete each step. The developer sees checkboxes with real-time progress.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            tasks: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', description: 'Unique task ID (e.g., "1", "install_deps")' },
+                  description: { type: 'string', description: 'Short task description' },
+                  status: { type: 'string', enum: ['pending', 'in_progress', 'completed'], description: 'Task status' },
+                },
+                required: ['id', 'description', 'status'],
+              },
+              description: 'Full task list. Each call replaces the previous list — always send the complete state.',
+            },
+          },
+          required: ['tasks'],
+        },
+      },
+      execute: async (input) => {
+        const { useAgentStore } = await import('../../stores/agentStore')
+        const tasks = (input.tasks as Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>) || []
+        useAgentStore.getState().setTasks(tasks)
+        const completed = tasks.filter(t => t.status === 'completed').length
+        return `Task list updated: ${completed}/${tasks.length} completed.`
+      }
+    })
+
     // === check_background_agents ===
     this.tools.set('check_background_agents', {
       definition: {
@@ -1290,6 +1755,152 @@ Project root: ${projectRoot}`
         }
 
         return lines.join('\n\n')
+      }
+    })
+
+    // === verify (adversarial verification sub-agent) ===
+    this.tools.set('verify', {
+      definition: {
+        name: 'verify',
+        description: 'Launch an independent verification agent that checks your implementation by running tests, reading code, and executing diagnostic commands. The verifier CANNOT edit files — it can only read and execute. Use after completing non-trivial changes (3+ files, backend/API work, complex logic) to catch issues before reporting done. Returns a verdict: PASS, FAIL, or PARTIAL.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            task_description: { type: 'string', description: 'What was the original task/requirement' },
+            files_changed: { type: 'array', items: { type: 'string' }, description: 'List of absolute file paths that were modified' },
+            approach: { type: 'string', description: 'Brief description of how you implemented it' }
+          },
+          required: ['task_description', 'files_changed']
+        }
+      },
+      execute: async (input) => {
+        const taskDescription = input.task_description as string
+        const filesChanged = (input.files_changed as string[]) || []
+        const approach = (input.approach as string) || ''
+
+        const { default: AgentService } = await import('./agentService')
+
+        // Verification agent: read-only + execute (NO write/edit/create tools).
+        // execute_command gets a modified description warning about read-only restrictions.
+        const verifierToolNames = new Set([
+          'read_file', 'list_directory', 'search_files', 'glob',
+          'get_diagnostics', 'execute_command', 'read_dev_server_logs',
+          'read_large_result',
+        ])
+        const verifierTools = this.getToolDefinitions()
+          .filter(t => verifierToolNames.has(t.function.name))
+          .map(t => {
+            // Annotate execute_command description with read-only constraint
+            if (t.function.name === 'execute_command') {
+              return {
+                ...t,
+                function: {
+                  ...t.function,
+                  description: t.function.description + ' RESTRICTION: You are a read-only verification agent. Only run diagnostic commands (tests, linters, type checkers, curl). Do NOT run commands that modify files (no redirects >, >>, no sed -i, no mv/cp/rm, no tee, no mkdir/touch).',
+                }
+              }
+            }
+            return t
+          })
+
+        const mainAgent = AgentService.getInstance()
+        const subAgent = AgentService.createLightweight({
+          tools: verifierTools,
+          readOnly: true,
+          maxTurns: 30,
+          abortController: mainAgent.getAbortController() || undefined,
+        })
+
+        const projectRoot = this.getProjectRoot()
+        const systemPrompt = `You are a VERIFICATION agent inside TM Code. Your job is to independently verify that an implementation is correct.
+
+You CANNOT edit, write, or create files. You can only read files and execute commands (tests, linters, type checks, curl).
+
+## Verification process
+1. Read each changed file to understand the implementation.
+2. Run relevant tests (if they exist).
+3. Run type checking (get_diagnostics or execute tsc --noEmit).
+4. Check for common issues: missing imports, unused variables, type errors, runtime errors.
+5. If a dev server is running, check read_dev_server_logs for errors.
+6. For API/backend changes, execute curl or similar to verify endpoints work.
+
+## Rules
+- Reading code is NOT verification. You must execute something (test, typecheck, curl) to verify.
+- Do not trust the implementer's claims. Verify independently.
+- Be specific about what passed and what failed.
+
+## Output format
+End your response with exactly one of:
+VERDICT: PASS — All checks passed, implementation is correct.
+VERDICT: FAIL — Found issues that need fixing. List them.
+VERDICT: PARTIAL — Some checks passed, others could not be verified. List what passed and what couldn't be checked.
+
+Project root: ${projectRoot}`
+
+        subAgent.setSystemPrompt(systemPrompt)
+
+        const prompt = `## Task
+${taskDescription}
+
+## Approach
+${approach || '(not provided)'}
+
+## Files changed
+${filesChanged.map(f => `- ${f}`).join('\n')}
+
+Verify this implementation. Run tests, type checks, and any other relevant validation. End with your VERDICT.`
+
+        let result = ''
+        let totalTokens = 0
+        let toolsCalled = 0
+        const toolCallId = (input._toolCallId as string) || this.currentToolCallId
+
+        const updateProgress = (status: string) => {
+          if (toolCallId) {
+            const tokenStr = totalTokens > 0 ? ` | ${Math.round(totalTokens / 1000)}K tokens` : ''
+            useChatStore.getState().updateToolCallProgress(toolCallId, `🔍 ${status}${tokenStr}`)
+          }
+        }
+
+        updateProgress('Starting verification...')
+
+        // Activate read-only mode to block file-writing shell commands.
+        // Uses a scoped context ID so concurrent background agents aren't affected.
+        const readOnlyId = this.enterReadOnlyMode()
+        try {
+        await subAgent.runAgentLoop(prompt, [], {
+          onTextDelta: (delta) => { result += delta },
+          onReasoningDelta: () => { updateProgress('Analyzing...') },
+          onToolCallPending: (_toolId, toolName) => {
+            toolsCalled++
+            updateProgress(`${toolName}...`)
+          },
+          onToolCallStart: (_toolId, toolName, args) => {
+            const target = (args.path as string)?.split('/').pop()
+              || (args.command as string)?.slice(0, 40)
+              || (args.query as string)
+              || ''
+            updateProgress(`${toolName}: ${target}`)
+          },
+          onToolResult: () => {},
+          onTurnComplete: () => {},
+          onDone: (finalText) => {
+            if (finalText && !result) result = finalText
+            updateProgress(`Done — ${toolsCalled} checks`)
+          },
+          onError: (error) => {
+            result = `Verification error: ${error.message}`
+            updateProgress('Error')
+          },
+          onUsageUpdate: (inputTokens, outputTokens) => {
+            totalTokens += inputTokens + outputTokens
+          },
+        } satisfies AgentCallbacks)
+
+        return result || 'Verification produced no output.'
+        } finally {
+          this.exitReadOnlyMode(readOnlyId)
+        }
       }
     })
   }

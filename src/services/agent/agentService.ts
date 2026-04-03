@@ -145,6 +145,12 @@ class AgentService {
   private summarizationFailures = 0
   /** Options for lightweight sub-agents (null for the main singleton). */
   private lightweightOptions: LightweightAgentOptions | null = null
+  /** Tracks unique files edited in the current session (for verify enforcement). */
+  private filesEditedThisSession: Set<string> = new Set()
+  /** Whether the verify tool was called in the current session. */
+  private verifyCalledThisSession = false
+  /** Timestamp of the last approved file change — used to filter dev server errors in COMPLETION_BLOCKED. */
+  private lastFileChangeTimestamp = 0
 
   private constructor(options?: LightweightAgentOptions) {
     this.toolExecutor = ToolExecutor.getInstance()
@@ -282,6 +288,16 @@ class AgentService {
       this.abortController = new AbortController()
     }
 
+    // Reset per-message tracking (files edited and verify status are per user message, not per session)
+    this.filesEditedThisSession.clear()
+    this.verifyCalledThisSession = false
+    this.lastFileChangeTimestamp = 0
+    // Clear agent tasks from previous message
+    try {
+      const { useAgentStore } = await import('../../stores/agentStore')
+      useAgentStore.getState().clearTasks()
+    } catch { /* non-critical */ }
+
     // Reset stale compression state for fresh conversations (new session)
     if (conversationHistory.length === 0) {
       this.lastPromptTokens = 0
@@ -317,6 +333,8 @@ class AgentService {
 
     let turnCount = 0
     let continuationCount = 0
+    let enforcementRetries = 0
+    const MAX_ENFORCEMENT_RETRIES = 3
 
     try {
       const maxTurns = this.lightweightOptions?.maxTurns ?? Infinity
@@ -408,11 +426,51 @@ class AgentService {
         }
         messages.push(assistantMsg)
 
-        // If no tool calls, loop is done
+        // If no tool calls, the model wants to stop. But first, enforce completion checks.
         if (
           turnResult.toolCalls.length === 0 ||
           (turnResult.finishReason !== 'tool_calls' && turnResult.finishReason !== 'function_call')
         ) {
+          // Completion enforcement — only for the main agent, not sub-agents
+          if (!this.lightweightOptions) {
+            const enforcements: string[] = []
+
+            // Enforcement: verify contract — 3+ files edited without verify
+            if (this.filesEditedThisSession.size >= 3 && !this.verifyCalledThisSession) {
+              enforcements.push(`You edited ${this.filesEditedThisSession.size} files but did not call the verify tool. Per the verification contract, non-trivial changes (3+ files) require independent verification. Call verify now with the list of changed files before reporting completion.`)
+            }
+
+            // Enforcement: never done with errors — check dev server logs.
+            // Only check errors that appeared AFTER the last file change to avoid
+            // false-blocking on stale errors that were already fixed by hot-reload.
+            if (devServerManager.isActive() && this.lastFileChangeTimestamp > 0) {
+              try {
+                const { useLayoutStore } = await import('../../stores/layoutStore')
+                const logs = useLayoutStore.getState().devServerLogs
+                const errorsAfterLastChange = logs.filter(l =>
+                  l.level === 'error' && l.timestamp > this.lastFileChangeTimestamp
+                )
+                if (errorsAfterLastChange.length > 0) {
+                  const errorText = errorsAfterLastChange.slice(-5).map(e => e.text).join('\n')
+                  enforcements.push(`The dev server is showing errors after your changes:\n${errorText}\n\nFix these errors before reporting completion.`)
+                }
+              } catch { /* non-critical */ }
+            }
+
+            // If any enforcement triggered, push the model back into the loop.
+            // assistantMsg is already in messages (pushed above) — only add the enforcement.
+            // Limited retries prevent infinite loops from persistent server errors.
+            if (enforcements.length > 0 && enforcementRetries < MAX_ENFORCEMENT_RETRIES) {
+              enforcementRetries++
+              messages.push({
+                role: 'user',
+                content: `[COMPLETION_BLOCKED]\n${enforcements.join('\n\n')}\n[/COMPLETION_BLOCKED]`,
+              })
+              callbacks.onTurnComplete(turnCount)
+              continue // Back to loop — model must address the issues
+            }
+          }
+
           callbacks.onDone(turnResult.textContent || '')
           return
         }
@@ -459,9 +517,24 @@ class AgentService {
               // Wait for user to approve/reject the file change
               const approved = await createDiffApprovalPromise(toolCall.id)
               if (this.abortController?.signal.aborted) return null
-              llmResult = approved
-                ? `File ${parsedDiff.isNewFile ? 'created' : 'updated'}: ${parsedDiff.path}`
-                : `User rejected the file change: ${parsedDiff.path}. Ask the user what they want instead.`
+              if (approved) {
+                llmResult = `File ${parsedDiff.isNewFile ? 'created' : 'updated'}: ${parsedDiff.path}`
+                // Track approved file edit for verify enforcement (only count approved writes)
+                if (!this.lightweightOptions) {
+                  this.filesEditedThisSession.add(parsedDiff.path)
+                  this.lastFileChangeTimestamp = Date.now()
+                }
+                // Update read state so the model can edit this file again without re-reading.
+                // The file now has newContent on disk — sync the hash.
+                try {
+                  const parsed = JSON.parse(result)
+                  if (parsed.newContent !== undefined) {
+                    this.toolExecutor.updateReadStateAfterWrite(parsed.path, parsed.newContent)
+                  }
+                } catch { /* non-critical — model just needs to re-read */ }
+              } else {
+                llmResult = `User rejected the file change: ${parsedDiff.path}. Ask the user what they want instead.`
+              }
             } else if (parsedDiff) {
               llmResult = `File ${parsedDiff.isNewFile ? 'created' : 'updated'}: ${parsedDiff.path}`
             } else {
@@ -489,6 +562,34 @@ class AgentService {
             tool_call_id: entry.toolCall.id,
             content: `[TOOL_RESULT:${entry.toolCall.name}]\n${entry.content}\n[/TOOL_RESULT]`,
           })
+
+          // Track verify calls for completion enforcement (tool-level, not approval-dependent)
+          if (!this.lightweightOptions && entry.toolCall.name === 'verify') {
+            this.verifyCalledThisSession = true
+          }
+        }
+
+        // Closed-loop feedback: auto-inject dev server errors after file modifications.
+        // The brain (model) must see what the body (IDE) observed — build errors,
+        // type errors, crashes — even if the model forgot to call read_dev_server_logs.
+        if (!this.lightweightOptions) {
+          const hasFileChanges = toolResults.some(r =>
+            r && !r.isError && ['write_file', 'edit_file', 'create_file'].includes(r.toolCall.name)
+          )
+          if (hasFileChanges && devServerManager.isActive()) {
+            // Brief delay for hot-reload/rebuild to process the file changes.
+            // 800ms catches most HMR errors without excessive wait.
+            await new Promise(r => setTimeout(r, 800))
+            if (!this.abortController?.signal.aborted) {
+              const devErrors = await this.getRecentDevServerErrors()
+              if (devErrors) {
+                messages.push({
+                  role: 'user',
+                  content: `[DEV_SERVER_FEEDBACK]\nThe dev server detected errors after your file changes:\n\n${devErrors}\n\nFix these errors before continuing. Use read_dev_server_logs for full output if needed.\n[/DEV_SERVER_FEEDBACK]`,
+                })
+              }
+            }
+          }
         }
 
         if (this.abortController?.signal.aborted) return
@@ -855,6 +956,28 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       }
     } catch {
       return result.length > 200 ? result.slice(0, 150) + ' [... compacted]' : result
+    }
+  }
+
+  // === Closed-Loop Feedback (dev server error detection) ===
+
+  /**
+   * Returns recent error-level dev server logs (last 5 seconds).
+   * Used by the auto-injection in runAgentLoop to push build errors,
+   * type errors, and crashes back to the model after file modifications.
+   */
+  private async getRecentDevServerErrors(): Promise<string | null> {
+    try {
+      const { useLayoutStore } = await import('../../stores/layoutStore')
+      const logs = useLayoutStore.getState().devServerLogs
+      const now = Date.now()
+      const recentErrors = logs.filter(l =>
+        l.level === 'error' && now - l.timestamp < 5000
+      )
+      if (recentErrors.length === 0) return null
+      return recentErrors.map(e => e.text).join('\n')
+    } catch {
+      return null
     }
   }
 
