@@ -1145,16 +1145,6 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     }
 
     // Read billing info from response headers
-    console.info('[billing:headers]', {
-      status: response.headers.get('x-tm-ratelimit-status'),
-      '5h-util': response.headers.get('x-tm-ratelimit-5h-utilization'),
-      '5h-reset': response.headers.get('x-tm-ratelimit-5h-reset'),
-      '7d-util': response.headers.get('x-tm-ratelimit-7d-utilization'),
-      '7d-reset': response.headers.get('x-tm-ratelimit-7d-reset'),
-      claim: response.headers.get('x-tm-ratelimit-representative-claim'),
-      tmsStatus: response.headers.get('x-tm-ratelimit-tms-status'),
-      tmsRem: response.headers.get('x-tm-ratelimit-tms-remaining'),
-    })
     useBillingStore.getState().updateFromHeaders(response.headers)
 
     return response
@@ -1237,17 +1227,6 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
           }
 
           case 'billing': {
-            console.info('[billing:sse]', {
-              '5h-util': event.envelope5hUtilization,
-              '5h-reset': event.envelope5hReset,
-              '7d-util': event.envelope7dUtilization,
-              '7d-reset': event.envelope7dReset,
-              status: event.envelopeStatus,
-              tmsStatus: event.tmsStatus,
-              tmsRem: event.tmsRemaining,
-              multiplier: event.modelMultiplier,
-              effectiveTokens: event.effectiveTokens,
-            })
             useBillingStore.getState().updateFromSSE({
               type: 'billing',
               credits_remaining: event.creditsRemaining,
@@ -1264,12 +1243,6 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
               tms_remaining: event.tmsRemaining,
               model_multiplier: event.modelMultiplier,
               effective_tokens: event.effectiveTokens,
-            })
-            console.info('[billing:store-after]', {
-              '5h-reset': useBillingStore.getState().envelope5hReset,
-              '7d-reset': useBillingStore.getState().envelope7dReset,
-              '5h-util': useBillingStore.getState().envelope5hUtilization,
-              '7d-util': useBillingStore.getState().envelope7dUtilization,
             })
             break
           }

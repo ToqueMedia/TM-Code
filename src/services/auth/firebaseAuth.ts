@@ -346,7 +346,7 @@ class FirebaseAuthService {
           tmsRemaining?: number
         }
 
-        console.info(`[billing] /v1/me response:`, JSON.stringify(data))
+        console.info(`[billing] Plan: ${data.plan}, Credits: ${data.creditsRemaining}/${data.planCapacity}, Active: ${data.isActive}`)
 
         useBillingStore.setState({
           plan: (data.plan || 'explorer') as import('../../stores/billingStore').UserPlanName,

@@ -41,11 +41,6 @@ function ChatView() {
   const tmsStatus = useBillingStore(s => s.tmsStatus)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const usingTmsOverage = useBillingStore(s => s.usingTmsOverage)
-  const lastEffectiveTokens = useBillingStore(s => s.lastEffectiveTokens)
-  const lastTokensUsed = useBillingStore(s => s.lastTokensUsed)
-  const modelMultiplier = useBillingStore(s => s.modelMultiplier)
-  const envelopeMonthlyLimit = useBillingStore(s => s.envelopeMonthlyLimit)
-  const envelopeMonthlyConsumed = useBillingStore(s => s.envelopeMonthlyConsumed)
   const [showAttachDialog, setShowAttachDialog] = useState(false)
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
@@ -154,11 +149,6 @@ function ChatView() {
             tmsStatus={tmsStatus}
             tmsRemaining={tmsRemaining}
             usingTmsOverage={usingTmsOverage}
-            lastEffectiveTokens={lastEffectiveTokens}
-            lastTokensUsed={lastTokensUsed}
-            modelMultiplier={modelMultiplier}
-            envelopeMonthlyLimit={envelopeMonthlyLimit}
-            envelopeMonthlyConsumed={envelopeMonthlyConsumed}
           />
           {sandboxEnabled && (
             <IsolationPill
@@ -315,16 +305,18 @@ function CreditIndicator(props: {
   tmsStatus: string
   tmsRemaining: number
   usingTmsOverage: boolean
-  lastEffectiveTokens: number
-  lastTokensUsed: number
-  modelMultiplier: number
-  envelopeMonthlyLimit: number
-  envelopeMonthlyConsumed: number
 }) {
   const [showDetail, setShowDetail] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const prev5hRef = useRef(0)
   const [flash, setFlash] = useState(false)
+  // Tick every 30s while dropdown is open to keep reset times fresh
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (!showDetail) return
+    const interval = setInterval(() => setTick(t => t + 1), 30_000)
+    return () => clearInterval(interval)
+  }, [showDetail])
 
   const planInfo = PLAN_DISPLAY[props.plan] || PLAN_DISPLAY.explorer
   const h5Pct = Math.round(props.envelope5hUtil * 100)
@@ -371,20 +363,21 @@ function CreditIndicator(props: {
     : props.usingTmsOverage ? 'rgba(247, 127, 0, 0.2)'
     : 'rgba(255, 255, 255, 0.06)'
 
-  // Format reset: "4h 52min" for <24h, "qua, 11:49" for >=24h
+  // Format reset: "4h 52min" for <24h, "Wed, 11:49" for >=24h
+  const appLang = useSettingsStore(s => s.appLanguage)
   function formatReset(epoch: number): string {
     if (!epoch) return ''
     const diff = epoch - Math.floor(Date.now() / 1000)
-    if (diff <= 0) return 'agora'
+    if (diff <= 0) return appLang === 'pt' ? 'agora' : 'now'
     if (diff < 86400) {
       const h = Math.floor(diff / 3600)
       const m = Math.ceil((diff % 3600) / 60)
       return h > 0 ? `${h}h ${m}min` : `${m}min`
     }
-    // Show weekday + time for >=24h
+    const locale = appLang === 'pt' ? 'pt' : 'en'
     const resetDate = new Date(epoch * 1000)
-    const weekday = resetDate.toLocaleDateString('pt', { weekday: 'short' }).replace('.', '')
-    const time = resetDate.toLocaleTimeString('pt', { hour: '2-digit', minute: '2-digit' })
+    const weekday = resetDate.toLocaleDateString(locale, { weekday: 'short' }).replace('.', '')
+    const time = resetDate.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })
     return `${weekday}, ${time}`
   }
 

@@ -33,7 +33,9 @@ function AgentStatusBar() {
   const billingPlan = useBillingStore(s => s.plan)
   const noCredits = useBillingStore(s => s.noCredits)
   const envelope5hUtil = useBillingStore(s => s.envelope5hUtilization)
+  const envelope5hReset = useBillingStore(s => s.envelope5hReset)
   const envelope7dUtil = useBillingStore(s => s.envelope7dUtilization)
+  const envelope7dReset = useBillingStore(s => s.envelope7dReset)
   const envelopeStatus = useBillingStore(s => s.envelopeStatus)
   const tmsStatus = useBillingStore(s => s.tmsStatus)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
@@ -78,12 +80,13 @@ function AgentStatusBar() {
     : (statusConfig[status] || statusConfig.idle)
   const totalTokens = totalTokensUsed.input + totalTokensUsed.output
 
-  // Build info segments — show envelope utilization instead of raw credits
+  // Build info segments — show remaining % (consistent with CreditIndicator pill)
   const infoSegments: string[] = []
-  const h5Pct = Math.round(envelope5hUtil * 100)
-  const d7Pct = Math.round(envelope7dUtil * 100)
-  infoSegments.push(`5h: ${h5Pct}%`)
-  infoSegments.push(`7d: ${d7Pct}%`)
+  const h5Remaining = 100 - Math.round(envelope5hUtil * 100)
+  const d7Remaining = 100 - Math.round(envelope7dUtil * 100)
+  // Only show window % when session is active (has reset epoch)
+  if (envelope5hReset > 0) infoSegments.push(`5h: ${h5Remaining}%`)
+  if (envelope7dReset > 0) infoSegments.push(`7d: ${d7Remaining}%`)
   if (usingTmsOverage) {
     infoSegments.push(`TMS: ${tmsRemaining}`)
   }
