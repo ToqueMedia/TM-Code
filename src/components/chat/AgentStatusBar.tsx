@@ -30,9 +30,15 @@ function AgentStatusBar() {
   const runningServers = useMcpStore(s => s.getRunningServers())
   const totalMcpTools = useMcpStore(s => s.getTotalToolCount())
   const isolationMode = useContainerStore(s => s.isolationMode)
-  const creditsRemaining = useBillingStore(s => s.creditsRemaining)
   const billingPlan = useBillingStore(s => s.plan)
   const noCredits = useBillingStore(s => s.noCredits)
+  const envelope5hUtil = useBillingStore(s => s.envelope5hUtilization)
+  const envelope7dUtil = useBillingStore(s => s.envelope7dUtilization)
+  const envelopeStatus = useBillingStore(s => s.envelopeStatus)
+  const tmsStatus = useBillingStore(s => s.tmsStatus)
+  const tmsRemaining = useBillingStore(s => s.tmsRemaining)
+  const usingTmsOverage = useBillingStore(s => s.usingTmsOverage)
+  const representativeClaim = useBillingStore(s => s.representativeClaim)
   const queuePosition = useAgentStore(s => s.queuePosition)
   const bgRunning = useBackgroundAgentStore(s => s.getRunningCount())
   const bgTotal = useBackgroundAgentStore(s => s.getAll().length)
@@ -54,19 +60,32 @@ function AgentStatusBar() {
     error: { color: tokens.colors.accent.red, label: error || 'Error', pulse: false },
   }
 
-  // Queue position overrides thinking status
-  // "Sem créditos" only when idle
+  // Status priority: queue > envelope exhausted > no credits > agent status
+  const isEnvelopeBlocked = envelopeStatus === 'rejected' && tmsStatus === 'rejected'
+  const blockedLabel = representativeClaim === 'monthly'
+    ? t('chat.noTokens') + ' (mensal)'
+    : representativeClaim === '7d'
+    ? t('chat.noTokens') + ' (7d)'
+    : t('chat.noTokens') + ' (5h)'
   const config = queuePosition
     ? { color: tokens.colors.accent.orange, label: `${t('chat.inQueue')}: ${queuePosition.position} / ${queuePosition.total}`, pulse: true }
+    : (isEnvelopeBlocked && status === 'idle')
+    ? { color: tokens.colors.accent.red, label: blockedLabel, pulse: false }
+    : (usingTmsOverage && status === 'idle')
+    ? { color: tokens.colors.accent.orange, label: t('chat.usingTmsOverage'), pulse: false }
     : (noCredits && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.noCredits'), pulse: false }
     : (statusConfig[status] || statusConfig.idle)
   const totalTokens = totalTokensUsed.input + totalTokensUsed.output
 
-  // Build info segments
+  // Build info segments — show envelope utilization instead of raw credits
   const infoSegments: string[] = []
-  if (creditsRemaining !== null) {
-    infoSegments.push(`${creditsRemaining} ${t("chat.credits")}`)
+  const h5Pct = Math.round(envelope5hUtil * 100)
+  const d7Pct = Math.round(envelope7dUtil * 100)
+  infoSegments.push(`5h: ${h5Pct}%`)
+  infoSegments.push(`7d: ${d7Pct}%`)
+  if (usingTmsOverage) {
+    infoSegments.push(`TMS: ${tmsRemaining}`)
   }
   if (billingPlan) {
     infoSegments.push(billingPlan)

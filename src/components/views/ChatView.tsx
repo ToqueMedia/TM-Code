@@ -32,11 +32,20 @@ function ChatView() {
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const scaffoldMessage = useLayoutStore(s => s.scaffoldMessage)
   const billingPlan = useBillingStore(s => s.plan)
-  const creditsRemaining = useBillingStore(s => s.creditsRemaining)
   const noCredits = useBillingStore(s => s.noCredits)
-  const lastCreditsUsed = useBillingStore(s => s.lastCreditsUsed)
+  const envelope5hUtil = useBillingStore(s => s.envelope5hUtilization)
+  const envelope7dUtil = useBillingStore(s => s.envelope7dUtilization)
+  const envelope5hReset = useBillingStore(s => s.envelope5hReset)
+  const envelope7dReset = useBillingStore(s => s.envelope7dReset)
+  const envelopeStatus = useBillingStore(s => s.envelopeStatus)
+  const tmsStatus = useBillingStore(s => s.tmsStatus)
+  const tmsRemaining = useBillingStore(s => s.tmsRemaining)
+  const usingTmsOverage = useBillingStore(s => s.usingTmsOverage)
+  const lastEffectiveTokens = useBillingStore(s => s.lastEffectiveTokens)
   const lastTokensUsed = useBillingStore(s => s.lastTokensUsed)
-  const planCapacity = useBillingStore(s => s.planCapacity)
+  const modelMultiplier = useBillingStore(s => s.modelMultiplier)
+  const envelopeMonthlyLimit = useBillingStore(s => s.envelopeMonthlyLimit)
+  const envelopeMonthlyConsumed = useBillingStore(s => s.envelopeMonthlyConsumed)
   const [showAttachDialog, setShowAttachDialog] = useState(false)
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
@@ -135,12 +144,21 @@ function ChatView() {
         <HStack gap={1.5}>
           <CreditIndicator
             plan={billingPlan}
-            creditsRemaining={creditsRemaining}
             noCredits={noCredits}
             isStreaming={isStreaming}
-            lastCreditsUsed={lastCreditsUsed}
+            envelope5hUtil={envelope5hUtil}
+            envelope7dUtil={envelope7dUtil}
+            envelope5hReset={envelope5hReset}
+            envelope7dReset={envelope7dReset}
+            envelopeStatus={envelopeStatus}
+            tmsStatus={tmsStatus}
+            tmsRemaining={tmsRemaining}
+            usingTmsOverage={usingTmsOverage}
+            lastEffectiveTokens={lastEffectiveTokens}
             lastTokensUsed={lastTokensUsed}
-            planCapacity={planCapacity}
+            modelMultiplier={modelMultiplier}
+            envelopeMonthlyLimit={envelopeMonthlyLimit}
+            envelopeMonthlyConsumed={envelopeMonthlyConsumed}
           />
           {sandboxEnabled && (
             <IsolationPill
@@ -287,34 +305,42 @@ const PLAN_DISPLAY: Record<UserPlanName, { label: string; color: string }> = {
 
 function CreditIndicator(props: {
   plan: UserPlanName
-  creditsRemaining: number | null
   noCredits: boolean
   isStreaming: boolean
-  lastCreditsUsed: number
+  envelope5hUtil: number
+  envelope7dUtil: number
+  envelope5hReset: number
+  envelope7dReset: number
+  envelopeStatus: string
+  tmsStatus: string
+  tmsRemaining: number
+  usingTmsOverage: boolean
+  lastEffectiveTokens: number
   lastTokensUsed: number
-  planCapacity: number
+  modelMultiplier: number
+  envelopeMonthlyLimit: number
+  envelopeMonthlyConsumed: number
 }) {
   const [showDetail, setShowDetail] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-  const prevCreditsRef = useRef<number | null>(null)
+  const prev5hRef = useRef(0)
   const [flash, setFlash] = useState(false)
 
   const planInfo = PLAN_DISPLAY[props.plan] || PLAN_DISPLAY.explorer
-  const isLoading = props.creditsRemaining === null
-  const remaining = props.creditsRemaining ?? 0
-  const pct = isLoading ? 50 // neutral position while loading
-    : props.planCapacity > 0 ? Math.min(100, Math.max(0, (remaining / props.planCapacity) * 100)) : 0
+  const h5Pct = Math.round(props.envelope5hUtil * 100)
+  const d7Pct = Math.round(props.envelope7dUtil * 100)
+  const maxUtil = Math.max(props.envelope5hUtil, props.envelope7dUtil)
+  const isBlocked = props.envelopeStatus === 'rejected' && props.tmsStatus === 'rejected'
 
-  // Flash animation when credits decrease
+  // Flash animation when 5h utilization increases
   useEffect(() => {
-    if (prevCreditsRef.current !== null && props.creditsRemaining !== null
-        && props.creditsRemaining < prevCreditsRef.current) {
+    if (props.envelope5hUtil > prev5hRef.current && prev5hRef.current > 0) {
       setFlash(true)
       const timer = setTimeout(() => setFlash(false), 600)
       return () => clearTimeout(timer)
     }
-    prevCreditsRef.current = props.creditsRemaining
-  }, [props.creditsRemaining])
+    prev5hRef.current = props.envelope5hUtil
+  }, [props.envelope5hUtil])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -326,22 +352,41 @@ function CreditIndicator(props: {
     return () => document.removeEventListener('mousedown', handler)
   }, [showDetail])
 
-  // Determine credit color
-  let creditColor: string = isLoading
-    ? tokens.colors.text.disabled
-    : tokens.colors.accent.greenBright
-  if (!isLoading && props.noCredits) {
-    creditColor = tokens.colors.accent.red
-  } else if (!isLoading && pct <= 20) {
-    creditColor = tokens.colors.accent.orange
+  // Color based on envelope status
+  function getBarColor(util: number): string {
+    if (util >= 1) return tokens.colors.accent.red
+    if (util >= 0.8) return tokens.colors.accent.orange
+    return `linear-gradient(90deg, ${tokens.colors.accent.primary}, ${tokens.colors.accent.purple})`
   }
 
-  // Progress bar color
-  let barColor: string = isLoading
-    ? tokens.colors.text.disabled
-    : `linear-gradient(90deg, ${tokens.colors.accent.primary}, ${tokens.colors.accent.purple})`
-  if (!isLoading && props.noCredits) barColor = tokens.colors.accent.red
-  else if (!isLoading && pct <= 20) barColor = tokens.colors.accent.orange
+  const pillBg = isBlocked
+    ? 'rgba(248, 81, 73, 0.08)'
+    : props.usingTmsOverage
+    ? 'rgba(247, 127, 0, 0.08)'
+    : 'rgba(255, 255, 255, 0.04)'
+
+  const pillBorder = showDetail
+    ? 'rgba(255, 255, 255, 0.15)'
+    : isBlocked ? 'rgba(248, 81, 73, 0.2)'
+    : props.usingTmsOverage ? 'rgba(247, 127, 0, 0.2)'
+    : 'rgba(255, 255, 255, 0.06)'
+
+  // Format reset: "4h 52min" for <24h, "qua, 11:49" for >=24h
+  function formatReset(epoch: number): string {
+    if (!epoch) return ''
+    const diff = epoch - Math.floor(Date.now() / 1000)
+    if (diff <= 0) return 'agora'
+    if (diff < 86400) {
+      const h = Math.floor(diff / 3600)
+      const m = Math.ceil((diff % 3600) / 60)
+      return h > 0 ? `${h}h ${m}min` : `${m}min`
+    }
+    // Show weekday + time for >=24h
+    const resetDate = new Date(epoch * 1000)
+    const weekday = resetDate.toLocaleDateString('pt', { weekday: 'short' }).replace('.', '')
+    const time = resetDate.toLocaleTimeString('pt', { hour: '2-digit', minute: '2-digit' })
+    return `${weekday}, ${time}`
+  }
 
   return (
     <Box position="relative" ref={ref}>
@@ -350,169 +395,165 @@ function CreditIndicator(props: {
         px={2}
         py="3px"
         borderRadius={tokens.radius.full}
-        bg={props.noCredits ? 'rgba(248, 81, 73, 0.08)' : 'rgba(255, 255, 255, 0.04)'}
+        bg={pillBg}
         border="1px solid"
-        borderColor={showDetail
-          ? 'rgba(255, 255, 255, 0.15)'
-          : props.noCredits ? 'rgba(248, 81, 73, 0.2)' : 'rgba(255, 255, 255, 0.06)'
-        }
+        borderColor={pillBorder}
         cursor="pointer"
         transition={`all ${tokens.transition.fast}`}
         _hover={{ bg: 'rgba(255, 255, 255, 0.08)', borderColor: 'rgba(255, 255, 255, 0.12)' }}
         onClick={() => setShowDetail(!showDetail)}
       >
         {/* Plan badge */}
-        <Text
-          fontSize="9px"
-          fontWeight="700"
-          color={planInfo.color}
-          textTransform="uppercase"
-          letterSpacing="0.04em"
-        >
+        <Text fontSize="9px" fontWeight="700" color={planInfo.color} textTransform="uppercase" letterSpacing="0.04em">
           {planInfo.label}
         </Text>
 
-        {/* Credits count */}
+        {/* 5h + 7d utilization compact */}
         <Text
           fontSize="10px"
           fontWeight="600"
           fontFamily={tokens.fontFamily.mono}
-          color={creditColor}
+          color={maxUtil >= 1 ? tokens.colors.accent.red : maxUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}
           css={flash ? {
             animation: 'creditFlash 0.6s ease',
             '@keyframes creditFlash': {
               '0%': { transform: 'scale(1)' },
-              '30%': { transform: 'scale(1.2)', color: tokens.colors.accent.orange },
+              '30%': { transform: 'scale(1.2)' },
               '100%': { transform: 'scale(1)' },
             }
           } : undefined}
         >
-          {props.creditsRemaining !== null ? `${remaining}/${props.planCapacity}` : '—'}
+          {props.usingTmsOverage ? `TMS: ${props.tmsRemaining}` : props.envelope5hReset > 0 ? `${100 - h5Pct}%` : ''}
         </Text>
 
-        {/* Mini progress bar */}
-        <Box w="24px" h="3px" borderRadius="full" bg="rgba(255, 255, 255, 0.08)" flexShrink={0} overflow="hidden">
-          <Box
-            h="100%"
-            borderRadius="full"
-            bg={barColor}
-            width={`${Math.max(2, pct)}%`}
-            transition="width 0.5s ease"
-          />
-        </Box>
+        {/* Mini dual progress bars — empty when no active session, fills as tokens are used */}
+        <VStack gap="1px" flexShrink={0}>
+          <Box w="20px" h="2px" borderRadius="full" bg="rgba(255, 255, 255, 0.08)" overflow="hidden">
+            {props.envelope5hReset > 0 && (
+              <Box h="100%" borderRadius="full" bg={getBarColor(props.envelope5hUtil)} width={`${Math.max(2, 100 - h5Pct)}%`} transition="width 0.5s ease" />
+            )}
+          </Box>
+          <Box w="20px" h="2px" borderRadius="full" bg="rgba(255, 255, 255, 0.08)" overflow="hidden">
+            {props.envelope7dReset > 0 && (
+              <Box h="100%" borderRadius="full" bg={getBarColor(props.envelope7dUtil)} width={`${Math.max(2, 100 - d7Pct)}%`} transition="width 0.5s ease" />
+            )}
+          </Box>
+        </VStack>
 
-        {/* Streaming consumption indicator */}
+        {/* Streaming pulse */}
         {props.isStreaming && (
-          <Box
-            w="5px"
-            h="5px"
-            borderRadius="full"
-            bg={tokens.colors.accent.primary}
-            flexShrink={0}
-            css={{
-              animation: 'consumePulse 1s ease-in-out infinite',
-              '@keyframes consumePulse': {
-                '0%, 100%': { opacity: 0.4 },
-                '50%': { opacity: 1 },
-              }
-            }}
+          <Box w="5px" h="5px" borderRadius="full" bg={tokens.colors.accent.primary} flexShrink={0}
+            css={{ animation: 'consumePulse 1s ease-in-out infinite', '@keyframes consumePulse': { '0%, 100%': { opacity: 0.4 }, '50%': { opacity: 1 } } }}
           />
         )}
 
-        <FiChevronDown
-          size={8}
-          color={tokens.colors.text.disabled}
-          style={{
-            transition: 'transform 0.15s',
-            transform: showDetail ? 'rotate(180deg)' : 'rotate(0deg)',
-          }}
+        <FiChevronDown size={8} color={tokens.colors.text.disabled}
+          style={{ transition: 'transform 0.15s', transform: showDetail ? 'rotate(180deg)' : 'rotate(0deg)' }}
         />
       </HStack>
 
       {/* Detail dropdown */}
       {showDetail && (
         <VStack
-          position="absolute"
-          top="calc(100% + 4px)"
-          right={0}
-          minW="220px"
-          bg={tokens.colors.bg.overlay}
-          border="1px solid"
-          borderColor={tokens.colors.border.panel}
-          borderRadius="8px"
-          boxShadow="0 8px 24px rgba(0,0,0,0.4)"
-          py={2}
-          px={3}
-          gap={2}
+          position="absolute" top="calc(100% + 4px)" right={0} minW="240px"
+          bg={tokens.colors.bg.overlay} border="1px solid" borderColor={tokens.colors.border.panel}
+          borderRadius="8px" boxShadow="0 8px 24px rgba(0,0,0,0.4)" py={2} px={3} gap={2}
           zIndex={tokens.zIndex.dropdown}
         >
-          {/* Plan + credits header */}
+          {/* Plan header */}
           <Flex justify="space-between" align="center" w="100%">
             <HStack gap={1.5}>
               <Box w="6px" h="6px" borderRadius="full" bg={planInfo.color} />
-              <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary}>
-                {planInfo.label}
-              </Text>
+              <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary}>{planInfo.label}</Text>
             </HStack>
-            <Text fontSize="11px" fontWeight="700" fontFamily={tokens.fontFamily.mono} color={creditColor}>
-              {props.creditsRemaining !== null ? `${remaining} / ${props.planCapacity} TMS` : '—'}
-            </Text>
+            {props.usingTmsOverage && (
+              <Text fontSize="9px" fontWeight="700" color={tokens.colors.accent.orange} textTransform="uppercase">
+                {t('chat.tmsOverage')}
+              </Text>
+            )}
           </Flex>
 
-          {/* Progress bar */}
-          <Box w="100%" h="3px" borderRadius="full" bg="rgba(255, 255, 255, 0.06)" overflow="hidden">
-            <Box
-              h="100%"
-              borderRadius="full"
-              bg={barColor}
-              width={`${Math.max(2, pct)}%`}
-              transition="width 0.5s ease"
-            />
-          </Box>
-
-          {/* Plan type label */}
-          <Text fontSize="10px" color={tokens.colors.text.disabled}>
-            {props.plan === 'explorer'
-              ? t('settings.dailyCredits')
-              : t('settings.monthlyCredits')
-            }
-          </Text>
-
-          {/* Last consumption (shown after a message completes) */}
-          {props.lastCreditsUsed > 0 && (
-            <>
-              <Box w="100%" h="1px" bg="rgba(255, 255, 255, 0.06)" />
-              <VStack gap={1} align="stretch" w="100%">
-                <Text fontSize="10px" fontWeight="600" color={tokens.colors.text.muted} textTransform="uppercase" letterSpacing="0.04em">
-                  {t('chat.lastMessage')}
-                </Text>
+          {/* 5h session window — bar shows REMAINING (inverted) */}
+          {(() => {
+            const hasActiveSession = props.envelope5hReset > 0
+            return (
+              <VStack gap={0.5} align="stretch" w="100%">
                 <Flex justify="space-between" w="100%">
-                  <Text fontSize="10px" color={tokens.colors.text.secondary}>TMS</Text>
-                  <Text fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.accent.orange}>
-                    -{props.lastCreditsUsed}
-                  </Text>
-                </Flex>
-                {props.lastTokensUsed > 0 && (
-                  <Flex justify="space-between" w="100%">
-                    <Text fontSize="10px" color={tokens.colors.text.secondary}>Tokens</Text>
-                    <Text fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.text.muted}>
-                      {props.lastTokensUsed.toLocaleString()}
+                  <Text fontSize="10px" color={tokens.colors.text.muted}>{t('chat.sessionCurrent')}</Text>
+                  {hasActiveSession ? (
+                    <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
+                      color={props.envelope5hUtil >= 1 ? tokens.colors.accent.red : props.envelope5hUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}>
+                      {100 - h5Pct}%
                     </Text>
-                  </Flex>
-                )}
+                  ) : (
+                    <Text fontSize="10px" color={tokens.colors.accent.greenBright}>{t('chat.available')}</Text>
+                  )}
+                </Flex>
+                <Box w="100%" h="3px" borderRadius="full" bg="rgba(255, 255, 255, 0.06)" overflow="hidden">
+                  {hasActiveSession && (
+                    <Box h="100%" borderRadius="full"
+                      bg={getBarColor(props.envelope5hUtil)}
+                      width={`${Math.max(2, 100 - h5Pct)}%`}
+                      transition="width 0.5s ease" />
+                  )}
+                </Box>
+                <Text fontSize="9px" color={tokens.colors.text.disabled}>
+                  {hasActiveSession ? `${t('chat.resetsIn')} ${formatReset(props.envelope5hReset)}` : t('chat.noActiveSession')}
+                </Text>
               </VStack>
+            )
+          })()}
+
+          {/* 7d weekly window — bar shows REMAINING (inverted) */}
+          {(() => {
+            const hasActiveWeek = props.envelope7dReset > 0
+            return (
+              <VStack gap={0.5} align="stretch" w="100%">
+                <Flex justify="space-between" w="100%">
+                  <Text fontSize="10px" color={tokens.colors.text.muted}>{t('chat.sessionWeekly')}</Text>
+                  {hasActiveWeek ? (
+                    <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
+                      color={props.envelope7dUtil >= 1 ? tokens.colors.accent.red : props.envelope7dUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}>
+                      {100 - d7Pct}%
+                    </Text>
+                  ) : (
+                    <Text fontSize="10px" color={tokens.colors.accent.greenBright}>{t('chat.available')}</Text>
+                  )}
+                </Flex>
+                <Box w="100%" h="3px" borderRadius="full" bg="rgba(255, 255, 255, 0.06)" overflow="hidden">
+                  {hasActiveWeek && (
+                    <Box h="100%" borderRadius="full"
+                      bg={getBarColor(props.envelope7dUtil)}
+                      width={`${Math.max(2, 100 - d7Pct)}%`}
+                      transition="width 0.5s ease" />
+                  )}
+                </Box>
+                <Text fontSize="9px" color={tokens.colors.text.disabled}>
+                  {hasActiveWeek ? `${t('chat.resetsIn')} ${formatReset(props.envelope7dReset)}` : t('chat.noActiveSession')}
+                </Text>
+              </VStack>
+            )
+          })()}
+
+          {/* TMS overage info (only when active) */}
+          {props.usingTmsOverage && (
+            <>
+              <Box w="100%" h="1px" bg="rgba(247, 127, 0, 0.15)" />
+              <Flex justify="space-between" w="100%">
+                <Text fontSize="10px" color={tokens.colors.accent.orange}>{t('chat.tmsRemaining')}</Text>
+                <Text fontSize="10px" fontWeight="700" fontFamily={tokens.fontFamily.mono} color={tokens.colors.accent.orange}>
+                  {props.tmsRemaining}
+                </Text>
+              </Flex>
             </>
           )}
 
-          {/* No credits warning */}
-          {props.noCredits && (
+          {/* Blocked warning */}
+          {isBlocked && (
             <>
               <Box w="100%" h="1px" bg="rgba(248, 81, 73, 0.15)" />
               <Text fontSize="10px" color={tokens.colors.accent.red}>
-                {props.plan === 'explorer'
-                  ? t('settings.upgradeForMore')
-                  : t('settings.buyMore')
-                }
+                {props.plan === 'explorer' ? t('settings.upgradeForMore') : t('chat.buyTms')}
               </Text>
             </>
           )}
@@ -520,13 +561,8 @@ function CreditIndicator(props: {
           {/* Refresh button */}
           <Box w="100%" h="1px" bg="rgba(255, 255, 255, 0.06)" />
           <Box
-            as="button"
-            w="100%"
-            py="4px"
-            fontSize="10px"
-            color={tokens.colors.text.disabled}
-            cursor="pointer"
-            transition={`color ${tokens.transition.fast}`}
+            as="button" w="100%" py="4px" fontSize="10px" color={tokens.colors.text.disabled}
+            cursor="pointer" transition={`color ${tokens.transition.fast}`}
             _hover={{ color: tokens.colors.text.secondary }}
             onClick={() => {
               import('../../services/auth/firebaseAuth').then(m => {

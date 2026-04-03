@@ -11,7 +11,15 @@ export type StreamEvent =
   | { type: 'tool_call_args_delta'; index: number; argsDelta: string }
   | { type: 'finish'; reason: string }
   | { type: 'usage'; promptTokens: number; completionTokens: number }
-  | { type: 'billing'; creditsRemaining: number; creditsUsed: number; tokensUsed: number; plan: string; source: string }
+  | {
+      type: 'billing'
+      creditsRemaining: number; creditsUsed: number; tokensUsed: number; plan: string; source: string
+      // Token envelope fields
+      envelope5hUtilization: number; envelope5hReset: number | undefined
+      envelope7dUtilization: number; envelope7dReset: number | undefined
+      envelopeStatus: string; tmsStatus: string; tmsRemaining: number
+      modelMultiplier: number; effectiveTokens: number
+    }
   | { type: 'error'; message: string }
   | { type: 'done' }
 
@@ -51,6 +59,16 @@ function processSSELines(
         tokensUsed: json.tokens_used ?? 0,
         plan: json.plan ?? '',
         source: json.source ?? '',
+        // Token envelope fields (graceful — defaults for old backends)
+        envelope5hUtilization: json.envelope_5h_utilization ?? 0,
+        envelope5hReset: json.envelope_5h_reset ?? undefined,
+        envelope7dUtilization: json.envelope_7d_utilization ?? 0,
+        envelope7dReset: json.envelope_7d_reset ?? undefined,
+        envelopeStatus: json.envelope_status ?? 'allowed',
+        tmsStatus: json.tms_status ?? 'allowed',
+        tmsRemaining: json.tms_remaining ?? 0,
+        modelMultiplier: json.model_multiplier ?? 1,
+        effectiveTokens: json.effective_tokens ?? 0,
       })
       continue
     }

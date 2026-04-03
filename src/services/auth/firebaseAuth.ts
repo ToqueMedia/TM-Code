@@ -342,9 +342,11 @@ class FirebaseAuthService {
           creditsRemaining: number
           planCapacity: number
           isActive: boolean
+          envelope?: { monthlyLimit: number; monthlyConsumed: number; fiveHourUtilization: number; fiveHourResetEpoch: number; sevenDayUtilization: number; sevenDayResetEpoch: number }
+          tmsRemaining?: number
         }
 
-        console.info(`[billing] Plan: ${data.plan}, Credits: ${data.creditsRemaining}/${data.planCapacity}, Active: ${data.isActive}`)
+        console.info(`[billing] /v1/me response:`, JSON.stringify(data))
 
         useBillingStore.setState({
           plan: (data.plan || 'explorer') as import('../../stores/billingStore').UserPlanName,
@@ -354,6 +356,14 @@ class FirebaseAuthService {
           planCapacity: data.planCapacity || 10,
           noCredits: data.creditsRemaining <= 0,
         })
+
+        // Token envelope state (graceful — old backends won't send this)
+        if (data.envelope || data.tmsRemaining !== undefined) {
+          useBillingStore.getState().setEnvelopeFromMe({
+            envelope: data.envelope,
+            tmsRemaining: data.tmsRemaining,
+          })
+        }
         return // success
       } catch (err) {
         console.warn(`[billing] Fetch failed (attempt ${attempt}/${MAX_ATTEMPTS}):`, err)
