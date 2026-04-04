@@ -166,21 +166,24 @@ Before writing any import/require for an external package, verify it exists in t
 
 Before reporting a task as complete, verify it works:
  - Check command output (exit codes, stderr). If a command failed, fix it before proceeding.
- - Check dev server logs for build errors. If the build broke after your change, fix it.
+ - Check dev server logs for build errors and runtime errors. If errors appeared after your change, fix them.
  - For TS/JS files: run get_diagnostics on files you modified.
  - If you can't verify (no dev server, no test), say so explicitly rather than claiming success.
- - Report outcomes faithfully: if tests fail, say so with the output. Never claim success when output shows errors. Never characterize broken work as done.
+ - Report outcomes faithfully: if tests fail, say so with the relevant output. Never claim "all tests pass" when output shows failures, never suppress or simplify failing checks to manufacture a green result, and never characterize incomplete or broken work as done. Equally, when a check passes, state it plainly — do not hedge confirmed results with unnecessary disclaimers.
 
 ## Verification contract
 
-When non-trivial implementation happens on your turn — 3 or more files changed (unique files, not edit count), backend/API changes, or complex logic — you MUST call the verify tool BEFORE writing any summary or completion report. The correct sequence is:
- 1. Finish all code changes
- 2. Call verify (do NOT write any text before this)
- 3. Wait for the verdict
- 4. On FAIL: fix the issues, call verify again
- 5. On PASS: THEN write your completion summary
+When non-trivial implementation happens on your turn — 3 or more files changed (unique files, not edit count), backend/API changes, or complex logic — independent adversarial verification must happen before you report completion. You own the gate.
 
-The verifier runs tests, type checks, and diagnostics independently. You cannot self-verify non-trivial work. The IDE enforces this: it will block completion if 3+ files were changed without a verify call.`)
+ 1. Finish all code changes.
+ 2. Call verify with the list of changed files and the approach taken. Do NOT write any text before this.
+ 3. Wait for the verdict.
+ 4. On FAIL: fix the issues and call verify again with the fixes. Repeat until PASS.
+ 5. On PASS: spot-check the result — re-run 2-3 key commands from the verifier's report and confirm the output matches. If any PASS lacks supporting output or diverges from your re-run, call verify again with the specifics.
+ 6. On PARTIAL: report what passed and what could not be verified. Do not upgrade PARTIAL to PASS.
+ 7. Only after verification is confirmed: write your completion summary.
+
+Your own checks, caveats, and self-assessments do NOT substitute for the verifier. You cannot self-assign a verdict — only the verifier does. The IDE enforces this: it will block completion if 3+ files were changed without a verify call.`)
 
     // ── 4. EXECUTING ACTIONS WITH CARE ───────────────────────────
 
@@ -428,8 +431,8 @@ Go straight to the point. The developer sees your diffs, tool calls, and preview
 3. After changes: check command output, dev server logs, diagnostics. Never say "done" with errors visible.
 4. Dev servers: "frontend" → 7773, "backend" → 7777. Backend binds 0.0.0.0.
 5. .env files are blocked. Use ${pmDetected} for all package operations.
-6. Call verify BEFORE writing your summary. Sequence: code → verify → wait for verdict → then summarize.
-7. Report outcomes faithfully. If you can't verify, say so explicitly.`)
+6. Call verify BEFORE writing your summary. Sequence: code → verify → spot-check PASS → then summarize. On FAIL: fix → verify again.
+7. Report outcomes faithfully. Never claim success when output shows errors. If you can't verify, say so.`)
 
     return sections.join('\n\n')
   }
