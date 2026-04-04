@@ -1452,7 +1452,7 @@ class ToolExecutor {
     this.tools.set('read_dev_server_logs', {
       definition: {
         name: 'read_dev_server_logs',
-        description: 'Read recent output from the running dev server (stdout, stderr, errors, warnings). Use after file changes to check if the build broke, after start_dev_server to verify startup, or anytime you need to observe what the dev server is doing. Returns the last N log lines.',
+        description: 'Read recent output from the dev server AND browser runtime errors from the live preview. Includes: build errors, type errors, HMR failures (from dev server stdout/stderr), plus uncaught exceptions, unhandled promise rejections, and console.error from the preview browser (prefixed [runtime]). Use after file changes, after start_dev_server, or when asked about preview/console/browser errors.',
         input_schema: {
           type: 'object',
           properties: {

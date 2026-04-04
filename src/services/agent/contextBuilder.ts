@@ -203,7 +203,9 @@ After execute_command:
  - Do not ignore warnings about missing dependencies or type errors.
 
 After file changes (write_file / edit_file / create_file) when a dev server is running:
- - Call read_dev_server_logs to check for build errors, type errors, or crashes.
+ - Call read_dev_server_logs to check for build errors, type errors, or runtime crashes.
+ - This tool shows BOTH server-side logs AND browser runtime errors (prefixed [runtime]).
+ - Runtime errors include uncaught exceptions, unhandled promise rejections, and console.error from the live preview.
  - If new errors appear → fix them immediately before continuing.
  - The IDE may auto-inject errors as [DEV_SERVER_FEEDBACK] — address them before proceeding.
 
@@ -230,7 +232,7 @@ ${totalTools} tools available. Key behaviors not obvious from tool schemas:
  - execute_command blocks until the process exits. start_dev_server returns immediately (background process).
  - write_file replaces the entire file — omitted code is deleted. Use edit_file for small changes (~20 lines).
  - write_file and edit_file require you to read_file first. The system will block writes to files you haven't read.
- - read_dev_server_logs reads recent output from the running dev server. Use after file changes to check for errors.
+ - read_dev_server_logs reads recent output from the running dev server AND runtime errors from the live preview (browser console). Entries prefixed [runtime] are from the browser. Use after file changes or when asked about preview/browser errors.
  - get_diagnostics checks TypeScript/JavaScript errors without a build step. Use after modifying TS/JS files.
  - read_large_result retrieves large tool outputs that were too big to return inline. Use the reference ID from the "Output too large" message.
  - research: parallel sub-agent with read+write access. Blocks your turn until complete.
@@ -510,7 +512,7 @@ Components:
  - Frontend port 7773, backend port 7777. Backend binds 0.0.0.0.
  - .env files blocked. Use ${pmDetected} for packages.
  - Before importing a package, verify it's in deps. If not, install first via execute_command.
- - After changes, check execute_command output and read_dev_server_logs for errors. Fix before continuing.
+ - After changes, check execute_command output and read_dev_server_logs for errors (includes browser runtime errors prefixed [runtime]). Fix before continuing.
  - Never report "done" when the environment shows errors.
  - For multi-step work (3+ steps), use update_tasks to show progress to the developer.
  - Git commits: append Co-Authored-By: TM Code <tm.code@toquemedia.net>`)
