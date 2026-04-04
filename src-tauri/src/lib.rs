@@ -92,17 +92,31 @@ fn open_preview_webview(
                 var _lastSent = 0;
                 var _lastMsg = '';
                 var _onerrorFired = false;
+                var _pendingTimer = null;
 
-                var _send = function(level, msg) {
-                    var now = Date.now();
-                    // Deduplicate identical consecutive messages and throttle (300ms)
-                    if (msg === _lastMsg && now - _lastSent < 2000) return;
-                    if (now - _lastSent < 300) return;
-                    _lastSent = now;
+                var _doSend = function(level, msg) {
+                    _lastSent = Date.now();
                     _lastMsg = msg;
                     try {
                         window.ipc.postMessage(JSON.stringify({ type: 'console', level: level, text: msg }));
                     } catch(_) {}
+                };
+
+                var _send = function(level, msg) {
+                    var now = Date.now();
+                    // Deduplicate identical consecutive messages (within 2s)
+                    if (msg === _lastMsg && now - _lastSent < 2000) return;
+                    // Throttle: if within 300ms of last send, queue for deferred delivery
+                    if (now - _lastSent < 300) {
+                        if (_pendingTimer) clearTimeout(_pendingTimer);
+                        _pendingTimer = setTimeout(function() {
+                            _pendingTimer = null;
+                            _doSend(level, msg);
+                        }, 300 - (now - _lastSent));
+                        return;
+                    }
+                    if (_pendingTimer) { clearTimeout(_pendingTimer); _pendingTimer = null; }
+                    _doSend(level, msg);
                 };
 
                 var _stringify = function(arg) {

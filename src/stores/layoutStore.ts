@@ -181,12 +181,14 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   },
 
   addDevServerLog: (text: string, level: DevLogLevel = 'info') => {
-    set(state => ({
-      devServerLogs: [
-        ...state.devServerLogs,
-        { id: Date.now() + Math.random(), level, text, timestamp: Date.now() },
-      ],
-    }))
+    set(state => {
+      const MAX_LOG_ENTRIES = 500
+      const logs = state.devServerLogs
+      const entry = { id: Date.now() + Math.random(), level, text, timestamp: Date.now() }
+      // Trim oldest entries when exceeding limit to prevent memory growth
+      const trimmed = logs.length >= MAX_LOG_ENTRIES ? logs.slice(-MAX_LOG_ENTRIES + 1) : logs
+      return { devServerLogs: [...trimmed, entry] }
+    })
   },
 
   clearDevServerLogs: () => {
