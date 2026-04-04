@@ -193,14 +193,9 @@ jobs:
           mkdir -p sigs
           gh release download "$VERSION" --repo "$REPO" --pattern "*.sig" --dir sigs 2>/dev/null || true
 
-          # Read signatures (empty string if file doesn't exist)
+          # Read signature file content (empty string if missing)
           read_sig() {
-            local file="sigs/$1"
-            if [ -f "$file" ]; then
-              cat "$file"
-            else
-              echo ""
-            fi
+            if [ -f "sigs/$1" ]; then cat "sigs/$1"; else echo ""; fi
           }
 
           MAC_ARM_SIG=$(read_sig "TM.Code_aarch64.app.tar.gz.sig")
@@ -208,13 +203,28 @@ jobs:
           LINUX_APPIMAGE_SIG=$(read_sig "TM.Code_${BARE_VERSION}_amd64.AppImage.sig")
           WIN_NSIS_SIG=$(read_sig "TM.Code_${BARE_VERSION}_x64-setup.exe.sig")
 
-          printf '{\n  "version": "%s",\n  "notes": "TM Code %s",\n  "pub_date": "%s",\n  "platforms": {\n    "darwin-aarch64": {\n      "signature": "%s",\n      "url": "%s/TM.Code_aarch64.app.tar.gz"\n    },\n    "darwin-x86_64": {\n      "signature": "%s",\n      "url": "%s/TM.Code_x64.app.tar.gz"\n    },\n    "linux-x86_64": {\n      "signature": "%s",\n      "url": "%s/TM.Code_%s_amd64.AppImage"\n    },\n    "windows-x86_64": {\n      "signature": "%s",\n      "url": "%s/TM.Code_%s_x64-setup.exe"\n    }\n  }\n}\n' \
-            "$BARE_VERSION" "$VERSION" "$PUB_DATE" \
-            "$MAC_ARM_SIG" "$BASE_URL" \
-            "$MAC_X64_SIG" "$BASE_URL" \
-            "$LINUX_APPIMAGE_SIG" "$BASE_URL" "$BARE_VERSION" \
-            "$WIN_NSIS_SIG" "$BASE_URL" "$BARE_VERSION" \
-            > latest.json
+          # Build latest.json using jq to properly escape signatures (multi-line base64)
+          jq -n \
+            --arg ver "$BARE_VERSION" \
+            --arg notes "TM Code $VERSION" \
+            --arg date "$PUB_DATE" \
+            --arg mac_arm_sig "$MAC_ARM_SIG" \
+            --arg mac_x64_sig "$MAC_X64_SIG" \
+            --arg linux_sig "$LINUX_APPIMAGE_SIG" \
+            --arg win_sig "$WIN_NSIS_SIG" \
+            --arg base "$BASE_URL" \
+            --arg bv "$BARE_VERSION" \
+            '{
+              version: $ver,
+              notes: $notes,
+              pub_date: $date,
+              platforms: {
+                "darwin-aarch64": { signature: $mac_arm_sig, url: ($base + "/TM.Code_aarch64.app.tar.gz") },
+                "darwin-x86_64":  { signature: $mac_x64_sig, url: ($base + "/TM.Code_x64.app.tar.gz") },
+                "linux-x86_64":   { signature: $linux_sig,   url: ($base + "/TM.Code_" + $bv + "_amd64.AppImage") },
+                "windows-x86_64": { signature: $win_sig,     url: ($base + "/TM.Code_" + $bv + "_x64-setup.exe") }
+              }
+            }' > latest.json
 
           echo "Generated latest.json:"
           cat latest.json

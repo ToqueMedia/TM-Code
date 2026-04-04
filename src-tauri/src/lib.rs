@@ -18,7 +18,7 @@ use commands::terminal::*;
 use tauri::image::Image;
 use tauri::webview::NewWindowResponse;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
 
 // ── Preview webview (separate window approach — reliable on all platforms) ────
