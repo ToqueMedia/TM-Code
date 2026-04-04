@@ -67,7 +67,7 @@ interface EditorActions {
 
 // Get language from file extension — comprehensive mapping
 const getLanguageFromExtension = (filePath: string): string => {
-  const name = filePath.split('/').pop()?.toLowerCase() || '';
+  const name = filePath.replace(/\\/g, '/').split('/').pop()?.toLowerCase() || '';
   const ext = name.split('.').pop()?.toLowerCase() || '';
 
   // Special filenames first

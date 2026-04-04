@@ -85,8 +85,11 @@ pub async fn search_in_files(
 
     // Security: reject search outside the user's home directory to prevent
     // path traversal attacks (e.g. searching /etc/passwd via the agent).
+    // Canonicalize home too — on Windows, canonicalize() returns UNC paths (\\?\C:\...)
+    // which won't match non-canonicalized paths from dirs::home_dir().
     if let Some(home) = dirs::home_dir() {
-        if !directory_path.starts_with(&home) {
+        let canonical_home = std::fs::canonicalize(&home).unwrap_or(home);
+        if !directory_path.starts_with(&canonical_home) {
             return Err(format!(
                 "Search directory must be within home directory: {}",
                 directory_path.display()
@@ -667,7 +670,10 @@ pub async fn replace_in_files(
     .map_err(|e| format!("Invalid search pattern: {}", e))?;
 
     for file_path in &files {
-        let path = PathBuf::from(file_path);
+        // Canonicalize to match directory_path (which is canonicalized).
+        // On Windows, canonicalize returns UNC paths (\\?\C:\...) — both must match.
+        let path = std::fs::canonicalize(file_path)
+            .unwrap_or_else(|_| PathBuf::from(file_path));
         if !path.starts_with(&directory_path) {
             continue;
         }

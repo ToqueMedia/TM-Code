@@ -198,7 +198,7 @@ export default class SearchService {
   private getRelativePath(fullPath: string): string {
     if (this.currentSearchDir && fullPath.startsWith(this.currentSearchDir)) {
       const relative = fullPath.slice(this.currentSearchDir.length);
-      return relative.startsWith('/') ? relative.slice(1) : relative;
+      return (relative.startsWith('/') || relative.startsWith('\\')) ? relative.slice(1) : relative;
     }
     return fullPath;
   }

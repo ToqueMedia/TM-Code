@@ -307,7 +307,7 @@ export const useProjectStore = create<ProjectStore>()(
       deleteProject: async (projectId: string, projectPath: string) => {
         try {
           const project = get().recentProjects.find(p => p.id === projectId);
-          const name = project?.name || projectPath.split('/').pop() || projectId;
+          const name = project?.name || projectPath.replace(/\\/g, '/').split('/').pop() || projectId;
 
           const ok = await tauriConfirm(
             `Eliminar permanentemente "${name}" e todos os seus ficheiros?\n\nEsta acção não pode ser revertida.`,
