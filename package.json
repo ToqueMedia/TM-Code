@@ -15,12 +15,6 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "test:implementation": "./test-implementation.sh",
-    "test:components": "echo \"Testing UI components implementation\" && npm run build",
-    "benchmark": "tsx src/testing/benchmarkCLI.ts",
-    "benchmark:watch": "tsx watch src/testing/benchmarkCLI.ts",
-    "test:performance": "npm run benchmark",
-    "test:regression": "npm run benchmark -- --regression",
     "deploy": "yarn run build && wrangler deploy"
   },
   "dependencies": {
