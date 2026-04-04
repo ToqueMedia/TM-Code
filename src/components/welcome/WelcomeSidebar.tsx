@@ -12,7 +12,6 @@ import {
   LuFilePlus2,
   LuFolderOpen,
   LuGitBranch,
-  LuFileCode,
   LuFolder,
   LuClock,
   LuChevronRight,
@@ -30,9 +29,7 @@ interface RecentProject {
 interface WelcomeSidebarProps {
   recentProjects: RecentProject[]
   onNewProject: () => void
-  onProjectFromScratch: () => void
   onOpenFolder: () => void
-  onOpenFile: () => void
   onCloneRepository: () => void
   onOpenProject: (path?: string) => void
   onSettings?: () => void
@@ -40,27 +37,21 @@ interface WelcomeSidebarProps {
 
 const actionItems = [
   { id: 'new', icon: LuFilePlus2, label: 'New Project', color: tokens.colors.accent.primary },
-  { id: 'scratch', icon: LuFileCode, label: 'Project from Scratch', color: tokens.colors.accent.orange },
-  { id: 'open', icon: LuFolderOpen, label: 'Open Folder', color: tokens.colors.accent.greenBright },
-  { id: 'file', icon: LuFileCode, label: 'Open File', color: tokens.colors.text.secondary },
+  { id: 'open', icon: LuFolderOpen, label: 'Open Project', color: tokens.colors.accent.greenBright },
   { id: 'clone', icon: LuGitBranch, label: 'Clone Repository', color: tokens.colors.accent.purple },
 ]
 
 const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   recentProjects,
   onNewProject,
-  onProjectFromScratch,
   onOpenFolder,
-  onOpenFile,
   onCloneRepository,
   onOpenProject,
   onSettings,
 }) => {
   const handleAction = (id: string) => {
     if (id === 'new') onNewProject()
-    else if (id === 'scratch') onProjectFromScratch()
     else if (id === 'open') onOpenFolder()
-    else if (id === 'file') onOpenFile()
     else if (id === 'clone') onCloneRepository()
   }
 

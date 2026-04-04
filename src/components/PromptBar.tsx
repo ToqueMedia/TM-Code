@@ -8,6 +8,7 @@ import PromptActions from './prompt/PromptActions'
 import AttachmentChips from './prompt/AttachmentChips'
 import SlashCommandMenu from './chat/SlashCommandMenu'
 import MentionMenu from './prompt/MentionMenu'
+import QueuedMessagesPreview from './prompt/QueuedMessagesPreview'
 import { usePromptBar } from './prompt/usePromptBar'
 import KeyBindingDisplay from './ui/KeyBindingDisplay'
 
@@ -17,6 +18,7 @@ function PromptBar() {
     setInput,
     textareaRef,
     isStreaming,
+    isAgentBusy,
     isScaffolding,
     isSendBlocked,
     isDisabled,
@@ -77,6 +79,9 @@ function PromptBar() {
           />
         )}
 
+        {/* Queued messages preview (above input) */}
+        <QueuedMessagesPreview />
+
         {/* Main input container */}
         <Box
           bg={tokens.colors.bg.panel}
@@ -104,6 +109,7 @@ function PromptBar() {
             onBlur={handleBlur}
             onPaste={handlePaste}
             disabled={isDisabled}
+            isAgentBusy={isAgentBusy}
           />
 
           {draftAttachments.length > 0 && (
@@ -129,12 +135,15 @@ function PromptBar() {
 
         {/* Hint */}
         <Flex justify="center" align="center" gap={1.5} mt={1.5}>
-          {isStreaming ? (
-            <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.working')}</Text>
-          ) : isScaffolding ? (
+          {isScaffolding ? (
             <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.settingUp')}</Text>
           ) : isDisabled ? (
             <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.awaitingPermission')}</Text>
+          ) : isAgentBusy ? (
+            <>
+              <KeyBindingDisplay binding={{ key: 'Enter', meta: true }} size="sm" />
+              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.queueHint')}</Text>
+            </>
           ) : (
             <>
               <KeyBindingDisplay binding={{ key: 'Enter', meta: true }} size="sm" />

@@ -12,7 +12,6 @@ import {
   LuRocket,
   LuFolderOpen,
   LuGitBranch,
-  LuFileCode,
 } from 'react-icons/lu'
 import { tokens } from '@/theme/tokens'
 import { useSettingsStore, matchesBinding, type ShortcutId } from '@/stores/settingsStore'
@@ -21,7 +20,6 @@ import WelcomeFeatureCard from './WelcomeFeatureCard'
 interface WelcomeHeroProps {
   onNewProject: () => void
   onOpenFolder: () => void
-  onProjectFromScratch: () => void
   onCloneRepository: () => void
 }
 
@@ -37,22 +35,14 @@ const featureCards: {
     id: 'new',
     icon: LuRocket,
     title: 'New Project',
-    description: 'Start fresh with templates and boilerplates for any framework.',
+    description: 'Choose a folder and start building with the AI agent.',
     shortcutId: 'newProject',
     color: tokens.colors.accent.primary,
   },
   {
-    id: 'scratch',
-    icon: LuFileCode,
-    title: 'Project from Scratch',
-    description: 'Pick an empty folder and start building from zero.',
-    shortcutId: null,
-    color: tokens.colors.accent.orange,
-  },
-  {
     id: 'open',
     icon: LuFolderOpen,
-    title: 'Open Folder',
+    title: 'Open Project',
     description: 'Open an existing project and start coding immediately.',
     shortcutId: 'openFile',
     color: tokens.colors.accent.greenBright,
@@ -61,18 +51,17 @@ const featureCards: {
     id: 'clone',
     icon: LuGitBranch,
     title: 'Clone Repository',
-    description: 'Clone from GitHub, GitLab, or any Git remote server.',
+    description: 'Clone from GitHub, GitLab, or any Git remote.',
     shortcutId: null,
     color: tokens.colors.accent.purple,
   },
 ]
 
-const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onProjectFromScratch, onCloneRepository }) => {
+const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onCloneRepository }) => {
   const shortcuts = useSettingsStore(s => s.shortcuts)
 
   const cardActions: Record<string, () => void> = {
     new: onNewProject,
-    scratch: onProjectFromScratch,
     open: onOpenFolder,
     clone: onCloneRepository,
   }

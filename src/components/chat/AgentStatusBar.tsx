@@ -7,7 +7,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useContainerStore } from '../../stores/containerStore'
-import { useBillingStore } from '../../stores/billingStore'
+import { useBillingStore, getEffectiveUtilization } from '../../stores/billingStore'
 import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
@@ -16,7 +16,12 @@ import { t } from '@/i18n'
 function formatTokens(count: number): string {
   if (count === 0) return '0'
   if (count < 1000) return String(count)
-  return `${(count / 1000).toFixed(1)}K`
+  if (count < 1_000_000) {
+    const k = count / 1000
+    return k >= 100 ? `${Math.round(k)}k` : k >= 10 ? `${Math.round(k)}k` : `${k.toFixed(1)}k`
+  }
+  const m = count / 1_000_000
+  return m >= 10 ? `${Math.round(m)}M` : `${m.toFixed(1)}M`
 }
 
 function AgentStatusBar() {
@@ -32,10 +37,12 @@ function AgentStatusBar() {
   const isolationMode = useContainerStore(s => s.isolationMode)
   const billingPlan = useBillingStore(s => s.plan)
   const noCredits = useBillingStore(s => s.noCredits)
-  const envelope5hUtil = useBillingStore(s => s.envelope5hUtilization)
+  const raw5hUtil = useBillingStore(s => s.envelope5hUtilization)
   const envelope5hReset = useBillingStore(s => s.envelope5hReset)
-  const envelope7dUtil = useBillingStore(s => s.envelope7dUtilization)
+  const raw7dUtil = useBillingStore(s => s.envelope7dUtilization)
   const envelope7dReset = useBillingStore(s => s.envelope7dReset)
+  const envelope5hUtil = getEffectiveUtilization(raw5hUtil, envelope5hReset)
+  const envelope7dUtil = getEffectiveUtilization(raw7dUtil, envelope7dReset)
   const envelopeStatus = useBillingStore(s => s.envelopeStatus)
   const tmsStatus = useBillingStore(s => s.tmsStatus)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
@@ -81,13 +88,13 @@ function AgentStatusBar() {
     : (statusConfig[status] || statusConfig.idle)
   const totalTokens = totalTokensUsed.input + totalTokensUsed.output
 
-  // Build info segments — show remaining % (consistent with CreditIndicator pill)
+  // Build info segments — show usage % (0→100 as tokens are consumed)
   const infoSegments: string[] = []
-  const h5Remaining = 100 - Math.round(envelope5hUtil * 100)
-  const d7Remaining = 100 - Math.round(envelope7dUtil * 100)
+  const h5Used = Math.round(envelope5hUtil * 100)
+  const d7Used = Math.round(envelope7dUtil * 100)
   // Only show window % when session is active (has reset epoch)
-  if (envelope5hReset > 0) infoSegments.push(`5h: ${h5Remaining}%`)
-  if (envelope7dReset > 0) infoSegments.push(`7d: ${d7Remaining}%`)
+  if (envelope5hReset > 0) infoSegments.push(`5h: ${h5Used}%`)
+  if (envelope7dReset > 0) infoSegments.push(`7d: ${d7Used}%`)
   if (usingTmsOverage) {
     infoSegments.push(`TMS: ${tmsRemaining}`)
   }
@@ -120,9 +127,15 @@ function AgentStatusBar() {
     <Box borderTop="1px solid rgba(255, 255, 255, 0.04)" bg="rgba(255, 255, 255, 0.02)">
       {/* Agent task list — shows when agent has active tasks */}
       {agentTasks.length > 0 && (
-        <Box px={3} pt="6px" pb="2px">
+        <Box px={3} pt="6px" pb="4px" borderBottom="1px solid rgba(255, 255, 255, 0.04)">
+          <Flex align="center" gap="6px" mb="4px">
+            <FiCheckSquare size={10} color={tokens.colors.accent.purple} />
+            <Text fontSize="10px" fontWeight="600" color={tokens.colors.text.muted} letterSpacing="0.02em">
+              {agentTasks.filter(t => t.status === 'completed').length}/{agentTasks.length} tasks
+            </Text>
+          </Flex>
           {agentTasks.map((task: AgentTask) => (
-            <Flex key={task.id} align="center" gap="6px" py="2px">
+            <Flex key={task.id} align="center" gap="6px" py="2px" pl={1}>
               {task.status === 'completed' ? (
                 <FiCheckSquare size={11} color={tokens.colors.accent.greenBright} style={{ flexShrink: 0 }} />
               ) : task.status === 'in_progress' ? (

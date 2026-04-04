@@ -5,6 +5,7 @@ import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
 import { useCheckpointStore } from './checkpointStore'
 import { usePermissionStore } from './permissionStore'
+import { clearQueue as clearMessageQueue } from '../services/agent/messageQueue'
 import { logger } from '../utils/logger'
 
 interface ChatState {
@@ -90,7 +91,7 @@ function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${idCounter}`
 }
 
-// Debounce helper
+// Debounce helper — saves session 2s after last call
 let saveTimeout: ReturnType<typeof setTimeout> | null = null
 function debouncedSave() {
   if (saveTimeout) clearTimeout(saveTimeout)
@@ -100,6 +101,25 @@ function debouncedSave() {
       logger.error('chat', 'Auto-save failed:', err)
     )
   }, 2000)
+}
+
+// Throttled save during streaming — persists partial content every 5s
+// so interrupted/crashed sessions don't lose the assistant's work.
+let streamingSaveInterval: ReturnType<typeof setInterval> | null = null
+function startStreamingSave() {
+  if (streamingSaveInterval) return // already running
+  streamingSaveInterval = setInterval(() => {
+    sessionService.markDirty()
+    sessionService.flushNow().catch(err =>
+      logger.error('chat', 'Streaming auto-save failed:', err)
+    )
+  }, 5000)
+}
+function stopStreamingSave() {
+  if (streamingSaveInterval) {
+    clearInterval(streamingSaveInterval)
+    streamingSaveInterval = null
+  }
 }
 
 // === Diff approval promises ===
@@ -453,6 +473,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
       })
 
+      startStreamingSave()
       return messageId
     },
 
@@ -928,6 +949,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         set({ conversationHistory })
       }
 
+      stopStreamingSave()
       debouncedSave()
     },
 
@@ -1232,6 +1254,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         })
       }
 
+      // Clear message queue — queued messages belong to the previous session
+      clearMessageQueue()
+
       // Reset tool permission auto-approve for the new session
       usePermissionStore.getState().resetAutoApprove()
 
@@ -1274,6 +1299,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             turns: state.currentTurnCount,
           })
         }
+
+        // Clear message queue — queued messages belong to the previous session
+        clearMessageQueue()
 
         // Reset tool permission auto-approve for the new session
         usePermissionStore.getState().resetAutoApprove()
@@ -1349,11 +1377,14 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     clearAllSessions: () => {
-      // Clear module-level debounce timer to prevent stale writes
+      // Clear message queue — queued messages belong to the previous project
+      clearMessageQueue()
+      // Clear module-level timers to prevent stale writes
       if (saveTimeout) {
         clearTimeout(saveTimeout)
         saveTimeout = null
       }
+      stopStreamingSave()
       set({
         sessions: new Map(),
         activeSessionId: null,

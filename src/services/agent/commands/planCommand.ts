@@ -193,11 +193,32 @@ The PLAN.md must follow this structure exactly:
 |------|--------|------------|
 | {what can go wrong} | {consequence if it happens} | {how to prevent or recover} |
 
-## 9. Testing Strategy
+## 9. UI/UX Design
+
+### Layout
+{main layout structure — sidebar? header? grid? How content is organized}
+{responsive behavior: mobile, tablet, desktop breakpoints}
+
+### Visual Style
+{color palette: backgrounds, text, accents — with hex values}
+{typography: font family, sizes for headings/body/small text}
+{spacing system: base unit, common gaps, padding}
+
+### Key Screens / Views
+{for each screen: describe the visual structure, components, and user interactions}
+{include empty states, loading states, error states}
+
+### Component Specs
+{for each custom component: visual appearance, dimensions, states (default, hover, active, disabled)}
+
+### Accessibility
+{contrast requirements, keyboard navigation, screen reader considerations}
+
+## 10. Testing Strategy
 
 - {what needs testing, what kind of test (unit/integration/manual), what is hard to test}
 
-## 10. Implementation Phases
+## 11. Implementation Phases
 
 ### Phase 1 — {name}: {deliverable}
 - {task}: {files to create/modify}
@@ -209,7 +230,7 @@ The PLAN.md must follow this structure exactly:
 
 **Critical path:** {which phases block others, what can be parallelized}
 
-## 11. Open Questions
+## 12. Open Questions
 
 - {decisions that need developer input before or during implementation}
 </plan_template>
@@ -331,7 +352,7 @@ WebSocket messages (JSON):
 
 **Critical path:** Phase 1 → 2 → 3 → 4 (linear — each builds on the previous). Phase 4 can begin partially during Phase 3 (buffering logic is independent of UI).
 
-## 11. Open Questions
+## 12. Open Questions
 
 - Should presence show only cursor position or also selection ranges?
 - Maximum number of concurrent editors per file? (Affects OT performance budget)

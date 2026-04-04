@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo } from 'react'
 import { Flex, Box } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -18,18 +18,13 @@ import PreviewView from './views/PreviewView'
 import EditorView from './views/EditorView'
 import PermissionDialog from './chat/PermissionDialog'
 import ProjectsSidebar from './chat/ProjectsSidebar'
-import TemplateSelector from './TemplateSelector'
 import { ErrorBoundary } from './ErrorBoundary'
-import { RequirementsDialog } from './dialogs'
+// RequirementsDialog removed — templates disabled
 import SettingsView from './views/SettingsView'
 import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
-import { Template } from '../services/templateService'
-import { verifyRequirements, CheckResult } from '../services/environmentCheck'
-import { setupScaffoldedProject } from '../services/postScaffoldPipeline'
 import { devServerManager } from '../services/devServerManager'
 import DevServerStatus from './chat/DevServerStatus'
-import { message as tauriMessage } from '@tauri-apps/plugin-dialog'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 
@@ -37,92 +32,9 @@ function MainLayout() {
   const viewMode = useLayoutStore(s => s.viewMode)
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
-  const showTemplateSelector = useLayoutStore(s => s.showTemplateSelector)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const currentProject = useCurrentProject()
   const { handleFileSelect } = useCodeEditorState()
-  const [isScaffolding, setIsScaffolding] = useState(false)
-
-  // Environment requirements check state
-  const [requirementsResults, setRequirementsResults] = useState<CheckResult[] | null>(null)
-  const [pendingScaffold, setPendingScaffold] = useState<{ template: Template; projectPath: string } | null>(null)
-
-  const doScaffold = async (template: Template, projectPath: string) => {
-    try {
-      setIsScaffolding(true)
-      await setupScaffoldedProject(template, projectPath)
-      useLayoutStore.getState().setShowTemplateSelector(false)
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : String(error)
-      logger.error('ui', 'Failed to scaffold template:', error)
-      await tauriMessage(`Failed to create project: ${msg}`, { title: 'Error', kind: 'error' }).catch(() => {})
-    } finally {
-      setIsScaffolding(false)
-    }
-  }
-
-  const handleSelectTemplate = async (template: Template, projectName: string) => {
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog')
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: 'Choose where to create the project',
-      })
-      if (!selected) return
-
-      const projectPath = `${selected as string}/${projectName}`
-
-      // Check environment requirements before scaffolding
-      if (template.requirements && template.requirements.length > 0) {
-        const checkResult = await verifyRequirements(template.requirements)
-
-        if (!checkResult.allPassed) {
-          setPendingScaffold({ template, projectPath })
-          setRequirementsResults(checkResult.results)
-          return
-        }
-      }
-
-      await doScaffold(template, projectPath)
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : String(error)
-      logger.error('ui', 'Failed to check requirements:', error)
-      await tauriMessage(`Failed to create project: ${msg}`, { title: 'Error', kind: 'error' }).catch(() => {})
-    }
-  }
-
-  const handleRequirementsContinue = () => {
-    if (pendingScaffold) {
-      const { template, projectPath } = pendingScaffold
-      setRequirementsResults(null)
-      setPendingScaffold(null)
-      doScaffold(template, projectPath)
-    }
-  }
-
-  const handleRequirementsCancel = () => {
-    setRequirementsResults(null)
-    setPendingScaffold(null)
-  }
-
-  const handleSelectEmpty = async () => {
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog')
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: 'Choose a folder for your new project',
-      })
-      if (selected) {
-        useLayoutStore.getState().setShowTemplateSelector(false)
-        await useProjectStore.getState().openProject(selected as string)
-        // Session creation is handled by App.tsx's useEffect on currentProject change
-      }
-    } catch (error: unknown) {
-      logger.error('ui', 'Failed to open directory dialog:', error)
-    }
-  }
 
   // Initialize services
   const lspServiceRef = useMemo(() => TypeScriptLspService.getInstance(), [])
@@ -345,27 +257,12 @@ function MainLayout() {
         </Flex>
       </Flex>
 
-      {/* Template selector overlay */}
-      {showTemplateSelector && (
-        <TemplateSelector
-          onSelectTemplate={handleSelectTemplate}
-          onSelectEmpty={handleSelectEmpty}
-          onBack={() => useLayoutStore.getState().setShowTemplateSelector(false)}
-          isLoading={isScaffolding}
-        />
-      )}
+      {/* Template selector removed — all projects start from scratch */}
 
       {/* Floating dev server status panel */}
       <DevServerStatus />
 
-      {/* Requirements check dialog */}
-      {requirementsResults && (
-        <RequirementsDialog
-          results={requirementsResults}
-          onContinue={handleRequirementsContinue}
-          onCancel={handleRequirementsCancel}
-        />
-      )}
+      {/* Requirements check dialog removed — templates disabled */}
     </Flex>
   )
 }

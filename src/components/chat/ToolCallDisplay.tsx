@@ -32,33 +32,102 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>
 /** Tools where we show a file-extension icon instead of the generic tool icon. */
 const FILE_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'])
 
+/** Human-readable tool labels shown in the chat UI. */
+const TOOL_LABELS: Record<string, string> = {
+  read_file: 'Reading',
+  write_file: 'Writing',
+  create_file: 'Creating',
+  edit_file: 'Editing',
+  delete_file: 'Deleting',
+  rename_file: 'Renaming',
+  list_directory: 'Exploring',
+  create_directory: 'Creating folder',
+  search_files: 'Searching',
+  glob: 'Finding files',
+  execute_command: 'Running',
+  start_dev_server: 'Starting server',
+  get_diagnostics: 'Checking types',
+  read_dev_server_logs: 'Reading server logs',
+  read_large_result: 'Reading output',
+  web_fetch: 'Fetching',
+  research: 'Researching',
+  spawn_background_agent: 'Background task',
+  check_background_agents: 'Checking agents',
+  verify: 'Verifying',
+  update_tasks: 'Updating tasks',
+  request_thinking: 'Activating reasoning',
+}
+
+function getToolLabel(toolName: string): string {
+  return TOOL_LABELS[toolName] || toolName
+}
+
 function getInputSummary(toolName: string, input: Record<string, unknown>): string {
+  const fileName = (p: string) => p.split('/').pop() || p
+
   switch (toolName) {
     case 'read_file':
-    case 'delete_file':
+      return fileName(String(input.path || ''))
     case 'write_file':
     case 'create_file':
-    case 'list_directory':
+      return fileName(String(input.path || ''))
     case 'edit_file':
-    case 'create_directory':
-      return String(input.path || '')
-    case 'search_files':
-      return `"${input.query}" in ${input.directory}`
-    case 'execute_command':
-      return String(input.command || '')
+      return fileName(String(input.path || ''))
+    case 'delete_file':
+      return fileName(String(input.path || ''))
     case 'rename_file':
-      return `${input.oldPath} \u2192 ${input.newName}`
+      return `${fileName(String(input.oldPath || ''))} → ${input.newName}`
+    case 'list_directory':
+      return fileName(String(input.path || '')) || 'project'
+    case 'create_directory':
+      return fileName(String(input.path || ''))
+    case 'search_files':
+      return `"${input.query}"`
+    case 'execute_command': {
+      const cmd = String(input.command || '')
+      return cmd.length > 60 ? cmd.slice(0, 57) + '...' : cmd
+    }
+    case 'start_dev_server': {
+      const type = input.server_type === 'backend' ? 'backend' : 'frontend'
+      return `${type} server`
+    }
+    case 'get_diagnostics':
+      return fileName(String(input.path || ''))
+    case 'read_dev_server_logs':
+      return `last ${input.lines || 50} lines`
     case 'glob':
       return String(input.pattern || '')
     case 'web_fetch':
-      return String(input.url || '')
+      return String(input.url || '').replace(/^https?:\/\//, '').slice(0, 50)
     case 'research':
-    case 'spawn_background_agent':
-      return String(input.question || '')
+    case 'spawn_background_agent': {
+      const q = String(input.question || '')
+      return q.length > 50 ? q.slice(0, 47) + '...' : q
+    }
     case 'check_background_agents':
-      return 'Checking status...'
-    default:
-      return JSON.stringify(input)
+      return ''
+    case 'verify': {
+      const desc = String(input.task_description || '')
+      return desc.length > 50 ? desc.slice(0, 47) + '...' : desc
+    }
+    case 'update_tasks': {
+      const tasks = input.tasks as Array<{ status: string }> | undefined
+      if (tasks) {
+        const done = tasks.filter(t => t.status === 'completed').length
+        return `${done}/${tasks.length} completed`
+      }
+      return ''
+    }
+    case 'request_thinking':
+      return 'deep reasoning mode'
+    default: {
+      // MCP tools: show just the tool name part
+      if (toolName.startsWith('mcp__')) {
+        const parts = toolName.split('__')
+        return parts[2] || toolName
+      }
+      return JSON.stringify(input).slice(0, 50)
+    }
   }
 }
 
@@ -124,7 +193,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
             fontFamily={tokens.fontFamily.mono}
             fontSize="12px"
           >
-            {toolCall.toolName}
+            {getToolLabel(toolCall.toolName)}
           </Text>
           <Text
             color={tokens.colors.text.disabled}
@@ -221,7 +290,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
           flexShrink={0}
           fontWeight="500"
         >
-          {toolCall.toolName}
+          {getToolLabel(toolCall.toolName)}
         </Text>
 
         {/* Summary */}

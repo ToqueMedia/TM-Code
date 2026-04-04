@@ -15,7 +15,12 @@ function formatElapsed(ms: number): string {
 function formatTokens(count: number): string {
   if (count === 0) return '0'
   if (count < 1000) return String(count)
-  return `${(count / 1000).toFixed(1)}k`
+  if (count < 1_000_000) {
+    const k = count / 1000
+    return k >= 100 ? `${Math.round(k)}k` : k >= 10 ? `${Math.round(k)}k` : `${k.toFixed(1)}k`
+  }
+  const m = count / 1_000_000
+  return m >= 10 ? `${Math.round(m)}M` : `${m.toFixed(1)}M`
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -62,13 +67,20 @@ function AgentActivityIndicator() {
   const label = STATUS_LABELS[status] || 'Working'
   const inputTokens = totalTokensUsed.input
   const outputTokens = totalTokensUsed.output
+  // ↑ when sending (thinking/compressing = waiting for model), ↓ when receiving (generating/applying)
+  const isSending = status === 'thinking' || status === 'compressing'
 
   return (
     <Flex
       align="center"
       gap="6px"
-      py="10px"
-      px={1}
+      py="8px"
+      px={3}
+      position="sticky"
+      bottom={0}
+      bg={tokens.colors.bg.app}
+      zIndex={1}
+      borderTop="1px solid rgba(255, 255, 255, 0.04)"
     >
       {/* Pulsing dot */}
       <Box
@@ -110,15 +122,31 @@ function AgentActivityIndicator() {
         />
       </Text>
 
-      {/* Elapsed time + tokens */}
+      {/* Elapsed time + tokens with directional arrow */}
       <Text
         fontSize="11.5px"
         color={tokens.colors.text.disabled}
         fontFamily={tokens.fontFamily.mono}
+        whiteSpace="nowrap"
       >
-        ({formatElapsed(elapsed)}
-        {(inputTokens > 0 || outputTokens > 0) && ` · ↑${formatTokens(inputTokens)} ↓${formatTokens(outputTokens)}`})
+        {`(${formatElapsed(elapsed)}${
+          (inputTokens > 0 || outputTokens > 0)
+            ? ` · ${formatTokens(inputTokens + outputTokens)}`
+            : ''
+        })`}
       </Text>
+      {(inputTokens > 0 || outputTokens > 0) && (
+        <Box
+          as="span"
+          fontSize="11px"
+          css={{
+            display: 'inline-block',
+            transition: 'transform 0.3s ease, color 0.3s ease',
+            transform: isSending ? 'rotate(0deg)' : 'rotate(180deg)',
+            color: isSending ? tokens.colors.accent.orange : tokens.colors.accent.greenBright,
+          }}
+        >{'\u2191'}</Box>
+      )}
     </Flex>
   )
 }

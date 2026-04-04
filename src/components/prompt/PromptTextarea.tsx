@@ -11,9 +11,11 @@ interface PromptTextareaProps {
   onBlur?: () => void
   onPaste?: (e: React.ClipboardEvent) => void
   disabled: boolean
+  /** When true, shows a queue-oriented placeholder */
+  isAgentBusy?: boolean
 }
 
-function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPaste, disabled }: PromptTextareaProps) {
+function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPaste, disabled, isAgentBusy }: PromptTextareaProps) {
   return (
     <Box px={4} pt={3} pb={1}>
       <textarea
@@ -23,7 +25,7 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPas
         onKeyDown={onKeyDown}
         onBlur={onBlur}
         onPaste={onPaste}
-        placeholder={t('prompt.placeholder')}
+        placeholder={isAgentBusy ? t('prompt.placeholderBusy') : t('prompt.placeholder')}
         aria-label={t('prompt.ariaLabel')}
         disabled={disabled}
         rows={1}

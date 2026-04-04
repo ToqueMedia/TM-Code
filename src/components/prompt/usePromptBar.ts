@@ -15,6 +15,10 @@ import MCPService from '../../services/mcp/mcpService'
 import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, extractAndResolveMentions } from '../../services/attachmentService'
+import type { Attachment } from '../../types/chat'
+import { enqueue as enqueueMessage, clearQueue as clearMessageQueue, dequeueAll, type QueuedCommand } from '../../services/agent/messageQueue'
+import { useQueryGuard } from '../../services/agent/queryGuard'
+import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { logger } from '../../utils/logger'
 
 export function usePromptBar() {
@@ -23,20 +27,26 @@ export function usePromptBar() {
   const [devCommand, setDevCommand] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const runningRef = useRef(false)
+  /** Abort controller for the queue processing loop — allows handleStop to cancel it. */
+  const queueAbortRef = useRef<AbortController | null>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const historyIndexRef = useRef(-1)
   const savedDraftRef = useRef('')
   const navigatingHistoryRef = useRef(false)
   const isStreaming = useChatStore(s => s.isStreaming)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
+  const isAgentBusy = useQueryGuard()
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewServerRunning = useLayoutStore(s => s.isPreviewServerRunning)
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const isScaffolding = scaffoldPhase === 'installing' || scaffoldPhase === 'starting'
-  const isDisabled = isStreaming || hasPendingPermission
-  const isSendBlocked = isDisabled || isScaffolding
+  // Input is always active — user can type and enqueue while agent is busy.
+  // Only disable during permission dialogs (user must respond first).
+  const isDisabled = hasPendingPermission
+  // Send is only blocked during scaffolding (deps install / server start).
+  const isSendBlocked = isScaffolding
   const hasPreview = isPreviewServerRunning || !!previewHtmlContent || !!devCommand
 
   // Slash command menu state
@@ -350,109 +360,66 @@ export function usePromptBar() {
     return () => window.removeEventListener('promptbar:insert', handleInsert)
   }, [])
 
-  const handleSend = useCallback(async () => {
-    const prompt = useChatStore.getState().draftInput.trim()
-    const hasAttachments = useChatStore.getState().draftAttachments.length > 0
-    if ((!prompt && !hasAttachments) || useChatStore.getState().isStreaming) return
-    if (usePermissionStore.getState().pendingPermission) return
-    const phase = useLayoutStore.getState().scaffoldPhase
-    if (phase === 'installing' || phase === 'starting') return
+  /**
+   * Core send logic — runs the agent loop for a given prompt.
+   * Extracted so both handleSend (direct) and executeQueuedInput (from queue) can use it.
+   *
+   * @param skipUserMessage - If true, don't add user message to chat (already added by caller).
+   */
+  const runAgentForPrompt = useCallback(async (
+    prompt: string,
+    attachments: Attachment[],
+    skipUserMessage = false,
+  ) => {
+    let chatStore = useChatStore.getState()
+    const agentStore = useAgentStore.getState()
 
-    // Non-reentrant guard: prevent overlapping sends
-    if (runningRef.current) return
-    runningRef.current = true
+    let sessionId = chatStore.activeSessionId
+    if (!sessionId) {
+      const projectPath = currentProject?.path || ''
+      sessionId = await chatStore.createNewSession(projectPath)
+    }
+
+    // Re-read state after potential async createNewSession to get fresh conversationHistory
+    chatStore = useChatStore.getState()
+
+    // If preview is open, switch to chat so the user sees the agent working
+    const layoutStore = useLayoutStore.getState()
+    if (layoutStore.viewMode === 'preview') {
+      layoutStore.setViewMode('chat')
+    }
+
+    // Resolve @mentions from text + chip attachments
+    const projectPath = currentProject?.path || ''
+    const projectType = currentProject?.projectType || 'unknown'
+    let augmentedPrompt = prompt || 'Analyze the attached files.'
+
+    // Extract inline @mentions from the prompt text
+    const mentionContext = await extractAndResolveMentions(augmentedPrompt, projectPath)
+    if (mentionContext) {
+      augmentedPrompt = augmentedPrompt + mentionContext
+    }
+
+    // Resolve chip attachments (images, files from paperclip button)
+    if (attachments.length > 0) {
+      const attachmentContext = await resolveAttachments(attachments)
+      augmentedPrompt = augmentedPrompt + attachmentContext
+    }
+
+    // Display the original prompt (without file contents) in the chat bubble.
+    // The augmented version (with file contents) is only sent to the model.
+    // Skip if caller already added the message (e.g. queued commands).
+    if (!skipUserMessage) {
+      chatStore.addUserMessage(prompt, attachments)
+    }
+    chatStore.startAssistantMessage()
+    agentStore.setStatus('thinking')
+
+    // Track whether the agent loop ended with an error.
+    // Used by executeQueuedInput to stop processing remaining commands.
+    let hadError = false
 
     try {
-      // Check authentication
-      const { isAuthenticated } = useAuthStore.getState()
-      if (!isAuthenticated) return
-
-      // Reset prompt history navigation
-      historyIndexRef.current = -1
-      savedDraftRef.current = ''
-
-      // Close command menu
-      setShowCommandMenu(false)
-
-      // Check if it's a slash command
-      if (slashCommandRegistry.isSlashCommand(prompt)) {
-        const command = slashCommandRegistry.getCommand(prompt)
-        if (!command) return
-
-        if (!command.enabled) {
-          useChatStore.getState().setDraftInput('')
-          clearDraftAttachments()
-          useChatStore.getState().addSystemMessage(`Command ${command.name} is not yet available.`)
-          return
-        }
-
-        const projectPath = currentProject?.path
-        if (!projectPath) {
-          useChatStore.getState().setDraftInput('')
-          clearDraftAttachments()
-          useChatStore.getState().addSystemMessage('No project open. Open a project first.')
-          return
-        }
-
-        useChatStore.getState().setDraftInput('')
-        clearDraftAttachments()
-
-        // Switch to chat so the user sees the agent working
-        const layout = useLayoutStore.getState()
-        if (layout.viewMode !== 'chat') {
-          layout.setViewMode('chat')
-        }
-
-        const args = slashCommandRegistry.getArgs(prompt)
-        await command.execute(args, projectPath)
-        return
-      }
-
-      let chatStore = useChatStore.getState()
-      const agentStore = useAgentStore.getState()
-
-      let sessionId = chatStore.activeSessionId
-      if (!sessionId) {
-        const projectPath = currentProject?.path || ''
-        sessionId = await chatStore.createNewSession(projectPath)
-      }
-
-      chatStore.setDraftInput('')
-
-      // Re-read state after potential async createNewSession to get fresh conversationHistory
-      chatStore = useChatStore.getState()
-
-      // If preview is open, switch to chat so the user sees the agent working
-      const layoutStore = useLayoutStore.getState()
-      if (layoutStore.viewMode === 'preview') {
-        layoutStore.setViewMode('chat')
-      }
-
-      // Resolve @mentions from text + chip attachments
-      const attachments = useChatStore.getState().draftAttachments
-      const projectPath = currentProject?.path || ''
-      const projectType = currentProject?.projectType || 'unknown'
-      let augmentedPrompt = prompt || 'Analyze the attached files.'
-
-      // Extract inline @mentions from the prompt text
-      const mentionContext = await extractAndResolveMentions(augmentedPrompt, projectPath)
-      if (mentionContext) {
-        augmentedPrompt = augmentedPrompt + mentionContext
-      }
-
-      // Resolve chip attachments (images, files from paperclip button)
-      if (attachments.length > 0) {
-        const attachmentContext = await resolveAttachments(attachments)
-        augmentedPrompt = augmentedPrompt + attachmentContext
-        clearDraftAttachments()
-      }
-
-      // Display the original prompt (without file contents) in the chat bubble.
-      // The augmented version (with file contents) is only sent to the model.
-      chatStore.addUserMessage(prompt, attachments)
-      chatStore.startAssistantMessage()
-      agentStore.setStatus('thinking')
-
       // Refresh MCP tools before building prompt (handles mid-session server changes)
       const mcpService = MCPService.getInstance()
       const mcpTools = mcpService.getAllTools()
@@ -541,6 +508,7 @@ export function usePromptBar() {
           agentStore.setStatus('error')
           agentStore.setError(error.message)
           useChatStore.getState().finalizeAssistantMessage()
+          hadError = true
         },
         onUsageUpdate: (inputTokens, outputTokens) => {
           useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
@@ -558,12 +526,118 @@ export function usePromptBar() {
           }
         },
       })
+    } catch (error) {
+      // Cleanup if anything fails before or during runAgentLoop setup.
+      // Prevents isStreaming/agentStatus getting stuck.
+      flushBufferedDeltas()
+      useChatStore.getState().finalizeAssistantMessage()
+      agentStore.setStatus('idle')
+      logger.error('prompt', 'runAgentForPrompt failed:', error)
+      hadError = true
+    }
+
+    return !hadError
+  }, [currentProject, devCommand])
+
+  const handleSend = useCallback(async () => {
+    const prompt = useChatStore.getState().draftInput.trim()
+    const hasAttachments = useChatStore.getState().draftAttachments.length > 0
+    if (!prompt && !hasAttachments) return
+    if (usePermissionStore.getState().pendingPermission) return
+    const phase = useLayoutStore.getState().scaffoldPhase
+    if (phase === 'installing' || phase === 'starting') return
+
+    // Check authentication
+    const { isAuthenticated } = useAuthStore.getState()
+    if (!isAuthenticated) return
+
+    // Reset prompt history navigation
+    historyIndexRef.current = -1
+    savedDraftRef.current = ''
+
+    // Close command menu
+    setShowCommandMenu(false)
+
+    // Check if it's a slash command — these are never queued
+    if (slashCommandRegistry.isSlashCommand(prompt)) {
+      const command = slashCommandRegistry.getCommand(prompt)
+      if (!command) return
+
+      if (!command.enabled) {
+        useChatStore.getState().setDraftInput('')
+        clearDraftAttachments()
+        useChatStore.getState().addSystemMessage(`Command ${command.name} is not yet available.`)
+        return
+      }
+
+      const projectPath = currentProject?.path
+      if (!projectPath) {
+        useChatStore.getState().setDraftInput('')
+        clearDraftAttachments()
+        useChatStore.getState().addSystemMessage('No project open. Open a project first.')
+        return
+      }
+
+      useChatStore.getState().setDraftInput('')
+      clearDraftAttachments()
+
+      // Switch to chat so the user sees the agent working
+      const layout = useLayoutStore.getState()
+      if (layout.viewMode !== 'chat') {
+        layout.setViewMode('chat')
+      }
+
+      const args = slashCommandRegistry.getArgs(prompt)
+      await command.execute(args, projectPath)
+      return
+    }
+
+    // === Agent is busy — enqueue the message ===
+    if (isAgentBusy) {
+      const attachments = [...useChatStore.getState().draftAttachments]
+
+      // Enqueue with attachments — message will be added to chat when processed.
+      // Until then, it's visible in QueuedMessagesPreview above the input.
+      enqueueMessage(prompt, attachments.length > 0 ? attachments : undefined)
+
+      // Clear input
+      useChatStore.getState().setDraftInput('')
+      clearDraftAttachments()
+
+      logger.info('queue', `Message enqueued: "${prompt.slice(0, 50)}..."`)
+      return
+    }
+
+    // === Agent is idle — run directly ===
+
+    // Non-reentrant guard: prevent overlapping sends
+    if (runningRef.current) return
+    runningRef.current = true
+
+    try {
+      useChatStore.getState().setDraftInput('')
+      const attachments = useChatStore.getState().draftAttachments
+      clearDraftAttachments()
+
+      // Switch to chat so the user sees the agent working
+      const layoutStore = useLayoutStore.getState()
+      if (layoutStore.viewMode !== 'chat') {
+        layoutStore.setViewMode('chat')
+      }
+
+      await runAgentForPrompt(prompt, attachments)
     } finally {
       runningRef.current = false
     }
-  }, [currentProject, devCommand])
+  }, [currentProject, devCommand, isAgentBusy, runAgentForPrompt])
 
   const handleStop = useCallback(() => {
+    // Clear the message queue BEFORE cancelling — prevents useQueueProcessor
+    // from firing when queryGuard transitions to idle.
+    clearMessageQueue()
+    // Abort the queue processing loop (if running) so it doesn't
+    // continue to the next command after the current one is cancelled.
+    queueAbortRef.current?.abort()
     // Clear any pending permission first — resolves the dangling Promise
     usePermissionStore.getState().clearPending()
     // Resolve any pending diff approval waits (rejects them)
@@ -572,6 +646,53 @@ export function usePromptBar() {
     useAgentStore.getState().setStatus('idle')
     useChatStore.getState().finalizeAssistantMessage()
   }, [])
+
+  // === Queue processor — runs queued commands when agent becomes idle ===
+  const executeQueuedInput = useCallback(async (commands: QueuedCommand[]) => {
+    if (runningRef.current) return
+    runningRef.current = true
+
+    // Create an abort controller so handleStop can cancel the loop
+    const abortController = new AbortController()
+    queueAbortRef.current = abortController
+
+    try {
+      // Switch to chat so the user sees the agent working
+      const layoutStore = useLayoutStore.getState()
+      if (layoutStore.viewMode !== 'chat') {
+        layoutStore.setViewMode('chat')
+      }
+
+      // Process each command individually — preserves per-message @mention resolution
+      // and correct attachment binding. Each command becomes a user message + agent loop.
+      let pending = commands
+      outer: while (pending.length > 0) {
+        for (const cmd of pending) {
+          // Check if Stop was pressed — abort remaining commands
+          if (abortController.signal.aborted) break outer
+
+          // Add user message to chat now (was only in QueuedMessagesPreview until now)
+          useChatStore.getState().addUserMessage(cmd.value, cmd.attachments)
+
+          const ok = await runAgentForPrompt(cmd.value, cmd.attachments || [], true)
+          // Stop processing on error — remaining commands would likely fail too
+          // (e.g. rate limit, network error). The queue is already drained so
+          // they won't retry automatically; the user can re-send manually.
+          if (!ok) break outer
+        }
+        // If aborted, don't drain more from the queue
+        if (abortController.signal.aborted) break
+        // Check if new messages arrived while we were processing.
+        // This handles the case where the user enqueues during the loop.
+        pending = dequeueAll()
+      }
+    } finally {
+      queueAbortRef.current = null
+      runningRef.current = false
+    }
+  }, [runAgentForPrompt])
+
+  useQueueProcessor({ executeQueuedInput })
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -756,6 +877,7 @@ export function usePromptBar() {
     setInput: handleInputChange,
     textareaRef,
     isStreaming,
+    isAgentBusy,
     isScaffolding,
     isSendBlocked,
     isDisabled,

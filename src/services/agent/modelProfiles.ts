@@ -12,6 +12,14 @@ export interface ModelPersona {
   tagline: string
 }
 
+/**
+ * Thinking mode classification:
+ * - 'toggleable': Model supports on/off via API param. The agent can activate via request_thinking tool.
+ * - 'mandatory': Model always thinks. Cannot be disabled. No request_thinking tool shown.
+ * - 'none': Model has no thinking/reasoning capability.
+ */
+export type ThinkingMode = 'toggleable' | 'mandatory' | 'none'
+
 export interface ModelProfile {
   /** Unique profile identifier */
   id: string
@@ -37,6 +45,8 @@ export interface ModelProfile {
   extraSamplingParams?: Record<string, unknown>
 
   // ── Thinking / Reasoning ──
+  /** Thinking mode: 'toggleable' (on/off via API), 'mandatory' (always on), 'none' */
+  thinkingMode: ThinkingMode
   /** Whether the model supports a thinking/reasoning toggle */
   supportsThinking: boolean
   /** Parameter name to enable thinking (varies by model) */
@@ -65,7 +75,7 @@ import type { UserPlanName } from '../../stores/billingStore'
 const MIMO_V2_FLASH: ModelProfile = {
   id: 'mimo-v2-flash',
   name: 'MiMo V2 Flash',
-  persona: { name: 'Free', tagline: 'Rápida e acessível. MoE 309B com 15B activos — ideal para tarefas do dia-a-dia.' },
+  persona: { name: 'Free', tagline: 'Rápida e acessível. MoE 309B com 15B activos — ideal para tarefas do dia-a-dia. Custo: 1x' },
   modelId: 'mimo-v2-flash',
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
@@ -76,6 +86,7 @@ const MIMO_V2_FLASH: ModelProfile = {
   topK: null,
 
   // Thinking supported but DEGRADES quality at all temperatures — keep OFF
+  thinkingMode: 'none',
   supportsThinking: false,
   thinkingParam: null,
   thinkingBudget: null,
@@ -89,7 +100,7 @@ const MIMO_V2_FLASH: ModelProfile = {
 const DEEPSEEK_V3_2: ModelProfile = {
   id: 'deepseek-v3.2',
   name: 'DeepSeek V3.2',
-  persona: { name: 'Nzinga Mbandi', tagline: 'Estratega profunda. Raciocina e orquestra com precisão.' },
+  persona: { name: 'Nzinga Mbandi', tagline: 'Estratega profunda. Raciocina e orquestra com precisão. Custo: 1x' },
   modelId: 'deepseek-v3.2',
   contextWindow: 131_072,
   maxOutputTokens: 32_768,
@@ -99,6 +110,7 @@ const DEEPSEEK_V3_2: ModelProfile = {
   topP: 1.0,
   topK: null,
 
+  thinkingMode: 'toggleable',
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
   thinkingBudget: 4096,
@@ -112,7 +124,7 @@ const DEEPSEEK_V3_2: ModelProfile = {
 const GLM_5: ModelProfile = {
   id: 'glm-5',
   name: 'GLM-5',
-  persona: { name: 'Rei Mandume', tagline: 'Resiliente em combate. Forte em terminal e debugging real.' },
+  persona: { name: 'Rei Mandume', tagline: 'Resiliente em combate. Forte em terminal e debugging real. Custo: 4x' },
   modelId: 'glm-5',
   contextWindow: 131_072,
   maxOutputTokens: 16_384,
@@ -123,6 +135,7 @@ const GLM_5: ModelProfile = {
   topP: 0.7,
   topK: null,
 
+  thinkingMode: 'toggleable',
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
   thinkingBudget: null,
@@ -136,7 +149,7 @@ const GLM_5: ModelProfile = {
 const KIMI_K2_5: ModelProfile = {
   id: 'kimi-k2.5',
   name: 'Kimi K2.5',
-  persona: { name: 'Agostinho Neto', tagline: 'Virtuoso do código. Melhor qualidade bruta e compreensão visual.' },
+  persona: { name: 'Agostinho Neto', tagline: 'Virtuoso do código. Melhor qualidade bruta e compreensão visual. Custo: 4x' },
   modelId: 'kimi-k2.5',
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
@@ -149,6 +162,7 @@ const KIMI_K2_5: ModelProfile = {
   topK: null,
 
   // Routed via DashScope (not native Moonshot API), so uses enable_thinking format
+  thinkingMode: 'toggleable',
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
   thinkingBudget: null,
@@ -162,7 +176,7 @@ const KIMI_K2_5: ModelProfile = {
 const QWEN3_CODER_NEXT: ModelProfile = {
   id: 'qwen3-coder-next',
   name: 'Qwen3 Coder Next',
-  persona: { name: 'Ngola Kiluange', tagline: 'Ultra-rápido e eficiente. 358 linguagens com overhead mínimo.' },
+  persona: { name: 'Ngola Kiluange', tagline: 'Ultra-rápido e eficiente. 358 linguagens com overhead mínimo. Custo: 2x' },
   modelId: 'qwen3-coder-next',
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
@@ -173,6 +187,7 @@ const QWEN3_CODER_NEXT: ModelProfile = {
   topP: 0.8,
   topK: 20,
 
+  thinkingMode: 'none',
   supportsThinking: false,
   thinkingParam: null,
   thinkingBudget: null,
@@ -186,7 +201,7 @@ const QWEN3_CODER_NEXT: ModelProfile = {
 const MINIMAX_M2_5: ModelProfile = {
   id: 'minimax-m2.5',
   name: 'MiniMax M2.5',
-  persona: { name: 'Ekuikui II', tagline: 'Maior score SWE-bench. O mais forte em engenharia complexa.' },
+  persona: { name: 'Ekuikui II', tagline: 'Maior score SWE-bench. O mais forte em engenharia complexa. Custo: 2x' },
   modelId: 'minimax-m2.5',
   contextWindow: 196_608,
   maxOutputTokens: 65_536,
@@ -197,6 +212,7 @@ const MINIMAX_M2_5: ModelProfile = {
   topP: 0.95,
   topK: null,
 
+  thinkingMode: 'mandatory',
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
   thinkingBudget: 4096,
@@ -210,9 +226,9 @@ const MINIMAX_M2_5: ModelProfile = {
 const QWEN3_6_PLUS: ModelProfile = {
   id: 'qwen3.6-plus',
   name: 'Qwen 3.6 Plus',
-  persona: { name: 'Hoji Ya Henda', tagline: 'Agente supremo. 1M de contexto, visão nativa e execução decisiva.' },
+  persona: { name: 'Hoji Ya Henda', tagline: 'Agente supremo. 256K de contexto, visão nativa e execução decisiva. Custo: 2x' },
   modelId: 'qwen3.6-plus',
-  contextWindow: 1_000_000,
+  contextWindow: 262_144,
   maxOutputTokens: 65_536,
 
   // Qwen3 official: temp=0.6 thinking / 0.7 non-thinking, top_p=0.95/0.8, top_k=20
@@ -221,6 +237,7 @@ const QWEN3_6_PLUS: ModelProfile = {
   topP: 0.95,
   topK: 20,
 
+  thinkingMode: 'toggleable',
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
   thinkingBudget: null,
@@ -234,7 +251,7 @@ const QWEN3_6_PLUS: ModelProfile = {
 const GEMINI_3_FLASH: ModelProfile = {
   id: 'gemini-3-flash',
   name: 'Gemini 3 Flash',
-  persona: { name: 'Simione Mucune', tagline: 'Versátil e fiável. Adapta-se a qualquer contexto.' },
+  persona: { name: 'Simione Mucune', tagline: 'Versátil e fiável. Adapta-se a qualquer contexto. Custo: 5x' },
   modelId: 'gemini-3-flash',
   contextWindow: 1_048_576,
   maxOutputTokens: 65_536,
@@ -246,6 +263,7 @@ const GEMINI_3_FLASH: ModelProfile = {
   topK: null,
   extraSamplingParams: { thinking_level: 'medium' },
 
+  thinkingMode: 'mandatory', // Gemini thinking_level is not binary toggle — always applies
   supportsThinking: true,
   thinkingParam: null, // Gemini uses thinking_level via extraSamplingParams, not enable_thinking
   thinkingBudget: null,

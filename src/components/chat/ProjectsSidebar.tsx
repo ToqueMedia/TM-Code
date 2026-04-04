@@ -101,8 +101,16 @@ function ProjectsSidebar() {
     showProjectContextMenu(project)
   }, [])
 
-  const handleNewProject = () => {
-    useLayoutStore.getState().setShowTemplateSelector(true)
+  const handleNewProject = async () => {
+    // All projects start from scratch — open folder dialog directly
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({ directory: true, title: 'Choose project folder' })
+      if (selected) {
+        const { useProjectStore } = await import('../../stores/projectStore')
+        await useProjectStore.getState().openProject(selected as string)
+      }
+    } catch { /* cancelled */ }
   }
 
   return (

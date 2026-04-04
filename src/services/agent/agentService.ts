@@ -8,6 +8,7 @@ import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore
 import { useBillingStore } from '../../stores/billingStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
+import { reserve as queryGuardReserve, end as queryGuardEnd } from './queryGuard'
 import type { StreamEvent } from './streamParser'
 
 // === Types ===
@@ -220,45 +221,60 @@ class AgentService {
     this.contextWindowSize = DEFAULT_CONTEXT_WINDOW
   }
 
+  /** Whether thinking was enabled for the current agent loop (activated by model via request_thinking tool). */
+  private thinkingEnabledForLoop = false
+  /** Current turn number in the active loop — used by buildRequestBody for Turn 1 thinking. */
+  private currentTurnInLoop = 0
+
+  /** Called by request_thinking tool — enables thinking for remaining turns in this loop. */
+  enableThinkingForLoop(): void {
+    this.thinkingEnabledForLoop = true
+    logger.info('agent', 'Thinking mode activated by model for this loop')
+  }
+
+
   /**
    * Build the JSON request body for the chat completion API,
    * including model-specific sampling and thinking parameters.
    */
   private async buildRequestBody(messages: OpenAIMessage[]): Promise<Record<string, unknown>> {
-    const body: Record<string, unknown> = {
-      messages,
-      tools: this.tools,
-      stream: true,
-      stream_options: { include_usage: true },
-    }
-
-    // Lightweight sub-agents inherit the active model but with defaults
-    if (this.lightweightOptions) {
-      try {
-        const { getModelProfile } = await import('./modelProfiles')
-        const { useSettingsStore } = await import('../../stores/settingsStore')
-        const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
-        const profile = getModelProfile(modelId)
-        body.model = profile.modelId
-      } catch { /* fallback: no model field */ }
-      body.max_tokens = MAX_OUTPUT_TOKENS
-      return body
-    }
-
     try {
       const { getModelProfile, buildSamplingParams, buildThinkingParam } = await import('./modelProfiles')
       const { useSettingsStore } = await import('../../stores/settingsStore')
       const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
       const profile = getModelProfile(modelId)
 
-      // Model ID for DashScope routing
-      body.model = profile.modelId
+      // Filter request_thinking tool: only show for toggleable models
+      const tools = profile.thinkingMode === 'toggleable'
+        ? this.tools
+        : this.tools.filter(t => t.function.name !== 'request_thinking')
 
-      // Context window from profile
+      const body: Record<string, unknown> = {
+        messages,
+        tools,
+        stream: true,
+        stream_options: { include_usage: true },
+        model: profile.modelId,
+      }
+
+      // Lightweight sub-agents — no thinking, no sampling config
+      if (this.lightweightOptions) {
+        body.max_tokens = MAX_OUTPUT_TOKENS
+        return body
+      }
+
       this.contextWindowSize = profile.contextWindow
 
-      // Thinking: enable unless model doesn't support it
-      const isThinking = profile.supportsThinking
+      // Thinking decision based on model category:
+      // - 'toggleable': Turn 1 ON (model reasons about whether to keep it), Turn 2+ per model decision
+      // - 'mandatory': always ON
+      // - 'none': always OFF
+      const isThinking = profile.thinkingMode === 'mandatory'
+        ? true
+        : profile.thinkingMode === 'toggleable'
+          ? (this.currentTurnInLoop <= 1 || this.thinkingEnabledForLoop)
+          : false
+
       const sampling = buildSamplingParams(profile, isThinking)
       Object.assign(body, sampling)
 
@@ -266,11 +282,18 @@ class AgentService {
       if (thinking) {
         Object.assign(body, thinking)
       }
-    } catch {
-      body.max_tokens = MAX_OUTPUT_TOKENS
-    }
 
-    return body
+      return body
+    } catch {
+      const body: Record<string, unknown> = {
+        messages,
+        tools: this.tools,
+        stream: true,
+        stream_options: { include_usage: true },
+        max_tokens: MAX_OUTPUT_TOKENS,
+      }
+      return body
+    }
   }
 
   async runAgentLoop(
@@ -284,6 +307,8 @@ class AgentService {
     this.isRunning = true
     if (!this.lightweightOptions) {
       this.abortController = new AbortController()
+      // Signal that the main agent is actively running (enables message queuing)
+      queryGuardReserve()
     } else if (!this.abortController) {
       this.abortController = new AbortController()
     }
@@ -315,6 +340,14 @@ class AgentService {
         const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
         this.contextWindowSize = getModelProfile(modelId).contextWindow
       } catch { /* keep default */ }
+
+      // Thinking starts OFF — the model activates it via request_thinking if needed.
+      // Turn 1 always has thinking ON so the model can reason about the decision.
+      this.thinkingEnabledForLoop = false
+      this.currentTurnInLoop = 0
+    } else {
+      this.thinkingEnabledForLoop = false
+      this.currentTurnInLoop = 0
     }
 
     const messages: OpenAIMessage[] = [
@@ -342,6 +375,7 @@ class AgentService {
         if (this.abortController?.signal.aborted) return
 
         turnCount++
+        this.currentTurnInLoop = turnCount
 
         // Layer 2: Compress context if approaching token limit (percentage-based)
         const compressionThreshold = Math.floor(this.contextWindowSize * COMPRESSION_THRESHOLD_PCT)
@@ -605,6 +639,10 @@ class AgentService {
       callbacks.onError(error instanceof Error ? error : new Error(String(error)))
     } finally {
       this.isRunning = false
+      // Signal that the main agent is idle (triggers queue processing)
+      if (!this.lightweightOptions) {
+        queryGuardEnd()
+      }
     }
   }
 
@@ -1097,6 +1135,10 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     // Unblock any pending diff approval waits
     resolveAllPendingDiffApprovals(false)
     this.isRunning = false
+    // Signal idle — allows queue processing to start
+    if (!this.lightweightOptions) {
+      queryGuardEnd()
+    }
   }
 
   private async callAPI(messages: OpenAIMessage[]): Promise<Response> {

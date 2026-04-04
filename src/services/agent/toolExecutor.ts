@@ -8,7 +8,7 @@ import { useLayoutStore } from '../../stores/layoutStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { devServerManager } from '../devServerManager'
-import TypeScriptLspService from '../typescriptLspService'
+// TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
 import type { AgentCallbacks } from './agentService'
@@ -697,11 +697,19 @@ class ToolExecutor {
       }
     }
 
-    // Read-only mode: block file-writing shell operations (verification agents)
+    // Read-only mode: block file-writing shell operations (verification agents).
+    // Allow common test/lint/typecheck commands even if they contain patterns
+    // that look like writes (e.g., npm test may use internal redirects).
     if (this.readOnlyMode) {
-      for (const pattern of ToolExecutor.WRITE_COMMAND_PATTERNS) {
-        if (pattern.test(command)) {
-          throw new Error(`Command blocked: "${command}" would modify files, but you are running in read-only verification mode. Only diagnostic commands (tests, linters, type checkers, curl) are allowed.`)
+      // Strip common prefixes that don't affect read/write nature: cd ../ &&, env VAR=val, etc.
+      const strippedCmd = command.replace(/^\s*(cd\s+\S+\s*&&\s*)+/, '').replace(/^\s*([\w]+=\S+\s+)+/, '').trim()
+      // Allowlist: commands that are safe diagnostic operations
+      const isAllowedDiagnostic = /^(npm\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|npx\s+(tsc|eslint|jest|vitest|mocha|next\s+lint)|pnpm\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|yarn\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|bun\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|ng\s+(test|lint|build)|curl\s|cat\s|head\s|tail\s|wc\s|grep\s|rg\s|find\s|ls\s|echo\s)/.test(strippedCmd)
+      if (!isAllowedDiagnostic) {
+        for (const pattern of ToolExecutor.WRITE_COMMAND_PATTERNS) {
+          if (pattern.test(command)) {
+            throw new Error(`Command blocked: "${command}" would modify files, but you are running in read-only verification mode. Only diagnostic commands (tests, linters, type checkers, curl) are allowed.`)
+          }
         }
       }
     }
@@ -1344,11 +1352,11 @@ class ToolExecutor {
     this.tools.set('get_diagnostics', {
       definition: {
         name: 'get_diagnostics',
-        description: 'Get TypeScript/JavaScript diagnostics (type errors, syntax errors, unused variables) for a file. Uses the built-in language service — no compilation step needed. Returns errors and warnings with line numbers. Use after writing/editing code to verify correctness.',
+        description: 'Get TypeScript/JavaScript diagnostics for the developer\'s project. Runs "npx tsc --noEmit" with a 15-second timeout. For faster checks on a single file, prefer running "npx tsc --noEmit path/to/file.ts" via execute_command.',
         input_schema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Absolute path to the TS/JS file to check' }
+            path: { type: 'string', description: 'Absolute path to a TS/JS file or the project root. If a file, checks only that file. If a directory, checks the whole project.' }
           },
           required: ['path']
         }
@@ -1357,25 +1365,40 @@ class ToolExecutor {
         const filePath = input.path as string
         this.validatePathWithinProject(filePath)
 
-        const ext = filePath.split('.').pop()?.toLowerCase() || ''
-        if (!['ts', 'tsx', 'js', 'jsx'].includes(ext)) {
-          return `get_diagnostics only supports TypeScript/JavaScript files (.ts, .tsx, .js, .jsx). Got: .${ext}`
-        }
+        // Use tsc --noEmit directly instead of the IDE's internal LSP
+        // (the LSP is configured for the IDE, not the developer's project)
+        const projectRoot = this.getProjectRoot()
+        const isFile = filePath.includes('.') && !filePath.endsWith('/')
+        const cmd = isFile
+          ? `npx tsc --noEmit "${filePath}" 2>&1 || true`
+          : `npx tsc --noEmit 2>&1 || true`
+        const cwd = isFile ? projectRoot : filePath
 
-        const lspService = TypeScriptLspService.getInstance()
         try {
-          const diagnostics = await lspService.getDiagnostics(filePath)
-          if (diagnostics.length === 0) {
-            return `No errors or warnings in ${filePath.split('/').pop()}`
+          const result = await invoke<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }>('execute_command', {
+            command: cmd,
+            cwd,
+            timeoutSecs: 15,
+          })
+
+          if (result.timedOut) {
+            return `Diagnostics timed out after 15s. The project may not have TypeScript configured. Try running "npx tsc --noEmit" manually via execute_command with a longer timeout.`
           }
 
-          const lines = diagnostics.map(d =>
-            `${d.severity.toUpperCase()} (line ${d.line}, col ${d.column}): ${d.message} [TS${d.code}]`
-          )
-          return `${diagnostics.length} diagnostic(s) in ${filePath.split('/').pop()}:\n${lines.join('\n')}`
+          const output = (result.stdout + '\n' + result.stderr).trim()
+          if (!output || result.exitCode === 0) {
+            return `No type errors found.`
+          }
+
+          // Limit output to prevent context bloat
+          const lines = output.split('\n')
+          if (lines.length > 30) {
+            return lines.slice(0, 30).join('\n') + `\n\n[... ${lines.length - 30} more lines — run tsc manually for full output]`
+          }
+          return output
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
-          return `Could not get diagnostics: ${msg}. Try running "npx tsc --noEmit" via execute_command as a fallback.`
+          return `Diagnostics failed: ${msg}. Try running "npx tsc --noEmit" via execute_command as a fallback.`
         }
       }
     })
@@ -1684,6 +1707,24 @@ Project root: ${projectRoot}`
       }
     })
 
+    // === request_thinking ===
+    this.tools.set('request_thinking', {
+      definition: {
+        name: 'request_thinking',
+        description: 'Activate deep reasoning mode for the current task. Call this when you determine the task requires complex logic, multi-step planning, architecture decisions, or careful debugging. Once activated, reasoning stays on for all remaining turns of this message. Do not call for simple tasks (renaming, small edits, direct questions).',
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+      execute: async () => {
+        const { default: AgentService } = await import('./agentService')
+        AgentService.getInstance().enableThinkingForLoop()
+        return 'Reasoning mode activated. Your next turns will use deep thinking. Continue with the task.'
+      }
+    })
+
     // === update_tasks ===
     this.tools.set('update_tasks', {
       definition: {
@@ -1812,28 +1853,50 @@ Project root: ${projectRoot}`
         })
 
         const projectRoot = this.getProjectRoot()
-        const systemPrompt = `You are a VERIFICATION agent inside TM Code. Your job is to independently verify that an implementation is correct.
+        const systemPrompt = `You are a verification specialist. Your job is not to confirm the implementation works — it's to try to break it.
 
-You CANNOT edit, write, or create files. You can only read files and execute commands (tests, linters, type checks, curl).
+You have two failure patterns to avoid. First, verification avoidance: reading code, narrating what you would test, writing "PASS," and moving on. Second, being seduced by the first 80%: a passing test suite while half the logic is broken on edge cases.
 
-## Verification process
-1. Read each changed file to understand the implementation.
-2. Run relevant tests (if they exist).
-3. Run type checking (get_diagnostics or execute tsc --noEmit).
-4. Check for common issues: missing imports, unused variables, type errors, runtime errors.
-5. If a dev server is running, check read_dev_server_logs for errors.
-6. For API/backend changes, execute curl or similar to verify endpoints work.
+=== CRITICAL: DO NOT MODIFY THE PROJECT ===
+You CANNOT create, modify, or delete any files in the project. You can only read and execute.
+You MAY write ephemeral test scripts to /tmp via execute_command when needed. Clean up after.
 
-## Rules
-- Reading code is NOT verification. You must execute something (test, typecheck, curl) to verify.
-- Do not trust the implementer's claims. Verify independently.
-- Be specific about what passed and what failed.
+=== VERIFICATION STRATEGY ===
+Adapt based on what was changed:
+- **Frontend**: Check read_dev_server_logs for errors → run frontend tests if they exist
+- **Backend/API**: Start server → curl/fetch endpoints → verify response shapes → test error handling → edge cases
+- **Bug fixes**: Reproduce the original bug → verify fix → check for side effects
+- **Refactoring**: Existing tests MUST pass unchanged → spot-check behavior is identical
 
-## Output format
-End your response with exactly one of:
-VERDICT: PASS — All checks passed, implementation is correct.
-VERDICT: FAIL — Found issues that need fixing. List them.
-VERDICT: PARTIAL — Some checks passed, others could not be verified. List what passed and what couldn't be checked.
+=== REQUIRED STEPS ===
+1. Read CLAUDE.md / package.json for build/test commands.
+2. Run the build (if applicable). Broken build = automatic FAIL.
+3. Run the project's test suite (if it exists). Failing tests = automatic FAIL.
+4. Run linters/type-checkers if configured (eslint, tsc --noEmit).
+5. Apply the type-specific strategy above.
+
+=== RECOGNIZE YOUR OWN RATIONALIZATIONS ===
+- "The code looks correct based on my reading" — reading is not verification. Run it.
+- "The implementer's tests already pass" — verify independently.
+- "This is probably fine" — probably is not verified. Run it.
+If you catch yourself writing an explanation instead of a command, stop. Run the command.
+
+=== OUTPUT FORMAT ===
+Every check MUST follow this structure:
+
+### Check: [what you're verifying]
+**Command run:** [exact command]
+**Output observed:** [actual output — copy-paste, not paraphrased]
+**Result: PASS** (or FAIL — with Expected vs Actual)
+
+A check without a Command run block is not a PASS — it's a skip.
+
+End with exactly one of:
+VERDICT: PASS
+VERDICT: FAIL
+VERDICT: PARTIAL
+
+PARTIAL is for environmental limitations only (no test framework, tool unavailable) — not for "I'm unsure."
 
 Project root: ${projectRoot}`
 

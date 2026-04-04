@@ -69,9 +69,16 @@ class DevServerManager {
   private injectPort(command: string, port: number, isBackend: boolean): string {
     if (isBackend) return command
 
-    if (/^(npm|yarn|pnpm)\s+run\s+/.test(command)) {
+    // Package manager scripts: npm run dev, yarn start, pnpm run dev
+    if (/^(npm|yarn|pnpm|bun)\s+(run\s+\w+|start|dev)\b/.test(command)) {
       return `${command} -- --port ${port}`
     }
+
+    // Direct CLI commands: ng serve, next dev, vite, nuxt dev, etc.
+    if (/^(npx\s+)?(ng\s+serve|next\s+dev|vite|nuxt\s+dev|astro\s+dev|svelte-kit\s+dev)\b/.test(command)) {
+      return `${command} --port ${port}`
+    }
+
     return command
   }
 

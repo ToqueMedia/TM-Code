@@ -8,7 +8,7 @@ import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { useBillingStore, type UserPlanName } from '../../stores/billingStore'
+import { useBillingStore, getEffectiveUtilization, type UserPlanName } from '../../stores/billingStore'
 import MessageBubble from '../chat/MessageBubble'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
@@ -33,10 +33,27 @@ function ChatView() {
   const scaffoldMessage = useLayoutStore(s => s.scaffoldMessage)
   const billingPlan = useBillingStore(s => s.plan)
   const noCredits = useBillingStore(s => s.noCredits)
-  const envelope5hUtil = useBillingStore(s => s.envelope5hUtilization)
-  const envelope7dUtil = useBillingStore(s => s.envelope7dUtilization)
+  const raw5hUtil = useBillingStore(s => s.envelope5hUtilization)
+  const raw7dUtil = useBillingStore(s => s.envelope7dUtilization)
   const envelope5hReset = useBillingStore(s => s.envelope5hReset)
   const envelope7dReset = useBillingStore(s => s.envelope7dReset)
+  // Force re-render when a window expires so utilization drops to 0.
+  // Capped at 1 hour — longer durations are handled by the next API call.
+  const MAX_TIMER_MS = 60 * 60 * 1000
+  const [, forceRender] = useState(0)
+  useEffect(() => {
+    const nowSecs = Math.floor(Date.now() / 1000)
+    const resets = [envelope5hReset, envelope7dReset].filter(r => r > nowSecs)
+    if (resets.length === 0) return
+    const nearest = Math.min(...resets)
+    const msUntilExpiry = (nearest - nowSecs) * 1000 + 500
+    if (msUntilExpiry > MAX_TIMER_MS) return // too far — next API call will handle it
+    const timer = setTimeout(() => forceRender(n => n + 1), msUntilExpiry)
+    return () => clearTimeout(timer)
+  }, [envelope5hReset, envelope7dReset])
+  // Effective utilization — returns 0 if window has expired
+  const envelope5hUtil = getEffectiveUtilization(raw5hUtil, envelope5hReset)
+  const envelope7dUtil = getEffectiveUtilization(raw7dUtil, envelope7dReset)
   const envelopeStatus = useBillingStore(s => s.envelopeStatus)
   const tmsStatus = useBillingStore(s => s.tmsStatus)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
@@ -416,19 +433,19 @@ function CreditIndicator(props: {
             }
           } : undefined}
         >
-          {props.usingTmsOverage ? `TMS: ${props.tmsRemaining}` : props.envelope5hReset > 0 ? `${100 - h5Pct}%` : ''}
+          {props.usingTmsOverage ? `TMS: ${props.tmsRemaining}` : props.envelope5hReset > 0 ? `${h5Pct}%` : ''}
         </Text>
 
         {/* Mini dual progress bars — empty when no active session, fills as tokens are used */}
         <VStack gap="1px" flexShrink={0}>
           <Box w="20px" h="2px" borderRadius="full" bg="rgba(255, 255, 255, 0.08)" overflow="hidden">
             {props.envelope5hReset > 0 && (
-              <Box h="100%" borderRadius="full" bg={getBarColor(props.envelope5hUtil)} width={`${Math.max(2, 100 - h5Pct)}%`} transition="width 0.5s ease" />
+              <Box h="100%" borderRadius="full" bg={getBarColor(props.envelope5hUtil)} width={`${Math.max(2, h5Pct)}%`} transition="width 0.5s ease" />
             )}
           </Box>
           <Box w="20px" h="2px" borderRadius="full" bg="rgba(255, 255, 255, 0.08)" overflow="hidden">
             {props.envelope7dReset > 0 && (
-              <Box h="100%" borderRadius="full" bg={getBarColor(props.envelope7dUtil)} width={`${Math.max(2, 100 - d7Pct)}%`} transition="width 0.5s ease" />
+              <Box h="100%" borderRadius="full" bg={getBarColor(props.envelope7dUtil)} width={`${Math.max(2, d7Pct)}%`} transition="width 0.5s ease" />
             )}
           </Box>
         </VStack>
@@ -466,7 +483,7 @@ function CreditIndicator(props: {
             )}
           </Flex>
 
-          {/* 5h session window — bar shows REMAINING (inverted) */}
+          {/* 5h session window — bar shows USAGE (0→100%) */}
           {(() => {
             const hasActiveSession = props.envelope5hReset > 0
             return (
@@ -476,7 +493,7 @@ function CreditIndicator(props: {
                   {hasActiveSession ? (
                     <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
                       color={props.envelope5hUtil >= 1 ? tokens.colors.accent.red : props.envelope5hUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}>
-                      {100 - h5Pct}%
+                      {h5Pct}%
                     </Text>
                   ) : (
                     <Text fontSize="10px" color={tokens.colors.accent.greenBright}>{t('chat.available')}</Text>
@@ -486,7 +503,7 @@ function CreditIndicator(props: {
                   {hasActiveSession && (
                     <Box h="100%" borderRadius="full"
                       bg={getBarColor(props.envelope5hUtil)}
-                      width={`${Math.max(2, 100 - h5Pct)}%`}
+                      width={`${Math.max(2, h5Pct)}%`}
                       transition="width 0.5s ease" />
                   )}
                 </Box>
@@ -497,7 +514,7 @@ function CreditIndicator(props: {
             )
           })()}
 
-          {/* 7d weekly window — bar shows REMAINING (inverted) */}
+          {/* 7d weekly window — bar shows USAGE (0→100%) */}
           {(() => {
             const hasActiveWeek = props.envelope7dReset > 0
             return (
@@ -507,7 +524,7 @@ function CreditIndicator(props: {
                   {hasActiveWeek ? (
                     <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
                       color={props.envelope7dUtil >= 1 ? tokens.colors.accent.red : props.envelope7dUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}>
-                      {100 - d7Pct}%
+                      {d7Pct}%
                     </Text>
                   ) : (
                     <Text fontSize="10px" color={tokens.colors.accent.greenBright}>{t('chat.available')}</Text>
@@ -517,7 +534,7 @@ function CreditIndicator(props: {
                   {hasActiveWeek && (
                     <Box h="100%" borderRadius="full"
                       bg={getBarColor(props.envelope7dUtil)}
-                      width={`${Math.max(2, 100 - d7Pct)}%`}
+                      width={`${Math.max(2, d7Pct)}%`}
                       transition="width 0.5s ease" />
                   )}
                 </Box>
