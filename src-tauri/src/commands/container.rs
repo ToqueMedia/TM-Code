@@ -177,7 +177,8 @@ pub fn host_to_container_path(host_path: &str, project_path: &str) -> String {
     let pp = Path::new(project_path);
 
     if let Ok(relative) = hp.strip_prefix(pp) {
-        let rel_str = relative.to_string_lossy();
+        // Ensure forward slashes for container paths (Linux inside Docker)
+        let rel_str = relative.to_string_lossy().replace('\\', "/");
         if rel_str.is_empty() {
             WORKSPACE_PATH.to_string()
         } else {

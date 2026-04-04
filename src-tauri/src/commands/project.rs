@@ -6,6 +6,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::normalize_str_for_frontend;
 use uuid::Uuid;
 
 // Data Structures
@@ -366,7 +368,7 @@ pub fn open_project(path: String, init_git: Option<bool>) -> Result<ProjectInfo>
     let project_info = ProjectInfo {
         id: project_id,
         name: project_name,
-        path: path.clone(),
+        path: normalize_str_for_frontend(&path),
         project_type,
         last_opened: now_unix_secs(),
         created_at: now_unix_secs(),
@@ -791,7 +793,7 @@ cargo run
     let project_info = ProjectInfo {
         id: project_id.clone(),
         name: project_name,
-        path: path.clone(),
+        path: normalize_str_for_frontend(&path),
         project_type,
         last_opened: now_unix_secs(),
         created_at: now_unix_secs(),
@@ -821,10 +823,11 @@ pub fn get_recent_projects() -> Result<Vec<RecentProject>> {
     let settings_content = fs::read_to_string(&settings_path)?;
     let settings: GlobalSettings = serde_json::from_str(&settings_content)?;
 
-    // Filter out projects that no longer exist
+    // Filter out projects that no longer exist and normalize paths for frontend
     let mut valid_projects = Vec::new();
-    for project in settings.recent_projects {
+    for mut project in settings.recent_projects {
         if Path::new(&project.path).exists() {
+            project.path = normalize_str_for_frontend(&project.path);
             valid_projects.push(project);
         }
     }
