@@ -73,7 +73,64 @@ fn open_preview_webview(
     let proxy_target = url.trim_end_matches('/').to_string();
     let proxy_target_for_ws = proxy_target.clone();
 
+    // Clone app handle for IPC handler (receives runtime errors from preview JS)
+    let app_for_ipc = app.clone();
+
     let wv = wry::WebViewBuilder::new()
+        // Inject error capture script into every page load.
+        // Captures: uncaught errors, unhandled promise rejections, and console.error.
+        // Forwards them to Rust via window.ipc.postMessage for the agent to see.
+        .with_initialization_script(r#"
+            (function() {
+                var _send = function(level, msg) {
+                    try {
+                        window.ipc.postMessage(JSON.stringify({ type: 'console', level: level, text: msg }));
+                    } catch(_) {}
+                };
+                window.addEventListener('error', function(e) {
+                    _send('error', 'Uncaught ' + (e.error ? (e.error.stack || e.error.toString()) : e.message) + ' (' + (e.filename || '').split('/').pop() + ':' + e.lineno + ')');
+                });
+                window.addEventListener('unhandledrejection', function(e) {
+                    _send('error', 'Unhandled Promise rejection: ' + (e.reason && e.reason.stack ? e.reason.stack : String(e.reason)));
+                });
+                var _origError = console.error;
+                console.error = function() {
+                    _origError.apply(console, arguments);
+                    var parts = [];
+                    for (var i = 0; i < arguments.length; i++) {
+                        try { parts.push(typeof arguments[i] === 'object' ? JSON.stringify(arguments[i]) : String(arguments[i])); }
+                        catch(_) { parts.push('[object]'); }
+                    }
+                    _send('error', parts.join(' '));
+                };
+                var _origWarn = console.warn;
+                console.warn = function() {
+                    _origWarn.apply(console, arguments);
+                    var parts = [];
+                    for (var i = 0; i < arguments.length; i++) {
+                        try { parts.push(typeof arguments[i] === 'object' ? JSON.stringify(arguments[i]) : String(arguments[i])); }
+                        catch(_) { parts.push('[object]'); }
+                    }
+                    _send('warn', parts.join(' '));
+                };
+            })();
+        "#)
+        // IPC handler: receives console messages from the preview JS and emits Tauri events
+        .with_ipc_handler(move |request| {
+            let body = request.body();
+            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) {
+                if msg.get("type").and_then(|t| t.as_str()) == Some("console") {
+                    let level = msg.get("level").and_then(|l| l.as_str()).unwrap_or("error");
+                    let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if !text.is_empty() {
+                        let _ = app_for_ipc.emit("preview-console", serde_json::json!({
+                            "level": level,
+                            "text": text
+                        }));
+                    }
+                }
+            }
+        })
         .with_asynchronous_custom_protocol("tmpreview".into(), move |_webview_id, request, responder| {
             let target = proxy_target.clone();
             std::thread::spawn(move || {
