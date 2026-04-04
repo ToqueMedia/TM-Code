@@ -152,7 +152,7 @@ const GLM_5: ModelProfile = {
   thinkingBudget: null,
   thinkingMandatory: false,
 
-  preserveReasoning: false, // ZhipuAI: no documentation on multi-turn reasoning preservation
+  preserveReasoning: true, // ZhipuAI docs: clear_thinking param — during tool calling sequences (our loop), preservation required
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
   modelSpecificPrompt: `You are TM Code Agent, a coding assistant built into TM Code IDE by Toque Media. You are NOT Claude, NOT ChatGPT, NOT any other assistant. Always identify yourself as TM Code Agent when asked.`,
@@ -180,7 +180,7 @@ const KIMI_K2_5: ModelProfile = {
   thinkingBudget: null,
   thinkingMandatory: false,
 
-  preserveReasoning: false, // Moonshot: no documentation on multi-turn reasoning preservation
+  preserveReasoning: true, // Moonshot docs: REQUIRED during tool calling — API returns 400 if reasoning_content missing
   skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (MoonViT)
   modelSpecificPrompt: '',

@@ -127,6 +127,15 @@ Before writing PLAN.md, work through these steps using your tools:
 5. Then write PLAN.md.
 </chain_of_thought>
 
+<complexity_classification>
+Classify the project as one of:
+- STATIC: No user interaction beyond navigation (landing pages, portfolios)
+- INTERACTIVE: User interaction with local/global state, no backend persistence (dashboards, tools, calculators)
+- FULLSTACK: Data persistence, auth, API endpoints (e-commerce, messaging, SaaS)
+
+The complexity determines which sections are REQUIRED vs N/A. Mark sections that don't apply for the complexity level.
+</complexity_classification>
+
 <plan_template>
 The PLAN.md must follow this structure exactly:
 
@@ -135,6 +144,7 @@ The PLAN.md must follow this structure exactly:
 > Author: TM Code Architect
 > Date: {current date}
 > Status: PENDING APPROVAL
+> Complexity: {STATIC | INTERACTIVE | FULLSTACK}
 
 ## 1. Context
 
@@ -163,77 +173,127 @@ The PLAN.md must follow this structure exactly:
 ### Key Interactions
 {step-by-step flow for the primary scenario AND the primary failure scenario}
 
-## 4. Data Design
+## 4. Domain Schema
 
-{entities with field names, types, and constraints — not just "key fields"}
-{storage location: Zustand store, filesystem, database — and why}
+{for each entity:}
+
+**{EntityName}** ({catalog | user})
+- fieldName: type [CONSTRAINT] — description
+- fieldName: type [CONSTRAINT] — description
+- Relations: fieldName → OtherEntity.id
+
+{storage: Zustand store | filesystem | database | API — and why}
 {migration strategy if existing data is affected}
 
-## 5. Interface Contracts
+## 5. State Management
 
-{for APIs: method, path, request body, response body, error codes}
-{for components: props with types, callbacks}
-{for events: event name, payload shape}
+### Global Store
+- **{useXxxStore}**: {actions: action1(params), action2(params)}
 
-## 6. Technical Decisions
+### Per-Screen State (INTERACTIVE/FULLSTACK)
+| Screen | Local State (useState) | Global State (store selectors) |
+|--------|----------------------|-------------------------------|
+| {screen} | {local vars} | {store selectors} |
+
+## 6. Interface Contracts
+
+### API Endpoints (FULLSTACK)
+| Method | Path | Auth | Request Body | Response | Status Codes |
+|--------|------|------|-------------|----------|-------------|
+| {GET/POST/...} | {/api/...} | {yes/no} | {shape or N/A} | {shape} | {200, 404, ...} |
+
+### Component Props
+{for key components: props with types, callbacks, default values}
+
+### Events
+{event name, payload shape — if applicable}
+
+## 7. Technical Decisions
 
 | Decision | Chosen | Alternatives considered | Trade-off |
 |----------|--------|------------------------|-----------|
 | {what was decided} | {chosen approach} | {at least one other option} | {what is gained vs. what is sacrificed} |
 
-## 7. Quality Attributes
+## 8. Business Rules & Validation (INTERACTIVE/FULLSTACK)
+
+### Business Rules
+- {rule: description with exact behavior}
+
+### Validation Rules
+- {field/action: validation logic}
+
+### Error Handling
+- {scenario: how the system responds}
+
+## 9. Quality Attributes
 
 - **Performance:** {measurable target — e.g. "renders < 200ms with 1000 items"}
 - **Reliability:** {failure modes and graceful degradation behavior}
-- **Security:** {auth, validation, data protection — if applicable}
+- **Security:** {auth model, input validation, data protection — if applicable}
 
-## 8. Risks
+## 10. Risks
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | {what can go wrong} | {consequence if it happens} | {how to prevent or recover} |
 
-## 9. UI/UX Design
+## 11. UI/UX Design
 
 ### Layout
 {main layout structure — sidebar? header? grid? How content is organized}
-{responsive behavior: mobile, tablet, desktop breakpoints}
+{responsive behavior if applicable}
 
 ### Visual Style
-{color palette: backgrounds, text, accents — with hex values}
-{typography: font family, sizes for headings/body/small text}
-{spacing system: base unit, common gaps, padding}
+{color palette with hex values, typography, spacing system}
 
 ### Key Screens / Views
-{for each screen: describe the visual structure, components, and user interactions}
+{for each screen: visual structure, components, user interactions}
 {include empty states, loading states, error states}
-
-### Component Specs
-{for each custom component: visual appearance, dimensions, states (default, hover, active, disabled)}
 
 ### Accessibility
 {contrast requirements, keyboard navigation, screen reader considerations}
 
-## 10. Testing Strategy
+## 12. File Structure
 
-- {what needs testing, what kind of test (unit/integration/manual), what is hard to test}
+{every file to create or modify, assigned to a phase:}
 
-## 11. Implementation Phases
+| File Path | Action | Description | Phase |
+|-----------|--------|-------------|-------|
+| {src/...} | {CREATE/UPDATE} | {what this file does} | {1/2/3} |
 
-### Phase 1 — {name}: {deliverable}
-- {task}: {files to create/modify}
-- Depends on: none
+## 13. Implementation Phases
 
-### Phase 2 — {name}: {deliverable}
-- {task}: {files to create/modify}
+Phase names must describe FUNCTIONAL deliverables (what the user gets), not technical layers.
+
+### Phase 1 — {user-facing feature name}
+- Scope: {what the user can do after this phase}
+- Files: {list from File Structure table}
+- Completion criteria: {how to verify this phase works}
+
+### Phase 2 — {user-facing feature name}
+- Scope: {what the user can do after this phase}
 - Depends on: Phase 1
+- Files: {list from File Structure table}
+- Completion criteria: {how to verify this phase works}
 
 **Critical path:** {which phases block others, what can be parallelized}
 
-## 12. Open Questions
+## 14. Open Questions
 
 - {decisions that need developer input before or during implementation}
 </plan_template>
+
+<self_check>
+Before writing PLAN.md, verify:
+1. Every screen mentioned in the architecture has at least one file in the File Structure
+2. Every API endpoint has a corresponding route/handler file
+3. Domain Schema covers all entities referenced anywhere in the document
+4. Every file in File Structure is assigned to exactly one phase
+5. Phase names describe user-facing features (never "Backend Setup", "API Layer", "Database")
+6. FULLSTACK projects include both frontend AND backend files in the same phase for related features
+7. Business rules are specific and testable (not vague statements)
+If any check fails, fix it before writing the file.
+</self_check>
 
 <example>
 <user_idea>Add WebSocket support for real-time collaboration</user_idea>
