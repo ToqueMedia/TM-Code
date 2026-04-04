@@ -136,15 +136,16 @@ jobs:
           VERSION="${{ needs.create-release.outputs.version }}"
           ARGS="${{ matrix.args }}"
 
-          # Find all release artifacts + signatures — search the entire target tree since
-          # cross-compilation puts artifacts under target/<triple>/release/bundle/
-          find src-tauri/target -type f \( \
+          # Find release artifacts + signatures ONLY inside bundle directories.
+          # Tauri places installers under target/**/release/bundle/ — restricting to
+          # */bundle/* avoids uploading build tools (WiX), build scripts, and raw binaries.
+          find src-tauri/target -path "*/bundle/*" -type f \( \
             -name "*.dmg" -o -name "*.exe" -o -name "*.msi" -o \
             -name "*.deb" -o -name "*.AppImage" -o \
             -name "*.nsis.zip" -o -name "*.nsis.zip.sig" -o \
             -name "*.AppImage.sig" -o -name "*.exe.sig" -o \
             -name "*.msi.sig" -o -name "*.deb.sig" \
-          \) -not -path "*/deps/*" | while read file; do
+          \) | while read file; do
             echo "Uploading: $file"
             gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
           done
