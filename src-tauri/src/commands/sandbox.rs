@@ -52,18 +52,27 @@ fn check_tools() -> bool {
     { false }
 }
 
+/// Create a Command that runs without a visible console window on Windows.
+#[cfg(target_os = "windows")]
+fn silent_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 #[cfg(target_os = "windows")]
 fn is_wsl2_available() -> bool {
-    Command::new("wsl")
+    silent_command("wsl")
         .args(["--status"])
-        .stdout(Stdio::null()).stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
         &&
-    Command::new("wsl")
+    silent_command("wsl")
         .args(["bwrap", "--version"])
-        .stdout(Stdio::null()).stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -342,14 +351,12 @@ pub fn sandbox_check_deps() -> SandboxDeps {
 
     #[cfg(target_os = "windows")]
     {
-        if !Command::new("wsl").args(["--status"])
-            .stdout(Stdio::null()).stderr(Stdio::null())
+        if !silent_command("wsl").args(["--status"])
             .status().map(|s| s.success()).unwrap_or(false)
         {
             missing.push("WSL2".into());
             hints.push("Install: wsl --install".into());
-        } else if !Command::new("wsl").args(["bwrap", "--version"])
-            .stdout(Stdio::null()).stderr(Stdio::null())
+        } else if !silent_command("wsl").args(["bwrap", "--version"])
             .status().map(|s| s.success()).unwrap_or(false)
         {
             missing.push("bubblewrap inside WSL".into());

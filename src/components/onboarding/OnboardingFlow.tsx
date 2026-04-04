@@ -149,7 +149,6 @@ function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
       fontFamily={tokens.fontFamily.ui}
       position="relative"
       overflow="hidden"
-      data-tauri-drag-region
       onMouseDown={handleDrag}
     >
       {/* Single global style tag for all onboarding CSS */}

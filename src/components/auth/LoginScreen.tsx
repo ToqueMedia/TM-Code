@@ -147,7 +147,6 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
       fontFamily={tokens.fontFamily.ui}
       position="relative"
       overflow="hidden"
-      data-tauri-drag-region
       onMouseDown={handleDrag}
     >
       {/* Window controls — macOS: top-left, Windows/Linux: top-right */}

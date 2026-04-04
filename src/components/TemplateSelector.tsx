@@ -152,7 +152,6 @@ const TemplateSelector: React.FC<TemplateSelectorProps> = ({
       zIndex={tokens.zIndex.modal}
       flexDirection="column"
       overflow="hidden"
-      data-tauri-drag-region
       onMouseDown={handleDrag}
     >
       {/* Window controls — macOS: top-left, Windows/Linux: top-right */}

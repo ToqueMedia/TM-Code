@@ -100,7 +100,6 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       minHeight="100vh"
       bg="#0a0a0a"
       color={tokens.colors.text.primary}
-      data-tauri-drag-region
       onMouseDown={handleDrag}
       position="relative"
     >

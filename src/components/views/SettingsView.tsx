@@ -26,6 +26,7 @@ import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
 import { invoke } from '@tauri-apps/api/core'
 import { getPendingUpdate, setPendingUpdate, installUpdate, checkForUpdate, type UpdateInfo } from '../../services/updateService'
+import { IS_WINDOWS } from '@/utils/platform'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
@@ -944,7 +945,7 @@ function SkillsSection() {
         )}
       </SettingsGroup>
 
-      <SettingsGroup title={t("settings.global")} badge="~/.toquemedia-studio/skills/">
+      <SettingsGroup title={t("settings.global")} badge={IS_WINDOWS ? '%USERPROFILE%\\.toquemedia-studio\\skills\\' : '~/.toquemedia-studio/skills/'}>
         {globalSkills.length === 0 ? (
           <EmptyState text={t('settings.noGlobalSkills')} />
         ) : (
@@ -956,7 +957,7 @@ function SkillsSection() {
         )}
       </SettingsGroup>
 
-      <SettingsGroup title={t("settings.project")} badge=".tms/skills/">
+      <SettingsGroup title={t("settings.project")} badge={IS_WINDOWS ? '.tms\\skills\\' : '.tms/skills/'}>
         {projectSkills.length === 0 ? (
           <EmptyState text={t('settings.noProjectSkills')} />
         ) : (
