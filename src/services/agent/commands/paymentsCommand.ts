@@ -1,5 +1,4 @@
 import { useChatStore } from '../../../stores/chatStore'
-import { useAgentStore } from '../../../stores/agentStore'
 import { runAgentWithCallbacks } from '../agentRunner'
 import { logger } from '../../../utils/logger'
 
@@ -11,27 +10,32 @@ const SKILL_FILES = [
   { name: 'mom-factura-testing', files: ['SKILL.md'] },
 ]
 
-async function fetchSkillContent(skillName: string, file: string): Promise<string | null> {
+async function fetchSkillContent(skillName: string, file: string): Promise<{ label: string; content: string } | null> {
   try {
     const url = `${SKILLS_BASE}/${skillName}/${file}`
     const res = await fetch(url)
     if (!res.ok) return null
-    return await res.text()
+    const content = await res.text()
+    const label = file === 'SKILL.md' ? skillName : `${skillName}/${file}`
+    return { label, content }
   } catch {
     return null
   }
 }
 
 async function fetchAllSkills(): Promise<string> {
-  const parts: string[] = []
+  // Fetch all skill files in parallel
+  const fetches = SKILL_FILES.flatMap(skill =>
+    skill.files.map(file => fetchSkillContent(skill.name, file))
+  )
+  const results = await Promise.all(fetches)
 
-  for (const skill of SKILL_FILES) {
-    for (const file of skill.files) {
-      const content = await fetchSkillContent(skill.name, file)
-      if (content) {
-        const label = file === 'SKILL.md' ? skill.name : `${skill.name}/${file}`
-        parts.push(`<skill name="${label}">\n${content}\n</skill>`)
-      }
+  const parts: string[] = []
+  for (const result of results) {
+    if (result) {
+      // Sanitize: escape XML-like tags to prevent prompt injection from remote content
+      const sanitized = result.content.replace(/</g, '＜').replace(/>/g, '＞')
+      parts.push(`<skill name="${result.label}">\n${sanitized}\n</skill>`)
     }
   }
 
@@ -52,17 +56,12 @@ export async function executePayments(args: string, _projectPath: string): Promi
     return
   }
 
-  // Show loading state
-  chatStore.addSystemMessage('Loading MoMenu Payment skills...')
-  useAgentStore.getState().setStatus('thinking')
-
   // Fetch skills from GitHub (fire-and-forget — not persisted)
   let skillsContent: string
   try {
     skillsContent = await fetchAllSkills()
   } catch (err) {
     logger.error('payments', 'Failed to fetch skills:', err)
-    useAgentStore.getState().setStatus('idle')
     chatStore.addSystemMessage(
       'Failed to load payment skills. Check your internet connection and try again.'
     )
@@ -70,7 +69,6 @@ export async function executePayments(args: string, _projectPath: string): Promi
   }
 
   if (!skillsContent) {
-    useAgentStore.getState().setStatus('idle')
     chatStore.addSystemMessage(
       'Could not fetch any payment skills from the repository.'
     )
@@ -88,7 +86,8 @@ Developer request: ${args}
 
 Implement this following the exact API contracts in the skills. Use the project's existing patterns and framework.`
 
-  // Run the agent with skills injected as context (fire-and-forget)
+  // Run the agent with skills injected as context (fire-and-forget).
+  // Status management is handled entirely by runAgentWithCallbacks — don't set it manually.
   await runAgentWithCallbacks(prompt, {
     addUserMessage: true,
     userMessageText: `/payments ${args}`,
