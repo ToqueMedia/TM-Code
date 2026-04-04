@@ -104,6 +104,11 @@ pub async fn search_in_files(
         .unwrap_or(false);
 
     if !has_rg {
+        // On Windows, grep is not available — use findstr as last resort.
+        // On macOS/Linux, grep is always available.
+        if cfg!(target_os = "windows") {
+            return search_with_findstr(&query, &directory, &options, start_time).await;
+        }
         return search_with_grep(&query, &directory, &options, start_time).await;
     }
 
@@ -456,6 +461,109 @@ async fn search_with_grep(
         total_matches,
         files,
         file_name_matches: vec![], // grep fallback doesn't do filename search
+        duration_ms: duration.as_millis() as u64,
+        truncated,
+    })
+}
+
+/// Windows-only fallback using findstr when neither ripgrep nor grep are available.
+#[allow(dead_code)]
+async fn search_with_findstr(
+    query: &str,
+    directory: &str,
+    options: &SearchOptions,
+    start_time: std::time::Instant,
+) -> Result<SearchResult, String> {
+    let mut cmd = tokio::process::Command::new("findstr");
+    cmd.arg("/S")  // search subdirectories
+       .arg("/N"); // print line numbers
+
+    if !options.case_sensitive {
+        cmd.arg("/I");
+    }
+
+    if !options.use_regex {
+        cmd.arg("/L"); // literal match (default, but explicit)
+    } else {
+        cmd.arg("/R"); // regex (basic, not full PCRE)
+    }
+
+    // findstr pattern and file spec
+    cmd.arg(query)
+       .arg(format!("{}\\*", directory));
+
+    // Hide console window on Windows
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd.output().await.map_err(|e| format!("findstr failed: {}", e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut file_map: std::collections::HashMap<String, FileSearchResult> =
+        std::collections::HashMap::new();
+    let mut total_matches = 0;
+
+    // findstr output format: "filepath:line_number:text"
+    for line in stdout.lines() {
+        if total_matches >= GLOBAL_MAX_MATCHES {
+            break;
+        }
+
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        // Windows paths have C: prefix — need at least 4 parts for drive letter
+        let (file_path, line_number, text) = if parts.len() >= 2 && parts[0].len() == 1 && parts[0].chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+            // Drive letter detected: "C:path:line:text"
+            let rest: Vec<&str> = line[2..].splitn(3, ':').collect();
+            if rest.len() < 3 { continue; }
+            (format!("{}:{}", parts[0], rest[0]), rest[1].parse::<u32>().unwrap_or(0), rest[2].to_string())
+        } else if parts.len() >= 3 {
+            (parts[0].to_string(), parts[1].parse::<u32>().unwrap_or(0), parts[2].to_string())
+        } else {
+            continue;
+        };
+
+        let text = if text.len() > MAX_LINE_LENGTH {
+            match text.char_indices().nth(MAX_LINE_LENGTH) {
+                Some((byte_idx, _)) => format!("{}…", &text[..byte_idx]),
+                None => text,
+            }
+        } else {
+            text
+        };
+
+        let entry = file_map
+            .entry(file_path.clone())
+            .or_insert_with(|| FileSearchResult {
+                file_path,
+                matches: vec![],
+                total_matches: 0,
+            });
+
+        entry.matches.push(SearchMatch {
+            line_number,
+            column: 1,
+            text: text.clone(),
+            match_text: query.to_string(),
+            context_before: vec![],
+            context_after: vec![],
+        });
+        entry.total_matches += 1;
+        total_matches += 1;
+    }
+
+    let files: Vec<FileSearchResult> = file_map.into_values().collect();
+    let duration = start_time.elapsed();
+    let truncated = total_matches >= GLOBAL_MAX_MATCHES;
+
+    Ok(SearchResult {
+        query: query.to_string(),
+        total_files: files.len(),
+        total_matches,
+        files,
+        file_name_matches: vec![],
         duration_ms: duration.as_millis() as u64,
         truncated,
     })

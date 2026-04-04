@@ -297,7 +297,15 @@ pub fn open_project(path: String, init_git: Option<bool>) -> Result<ProjectInfo>
 
     // Initialize git for empty projects (e.g. "New Empty Project" flow)
     if init_git.unwrap_or(false) && !project_path.join(".git").exists() {
-        // Try common git paths — GUI apps on macOS may not inherit shell PATH
+        // Try common git paths — GUI apps may not inherit shell PATH.
+        // "git" (first) uses PATH lookup; platform-specific absolute paths as fallback.
+        #[cfg(target_os = "windows")]
+        let git_candidates = [
+            "git",
+            "C:\\Program Files\\Git\\bin\\git.exe",
+            "C:\\Program Files (x86)\\Git\\bin\\git.exe",
+        ];
+        #[cfg(not(target_os = "windows"))]
         let git_candidates = ["git", "/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"];
         let mut initialized = false;
 

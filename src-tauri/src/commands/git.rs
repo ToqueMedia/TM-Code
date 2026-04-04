@@ -62,7 +62,7 @@ fn parse_range(s: &str) -> Option<(u32, u32)> {
 #[tauri::command]
 pub async fn git_diff_lines(file_path: String) -> Result<Vec<GitLineChange>, String> {
     let abs_path = std::path::Path::new(&file_path);
-    let parent = abs_path.parent().unwrap_or(std::path::Path::new("/"));
+    let parent = abs_path.parent().unwrap_or(std::path::Path::new("."));
 
     // Find the git repo root
     let repo_root = git_cmd_path(parent)

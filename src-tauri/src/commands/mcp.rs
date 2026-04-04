@@ -88,6 +88,14 @@ pub async fn mcp_start_server(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
+    // Prevent visible console window on Windows
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
     for env_var in &env {
         cmd.env(&env_var.key, &env_var.value);
     }

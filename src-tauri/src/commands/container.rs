@@ -7,7 +7,8 @@ use tauri::{Emitter, State};
 
 use super::devcontainer::{self, DevcontainerConfig};
 
-/// Get the Colima socket path if available.
+/// Get the Colima socket path if available (macOS only — Colima is a macOS tool).
+#[cfg(target_os = "macos")]
 fn colima_socket_path() -> Option<String> {
     if let Some(home) = std::env::var_os("HOME") {
         let sock = format!("{}/.colima/default/docker.sock", home.to_string_lossy());
@@ -18,10 +19,19 @@ fn colima_socket_path() -> Option<String> {
     None
 }
 
+#[cfg(not(target_os = "macos"))]
+fn colima_socket_path() -> Option<String> { None }
+
+/// Recover Colima from any broken state (macOS only).
+/// On Windows/Linux, returns false immediately (Colima is not available).
+#[cfg(not(target_os = "macos"))]
+pub fn recover_colima() -> bool { false }
+
 /// Recover Colima from any broken state. Escalates through:
 /// 1. stop + start (fixes stale socket after sleep/wake)
 /// 2. kill residual processes + start (fixes zombie Lima processes)
 /// 3. delete -f + start (nuclear — destroys containers, fixes corrupted VM)
+#[cfg(target_os = "macos")]
 pub fn recover_colima() -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};
     static RECOVERING: AtomicBool = AtomicBool::new(false);
@@ -43,6 +53,7 @@ pub fn recover_colima() -> bool {
     result
 }
 
+#[cfg(target_os = "macos")]
 fn recover_colima_inner() -> bool {
     let has_colima = Command::new("which")
         .arg("colima")
@@ -96,7 +107,8 @@ fn test_docker_connection() -> bool {
 pub fn docker_cmd() -> Command {
     let mut cmd = Command::new("docker");
 
-    // Docker Desktop: standard socket, no --host needed
+    // Docker Desktop: standard socket, no --host needed (Unix only)
+    #[cfg(unix)]
     if Path::new("/var/run/docker.sock").exists() {
         return cmd;
     }
