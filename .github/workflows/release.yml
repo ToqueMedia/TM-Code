@@ -208,31 +208,13 @@ jobs:
           LINUX_APPIMAGE_SIG=$(read_sig "TM.Code_${BARE_VERSION}_amd64.AppImage.sig")
           WIN_NSIS_SIG=$(read_sig "TM.Code_${BARE_VERSION}_x64-setup.exe.sig")
 
-          cat > latest.json <<ENDJSON
-{
-  "version": "${BARE_VERSION}",
-  "notes": "TM Code ${VERSION}",
-  "pub_date": "${PUB_DATE}",
-  "platforms": {
-    "darwin-aarch64": {
-      "signature": "${MAC_ARM_SIG}",
-      "url": "${BASE_URL}/TM.Code_aarch64.app.tar.gz"
-    },
-    "darwin-x86_64": {
-      "signature": "${MAC_X64_SIG}",
-      "url": "${BASE_URL}/TM.Code_x64.app.tar.gz"
-    },
-    "linux-x86_64": {
-      "signature": "${LINUX_APPIMAGE_SIG}",
-      "url": "${BASE_URL}/TM.Code_${BARE_VERSION}_amd64.AppImage"
-    },
-    "windows-x86_64": {
-      "signature": "${WIN_NSIS_SIG}",
-      "url": "${BASE_URL}/TM.Code_${BARE_VERSION}_x64-setup.exe"
-    }
-  }
-}
-ENDJSON
+          printf '{\n  "version": "%s",\n  "notes": "TM Code %s",\n  "pub_date": "%s",\n  "platforms": {\n    "darwin-aarch64": {\n      "signature": "%s",\n      "url": "%s/TM.Code_aarch64.app.tar.gz"\n    },\n    "darwin-x86_64": {\n      "signature": "%s",\n      "url": "%s/TM.Code_x64.app.tar.gz"\n    },\n    "linux-x86_64": {\n      "signature": "%s",\n      "url": "%s/TM.Code_%s_amd64.AppImage"\n    },\n    "windows-x86_64": {\n      "signature": "%s",\n      "url": "%s/TM.Code_%s_x64-setup.exe"\n    }\n  }\n}\n' \
+            "$BARE_VERSION" "$VERSION" "$PUB_DATE" \
+            "$MAC_ARM_SIG" "$BASE_URL" \
+            "$MAC_X64_SIG" "$BASE_URL" \
+            "$LINUX_APPIMAGE_SIG" "$BASE_URL" "$BARE_VERSION" \
+            "$WIN_NSIS_SIG" "$BASE_URL" "$BARE_VERSION" \
+            > latest.json
 
           echo "Generated latest.json:"
           cat latest.json
