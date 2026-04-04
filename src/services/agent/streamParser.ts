@@ -140,9 +140,11 @@ function processChunk(
     callbacks.onEvent({ type: 'text_delta', content: delta.content })
   }
 
-  // Reasoning (native field: Qwen, DeepSeek)
+  // Reasoning (native field: Qwen/DeepSeek use reasoning_content, StepFun uses reasoning)
   if (delta.reasoning_content) {
     callbacks.onEvent({ type: 'reasoning_delta', content: delta.reasoning_content })
+  } else if (delta.reasoning) {
+    callbacks.onEvent({ type: 'reasoning_delta', content: delta.reasoning })
   }
 
   // Tool calls (incremental)

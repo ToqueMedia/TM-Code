@@ -56,6 +56,15 @@ export interface ModelProfile {
   /** If true, thinking is always-on and cannot be disabled (MiniMax M2.5) */
   thinkingMandatory: boolean
 
+  // ── Reasoning Preservation ──
+  /**
+   * Whether reasoning_content should be preserved in conversation history between turns.
+   * - true: include reasoning_content in assistant messages sent to the API (Qwen 3.6+, Gemini)
+   * - false: strip reasoning_content from history — model ignores or rejects it (DeepSeek, GLM, Kimi, Step)
+   * Based on official documentation for each provider.
+   */
+  preserveReasoning: boolean
+
   // ── System Prompt Behavior ──
   /** If true, skip/minimize system prompt when thinking is active (DeepSeek) */
   skipSystemPromptInThinking: boolean
@@ -92,6 +101,7 @@ const MIMO_V2_FLASH: ModelProfile = {
   thinkingBudget: null,
   thinkingMandatory: false,
 
+  preserveReasoning: false, // N/A — thinking disabled
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
   modelSpecificPrompt: `Never start responses with filler ("Sure!", "Of course!", "Let me help you"). Go straight to the answer or code. Output only changed code — never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
@@ -116,6 +126,7 @@ const DEEPSEEK_V3_2: ModelProfile = {
   thinkingBudget: 4096,
   thinkingMandatory: false,
 
+  preserveReasoning: false, // DeepSeek docs: "API will return 400 if reasoning_content included" (DashScope proxy patches with '')
   skipSystemPromptInThinking: true,
   supportsAttachments: false,
   modelSpecificPrompt: '',
@@ -141,6 +152,7 @@ const GLM_5: ModelProfile = {
   thinkingBudget: null,
   thinkingMandatory: false,
 
+  preserveReasoning: false, // ZhipuAI: no documentation on multi-turn reasoning preservation
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
   modelSpecificPrompt: `You are TM Code Agent, a coding assistant built into TM Code IDE by Toque Media. You are NOT Claude, NOT ChatGPT, NOT any other assistant. Always identify yourself as TM Code Agent when asked.`,
@@ -168,6 +180,7 @@ const KIMI_K2_5: ModelProfile = {
   thinkingBudget: null,
   thinkingMandatory: false,
 
+  preserveReasoning: false, // Moonshot: no documentation on multi-turn reasoning preservation
   skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (MoonViT)
   modelSpecificPrompt: '',
@@ -193,6 +206,7 @@ const QWEN3_CODER_NEXT: ModelProfile = {
   thinkingBudget: null,
   thinkingMandatory: false,
 
+  preserveReasoning: false, // N/A — thinking disabled
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
   modelSpecificPrompt: `Be concise in explanations. Output code changes directly without verbose commentary. When editing files, output only the changed code — do not repeat unchanged sections.`,
@@ -218,6 +232,7 @@ const MINIMAX_M2_5: ModelProfile = {
   thinkingBudget: 4096,
   thinkingMandatory: true,
 
+  preserveReasoning: true, // MiniMax docs: strongly recommend preserving reasoning between turns
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
   modelSpecificPrompt: `Be concise. Output only the code changes needed. Do not add explanatory comments unless asked. Do not overthink simple tasks.`,
@@ -243,6 +258,7 @@ const QWEN3_6_PLUS: ModelProfile = {
   thinkingBudget: null,
   thinkingMandatory: false,
 
+  preserveReasoning: true, // DashScope docs: supports preserve_thinking=true (only qwen3.6-plus)
   skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (text + vision)
   modelSpecificPrompt: `Be decisive and direct. Reach conclusions quickly — do not overthink simple tasks. Output only changed code, never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
@@ -269,8 +285,35 @@ const GEMINI_3_FLASH: ModelProfile = {
   thinkingBudget: null,
   thinkingMandatory: false,
 
+  preserveReasoning: true, // Google docs: "always pass all signatures back" for thought context
   skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (text, image, audio, video, PDF)
+  modelSpecificPrompt: '',
+}
+
+const STEP_3_5_FLASH: ModelProfile = {
+  id: 'step-3.5-flash',
+  name: 'Step 3.5 Flash',
+  persona: { name: 'Deolinda Rodrigues', tagline: 'Raciocínio nativo. MoE 196B com 11B activos — rápida e precisa. Custo: 1x' },
+  modelId: 'step-3.5-flash',
+  contextWindow: 262_144,
+  maxOutputTokens: 32_768,
+
+  // StepFun docs: no specific temperature recommendation — use conservative defaults
+  temperature: 0.7,
+  reasoningTemperature: null,
+  topP: 0.95,
+  topK: null,
+
+  thinkingMode: 'mandatory', // Step 3.5 Flash has native reasoning — always active
+  supportsThinking: true,
+  thinkingParam: null, // reasoning is built-in, no toggle parameter
+  thinkingBudget: null,
+  thinkingMandatory: true,
+
+  preserveReasoning: false, // StepFun: no documentation on preserving reasoning between turns
+  skipSystemPromptInThinking: false,
+  supportsAttachments: false,
   modelSpecificPrompt: '',
 }
 
@@ -287,6 +330,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'minimax-m2.5': MINIMAX_M2_5,
   'qwen3.6-plus': QWEN3_6_PLUS,
   'gemini-3-flash': GEMINI_3_FLASH,
+  'step-3.5-flash': STEP_3_5_FLASH,
 }
 
 export const DEFAULT_MODEL_ID = 'deepseek-v3.2'

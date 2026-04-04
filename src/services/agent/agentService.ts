@@ -225,6 +225,9 @@ class AgentService {
   private thinkingEnabledForLoop = false
   /** Current turn number in the active loop — used by buildRequestBody for Turn 1 thinking. */
   private currentTurnInLoop = 0
+  /** Whether reasoning_content should be preserved in conversation history between turns.
+   *  Set per-loop from the model profile. Default: false (strip reasoning). */
+  private preserveReasoningBetweenTurns = false
 
   /** Called by request_thinking tool — enables thinking for remaining turns in this loop. */
   enableThinkingForLoop(): void {
@@ -338,7 +341,9 @@ class AgentService {
         const { getModelProfile } = await import('./modelProfiles')
         const { useSettingsStore } = await import('../../stores/settingsStore')
         const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
-        this.contextWindowSize = getModelProfile(modelId).contextWindow
+        const profile = getModelProfile(modelId)
+        this.contextWindowSize = profile.contextWindow
+        this.preserveReasoningBetweenTurns = profile.preserveReasoning
       } catch { /* keep default */ }
 
       // Thinking starts OFF — the model activates it via request_thinking if needed.
@@ -434,7 +439,7 @@ class AgentService {
           messages.push({
             role: 'assistant',
             content: turnResult.textContent || null,
-            ...(turnResult.reasoningContent && { reasoning_content: turnResult.reasoningContent }),
+            ...(this.preserveReasoningBetweenTurns && turnResult.reasoningContent && { reasoning_content: turnResult.reasoningContent }),
           })
           // Prompt continuation — the model will resume from where it stopped
           messages.push({
@@ -445,11 +450,11 @@ class AgentService {
           continue
         }
 
-        // Add assistant message to history (preserve reasoning for models that use it)
+        // Add assistant message to history (preserve reasoning only for models that document it)
         const assistantMsg: OpenAIMessage = {
           role: 'assistant',
           content: turnResult.textContent || null,
-          ...(turnResult.reasoningContent && { reasoning_content: turnResult.reasoningContent }),
+          ...(this.preserveReasoningBetweenTurns && turnResult.reasoningContent && { reasoning_content: turnResult.reasoningContent }),
         }
         if (turnResult.toolCalls.length > 0) {
           assistantMsg.tool_calls = turnResult.toolCalls.map(tc => ({
