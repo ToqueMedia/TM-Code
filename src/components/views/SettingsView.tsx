@@ -25,6 +25,7 @@ import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
 import { invoke } from '@tauri-apps/api/core'
+import { getPendingUpdate, installUpdate, checkForUpdate, type UpdateInfo } from '../../services/updateService'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
@@ -317,6 +318,9 @@ function ProfileSection() {
         <Box h="1px" bg={tokens.colors.border.subtle} />
       </VStack>
 
+      {/* ── App Update ──────────────────────────────────── */}
+      <UpdateSection />
+
       {/* ── Language ─────────────────────────────────────── */}
       <VStack align="stretch" gap={3}>
         <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.muted} textTransform="uppercase" letterSpacing="0.06em">
@@ -365,6 +369,107 @@ function ProfileSection() {
         </HStack>
       </VStack>
 
+    </VStack>
+  )
+}
+
+// ━━━ Update Section ━━━
+
+function UpdateSection() {
+  const t = useTranslation()
+  const [update, setUpdate] = useState<UpdateInfo | null>(getPendingUpdate)
+  const [status, setStatus] = useState<'idle' | 'checking' | 'downloading' | 'error'>('idle')
+  const [error, setError] = useState<string | null>(null)
+
+  const handleCheck = useCallback(async () => {
+    setStatus('checking')
+    setError(null)
+    try {
+      const result = await checkForUpdate()
+      setUpdate(result)
+      setStatus('idle')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setStatus('error')
+    }
+  }, [])
+
+  const handleInstall = useCallback(async () => {
+    setStatus('downloading')
+    setError(null)
+    try {
+      await installUpdate()
+      // relaunch happens inside installUpdate — this line is unreachable
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setStatus('error')
+    }
+  }, [])
+
+  return (
+    <VStack align="stretch" gap={3}>
+      <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.muted} textTransform="uppercase" letterSpacing="0.06em">
+        {t('settings.appUpdate')}
+      </Text>
+
+      {update ? (
+        <Flex
+          align="center" justify="space-between"
+          px={4} py={3} borderRadius={tokens.radius.lg}
+          bg="rgba(254, 16, 99, 0.06)"
+          border="1px solid rgba(254, 16, 99, 0.15)"
+        >
+          <Box>
+            <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
+              TM Code {update.version} {t('settings.updateAvailable')}
+            </Text>
+            <Text fontSize="11px" color={tokens.colors.text.secondary} mt={0.5}>
+              {t('settings.updateRestart')}
+            </Text>
+          </Box>
+          <Button
+            size="sm"
+            bg={tokens.colors.accent.primary}
+            color="white"
+            borderRadius={tokens.radius.md}
+            fontSize="12px"
+            fontWeight="600"
+            px={4}
+            _hover={{ bg: tokens.colors.accent.primaryDark }}
+            disabled={status === 'downloading'}
+            onClick={handleInstall}
+          >
+            {status === 'downloading' ? t('settings.updateDownloading') : t('settings.updateNow')}
+          </Button>
+        </Flex>
+      ) : (
+        <Flex align="center" justify="space-between">
+          <Text fontSize="13px" color={tokens.colors.text.secondary}>
+            {t('settings.updateUpToDate')}
+          </Text>
+          <Box
+            as="button" display="flex" alignItems="center" gap="5px"
+            px={2.5} py="5px" borderRadius={tokens.radius.md}
+            fontSize="12px" fontWeight="500"
+            color={tokens.colors.text.secondary} bg={tokens.colors.bg.card}
+            border="1px solid" borderColor={tokens.colors.bg.cardBorder}
+            cursor={status === 'checking' ? 'default' : 'pointer'}
+            opacity={status === 'checking' ? 0.6 : 1}
+            transition={tokens.transition.fast}
+            _hover={{ borderColor: tokens.colors.border.default, color: tokens.colors.text.primary }}
+            onClick={status === 'checking' ? undefined : handleCheck}
+          >
+            <FiRefreshCw size={11} style={status === 'checking' ? { animation: 'spin 1s linear infinite' } : undefined} />
+            {status === 'checking' ? t('settings.updateChecking') : t('settings.updateCheck')}
+          </Box>
+        </Flex>
+      )}
+
+      {error && (
+        <Text fontSize="11px" color={tokens.colors.accent.red}>{error}</Text>
+      )}
+
+      <Box h="1px" bg={tokens.colors.border.subtle} />
     </VStack>
   )
 }
