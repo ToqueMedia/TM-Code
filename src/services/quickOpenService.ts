@@ -54,7 +54,7 @@ export default class QuickOpenService {
           const entry = entries[i]
           const n: string = entry.name || ''
           if (!n) continue
-          const p: string = `${current}/${n}`
+          const p: string = current.includes('\\') ? `${current}\\${n}` : `${current}/${n}`
           const lower = n.toLowerCase()
           if (n.startsWith('.')) {
             // skip hidden files/directories
@@ -86,7 +86,7 @@ export default class QuickOpenService {
   list(limit: number = 20): QuickOpenItem[] {
     return this.index.slice(0, limit).map(path => ({
       path,
-      name: path.split('/').pop() as string,
+      name: path.replace(/\\/g, '/').split('/').pop() as string,
       score: 0,
     }))
   }
@@ -97,7 +97,7 @@ export default class QuickOpenService {
     const results: QuickOpenItem[] = []
     for (let i = 0; i < this.index.length; i++) {
       const path = this.index[i]
-      const name = path.split('/').pop() as string
+      const name = path.replace(/\\/g, '/').split('/').pop() as string
       const ln = name.toLowerCase()
       const lp = path.toLowerCase()
       let score = 0

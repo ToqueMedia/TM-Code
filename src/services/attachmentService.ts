@@ -17,14 +17,14 @@ function getExtension(name: string): string {
 }
 
 function guessTypeFromExtension(path: string): AttachmentType {
-  const name = path.split('/').pop() || ''
+  const name = path.replace(/\\/g, '/').split('/').pop() || ''
   const ext = getExtension(name)
   if (IMAGE_EXTENSIONS.has(ext)) return 'image'
   return 'file'
 }
 
 export async function createAttachmentFromPath(path: string): Promise<Attachment> {
-  const name = path.split('/').pop() || path
+  const name = path.replace(/\\/g, '/').split('/').pop() || path
 
   // Check if path is a directory on disk via lightweight stat()
   let type: AttachmentType
@@ -102,7 +102,8 @@ export async function extractAndResolveMentions(text: string, projectPath: strin
   if (paths.size === 0) return ''
 
   const parts = await Promise.all(Array.from(paths).map(async (relativePath): Promise<string> => {
-    const fullPath = relativePath.startsWith('/') ? relativePath : `${projectPath}/${relativePath}`
+    const isAbsolute = relativePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(relativePath)
+    const fullPath = isAbsolute ? relativePath : `${projectPath}/${relativePath}`
     try {
       const content = await invoke<string>('read_file', { path: fullPath })
       const truncated = content.length > MAX_FILE_CHARS

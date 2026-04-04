@@ -12,7 +12,9 @@ class StaticPreviewBuilder {
 
   async buildPreview(htmlFilePath: string): Promise<string> {
     let html = await invoke<string>('read_file', { path: htmlFilePath })
-    const baseDir = htmlFilePath.substring(0, htmlFilePath.lastIndexOf('/'))
+    // Normalize separators for cross-platform path handling
+    const normalized = htmlFilePath.replace(/\\/g, '/')
+    const baseDir = normalized.substring(0, normalized.lastIndexOf('/'))
 
     // Inline <link rel="stylesheet" href="...">
     const linkRegex = /<link\s+[^>]*?href=["']([^"']+)["'][^>]*?>/gi
@@ -66,7 +68,7 @@ class StaticPreviewBuilder {
 
   findHtmlFile(filePaths: string[]): string | null {
     // Prioritize index.html
-    const indexHtml = filePaths.find(p => p.endsWith('/index.html'))
+    const indexHtml = filePaths.find(p => p.endsWith('/index.html') || p.endsWith('\\index.html'))
     if (indexHtml) return indexHtml
 
     // Fall back to any .html file
