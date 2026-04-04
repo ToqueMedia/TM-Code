@@ -7,6 +7,7 @@
 import { check } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { useToastStore } from '../stores/toastStore'
+import { t } from '../i18n'
 
 let checkedThisSession = false
 
@@ -48,6 +49,10 @@ export function getPendingUpdate(): UpdateInfo | null {
   return pendingUpdate
 }
 
+export function setPendingUpdate(update: UpdateInfo | null): void {
+  pendingUpdate = update
+}
+
 /** Auto-check on startup (once per session). Shows toast if update available. */
 export async function autoCheckForUpdate(): Promise<void> {
   if (checkedThisSession) return
@@ -65,7 +70,7 @@ export async function autoCheckForUpdate(): Promise<void> {
 
     useToastStore.getState().addToast(
       'info',
-      `TM Code ${update.version} is available. Go to Settings to update.`,
+      `TM Code ${update.version} ${t('settings.updateAvailable')}. ${t('settings.updateGoSettings')}`,
       15000
     )
   } catch (err) {

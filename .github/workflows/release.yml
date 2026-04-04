@@ -134,13 +134,13 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ needs.create-release.outputs.version }}"
+          ARGS="${{ matrix.args }}"
 
           # Find all release artifacts + signatures — search the entire target tree since
           # cross-compilation puts artifacts under target/<triple>/release/bundle/
           find src-tauri/target -type f \( \
             -name "*.dmg" -o -name "*.exe" -o -name "*.msi" -o \
             -name "*.deb" -o -name "*.AppImage" -o \
-            -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" -o \
             -name "*.nsis.zip" -o -name "*.nsis.zip.sig" -o \
             -name "*.AppImage.sig" -o -name "*.exe.sig" -o \
             -name "*.msi.sig" -o -name "*.deb.sig" \
@@ -148,6 +148,27 @@ jobs:
             echo "Uploading: $file"
             gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
           done
+
+          # macOS updater artifact (.app.tar.gz + .sig) — rename per-arch to avoid collision.
+          # Both ARM and Intel builds produce "TM.Code.app.tar.gz" — without renaming the
+          # second upload overwrites the first.
+          TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
+          TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
+          if [ -n "$TAR_GZ" ]; then
+            if echo "$ARGS" | grep -q "aarch64"; then
+              ARCH="aarch64"
+            elif echo "$ARGS" | grep -q "x86_64"; then
+              ARCH="x64"
+            else
+              ARCH="unknown"
+            fi
+            cp "$TAR_GZ" "TM.Code_${ARCH}.app.tar.gz"
+            gh release upload "$VERSION" "TM.Code_${ARCH}.app.tar.gz" --repo ToqueMedia/TM-Code --clobber
+            if [ -n "$TAR_SIG" ]; then
+              cp "$TAR_SIG" "TM.Code_${ARCH}.app.tar.gz.sig"
+              gh release upload "$VERSION" "TM.Code_${ARCH}.app.tar.gz.sig" --repo ToqueMedia/TM-Code --clobber
+            fi
+          fi
 
   generate-updater:
     # Runs AFTER all platform builds complete.
@@ -181,12 +202,10 @@ jobs:
             fi
           }
 
-          MAC_ARM_SIG=$(read_sig "TM.Code.app.tar.gz.sig")
-          # macOS x64 uses the same .app.tar.gz artifact (universal or Intel)
-          MAC_X64_SIG="$MAC_ARM_SIG"
+          MAC_ARM_SIG=$(read_sig "TM.Code_aarch64.app.tar.gz.sig")
+          MAC_X64_SIG=$(read_sig "TM.Code_x64.app.tar.gz.sig")
           LINUX_APPIMAGE_SIG=$(read_sig "TM.Code_${BARE_VERSION}_amd64.AppImage.sig")
           WIN_NSIS_SIG=$(read_sig "TM.Code_${BARE_VERSION}_x64-setup.exe.sig")
-          WIN_MSI_SIG=$(read_sig "TM.Code_${BARE_VERSION}_x64_en-US.msi.sig")
 
           cat > latest.json <<ENDJSON
 {
@@ -196,11 +215,11 @@ jobs:
   "platforms": {
     "darwin-aarch64": {
       "signature": "${MAC_ARM_SIG}",
-      "url": "${BASE_URL}/TM.Code.app.tar.gz"
+      "url": "${BASE_URL}/TM.Code_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
       "signature": "${MAC_X64_SIG}",
-      "url": "${BASE_URL}/TM.Code.app.tar.gz"
+      "url": "${BASE_URL}/TM.Code_x64.app.tar.gz"
     },
     "linux-x86_64": {
       "signature": "${LINUX_APPIMAGE_SIG}",

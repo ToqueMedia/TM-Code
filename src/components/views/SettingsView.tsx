@@ -25,7 +25,7 @@ import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
 import { invoke } from '@tauri-apps/api/core'
-import { getPendingUpdate, installUpdate, checkForUpdate, type UpdateInfo } from '../../services/updateService'
+import { getPendingUpdate, setPendingUpdate, installUpdate, checkForUpdate, type UpdateInfo } from '../../services/updateService'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
@@ -387,6 +387,8 @@ function UpdateSection() {
     try {
       const result = await checkForUpdate()
       setUpdate(result)
+      // Persist so the banner survives navigation away from Settings
+      setPendingUpdate(result)
       setStatus('idle')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
