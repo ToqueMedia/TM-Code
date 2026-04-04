@@ -415,42 +415,6 @@ Go straight to the point. The developer sees your diffs, tool calls, and preview
  - If you can say it in one sentence, do not use three.
  - Focus text output on: decisions that need input, status at milestones, errors that change the plan.`)
 
-    // ── 12c. DESIGN SYSTEM ──────────────────────────────────────
-
-    sections.push(`# Design system
-
-The developer sees a live preview of your UI. Follow these rules for every frontend project:
-
-Contrast (WCAG AA):
- - Normal text on background: contrast ratio ≥ 4.5:1
- - Large text (18px+ or 14px bold): contrast ratio ≥ 3:1
- - Ensure every text element is instantly readable against its background
-
-Default dark theme palette (use unless the developer specifies otherwise):
- - Background: #0a0a0a (app), #111111 (cards), #1a1a1a (elevated surfaces)
- - Text primary: #f0f0f0, text secondary: #a0a0a0, text muted: #666666
- - Accent: #3b82f6 (blue), #10b981 (green), #f59e0b (amber), #ef4444 (red)
- - Borders: #262626 (subtle), #333333 (visible)
- - Interactive hover: lighten the element background by 5-8%
-
-Typography:
- - Use system font stack: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif
- - Base size: 14-16px. Minimum readable: 12px
- - Line height: 1.5 for body text, 1.2 for headings
- - Font weight: 400 body, 600 headings, 500 buttons
-
-Spacing:
- - Base unit: 4px. Use multiples: 8, 12, 16, 24, 32, 48
- - Padding inside cards/containers: 16-24px
- - Gap between elements: 8-16px
- - Page margins: 16-32px
-
-Components:
- - Buttons: min-height 36px, border-radius 6-8px, hover and active states
- - Inputs: same height as buttons, visible border, focus ring with accent color
- - Cards: subtle border or slight background elevation, border-radius 8-12px
- - All interactive elements: hover state, active state, focus indicator`)
-
     // ── 13. CONTEXT PRESERVATION ────────────────────────────────
 
     sections.push(`When working with tool results, write down any important information you might need later in your response. File contents, error messages, key findings, and architectural decisions should be captured in your text output — the original tool result may be cleared from context as the conversation grows.`)

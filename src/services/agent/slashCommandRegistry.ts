@@ -1,7 +1,6 @@
 import { executeInit } from './commands/initCommand'
 import { executePlan } from './commands/planCommand'
 import { executePaymentsStub } from './commands/paymentsCommand'
-import { executeSystemPrompt } from './commands/systemPromptCommand'
 
 export interface SlashCommand {
   name: string
@@ -44,12 +43,6 @@ class SlashCommandRegistry {
       execute: executePaymentsStub,
     })
 
-    this.register({
-      name: '/system-prompt',
-      description: 'Show the current system prompt sent to the AI agent',
-      enabled: true,
-      execute: executeSystemPrompt,
-    })
   }
 
   register(command: SlashCommand): void {
