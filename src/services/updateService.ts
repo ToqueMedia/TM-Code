@@ -16,19 +16,14 @@ export interface UpdateInfo {
   date: string | null
 }
 
-/** Check for updates. Returns update info if available, null if up-to-date. */
+/** Check for updates. Returns update info if available, null if up-to-date. Throws on error. */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
-  try {
-    const update = await check()
-    if (!update) return null
-    return {
-      version: update.version,
-      body: update.body ?? null,
-      date: update.date ?? null,
-    }
-  } catch (err) {
-    console.warn('[updater] Check failed:', err)
-    return null
+  const update = await check()
+  if (!update) return null
+  return {
+    version: update.version,
+    body: update.body ?? null,
+    date: update.date ?? null,
   }
 }
 
@@ -61,15 +56,19 @@ export async function autoCheckForUpdate(): Promise<void> {
   // Delay check to not slow down startup
   await new Promise(r => setTimeout(r, 5000))
 
-  const update = await checkForUpdate()
-  if (!update) return
+  try {
+    const update = await checkForUpdate()
+    if (!update) return
 
-  // Store pending update so UI can show an update banner/button
-  pendingUpdate = update
+    // Store pending update so UI can show an update banner/button
+    pendingUpdate = update
 
-  useToastStore.getState().addToast(
-    'info',
-    `TM Code ${update.version} is available. Go to Settings to update.`,
-    15000
-  )
+    useToastStore.getState().addToast(
+      'info',
+      `TM Code ${update.version} is available. Go to Settings to update.`,
+      15000
+    )
+  } catch (err) {
+    console.warn('[updater] Auto-check failed:', err)
+  }
 }

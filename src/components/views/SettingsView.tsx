@@ -437,7 +437,7 @@ function UpdateSection() {
             px={4}
             _hover={{ bg: tokens.colors.accent.primaryDark }}
             disabled={status === 'downloading'}
-            onClick={handleInstall}
+            onClick={status === 'downloading' ? undefined : handleInstall}
           >
             {status === 'downloading' ? t('settings.updateDownloading') : t('settings.updateNow')}
           </Button>
@@ -445,7 +445,7 @@ function UpdateSection() {
       ) : (
         <Flex align="center" justify="space-between">
           <Text fontSize="13px" color={tokens.colors.text.secondary}>
-            {t('settings.updateUpToDate')}
+            {status === 'error' ? t('settings.updateCheckFailed') : t('settings.updateUpToDate')}
           </Text>
           <Box
             as="button" display="flex" alignItems="center" gap="5px"
@@ -459,7 +459,15 @@ function UpdateSection() {
             _hover={{ borderColor: tokens.colors.border.default, color: tokens.colors.text.primary }}
             onClick={status === 'checking' ? undefined : handleCheck}
           >
-            <FiRefreshCw size={11} style={status === 'checking' ? { animation: 'spin 1s linear infinite' } : undefined} />
+            <Box
+              display="inline-flex"
+              css={status === 'checking' ? {
+                animation: 'spin 1s linear infinite',
+                '@keyframes spin': { to: { transform: 'rotate(360deg)' } },
+              } : undefined}
+            >
+              <FiRefreshCw size={11} />
+            </Box>
             {status === 'checking' ? t('settings.updateChecking') : t('settings.updateCheck')}
           </Box>
         </Flex>
