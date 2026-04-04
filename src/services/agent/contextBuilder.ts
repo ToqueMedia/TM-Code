@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { TemplateManifest } from '../templateService'
 import { detectSystemPackageManager } from '../packageManagerDetector'
+import { IS_MAC, IS_WINDOWS } from '@/utils/platform'
 import SkillService from './skillService'
 
 interface MCPToolSummary {
@@ -268,10 +269,15 @@ Install command: ${templateManifest.installCommand}
 Build on the existing structure. Use the framework's entry points and conventions.`)
     }
 
+    // Normalize project path to forward slashes for the LLM — ensures the agent
+    // always uses '/' in tool calls, which toolExecutor.normalizePath() handles correctly.
+    const normalizedProjectPath = projectPath.replace(/\\/g, '/')
+    const osName = IS_WINDOWS ? 'Windows' : IS_MAC ? 'macOS' : 'Linux'
+
     const envLines = [
-      `project_path: ${projectPath}`,
+      `project_path: ${normalizedProjectPath}`,
       `project_type: ${projectType}`,
-      `os: macOS (Tauri 2)`,
+      `os: ${osName} (Tauri 2)`,
       `package_manager: ${pmDetected}`,
     ]
     if (pkgSummary) {
@@ -360,7 +366,7 @@ This file is your persistent memory across sessions. Keep it updated as you work
     sections.push(`# Constraints
 
 Files:
- - All paths absolute, starting with "${projectPath}". Operations outside this directory are blocked.
+ - All paths absolute, starting with "${normalizedProjectPath}". Operations outside this directory are blocked.
  - Read files before modifying them. For new files, write directly.
  - create_file is for new files only. Use write_file to overwrite existing files.
 
@@ -480,7 +486,8 @@ Components:
 
     sections.push(`# Role\nSenior software engineer. Autonomous coding agent in TM Code IDE. ${langInstruction}`)
 
-    const envLines = [`project_path: ${projectPath}`, `package_manager: ${pmDetected}`]
+    const normalizedProjectPath = projectPath.replace(/\\/g, '/')
+    const envLines = [`project_path: ${normalizedProjectPath}`, `package_manager: ${pmDetected}`]
     if (pkgSummary) {
       if (pkgSummary.scripts.length) envLines.push(`scripts: ${pkgSummary.scripts.join(', ')}`)
       if (pkgSummary.dependencies.length) envLines.push(`deps: ${pkgSummary.dependencies.join(', ')}`)
@@ -498,7 +505,7 @@ Components:
  - The system mechanically blocks: writes to unread files, imports of uninstalled packages, completion with dev server errors, completion without verification when 3+ files changed.`)
 
     sections.push(`# Constraints
- - All paths absolute under "${projectPath}". write_file replaces entire file. No placeholders.
+ - All paths absolute under "${normalizedProjectPath}". write_file replaces entire file. No placeholders.
  - You must read_file before write_file or edit_file. The system blocks writes to unread files.
  - Frontend port 7773, backend port 7777. Backend binds 0.0.0.0.
  - .env files blocked. Use ${pmDetected} for packages.

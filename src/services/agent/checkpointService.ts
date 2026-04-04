@@ -415,7 +415,7 @@ class CheckpointService {
 
   /** Returns parent/filename for disambiguation (e.g. "components/index.ts"). */
   private shortPath(filePath: string): string {
-    const parts = filePath.split('/')
+    const parts = filePath.replace(/\\/g, '/').split('/')
     return parts.length >= 2 ? parts.slice(-2).join('/') : parts[0] || filePath
   }
 

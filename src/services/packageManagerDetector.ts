@@ -42,7 +42,7 @@ export async function detectSystemPackageManager(): Promise<PackageManager> {
           timedOut: boolean
         }>('execute_command', {
           command: `${pm} --version`,
-          cwd: '/tmp',
+          cwd: navigator.platform?.startsWith('Win') ? 'C:\\' : '/tmp',
           timeoutSecs: 5,
         })
 

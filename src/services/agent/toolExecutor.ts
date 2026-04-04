@@ -385,8 +385,17 @@ class ToolExecutor {
   }
 
   private normalizePath(p: string): string {
+    // Normalize separators: convert all backslashes to forward slashes (cross-platform).
+    // This allows consistent comparison on Windows where paths may use \ or mixed separators.
+    const unified = p.replace(/\\/g, '/')
+
+    // Detect Windows drive letter (e.g., "C:/Users/...")
+    const driveMatch = unified.match(/^([A-Za-z]):\//)
+    const prefix = driveMatch ? driveMatch[1].toUpperCase() + ':/' : '/'
+    const pathAfterPrefix = driveMatch ? unified.slice(3) : unified
+
     // Resolve '..' and '.' segments
-    const parts = p.split('/')
+    const parts = pathAfterPrefix.split('/')
     const resolved: string[] = []
     for (const part of parts) {
       if (part === '..') {
@@ -395,7 +404,7 @@ class ToolExecutor {
         resolved.push(part)
       }
     }
-    return '/' + resolved.join('/')
+    return prefix + resolved.join('/')
   }
 
   /**
@@ -406,7 +415,7 @@ class ToolExecutor {
   private async suggestSimilarPath(requestedPath: string): Promise<string | null> {
     try {
       const projectRoot = this.getProjectRoot()
-      const basename = requestedPath.split('/').pop() || ''
+      const basename = requestedPath.replace(/\\/g, '/').split('/').pop() || ''
       if (!basename) return null
 
       // Timeout: abort suggestion if glob takes too long (large projects)
@@ -457,14 +466,14 @@ class ToolExecutor {
 
   private isEnvFile(filePath: string): boolean {
     if (!filePath) return false
-    const filename = filePath.split('/').pop() || ''
+    const filename = filePath.replace(/\\/g, '/').split('/').pop() || ''
     // Block all .env files EXCEPT exactly ".env.example"
     if (!filename.startsWith('.env')) return false
     return filename !== '.env.example'
   }
 
   private isSensitiveFile(filePath: string): boolean {
-    const filename = filePath.split('/').pop() || ''
+    const filename = filePath.replace(/\\/g, '/').split('/').pop() || ''
     return ToolExecutor.SENSITIVE_FILE_PATTERNS.some(p => p.test(filename))
   }
 
@@ -1566,7 +1575,7 @@ Project root: ${projectRoot}`
             updateProgress(`Using ${toolName}...`)
           },
           onToolCallStart: (_toolId, toolName, args) => {
-            const target = (args.path as string)?.split('/').pop()
+            const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.query as string)
               || (args.pattern as string)
               || ''
@@ -1678,7 +1687,7 @@ Project root: ${projectRoot}`
             bgStore.updateProgress(agentId, `Using ${toolName}...`, calls, tokens)
           },
           onToolCallStart: (_id, toolName, args) => {
-            const target = (args.path as string)?.split('/').pop()
+            const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.query as string)
               || (args.pattern as string)
               || ''
@@ -1939,7 +1948,7 @@ Verify this implementation. Run tests, type checks, and any other relevant valid
             updateProgress(`${toolName}...`)
           },
           onToolCallStart: (_toolId, toolName, args) => {
-            const target = (args.path as string)?.split('/').pop()
+            const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.command as string)?.slice(0, 40)
               || (args.query as string)
               || ''
