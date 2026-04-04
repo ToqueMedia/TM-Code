@@ -33,9 +33,7 @@ async function fetchAllSkills(): Promise<string> {
   const parts: string[] = []
   for (const result of results) {
     if (result) {
-      // Sanitize: escape XML-like tags to prevent prompt injection from remote content
-      const sanitized = result.content.replace(/</g, '＜').replace(/>/g, '＞')
-      parts.push(`<skill name="${result.label}">\n${sanitized}\n</skill>`)
+      parts.push(`<skill name="${result.label}">\n${result.content}\n</skill>`)
     }
   }
 
