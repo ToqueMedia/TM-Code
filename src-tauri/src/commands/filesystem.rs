@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+use super::normalize_path_for_frontend;
+
 /// Validates that a template ID contains only safe characters (alphanumeric, hyphens).
 /// Prevents path traversal via crafted IDs like "../../../etc".
 fn validate_template_id(id: &str) -> Result<(), String> {
@@ -152,11 +154,10 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
                     }
                 }
 
-                let path_str = path.to_string_lossy().to_string();
-                // Check both Unix (/) and Windows (\) separators for path filtering
+                let path_str = normalize_path_for_frontend(&path);
+                // Check excluded directories (always uses / after normalization)
                 let has_excluded = |segment: &str| {
                     path_str.contains(&format!("/{}/", segment))
-                        || path_str.contains(&format!("\\{}\\", segment))
                 };
                 if !has_excluded("node_modules")
                     && !has_excluded(".git")
@@ -223,7 +224,7 @@ pub async fn list_skills_bundled(app: tauri::AppHandle) -> Result<Vec<SkillEntry
                 let name = entry.file_name().to_string_lossy().to_string();
                 entries.push(SkillEntry {
                     name,
-                    path: path.to_string_lossy().to_string(),
+                    path: normalize_path_for_frontend(&path),
                 });
             }
         }

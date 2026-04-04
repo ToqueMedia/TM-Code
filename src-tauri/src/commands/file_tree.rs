@@ -5,6 +5,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::normalize_path_for_frontend;
+
 // File tree node types
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -255,7 +257,7 @@ fn build_tree_node(
 
         return Ok(FileTreeNode::File {
             name,
-            path: path.to_string_lossy().to_string(),
+            path: normalize_path_for_frontend(path),
             extension,
             metadata: create_file_metadata(metadata, path),
         });
@@ -274,7 +276,7 @@ fn build_tree_node(
             if depth >= max_depth {
                 return Ok(FileTreeNode::Directory {
                     name,
-                    path: path.to_string_lossy().to_string(),
+                    path: normalize_path_for_frontend(path),
                     children: vec![],
                     expanded: false,
                     metadata: create_file_metadata(metadata, path),
@@ -345,7 +347,7 @@ fn build_tree_node(
 
     Ok(FileTreeNode::Directory {
         name,
-        path: path.to_string_lossy().to_string(),
+        path: normalize_path_for_frontend(path),
         children,
         expanded: false,
         metadata: create_file_metadata(metadata, path),
@@ -381,13 +383,13 @@ pub fn create_file_or_directory(
         std::fs::create_dir(&full_path).map(|_| FileOperationResult {
             success: true,
             message: "Directory created successfully".to_string(),
-            path: full_path.to_string_lossy().to_string(),
+            path: normalize_path_for_frontend(&full_path),
         })
     } else {
         std::fs::File::create(&full_path).map(|_| FileOperationResult {
             success: true,
             message: "File created successfully".to_string(),
-            path: full_path.to_string_lossy().to_string(),
+            path: normalize_path_for_frontend(&full_path),
         })
     };
 
@@ -455,7 +457,7 @@ pub fn rename_file_or_directory(old_path: String, new_name: String) -> Result<Fi
         .map(|_| FileOperationResult {
             success: true,
             message: "Renamed successfully".to_string(),
-            path: new_path.to_string_lossy().to_string(),
+            path: normalize_path_for_frontend(&new_path),
         })
         .map_err(FileTreeError::from)
 }
@@ -620,7 +622,7 @@ pub fn create_directories_all(path: String) -> Result<FileOperationResult> {
         .map(|_| FileOperationResult {
             success: true,
             message: "Directories created successfully".to_string(),
-            path: p.to_string_lossy().to_string(),
+            path: normalize_path_for_frontend(p),
         })
         .map_err(FileTreeError::from)
 }

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use super::normalize_str_for_frontend;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchOptions {
     pub case_sensitive: bool,
@@ -272,7 +274,7 @@ pub async fn search_in_files(
                 files.push(file);
             }
             current_file = Some(FileSearchResult {
-                file_path: path.to_string(),
+                file_path: normalize_str_for_frontend(&path),
                 matches: vec![],
                 total_matches: 0,
             });
