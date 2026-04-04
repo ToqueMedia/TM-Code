@@ -18,7 +18,7 @@ use commands::terminal::*;
 use tauri::image::Image;
 use tauri::webview::NewWindowResponse;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
 
 // ── Preview webview (separate window approach — reliable on all platforms) ────
@@ -156,7 +156,10 @@ fn open_preview_webview(
                 };
             })();
         "#)
-        // IPC handler: receives console messages from the preview JS and emits Tauri events
+        // IPC handler: receives console messages from the preview JS.
+        // Forwards to the main window via eval() — dispatches a CustomEvent
+        // that the App.tsx listener picks up. We use eval instead of emit()
+        // because the wry IPC closure doesn't have access to Tauri's Emitter trait.
         .with_ipc_handler(move |request| {
             let body = request.body();
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) {
@@ -164,10 +167,19 @@ fn open_preview_webview(
                     let level = msg.get("level").and_then(|l| l.as_str()).unwrap_or("error");
                     let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("");
                     if !text.is_empty() {
-                        let _ = app_for_ipc.emit("preview-console", serde_json::json!({
-                            "level": level,
-                            "text": text
-                        }));
+                        // Escape for JS string literal (backslash, quotes, newlines)
+                        let safe_text = text
+                            .replace('\\', "\\\\")
+                            .replace('\'', "\\'")
+                            .replace('\n', "\\n")
+                            .replace('\r', "");
+                        let safe_level = level.replace('\'', "\\'");
+                        if let Some(win) = app_for_ipc.get_webview_window("main") {
+                            let _ = win.eval(&format!(
+                                "window.dispatchEvent(new CustomEvent('preview-console',{{detail:{{level:'{}',text:'{}'}}}}));",
+                                safe_level, safe_text
+                            ));
+                        }
                     }
                 }
             }

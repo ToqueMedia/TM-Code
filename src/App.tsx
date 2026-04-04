@@ -18,7 +18,6 @@ import MCPService from './services/mcp/mcpService';
 import ToolExecutor from './services/agent/toolExecutor';
 import AgentService from './services/agent/agentService';
 import { autoCheckForUpdate } from './services/updateService';
-import { listen } from '@tauri-apps/api/event';
 import { useLayoutStore } from './stores/layoutStore';
 import { logger } from './utils/logger';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -122,19 +121,20 @@ function App() {
 	}, [isAuthenticated]);
 
 	// Listen for runtime errors from the preview WebView (console.error, uncaught exceptions).
-	// App-level listener — active regardless of dev server state (covers static previews too).
+	// The preview IPC handler dispatches a CustomEvent on window (via eval) because
+	// wry's IPC closure doesn't have access to Tauri's Emitter trait.
 	useEffect(() => {
-		let unlisten: (() => void) | null = null;
-		listen<{ level: string; text: string }>('preview-console', (event) => {
-			const { level, text } = event.payload;
+		function handlePreviewConsole(e: Event) {
+			const { level, text } = (e as CustomEvent<{ level: string; text: string }>).detail;
 			if (text) {
 				useLayoutStore.getState().addDevServerLog(
 					`[runtime] ${text}`,
 					level === 'warn' ? 'warn' : 'error',
 				);
 			}
-		}).then(fn => { unlisten = fn; });
-		return () => { unlisten?.(); };
+		}
+		window.addEventListener('preview-console', handlePreviewConsole);
+		return () => window.removeEventListener('preview-console', handlePreviewConsole);
 	}, []);
 
 	// Initialize MCP servers once at app startup (global — persists across project switches)
