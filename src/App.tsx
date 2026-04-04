@@ -18,6 +18,8 @@ import MCPService from './services/mcp/mcpService';
 import ToolExecutor from './services/agent/toolExecutor';
 import AgentService from './services/agent/agentService';
 import { autoCheckForUpdate } from './services/updateService';
+import { listen } from '@tauri-apps/api/event';
+import { useLayoutStore } from './stores/layoutStore';
 import { logger } from './utils/logger';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNativeMenu } from './hooks/useNativeMenu';
@@ -118,6 +120,22 @@ function App() {
 		if (!isAuthenticated) return;
 		autoCheckForUpdate();
 	}, [isAuthenticated]);
+
+	// Listen for runtime errors from the preview WebView (console.error, uncaught exceptions).
+	// App-level listener — active regardless of dev server state (covers static previews too).
+	useEffect(() => {
+		let unlisten: (() => void) | null = null;
+		listen<{ level: string; text: string }>('preview-console', (event) => {
+			const { level, text } = event.payload;
+			if (text) {
+				useLayoutStore.getState().addDevServerLog(
+					`[runtime] ${text}`,
+					level === 'warn' ? 'warn' : 'error',
+				);
+			}
+		}).then(fn => { unlisten = fn; });
+		return () => { unlisten?.(); };
+	}, []);
 
 	// Initialize MCP servers once at app startup (global — persists across project switches)
 	useEffect(() => {

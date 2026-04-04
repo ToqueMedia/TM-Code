@@ -40,7 +40,6 @@ class DevServerManager {
   private currentServer: DevServerState | null = null
   private unlistenOutput: UnlistenFn | null = null
   private unlistenExit: UnlistenFn | null = null
-  private unlistenPreviewConsole: UnlistenFn | null = null
   /** Incremented on each start() — lets us detect stale invoke returns. */
   private generation = 0
   /** Incremented on each waitForServerReady call — cancels previous polling if URL changes. */
@@ -145,19 +144,6 @@ class DevServerManager {
     this.unlistenExit = await listen<number>(
       'dev-server-exit',
       (event) => this.handleExit(event.payload),
-    )
-
-    // Listen for runtime errors from the preview WebView (console.error, uncaught exceptions).
-    // These arrive via the initialization script injected into the preview WebView.
-    this.unlistenPreviewConsole = await listen<{ level: string; text: string }>(
-      'preview-console',
-      (event) => {
-        const { level, text } = event.payload
-        if (text) {
-          const logLevel = level === 'warn' ? 'warn' : 'error'
-          useLayoutStore.getState().addDevServerLog(`[runtime] ${text}`, logLevel)
-        }
-      },
     )
 
     try {
@@ -431,8 +417,6 @@ class DevServerManager {
     this.unlistenOutput = null
     this.unlistenExit?.()
     this.unlistenExit = null
-    this.unlistenPreviewConsole?.()
-    this.unlistenPreviewConsole = null
     this.unsubPreviewDefer?.()
     this.unsubPreviewDefer = null
   }

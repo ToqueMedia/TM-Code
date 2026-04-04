@@ -611,9 +611,11 @@ class AgentService {
             r && !r.isError && ['write_file', 'edit_file', 'create_file'].includes(r.toolCall.name)
           )
           if (hasFileChanges && devServerManager.isActive()) {
-            // Brief delay for hot-reload/rebuild to process the file changes.
-            // 800ms catches most HMR errors without excessive wait.
-            await new Promise(r => setTimeout(r, 800))
+            // Wait for hot-reload + component mount + runtime execution.
+            // 800ms was too short — runtime errors (e.g., bad API call in useEffect)
+            // only appear after React mounts the component (~500-1000ms after HMR).
+            // 1500ms catches both build errors AND runtime errors reliably.
+            await new Promise(r => setTimeout(r, 1500))
             if (!this.abortController?.signal.aborted) {
               const devErrors = await this.getRecentDevServerErrors()
               if (devErrors) {

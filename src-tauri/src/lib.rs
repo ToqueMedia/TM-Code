@@ -80,38 +80,65 @@ fn open_preview_webview(
         // Inject error capture script into every page load.
         // Captures: uncaught errors, unhandled promise rejections, and console.error.
         // Forwards them to Rust via window.ipc.postMessage for the agent to see.
+        //
+        // Design decisions:
+        // - console.warn NOT captured (too noisy — React/Next.js emit hundreds of deprecation warnings)
+        // - Deduplication: window.onerror sets a flag so the subsequent console.error for the
+        //   same error is suppressed (the browser fires both for uncaught exceptions)
+        // - Throttle: max 1 message per 300ms to prevent IPC flood during error cascades
+        // - Circular objects: uses toString() fallback instead of JSON.stringify
         .with_initialization_script(r#"
             (function() {
+                var _lastSent = 0;
+                var _lastMsg = '';
+                var _onerrorFired = false;
+
                 var _send = function(level, msg) {
+                    var now = Date.now();
+                    // Deduplicate identical consecutive messages and throttle (300ms)
+                    if (msg === _lastMsg && now - _lastSent < 2000) return;
+                    if (now - _lastSent < 300) return;
+                    _lastSent = now;
+                    _lastMsg = msg;
                     try {
                         window.ipc.postMessage(JSON.stringify({ type: 'console', level: level, text: msg }));
                     } catch(_) {}
                 };
+
+                var _stringify = function(arg) {
+                    if (arg === null) return 'null';
+                    if (arg === undefined) return 'undefined';
+                    if (arg instanceof Error) return arg.stack || arg.toString();
+                    if (typeof arg === 'object') {
+                        try { return JSON.stringify(arg); }
+                        catch(_) { return Object.prototype.toString.call(arg); }
+                    }
+                    return String(arg);
+                };
+
                 window.addEventListener('error', function(e) {
-                    _send('error', 'Uncaught ' + (e.error ? (e.error.stack || e.error.toString()) : e.message) + ' (' + (e.filename || '').split('/').pop() + ':' + e.lineno + ')');
+                    _onerrorFired = true;
+                    setTimeout(function() { _onerrorFired = false; }, 50);
+                    var msg = e.error ? (e.error.stack || e.error.toString()) : e.message;
+                    var loc = (e.filename || '').split('/').pop() + ':' + e.lineno;
+                    _send('error', msg + ' (' + loc + ')');
                 });
+
                 window.addEventListener('unhandledrejection', function(e) {
-                    _send('error', 'Unhandled Promise rejection: ' + (e.reason && e.reason.stack ? e.reason.stack : String(e.reason)));
+                    var reason = e.reason;
+                    _send('error', 'Unhandled Promise rejection: ' + (reason && reason.stack ? reason.stack : String(reason)));
                 });
+
                 var _origError = console.error;
                 console.error = function() {
                     _origError.apply(console, arguments);
+                    // Skip if this console.error is the browser echoing a window.onerror
+                    if (_onerrorFired) return;
                     var parts = [];
                     for (var i = 0; i < arguments.length; i++) {
-                        try { parts.push(typeof arguments[i] === 'object' ? JSON.stringify(arguments[i]) : String(arguments[i])); }
-                        catch(_) { parts.push('[object]'); }
+                        parts.push(_stringify(arguments[i]));
                     }
                     _send('error', parts.join(' '));
-                };
-                var _origWarn = console.warn;
-                console.warn = function() {
-                    _origWarn.apply(console, arguments);
-                    var parts = [];
-                    for (var i = 0; i < arguments.length; i++) {
-                        try { parts.push(typeof arguments[i] === 'object' ? JSON.stringify(arguments[i]) : String(arguments[i])); }
-                        catch(_) { parts.push('[object]'); }
-                    }
-                    _send('warn', parts.join(' '));
                 };
             })();
         "#)
