@@ -1,6 +1,6 @@
 import { executeInit } from './commands/initCommand'
 import { executePlan } from './commands/planCommand'
-import { executePaymentsStub } from './commands/paymentsCommand'
+import { executePayments } from './commands/paymentsCommand'
 
 export interface SlashCommand {
   name: string
@@ -38,9 +38,9 @@ class SlashCommandRegistry {
 
     this.register({
       name: '/payments',
-      description: 'Load MoMenu payment skills (Multicaixa, E-kwanza, Referencia)',
-      enabled: false,
-      execute: executePaymentsStub,
+      description: 'Integrate MoMenu Payments — fetches API skills and implements (MCX, E-kwanza, Referencia)',
+      enabled: true,
+      execute: executePayments,
     })
 
   }
