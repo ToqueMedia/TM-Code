@@ -153,10 +153,15 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
                 }
 
                 let path_str = path.to_string_lossy().to_string();
-                if !path_str.contains("/node_modules/")
-                    && !path_str.contains("/.git/")
-                    && !path_str.contains("/dist/")
-                    && !path_str.contains("/build/")
+                // Check both Unix (/) and Windows (\) separators for path filtering
+                let has_excluded = |segment: &str| {
+                    path_str.contains(&format!("/{}/", segment))
+                        || path_str.contains(&format!("\\{}\\", segment))
+                };
+                if !has_excluded("node_modules")
+                    && !has_excluded(".git")
+                    && !has_excluded("dist")
+                    && !has_excluded("build")
                 {
                     results.push(path_str);
                 }

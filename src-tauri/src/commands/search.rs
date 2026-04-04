@@ -319,8 +319,12 @@ pub async fn search_in_files(
     // near the top when searching for "index".
     let query_lower = query.to_lowercase();
     files.sort_by(|a, b| {
-        let a_name = a.file_path.rsplit('/').next().unwrap_or(&a.file_path).to_lowercase();
-        let b_name = b.file_path.rsplit('/').next().unwrap_or(&b.file_path).to_lowercase();
+        let a_name = std::path::Path::new(&a.file_path).file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| a.file_path.to_lowercase());
+        let b_name = std::path::Path::new(&b.file_path).file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| b.file_path.to_lowercase());
         let a_in_name = a_name.contains(&query_lower);
         let b_in_name = b_name.contains(&query_lower);
         match (a_in_name, b_in_name) {

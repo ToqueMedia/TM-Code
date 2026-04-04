@@ -34,7 +34,7 @@ class SessionService {
   private async getBasePath(): Promise<string> {
     if (this.basePath) return this.basePath
     const home = await invoke<string>('get_home_directory')
-    const normalized = home.endsWith('/') ? home.slice(0, -1) : home
+    const normalized = home.endsWith('/') || home.endsWith('\\') ? home.slice(0, -1) : home
     this.basePath = `${normalized}/${BASE_DIR_NAME}`
     return this.basePath
   }

@@ -55,6 +55,12 @@ pub fn init_user_path() {
 
 pub fn get_user_path() -> Option<&'static str> {
     USER_PATH.get_or_init(|| {
+        // On Windows, the system PATH is already correct — no shell extraction needed.
+        if cfg!(target_os = "windows") {
+            eprintln!("[PATH] Windows detected — using inherited PATH");
+            return None;
+        }
+
         let user_shell = std::env::var("SHELL").unwrap_or_default();
         eprintln!("[PATH] Extracting user PATH... SHELL={:?}", user_shell);
 
@@ -1389,7 +1395,8 @@ pub async fn get_completions(
     // Host mode: resolve path-aware completion
     // The partial may be a bare name ("src") or a path ("src/comp")
     let partial_path = PathBuf::from(&partial);
-    let (search_dir, prefix) = if partial.contains('/') {
+    let has_path_sep = partial.contains('/') || partial.contains('\\');
+    let (search_dir, prefix) = if has_path_sep {
         // Path completion: "src/comp" → search in "src/", filter by "comp"
         let parent = partial_path.parent().unwrap_or(std::path::Path::new(""));
         let file_prefix = partial_path.file_name()
@@ -1418,21 +1425,22 @@ pub async fn get_completions(
                 }
                 if name.starts_with(&prefix) {
                     // Add trailing / for directories
+                    let sep = if cfg!(target_os = "windows") { "\\" } else { "/" };
                     let display = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        if partial.contains('/') {
+                        if has_path_sep {
                             // Reconstruct relative path: "src/" + "components/"
                             let parent_str = partial_path.parent()
                                 .and_then(|p| p.to_str())
                                 .unwrap_or("");
-                            format!("{}/{}/", parent_str, name)
+                            format!("{}{}{}{}", parent_str, sep, name, sep)
                         } else {
-                            format!("{}/", name)
+                            format!("{}{}", name, sep)
                         }
-                    } else if partial.contains('/') {
+                    } else if has_path_sep {
                         let parent_str = partial_path.parent()
                             .and_then(|p| p.to_str())
                             .unwrap_or("");
-                        format!("{}/{}", parent_str, name)
+                        format!("{}{}{}", parent_str, sep, name)
                     } else {
                         name.to_string()
                     };
@@ -1443,7 +1451,7 @@ pub async fn get_completions(
     }
 
     // If no file matches and partial looks like a command (first word), try command completion
-    if completions.is_empty() && !partial.contains('/') {
+    if completions.is_empty() && !partial.contains('/') && !partial.contains('\\') {
         // Shell-escape partial to prevent command injection
         let safe_partial = partial.replace('\'', "'\\''");
         if let Ok(output) = Command::new("bash")

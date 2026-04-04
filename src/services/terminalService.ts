@@ -27,7 +27,7 @@ export default class TerminalService {
         try {
           workingDir = await invoke('get_current_directory') as string;
         } catch {
-          workingDir = '/'; // Fallback
+          workingDir = navigator.platform?.startsWith('Win') ? 'C:\\' : '/';
         }
       }
 
@@ -52,7 +52,7 @@ export default class TerminalService {
         try {
           workingDir = await invoke('get_current_directory') as string;
         } catch {
-          workingDir = '/'; // Fallback
+          workingDir = navigator.platform?.startsWith('Win') ? 'C:\\' : '/';
         }
       }
       
@@ -99,7 +99,7 @@ export default class TerminalService {
       return cwd as string;
     } catch (error) {
       logger.error('terminal', 'Failed to get current directory:', error);
-      return '/'; // Fallback for Unix-like systems
+      return navigator.platform?.startsWith('Win') ? 'C:\\' : '/';
     }
   }
 
@@ -144,7 +144,7 @@ export default class TerminalService {
         try {
           workingDir = await invoke('get_current_directory') as string;
         } catch {
-          workingDir = '/'; // Fallback
+          workingDir = navigator.platform?.startsWith('Win') ? 'C:\\' : '/';
         }
       }
       
