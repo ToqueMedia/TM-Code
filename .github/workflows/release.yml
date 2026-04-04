@@ -135,7 +135,8 @@ jobs:
         run: |
           VERSION="${{ needs.create-release.outputs.version }}"
 
-          # Find all release artifacts (dmg, exe, deb, AppImage, msi, sig, json)
+          # Find all release artifacts — search the entire target tree since
+          # cross-compilation puts artifacts under target/<triple>/release/bundle/
           find src-tauri/target -type f \( \
             -name "*.dmg" -o -name "*.exe" -o -name "*.msi" -o \
             -name "*.deb" -o -name "*.AppImage" -o \
@@ -146,13 +147,78 @@ jobs:
             gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
           done
 
-          # Upload latest.json if generated
-          if [ -f src-tauri/target/release/bundle/latest.json ]; then
-            gh release upload "$VERSION" src-tauri/target/release/bundle/latest.json --repo ToqueMedia/TM-Code --clobber
-          fi
+  generate-updater:
+    # Runs AFTER all platform builds complete.
+    # Builds the latest.json updater manifest from the release assets,
+    # so all platforms are included in one file.
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate latest.json from release assets
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          REPO="ToqueMedia/TM-Code"
+          BARE_VERSION="${VERSION#v}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Read .sig files from the release assets
+          # Download all .sig files to get signatures
+          mkdir -p sigs
+          gh release download "$VERSION" --repo "$REPO" --pattern "*.sig" --dir sigs 2>/dev/null || true
+
+          # Read signatures (empty string if file doesn't exist)
+          read_sig() {
+            local file="sigs/$1"
+            if [ -f "$file" ]; then
+              cat "$file"
+            else
+              echo ""
+            fi
+          }
+
+          MAC_ARM_SIG=$(read_sig "TM.Code.app.tar.gz.sig")
+          # macOS x64 uses the same .app.tar.gz artifact (universal or Intel)
+          MAC_X64_SIG="$MAC_ARM_SIG"
+          LINUX_APPIMAGE_SIG=$(read_sig "TM.Code_${BARE_VERSION}_amd64.AppImage.sig")
+          WIN_NSIS_SIG=$(read_sig "TM.Code_${BARE_VERSION}_x64-setup.exe.sig")
+          WIN_MSI_SIG=$(read_sig "TM.Code_${BARE_VERSION}_x64_en-US.msi.sig")
+
+          cat > latest.json << ENDJSON
+          {
+            "version": "${BARE_VERSION}",
+            "notes": "TM Code ${VERSION}",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "${MAC_ARM_SIG}",
+                "url": "${BASE_URL}/TM.Code.app.tar.gz"
+              },
+              "darwin-x86_64": {
+                "signature": "${MAC_X64_SIG}",
+                "url": "${BASE_URL}/TM.Code.app.tar.gz"
+              },
+              "linux-x86_64": {
+                "signature": "${LINUX_APPIMAGE_SIG}",
+                "url": "${BASE_URL}/TM.Code_${BARE_VERSION}_amd64.AppImage"
+              },
+              "windows-x86_64": {
+                "signature": "${WIN_NSIS_SIG}",
+                "url": "${BASE_URL}/TM.Code_${BARE_VERSION}_x64-setup.exe"
+              }
+            }
+          }
+          ENDJSON
+
+          echo "Generated latest.json:"
+          cat latest.json
+
+          gh release upload "$VERSION" latest.json --repo "$REPO" --clobber
 
   publish-release:
-    needs: [create-release, build]
+    needs: [create-release, build, generate-updater]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release (remove draft)
