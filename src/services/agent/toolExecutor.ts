@@ -491,8 +491,10 @@ class ToolExecutor {
     if (flaggedCommands.length === 0) return false
     const cmdLower = command.toLowerCase()
     return flaggedCommands.some(flagged => {
-      // Match the command name at word boundary (not substring of another command)
-      const pattern = new RegExp(`(?:^|[;&|\\s])${flagged.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$|;|&|\\|)`, 'i')
+      // Match the command name at word boundary.
+      // Delimiters: whitespace, ;, &, |, (, ), `, $, start, end
+      const escaped = flagged.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const pattern = new RegExp(`(?:^|[;&|\\s(\`$])${escaped}(?:\\s|$|[;&|)\`])`, 'i')
       return pattern.test(` ${cmdLower} `)
     })
   }

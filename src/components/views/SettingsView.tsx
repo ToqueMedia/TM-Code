@@ -655,7 +655,17 @@ function FlaggedCommandsSection() {
       <Text fontSize="12px" color={tokens.colors.text.secondary} mb={3}>
         {t('settings.flaggedCommandsDesc')}
       </Text>
-      <VStack align="stretch" gap={0}>
+      <VStack
+        align="stretch"
+        gap={0}
+        maxH="360px"
+        overflowY="auto"
+        css={{
+          '&::-webkit-scrollbar': { width: '4px' },
+          '&::-webkit-scrollbar-track': { background: 'transparent' },
+          '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.1)', borderRadius: '4px' },
+        }}
+      >
         {FLAGGABLE_COMMANDS.map(({ command, label, description }) => {
           const isActive = flaggedCommands.includes(command)
           return (

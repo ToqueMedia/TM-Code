@@ -62,10 +62,16 @@ function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionSt
   const { permissionQueue, approvedScopes } = get()
   if (permissionQueue.length === 0) return
 
-  // Find the next permission that isn't already auto-approved by scope
+  // Find the next permission that isn't already auto-approved by scope.
+  // Sensitive/flagged permissions ALWAYS show a dialog — never auto-approved.
   const remaining = [...permissionQueue]
   while (remaining.length > 0) {
     const next = remaining.shift()!
+    if (next.sensitive) {
+      // Flagged command or sensitive file — must show dialog every time
+      set(() => ({ pendingPermission: next, permissionQueue: remaining }))
+      return
+    }
     const scope = getToolScope(next.toolName)
     if (approvedScopes.has(scope)) {
       // Auto-approve this one and continue to the next
@@ -87,12 +93,14 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   permissionQueue: [],
 
   requestPermission: (toolName, args, forcePrompt) => {
-    const scope = getToolScope(toolName)
-
-    // User authorized all tools in this scope (core or mcp)
-    if (get().approvedScopes.has(scope)) return Promise.resolve(true)
-
+    // forcePrompt (sensitive files, flagged commands) ALWAYS shows the dialog.
+    // It bypasses scope auto-approval — the user must approve every time.
     if (!forcePrompt) {
+      const scope = getToolScope(toolName)
+
+      // User authorized all tools in this scope (core or mcp)
+      if (get().approvedScopes.has(scope)) return Promise.resolve(true)
+
       if (SAFE_TOOLS.has(toolName)) return Promise.resolve(true)
       if (HAS_OWN_APPROVAL.has(toolName)) return Promise.resolve(true)
     }
@@ -136,14 +144,20 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       // Auto-approve diffs when core tools are approved
       const autoApproveDiffs = scope === 'core' ? true : get().autoApproveDiffs
 
-      // Auto-approve all queued permissions in the same scope
+      // Auto-approve all queued permissions in the same scope,
+      // but KEEP sensitive/flagged ones — they must always prompt individually.
       const remaining: PendingPermission[] = []
       for (const queued of permissionQueue) {
-        const qScope = getToolScope(queued.toolName)
-        if (scopes.has(qScope)) {
-          queued.resolve(true)
-        } else {
+        if (queued.sensitive) {
+          // Flagged command or sensitive file — never auto-approve
           remaining.push(queued)
+        } else {
+          const qScope = getToolScope(queued.toolName)
+          if (scopes.has(qScope)) {
+            queued.resolve(true)
+          } else {
+            remaining.push(queued)
+          }
         }
       }
 
