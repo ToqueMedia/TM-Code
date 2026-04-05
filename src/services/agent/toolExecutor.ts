@@ -4,6 +4,7 @@ import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
@@ -98,7 +99,10 @@ class ToolExecutor {
     // Sensitive files require explicit developer authorization
     const isSensitive = toolName === 'read_file' && this.isSensitiveFile(input.path as string)
 
-    const approved = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive)
+    // Flagged commands: user selected these in Settings → always prompt (never auto-approve)
+    const isFlaggedCommand = toolName === 'execute_command' && this.isFlaggedCommand(input.command as string)
+
+    const approved = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive || isFlaggedCommand)
     if (!approved) {
       const target = (input.path || input.command || input.name || '') as string
       return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}. Ask the user what they want instead or suggest an alternative approach.`
@@ -475,6 +479,22 @@ class ToolExecutor {
   private isSensitiveFile(filePath: string): boolean {
     const filename = filePath.replace(/\\/g, '/').split('/').pop() || ''
     return ToolExecutor.SENSITIVE_FILE_PATTERNS.some(p => p.test(filename))
+  }
+
+  /**
+   * Check if a command contains any user-flagged command from Settings.
+   * Flagged commands always require explicit developer approval (Yes/No).
+   */
+  private isFlaggedCommand(command: string): boolean {
+    if (!command) return false
+    const { flaggedCommands } = useSettingsStore.getState()
+    if (flaggedCommands.length === 0) return false
+    const cmdLower = command.toLowerCase()
+    return flaggedCommands.some(flagged => {
+      // Match the command name at word boundary (not substring of another command)
+      const pattern = new RegExp(`(?:^|[;&|\\s])${flagged.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$|;|&|\\|)`, 'i')
+      return pattern.test(` ${cmdLower} `)
+    })
   }
 
   private static readonly BLOCKED_COMMANDS = [

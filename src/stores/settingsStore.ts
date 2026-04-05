@@ -73,6 +73,9 @@ interface SettingsState {
   shortcuts: ShortcutMap
   hasCompletedOnboarding: boolean
   sandboxEnabled: boolean
+  /** Commands that require explicit developer approval every time the agent uses them.
+   *  Empty by default (nothing blocked). User selects which commands to flag in Settings. */
+  flaggedCommands: string[]
 }
 
 interface SettingsActions {
@@ -83,6 +86,8 @@ interface SettingsActions {
   setAutocompleteModel: (model: string) => void
   setAutocompleteOllamaUrl: (url: string) => void
   setSandboxEnabled: (enabled: boolean) => void
+  setFlaggedCommands: (commands: string[]) => void
+  toggleFlaggedCommand: (command: string) => void
   setAgentModel: (model: AgentModelId) => void
   setFormatOnSave: (value: boolean) => void
   setAppLanguage: (lang: AppLanguage) => void
@@ -110,6 +115,7 @@ const DEFAULTS: SettingsState = {
   shortcuts: { ...DEFAULT_SHORTCUTS },
   hasCompletedOnboarding: false,
   sandboxEnabled: false,
+  flaggedCommands: [],
 }
 
 export const useSettingsStore = create<SettingsState & SettingsActions>()(
@@ -174,6 +180,20 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         // Sync to Rust backend
         import('@tauri-apps/api/core').then(({ invoke }) => {
           invoke('sandbox_set_enabled', { enabled }).catch(() => {})
+        })
+      },
+
+      setFlaggedCommands: (commands: string[]) => {
+        set(() => ({ flaggedCommands: commands }))
+      },
+
+      toggleFlaggedCommand: (command: string) => {
+        set(state => {
+          const current = state.flaggedCommands
+          if (current.includes(command)) {
+            return { flaggedCommands: current.filter(c => c !== command) }
+          }
+          return { flaggedCommands: [...current, command] }
         })
       },
 

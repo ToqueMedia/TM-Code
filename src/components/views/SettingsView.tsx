@@ -600,7 +600,97 @@ function SandboxSection() {
           </VStack>
         )}
       </SettingsGroup>
+
+      <FlaggedCommandsSection />
     </VStack>
+  )
+}
+
+// ── All commands that can be flagged for approval ──
+const FLAGGABLE_COMMANDS: { command: string; label: string; description: string }[] = [
+  // Filesystem — destructive
+  { command: 'rm', label: 'rm', description: 'Remove files or directories' },
+  { command: 'rmdir', label: 'rmdir', description: 'Remove empty directories' },
+  { command: 'mv', label: 'mv', description: 'Move or rename files' },
+  { command: 'cp', label: 'cp', description: 'Copy files or directories' },
+  { command: 'chmod', label: 'chmod', description: 'Change file permissions' },
+  { command: 'chown', label: 'chown', description: 'Change file ownership' },
+  { command: 'ln', label: 'ln', description: 'Create symbolic links' },
+  { command: 'touch', label: 'touch', description: 'Create empty files' },
+  { command: 'mkdir', label: 'mkdir', description: 'Create directories' },
+  // Git — risky
+  { command: 'git push', label: 'git push', description: 'Push commits to remote' },
+  { command: 'git reset', label: 'git reset', description: 'Reset commit history' },
+  { command: 'git checkout', label: 'git checkout', description: 'Switch branches or restore files' },
+  { command: 'git merge', label: 'git merge', description: 'Merge branches' },
+  { command: 'git rebase', label: 'git rebase', description: 'Rebase commit history' },
+  { command: 'git stash', label: 'git stash', description: 'Stash uncommitted changes' },
+  { command: 'git clean', label: 'git clean', description: 'Remove untracked files' },
+  { command: 'git commit', label: 'git commit', description: 'Create a commit' },
+  // Package managers — install/remove
+  { command: 'npm install', label: 'npm install', description: 'Install packages (npm)' },
+  { command: 'npm uninstall', label: 'npm uninstall', description: 'Remove packages (npm)' },
+  { command: 'yarn add', label: 'yarn add', description: 'Install packages (yarn)' },
+  { command: 'yarn remove', label: 'yarn remove', description: 'Remove packages (yarn)' },
+  { command: 'pnpm add', label: 'pnpm add', description: 'Install packages (pnpm)' },
+  { command: 'pnpm remove', label: 'pnpm remove', description: 'Remove packages (pnpm)' },
+  // Process management
+  { command: 'kill', label: 'kill', description: 'Kill a process' },
+  { command: 'pkill', label: 'pkill', description: 'Kill processes by name' },
+  // Network
+  { command: 'curl', label: 'curl', description: 'Transfer data from URLs' },
+  { command: 'wget', label: 'wget', description: 'Download files from the web' },
+  // Docker
+  { command: 'docker', label: 'docker', description: 'Docker container commands' },
+  { command: 'docker-compose', label: 'docker-compose', description: 'Docker Compose commands' },
+]
+
+function FlaggedCommandsSection() {
+  const t = useTranslation()
+  const flaggedCommands = useSettingsStore(s => s.flaggedCommands)
+  const toggleFlaggedCommand = useSettingsStore(s => s.toggleFlaggedCommand)
+
+  return (
+    <SettingsGroup title={t('settings.flaggedCommands')} badge={`${flaggedCommands.length} flagged`}>
+      <Text fontSize="12px" color={tokens.colors.text.secondary} mb={3}>
+        {t('settings.flaggedCommandsDesc')}
+      </Text>
+      <VStack align="stretch" gap={0}>
+        {FLAGGABLE_COMMANDS.map(({ command, label, description }) => {
+          const isActive = flaggedCommands.includes(command)
+          return (
+            <Flex
+              key={command}
+              align="center"
+              justify="space-between"
+              py="6px"
+              px={2}
+              borderRadius={tokens.radius.md}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+              cursor="pointer"
+              onClick={() => toggleFlaggedCommand(command)}
+            >
+              <Box flex={1} minW={0}>
+                <Text fontSize="13px" fontWeight="500" color={tokens.colors.text.primary} fontFamily={tokens.fontFamily.mono}>
+                  {label}
+                </Text>
+                <Text fontSize="11px" color={tokens.colors.text.disabled}>{description}</Text>
+              </Box>
+              <Switch.Root
+                checked={isActive}
+                onCheckedChange={() => toggleFlaggedCommand(command)}
+                size="sm"
+              >
+                <Switch.HiddenInput />
+                <Switch.Control>
+                  <Switch.Thumb />
+                </Switch.Control>
+              </Switch.Root>
+            </Flex>
+          )
+        })}
+      </VStack>
+    </SettingsGroup>
   )
 }
 
