@@ -503,8 +503,9 @@ class ToolExecutor {
   }
 
   /**
-   * All commands that are considered dangerous and always require approval.
-   * Must match the FLAGGABLE_COMMANDS list in SettingsView.tsx.
+   * All commands that always require explicit Yes/No approval.
+   * The Settings UI imports this list directly — no separate list to maintain.
+   * User can block individual commands in Settings > Sandbox > Dangerous Commands.
    */
   static readonly DANGEROUS_COMMANDS = [
     // Filesystem — destructive
