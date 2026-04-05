@@ -235,8 +235,22 @@ function PromptActions({
         )}
       </Flex>
 
-      {/* Send / Stop button */}
-      {isStreaming ? (
+      {/* Send / Stop / Queue button */}
+      {isStreaming && hasInput ? (
+        // Agent working + user typed → send to queue
+        <IconButton
+          aria-label={t("prompt.sendToQueue")}
+          size="sm"
+          bg={tokens.colors.accent.primary}
+          color={tokens.colors.text.inverse}
+          borderRadius="8px"
+          _hover={{ bg: tokens.colors.accent.primaryDark }}
+          onClick={onSend}
+        >
+          <FiSend size={14} />
+        </IconButton>
+      ) : isStreaming ? (
+        // Agent working + no input → stop
         <IconButton
           aria-label={t("prompt.stopGeneration")}
           size="sm"
@@ -249,6 +263,7 @@ function PromptActions({
           <FiSquare size={14} />
         </IconButton>
       ) : (
+        // Agent idle → normal send
         <IconButton
           aria-label={t("prompt.send")}
           size="sm"

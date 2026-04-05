@@ -392,6 +392,7 @@ const en = {
   'prompt.showPreview': 'Show preview',
   'prompt.stopGeneration': 'Stop generation',
   'prompt.send': 'Send message',
+  'prompt.sendToQueue': 'Send to queue',
   'prompt.attach': 'Attach files',
 
   // ── Views ──────────────────────────────────────────
@@ -1022,6 +1023,7 @@ const pt: Record<keyof typeof en, string> = {
   'prompt.showPreview': 'Mostrar pré-visualização',
   'prompt.stopGeneration': 'Parar geração',
   'prompt.send': 'Enviar mensagem',
+  'prompt.sendToQueue': 'Enviar para fila',
   'prompt.attach': 'Anexar ficheiros',
   'view.toggleProjects': 'Alternar barra de projetos',
   'view.attachContainer': 'Anexar contentor',

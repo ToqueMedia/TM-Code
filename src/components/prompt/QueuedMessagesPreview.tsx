@@ -1,16 +1,14 @@
 /**
  * Queued Messages Preview — shows pending messages above the PromptBar.
  *
- * Inspired by Claude Code's PromptInputQueuedCommands.tsx:
- * - Renders queued commands as a lightweight preview (not in chat history)
- * - Disappears when commands are processed
- * - Uses useSyncExternalStore via useCommandQueue for reactivity
+ * Each message has a cancel button to remove it from the queue.
  */
 
 import { memo } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
+import { FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
-import { useCommandQueue } from '@/services/agent/messageQueue'
+import { useCommandQueue, remove as removeFromQueue } from '@/services/agent/messageQueue'
 
 function QueuedMessagesPreview() {
   const queuedCommands = useCommandQueue()
@@ -54,6 +52,23 @@ function QueuedMessagesPreview() {
           >
             queued
           </Text>
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            w="18px"
+            h="18px"
+            borderRadius="full"
+            flexShrink={0}
+            cursor="pointer"
+            color={tokens.colors.text.disabled}
+            _hover={{ color: tokens.colors.accent.red, bg: tokens.colors.accent.redSubtle }}
+            transition={tokens.transition.fast}
+            onClick={() => removeFromQueue(cmd.id)}
+          >
+            <FiX size={12} />
+          </Box>
         </Flex>
       ))}
     </Box>
