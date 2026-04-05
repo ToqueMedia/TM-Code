@@ -651,7 +651,7 @@ function FlaggedCommandsSection() {
   const toggleFlaggedCommand = useSettingsStore(s => s.toggleFlaggedCommand)
 
   return (
-    <SettingsGroup title={t('settings.flaggedCommands')} badge={`${flaggedCommands.length} flagged`}>
+    <SettingsGroup title={t('settings.flaggedCommands')}>
       <Text fontSize="12px" color={tokens.colors.text.secondary} mb={3}>
         {t('settings.flaggedCommandsDesc')}
       </Text>
@@ -672,7 +672,7 @@ function FlaggedCommandsSection() {
             <Flex
               key={command}
               align="center"
-              justify="space-between"
+              gap={3}
               py="6px"
               px={2}
               borderRadius={tokens.radius.md}
@@ -680,22 +680,36 @@ function FlaggedCommandsSection() {
               cursor="pointer"
               onClick={() => toggleFlaggedCommand(command)}
             >
+              {/* Checkbox — checked = agent must ask before running */}
+              <Box
+                w="16px"
+                h="16px"
+                borderRadius="4px"
+                border={`1.5px solid ${isActive ? tokens.colors.accent.primary : tokens.colors.border.default}`}
+                bg={isActive ? tokens.colors.accent.primary : 'transparent'}
+                display="flex"
+                alignItems="center"
+                justifyContent="center"
+                flexShrink={0}
+                transition={tokens.transition.fast}
+              >
+                {isActive && (
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <path d="M2 5L4 7L8 3" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </Box>
               <Box flex={1} minW={0}>
                 <Text fontSize="13px" fontWeight="500" color={tokens.colors.text.primary} fontFamily={tokens.fontFamily.mono}>
                   {label}
                 </Text>
                 <Text fontSize="11px" color={tokens.colors.text.disabled}>{description}</Text>
               </Box>
-              <Switch.Root
-                checked={isActive}
-                onCheckedChange={() => toggleFlaggedCommand(command)}
-                size="sm"
-              >
-                <Switch.HiddenInput />
-                <Switch.Control>
-                  <Switch.Thumb />
-                </Switch.Control>
-              </Switch.Root>
+              {isActive && (
+                <Text fontSize="10px" color={tokens.colors.accent.primary} fontWeight="600" flexShrink={0}>
+                  {t('settings.askMe')}
+                </Text>
+              )}
             </Flex>
           )
         })}
