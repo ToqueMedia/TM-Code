@@ -84,7 +84,7 @@ import type { UserPlanName } from '../../stores/billingStore'
 const MIMO_V2_FLASH: ModelProfile = {
   id: 'mimo-v2-flash',
   name: 'MiMo V2 Flash',
-  persona: { name: 'Free', tagline: 'Rápida e acessível. MoE 309B com 15B activos — ideal para tarefas do dia-a-dia. Custo: 1x' },
+  persona: { name: 'Free', tagline: 'Rápida para tarefas simples — edições, perguntas e protótipos rápidos. Custo: 1x' },
   modelId: 'mimo-v2-flash',
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
@@ -110,7 +110,7 @@ const MIMO_V2_FLASH: ModelProfile = {
 const DEEPSEEK_V3_2: ModelProfile = {
   id: 'deepseek-v3.2',
   name: 'DeepSeek V3.2',
-  persona: { name: 'Nzinga Mbandi', tagline: 'Estratega profunda. Raciocina e orquestra com precisão. Custo: 1x' },
+  persona: { name: 'Nzinga Mbandi', tagline: 'Equilibrada e precisa — pensa antes de agir, excelente custo-benefício. Custo: 1x' },
   modelId: 'deepseek-v3.2',
   contextWindow: 131_072,
   maxOutputTokens: 32_768,
@@ -135,9 +135,9 @@ const DEEPSEEK_V3_2: ModelProfile = {
 const GLM_5: ModelProfile = {
   id: 'glm-5',
   name: 'GLM-5',
-  persona: { name: 'Rei Mandume', tagline: 'Resiliente em combate. Forte em terminal e debugging real. Custo: 4x' },
+  persona: { name: 'Rei Mandume', tagline: 'Persistente e metódico — forte em debugging e execução passo-a-passo. Custo: 4x' },
   modelId: 'glm-5',
-  contextWindow: 131_072,
+  contextWindow: 198_000,
   maxOutputTokens: 16_384,
 
   // Zhipu AI defaults: temp=0.95, top_p=0.7 (notably lower than industry standard)
@@ -161,7 +161,7 @@ const GLM_5: ModelProfile = {
 const KIMI_K2_5: ModelProfile = {
   id: 'kimi-k2.5',
   name: 'Kimi K2.5',
-  persona: { name: 'Agostinho Neto', tagline: 'Virtuoso do código. Melhor qualidade bruta e compreensão visual. Custo: 4x' },
+  persona: { name: 'Agostinho Neto', tagline: 'Qualidade máxima de código — compreende imagens e lê projectos enormes. Custo: 4x' },
   modelId: 'kimi-k2.5',
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
@@ -189,7 +189,7 @@ const KIMI_K2_5: ModelProfile = {
 const QWEN3_CODER_NEXT: ModelProfile = {
   id: 'qwen3-coder-next',
   name: 'Qwen3 Coder Next',
-  persona: { name: 'Ngola Kiluange', tagline: 'Ultra-rápido e eficiente. 358 linguagens com overhead mínimo. Custo: 2x' },
+  persona: { name: 'Ngola Kiluange', tagline: 'Especialista em código — veloz, domina 358 linguagens, vai directo ao ponto. Custo: 2x' },
   modelId: 'qwen3-coder-next',
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
@@ -215,7 +215,7 @@ const QWEN3_CODER_NEXT: ModelProfile = {
 const MINIMAX_M2_5: ModelProfile = {
   id: 'minimax-m2.5',
   name: 'MiniMax M2.5',
-  persona: { name: 'Ekuikui II', tagline: 'Maior score SWE-bench. O mais forte em engenharia complexa. Custo: 2x' },
+  persona: { name: 'Ekuikui II', tagline: 'O mais forte em engenharia complexa — resolve o que outros não conseguem. Custo: 2x' },
   modelId: 'minimax-m2.5',
   contextWindow: 196_608,
   maxOutputTokens: 65_536,
@@ -241,7 +241,7 @@ const MINIMAX_M2_5: ModelProfile = {
 const QWEN3_6_PLUS: ModelProfile = {
   id: 'qwen3.6-plus',
   name: 'Qwen 3.6 Plus',
-  persona: { name: 'Hoji Ya Henda', tagline: 'Agente supremo. 256K de contexto, visão nativa e execução decisiva. Custo: 2x' },
+  persona: { name: 'Hoji Ya Henda', tagline: 'O mais completo — vê imagens, lê projectos inteiros e executa com decisão. Custo: 2x' },
   modelId: 'qwen3.6-plus',
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
@@ -267,7 +267,7 @@ const QWEN3_6_PLUS: ModelProfile = {
 const GEMINI_3_FLASH: ModelProfile = {
   id: 'gemini-3-flash',
   name: 'Gemini 3 Flash',
-  persona: { name: 'Simione Mucune', tagline: 'Versátil e fiável. Adapta-se a qualquer contexto. Custo: 5x' },
+  persona: { name: 'Simione Mucune', tagline: 'Contexto enorme, aceita tudo — texto, imagens, PDFs e vídeo. Custo: 5x' },
   modelId: 'gemini-3-flash',
   contextWindow: 1_048_576,
   maxOutputTokens: 65_536,
@@ -294,7 +294,7 @@ const GEMINI_3_FLASH: ModelProfile = {
 const STEP_3_5_FLASH: ModelProfile = {
   id: 'step-3.5-flash',
   name: 'Step 3.5 Flash',
-  persona: { name: 'Deolinda Rodrigues', tagline: 'Raciocínio nativo. MoE 196B com 11B activos — rápida e precisa. Custo: 1x' },
+  persona: { name: 'Deolinda Rodrigues', tagline: 'Pensa sempre antes de responder — raciocínio nativo a custo mínimo. Custo: 1x' },
   modelId: 'step-3.5-flash',
   contextWindow: 262_144,
   maxOutputTokens: 32_768,
@@ -322,15 +322,19 @@ const STEP_3_5_FLASH: ModelProfile = {
 // ─────────────────────────────────────────────────
 
 export const MODEL_PROFILES: Record<string, ModelProfile> = {
+  // 1x cost
   'mimo-v2-flash': MIMO_V2_FLASH,
   'deepseek-v3.2': DEEPSEEK_V3_2,
-  'glm-5': GLM_5,
-  'kimi-k2.5': KIMI_K2_5,
+  'step-3.5-flash': STEP_3_5_FLASH,
+  // 2x cost
   'qwen3-coder-next': QWEN3_CODER_NEXT,
   'minimax-m2.5': MINIMAX_M2_5,
   'qwen3.6-plus': QWEN3_6_PLUS,
+  // 4x cost
+  'glm-5': GLM_5,
+  'kimi-k2.5': KIMI_K2_5,
+  // 5x cost
   'gemini-3-flash': GEMINI_3_FLASH,
-  'step-3.5-flash': STEP_3_5_FLASH,
 }
 
 export const DEFAULT_MODEL_ID = 'deepseek-v3.2'
