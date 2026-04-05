@@ -271,7 +271,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
           </Icon>
         </Flex>
         <Text fontSize="10px" color={tokens.colors.text.muted} opacity={0.5}>
-          v0.1.4
+          v0.1.5
         </Text>
       </Flex>
     </Box>
