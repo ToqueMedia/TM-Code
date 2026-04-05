@@ -299,8 +299,7 @@ const STEP_3_5_FLASH: ModelProfile = {
   contextWindow: 262_144,
   maxOutputTokens: 32_768,
 
-  // StepFun docs: no specific temperature recommendation — use conservative defaults
-  temperature: 0.7,
+  temperature: 1.0,
   reasoningTemperature: null,
   topP: 0.95,
   topK: null,
