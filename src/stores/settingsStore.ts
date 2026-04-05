@@ -238,7 +238,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, agentModel: state.agentModel, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled }
+        return { editor: state.editor, autocomplete: state.autocomplete, agentModel: state.agentModel, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -253,6 +253,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           agentLanguage: p.agentLanguage ?? DEFAULTS.agentLanguage,
           hasCompletedOnboarding: p.hasCompletedOnboarding ?? DEFAULTS.hasCompletedOnboarding,
           sandboxEnabled: p.sandboxEnabled ?? DEFAULTS.sandboxEnabled,
+          flaggedCommands: Array.isArray(p.flaggedCommands) ? p.flaggedCommands : DEFAULTS.flaggedCommands,
           // Merge shortcuts: defaults for new keys, but preserve null (cleared by conflict)
           shortcuts: Object.fromEntries(
             Object.keys(DEFAULT_SHORTCUTS).map(k => [
