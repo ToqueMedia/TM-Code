@@ -12,16 +12,7 @@
   "app": {
     "macOSPrivateApi": true,
     "windows": [],
-    "security": {
-      "dangerousRemoteDomainIpcAccess": [
-        {
-          "scheme": "http",
-          "domain": "localhost",
-          "windows": ["main"],
-          "plugins": ["dialog", "fs", "opener", "process", "updater"]
-        }
-      ]
-    }
+    "security": {}
   },
   "bundle": {
     "active": true,
