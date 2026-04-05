@@ -330,7 +330,9 @@ pub fn sandbox_set_enabled(enabled: bool) {
 
 #[tauri::command]
 pub fn sandbox_check_deps() -> SandboxDeps {
+    #[allow(unused_mut)]
     let mut missing: Vec<String> = Vec::new();
+    #[allow(unused_mut)]
     let mut hints: Vec<String> = Vec::new();
 
     #[cfg(target_os = "macos")]

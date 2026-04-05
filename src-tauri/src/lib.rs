@@ -71,7 +71,7 @@ fn open_preview_webview(
     // that proxies requests to the dev server via Rust's reqwest.
     // Keep "localhost" — Vite may bind to IPv6 [::1], and "localhost" resolves to both
     let proxy_target = url.trim_end_matches('/').to_string();
-    let proxy_target_for_ws = proxy_target.clone();
+    let _proxy_target_for_ws = proxy_target.clone();
 
     // Clone app handle for IPC handler (receives runtime errors from preview JS)
     let app_for_ipc = app.clone();
