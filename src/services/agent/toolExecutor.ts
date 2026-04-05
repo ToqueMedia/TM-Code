@@ -99,13 +99,34 @@ class ToolExecutor {
     // Sensitive files require explicit developer authorization
     const isSensitive = toolName === 'read_file' && this.isSensitiveFile(input.path as string)
 
-    // Flagged commands: user selected these in Settings → always prompt (never auto-approve)
-    const isFlaggedCommand = toolName === 'execute_command' && this.isFlaggedCommand(input.command as string)
+    // Dangerous commands: all commands in the DANGEROUS_COMMANDS list.
+    // - If BLOCKED by user in Settings → rejected immediately (never runs)
+    // - If NOT blocked → always prompts Yes/No (forcePrompt bypasses Accept All)
+    // - Commands NOT in the list → normal permission flow
+    let dangerousAlreadyApproved = false
+    if (toolName === 'execute_command') {
+      const commandStr = (input.command as string) || ''
+      const dangerousMatch = this.matchDangerousCommand(commandStr)
+      if (dangerousMatch) {
+        const { flaggedCommands } = useSettingsStore.getState()
+        if (flaggedCommands.includes(dangerousMatch)) {
+          return `Blocked: "${dangerousMatch}" is blocked in your Settings. The developer disabled this command. Ask the developer to unblock it in Settings > Sandbox if needed.`
+        }
+        // Not blocked but dangerous → always ask (forcePrompt bypasses Accept All)
+        const approved = await usePermissionStore.getState().requestPermission(toolName, input, true)
+        if (!approved) {
+          return `Permission denied by user for ${dangerousMatch}. Ask the user what they want instead.`
+        }
+        dangerousAlreadyApproved = true
+      }
+    }
 
-    const approved = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive || isFlaggedCommand)
-    if (!approved) {
-      const target = (input.path || input.command || input.name || '') as string
-      return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}. Ask the user what they want instead or suggest an alternative approach.`
+    if (!dangerousAlreadyApproved) {
+      const approved = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive)
+      if (!approved) {
+        const target = (input.path || input.command || input.name || '') as string
+        return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}. Ask the user what they want instead or suggest an alternative approach.`
+      }
     }
 
     // Inject toolCallId for tools that need per-call context (parallel sub-agents)
@@ -482,21 +503,31 @@ class ToolExecutor {
   }
 
   /**
-   * Check if a command contains any user-flagged command from Settings.
-   * Flagged commands always require explicit developer approval (Yes/No).
+   * All commands that are considered dangerous and always require approval.
+   * Must match the FLAGGABLE_COMMANDS list in SettingsView.tsx.
    */
-  private isFlaggedCommand(command: string): boolean {
-    if (!command) return false
-    const { flaggedCommands } = useSettingsStore.getState()
-    if (flaggedCommands.length === 0) return false
+  private static readonly DANGEROUS_COMMANDS = [
+    'rm', 'rmdir', 'mv', 'cp', 'chmod', 'chown', 'ln', 'touch', 'mkdir',
+    'git push', 'git reset', 'git checkout', 'git merge', 'git rebase',
+    'git stash', 'git clean', 'git commit',
+    'npm install', 'npm uninstall', 'yarn add', 'yarn remove',
+    'pnpm add', 'pnpm remove',
+    'kill', 'pkill', 'curl', 'wget', 'docker', 'docker-compose',
+  ]
+
+  /**
+   * Check if a command contains any dangerous command from the list.
+   * Returns the matched command name, or null if not dangerous.
+   */
+  private matchDangerousCommand(command: string): string | null {
+    if (!command) return null
     const cmdLower = command.toLowerCase()
-    return flaggedCommands.some(flagged => {
-      // Match the command name at word boundary.
-      // Delimiters: whitespace, ;, &, |, (, ), `, $, start, end
-      const escaped = flagged.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    for (const dangerous of ToolExecutor.DANGEROUS_COMMANDS) {
+      const escaped = dangerous.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       const pattern = new RegExp(`(?:^|[;&|\\s(\`$])${escaped}(?:\\s|$|[;&|)\`])`, 'i')
-      return pattern.test(` ${cmdLower} `)
-    })
+      if (pattern.test(` ${cmdLower} `)) return dangerous
+    }
+    return null
   }
 
   private static readonly BLOCKED_COMMANDS = [

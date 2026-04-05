@@ -658,7 +658,7 @@ function FlaggedCommandsSection() {
       <VStack
         align="stretch"
         gap={0}
-        maxH="360px"
+        maxH="calc(100vh - 380px)"
         overflowY="auto"
         css={{
           '&::-webkit-scrollbar': { width: '4px' },
@@ -685,8 +685,8 @@ function FlaggedCommandsSection() {
                 w="16px"
                 h="16px"
                 borderRadius="4px"
-                border={`1.5px solid ${isActive ? tokens.colors.accent.primary : tokens.colors.border.default}`}
-                bg={isActive ? tokens.colors.accent.primary : 'transparent'}
+                border={`1.5px solid ${isActive ? tokens.colors.accent.red : tokens.colors.border.default}`}
+                bg={isActive ? tokens.colors.accent.red : 'transparent'}
                 display="flex"
                 alignItems="center"
                 justifyContent="center"
@@ -706,8 +706,8 @@ function FlaggedCommandsSection() {
                 <Text fontSize="11px" color={tokens.colors.text.disabled}>{description}</Text>
               </Box>
               {isActive && (
-                <Text fontSize="10px" color={tokens.colors.accent.primary} fontWeight="600" flexShrink={0}>
-                  {t('settings.askMe')}
+                <Text fontSize="10px" color={tokens.colors.accent.red} fontWeight="600" flexShrink={0}>
+                  {t('settings.blocked')}
                 </Text>
               )}
             </Flex>
