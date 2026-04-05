@@ -3,6 +3,9 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": ["main"],
+  "remote": {
+    "urls": ["http://localhost:14300"]
+  },
   "permissions": [
     "core:default",
     "dialog:default",

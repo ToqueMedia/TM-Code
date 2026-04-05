@@ -384,7 +384,8 @@ pub fn run() {
         // Serve app via HTTP localhost instead of tauri:// protocol.
         // This allows iframes to load other HTTP origins (dev server previews)
         // without cross-protocol security restrictions.
-        .plugin(tauri_plugin_localhost::Builder::new(1430).build())
+        // Port 14300 — TM Code specific. Avoids conflict with common dev ports.
+        .plugin(tauri_plugin_localhost::Builder::new(14300).build())
         .setup(move |app| {
             // Load app icon from embedded PNG
             let icon = Image::from_bytes(include_bytes!("../icons/128x128@2x.png"))
@@ -543,7 +544,7 @@ pub fn run() {
             #[cfg(dev)]
             let main_url = WebviewUrl::default();
             #[cfg(not(dev))]
-            let main_url = WebviewUrl::External("http://localhost:1430".parse().unwrap());
+            let main_url = WebviewUrl::External("http://localhost:14300".parse().unwrap());
 
             WebviewWindowBuilder::new(app, "main", main_url)
                 .title("TM Code")
