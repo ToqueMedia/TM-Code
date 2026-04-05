@@ -607,43 +607,51 @@ function SandboxSection() {
 }
 
 // ── All commands that can be flagged for approval ──
-const FLAGGABLE_COMMANDS: { command: string; label: string; description: string }[] = [
-  // Filesystem — destructive
-  { command: 'rm', label: 'rm', description: 'Remove files or directories' },
-  { command: 'rmdir', label: 'rmdir', description: 'Remove empty directories' },
-  { command: 'mv', label: 'mv', description: 'Move or rename files' },
-  { command: 'cp', label: 'cp', description: 'Copy files or directories' },
-  { command: 'chmod', label: 'chmod', description: 'Change file permissions' },
-  { command: 'chown', label: 'chown', description: 'Change file ownership' },
-  { command: 'ln', label: 'ln', description: 'Create symbolic links' },
-  { command: 'touch', label: 'touch', description: 'Create empty files' },
-  { command: 'mkdir', label: 'mkdir', description: 'Create directories' },
-  // Git — risky
-  { command: 'git push', label: 'git push', description: 'Push commits to remote' },
-  { command: 'git reset', label: 'git reset', description: 'Reset commit history' },
-  { command: 'git checkout', label: 'git checkout', description: 'Switch branches or restore files' },
-  { command: 'git merge', label: 'git merge', description: 'Merge branches' },
-  { command: 'git rebase', label: 'git rebase', description: 'Rebase commit history' },
-  { command: 'git stash', label: 'git stash', description: 'Stash uncommitted changes' },
-  { command: 'git clean', label: 'git clean', description: 'Remove untracked files' },
-  { command: 'git commit', label: 'git commit', description: 'Create a commit' },
-  // Package managers — install/remove
-  { command: 'npm install', label: 'npm install', description: 'Install packages (npm)' },
-  { command: 'npm uninstall', label: 'npm uninstall', description: 'Remove packages (npm)' },
-  { command: 'yarn add', label: 'yarn add', description: 'Install packages (yarn)' },
-  { command: 'yarn remove', label: 'yarn remove', description: 'Remove packages (yarn)' },
-  { command: 'pnpm add', label: 'pnpm add', description: 'Install packages (pnpm)' },
-  { command: 'pnpm remove', label: 'pnpm remove', description: 'Remove packages (pnpm)' },
-  // Process management
-  { command: 'kill', label: 'kill', description: 'Kill a process' },
-  { command: 'pkill', label: 'pkill', description: 'Kill processes by name' },
-  // Network
-  { command: 'curl', label: 'curl', description: 'Transfer data from URLs' },
-  { command: 'wget', label: 'wget', description: 'Download files from the web' },
-  // Docker
-  { command: 'docker', label: 'docker', description: 'Docker container commands' },
-  { command: 'docker-compose', label: 'docker-compose', description: 'Docker Compose commands' },
-]
+// Import the canonical list from toolExecutor to keep UI and logic in sync
+import ToolExecutor from '../../services/agent/toolExecutor'
+
+const COMMAND_DESCRIPTIONS: Record<string, string> = {
+  'rm': 'Remove files or directories',
+  'rmdir': 'Remove empty directories',
+  'mv': 'Move or rename files',
+  'cp': 'Copy files or directories',
+  'chmod': 'Change file permissions',
+  'chown': 'Change file ownership',
+  'ln': 'Create symbolic links',
+  'mkfs': 'Format a disk partition',
+  'dd': 'Low-level disk copy',
+  'shutdown': 'Shut down the system',
+  'reboot': 'Reboot the system',
+  'git push': 'Push commits to remote',
+  'git reset': 'Reset commit history',
+  'git checkout': 'Switch branches or restore files',
+  'git merge': 'Merge branches',
+  'git rebase': 'Rebase commit history',
+  'git stash': 'Stash uncommitted changes',
+  'git clean': 'Remove untracked files',
+  'git commit': 'Create a commit',
+  'npm uninstall': 'Remove packages (npm)',
+  'yarn remove': 'Remove packages (yarn)',
+  'pnpm remove': 'Remove packages (pnpm)',
+  'kill': 'Kill a process by PID',
+  'pkill': 'Kill processes by name',
+  'killall': 'Kill all processes by name',
+  'sudo': 'Run as superuser',
+  'su': 'Switch user',
+  'doas': 'Run as another user',
+  'pkexec': 'Run as privileged user',
+  'wget': 'Download files from the web',
+  'launchctl': 'Manage macOS services',
+  'systemctl': 'Manage Linux services',
+  'docker': 'Docker container commands',
+  'docker-compose': 'Docker Compose commands',
+}
+
+const FLAGGABLE_COMMANDS = ToolExecutor.DANGEROUS_COMMANDS.map(cmd => ({
+  command: cmd,
+  label: cmd,
+  description: COMMAND_DESCRIPTIONS[cmd] || cmd,
+}))
 
 function FlaggedCommandsSection() {
   const t = useTranslation()

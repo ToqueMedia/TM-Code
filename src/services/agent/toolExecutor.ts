@@ -506,13 +506,26 @@ class ToolExecutor {
    * All commands that are considered dangerous and always require approval.
    * Must match the FLAGGABLE_COMMANDS list in SettingsView.tsx.
    */
-  private static readonly DANGEROUS_COMMANDS = [
-    'rm', 'rmdir', 'mv', 'cp', 'chmod', 'chown', 'ln', 'touch', 'mkdir',
+  static readonly DANGEROUS_COMMANDS = [
+    // Filesystem — destructive
+    'rm', 'rmdir', 'mv', 'cp', 'chmod', 'chown', 'ln',
+    // Filesystem — system-level
+    'mkfs', 'dd', 'shutdown', 'reboot',
+    // Git — risky operations
     'git push', 'git reset', 'git checkout', 'git merge', 'git rebase',
     'git stash', 'git clean', 'git commit',
-    'npm install', 'npm uninstall', 'yarn add', 'yarn remove',
-    'pnpm add', 'pnpm remove',
-    'kill', 'pkill', 'curl', 'wget', 'docker', 'docker-compose',
+    // Package managers — remove
+    'npm uninstall', 'yarn remove', 'pnpm remove',
+    // Process management
+    'kill', 'pkill', 'killall',
+    // Privilege escalation
+    'sudo', 'su', 'doas', 'pkexec',
+    // Network
+    'wget',
+    // System services
+    'launchctl', 'systemctl',
+    // Docker
+    'docker', 'docker-compose',
   ]
 
   /**
@@ -530,49 +543,6 @@ class ToolExecutor {
     return null
   }
 
-  private static readonly BLOCKED_COMMANDS = [
-    // Destructive filesystem
-    /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|--force|--recursive)\b/,
-    /\brm\s+-rf\b/,
-    /\bmkfs\b/,
-    /\bdd\s+/,
-    /\bformat\b/,
-    /\b:\(\)\s*\{\s*:\|:&\s*\}\s*;/,  // fork bomb
-    /\bchmod\s+[0-7]*777\b/,
-    />\s*\/dev\/sd[a-z]/,
-    /\bshutdown\b/,
-    /\breboot\b/,
-
-    // Privilege escalation
-    /\bsudo\b/,
-    /\bsu\s+/,
-    /\bdoas\b/,
-    /\bpkexec\b/,
-
-    // Remote code execution / exfiltration
-    /\bcurl\b.*\|\s*(bash|sh|zsh)/,
-    /\bwget\b.*\|\s*(bash|sh|zsh)/,
-    /\bpython[23]?\s+-c\b/,
-    /\bnode\s+-e\b/,
-    /\bperl\s+-e\b/,
-    /\bruby\s+-e\b/,
-    /\bphp\s+-r\b/,
-
-    // Network tools
-    /\bnc\s+/,
-    /\bncat\b/,
-    /\bsocat\b/,
-
-    // Secret exfiltration
-    /\bprintenv\b/,
-    /\bcat\b.*\.env\b/,
-    /\bbase64\b.*\.env\b/,
-
-    // System services
-    /\blaunchctl\b/,
-    /\bsystemctl\b/,
-    /\bkillall\b/,
-  ]
 
   /**
    * Patterns that indicate file-writing operations via shell.
@@ -753,12 +723,6 @@ class ToolExecutor {
   }
 
   private validateCommand(command: string): void {
-    for (const pattern of ToolExecutor.BLOCKED_COMMANDS) {
-      if (pattern.test(command)) {
-        throw new Error(`Command blocked for safety: "${command}" matches a destructive pattern.`)
-      }
-    }
-
     // Read-only mode: block file-writing shell operations (verification agents).
     // Allow common test/lint/typecheck commands even if they contain patterns
     // that look like writes (e.g., npm test may use internal redirects).
