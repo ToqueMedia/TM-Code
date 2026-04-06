@@ -385,13 +385,15 @@ function UpdateSection() {
   const handleCheck = useCallback(async () => {
     setStatus('checking')
     setError(null)
+    const minDelay = new Promise(r => setTimeout(r, 800))
     try {
-      const result = await checkForUpdate()
+      const [result] = await Promise.all([checkForUpdate(), minDelay])
       setUpdate(result)
       // Persist so the banner survives navigation away from Settings
       setPendingUpdate(result)
       setStatus('idle')
     } catch (err) {
+      await minDelay
       setError(err instanceof Error ? err.message : String(err))
       setStatus('error')
     }
@@ -456,6 +458,7 @@ function UpdateSection() {
             fontSize="12px" fontWeight="500"
             color={tokens.colors.text.secondary} bg={tokens.colors.bg.card}
             border="1px solid" borderColor={tokens.colors.bg.cardBorder}
+            outline="none"
             cursor={status === 'checking' ? 'default' : 'pointer'}
             opacity={status === 'checking' ? 0.6 : 1}
             transition={tokens.transition.fast}

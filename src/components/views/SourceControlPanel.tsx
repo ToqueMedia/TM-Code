@@ -292,7 +292,8 @@ function SourceControlPanel() {
       if (!token) throw new Error('Not authenticated')
 
       const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
-      const response = await fetch(`${workerUrl}/v1/commit-message`, {
+      const { tauriFetch } = await import('../../services/tauriFetch')
+      const response = await tauriFetch(`${workerUrl}/v1/commit-message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({

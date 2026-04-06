@@ -13,7 +13,8 @@
     <script>
       if (window.__TAURI_INTERNALS__) {
         // Disable browser context menu in production only — keep Reload/Inspect in dev
-        if (!location.port) {
+        // In dev: Vite runs on port 1420. In prod: tauri-plugin-localhost runs on 14300.
+        if (location.port !== '1420') {
           document.addEventListener('contextmenu', function(e) {
             var el = e.target;
             var tag = el.tagName;
@@ -49,6 +50,15 @@
               window.dispatchEvent(new MessageEvent('message', { data: data }));
               if (_oauthProxy) _oauthProxy.closed = true;
             } catch(err) {}
+          })
+        }).catch(function(){});
+
+        // Detect OAuth popup closed/cancelled — tells Firebase the popup is gone
+        // so signInWithPopup rejects with auth/popup-closed-by-user.
+        window.__TAURI_INTERNALS__.invoke('plugin:event|listen', {
+          event: 'oauth-popup-closed',
+          handler: window.__TAURI_INTERNALS__.transformCallback(function() {
+            if (_oauthProxy) _oauthProxy.closed = true;
           })
         }).catch(function(){});
       }

@@ -148,8 +148,6 @@ class AgentService {
   private lightweightOptions: LightweightAgentOptions | null = null
   /** Tracks unique files edited in the current session (for verify enforcement). */
   private filesEditedThisSession: Set<string> = new Set()
-  /** Whether the verify tool was called in the current session. */
-  private verifyCalledThisSession = false
   /** Timestamp of the last approved file change — used to filter dev server errors in COMPLETION_BLOCKED. */
   private lastFileChangeTimestamp = 0
 
@@ -318,7 +316,6 @@ class AgentService {
 
     // Reset per-message tracking (files edited and verify status are per user message, not per session)
     this.filesEditedThisSession.clear()
-    this.verifyCalledThisSession = false
     this.lastFileChangeTimestamp = 0
     // Clear agent tasks from previous message
     try {
@@ -474,11 +471,6 @@ class AgentService {
           if (!this.lightweightOptions) {
             const enforcements: string[] = []
 
-            // Enforcement: verify contract — 3+ files edited without verify
-            if (this.filesEditedThisSession.size >= 3 && !this.verifyCalledThisSession) {
-              enforcements.push(`You edited ${this.filesEditedThisSession.size} files but did not call the verify tool. Per the verification contract, non-trivial changes (3+ files) require independent verification. Call verify now with the list of changed files before reporting completion.`)
-            }
-
             // Enforcement: never done with errors — check dev server logs.
             // Only check errors that appeared AFTER the last file change to avoid
             // false-blocking on stale errors that were already fixed by hot-reload.
@@ -604,7 +596,6 @@ class AgentService {
 
           // Track verify calls for completion enforcement (tool-level, not approval-dependent)
           if (!this.lightweightOptions && entry.toolCall.name === 'verify') {
-            this.verifyCalledThisSession = true
           }
         }
 

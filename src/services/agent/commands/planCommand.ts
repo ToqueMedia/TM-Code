@@ -1,5 +1,6 @@
 import { useChatStore } from '../../../stores/chatStore'
 import { useAgentStore } from '../../../stores/agentStore'
+import { usePermissionStore } from '../../../stores/permissionStore'
 import { runAgentWithCallbacks } from '../agentRunner'
 import AgentService from '../agentService'
 
@@ -14,6 +15,12 @@ export async function executePlan(args: string, projectPath: string): Promise<vo
     return
   }
 
+  // Auto-approve file diffs during plan generation — the plan approval card
+  // is the real approval mechanism, so inline diff prompts are redundant.
+  const permStore = usePermissionStore.getState()
+  const prevAutoApprove = permStore.autoApproveDiffs
+  permStore.setAutoApproveDiffs(true)
+
   // Run the architect agent with reasoning model (Qwen 3.6 Plus via OpenRouter)
   const agentService = AgentService.getInstance()
   agentService.setRequestType('plan')
@@ -24,6 +31,7 @@ export async function executePlan(args: string, projectPath: string): Promise<vo
     })
   } finally {
     agentService.setRequestType(null)
+    permStore.setAutoApproveDiffs(prevAutoApprove)
   }
 
   // Only show approval card if the agent didn't error out
@@ -37,6 +45,11 @@ export async function handlePlanApprove(projectPath: string): Promise<void> {
 
   chatStore.addSystemMessage('Plan approved. Generating development task list...')
 
+  // Auto-approve file diffs during TODO generation (same rationale as plan generation)
+  const permStore = usePermissionStore.getState()
+  const prevAutoApprove = permStore.autoApproveDiffs
+  permStore.setAutoApproveDiffs(true)
+
   // Generate TODO.md from the approved plan (with reasoning model)
   const agentService = AgentService.getInstance()
   agentService.setRequestType('plan')
@@ -47,6 +60,7 @@ export async function handlePlanApprove(projectPath: string): Promise<void> {
     })
   } finally {
     agentService.setRequestType(null)
+    permStore.setAutoApproveDiffs(prevAutoApprove)
   }
 
   // Only show todo card if the agent didn't error out

@@ -18,7 +18,7 @@ use commands::terminal::*;
 use tauri::image::Image;
 use tauri::webview::NewWindowResponse;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
 
 // ── Preview webview (separate window approach — reliable on all platforms) ────
@@ -537,7 +537,7 @@ pub fn run() {
 
             // Create main window.
             // Dev: WebviewUrl::default() → Vite dev server (http://localhost:1420)
-            // Prod: localhost plugin serves app via HTTP (port 1430) so iframes work
+            // Prod: localhost plugin serves app via HTTP (port 14300) so iframes work
             //       without cross-protocol (tauri:// vs http://) restrictions.
             let app_handle_for_popup = app.handle().clone();
 
@@ -637,6 +637,13 @@ pub fn run() {
                             }
                             map.clear();
                         }
+                    }
+                }
+                // Notify main window when OAuth popup is closed (cancelled by user).
+                // Firebase checks oauthProxy.closed to detect popup dismissal.
+                if window.label() == "oauth-popup" {
+                    if let Some(main) = window.app_handle().get_webview_window("main") {
+                        let _ = main.emit("oauth-popup-closed", ());
                     }
                 }
             }

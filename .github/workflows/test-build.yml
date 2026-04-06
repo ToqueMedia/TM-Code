@@ -1,0 +1,84 @@
+name: Test Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Target platform'
+        required: true
+        type: choice
+        options:
+          - windows-latest
+          - ubuntu-22.04
+          - macos-latest
+        default: windows-latest
+      macos-target:
+        description: 'macOS target (ignored for other platforms)'
+        required: false
+        type: choice
+        options:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+        default: aarch64-apple-darwin
+
+jobs:
+  build:
+    runs-on: ${{ inputs.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux dependencies
+        if: inputs.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          VITE_USE_EMULATORS: 'false'
+          VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
+          VITE_DASHSCOPE_API_KEY: ${{ secrets.VITE_DASHSCOPE_API_KEY }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: 'maiplayer-ac56d.firebaseapp.com'
+          VITE_FIREBASE_PROJECT_ID: 'maiplayer-ac56d'
+          VITE_FIREBASE_STORAGE_BUCKET: 'maiplayer-ac56d.firebasestorage.app'
+          VITE_FIREBASE_MESSAGING_SENDER_ID: '113004896685'
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: 'G-S6V1T01G96'
+        with:
+          args: ${{ inputs.platform == 'macos-latest' && format('--target {0}', inputs.macos-target) || '' }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tm-code-${{ inputs.platform }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.app.tar.gz
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.AppImage
+          retention-days: 7

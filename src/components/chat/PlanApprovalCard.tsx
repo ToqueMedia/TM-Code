@@ -16,7 +16,6 @@ interface PlanApprovalCardProps {
 
 function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
   const { projectPath, status } = card
-  const isStreaming = useChatStore(s => s.isStreaming)
 
   const handleApprove = useCallback(async () => {
     useChatStore.getState().updateCardStatus(messageId, 'approved')
@@ -108,7 +107,7 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
 
       {/* Action buttons or status */}
       {status === 'pending' && (
-        <Flex gap={2} flexWrap="wrap" opacity={isStreaming ? 0.4 : 1} pointerEvents={isStreaming ? 'none' : 'auto'}>
+        <Flex gap={2} flexWrap="wrap">
           <Flex
             as="button"
             align="center"

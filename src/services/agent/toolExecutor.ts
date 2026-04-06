@@ -8,6 +8,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
+import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
 // TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
@@ -1215,13 +1216,13 @@ class ToolExecutor {
 
         const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
 
-        const response = await fetch(`${workerUrl}/v1/web-fetch`, {
+        const response = await tauriFetch(`${workerUrl}/v1/web-fetch`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${idToken}`
           },
-          body: JSON.stringify({ url, maxLength })
+          body: JSON.stringify({ url, maxLength }),
         })
 
         if (!response.ok) {

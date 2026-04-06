@@ -27,6 +27,7 @@ import {
 import { useAuthStore } from '../../stores/authStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
+import { tauriFetch } from '../tauriFetch'
 
 // Firebase config from environment variables — no hardcoded fallbacks.
 // Lazy initialization: validated on first use (not at import time) so tests
@@ -78,7 +79,7 @@ function ensureFirebase() {
           }
 
           const idToken = await user.getIdToken()
-          const res = await fetch(`${workerUrl}/v1/appcheck-token`, {
+          const res = await tauriFetch(`${workerUrl}/v1/appcheck-token`, {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${idToken}`,
@@ -323,7 +324,7 @@ class FirebaseAuthService {
         if (gen !== this.authGeneration) return
 
         const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
-        const res = await fetch(`${workerUrl}/v1/me`, {
+        const res = await tauriFetch(`${workerUrl}/v1/me`, {
           headers: { 'Authorization': `Bearer ${token}` },
         })
 

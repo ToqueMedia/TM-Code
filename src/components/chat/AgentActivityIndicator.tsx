@@ -122,31 +122,32 @@ function AgentActivityIndicator() {
         />
       </Text>
 
-      {/* Elapsed time + tokens with directional arrow */}
+      {/* Elapsed time + total tokens + directional arrow (single element to avoid duplicate renders) */}
       <Text
         fontSize="11.5px"
         color={tokens.colors.text.disabled}
         fontFamily={tokens.fontFamily.mono}
         whiteSpace="nowrap"
       >
-        {`(${formatElapsed(elapsed)}${
-          (inputTokens > 0 || outputTokens > 0)
-            ? ` · ${formatTokens(inputTokens + outputTokens)}`
-            : ''
-        })`}
+        ({formatElapsed(elapsed)}
+        {(inputTokens > 0 || outputTokens > 0) && (
+          <>
+            {' \u00B7 '}
+            {formatTokens(inputTokens + outputTokens)}
+            {')'}
+            {' '}
+            <Box
+              as="span"
+              fontSize="11px"
+              css={{
+                display: 'inline',
+                color: isSending ? tokens.colors.accent.orange : tokens.colors.accent.greenBright,
+              }}
+            >{isSending ? '\u2191' : '\u2193'}</Box>
+          </>
+        )}
+        {(inputTokens === 0 && outputTokens === 0) && ')'}
       </Text>
-      {(inputTokens > 0 || outputTokens > 0) && (
-        <Box
-          as="span"
-          fontSize="11px"
-          css={{
-            display: 'inline-block',
-            transition: 'transform 0.3s ease, color 0.3s ease',
-            transform: isSending ? 'rotate(0deg)' : 'rotate(180deg)',
-            color: isSending ? tokens.colors.accent.orange : tokens.colors.accent.greenBright,
-          }}
-        >{'\u2191'}</Box>
-      )}
     </Flex>
   )
 }
