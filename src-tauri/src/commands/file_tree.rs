@@ -508,7 +508,9 @@ pub async fn write_file(path: String, content: String) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    tokio::fs::write(&canonical, content).await.map_err(FileTreeError::from)
+    tokio::fs::write(&canonical, content)
+        .await
+        .map_err(FileTreeError::from)
 }
 
 // Create a new file

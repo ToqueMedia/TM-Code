@@ -93,7 +93,10 @@ pub async fn fim_completion(
     });
 
     // Store abort handle so next request can cancel this one
-    *fim_state.current_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
+    *fim_state
+        .current_task
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
 
     match task.await {
         Ok(result) => result,

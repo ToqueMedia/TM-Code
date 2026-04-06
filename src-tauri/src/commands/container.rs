@@ -20,12 +20,16 @@ fn colima_socket_path() -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn colima_socket_path() -> Option<String> { None }
+fn colima_socket_path() -> Option<String> {
+    None
+}
 
 /// Recover Colima from any broken state (macOS only).
 /// On Windows/Linux, returns false immediately (Colima is not available).
 #[cfg(not(target_os = "macos"))]
-pub fn recover_colima() -> bool { false }
+pub fn recover_colima() -> bool {
+    false
+}
 
 /// Recover Colima from any broken state. Escalates through:
 /// 1. stop + start (fixes stale socket after sleep/wake)
@@ -63,29 +67,59 @@ fn recover_colima_inner() -> bool {
         .map(|s| s.success())
         .unwrap_or(false);
 
-    if !has_colima { return false; }
+    if !has_colima {
+        return false;
+    }
 
     // Attempt 1: gentle restart
-    let _ = Command::new("colima").args(["stop"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = Command::new("colima")
+        .args(["stop"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let _ = Command::new("colima").args(["start"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = Command::new("colima")
+        .args(["start"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     std::thread::sleep(std::time::Duration::from_secs(3));
 
-    if test_docker_connection() { return true; }
+    if test_docker_connection() {
+        return true;
+    }
 
     // Attempt 2: kill stale Lima processes, clean state, then restart
-    let _ = Command::new("colima").args(["stop"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = Command::new("colima")
+        .args(["stop"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     let _ = Command::new("sh").args(["-c", "pkill -9 -f 'limactl hostagent.*colima' 2>/dev/null; pkill -9 -f 'colima daemon' 2>/dev/null"]).status();
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let _ = Command::new("colima").args(["start"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = Command::new("colima")
+        .args(["start"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     std::thread::sleep(std::time::Duration::from_secs(3));
 
-    if test_docker_connection() { return true; }
+    if test_docker_connection() {
+        return true;
+    }
 
     // Attempt 3: nuclear — delete VM and recreate (destroys containers)
-    let _ = Command::new("colima").args(["delete", "-f"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = Command::new("colima")
+        .args(["delete", "-f"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     std::thread::sleep(std::time::Duration::from_secs(1));
-    let _ = Command::new("colima").args(["start"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = Command::new("colima")
+        .args(["start"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     std::thread::sleep(std::time::Duration::from_secs(3));
 
     test_docker_connection()
@@ -382,12 +416,7 @@ pub async fn create_project_container(
         .and_then(|c| c.forward_ports.clone())
         .unwrap_or_else(|| EXPOSED_PORTS.to_vec());
 
-    let tail_args: Vec<String> = vec![
-        img.clone(),
-        "tail".into(),
-        "-f".into(),
-        "/dev/null".into(),
-    ];
+    let tail_args: Vec<String> = vec![img.clone(), "tail".into(), "-f".into(), "/dev/null".into()];
 
     // Try with port mappings; retry without on conflict
     let mut args_with_ports = base_args.clone();
@@ -405,8 +434,7 @@ pub async fn create_project_container(
     let create_stdout = if !create.status.success() {
         let stderr = String::from_utf8_lossy(&create.stderr);
 
-        if stderr.contains("port is already allocated")
-            || stderr.contains("address already in use")
+        if stderr.contains("port is already allocated") || stderr.contains("address already in use")
         {
             let _ = docker_cmd().args(["rm", "-f", &name]).output();
 
@@ -532,7 +560,13 @@ pub async fn create_project_container(
         .map_err(|_| "Lock error")?
         .insert(project_id.clone(), info.clone());
 
-    set_active(&active_project, &project_id, &project_path, Some(&name), false)?;
+    set_active(
+        &active_project,
+        &project_id,
+        &project_path,
+        Some(&name),
+        false,
+    )?;
 
     Ok(info)
 }
@@ -553,10 +587,7 @@ async fn resolve_image(
             let dockerfile = config_base.join(&build.dockerfile);
 
             if !dockerfile.is_file() {
-                return Err(format!(
-                    "Dockerfile not found: {}",
-                    dockerfile.display()
-                ));
+                return Err(format!("Dockerfile not found: {}", dockerfile.display()));
             }
 
             let context = build
@@ -587,8 +618,15 @@ async fn resolve_image(
                         return Err(format!("Invalid build-arg key: {}", key));
                     }
                     // Reject values with shell metacharacters that could escape build context
-                    if val.contains(';') || val.contains('|') || val.contains('`') || val.contains("$(") {
-                        return Err(format!("Invalid build-arg value for {}: contains shell metacharacters", key));
+                    if val.contains(';')
+                        || val.contains('|')
+                        || val.contains('`')
+                        || val.contains("$(")
+                    {
+                        return Err(format!(
+                            "Invalid build-arg value for {}: contains shell metacharacters",
+                            key
+                        ));
                     }
                     args.push("--build-arg".into());
                     args.push(format!("{}={}", key, val));
@@ -597,12 +635,11 @@ async fn resolve_image(
 
             args.push(context.to_string_lossy().to_string());
 
-            let build_result = tokio::task::spawn_blocking(move || {
-                docker_cmd().args(&args).output()
-            })
-            .await
-            .map_err(|e| format!("Build task failed: {}", e))?
-            .map_err(|e| format!("Docker build failed: {}", e))?;
+            let build_result =
+                tokio::task::spawn_blocking(move || docker_cmd().args(&args).output())
+                    .await
+                    .map_err(|e| format!("Build task failed: {}", e))?
+                    .map_err(|e| format!("Docker build failed: {}", e))?;
 
             if !build_result.status.success() {
                 return Err(format!(
@@ -643,12 +680,10 @@ async fn ensure_image_available(image: &str) -> Result<String, String> {
 
     if !has_image {
         let img = image.to_string();
-        let pull = tokio::task::spawn_blocking(move || {
-            docker_cmd().args(["pull", &img]).output()
-        })
-        .await
-        .map_err(|e| format!("Pull task failed: {}", e))?
-        .map_err(|e| format!("Failed to pull image: {}", e))?;
+        let pull = tokio::task::spawn_blocking(move || docker_cmd().args(["pull", &img]).output())
+            .await
+            .map_err(|e| format!("Pull task failed: {}", e))?
+            .map_err(|e| format!("Failed to pull image: {}", e))?;
 
         if !pull.status.success() {
             return Err(format!(

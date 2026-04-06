@@ -10,8 +10,8 @@ pub mod http_client;
 pub mod issue_reporter;
 pub mod mcp;
 pub mod project;
-pub mod search;
 pub mod sandbox;
+pub mod search;
 pub mod terminal;
 
 /// Normalize a path to forward slashes for the TypeScript frontend.

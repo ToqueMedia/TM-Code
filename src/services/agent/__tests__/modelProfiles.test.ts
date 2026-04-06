@@ -20,13 +20,14 @@ describe('modelProfiles', () => {
       const ids = Object.keys(MODEL_PROFILES)
       expect(ids).toContain('mimo-v2-flash')
       expect(ids).toContain('deepseek-v3.2')
+      expect(ids).toContain('step-3.5-flash')
       expect(ids).toContain('glm-5')
       expect(ids).toContain('kimi-k2.5')
       expect(ids).toContain('qwen3-coder-next')
       expect(ids).toContain('minimax-m2.5')
       expect(ids).toContain('qwen3.6-plus')
       expect(ids).toContain('gemini-3-flash')
-      expect(ids.length).toBe(8)
+      expect(ids.length).toBe(9)
     })
 
     it('mimo-v2-flash has correct specs', () => {
@@ -56,7 +57,7 @@ describe('modelProfiles', () => {
   describe('getAllModelProfiles', () => {
     it('returns all profiles', () => {
       const all = getAllModelProfiles()
-      expect(all.length).toBe(8)
+      expect(all.length).toBe(9)
     })
   })
 
@@ -70,19 +71,19 @@ describe('modelProfiles', () => {
     it('pro gets all models EXCEPT mimo', () => {
       const models = getModelsForPlan('pro')
       expect(models.every(m => m.id !== FREE_MODEL_ID)).toBe(true)
-      expect(models.length).toBe(7)
+      expect(models.length).toBe(8)
     })
 
     it('business-4x gets all models EXCEPT mimo', () => {
       const models = getModelsForPlan('business-4x')
       expect(models.every(m => m.id !== FREE_MODEL_ID)).toBe(true)
-      expect(models.length).toBe(7)
+      expect(models.length).toBe(8)
     })
 
     it('business-8x gets all models EXCEPT mimo', () => {
       const models = getModelsForPlan('business-8x')
       expect(models.every(m => m.id !== FREE_MODEL_ID)).toBe(true)
-      expect(models.length).toBe(7)
+      expect(models.length).toBe(8)
     })
   })
 

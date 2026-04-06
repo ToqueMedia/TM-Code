@@ -74,7 +74,9 @@ pub async fn git_diff_lines(file_path: String) -> Result<Vec<GitLineChange>, Str
         return Err("Not a git repository".to_string());
     }
 
-    let root = String::from_utf8_lossy(&repo_root.stdout).trim().to_string();
+    let root = String::from_utf8_lossy(&repo_root.stdout)
+        .trim()
+        .to_string();
 
     // Convert absolute path to relative path from git root
     let rel_path = abs_path
@@ -187,7 +189,11 @@ pub async fn git_status_files(project_path: String) -> Result<Vec<GitFileStatus>
 
         // Handle renames: "R  old -> new"
         let display_path = if file_path.contains(" -> ") {
-            file_path.split(" -> ").last().unwrap_or(&file_path).to_string()
+            file_path
+                .split(" -> ")
+                .last()
+                .unwrap_or(&file_path)
+                .to_string()
         } else {
             file_path
         };
@@ -342,7 +348,10 @@ pub async fn git_commit(project_path: String, message: String) -> Result<String,
     let signed_message = if message.contains("Co-Authored-By:") {
         message
     } else {
-        format!("{}\n\nCo-Authored-By: TM Code <tm.code@toquemedia.net>", message.trim())
+        format!(
+            "{}\n\nCo-Authored-By: TM Code <tm.code@toquemedia.net>",
+            message.trim()
+        )
     };
 
     let output = git_cmd(&project_path)
@@ -408,13 +417,23 @@ pub async fn git_current_branch(project_path: String) -> Result<String, String> 
 
 /// Push to remote
 #[tauri::command]
-pub async fn git_push(project_path: String, remote: Option<String>, branch: Option<String>) -> Result<String, String> {
+pub async fn git_push(
+    project_path: String,
+    remote: Option<String>,
+    branch: Option<String>,
+) -> Result<String, String> {
     let mut cmd = git_cmd(&project_path);
     cmd.arg("push");
-    if let Some(r) = &remote { cmd.arg(r); }
-    if let Some(b) = &branch { cmd.arg(b); }
+    if let Some(r) = &remote {
+        cmd.arg(r);
+    }
+    if let Some(b) = &branch {
+        cmd.arg(b);
+    }
 
-    let output = cmd.output().map_err(|e| format!("git push failed: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("git push failed: {}", e))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
@@ -426,13 +445,23 @@ pub async fn git_push(project_path: String, remote: Option<String>, branch: Opti
 
 /// Pull from remote
 #[tauri::command]
-pub async fn git_pull(project_path: String, remote: Option<String>, branch: Option<String>) -> Result<String, String> {
+pub async fn git_pull(
+    project_path: String,
+    remote: Option<String>,
+    branch: Option<String>,
+) -> Result<String, String> {
     let mut cmd = git_cmd(&project_path);
     cmd.arg("pull");
-    if let Some(r) = &remote { cmd.arg(r); }
-    if let Some(b) = &branch { cmd.arg(b); }
+    if let Some(r) = &remote {
+        cmd.arg(r);
+    }
+    if let Some(b) = &branch {
+        cmd.arg(b);
+    }
 
-    let output = cmd.output().map_err(|e| format!("git pull failed: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("git pull failed: {}", e))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }

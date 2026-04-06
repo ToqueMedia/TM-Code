@@ -156,9 +156,7 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
 
                 let path_str = normalize_path_for_frontend(&path);
                 // Check excluded directories (always uses / after normalization)
-                let has_excluded = |segment: &str| {
-                    path_str.contains(&format!("/{}/", segment))
-                };
+                let has_excluded = |segment: &str| path_str.contains(&format!("/{}/", segment));
                 if !has_excluded("node_modules")
                     && !has_excluded(".git")
                     && !has_excluded("dist")

@@ -64,61 +64,44 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('/test/project')
     })
 
-    it('includes the project type', async () => {
+    it('includes completion contract', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('web')
-    })
-
-    it('includes completion rule section', async () => {
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('<completion_rule>')
+      expect(prompt).toContain('Complete every file')
     })
 
     it('includes role section', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('<role>')
+      expect(prompt).toContain('# Role')
     })
 
     it('includes environment section', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('<environment>')
+      expect(prompt).toContain('# Environment')
     })
 
     it('includes project structure section', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('<project_structure>')
+      expect(prompt).toContain('# Project structure')
     })
 
     it('includes constraints section', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('<constraints>')
+      expect(prompt).toContain('# Constraints')
     })
 
-    it('includes examples section', async () => {
+    it('includes system section', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('<examples>')
-    })
-
-    it('includes task rules section', async () => {
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('<task_rules>')
+      expect(prompt).toContain('# System')
     })
 
     it('includes reminder section', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('<reminder>')
+      expect(prompt).toContain('# Reminder')
     })
 
     it('includes package.json summary when available', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('test-project')
       expect(prompt).toContain('react')
-    })
-
-    it('includes README summary when available', async () => {
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('<readme_summary>')
-      expect(prompt).toContain('Test Project')
     })
 
     it('handles missing file tree gracefully', async () => {

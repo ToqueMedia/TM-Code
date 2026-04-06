@@ -53,7 +53,6 @@ const GLOBAL_MAX_MATCHES: usize = 500;
 /// Max line length sent to frontend (longer lines are truncated).
 const MAX_LINE_LENGTH: usize = 500;
 
-
 #[tauri::command]
 pub async fn search_in_files(
     query: String,
@@ -129,10 +128,12 @@ pub async fn search_in_files(
         .arg("--line-number")
         .arg("--column")
         .arg("--no-heading")
-        .arg("--max-filesize").arg("1M")
+        .arg("--max-filesize")
+        .arg("1M")
         // Limit matches per file so results span more files instead of
         // flooding from a few files with hundreds of hits.
-        .arg("--max-count").arg("10");
+        .arg("--max-count")
+        .arg("10");
 
     if !options.case_sensitive {
         cmd.arg("--ignore-case");
@@ -157,7 +158,8 @@ pub async fn search_in_files(
 
     // Exclude hidden directories (.*/) and common build artifacts/lock files
     cmd.arg("--hidden") // needed so --glob can match dotfiles to exclude them
-        .arg("--glob").arg("!.*/**"); // exclude ALL dot-directories (.git, .next, .yarn, .nuxt, .pnpm, etc.)
+        .arg("--glob")
+        .arg("!.*/**"); // exclude ALL dot-directories (.git, .next, .yarn, .nuxt, .pnpm, etc.)
 
     for exclude in &[
         "!node_modules/**",
@@ -242,7 +244,11 @@ pub async fn search_in_files(
             None => continue,
         };
 
-        let path = match data.get("path").and_then(|p| p.get("text")).and_then(|t| t.as_str()) {
+        let path = match data
+            .get("path")
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+        {
             Some(p) => p,
             None => continue,
         };
@@ -329,10 +335,12 @@ pub async fn search_in_files(
     // near the top when searching for "index".
     let query_lower = query.to_lowercase();
     files.sort_by(|a, b| {
-        let a_name = std::path::Path::new(&a.file_path).file_name()
+        let a_name = std::path::Path::new(&a.file_path)
+            .file_name()
             .map(|n| n.to_string_lossy().to_lowercase())
             .unwrap_or_else(|| a.file_path.to_lowercase());
-        let b_name = std::path::Path::new(&b.file_path).file_name()
+        let b_name = std::path::Path::new(&b.file_path)
+            .file_name()
             .map(|n| n.to_string_lossy().to_lowercase())
             .unwrap_or_else(|| b.file_path.to_lowercase());
         let a_in_name = a_name.contains(&query_lower);
@@ -379,7 +387,7 @@ async fn search_with_grep(
         cmd.arg("-F");
     }
 
-    cmd.arg("--exclude-dir=.*")  // all dot-directories
+    cmd.arg("--exclude-dir=.*") // all dot-directories
         .arg("--exclude-dir=node_modules")
         .arg("--exclude-dir=dist")
         .arg("--exclude-dir=build")
@@ -407,7 +415,10 @@ async fn search_with_grep(
 
     cmd.arg("--").arg(query).arg(directory);
 
-    let output = cmd.output().await.map_err(|e| format!("grep failed: {}", e))?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("grep failed: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut file_map: std::collections::HashMap<String, FileSearchResult> =
@@ -480,8 +491,8 @@ async fn search_with_findstr(
     start_time: std::time::Instant,
 ) -> Result<SearchResult, String> {
     let mut cmd = tokio::process::Command::new("findstr");
-    cmd.arg("/S")  // search subdirectories
-       .arg("/N"); // print line numbers
+    cmd.arg("/S") // search subdirectories
+        .arg("/N"); // print line numbers
 
     if !options.case_sensitive {
         cmd.arg("/I");
@@ -494,8 +505,7 @@ async fn search_with_findstr(
     }
 
     // findstr pattern and file spec
-    cmd.arg(query)
-       .arg(format!("{}\\*", directory));
+    cmd.arg(query).arg(format!("{}\\*", directory));
 
     // Hide console window on Windows
     #[cfg(target_os = "windows")]
@@ -505,7 +515,10 @@ async fn search_with_findstr(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let output = cmd.output().await.map_err(|e| format!("findstr failed: {}", e))?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("findstr failed: {}", e))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut file_map: std::collections::HashMap<String, FileSearchResult> =
         std::collections::HashMap::new();
@@ -519,13 +532,30 @@ async fn search_with_findstr(
 
         let parts: Vec<&str> = line.splitn(3, ':').collect();
         // Windows paths have C: prefix — need at least 4 parts for drive letter
-        let (file_path, line_number, text) = if parts.len() >= 2 && parts[0].len() == 1 && parts[0].chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+        let (file_path, line_number, text) = if parts.len() >= 2
+            && parts[0].len() == 1
+            && parts[0]
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic())
+                .unwrap_or(false)
+        {
             // Drive letter detected: "C:path:line:text"
             let rest: Vec<&str> = line[2..].splitn(3, ':').collect();
-            if rest.len() < 3 { continue; }
-            (format!("{}:{}", parts[0], rest[0]), rest[1].parse::<u32>().unwrap_or(0), rest[2].to_string())
+            if rest.len() < 3 {
+                continue;
+            }
+            (
+                format!("{}:{}", parts[0], rest[0]),
+                rest[1].parse::<u32>().unwrap_or(0),
+                rest[2].to_string(),
+            )
         } else if parts.len() >= 3 {
-            (parts[0].to_string(), parts[1].parse::<u32>().unwrap_or(0), parts[2].to_string())
+            (
+                parts[0].to_string(),
+                parts[1].parse::<u32>().unwrap_or(0),
+                parts[2].to_string(),
+            )
         } else {
             continue;
         };
@@ -674,8 +704,7 @@ pub async fn replace_in_files(
     for file_path in &files {
         // Canonicalize to match directory_path (which is canonicalized).
         // On Windows, canonicalize returns UNC paths (\\?\C:\...) — both must match.
-        let path = std::fs::canonicalize(file_path)
-            .unwrap_or_else(|_| PathBuf::from(file_path));
+        let path = std::fs::canonicalize(file_path).unwrap_or_else(|_| PathBuf::from(file_path));
         if !path.starts_with(&directory_path) {
             continue;
         }

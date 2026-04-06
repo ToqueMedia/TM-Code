@@ -1,3 +1,7 @@
+use super::container::{
+    clamp_to_project, docker_cmd, host_to_container_path, recover_colima, ActiveProjectState,
+    WORKSPACE_PATH,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -7,10 +11,6 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, State};
-use super::container::{
-    docker_cmd, recover_colima, clamp_to_project, host_to_container_path,
-    ActiveProjectState, WORKSPACE_PATH,
-};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,77 +50,91 @@ static USER_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new
 /// Call once at app startup (from lib.rs setup) to pre-warm the PATH cache
 /// on a background thread. Non-blocking.
 pub fn init_user_path() {
-    std::thread::spawn(|| { get_user_path(); });
+    std::thread::spawn(|| {
+        get_user_path();
+    });
 }
 
 pub fn get_user_path() -> Option<&'static str> {
-    USER_PATH.get_or_init(|| {
-        // On Windows, the system PATH is already correct — no shell extraction needed.
-        if cfg!(target_os = "windows") {
-            eprintln!("[PATH] Windows detected — using inherited PATH");
-            return None;
-        }
+    USER_PATH
+        .get_or_init(|| {
+            // On Windows, the system PATH is already correct — no shell extraction needed.
+            if cfg!(target_os = "windows") {
+                eprintln!("[PATH] Windows detected — using inherited PATH");
+                return None;
+            }
 
-        let user_shell = std::env::var("SHELL").unwrap_or_default();
-        eprintln!("[PATH] Extracting user PATH... SHELL={:?}", user_shell);
+            let user_shell = std::env::var("SHELL").unwrap_or_default();
+            eprintln!("[PATH] Extracting user PATH... SHELL={:?}", user_shell);
 
-        // fish has incompatible syntax ($PATH is a list, not colon-delimited).
-        // Use zsh or bash as a POSIX fallback for PATH extraction.
-        let shells: Vec<String> = if user_shell.ends_with("/fish") {
-            vec!["/bin/zsh".into(), "/bin/bash".into()]
-        } else if user_shell.is_empty() {
-            vec!["/bin/zsh".into()]
-        } else {
-            vec![user_shell, "/bin/zsh".into()]
-        };
+            // fish has incompatible syntax ($PATH is a list, not colon-delimited).
+            // Use zsh or bash as a POSIX fallback for PATH extraction.
+            let shells: Vec<String> = if user_shell.ends_with("/fish") {
+                vec!["/bin/zsh".into(), "/bin/bash".into()]
+            } else if user_shell.is_empty() {
+                vec!["/bin/zsh".into()]
+            } else {
+                vec![user_shell, "/bin/zsh".into()]
+            };
 
-        // Try interactive-login first (-i -l) to pick up .zshrc/.bashrc (nvm, volta, brew on M1),
-        // then fall back to login-only (-l) which reads .zprofile/.bash_profile.
-        let flag_sets: &[&[&str]] = &[&["-i", "-l", "-c"], &["-l", "-c"]];
-        for flags in flag_sets {
-            for shell in &shells {
-                // Run in a thread with channel-based timeout to avoid hangs
-                // from complex shell configs (oh-my-zsh, compinit, starship, etc.)
-                let shell_for_thread = shell.clone();
-                let flags_vec: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
-                let flags_dbg = format!("{:?}", flags); // for logging
-                let shell_dbg = shell.clone();
-                let (tx, rx) = std::sync::mpsc::channel();
+            // Try interactive-login first (-i -l) to pick up .zshrc/.bashrc (nvm, volta, brew on M1),
+            // then fall back to login-only (-l) which reads .zprofile/.bash_profile.
+            let flag_sets: &[&[&str]] = &[&["-i", "-l", "-c"], &["-l", "-c"]];
+            for flags in flag_sets {
+                for shell in &shells {
+                    // Run in a thread with channel-based timeout to avoid hangs
+                    // from complex shell configs (oh-my-zsh, compinit, starship, etc.)
+                    let shell_for_thread = shell.clone();
+                    let flags_vec: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
+                    let flags_dbg = format!("{:?}", flags); // for logging
+                    let shell_dbg = shell.clone();
+                    let (tx, rx) = std::sync::mpsc::channel();
 
-                std::thread::spawn(move || {
-                    let result = std::process::Command::new(&shell_for_thread)
-                        .args(&flags_vec)
-                        .arg("printf '%s' \"$PATH\"")
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::null())
-                        .stdin(Stdio::null())
-                        .output();
-                    let _ = tx.send(result);
-                });
+                    std::thread::spawn(move || {
+                        let result = std::process::Command::new(&shell_for_thread)
+                            .args(&flags_vec)
+                            .arg("printf '%s' \"$PATH\"")
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::null())
+                            .stdin(Stdio::null())
+                            .output();
+                        let _ = tx.send(result);
+                    });
 
-                match rx.recv_timeout(Duration::from_secs(5)) {
-                    Ok(Ok(output)) if output.status.success() => {
-                        if let Ok(path) = String::from_utf8(output.stdout) {
-                            if !path.is_empty() {
-                                eprintln!("[PATH] Success via {} {} ({} chars)", shell_dbg, flags_dbg, path.len());
-                                return Some(path);
+                    match rx.recv_timeout(Duration::from_secs(5)) {
+                        Ok(Ok(output)) if output.status.success() => {
+                            if let Ok(path) = String::from_utf8(output.stdout) {
+                                if !path.is_empty() {
+                                    eprintln!(
+                                        "[PATH] Success via {} {} ({} chars)",
+                                        shell_dbg,
+                                        flags_dbg,
+                                        path.len()
+                                    );
+                                    return Some(path);
+                                }
                             }
                         }
-                    }
-                    Ok(Ok(output)) => {
-                        eprintln!("[PATH] {} {} exited with {:?}", shell_dbg, flags_dbg, output.status.code());
-                    }
-                    Ok(Err(e)) => {
-                        eprintln!("[PATH] {} {} spawn error: {}", shell_dbg, flags_dbg, e);
-                    }
-                    Err(_) => {
-                        eprintln!("[PATH] {} {} timed out (5s)", shell_dbg, flags_dbg);
+                        Ok(Ok(output)) => {
+                            eprintln!(
+                                "[PATH] {} {} exited with {:?}",
+                                shell_dbg,
+                                flags_dbg,
+                                output.status.code()
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("[PATH] {} {} spawn error: {}", shell_dbg, flags_dbg, e);
+                        }
+                        Err(_) => {
+                            eprintln!("[PATH] {} {} timed out (5s)", shell_dbg, flags_dbg);
+                        }
                     }
                 }
             }
-        }
-        None
-    }).as_deref()
+            None
+        })
+        .as_deref()
 }
 
 /// Prevent a visible CMD/console window from flashing on Windows.
@@ -178,7 +192,8 @@ fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
         let nvm_bin = std::fs::read_dir(format!("{}/.nvm/versions/node", home))
             .ok()
             .and_then(|entries| {
-                entries.filter_map(|e| e.ok())
+                entries
+                    .filter_map(|e| e.ok())
                     .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
                     .max_by_key(|e| e.file_name())
                     .map(|e| format!("{}/bin", e.path().display()))
@@ -193,7 +208,8 @@ fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
             "/opt/homebrew/bin",
             "/usr/local/bin",
         ];
-        let prepend: String = extra_dirs.iter()
+        let prepend: String = extra_dirs
+            .iter()
             .filter(|d| !d.is_empty())
             .copied()
             .collect::<Vec<_>>()
@@ -241,9 +257,19 @@ fn ensure_container_running(container_name: &str) {
 fn build_container_command(command: &str, workdir: &str, container_name: &str) -> Command {
     let mut cmd = docker_cmd();
     let home_env = format!("HOME={}", workdir);
-    cmd.args(["exec", "-e", &home_env, "-w", workdir, container_name, "sh", "-c", command])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args([
+        "exec",
+        "-e",
+        &home_env,
+        "-w",
+        workdir,
+        container_name,
+        "sh",
+        "-c",
+        command,
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
 
     #[cfg(unix)]
     {
@@ -480,11 +506,7 @@ struct DevServerOutput {
 /// Validate a byte slice as UTF-8, emit the valid portion, and handle errors:
 /// - Incomplete sequence at the end → save to `leftover` for the next read
 /// - Genuinely invalid bytes → replace with U+FFFD and continue
-fn emit_utf8_validated(
-    data: &[u8],
-    leftover: &mut Vec<u8>,
-    emit: &dyn Fn(&str),
-) {
+fn emit_utf8_validated(data: &[u8], leftover: &mut Vec<u8>, emit: &dyn Fn(&str)) {
     let mut pos = 0;
     while pos < data.len() {
         match std::str::from_utf8(&data[pos..]) {
@@ -524,19 +546,19 @@ fn emit_utf8_validated(
 /// Handles incomplete UTF-8 sequences at 4KB read boundaries by carrying
 /// leftover bytes to the next read, so multi-byte characters are never split.
 /// Genuinely invalid bytes are replaced with U+FFFD and emitted immediately.
-fn stream_pipe_to_events(
-    pipe: &mut dyn Read,
-    pid: u32,
-    stream_name: &str,
-    app: &tauri::AppHandle,
-) {
+fn stream_pipe_to_events(pipe: &mut dyn Read, pid: u32, stream_name: &str, app: &tauri::AppHandle) {
     let mut buf = [0u8; 4096];
     let mut leftover: Vec<u8> = Vec::new();
 
     let emit = |text: &str| {
-        let _ = app.emit("cmd-output", DevServerOutput {
-            pid, stream: stream_name.into(), data: text.to_string(),
-        });
+        let _ = app.emit(
+            "cmd-output",
+            DevServerOutput {
+                pid,
+                stream: stream_name.into(),
+                data: text.to_string(),
+            },
+        );
     };
 
     loop {
@@ -601,7 +623,10 @@ pub async fn run_streaming_command(
         Err(e) => {
             if let Some(ref ap) = project {
                 if ap.container_name.is_some() {
-                    eprintln!("[cmd] Docker exec failed ({}), falling back to host execution", e);
+                    eprintln!(
+                        "[cmd] Docker exec failed ({}), falling back to host execution",
+                        e
+                    );
                     let working_dir = PathBuf::from(clamp_to_project(&cwd, &ap.project_path));
                     build_host_command(&command, &working_dir)
                         .spawn()
@@ -638,9 +663,7 @@ pub async fn run_streaming_command(
     // Wait for process exit and emit exit code
     let app_clone = app.clone();
     std::thread::spawn(move || {
-        let code = child.wait()
-            .map(|s| s.code().unwrap_or(-1))
-            .unwrap_or(-1);
+        let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
         let _ = app_clone.emit("cmd-exit", serde_json::json!({ "pid": pid, "code": code }));
     });
 
@@ -687,62 +710,74 @@ pub async fn start_dev_server(
             if !docker_reachable {
                 eprintln!("[dev-server] Docker not reachable, using host mode");
                 let clamped = clamp_to_project(&cwd, &ap.project_path);
-                let (shell, flag) = if cfg!(target_os = "windows") { ("cmd", "/C") } else { ("sh", "-c") };
+                let (shell, flag) = if cfg!(target_os = "windows") {
+                    ("cmd", "/C")
+                } else {
+                    ("sh", "-c")
+                };
                 let mut c = Command::new(shell);
-                c.arg(flag).arg(&command).current_dir(&clamped)
-                    .env("FORCE_COLOR", "0").env("NO_COLOR", "1")
-                    .env("PORT", &port_str).env("BROWSER", "none")
-                    .stdout(Stdio::piped()).stderr(Stdio::piped());
-                if let Some(path) = get_user_path() { c.env("PATH", path); }
+                c.arg(flag)
+                    .arg(&command)
+                    .current_dir(&clamped)
+                    .env("FORCE_COLOR", "0")
+                    .env("NO_COLOR", "1")
+                    .env("PORT", &port_str)
+                    .env("BROWSER", "none")
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                if let Some(path) = get_user_path() {
+                    c.env("PATH", path);
+                }
                 hide_console_window(&mut c);
-                #[cfg(unix)] { use std::os::unix::process::CommandExt; c.process_group(0); }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    c.process_group(0);
+                }
                 c
             } else {
-            // Docker mode — ensure container is running first
-            ensure_container_running(container_name);
+                // Docker mode — ensure container is running first
+                ensure_container_running(container_name);
 
-            let workdir = host_to_container_path(&cwd, &ap.project_path);
-            let mut c = docker_cmd();
-            // Kill any orphaned dev server on the target port inside the container,
-            // then run the actual command. Use fuser (busybox-compatible) instead of lsof.
-            let wrapped = format!(
-                "fuser -k {}/tcp 2>/dev/null; {}",
-                server_port, command
-            );
-            let port_env = format!("PORT={}", server_port);
-            c.args([
-                "exec",
-                "-w",
-                &workdir,
-                "-e",
-                "FORCE_COLOR=0",
-                "-e",
-                "NO_COLOR=1",
-                "-e",
-                &port_env,
-                "-e",
-                "BROWSER=none",
-                // Bind to 0.0.0.0 so port mapping works from host.
-                // Different frameworks read different vars (Vite: HOST, Next: HOSTNAME).
-                "-e",
-                "HOST=0.0.0.0",
-                "-e",
-                "HOSTNAME=0.0.0.0",
-                container_name,
-                "sh",
-                "-c",
-                &wrapped,
-            ]);
+                let workdir = host_to_container_path(&cwd, &ap.project_path);
+                let mut c = docker_cmd();
+                // Kill any orphaned dev server on the target port inside the container,
+                // then run the actual command. Use fuser (busybox-compatible) instead of lsof.
+                let wrapped = format!("fuser -k {}/tcp 2>/dev/null; {}", server_port, command);
+                let port_env = format!("PORT={}", server_port);
+                c.args([
+                    "exec",
+                    "-w",
+                    &workdir,
+                    "-e",
+                    "FORCE_COLOR=0",
+                    "-e",
+                    "NO_COLOR=1",
+                    "-e",
+                    &port_env,
+                    "-e",
+                    "BROWSER=none",
+                    // Bind to 0.0.0.0 so port mapping works from host.
+                    // Different frameworks read different vars (Vite: HOST, Next: HOSTNAME).
+                    "-e",
+                    "HOST=0.0.0.0",
+                    "-e",
+                    "HOSTNAME=0.0.0.0",
+                    container_name,
+                    "sh",
+                    "-c",
+                    &wrapped,
+                ]);
 
-            // MUST set own process group so kill_process doesn't kill the IDE
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                c.process_group(0);
-            }
+                // MUST set own process group so kill_process doesn't kill the IDE
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    c.process_group(0);
+                }
 
-            c.stdout(Stdio::piped()).stderr(Stdio::piped());
-            c
+                c.stdout(Stdio::piped()).stderr(Stdio::piped());
+                c
             } // end docker_reachable else
         } else {
             // App-level isolation: sandbox the dev server command
@@ -793,10 +828,18 @@ pub async fn start_dev_server(
         Err(e) => {
             if let Some(ref ap) = project {
                 if ap.container_name.is_some() {
-                    eprintln!("[dev-server] Docker exec failed ({}), falling back to host", e);
-                    let (shell, flag) = if cfg!(target_os = "windows") { ("cmd", "/C") } else { ("sh", "-c") };
+                    eprintln!(
+                        "[dev-server] Docker exec failed ({}), falling back to host",
+                        e
+                    );
+                    let (shell, flag) = if cfg!(target_os = "windows") {
+                        ("cmd", "/C")
+                    } else {
+                        ("sh", "-c")
+                    };
                     let mut fallback = Command::new(shell);
-                    fallback.arg(flag)
+                    fallback
+                        .arg(flag)
                         .arg(&command)
                         .current_dir(&ap.project_path)
                         .env("FORCE_COLOR", "0")
@@ -805,10 +848,18 @@ pub async fn start_dev_server(
                         .env("BROWSER", "none")
                         .stdout(Stdio::piped())
                         .stderr(Stdio::piped());
-                    if let Some(path) = get_user_path() { fallback.env("PATH", path); }
+                    if let Some(path) = get_user_path() {
+                        fallback.env("PATH", path);
+                    }
                     hide_console_window(&mut fallback);
-                    #[cfg(unix)] { use std::os::unix::process::CommandExt; fallback.process_group(0); }
-                    fallback.spawn().map_err(|e2| format!("Failed to start dev server (host fallback): {}", e2))?
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        fallback.process_group(0);
+                    }
+                    fallback.spawn().map_err(|e2| {
+                        format!("Failed to start dev server (host fallback): {}", e2)
+                    })?
                 } else {
                     return Err(format!("Failed to start dev server: {}", e));
                 }
@@ -956,9 +1007,7 @@ pub async fn start_interactive_shell(
             let shell = if has_bash { "bash" } else { "sh" };
 
             let child = docker_cmd()
-                .args([
-                    "exec", "-i", "-w", &workdir, container_name, shell,
-                ])
+                .args(["exec", "-i", "-w", &workdir, container_name, shell])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1001,7 +1050,8 @@ pub async fn start_interactive_shell(
 
         hide_console_window(&mut cmd);
 
-        let child = cmd.spawn()
+        let child = cmd
+            .spawn()
             .map_err(|e| format!("Failed to start interactive shell: {}", e))?;
 
         let pid = child.id();
@@ -1042,7 +1092,8 @@ pub async fn start_interactive_shell(
 
     hide_console_window(&mut cmd);
 
-    let child = cmd.spawn()
+    let child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to start interactive shell: {}", e))?;
 
     let pid = child.id();
@@ -1081,9 +1132,7 @@ pub async fn check_server_health(url: String) -> Result<bool, String> {
 pub async fn kill_port(port: u16) -> Result<bool, String> {
     if cfg!(unix) {
         let cmd = format!("lsof -ti:{} | xargs kill -9 2>/dev/null", port);
-        let _ = Command::new("sh")
-            .args(["-c", &cmd])
-            .output();
+        let _ = Command::new("sh").args(["-c", &cmd]).output();
     } else {
         let cmd = format!(
             "for /f \"tokens=5\" %a in ('netstat -aon ^| findstr :{} ^| findstr LISTENING') do taskkill /F /PID %a",
@@ -1101,7 +1150,9 @@ pub async fn kill_port(port: u16) -> Result<bool, String> {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let port_free = if cfg!(unix) {
             let check = format!("lsof -ti:{}", port);
-            Command::new("sh").args(["-c", &check]).output()
+            Command::new("sh")
+                .args(["-c", &check])
+                .output()
                 .map(|o| o.stdout.is_empty())
                 .unwrap_or(true)
         } else {
@@ -1109,9 +1160,7 @@ pub async fn kill_port(port: u16) -> Result<bool, String> {
             let mut nc = Command::new("cmd");
             nc.args(["/C", &check]);
             hide_console_window(&mut nc);
-            nc.output()
-                .map(|o| o.stdout.is_empty())
-                .unwrap_or(true)
+            nc.output().map(|o| o.stdout.is_empty()).unwrap_or(true)
         };
         if port_free {
             return Ok(true);
@@ -1225,10 +1274,7 @@ pub async fn change_directory(
 
     // After canonicalization, re-check that we're still inside the project
     if let Some(ref ap) = project {
-        let clamped = clamp_to_project(
-            &canonical.to_string_lossy(),
-            &ap.project_path,
-        );
+        let clamped = clamp_to_project(&canonical.to_string_lossy(), &ap.project_path);
         return Ok(clamped);
     }
 
@@ -1262,7 +1308,8 @@ pub async fn command_exists(
         let mut cmd = Command::new("where");
         cmd.arg(&command);
         hide_console_window(&mut cmd);
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| format!("Failed to check command existence: {}", e))?;
         Ok(output.status.success())
     } else {
@@ -1271,7 +1318,8 @@ pub async fn command_exists(
         if let Some(path) = get_user_path() {
             cmd.env("PATH", path);
         }
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| format!("Failed to check command existence: {}", e))?;
         Ok(output.status.success())
     }
@@ -1316,8 +1364,7 @@ pub async fn get_environment_variables(
                 for line in String::from_utf8_lossy(&output.stdout).lines() {
                     if let Some((key, value)) = line.split_once('=') {
                         let upper = key.to_uppercase();
-                        let is_sensitive =
-                            sensitive_patterns.iter().any(|pat| upper.contains(pat));
+                        let is_sensitive = sensitive_patterns.iter().any(|pat| upper.contains(pat));
                         if !is_sensitive {
                             env_vars.insert(key.to_string(), value.to_string());
                         }
@@ -1355,9 +1402,7 @@ pub async fn get_completions(
         (Some(dir), Some(ap)) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
         (Some(dir), None) => PathBuf::from(dir),
         (None, Some(ap)) => PathBuf::from(&ap.project_path),
-        (None, None) => {
-            env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?
-        }
+        (None, None) => env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?,
     };
 
     // Docker mode: use compgen inside container
@@ -1376,7 +1421,15 @@ pub async fn get_completions(
                 safe_workdir, safe_partial
             );
             let output = docker_cmd()
-                .args(["exec", "-w", &workdir, container_name, "bash", "-c", &script])
+                .args([
+                    "exec",
+                    "-w",
+                    &workdir,
+                    container_name,
+                    "bash",
+                    "-c",
+                    &script,
+                ])
                 .output()
                 .map_err(|e| format!("Docker completion failed: {}", e))?;
 
@@ -1399,7 +1452,8 @@ pub async fn get_completions(
     let (search_dir, prefix) = if has_path_sep {
         // Path completion: "src/comp" → search in "src/", filter by "comp"
         let parent = partial_path.parent().unwrap_or(std::path::Path::new(""));
-        let file_prefix = partial_path.file_name()
+        let file_prefix = partial_path
+            .file_name()
             .and_then(|f| f.to_str())
             .unwrap_or("");
 
@@ -1425,21 +1479,23 @@ pub async fn get_completions(
                 }
                 if name.starts_with(&prefix) {
                     // Add trailing / for directories
-                    let sep = if cfg!(target_os = "windows") { "\\" } else { "/" };
+                    let sep = if cfg!(target_os = "windows") {
+                        "\\"
+                    } else {
+                        "/"
+                    };
                     let display = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         if has_path_sep {
                             // Reconstruct relative path: "src/" + "components/"
-                            let parent_str = partial_path.parent()
-                                .and_then(|p| p.to_str())
-                                .unwrap_or("");
+                            let parent_str =
+                                partial_path.parent().and_then(|p| p.to_str()).unwrap_or("");
                             format!("{}{}{}{}", parent_str, sep, name, sep)
                         } else {
                             format!("{}{}", name, sep)
                         }
                     } else if has_path_sep {
-                        let parent_str = partial_path.parent()
-                            .and_then(|p| p.to_str())
-                            .unwrap_or("");
+                        let parent_str =
+                            partial_path.parent().and_then(|p| p.to_str()).unwrap_or("");
                         format!("{}{}{}", parent_str, sep, name)
                     } else {
                         name.to_string()
@@ -1455,7 +1511,10 @@ pub async fn get_completions(
         // Shell-escape partial to prevent command injection
         let safe_partial = partial.replace('\'', "'\\''");
         if let Ok(output) = Command::new("bash")
-            .args(["-c", &format!("compgen -c -- '{}' 2>/dev/null | head -20", safe_partial)])
+            .args([
+                "-c",
+                &format!("compgen -c -- '{}' 2>/dev/null | head -20", safe_partial),
+            ])
             .output()
         {
             if output.status.success() {

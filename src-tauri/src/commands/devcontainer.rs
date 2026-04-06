@@ -82,17 +82,24 @@ impl LifecycleCommand {
                 // Block dangerous shell patterns that indicate injection attempts.
                 // Legitimate lifecycle commands are simple (e.g. "npm install && npm run build").
                 let blocked = [
-                    "$(", "`",           // command substitution
-                    ">/dev/tcp",         // bash TCP redirect
-                    "| bash", "| sh",    // pipe to shell
-                    "curl ", "wget ",    // download + execute patterns
-                    "eval ", "exec ",    // dynamic execution
-                    "rm -rf /",          // destructive
+                    "$(",
+                    "`",         // command substitution
+                    ">/dev/tcp", // bash TCP redirect
+                    "| bash",
+                    "| sh", // pipe to shell
+                    "curl ",
+                    "wget ", // download + execute patterns
+                    "eval ",
+                    "exec ",    // dynamic execution
+                    "rm -rf /", // destructive
                 ];
                 let lower = s.to_lowercase();
                 for pattern in &blocked {
                     if lower.contains(pattern) {
-                        return format!("echo 'Blocked: devcontainer command contains disallowed pattern: {}'", pattern);
+                        return format!(
+                            "echo 'Blocked: devcontainer command contains disallowed pattern: {}'",
+                            pattern
+                        );
                     }
                 }
                 s.clone()

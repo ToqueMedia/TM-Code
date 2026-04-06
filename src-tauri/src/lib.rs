@@ -11,15 +11,15 @@ use commands::http_client::*;
 use commands::issue_reporter::*;
 use commands::mcp::*;
 use commands::project::*;
-use commands::search::*;
 use commands::sandbox::*;
+use commands::search::*;
 use commands::terminal::*;
 
 use tauri::image::Image;
-use tauri::webview::NewWindowResponse;
-use tauri::{WebviewUrl, WebviewWindowBuilder};
-use tauri::{Emitter, Manager};
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
+use tauri::webview::NewWindowResponse;
+use tauri::{Emitter, Manager};
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 // ── Preview webview (separate window approach — reliable on all platforms) ────
 
@@ -43,7 +43,9 @@ impl WvHolder {
     fn clear(&mut self) {
         if let Some(mut wv) = self.0.take() {
             // Safety: we only drop once, on the main thread
-            unsafe { ManuallyDrop::drop(&mut wv); }
+            unsafe {
+                ManuallyDrop::drop(&mut wv);
+            }
         }
     }
     fn get(&self) -> Option<&wry::WebView> {
@@ -60,7 +62,10 @@ fn preview() -> &'static std::sync::Mutex<WvHolder> {
 fn open_preview_webview(
     app: tauri::AppHandle,
     url: String,
-    x: f64, y: f64, width: f64, height: f64,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 ) -> std::result::Result<(), String> {
     // Close existing
     preview().lock().map_err(|e| format!("{}", e))?.clear();
@@ -284,51 +289,73 @@ fn close_preview_webview() -> std::result::Result<(), String> {
 
 #[tauri::command]
 fn resize_preview_webview(
-    x: f64, y: f64, width: f64, height: f64,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 ) -> std::result::Result<(), String> {
     let store = preview().lock().map_err(|e| format!("{}", e))?;
     if let Some(wv) = store.get() {
         wv.set_bounds(wry::Rect {
             position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(x, y)),
             size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(width, height)),
-        }).map_err(|e| format!("{}", e))?;
+        })
+        .map_err(|e| format!("{}", e))?;
     }
     Ok(())
 }
 
 /// Raw HTTP GET via TcpStream — bypasses reqwest issues with localhost.
-fn raw_http_get(host_port: &str, path: &str) -> std::result::Result<(u16, String, Vec<u8>), String> {
+fn raw_http_get(
+    host_port: &str,
+    path: &str,
+) -> std::result::Result<(u16, String, Vec<u8>), String> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
     // Use ToSocketAddrs to resolve "localhost" → [::1] or 127.0.0.1
-    let mut stream = TcpStream::connect(host_port)
-        .map_err(|e| format!("Connection refused: {}", e))?;
-    stream.set_write_timeout(Some(std::time::Duration::from_secs(3))).ok();
+    let mut stream =
+        TcpStream::connect(host_port).map_err(|e| format!("Connection refused: {}", e))?;
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+        .ok();
 
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok();
 
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         path, host_port
     );
-    stream.write_all(request.as_bytes()).map_err(|e| format!("Write failed: {}", e))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("Write failed: {}", e))?;
 
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| format!("Read failed: {}", e))?;
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("Read failed: {}", e))?;
 
     let response = String::from_utf8_lossy(&buf);
 
     // Parse status line
     let status_line = response.lines().next().unwrap_or("HTTP/1.1 502");
-    let status: u16 = status_line.split_whitespace().nth(1)
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(502);
 
     // Parse Content-Type header
-    let content_type = response.lines()
+    let content_type = response
+        .lines()
         .find(|l| l.to_lowercase().starts_with("content-type:"))
-        .map(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default())
+        .map(|l| {
+            l.split_once(':')
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap_or_default()
+        })
         .unwrap_or_else(|| "text/html; charset=utf-8".to_string());
 
     // Split headers from body (double CRLF)

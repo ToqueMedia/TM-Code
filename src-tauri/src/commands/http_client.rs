@@ -35,7 +35,12 @@ pub async fn http_client_request(input: HttpRequestInput) -> Result<HttpResponse
     // Only accept invalid certs for localhost dev servers (self-signed).
     // Remote URLs must have valid TLS certificates.
     let is_localhost = reqwest::Url::parse(&input.url)
-        .map(|u| matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "0.0.0.0" | "::1")))
+        .map(|u| {
+            matches!(
+                u.host_str(),
+                Some("localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+            )
+        })
         .unwrap_or(false);
 
     let client = reqwest::Client::builder()
@@ -72,7 +77,7 @@ pub async fn http_client_request(input: HttpRequestInput) -> Result<HttpResponse
                     IpAddr::V4(v4) => {
                         v4.is_link_local()           // 169.254.x.x
                         || v4.is_broadcast()         // 255.255.255.255
-                        || v4.octets()[0] == 0       // 0.x.x.x
+                        || v4.octets()[0] == 0 // 0.x.x.x
                     }
                     IpAddr::V6(v6) => v6.is_loopback() && host != "::1",
                 };

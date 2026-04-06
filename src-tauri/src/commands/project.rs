@@ -308,7 +308,12 @@ pub fn open_project(path: String, init_git: Option<bool>) -> Result<ProjectInfo>
             "C:\\Program Files (x86)\\Git\\bin\\git.exe",
         ];
         #[cfg(not(target_os = "windows"))]
-        let git_candidates = ["git", "/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"];
+        let git_candidates = [
+            "git",
+            "/usr/bin/git",
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+        ];
         let mut initialized = false;
 
         for git_bin in &git_candidates {
@@ -325,7 +330,10 @@ pub fn open_project(path: String, init_git: Option<bool>) -> Result<ProjectInfo>
         }
 
         if !initialized {
-            eprintln!("[open_project] git init failed for {:?} — none of the git candidates worked", project_path);
+            eprintln!(
+                "[open_project] git init failed for {:?} — none of the git candidates worked",
+                project_path
+            );
         }
     }
 
@@ -893,7 +901,10 @@ pub fn save_project_state(project_id: String, state: ProjectState) -> Result<()>
     if settings_path.exists() {
         if let Ok(content) = fs::read_to_string(&settings_path) {
             if let Ok(settings) = serde_json::from_str::<GlobalSettings>(&content) {
-                let already_in_list = settings.recent_projects.iter().any(|p| p.id == project_info.id);
+                let already_in_list = settings
+                    .recent_projects
+                    .iter()
+                    .any(|p| p.id == project_info.id);
                 if already_in_list {
                     update_recent_projects(&project_info)?;
                 }
@@ -1176,7 +1187,9 @@ fn is_valid_npm_name(name: &str) -> bool {
         return false;
     }
 
-    let Some(first_char) = name.chars().next() else { return false };
+    let Some(first_char) = name.chars().next() else {
+        return false;
+    };
     if !first_char.is_ascii_lowercase() {
         return false;
     }

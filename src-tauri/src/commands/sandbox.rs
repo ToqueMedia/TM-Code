@@ -33,15 +33,21 @@ fn check_tools() -> bool {
     {
         Command::new("sandbox-exec")
             .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
     #[cfg(target_os = "linux")]
     {
         Command::new("bwrap")
             .arg("--version")
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
     #[cfg(target_os = "windows")]
     {
@@ -49,7 +55,9 @@ fn check_tools() -> bool {
         is_wsl2_available()
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    { false }
+    {
+        false
+    }
 }
 
 /// Create a Command that runs without a visible console window on Windows.
@@ -70,12 +78,11 @@ fn is_wsl2_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-        &&
-    silent_command("wsl")
-        .args(["bwrap", "--version"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        && silent_command("wsl")
+            .args(["bwrap", "--version"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
 }
 
 /// Returns Some(Command) if sandbox is enabled+available, None otherwise.
@@ -89,16 +96,24 @@ pub fn sandboxed_command(
     }
 
     #[cfg(target_os = "macos")]
-    { Some(macos::build(command, project_path, extra_writable)) }
+    {
+        Some(macos::build(command, project_path, extra_writable))
+    }
 
     #[cfg(target_os = "linux")]
-    { Some(linux::build(command, project_path, extra_writable)) }
+    {
+        Some(linux::build(command, project_path, extra_writable))
+    }
 
     #[cfg(target_os = "windows")]
-    { windows::build(command, project_path, extra_writable) }
+    {
+        windows::build(command, project_path, extra_writable)
+    }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    { None }
+    {
+        None
+    }
 }
 
 /// Sanitize a path for embedding in Seatbelt profile strings.
@@ -114,10 +129,12 @@ mod macos {
     use super::*;
 
     pub fn build(command: &str, project_path: &Path, extra_writable: &[&str]) -> Command {
-        let home = sanitize_path(&std::env::var("HOME").unwrap_or_else(|_| "/Users/unknown".into()));
+        let home =
+            sanitize_path(&std::env::var("HOME").unwrap_or_else(|_| "/Users/unknown".into()));
         let project = sanitize_path(&project_path.to_string_lossy());
 
-        let extra = extra_writable.iter()
+        let extra = extra_writable
+            .iter()
             .map(|p| format!("(allow file-write* (subpath \"{}\"))", sanitize_path(p)))
             .collect::<Vec<_>>()
             .join("\n");
@@ -125,7 +142,8 @@ mod macos {
         // Allow-by-default, deny sensitive paths.
         // More permissive than deny-default but actually works — tools like node, npm,
         // git need dozens of mach services and file paths that are impossible to whitelist.
-        let profile = format!(r#"(version 1)
+        let profile = format!(
+            r#"(version 1)
 (allow default)
 
 ;; === STEP 1: Block other users ===
@@ -170,13 +188,18 @@ mod macos {
 )
 
 {extra}
-"#);
+"#
+        );
 
         let mut cmd = Command::new("sandbox-exec");
-        cmd.arg("-p").arg(&profile)
-            .arg("sh").arg("-c").arg(command)
+        cmd.arg("-p")
+            .arg(&profile)
+            .arg("sh")
+            .arg("-c")
+            .arg(command)
             .current_dir(project_path)
-            .stdout(Stdio::piped()).stderr(Stdio::piped());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         if let Some(path) = super::super::terminal::get_user_path() {
             cmd.env("PATH", path);
@@ -200,21 +223,35 @@ mod linux {
 
         let mut cmd = Command::new("bwrap");
         cmd.args([
-            "--ro-bind", "/", "/",
-            "--bind", &*project, &*project,
-            "--bind", "/tmp", "/tmp",
-            "--dev", "/dev",
-            "--proc", "/proc",
+            "--ro-bind",
+            "/",
+            "/",
+            "--bind",
+            &*project,
+            &*project,
+            "--bind",
+            "/tmp",
+            "/tmp",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
             "--unshare-pid",
             "--die-with-parent",
         ]);
 
         // Block sensitive directories
         let sensitive_dirs = [
-            ".ssh", ".aws", ".gnupg", ".docker",
-            ".config/gh", ".config/gcloud",
-            ".kube", ".azure",
-            ".password-store", ".1password",
+            ".ssh",
+            ".aws",
+            ".gnupg",
+            ".docker",
+            ".config/gh",
+            ".config/gcloud",
+            ".kube",
+            ".azure",
+            ".password-store",
+            ".1password",
         ];
         for dir in &sensitive_dirs {
             let p = format!("{}/{}", home, dir);
@@ -225,10 +262,16 @@ mod linux {
 
         // Block sensitive files (use /dev/null bind since --tmpfs only works on dirs)
         let sensitive_files = [
-            ".bash_history", ".zsh_history", ".python_history",
-            ".netrc", ".git-credentials",
-            ".npmrc", ".pypirc", ".m2/settings.xml",
-            ".env", ".env.local",
+            ".bash_history",
+            ".zsh_history",
+            ".python_history",
+            ".netrc",
+            ".git-credentials",
+            ".npmrc",
+            ".pypirc",
+            ".m2/settings.xml",
+            ".env",
+            ".env.local",
         ];
         for file in &sensitive_files {
             let p = format!("{}/{}", home, file);
@@ -252,7 +295,8 @@ mod linux {
 
         cmd.arg("sh").arg("-c").arg(command);
         cmd.current_dir(project_path)
-            .stdout(Stdio::piped()).stderr(Stdio::piped());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         if let Some(path) = super::super::terminal::get_user_path() {
             cmd.env("PATH", path);
@@ -298,9 +342,12 @@ mod windows {
         bwrap_args.push_str(&format!(" sh -c '{}'", command.replace('\'', "'\\''")));
 
         let mut cmd = Command::new("wsl");
-        cmd.arg("bash").arg("-c").arg(&bwrap_args)
+        cmd.arg("bash")
+            .arg("-c")
+            .arg(&bwrap_args)
             .current_dir(project_path)
-            .stdout(Stdio::piped()).stderr(Stdio::piped());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -324,7 +371,10 @@ mod windows {
 
 #[tauri::command]
 pub fn sandbox_set_enabled(enabled: bool) {
-    eprintln!("[sandbox] {} by user", if enabled { "Enabled" } else { "Disabled" });
+    eprintln!(
+        "[sandbox] {} by user",
+        if enabled { "Enabled" } else { "Disabled" }
+    );
     SANDBOX_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
@@ -342,9 +392,13 @@ pub fn sandbox_check_deps() -> SandboxDeps {
 
     #[cfg(target_os = "linux")]
     {
-        if !Command::new("bwrap").arg("--version")
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false)
+        if !Command::new("bwrap")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
         {
             missing.push("bubblewrap (bwrap)".into());
             hints.push("Install: sudo apt install bubblewrap".into());
@@ -353,20 +407,30 @@ pub fn sandbox_check_deps() -> SandboxDeps {
 
     #[cfg(target_os = "windows")]
     {
-        if !silent_command("wsl").args(["--status"])
-            .status().map(|s| s.success()).unwrap_or(false)
+        if !silent_command("wsl")
+            .args(["--status"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
         {
             missing.push("WSL2".into());
             hints.push("Install: wsl --install".into());
-        } else if !silent_command("wsl").args(["bwrap", "--version"])
-            .status().map(|s| s.success()).unwrap_or(false)
+        } else if !silent_command("wsl")
+            .args(["bwrap", "--version"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
         {
             missing.push("bubblewrap inside WSL".into());
             hints.push("Run in WSL: sudo apt install bubblewrap".into());
         }
     }
 
-    SandboxDeps { ok: missing.is_empty(), missing, hints }
+    SandboxDeps {
+        ok: missing.is_empty(),
+        missing,
+        hints,
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -381,10 +445,15 @@ pub fn sandbox_status() -> SandboxInfo {
     SandboxInfo {
         enabled: is_sandbox_enabled(),
         available: is_sandbox_available(),
-        platform: if cfg!(target_os = "macos") { "macos" }
-                  else if cfg!(target_os = "linux") { "linux" }
-                  else if cfg!(target_os = "windows") { "windows" }
-                  else { "unsupported" },
+        platform: if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            "unsupported"
+        },
     }
 }
 
