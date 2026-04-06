@@ -280,7 +280,7 @@ pub async fn search_in_files(
                 files.push(file);
             }
             current_file = Some(FileSearchResult {
-                file_path: normalize_str_for_frontend(&path),
+                file_path: normalize_str_for_frontend(path),
                 matches: vec![],
                 total_matches: 0,
             });

@@ -135,7 +135,7 @@ pub async fn send_issue_report(input: IssueReportInput) -> Result<IssueReportRes
     let status = resp.status().as_u16();
     let body = resp.text().await.unwrap_or_default();
 
-    if status >= 200 && status < 300 {
+    if (200..300).contains(&status) {
         Ok(IssueReportResult {
             success: true,
             message: "Issue report sent successfully".to_string(),
@@ -199,5 +199,5 @@ fn days_from_epoch(mut days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(y: u64) -> bool {
-    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+    y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400))
 }

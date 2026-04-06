@@ -49,7 +49,7 @@ impl WvHolder {
         }
     }
     fn get(&self) -> Option<&wry::WebView> {
-        self.0.as_ref().map(|m| &**m)
+        self.0.as_deref()
     }
 }
 
@@ -180,7 +180,7 @@ fn open_preview_webview(
                             .replace('\r', "");
                         let safe_level = level.replace('\'', "\\'");
                         if let Some(win) = app_for_ipc.get_webview_window("main") {
-                            let _ = win.eval(&format!(
+                            let _ = win.eval(format!(
                                 "window.dispatchEvent(new CustomEvent('preview-console',{{detail:{{level:'{}',text:'{}'}}}}));",
                                 safe_level, safe_text
                             ));
@@ -212,7 +212,7 @@ fn open_preview_webview(
 
                 match result {
                     Ok((status, content_type, body)) => {
-                        let _ = responder.respond(
+                        responder.respond(
                             wry::http::Response::builder()
                                 .status(status)
                                 .header("Content-Type", content_type)
@@ -223,7 +223,7 @@ fn open_preview_webview(
                     }
                     Err(e) => {
                         eprintln!("[preview] Proxy error: {} -> {}", full_url, e);
-                        let _ = responder.respond(
+                        responder.respond(
                             wry::http::Response::builder()
                                 .status(502)
                                 .header("Content-Type", "text/html")
@@ -554,7 +554,7 @@ pub fn run() {
                         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
                         .collect();
                     if let Some(window) = app_handle.get_webview_window("main") {
-                        let _: std::result::Result<(), _> = window.eval(&format!(
+                        let _: std::result::Result<(), _> = window.eval(format!(
                             "window.dispatchEvent(new CustomEvent('native-menu', {{ detail: {{ id: '{}' }} }}))",
                             safe_id
                         ));
