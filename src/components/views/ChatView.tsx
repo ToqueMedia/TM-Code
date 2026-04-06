@@ -37,6 +37,8 @@ function ChatView() {
   const raw7dUtil = useBillingStore(s => s.envelope7dUtilization)
   const envelope5hReset = useBillingStore(s => s.envelope5hReset)
   const envelope7dReset = useBillingStore(s => s.envelope7dReset)
+  const envelopeMonthlyConsumed = useBillingStore(s => s.envelopeMonthlyConsumed)
+  const envelopeMonthlyLimit = useBillingStore(s => s.envelopeMonthlyLimit)
   // Force re-render when a window expires so utilization drops to 0.
   // Capped at 1 hour — longer durations are handled by the next API call.
   const MAX_TIMER_MS = 60 * 60 * 1000
@@ -162,6 +164,8 @@ function ChatView() {
             envelope7dUtil={envelope7dUtil}
             envelope5hReset={envelope5hReset}
             envelope7dReset={envelope7dReset}
+            envelopeMonthlyConsumed={envelopeMonthlyConsumed}
+            envelopeMonthlyLimit={envelopeMonthlyLimit}
             envelopeStatus={envelopeStatus}
             tmsStatus={tmsStatus}
             tmsRemaining={tmsRemaining}
@@ -318,6 +322,8 @@ function CreditIndicator(props: {
   envelope7dUtil: number
   envelope5hReset: number
   envelope7dReset: number
+  envelopeMonthlyConsumed: number
+  envelopeMonthlyLimit: number
   envelopeStatus: string
   tmsStatus: string
   tmsRemaining: number
@@ -540,6 +546,34 @@ function CreditIndicator(props: {
                 </Box>
                 <Text fontSize="9px" color={tokens.colors.text.disabled}>
                   {hasActiveWeek ? `${t('chat.resetsIn')} ${formatReset(props.envelope7dReset)}` : t('chat.noActiveSession')}
+                </Text>
+              </VStack>
+            )
+          })()}
+
+          {/* Monthly envelope — primary metric users intuitively understand */}
+          {props.envelopeMonthlyLimit > 0 && (() => {
+            const monthlyUtil = Math.min(1, props.envelopeMonthlyConsumed / props.envelopeMonthlyLimit)
+            const monthlyPct = Math.round(monthlyUtil * 100)
+            const consumedM = (props.envelopeMonthlyConsumed / 1_000_000).toFixed(2)
+            const limitM = (props.envelopeMonthlyLimit / 1_000_000).toFixed(0)
+            return (
+              <VStack gap={0.5} align="stretch" w="100%">
+                <Flex justify="space-between" w="100%">
+                  <Text fontSize="10px" color={tokens.colors.text.muted}>{t('chat.sessionMonthly')}</Text>
+                  <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
+                    color={monthlyUtil >= 1 ? tokens.colors.accent.red : monthlyUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}>
+                    {monthlyPct}%
+                  </Text>
+                </Flex>
+                <Box w="100%" h="3px" borderRadius="full" bg="rgba(255, 255, 255, 0.06)" overflow="hidden">
+                  <Box h="100%" borderRadius="full"
+                    bg={getBarColor(monthlyUtil)}
+                    width={`${Math.max(2, monthlyPct)}%`}
+                    transition="width 0.5s ease" />
+                </Box>
+                <Text fontSize="9px" color={tokens.colors.text.disabled}>
+                  {consumedM}M / {limitM}M {t('chat.tokensMonth')}
                 </Text>
               </VStack>
             )

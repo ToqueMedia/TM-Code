@@ -114,7 +114,7 @@ function AgentStatusBar() {
     if (bgDone > 0) parts.push(`${bgDone} done`)
     infoSegments.push(`bg: ${parts.join(', ')}`)
   }
-  infoSegments.push(`${formatTokens(totalTokens)} tokens`)
+  infoSegments.push(`${t('chat.session')}: ${formatTokens(totalTokens)}`)
   infoSegments.push(`${currentTurnCount} turns`)
 
   const isolationBadge = isolationMode === 'docker'
