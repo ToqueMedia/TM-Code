@@ -125,6 +125,7 @@ fn recover_colima_inner() -> bool {
     test_docker_connection()
 }
 
+#[cfg(target_os = "macos")]
 fn test_docker_connection() -> bool {
     let mut test = Command::new("docker");
     if let Some(sock) = colima_socket_path() {

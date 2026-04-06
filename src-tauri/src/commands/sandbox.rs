@@ -118,6 +118,7 @@ pub fn sandboxed_command(
 
 /// Sanitize a path for embedding in Seatbelt profile strings.
 /// Escapes `"` and `\` to prevent injection.
+#[cfg(target_os = "macos")]
 fn sanitize_path(path: &str) -> String {
     path.replace('\\', "\\\\").replace('"', "\\\"")
 }

@@ -16,6 +16,7 @@ use commands::search::*;
 use commands::terminal::*;
 
 use tauri::image::Image;
+#[cfg(target_os = "macos")]
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
 use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager};
