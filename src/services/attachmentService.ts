@@ -144,7 +144,7 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
       } else if (att.type === 'image') {
         const size = att.sizeBytes ? `${Math.round(att.sizeBytes / 1024)}KB` : 'unknown size'
         const source = att.path ? `path="${att.path}"` : 'source="clipboard"'
-        return `<attached_image name="${att.name}" mime="${att.mimeType || 'image/png'}" ${source} size="${size}">\n[Image attached — the model cannot view images directly. Describe what you need help with.]\n</attached_image>`
+        return `<attached_image name="${att.name}" mime="${att.mimeType || 'image/png'}" ${source} size="${size}">\n[Image attached — this model is text-only, so the image could not be shown. Describe what you need help with, or switch to a multimodal model.]\n</attached_image>`
       }
       return ''
     } catch {
@@ -154,6 +154,39 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
 
   const filtered = parts.filter(Boolean)
   return filtered.length > 0 ? '\n\n<attachments>\n' + filtered.join('\n') + '\n</attachments>' : ''
+}
+
+/**
+ * Resolve an image attachment to a data URI suitable for the
+ * OpenAI/OpenAI-compatible `image_url` content part.
+ *
+ * Returns `null` if the attachment is not an image, cannot be read,
+ * or exceeds the maximum size limit.
+ *
+ * The base64 is either already cached on the Attachment (for
+ * clipboard/drag-drop paths) or read from disk here (for file picker
+ * / mention paths that only captured the path).
+ */
+export async function resolveImageToDataUri(att: Attachment): Promise<string | null> {
+  if (att.type !== 'image') return null
+
+  // Fast path — already loaded at capture time.
+  if (att.base64 && att.base64.startsWith('data:')) return att.base64
+
+  // Slow path — read from disk. Only possible if we have a path.
+  if (!att.path) return null
+
+  try {
+    const { readFile } = await import('@tauri-apps/plugin-fs')
+    const bytes = await readFile(att.path)
+    if (bytes.byteLength > MAX_IMAGE_BYTES) return null
+
+    const ext = getExtension(att.name)
+    const mime = att.mimeType || (ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`)
+    return `data:${mime};base64,${uint8ToBase64(bytes)}`
+  } catch {
+    return null
+  }
 }
 
 function uint8ToBase64(bytes: Uint8Array): string {

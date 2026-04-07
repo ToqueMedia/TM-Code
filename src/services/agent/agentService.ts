@@ -13,12 +13,38 @@ import type { StreamEvent } from './streamParser'
 
 // === Types ===
 
+/**
+ * OpenAI / OpenAI-compatible content parts for multimodal user messages.
+ * Matches the shape consumed by vision-capable providers (Qwen3 Plus,
+ * Kimi K2.5, Step3.5, etc.) via the backend proxy.
+ *
+ * Non-vision models do not receive this shape — the caller flattens to
+ * a plain string before sending. See buildUserMessageContent.
+ */
+export type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } }
+
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content?: string | null
+  /** Plain string for text-only messages, array of parts for multimodal user messages. */
+  content?: string | OpenAIContentPart[] | null
   reasoning_content?: string | null
   tool_calls?: OpenAIToolCall[]
   tool_call_id?: string
+}
+
+/**
+ * Flatten an OpenAIMessage content field to a string for code that only
+ * needs the text (logging, summarisation, mechanical fallback). Image
+ * parts become `[image]` markers; text parts concatenate newline-joined.
+ */
+function contentAsText(content: OpenAIMessage['content']): string {
+  if (content == null) return ''
+  if (typeof content === 'string') return content
+  return content
+    .map(part => (part.type === 'text' ? part.text : '[image]'))
+    .join('\n')
 }
 
 interface OpenAIToolCall {
@@ -298,7 +324,7 @@ class AgentService {
   }
 
   async runAgentLoop(
-    userMessage: string,
+    userMessage: string | OpenAIContentPart[],
     conversationHistory: Array<{ role: string; content: string | null; tool_calls?: OpenAIToolCall[]; tool_call_id?: string }>,
     callbacks: AgentCallbacks
   ): Promise<void> {
@@ -856,7 +882,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     for (const msg of messages) {
       // Capture user requests
       if (msg.role === 'user' && msg.content) {
-        const text = msg.content.slice(0, 300)
+        const text = contentAsText(msg.content).slice(0, 300)
         if (!text.startsWith('[Compressed context')) {
           userRequests.push(text)
         }
@@ -864,7 +890,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
       // Capture assistant narration (first 200 chars per message)
       if (msg.role === 'assistant' && msg.content) {
-        assistantNarration.push(msg.content.slice(0, 200))
+        assistantNarration.push(contentAsText(msg.content).slice(0, 200))
       }
 
       // Extract tool call details
@@ -888,13 +914,16 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
         }
       }
 
-      // Capture tool results (both success and error)
+      // Capture tool results (both success and error).
+      // Tool messages are always string content — contentAsText is a no-op
+      // but keeps the narrow typed so TS is happy with the union.
       if (msg.role === 'tool' && msg.content) {
-        if (msg.content.startsWith('Error:')) {
-          errors.push(msg.content.slice(0, 300))
-        } else if (msg.content.length < 300) {
+        const text = contentAsText(msg.content)
+        if (text.startsWith('Error:')) {
+          errors.push(text.slice(0, 300))
+        } else if (text.length < 300) {
           // Short results are likely meaningful (e.g., "File updated: /path/to/file")
-          toolResults.push(msg.content)
+          toolResults.push(text)
         }
       }
     }
@@ -954,7 +983,10 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
    */
   private summarizeToolResult(toolMsg: OpenAIMessage, msgIndex: number, messages: OpenAIMessage[]): string {
     const toolCallId = toolMsg.tool_call_id
-    const content = toolMsg.content || ''
+    // Tool results are always string content (tools return strings); the
+    // union-type cast here is just to satisfy the new PromptValue-aware
+    // content type without restructuring the tool handling path.
+    const content = contentAsText(toolMsg.content) || ''
 
     // Short content or errors — keep as-is
     if (content.length < 200) return content

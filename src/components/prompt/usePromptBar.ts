@@ -14,85 +14,24 @@ import ContextBuilder from '../../services/agent/contextBuilder'
 import MCPService from '../../services/mcp/mcpService'
 import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
-import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, extractAndResolveMentions } from '../../services/attachmentService'
-import type { Attachment } from '../../types/chat'
+import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../../services/attachmentService'
 import {
   enqueue as enqueueMessage,
   clearCommandQueue as clearMessageQueue,
   joinPromptValues,
 } from '../../services/agent/messageQueue'
+import type { OpenAIContentPart } from '../../services/agent/agentService'
+import { getModelProfile } from '../../services/agent/modelProfiles'
+import {
+  buildAugmentedPrompt,
+  buildContentParts,
+  extractDisplayFromValue,
+} from '../../services/agent/promptValueHelpers'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { getQueryGuard } from '../../services/agent/queryGuard'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { logger } from '../../utils/logger'
-
-// === PromptValue helpers ===
-//
-// These three helpers translate between the queue's PromptValue
-// representation (string | ContentBlock[]) and the two consumer
-// shapes that need it: the chat bubble (text + attachments) and
-// the agent's augmented prompt (single text string).
-
-/**
- * Build (text, attachments) for chat bubble display from a PromptValue.
- * Strings pass through unchanged. Block arrays are flattened: text
- * blocks join with newline, attachment blocks collect into a list.
- * The bubble component renders both fields side-by-side as today.
- */
-function extractDisplayFromValue(value: PromptValue): { text: string; attachments: Attachment[] } {
-  if (typeof value === 'string') {
-    return { text: value, attachments: [] }
-  }
-  const texts: string[] = []
-  const attachments: Attachment[] = []
-  for (const block of value) {
-    if (block.type === 'text') {
-      if (block.text.length > 0) texts.push(block.text)
-    } else {
-      attachments.push(block.attachment)
-    }
-  }
-  return { text: texts.join('\n'), attachments }
-}
-
-/**
- * Build the augmented prompt sent to the model. For string values this
- * is the existing path: extract @mentions, append. For block values
- * this walks the blocks in order, producing text + per-attachment XML
- * markers inline so the model sees the same ordering the user typed.
- *
- * The interleaved form is what makes batching multiple
- * messages-with-attachments give correct context to the model. The
- * legacy "all text first, all attachments at the end" form would lose
- * the correspondence between text segment and image.
- */
-async function buildAugmentedPrompt(value: PromptValue, projectPath: string): Promise<string> {
-  if (typeof value === 'string') {
-    let augmented = value || 'Analyze the attached files.'
-    const mentionContext = await extractAndResolveMentions(augmented, projectPath)
-    if (mentionContext) augmented += mentionContext
-    return augmented
-  }
-
-  // Block path — walk in order.
-  const parts: string[] = []
-  for (const block of value) {
-    if (block.type === 'text') {
-      let text = block.text
-      const mentionContext = await extractAndResolveMentions(text, projectPath)
-      if (mentionContext) text += mentionContext
-      if (text.length > 0) parts.push(text)
-    } else {
-      // Per-attachment XML — same shape resolveAttachments produces but
-      // for a single attachment, so it can sit between text segments.
-      const xml = await resolveAttachments([block.attachment])
-      if (xml) parts.push(xml.trim())
-    }
-  }
-  // Fall back to a non-empty placeholder if everything was empty.
-  if (parts.length === 0) return 'Analyze the attached files.'
-  return parts.join('\n')
-}
 
 export function usePromptBar() {
   const input = useChatStore(s => s.draftInput)
@@ -477,12 +416,44 @@ export function usePromptBar() {
     const projectPath = currentProject?.path || ''
     const projectType = currentProject?.projectType || 'unknown'
 
-    // Build the augmented prompt: walk blocks (or fall back to the
-    // string path) and produce a single text representation that will
-    // be sent to the model. @mentions in text blocks are still resolved
-    // here. Attachment blocks become per-block XML markers inline.
+    // Split on model capability. Vision-capable models (Kimi K2.5,
+    // Qwen3 Plus, Step3.5 — flagged `supportsAttachments: true`)
+    // receive an OpenAI-compatible content parts array with real
+    // image_url parts. Text-only models receive a flattened string
+    // with `<attached_image .../>` placeholders.
+    //
+    // The split happens at this boundary (not in the queue layer) so
+    // the queue stays provider-agnostic — it carries blocks, the
+    // boundary decides how to ship them.
     const display = extractDisplayFromValue(content)
-    const augmentedPrompt = await buildAugmentedPrompt(content, projectPath)
+    const activeModelId = useSettingsStore.getState().agentModel
+    const activeProfile = getModelProfile(activeModelId)
+
+    let userContent: string | OpenAIContentPart[] | null = null
+
+    if (activeProfile.supportsAttachments && display.attachments.some(a => a.type === 'image')) {
+      // Multimodal path — build content parts. If buildContentParts
+      // returns null (no images survived disk read / size limits),
+      // fall through to the text path.
+      const parts = await buildContentParts(
+        content,
+        projectPath,
+        extractAndResolveMentions,
+        resolveAttachments,
+        resolveImageToDataUri,
+      )
+      if (parts) userContent = parts
+    }
+
+    if (userContent === null) {
+      // Text-only path — interleaved `<attached_image>` placeholders.
+      userContent = await buildAugmentedPrompt(
+        content,
+        projectPath,
+        extractAndResolveMentions,
+        resolveAttachments,
+      )
+    }
 
     // Display the original prompt (without file contents) in the chat bubble.
     // The augmented version (with file contents) is only sent to the model.
@@ -523,7 +494,7 @@ export function usePromptBar() {
       const agentService = AgentService.getInstance()
       agentService.setSystemPrompt(systemPrompt)
 
-      await agentService.runAgentLoop(augmentedPrompt, history, {
+      await agentService.runAgentLoop(userContent, history, {
         onTextDelta: (delta) => {
           agentStore.setStatus('generating')
           appendTextDeltaBuffered(delta)
