@@ -510,10 +510,11 @@ async fn search_with_findstr(
     // findstr pattern and file spec
     cmd.arg(query).arg(format!("{}\\*", directory));
 
-    // Hide console window on Windows
+    // Hide console window on Windows.
+    // tokio::process::Command has an inherent `creation_flags` method on Windows,
+    // so no `use CommandExt` import is needed.
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
