@@ -18,19 +18,39 @@
  * React renderer.
  */
 
-import type { Attachment } from '../../types/chat'
+import type { Attachment, ContentPart, ConversationMessage } from '../../types/chat'
 import type { ContentBlock, PromptValue } from '../../types/messageQueueTypes'
 import type { OpenAIContentPart } from './agentService'
+
+/**
+ * Hard cap on the total bytes of image data URIs in a single multimodal
+ * payload. 10 MB matches the comfort zone for most vision providers
+ * (Qwen and Kimi reject larger; OpenAI's vision endpoint also has a
+ * per-message limit around this range). When exceeded, buildContentParts
+ * returns null so the caller falls back to the text path.
+ */
+export const MAX_MULTIMODAL_PAYLOAD_BYTES = 10 * 1024 * 1024
 
 // === Resolver function shapes ===
 //
 // The helpers take injected resolvers so unit tests can pass mocks
 // without reaching into the Tauri IPC layer. Production call sites
 // wire the real implementations from attachmentService.
+//
+// All three resolvers are bundled into a single PromptResolvers object
+// passed to the helpers — keeps call sites immune to argument
+// reordering and makes adding a new resolver in the future a typed
+// change at every site.
 
 export type MentionResolver = (text: string, projectPath: string) => Promise<string>
 export type AttachmentXmlResolver = (attachments: Attachment[]) => Promise<string>
 export type ImageDataUriResolver = (attachment: Attachment) => Promise<string | null>
+
+export type PromptResolvers = {
+  resolveMentions: MentionResolver
+  resolveAttachmentXml: AttachmentXmlResolver
+  resolveImageDataUri: ImageDataUriResolver
+}
 
 // === Display extraction ===
 
@@ -66,9 +86,10 @@ export function extractDisplayFromValue(value: PromptValue): { text: string; att
 export async function buildAugmentedPrompt(
   value: PromptValue,
   projectPath: string,
-  resolveMentions: MentionResolver,
-  resolveAttachmentXml: AttachmentXmlResolver,
+  resolvers: PromptResolvers,
 ): Promise<string> {
+  const { resolveMentions, resolveAttachmentXml } = resolvers
+
   if (typeof value === 'string') {
     let augmented = value || 'Analyze the attached files.'
     const mentionContext = await resolveMentions(augmented, projectPath)
@@ -107,10 +128,10 @@ export async function buildAugmentedPrompt(
 export async function buildContentParts(
   value: PromptValue,
   projectPath: string,
-  resolveMentions: MentionResolver,
-  resolveAttachmentXml: AttachmentXmlResolver,
-  resolveImageDataUri: ImageDataUriResolver,
+  resolvers: PromptResolvers,
 ): Promise<OpenAIContentPart[] | null> {
+  const { resolveMentions, resolveAttachmentXml, resolveImageDataUri } = resolvers
+
   const blocks: ContentBlock[] = typeof value === 'string'
     ? (value.length > 0 ? [{ type: 'text', text: value }] : [])
     : value
@@ -147,11 +168,78 @@ export async function buildContentParts(
 
   if (!hasImage) return null
 
-  // Vision APIs reject image-only user messages in some providers —
-  // ensure at least one text part.
-  if (!parts.some(p => p.type === 'text')) {
+  // Payload size guard. Vision providers and the backend proxy have
+  // request body limits; an over-budget multimodal payload typically
+  // returns an opaque 413 or upstream timeout. Cap the total size of
+  // image_url data URIs and downgrade to the text path if exceeded —
+  // the user gets a working (text-only) request instead of a confusing
+  // failure.
+  const totalImageBytes = parts.reduce(
+    (sum, p) => sum + (p.type === 'image_url' ? p.image_url.url.length : 0),
+    0,
+  )
+  if (totalImageBytes > MAX_MULTIMODAL_PAYLOAD_BYTES) {
+    return null
+  }
+
+  // Vision APIs reject image-only user messages in some providers AND
+  // reject whitespace-only text parts. Check that there's at least one
+  // text part with non-trivial content; otherwise prepend a fallback.
+  const hasNonEmptyText = parts.some(
+    p => p.type === 'text' && p.text.trim().length > 0,
+  )
+  if (!hasNonEmptyText) {
     parts.unshift({ type: 'text', text: 'Analyze the attached image(s).' })
   }
 
   return parts
+}
+
+// === Content flattening (for logging / fallback summarisation) ===
+
+/**
+ * Flatten an OpenAI-compatible content field to a string for code that
+ * only needs the text (logging, mechanical fallback summarisation).
+ * Image parts become `[image]` markers; text parts concatenate
+ * newline-joined. Null/undefined returns empty string.
+ *
+ * Used by agentService.mechanicalFallback and summarizeToolResult
+ * to safely extract text from messages whose content can be either
+ * shape after the multimodal refactor.
+ */
+export function contentAsText(content: string | ContentPart[] | null | undefined): string {
+  if (content == null) return ''
+  if (typeof content === 'string') return content
+  return content
+    .map(part => (part.type === 'text' ? part.text : '[image]'))
+    .join('\n')
+}
+
+// === ConversationHistory downgrade ===
+
+/**
+ * Flatten any `content: ContentPart[]` in a ConversationMessage[] into
+ * plain string content. Used at the boundary into the agent loop when
+ * the active model does not support vision but the history contains
+ * messages from a previous (vision-capable) session.
+ *
+ * Image parts become a `[image: <name>]` placeholder so the model at
+ * least knows an image was present in the history. Text parts join
+ * with newline.
+ *
+ * The original history is not mutated — a fresh array is returned.
+ */
+export function downgradeHistoryToText(
+  history: readonly ConversationMessage[],
+): ConversationMessage[] {
+  return history.map(msg => {
+    if (msg.content == null || typeof msg.content === 'string') {
+      return msg as ConversationMessage
+    }
+    const parts = msg.content as ContentPart[]
+    const text = parts
+      .map(p => (p.type === 'text' ? p.text : '[image attached — switch to a multimodal model to view]'))
+      .join('\n')
+    return { ...msg, content: text }
+  })
 }

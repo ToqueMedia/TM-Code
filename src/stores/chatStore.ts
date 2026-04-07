@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ConversationMessage, SessionSummary, ToolCallDisplay } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentPart, ConversationMessage, SessionSummary, ToolCallDisplay } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
@@ -224,6 +224,38 @@ export function flushBufferedDeltas() {
 // Per-result truncation for very large tool outputs (e.g. read_file on huge files)
 const MAX_TOOL_RESULT_CHARS = 4000
 
+/**
+ * Build a `ContentPart[]` for a user message that has image attachments
+ * with base64 cached. Walks `text` first, then images, producing the
+ * minimum interleaving the chat bubble can express today (the chat UI
+ * doesn't capture per-block ordering; everything goes text-then-images).
+ *
+ * Returns `null` if the message has no image attachments OR none of the
+ * image attachments have base64 cached (e.g. message was loaded from
+ * disk where base64 is stripped). The caller falls back to plain text
+ * content with the model still seeing the textual `<attached_image>`
+ * placeholder via the existing path.
+ */
+function userMessageToContentParts(msg: ChatMessage): ContentPart[] | null {
+  const imageAttachments = msg.attachments?.filter(a => a.type === 'image' && a.base64)
+  if (!imageAttachments || imageAttachments.length === 0) return null
+
+  const parts: ContentPart[] = []
+  const text = msg.content.trim()
+  if (text.length > 0) {
+    parts.push({ type: 'text', text: msg.content })
+  } else {
+    parts.push({ type: 'text', text: 'Analyze the attached image(s).' })
+  }
+  for (const img of imageAttachments) {
+    parts.push({
+      type: 'image_url',
+      image_url: { url: img.base64! },
+    })
+  }
+  return parts
+}
+
 function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessage[] {
   const history: ConversationMessage[] = []
 
@@ -233,7 +265,14 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
     if (msg.role === 'system') continue
 
     if (msg.role === 'user') {
-      history.push({ role: 'user', content: msg.content })
+      // Reconstruct content parts when the message had images with base64
+      // cached in memory. This makes follow-up turns with vision-capable
+      // models continue to see images from earlier turns.
+      const parts = userMessageToContentParts(msg)
+      history.push({
+        role: 'user',
+        content: parts ?? msg.content,
+      })
     } else if (msg.role === 'assistant') {
       if (msg.toolCalls?.length) {
         // Assistant message with tool calls (preserve reasoning for multi-turn)
@@ -388,7 +427,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         role: 'user',
         content,
         timestamp: Date.now(),
-        attachments: attachments?.length ? attachments.map(a => ({ ...a, base64: undefined })) : undefined,
+        // Keep base64 in the in-memory ChatMessage so follow-up turns
+        // (rebuildConversationHistory) can reconstruct content parts
+        // for vision-capable models. Disk persistence strips base64
+        // separately in sessionService.sanitizeMessageForSave.
+        attachments: attachments?.length ? attachments : undefined,
       }
 
       set(state => {

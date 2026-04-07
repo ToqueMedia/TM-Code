@@ -284,6 +284,20 @@ class SessionService {
       timestamp: msg.timestamp,
     }
 
+    // Persist attachment metadata WITHOUT base64. The base64 data URI is
+    // potentially several MB per image and would bloat the encrypted
+    // session file. On reload, attachments come back with only metadata
+    // (id, type, name, path, mimeType, sizeBytes) — image base64 is gone,
+    // so multimodal reconstruction in rebuildConversationHistory falls
+    // back to the text path. Multimodal across app restarts is a known
+    // limitation; in-session multimodal works correctly.
+    if (msg.attachments?.length) {
+      sanitized.attachments = msg.attachments.map(a => {
+        const { base64: _base64, ...rest } = a
+        return rest
+      })
+    }
+
     if (msg.codeBlocks?.length) {
       sanitized.codeBlocks = msg.codeBlocks
     }

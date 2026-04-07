@@ -25,6 +25,7 @@ import { getModelProfile } from '../../services/agent/modelProfiles'
 import {
   buildAugmentedPrompt,
   buildContentParts,
+  downgradeHistoryToText,
   extractDisplayFromValue,
 } from '../../services/agent/promptValueHelpers'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -431,28 +432,25 @@ export function usePromptBar() {
 
     let userContent: string | OpenAIContentPart[] | null = null
 
+    // Bundle the Tauri-backed resolvers once — both helpers consume the
+    // same shape, so call sites are immune to argument reordering.
+    const promptResolvers = {
+      resolveMentions: extractAndResolveMentions,
+      resolveAttachmentXml: resolveAttachments,
+      resolveImageDataUri: resolveImageToDataUri,
+    }
+
     if (activeProfile.supportsAttachments && display.attachments.some(a => a.type === 'image')) {
       // Multimodal path — build content parts. If buildContentParts
-      // returns null (no images survived disk read / size limits),
-      // fall through to the text path.
-      const parts = await buildContentParts(
-        content,
-        projectPath,
-        extractAndResolveMentions,
-        resolveAttachments,
-        resolveImageToDataUri,
-      )
+      // returns null (no images survived disk read / size limits / size
+      // budget), fall through to the text path.
+      const parts = await buildContentParts(content, projectPath, promptResolvers)
       if (parts) userContent = parts
     }
 
     if (userContent === null) {
       // Text-only path — interleaved `<attached_image>` placeholders.
-      userContent = await buildAugmentedPrompt(
-        content,
-        projectPath,
-        extractAndResolveMentions,
-        resolveAttachments,
-      )
+      userContent = await buildAugmentedPrompt(content, projectPath, promptResolvers)
     }
 
     // Display the original prompt (without file contents) in the chat bubble.
@@ -490,7 +488,13 @@ export function usePromptBar() {
       const coreToolCount = ToolExecutor.getInstance().getCoreToolCount()
       const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount)
 
-      const history = useChatStore.getState().conversationHistory
+      const rawHistory = useChatStore.getState().conversationHistory
+      // The history is canonical (carries content parts when previous
+      // turns had images). Downgrade to text if the active model is
+      // text-only — its API cannot consume the array form.
+      const history = activeProfile.supportsAttachments
+        ? rawHistory
+        : downgradeHistoryToText(rawHistory)
       const agentService = AgentService.getInstance()
       agentService.setSystemPrompt(systemPrompt)
 

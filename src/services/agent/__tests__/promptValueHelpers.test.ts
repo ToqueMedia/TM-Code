@@ -8,9 +8,12 @@
 import {
   buildAugmentedPrompt,
   buildContentParts,
+  contentAsText,
+  downgradeHistoryToText,
   extractDisplayFromValue,
+  MAX_MULTIMODAL_PAYLOAD_BYTES,
 } from '../promptValueHelpers'
-import type { Attachment } from '../../../types/chat'
+import type { Attachment, ContentPart, ConversationMessage } from '../../../types/chat'
 import type { ContentBlock } from '../../../types/messageQueueTypes'
 
 const mkImage = (id: string, base64 = `data:image/png;base64,AAAA${id}`): Attachment => ({
@@ -38,6 +41,12 @@ const xmlForAttachments = async (atts: Attachment[]) =>
       atts.map(a => `<${a.type} name="${a.name}" />`).join('\n') +
       '\n</attachments>'
 const dataUriForImage = async (att: Attachment) => att.base64 ?? null
+
+const defaultResolvers = {
+  resolveMentions: noMentions,
+  resolveAttachmentXml: xmlForAttachments,
+  resolveImageDataUri: dataUriForImage,
+}
 
 describe('extractDisplayFromValue', () => {
   it('returns the string unchanged with no attachments', () => {
@@ -75,29 +84,22 @@ describe('extractDisplayFromValue', () => {
 
 describe('buildAugmentedPrompt — string path', () => {
   it('returns the string unchanged when there are no mentions', async () => {
-    const result = await buildAugmentedPrompt(
-      'fix the bug',
-      '/proj',
-      noMentions,
-      xmlForAttachments,
-    )
+    const result = await buildAugmentedPrompt('fix the bug', '/proj', defaultResolvers)
     expect(result).toBe('fix the bug')
   })
 
   it('appends mention context when resolver returns text', async () => {
-    const resolveMentions = async () => '\n\n<mentioned_files>\n...file contents...\n</mentioned_files>'
-    const result = await buildAugmentedPrompt(
-      'fix @src/foo.ts',
-      '/proj',
-      resolveMentions,
-      xmlForAttachments,
-    )
+    const resolvers = {
+      ...defaultResolvers,
+      resolveMentions: async () => '\n\n<mentioned_files>\n...file contents...\n</mentioned_files>',
+    }
+    const result = await buildAugmentedPrompt('fix @src/foo.ts', '/proj', resolvers)
     expect(result).toContain('fix @src/foo.ts')
     expect(result).toContain('<mentioned_files>')
   })
 
   it('falls back to a placeholder for empty strings', async () => {
-    const result = await buildAugmentedPrompt('', '/proj', noMentions, xmlForAttachments)
+    const result = await buildAugmentedPrompt('', '/proj', defaultResolvers)
     expect(result).toBe('Analyze the attached files.')
   })
 })
@@ -112,7 +114,7 @@ describe('buildAugmentedPrompt — block path', () => {
       { type: 'text', text: 'second text' },
       { type: 'attachment', attachment: img2 },
     ]
-    const result = await buildAugmentedPrompt(value, '/proj', noMentions, xmlForAttachments)
+    const result = await buildAugmentedPrompt(value, '/proj', defaultResolvers)
 
     // Verify the ordering is preserved: text1 → img1 → text2 → img2
     const idx1 = result.indexOf('first text')
@@ -126,10 +128,7 @@ describe('buildAugmentedPrompt — block path', () => {
   })
 
   it('falls back to placeholder when blocks produce no text', async () => {
-    // buildAugmentedPrompt returns fallback only when parts is empty.
-    // An attachment still produces an XML marker, so test with empty
-    // blocks explicitly.
-    const result = await buildAugmentedPrompt([], '/proj', noMentions, xmlForAttachments)
+    const result = await buildAugmentedPrompt([], '/proj', defaultResolvers)
     expect(result).toBe('Analyze the attached files.')
   })
 })
@@ -139,9 +138,7 @@ describe('buildContentParts — multimodal vision path', () => {
     const result = await buildContentParts(
       'just text',
       '/proj',
-      noMentions,
-      xmlForAttachments,
-      dataUriForImage,
+      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
     expect(result).toBeNull()
   })
@@ -154,9 +151,7 @@ describe('buildContentParts — multimodal vision path', () => {
     const result = await buildContentParts(
       value,
       '/proj',
-      noMentions,
-      xmlForAttachments,
-      dataUriForImage,
+      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
     expect(result).toBeNull()
   })
@@ -173,9 +168,7 @@ describe('buildContentParts — multimodal vision path', () => {
     const result = await buildContentParts(
       value,
       '/proj',
-      noMentions,
-      xmlForAttachments,
-      dataUriForImage,
+      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
 
     expect(result).not.toBeNull()
@@ -211,9 +204,7 @@ describe('buildContentParts — multimodal vision path', () => {
     const result = await buildContentParts(
       value,
       '/proj',
-      noMentions,
-      xmlForAttachments,
-      dataUriForImage,
+      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
 
     expect(result).not.toBeNull()
@@ -235,9 +226,7 @@ describe('buildContentParts — multimodal vision path', () => {
     const result = await buildContentParts(
       value,
       '/proj',
-      noMentions,
-      xmlForAttachments,
-      dataUriForImage,
+      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
 
     expect(result).not.toBeNull()
@@ -255,9 +244,7 @@ describe('buildContentParts — multimodal vision path', () => {
     const result = await buildContentParts(
       value,
       '/proj',
-      noMentions,
-      xmlForAttachments,
-      dataUriForImage,
+      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
 
     expect(result).not.toBeNull()
@@ -270,25 +257,132 @@ describe('buildContentParts — multimodal vision path', () => {
   })
 
   it('resolves mentions inside text blocks and appends to the same text part', async () => {
-    const resolveMentions = async (text: string) =>
-      text.includes('@') ? '\n\n<mentioned_files>resolved</mentioned_files>' : ''
-
+    const resolvers = {
+      ...defaultResolvers,
+      resolveMentions: async (text: string) =>
+        text.includes('@') ? '\n\n<mentioned_files>resolved</mentioned_files>' : '',
+    }
     const img = mkImage('i')
     const value: ContentBlock[] = [
       { type: 'text', text: 'fix @src/foo.ts' },
       { type: 'attachment', attachment: img },
     ]
-    const result = await buildContentParts(
-      value,
-      '/proj',
-      resolveMentions,
-      xmlForAttachments,
-      dataUriForImage,
-    )
+    const result = await buildContentParts(value, '/proj', resolvers)
 
     expect(result).not.toBeNull()
     const textPart = result!.find(p => p.type === 'text') as { type: 'text'; text: string }
     expect(textPart.text).toContain('fix @src/foo.ts')
     expect(textPart.text).toContain('<mentioned_files>')
+  })
+
+  it('rejects whitespace-only text parts and prepends a fallback', async () => {
+    // Reproduces bug #1 from the critical analysis: a block with text
+    // that is just whitespace should NOT count as "has text" — the
+    // provider would reject the empty text part. The fallback must be
+    // prepended.
+    const img = mkImage('w')
+    const value: ContentBlock[] = [
+      { type: 'text', text: '   ' }, // whitespace only
+      { type: 'attachment', attachment: img },
+    ]
+    const result = await buildContentParts(value, '/proj', defaultResolvers)
+
+    expect(result).not.toBeNull()
+    // Whitespace text was kept (length > 0) but a fallback was prepended.
+    expect(result!.length).toBeGreaterThanOrEqual(2)
+    const firstText = result!.find(p => p.type === 'text') as { type: 'text'; text: string }
+    expect(firstText.text).toBe('Analyze the attached image(s).')
+  })
+
+  it('returns null when total image bytes exceed the payload guard', async () => {
+    // Build an "image" with a base64 longer than the payload limit.
+    const oversizedBase64 = 'data:image/png;base64,' + 'A'.repeat(MAX_MULTIMODAL_PAYLOAD_BYTES + 10)
+    const oversized = mkImage('big', oversizedBase64)
+    const value: ContentBlock[] = [
+      { type: 'text', text: 'analyze this' },
+      { type: 'attachment', attachment: oversized },
+    ]
+    const result = await buildContentParts(value, '/proj', defaultResolvers)
+
+    expect(result).toBeNull()
+  })
+})
+
+describe('contentAsText', () => {
+  it('returns empty string for null', () => {
+    expect(contentAsText(null)).toBe('')
+  })
+
+  it('returns empty string for undefined', () => {
+    expect(contentAsText(undefined)).toBe('')
+  })
+
+  it('returns the string unchanged when content is a string', () => {
+    expect(contentAsText('hello world')).toBe('hello world')
+  })
+
+  it('joins text parts with newline for content arrays', () => {
+    const parts: ContentPart[] = [
+      { type: 'text', text: 'first' },
+      { type: 'text', text: 'second' },
+    ]
+    expect(contentAsText(parts)).toBe('first\nsecond')
+  })
+
+  it('replaces image parts with [image] marker', () => {
+    const parts: ContentPart[] = [
+      { type: 'text', text: 'before' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,xxx' } },
+      { type: 'text', text: 'after' },
+    ]
+    expect(contentAsText(parts)).toBe('before\n[image]\nafter')
+  })
+})
+
+describe('downgradeHistoryToText', () => {
+  it('passes string content through unchanged', () => {
+    const history: ConversationMessage[] = [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+    ]
+    const result = downgradeHistoryToText(history)
+    expect(result[0].content).toBe('hello')
+    expect(result[1].content).toBe('hi')
+  })
+
+  it('flattens content parts to text with image placeholder', () => {
+    const history: ConversationMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'olha esta imagem' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,xxx' } },
+        ],
+      },
+    ]
+    const result = downgradeHistoryToText(history)
+    expect(typeof result[0].content).toBe('string')
+    expect(result[0].content).toContain('olha esta imagem')
+    expect(result[0].content).toContain('[image attached')
+  })
+
+  it('does not mutate the input history', () => {
+    const original: ConversationMessage[] = [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'msg' }],
+      },
+    ]
+    const snapshot = JSON.parse(JSON.stringify(original))
+    downgradeHistoryToText(original)
+    expect(original).toEqual(snapshot)
+  })
+
+  it('preserves null content', () => {
+    const history: ConversationMessage[] = [
+      { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'foo', arguments: '{}' } }] },
+    ]
+    const result = downgradeHistoryToText(history)
+    expect(result[0].content).toBeNull()
   })
 })

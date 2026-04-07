@@ -19,9 +19,26 @@ export type ContentBlock =
   | { type: 'tool_call'; toolCallId: string }
 
 /** Message format for OpenAI-compatible conversation history */
+/**
+ * OpenAI / OpenAI-compatible content parts for multimodal user messages.
+ *
+ * Mirrors the shape consumed by vision-capable providers (Qwen3 Plus,
+ * Kimi K2.5, Step3.5, etc.) via the backend proxy. Used wherever a
+ * message's content can carry images interleaved with text — chiefly
+ * the queue → agent boundary and the conversationHistory shape so
+ * follow-up turns continue to see images from earlier turns.
+ *
+ * Defined in types/chat.ts (rather than agentService.ts) so the
+ * stores layer can construct it without importing from a service.
+ */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } }
+
 export interface ConversationMessage {
   role: 'user' | 'assistant' | 'system' | 'tool'
-  content: string | null
+  /** String for text-only messages, ContentPart[] for multimodal user messages. */
+  content: string | ContentPart[] | null
   /** Reasoning/thinking content from reasoning models (Step 3.5 Flash, Qwen3, DeepSeek). Preserved across turns so the model can continue reasoning. */
   reasoning_content?: string | null
   tool_calls?: Array<{

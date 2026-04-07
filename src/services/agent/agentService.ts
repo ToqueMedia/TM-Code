@@ -9,43 +9,31 @@ import { useBillingStore } from '../../stores/billingStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
 import { getQueryGuard } from './queryGuard'
+import { contentAsText } from './promptValueHelpers'
+import type { ContentPart } from '../../types/chat'
 import type { StreamEvent } from './streamParser'
 
 // === Types ===
 
 /**
  * OpenAI / OpenAI-compatible content parts for multimodal user messages.
- * Matches the shape consumed by vision-capable providers (Qwen3 Plus,
- * Kimi K2.5, Step3.5, etc.) via the backend proxy.
+ * Re-exported from types/chat.ts as `OpenAIContentPart` for the existing
+ * external import paths in usePromptBar / promptValueHelpers.
  *
- * Non-vision models do not receive this shape — the caller flattens to
- * a plain string before sending. See buildUserMessageContent.
+ * Defined in types/chat.ts so the chatStore layer can construct content
+ * parts without importing from a service.
  */
-export type OpenAIContentPart =
-  | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } }
+export type OpenAIContentPart = ContentPart
 
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   /** Plain string for text-only messages, array of parts for multimodal user messages. */
-  content?: string | OpenAIContentPart[] | null
+  content?: string | ContentPart[] | null
   reasoning_content?: string | null
   tool_calls?: OpenAIToolCall[]
   tool_call_id?: string
 }
 
-/**
- * Flatten an OpenAIMessage content field to a string for code that only
- * needs the text (logging, summarisation, mechanical fallback). Image
- * parts become `[image]` markers; text parts concatenate newline-joined.
- */
-function contentAsText(content: OpenAIMessage['content']): string {
-  if (content == null) return ''
-  if (typeof content === 'string') return content
-  return content
-    .map(part => (part.type === 'text' ? part.text : '[image]'))
-    .join('\n')
-}
 
 interface OpenAIToolCall {
   id: string
@@ -324,8 +312,8 @@ class AgentService {
   }
 
   async runAgentLoop(
-    userMessage: string | OpenAIContentPart[],
-    conversationHistory: Array<{ role: string; content: string | null; tool_calls?: OpenAIToolCall[]; tool_call_id?: string }>,
+    userMessage: string | ContentPart[],
+    conversationHistory: Array<{ role: string; content: string | ContentPart[] | null; tool_calls?: OpenAIToolCall[]; tool_call_id?: string }>,
     callbacks: AgentCallbacks
   ): Promise<void> {
     if (this.isRunning && !this.lightweightOptions) {
