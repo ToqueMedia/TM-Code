@@ -429,10 +429,14 @@ class AgentService {
         // for future LLM summarization (which needs full detail).
         const apiMessages = this.microcompactToolResults(messages)
 
-        // Telemetry: log microcompaction savings (only when compaction actually ran)
+        // Telemetry: log microcompaction savings (only when compaction actually ran).
+        // contentAsText handles both string and ContentPart[] shapes; for
+        // multimodal messages this counts the text length of the parts
+        // (image_url URLs are excluded — they're huge data URIs that
+        // would distort the metric).
         if (apiMessages !== messages) {
-          const originalSize = messages.reduce((s, m) => s + (m.content?.length || 0), 0)
-          const compactedSize = apiMessages.reduce((s, m) => s + (m.content?.length || 0), 0)
+          const originalSize = messages.reduce((s, m) => s + contentAsText(m.content).length, 0)
+          const compactedSize = apiMessages.reduce((s, m) => s + contentAsText(m.content).length, 0)
           logger.info('agent', `Microcompaction: ${originalSize - compactedSize} chars saved (${originalSize} → ${compactedSize})`)
         }
 
@@ -743,13 +747,18 @@ class AgentService {
    */
   private serializeMessagesForSummary(messages: OpenAIMessage[]): string {
     return messages.map(msg => {
+      // Flatten content to text — multimodal user messages have
+      // ContentPart[] which would otherwise stringify as "[object Object]".
+      // Image parts become `[image]` markers in the summary.
+      const text = contentAsText(msg.content)
+
       if (msg.role === 'user') {
-        return `[USER]\n${msg.content}`
+        return `[USER]\n${text}`
       }
 
       if (msg.role === 'assistant') {
         const parts: string[] = []
-        if (msg.content) parts.push(`[ASSISTANT]\n${msg.content}`)
+        if (text) parts.push(`[ASSISTANT]\n${text}`)
         if (msg.tool_calls) {
           for (const tc of msg.tool_calls) {
             parts.push(`[TOOL CALL: ${tc.function.name}]\n${tc.function.arguments}`)
@@ -759,10 +768,10 @@ class AgentService {
       }
 
       if (msg.role === 'tool') {
-        return `[TOOL RESULT${msg.tool_call_id ? ` (${msg.tool_call_id})` : ''}]\n${msg.content}`
+        return `[TOOL RESULT${msg.tool_call_id ? ` (${msg.tool_call_id})` : ''}]\n${text}`
       }
 
-      return `[${msg.role}]\n${msg.content}`
+      return `[${msg.role}]\n${text}`
     }).join('\n\n---\n\n')
   }
 
