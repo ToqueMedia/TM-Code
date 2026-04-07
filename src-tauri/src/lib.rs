@@ -604,6 +604,18 @@ pub fn run() {
                 builder = builder.transparent(true).accept_first_mouse(true);
             }
 
+            // On Windows/Linux we don't use transparent(true), so the WebView
+            // shows its default background (white on Webview2). Combined with
+            // `body { background-color: transparent }` in theme.ts, that white
+            // bleeds through and the user sees a fully blank screen until React
+            // mounts. Force the WebView's underlying background to the same dark
+            // color the app uses (#0a0a0a = tokens.colors.bg.welcome).
+            #[cfg(not(target_os = "macos"))]
+            {
+                use tauri::utils::config::Color;
+                builder = builder.background_color(Color(10, 10, 10, 255));
+            }
+
             builder
                 // Allow ALL navigations including iframes to localhost dev servers
                 .on_navigation(|url| {

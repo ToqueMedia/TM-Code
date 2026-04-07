@@ -173,12 +173,15 @@ function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
         </Box>
       )}
 
-      {/* Skip button */}
+      {/* Skip button — placed in the corner OPPOSITE to the window controls
+          so it never overlaps minimize/maximize/close. macOS has its traffic
+          lights top-left, so Skip goes top-right; Windows/Linux have their
+          controls top-right, so Skip goes top-left. */}
       {step < TOTAL_STEPS - 1 && (
         <Text
           position="absolute"
           top="14px"
-          right="20px"
+          {...(IS_MAC ? { right: '20px' } : { left: '20px' })}
           zIndex={10}
           fontSize="12px"
           color={tokens.colors.text.muted}
