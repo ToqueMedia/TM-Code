@@ -25,11 +25,13 @@
  *   sessionStorage.
  */
 
-import type {
-  QueueOperation,
-  QueueOperationMessage,
-  QueuedCommand,
-  QueuePriority,
+import {
+  toBlocks,
+  type PromptValue,
+  type QueueOperation,
+  type QueueOperationMessage,
+  type QueuedCommand,
+  type QueuePriority,
 } from '../../types/messageQueueTypes'
 import { createSignal } from '../../utils/signal'
 import { getQueueLogSessionId, recordQueueOperation } from './queueOperationLog'
@@ -87,13 +89,25 @@ export function hasCommandsInQueue(): boolean {
 // ============================================================================
 
 /**
+ * Extract a string representation of a command's value for logging.
+ * Strings pass through; block arrays are flattened to their text content
+ * (attachment blocks become a placeholder marker).
+ */
+function valueToLogString(value: PromptValue): string {
+  if (typeof value === 'string') return value
+  return value
+    .map(b => (b.type === 'text' ? b.text : `[attachment:${b.attachment.name}]`))
+    .join(' ')
+}
+
+/**
  * Add a command to the queue. Defaults priority to 'next' (the user-input
  * default — ahead of 'later' notifications, behind 'now' interrupts).
  */
 export function enqueue(command: QueuedCommand): void {
   commandQueue.push({ ...command, priority: command.priority ?? 'next' })
   notifySubscribers()
-  logOperation('enqueue', command.value)
+  logOperation('enqueue', valueToLogString(command.value))
 }
 
 const PRIORITY_ORDER: Record<QueuePriority, number> = {
@@ -221,21 +235,40 @@ export function resetCommandQueue(): void {
  * Returns true if the command is a slash command. Commands with
  * `skipSlashCommands` (e.g. bridge messages) are NOT treated as slash
  * commands — their text is meant for the model.
+ *
+ * For block-valued commands, only the first text block is inspected —
+ * matching Claude Code's behaviour where the slash routing key has to
+ * be at the very start of the message.
  */
 export function isSlashCommand(cmd: QueuedCommand): boolean {
-  return cmd.value.trim().startsWith('/') && !cmd.skipSlashCommands
+  if (cmd.skipSlashCommands) return false
+  if (typeof cmd.value === 'string') {
+    return cmd.value.trim().startsWith('/')
+  }
+  const first = cmd.value[0]
+  if (!first || first.type !== 'text') return false
+  return first.text.trim().startsWith('/')
 }
 
 /**
- * Combine multiple prompt values into one. Single-value pass-through;
- * multiple values are newline-joined.
+ * Combine multiple prompt values into one.
  *
- * Separator matches Claude Code (`cli/print.ts:431`) — single newline.
- * Each enqueued message reads as an adjacent line in the coalesced turn.
+ * Ported from Claude Code (`cli/print.ts:428`):
+ *  - Single value: pass through
+ *  - All values are strings: newline-join
+ *  - Any value is blocks: normalise everything to blocks, concat via flatMap
+ *
+ * The block path is what preserves the order "msg1 → img1 → msg2 → img2"
+ * across coalesced commands. Without it, three messages each with their
+ * own image would produce "all text first, all images at the end" and the
+ * model would lose the correspondence.
  */
-export function joinPromptValues(values: string[]): string {
+export function joinPromptValues(values: PromptValue[]): PromptValue {
   if (values.length === 1) return values[0]!
-  return values.join('\n')
+  if (values.every(v => typeof v === 'string')) {
+    return values.join('\n')
+  }
+  return values.flatMap(toBlocks)
 }
 
 /**

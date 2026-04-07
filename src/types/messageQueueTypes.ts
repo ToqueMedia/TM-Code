@@ -11,17 +11,62 @@
  * has at least one real consumer.
  *
  * Adaptations from Claude Code:
- * - `value` is `string` only (Claude Code uses `string | ContentBlockParam[]`
- *   to inline images at the queue layer; TM Code keeps images in the
- *   `pastedContents` field as `Attachment[]`, resolved by the agent at
- *   execution time).
- * - `pastedContents` is `Attachment[]` instead of
- *   `Record<number, PastedContent>`. Functionally equivalent — both are
- *   "raw inputs captured at paste time, materialised later" — and TM
- *   Code's Attachment type already carries its own id.
+ * - `value` is `string | ContentBlock[]` where ContentBlock is a local
+ *   type (text or attachment) — Claude Code uses the Anthropic SDK's
+ *   `ContentBlockParam[]` directly, but TM Code does not take that
+ *   dependency at the queue layer. The agentService translates at the
+ *   API boundary.
+ * - Claude Code carries `pastedContents: Record<number, PastedContent>`
+ *   alongside the value; TM Code keeps everything inline as blocks (no
+ *   sidecar field), so a single message with an image is stored as
+ *   `[{type:'text', text}, {type:'attachment', attachment}]`. Removes
+ *   the dual-source-of-truth problem.
  */
 
 import type { Attachment } from './chat'
+
+// === Content blocks ===
+
+/**
+ * Inline content blocks for queued commands. Mirrors Claude Code's
+ * `ContentBlockParam[]` shape (Anthropic SDK) but defined locally so the
+ * queue layer does not depend on the SDK. The agentService translates
+ * to/from the SDK type at the API boundary.
+ *
+ * Two variants today:
+ *  - `text` — a chunk of user text
+ *  - `attachment` — a file/image attached at this position in the message
+ *
+ * The point of having blocks (rather than `value: string` + a flat
+ * `pastedContents` array) is to preserve **ordering** when multiple
+ * messages are coalesced into one turn. Without blocks, three messages
+ * each with their own image collapse to "all text, then all images" and
+ * the model loses the correspondence between text and image.
+ *
+ * Today TM Code's agent service does not yet send images to the model
+ * (the multimodal model providers are listed in modelProfiles.ts but not
+ * wired in agentService). The interleaving is preserved in the textual
+ * `<attached_image .../>` placeholder representation so that when real
+ * multimodal support lands, the queue layer is already correct.
+ */
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'attachment'; attachment: Attachment }
+
+/** Either a plain string or a list of content blocks. */
+export type PromptValue = string | ContentBlock[]
+
+/**
+ * Normalise a PromptValue to ContentBlock[]. Used by joinPromptValues
+ * when at least one value is already blocks — the others have to be
+ * promoted so the flatMap concatenates uniformly.
+ */
+export function toBlocks(value: PromptValue): ContentBlock[] {
+  if (typeof value === 'string') {
+    return value.length > 0 ? [{ type: 'text', text: value }] : []
+  }
+  return value
+}
 
 // === Prompt input modes ===
 
@@ -56,8 +101,20 @@ export type QueuePriority = 'now' | 'next' | 'later'
 // === Queued command ===
 
 export type QueuedCommand = {
-  /** The user's text. Plain string in TM Code (see file header). */
-  value: string
+  /**
+   * The user's input.
+   *
+   *  - Plain string for messages with no attachments.
+   *  - ContentBlock[] when the message has attachments — the blocks
+   *    interleave the user's text with each attachment in the order
+   *    they appear in the message. Coalescing multiple such commands
+   *    via joinPromptValues preserves that ordering across the merge.
+   *
+   * The display layer (chat bubble) and the API layer (agentService)
+   * each walk the blocks at the boundary; the queue itself never
+   * inspects the contents.
+   */
+  value: PromptValue
 
   /** What kind of input this is — drives downstream routing. */
   mode: PromptInputMode
@@ -67,12 +124,6 @@ export type QueuedCommand = {
 
   /** Stable id, useful for `remove` and React keys. */
   uuid?: string
-
-  /**
-   * Raw attachments captured at enqueue time. Resolved (read from disk,
-   * embedded as base64) at execution time so the model sees inline images.
-   */
-  pastedContents?: Attachment[]
 
   /**
    * When true, the input is treated as plain text even if it starts with

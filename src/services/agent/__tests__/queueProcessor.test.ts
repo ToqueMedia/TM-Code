@@ -17,7 +17,7 @@ import {
   joinPromptValues,
 } from '../messageQueue'
 import { processQueueIfReady } from '../queueProcessor'
-import type { QueuedCommand } from '../../../types/messageQueueTypes'
+import type { ContentBlock, QueuedCommand } from '../../../types/messageQueueTypes'
 
 const mk = (value: string, overrides?: Partial<QueuedCommand>): QueuedCommand => ({
   value,
@@ -164,5 +164,59 @@ describe('joinPromptValues coalescing (the efficiency win)', () => {
   it('preserves order', () => {
     const result = joinPromptValues(['c', 'a', 'b'])
     expect(result).toBe('c\na\nb')
+  })
+})
+
+describe('processQueueIfReady — block-valued commands', () => {
+  it('batches block-valued prompt commands together', () => {
+    const a: ContentBlock[] = [
+      { type: 'text', text: 'olha este erro' },
+      { type: 'attachment', attachment: { id: 'a1', type: 'image', name: 'shot1', path: '/1' } },
+    ]
+    const b: ContentBlock[] = [
+      { type: 'text', text: 'e este também' },
+      { type: 'attachment', attachment: { id: 'a2', type: 'image', name: 'shot2', path: '/2' } },
+    ]
+    enqueue(mk('', { value: a }))
+    enqueue(mk('', { value: b }))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+    processQueueIfReady({ executeInput: exec })
+
+    expect(exec).toHaveBeenCalledTimes(1)
+    const batch = exec.mock.calls[0]![0]
+    expect(batch.length).toBe(2)
+  })
+
+  it('coalescing preserves text→image→text→image order across messages', () => {
+    const msg1: ContentBlock[] = [
+      { type: 'text', text: 'first text' },
+      { type: 'attachment', attachment: { id: 'i1', type: 'image', name: 'img1', path: '/1' } },
+    ]
+    const msg2: ContentBlock[] = [
+      { type: 'text', text: 'second text' },
+      { type: 'attachment', attachment: { id: 'i2', type: 'image', name: 'img2', path: '/2' } },
+    ]
+    const merged = joinPromptValues([msg1, msg2]) as ContentBlock[]
+    expect(merged.length).toBe(4)
+    // The whole point of #3: ordering across messages is preserved.
+    expect((merged[0] as any).text).toBe('first text')
+    expect((merged[1] as any).attachment.id).toBe('i1')
+    expect((merged[2] as any).text).toBe('second text')
+    expect((merged[3] as any).attachment.id).toBe('i2')
+  })
+
+  it('mixing string and block messages produces a uniform block result', () => {
+    const blockMsg: ContentBlock[] = [
+      { type: 'text', text: 'with image' },
+      { type: 'attachment', attachment: { id: 'i', type: 'image', name: 'i', path: '/i' } },
+    ]
+    const merged = joinPromptValues(['plain text', blockMsg, 'another plain']) as ContentBlock[]
+    expect(Array.isArray(merged)).toBe(true)
+    expect(merged.length).toBe(4)
+    expect((merged[0] as any).text).toBe('plain text')
+    expect((merged[1] as any).text).toBe('with image')
+    expect((merged[2] as any).attachment.id).toBe('i')
+    expect((merged[3] as any).text).toBe('another plain')
   })
 })

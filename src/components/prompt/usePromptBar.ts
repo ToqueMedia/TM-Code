@@ -22,9 +22,77 @@ import {
   joinPromptValues,
 } from '../../services/agent/messageQueue'
 import { getQueryGuard } from '../../services/agent/queryGuard'
-import type { QueuedCommand } from '../../types/messageQueueTypes'
+import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { logger } from '../../utils/logger'
+
+// === PromptValue helpers ===
+//
+// These three helpers translate between the queue's PromptValue
+// representation (string | ContentBlock[]) and the two consumer
+// shapes that need it: the chat bubble (text + attachments) and
+// the agent's augmented prompt (single text string).
+
+/**
+ * Build (text, attachments) for chat bubble display from a PromptValue.
+ * Strings pass through unchanged. Block arrays are flattened: text
+ * blocks join with newline, attachment blocks collect into a list.
+ * The bubble component renders both fields side-by-side as today.
+ */
+function extractDisplayFromValue(value: PromptValue): { text: string; attachments: Attachment[] } {
+  if (typeof value === 'string') {
+    return { text: value, attachments: [] }
+  }
+  const texts: string[] = []
+  const attachments: Attachment[] = []
+  for (const block of value) {
+    if (block.type === 'text') {
+      if (block.text.length > 0) texts.push(block.text)
+    } else {
+      attachments.push(block.attachment)
+    }
+  }
+  return { text: texts.join('\n'), attachments }
+}
+
+/**
+ * Build the augmented prompt sent to the model. For string values this
+ * is the existing path: extract @mentions, append. For block values
+ * this walks the blocks in order, producing text + per-attachment XML
+ * markers inline so the model sees the same ordering the user typed.
+ *
+ * The interleaved form is what makes batching multiple
+ * messages-with-attachments give correct context to the model. The
+ * legacy "all text first, all attachments at the end" form would lose
+ * the correspondence between text segment and image.
+ */
+async function buildAugmentedPrompt(value: PromptValue, projectPath: string): Promise<string> {
+  if (typeof value === 'string') {
+    let augmented = value || 'Analyze the attached files.'
+    const mentionContext = await extractAndResolveMentions(augmented, projectPath)
+    if (mentionContext) augmented += mentionContext
+    return augmented
+  }
+
+  // Block path — walk in order.
+  const parts: string[] = []
+  for (const block of value) {
+    if (block.type === 'text') {
+      let text = block.text
+      const mentionContext = await extractAndResolveMentions(text, projectPath)
+      if (mentionContext) text += mentionContext
+      if (text.length > 0) parts.push(text)
+    } else {
+      // Per-attachment XML — same shape resolveAttachments produces but
+      // for a single attachment, so it can sit between text segments.
+      const xml = await resolveAttachments([block.attachment])
+      if (xml) parts.push(xml.trim())
+    }
+  }
+  // Fall back to a non-empty placeholder if everything was empty.
+  if (parts.length === 0) return 'Analyze the attached files.'
+  return parts.join('\n')
+}
 
 export function usePromptBar() {
   const input = useChatStore(s => s.draftInput)
@@ -368,14 +436,24 @@ export function usePromptBar() {
   }, [])
 
   /**
-   * Core send logic — runs the agent loop for a given prompt.
-   * Extracted so both handleSend (direct) and executeQueuedInput (from queue) can use it.
+   * Core send logic — runs the agent loop for a given content value.
+   *
+   * The `content` parameter can be either:
+   *  - A plain string (direct path from handleSend with no attachments,
+   *    or coalesced batch of text-only commands)
+   *  - A ContentBlock[] preserving the order of text and attachments
+   *    (single message with attachments, or coalesced batch with images
+   *    interleaved across messages)
+   *
+   * For blocks, the augmented prompt is built by walking the blocks in
+   * order, producing text + per-attachment XML markers inline. This
+   * preserves the correspondence "this text refers to this image" that
+   * a flat "all-text-then-all-attachments" representation would lose.
    *
    * @param skipUserMessage - If true, don't add user message to chat (already added by caller).
    */
   const runAgentForPrompt = useCallback(async (
-    prompt: string,
-    attachments: Attachment[],
+    content: PromptValue,
     skipUserMessage = false,
   ) => {
     let chatStore = useChatStore.getState()
@@ -396,28 +474,21 @@ export function usePromptBar() {
       layoutStore.setViewMode('chat')
     }
 
-    // Resolve @mentions from text + chip attachments
     const projectPath = currentProject?.path || ''
     const projectType = currentProject?.projectType || 'unknown'
-    let augmentedPrompt = prompt || 'Analyze the attached files.'
 
-    // Extract inline @mentions from the prompt text
-    const mentionContext = await extractAndResolveMentions(augmentedPrompt, projectPath)
-    if (mentionContext) {
-      augmentedPrompt = augmentedPrompt + mentionContext
-    }
-
-    // Resolve chip attachments (images, files from paperclip button)
-    if (attachments.length > 0) {
-      const attachmentContext = await resolveAttachments(attachments)
-      augmentedPrompt = augmentedPrompt + attachmentContext
-    }
+    // Build the augmented prompt: walk blocks (or fall back to the
+    // string path) and produce a single text representation that will
+    // be sent to the model. @mentions in text blocks are still resolved
+    // here. Attachment blocks become per-block XML markers inline.
+    const display = extractDisplayFromValue(content)
+    const augmentedPrompt = await buildAugmentedPrompt(content, projectPath)
 
     // Display the original prompt (without file contents) in the chat bubble.
     // The augmented version (with file contents) is only sent to the model.
     // Skip if caller already added the message (e.g. queued commands).
     if (!skipUserMessage) {
-      chatStore.addUserMessage(prompt, attachments)
+      chatStore.addUserMessage(display.text, display.attachments)
     }
     chatStore.startAssistantMessage()
     agentStore.setStatus('thinking')
@@ -603,15 +674,27 @@ export function usePromptBar() {
     if (isAgentBusy) {
       const attachments = [...useChatStore.getState().draftAttachments]
 
-      // Enqueue with mode='prompt' priority='next' (the user-input default).
-      // The message will be added to chat when the queue processor pulls it
-      // out; until then it's visible in QueuedMessagesPreview above the input.
+      // Build the queued value. Plain text → string. With attachments →
+      // ContentBlock[] interleaving text + attachments. The block form
+      // is what lets joinPromptValues preserve ordering when several
+      // queued commands are coalesced into a single agent turn.
+      let value: PromptValue
+      if (attachments.length === 0) {
+        value = prompt
+      } else {
+        const blocks: ContentBlock[] = []
+        if (prompt.length > 0) blocks.push({ type: 'text', text: prompt })
+        for (const att of attachments) {
+          blocks.push({ type: 'attachment', attachment: att })
+        }
+        value = blocks
+      }
+
       enqueueMessage({
-        value: prompt,
+        value,
         mode: 'prompt',
         priority: 'next',
         uuid: generateId('queued'),
-        ...(attachments.length > 0 && { pastedContents: attachments }),
       })
 
       // Clear input
@@ -629,7 +712,7 @@ export function usePromptBar() {
     // through during the sync setup will get null from tryStart and abort
     // cleanly with a warning.
     useChatStore.getState().setDraftInput('')
-    const attachments = useChatStore.getState().draftAttachments
+    const directAttachments = useChatStore.getState().draftAttachments
     clearDraftAttachments()
 
     // Switch to chat so the user sees the agent working
@@ -638,7 +721,21 @@ export function usePromptBar() {
       layoutStore.setViewMode('chat')
     }
 
-    await runAgentForPrompt(prompt, attachments)
+    // Build a PromptValue: plain string when no attachments, else
+    // ContentBlock[] interleaving the prompt and the attachments.
+    let directContent: PromptValue
+    if (directAttachments.length === 0) {
+      directContent = prompt
+    } else {
+      const blocks: ContentBlock[] = []
+      if (prompt.length > 0) blocks.push({ type: 'text', text: prompt })
+      for (const att of directAttachments) {
+        blocks.push({ type: 'attachment', attachment: att })
+      }
+      directContent = blocks
+    }
+
+    await runAgentForPrompt(directContent)
   }, [currentProject, devCommand, isAgentBusy, runAgentForPrompt])
 
   const handleStop = useCallback(() => {
@@ -688,28 +785,24 @@ export function usePromptBar() {
       }
 
       const head = commands[0]!
-      // Coalesce prompt-mode batches into a single turn.
-      let mergedValue: string
-      let mergedAttachments: typeof head.pastedContents
-      if (head.mode === 'prompt' && commands.length > 1) {
-        mergedValue = joinPromptValues(commands.map(c => c.value))
-        // Concatenate attachments across batched commands, preserving order.
-        const all: NonNullable<typeof head.pastedContents> = []
-        for (const c of commands) {
-          if (c.pastedContents) all.push(...c.pastedContents)
-        }
-        mergedAttachments = all.length > 0 ? all : undefined
-      } else {
-        mergedValue = head.value
-        mergedAttachments = head.pastedContents
-      }
+      // Coalesce prompt-mode batches into a single turn. joinPromptValues
+      // handles both string-only and block-mixed inputs:
+      //   - all strings → single newline-joined string
+      //   - any blocks  → concatenated block array (order preserved)
+      const mergedValue: PromptValue =
+        head.mode === 'prompt' && commands.length > 1
+          ? joinPromptValues(commands.map(c => c.value))
+          : head.value
 
       if (abortController.signal.aborted) return
 
-      // Add the (possibly coalesced) user message to chat now.
-      useChatStore.getState().addUserMessage(mergedValue, mergedAttachments ?? [])
+      // Extract a clean text + attachments view for the chat bubble.
+      // The block representation lives only at the agent boundary —
+      // the chat UI renders text and attachments separately as today.
+      const display = extractDisplayFromValue(mergedValue)
+      useChatStore.getState().addUserMessage(display.text, display.attachments)
 
-      await runAgentForPrompt(mergedValue, mergedAttachments ?? [], true)
+      await runAgentForPrompt(mergedValue, true)
       // Result intentionally ignored: if the agent errored, the next batch
       // (if any) will be picked up by the effect when it re-fires. The
       // user-visible error is already in the chat transcript.

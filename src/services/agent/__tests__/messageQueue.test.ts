@@ -25,7 +25,7 @@ import {
   joinPromptValues,
   canBatchWith,
 } from '../messageQueue'
-import type { QueuedCommand } from '../../../types/messageQueueTypes'
+import type { ContentBlock, QueuedCommand } from '../../../types/messageQueueTypes'
 
 const mk = (value: string, overrides?: Partial<QueuedCommand>): QueuedCommand => ({
   value,
@@ -207,12 +207,70 @@ describe('messageQueue — slash + batching helpers', () => {
     expect(isSlashCommand(mk('/init', { skipSlashCommands: true }))).toBe(false)
   })
 
+  it('isSlashCommand on a block-valued command checks the first text block', () => {
+    const cmd = mk('', {
+      value: [
+        { type: 'text', text: '/plan refactor auth' },
+        { type: 'attachment', attachment: { id: 'a', type: 'file', name: 'foo', path: '/foo' } },
+      ],
+    })
+    expect(isSlashCommand(cmd)).toBe(true)
+  })
+
+  it('isSlashCommand on a block-valued command returns false if first block is attachment', () => {
+    const cmd = mk('', {
+      value: [
+        { type: 'attachment', attachment: { id: 'a', type: 'image', name: 'i', path: '/i' } },
+        { type: 'text', text: '/init' },
+      ],
+    })
+    expect(isSlashCommand(cmd)).toBe(false)
+  })
+
   it('joinPromptValues passes through single values', () => {
     expect(joinPromptValues(['single'])).toBe('single')
   })
 
-  it('joinPromptValues joins multiple with single newline (matches Claude Code)', () => {
+  it('joinPromptValues joins multiple strings with single newline (matches Claude Code)', () => {
     expect(joinPromptValues(['one', 'two', 'three'])).toBe('one\ntwo\nthree')
+  })
+
+  it('joinPromptValues with all-block inputs concatenates blocks in order', () => {
+    const a: ContentBlock[] = [
+      { type: 'text', text: 'msg1' },
+      { type: 'attachment', attachment: { id: 'a1', type: 'image', name: '1', path: '/1' } },
+    ]
+    const b: ContentBlock[] = [
+      { type: 'text', text: 'msg2' },
+      { type: 'attachment', attachment: { id: 'a2', type: 'image', name: '2', path: '/2' } },
+    ]
+    const result = joinPromptValues([a, b]) as ContentBlock[]
+    expect(Array.isArray(result)).toBe(true)
+    expect(result.length).toBe(4)
+    expect((result[0] as any).text).toBe('msg1')
+    expect((result[1] as any).attachment.id).toBe('a1')
+    expect((result[2] as any).text).toBe('msg2')
+    expect((result[3] as any).attachment.id).toBe('a2')
+  })
+
+  it('joinPromptValues mixing string and blocks promotes string to text block', () => {
+    const blockValue: ContentBlock[] = [
+      { type: 'attachment', attachment: { id: 'a1', type: 'image', name: '1', path: '/1' } },
+    ]
+    const result = joinPromptValues(['hello', blockValue]) as ContentBlock[]
+    expect(result.length).toBe(2)
+    expect((result[0] as any).type).toBe('text')
+    expect((result[0] as any).text).toBe('hello')
+    expect((result[1] as any).type).toBe('attachment')
+  })
+
+  it('joinPromptValues with empty string + blocks drops the empty text', () => {
+    const blockValue: ContentBlock[] = [
+      { type: 'text', text: 'inner' },
+    ]
+    const result = joinPromptValues(['', blockValue]) as ContentBlock[]
+    expect(result.length).toBe(1)
+    expect((result[0] as any).text).toBe('inner')
   })
 
   it('canBatchWith returns true for two prompt-mode commands', () => {

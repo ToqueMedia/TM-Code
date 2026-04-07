@@ -13,6 +13,26 @@ import {
   remove as removeFromQueue,
   subscribeToCommandQueue,
 } from '@/services/agent/messageQueue'
+import type { PromptValue } from '@/types/messageQueueTypes'
+
+/**
+ * Render a queued command's value as a single-line preview string.
+ * Strings pass through; block arrays show their joined text plus an
+ * "[N attached]" suffix when they carry attachments.
+ */
+function previewText(value: PromptValue): string {
+  if (typeof value === 'string') return value
+  const texts: string[] = []
+  let attachmentCount = 0
+  for (const block of value) {
+    if (block.type === 'text') texts.push(block.text)
+    else attachmentCount++
+  }
+  const joined = texts.join(' ')
+  if (attachmentCount === 0) return joined
+  const suffix = `[${attachmentCount} attached]`
+  return joined.length > 0 ? `${joined} ${suffix}` : suffix
+}
 
 function QueuedMessagesPreview() {
   const queuedCommands = useSyncExternalStore(
@@ -55,7 +75,7 @@ function QueuedMessagesPreview() {
             lineClamp={1}
             flex={1}
           >
-            {cmd.value}
+            {previewText(cmd.value)}
           </Text>
           <Text
             fontSize={tokens.fontSize.xs}
