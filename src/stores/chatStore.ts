@@ -5,7 +5,8 @@ import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
 import { useCheckpointStore } from './checkpointStore'
 import { usePermissionStore } from './permissionStore'
-import { clearQueue as clearMessageQueue } from '../services/agent/messageQueue'
+import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
+import { setQueueLogContext } from '../services/agent/queueOperationLog'
 import { logger } from '../utils/logger'
 
 interface ChatState {
@@ -361,6 +362,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
       })
 
+      // Scope the queue operation log to this project + session.
+      setQueueLogContext(projectPath, sessionId)
+
       return sessionId
     },
 
@@ -372,6 +376,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     setActiveSession: (sessionId: string) => {
       set({ activeSessionId: sessionId })
+      // Re-scope the queue log to the newly-active session.
+      const session = get().sessions.get(sessionId)
+      if (session) setQueueLogContext(session.projectPath, sessionId)
     },
 
     addUserMessage: (content: string, attachments?: Attachment[]) => {
@@ -1281,6 +1288,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           pendingDiffs: [],
         }
       })
+
+      // Scope the queue operation log to the new project + session.
+      setQueueLogContext(projectPath, session.id)
 
       sessionService.startAutoSave(30000)
       return session.id

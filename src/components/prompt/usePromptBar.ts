@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -16,8 +16,13 @@ import { slashCommandRegistry, type SlashCommand } from '../../services/agent/sl
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, extractAndResolveMentions } from '../../services/attachmentService'
 import type { Attachment } from '../../types/chat'
-import { enqueue as enqueueMessage, clearQueue as clearMessageQueue, dequeueAll, type QueuedCommand } from '../../services/agent/messageQueue'
-import { useQueryGuard } from '../../services/agent/queryGuard'
+import {
+  enqueue as enqueueMessage,
+  clearCommandQueue as clearMessageQueue,
+  joinPromptValues,
+} from '../../services/agent/messageQueue'
+import { getQueryGuard } from '../../services/agent/queryGuard'
+import type { QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { logger } from '../../utils/logger'
 
@@ -35,7 +40,10 @@ export function usePromptBar() {
   const navigatingHistoryRef = useRef(false)
   const isStreaming = useChatStore(s => s.isStreaming)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
-  const isAgentBusy = useQueryGuard()
+  // Subscribe to the QueryGuard via useSyncExternalStore — same pattern
+  // Claude Code uses. Re-renders when reserve/tryStart/end/forceEnd fires.
+  const queryGuard = getQueryGuard()
+  const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewServerRunning = useLayoutStore(s => s.isPreviewServerRunning)
@@ -596,9 +604,16 @@ export function usePromptBar() {
     if (isAgentBusy) {
       const attachments = [...useChatStore.getState().draftAttachments]
 
-      // Enqueue with attachments — message will be added to chat when processed.
-      // Until then, it's visible in QueuedMessagesPreview above the input.
-      enqueueMessage(prompt, attachments.length > 0 ? attachments : undefined)
+      // Enqueue with mode='prompt' priority='next' (the user-input default).
+      // The message will be added to chat when the queue processor pulls it
+      // out; until then it's visible in QueuedMessagesPreview above the input.
+      enqueueMessage({
+        value: prompt,
+        mode: 'prompt',
+        priority: 'next',
+        uuid: crypto.randomUUID(),
+        ...(attachments.length > 0 && { pastedContents: attachments }),
+      })
 
       // Clear input
       useChatStore.getState().setDraftInput('')
@@ -648,8 +663,24 @@ export function usePromptBar() {
   }, [])
 
   // === Queue processor — runs queued commands when agent becomes idle ===
+  //
+  // `commands` is whatever processQueueIfReady decided to drain:
+  //  - Slash/bash modes: a single command (one at a time).
+  //  - Prompt mode: all consecutive prompt-mode commands batched together.
+  //  - Task notifications: all task-notification commands batched together.
+  //
+  // For prompt mode we additionally coalesce the values into a single
+  // agent turn (Claude Code's joinPromptValues), so 3 quick messages
+  // become ONE round-trip to the model instead of three. Attachments
+  // from all batched commands are concatenated.
+  //
+  // After the agent loop returns, the QueryGuard transitions back to
+  // idle and useQueueProcessor's effect re-fires, picking up anything
+  // that was enqueued while we were running. No manual dequeueAll loop
+  // is needed here — the React effect IS the loop.
   const executeQueuedInput = useCallback(async (commands: QueuedCommand[]) => {
     if (runningRef.current) return
+    if (commands.length === 0) return
     runningRef.current = true
 
     // Create an abort controller so handleStop can cancel the loop
@@ -663,29 +694,32 @@ export function usePromptBar() {
         layoutStore.setViewMode('chat')
       }
 
-      // Process each command individually — preserves per-message @mention resolution
-      // and correct attachment binding. Each command becomes a user message + agent loop.
-      let pending = commands
-      outer: while (pending.length > 0) {
-        for (const cmd of pending) {
-          // Check if Stop was pressed — abort remaining commands
-          if (abortController.signal.aborted) break outer
-
-          // Add user message to chat now (was only in QueuedMessagesPreview until now)
-          useChatStore.getState().addUserMessage(cmd.value, cmd.attachments)
-
-          const ok = await runAgentForPrompt(cmd.value, cmd.attachments || [], true)
-          // Stop processing on error — remaining commands would likely fail too
-          // (e.g. rate limit, network error). The queue is already drained so
-          // they won't retry automatically; the user can re-send manually.
-          if (!ok) break outer
+      const head = commands[0]!
+      // Coalesce prompt-mode batches into a single turn.
+      let mergedValue: string
+      let mergedAttachments: typeof head.pastedContents
+      if (head.mode === 'prompt' && commands.length > 1) {
+        mergedValue = joinPromptValues(commands.map(c => c.value))
+        // Concatenate attachments across batched commands, preserving order.
+        const all: NonNullable<typeof head.pastedContents> = []
+        for (const c of commands) {
+          if (c.pastedContents) all.push(...c.pastedContents)
         }
-        // If aborted, don't drain more from the queue
-        if (abortController.signal.aborted) break
-        // Check if new messages arrived while we were processing.
-        // This handles the case where the user enqueues during the loop.
-        pending = dequeueAll()
+        mergedAttachments = all.length > 0 ? all : undefined
+      } else {
+        mergedValue = head.value
+        mergedAttachments = head.pastedContents
       }
+
+      if (abortController.signal.aborted) return
+
+      // Add the (possibly coalesced) user message to chat now.
+      useChatStore.getState().addUserMessage(mergedValue, mergedAttachments ?? [])
+
+      await runAgentForPrompt(mergedValue, mergedAttachments ?? [], true)
+      // Result intentionally ignored: if the agent errored, the next batch
+      // (if any) will be picked up by the effect when it re-fires. The
+      // user-visible error is already in the chat transcript.
     } finally {
       queueAbortRef.current = null
       runningRef.current = false

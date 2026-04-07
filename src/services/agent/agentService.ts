@@ -8,7 +8,7 @@ import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore
 import { useBillingStore } from '../../stores/billingStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
-import { reserve as queryGuardReserve, end as queryGuardEnd } from './queryGuard'
+import { getQueryGuard } from './queryGuard'
 import type { StreamEvent } from './streamParser'
 
 // === Types ===
@@ -129,6 +129,11 @@ class AgentService {
   private static instance: AgentService
   private abortController: AbortController | null = null
   private isRunning = false
+  /** Generation number returned by queryGuard.tryStart(). Used by the
+   *  finally block in runAgentLoop to call queryGuard.end(generation) so
+   *  that stale finally blocks from cancelled queries are skipped (matches
+   *  Claude Code's QueryGuard contract). */
+  private currentGeneration: number | null = null
   private toolExecutor: ToolExecutor
   private tools: OpenAIToolDefinition[]
   private systemPrompt: string = ''
@@ -306,10 +311,14 @@ class AgentService {
       this.cancelLoop()
     }
     this.isRunning = true
+    let myGeneration: number | null = null
     if (!this.lightweightOptions) {
       this.abortController = new AbortController()
-      // Signal that the main agent is actively running (enables message queuing)
-      queryGuardReserve()
+      // Atomically transition the QueryGuard to running. tryStart() returns
+      // a generation number we capture for end() so a stale finally from a
+      // cancelled query (whose generation was bumped by forceEnd) is skipped.
+      myGeneration = getQueryGuard().tryStart()
+      this.currentGeneration = myGeneration
     } else if (!this.abortController) {
       this.abortController = new AbortController()
     }
@@ -637,9 +646,16 @@ class AgentService {
       callbacks.onError(error instanceof Error ? error : new Error(String(error)))
     } finally {
       this.isRunning = false
-      // Signal that the main agent is idle (triggers queue processing)
-      if (!this.lightweightOptions) {
-        queryGuardEnd()
+      // Signal that the main agent is idle (triggers queue processing).
+      // end(myGeneration) returns false if forceEnd() bumped the generation
+      // (i.e. cancelLoop ran) — in that case the cancel path already moved
+      // the guard to idle and a fresh runAgentLoop may already have started,
+      // so we MUST NOT touch the guard here.
+      if (!this.lightweightOptions && myGeneration !== null) {
+        const stillCurrent = getQueryGuard().end(myGeneration)
+        if (stillCurrent && this.currentGeneration === myGeneration) {
+          this.currentGeneration = null
+        }
       }
     }
   }
@@ -1133,9 +1149,13 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     // Unblock any pending diff approval waits
     resolveAllPendingDiffApprovals(false)
     this.isRunning = false
-    // Signal idle — allows queue processing to start
+    // forceEnd() bumps the QueryGuard's generation so the cancelled loop's
+    // finally block sees a stale generation and skips its end() call.
+    // This allows queue processing (or a fresh runAgentLoop) to start
+    // without racing the cancelled loop's late finally.
     if (!this.lightweightOptions) {
-      queryGuardEnd()
+      getQueryGuard().forceEnd()
+      this.currentGeneration = null
     }
   }
 

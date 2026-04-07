@@ -1,67 +1,146 @@
 /**
- * Query Guard — module-level tracker for agent execution state.
+ * Synchronous state machine for the query lifecycle, compatible with
+ * React's `useSyncExternalStore`.
  *
- * Inspired by Claude Code's QueryGuard.js:
- * - Simple active/inactive tracking
- * - Controls whether user input enqueues or executes immediately
- * - Signal-based reactivity for React (useSyncExternalStore)
+ * Three states:
+ *   idle        → no query, safe to dequeue and process
+ *   dispatching → an item was dequeued, async chain hasn't reached onQuery yet
+ *   running     → onQuery called tryStart(), query is executing
+ *
+ * Transitions:
+ *   idle → dispatching  (reserve)
+ *   dispatching → running  (tryStart)
+ *   idle → running  (tryStart, for direct user submissions)
+ *   running → idle  (end / forceEnd)
+ *   dispatching → idle  (cancelReservation, when processQueueIfReady fails)
+ *
+ * `isActive` returns true for both dispatching and running, preventing
+ * re-entry from the queue processor during the async gap.
+ *
+ * Usage with React:
+ *   const queryGuard = getQueryGuard()
+ *   const isQueryActive = useSyncExternalStore(
+ *     queryGuard.subscribe,
+ *     queryGuard.getSnapshot,
+ *   )
+ *
+ * Ported from Claude Code (utils/QueryGuard.ts). Adaptation: Claude Code
+ * instantiates a fresh QueryGuard per REPL session via useRef and threads
+ * it through props. TM Code does not have a single REPL host — the agent
+ * service is a singleton — so we expose a module-level `getQueryGuard()`
+ * accessor that returns a single shared instance. The class itself is
+ * unchanged so swapping to per-session instances later is mechanical.
  */
+import { createSignal } from '../../utils/signal'
 
-import { useSyncExternalStore } from 'react'
+export class QueryGuard {
+  private _status: 'idle' | 'dispatching' | 'running' = 'idle'
+  private _generation = 0
+  private _changed = createSignal()
 
-type Listener = () => void
+  /**
+   * Reserve the guard for queue processing. Transitions idle → dispatching.
+   * Returns false if not idle (another query or dispatch in progress).
+   */
+  reserve(): boolean {
+    if (this._status !== 'idle') return false
+    this._status = 'dispatching'
+    this._notify()
+    return true
+  }
 
-const listeners = new Set<Listener>()
-let active = false
+  /**
+   * Cancel a reservation when processQueueIfReady had nothing to process.
+   * Transitions dispatching → idle.
+   */
+  cancelReservation(): void {
+    if (this._status !== 'dispatching') return
+    this._status = 'idle'
+    this._notify()
+  }
 
-function emit() {
-  for (const listener of listeners) listener()
-}
+  /**
+   * Start a query. Returns the generation number on success,
+   * or null if a query is already running (concurrent guard).
+   * Accepts transitions from both idle (direct user submit)
+   * and dispatching (queue processor path).
+   */
+  tryStart(): number | null {
+    if (this._status === 'running') return null
+    this._status = 'running'
+    ++this._generation
+    this._notify()
+    return this._generation
+  }
 
-function subscribe(listener: Listener): () => void {
-  listeners.add(listener)
-  return () => listeners.delete(listener)
-}
+  /**
+   * End a query. Returns true if this generation is still current
+   * (meaning the caller should perform cleanup). Returns false if a
+   * newer query has started (stale finally block from a cancelled query).
+   */
+  end(generation: number): boolean {
+    if (this._generation !== generation) return false
+    if (this._status !== 'running') return false
+    this._status = 'idle'
+    this._notify()
+    return true
+  }
 
-/**
- * Mark the agent as actively running.
- * Called at the start of runAgentLoop.
- */
-export function reserve(): void {
-  if (!active) {
-    active = true
-    emit()
+  /**
+   * Force-end the current query regardless of generation.
+   * Used by onCancel where any running query should be terminated.
+   * Increments generation so stale finally blocks from the cancelled
+   * query's promise rejection will see a mismatch and skip cleanup.
+   */
+  forceEnd(): void {
+    if (this._status === 'idle') return
+    this._status = 'idle'
+    ++this._generation
+    this._notify()
+  }
+
+  /**
+   * Is the guard active (dispatching or running)?
+   * Always synchronous — not subject to React state batching delays.
+   */
+  get isActive(): boolean {
+    return this._status !== 'idle'
+  }
+
+  get generation(): number {
+    return this._generation
+  }
+
+  // --
+  // useSyncExternalStore interface
+
+  /** Subscribe to state changes. Stable reference — safe as useEffect dep. */
+  subscribe = this._changed.subscribe
+
+  /** Snapshot for useSyncExternalStore. Returns `isActive`. */
+  getSnapshot = (): boolean => {
+    return this._status !== 'idle'
+  }
+
+  private _notify(): void {
+    this._changed.emit()
   }
 }
 
-/**
- * Mark the agent as idle.
- * Called when runAgentLoop finishes (success, error, or cancel).
- */
-export function end(): void {
-  if (active) {
-    active = false
-    emit()
-  }
+// === Module-level singleton ===
+//
+// TM Code's agent service is a singleton and useQueueProcessor must read
+// the same instance the service writes to. Exposed via a getter so tests
+// can swap instances by replacing the module export.
+
+let _instance: QueryGuard | null = null
+
+export function getQueryGuard(): QueryGuard {
+  if (!_instance) _instance = new QueryGuard()
+  return _instance
 }
 
-/**
- * Check if the agent is currently running (non-reactive, for service code).
- */
-export function isActive(): boolean {
-  return active
-}
-
-// === React integration ===
-
-function getSnapshot(): boolean {
-  return active
-}
-
-/**
- * React hook — subscribe to agent active state.
- * Returns true if agent is running.
- */
-export function useQueryGuard(): boolean {
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+/** Test helper — drop the singleton so a fresh QueryGuard is created on next access. */
+export function __resetQueryGuard(): void {
+  _instance = null
 }

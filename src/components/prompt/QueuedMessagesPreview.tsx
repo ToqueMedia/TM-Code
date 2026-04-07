@@ -4,22 +4,34 @@
  * Each message has a cancel button to remove it from the queue.
  */
 
-import { memo } from 'react'
+import { memo, useSyncExternalStore } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
-import { useCommandQueue, remove as removeFromQueue } from '@/services/agent/messageQueue'
+import {
+  getCommandQueueSnapshot,
+  isQueuedCommandVisible,
+  remove as removeFromQueue,
+  subscribeToCommandQueue,
+} from '@/services/agent/messageQueue'
 
 function QueuedMessagesPreview() {
-  const queuedCommands = useCommandQueue()
+  const queuedCommands = useSyncExternalStore(
+    subscribeToCommandQueue,
+    getCommandQueueSnapshot,
+  )
 
-  if (queuedCommands.length === 0) return null
+  // Filter to only commands that should render in the preview — system
+  // notifications and meta messages stay hidden (matches Claude Code).
+  const visibleCommands = queuedCommands.filter(isQueuedCommandVisible)
+
+  if (visibleCommands.length === 0) return null
 
   return (
     <Box mb={2}>
-      {queuedCommands.map((cmd, index) => (
+      {visibleCommands.map((cmd, index) => (
         <Flex
-          key={cmd.id}
+          key={cmd.uuid ?? `queued-${index}`}
           align="center"
           gap={2}
           px={3}
@@ -27,7 +39,7 @@ function QueuedMessagesPreview() {
           borderRadius="8px"
           bg="rgba(254, 16, 99, 0.06)"
           border={`1px solid rgba(254, 16, 99, 0.15)`}
-          mb={index < queuedCommands.length - 1 ? 1 : 0}
+          mb={index < visibleCommands.length - 1 ? 1 : 0}
         >
           <Box
             w="6px"
@@ -65,7 +77,7 @@ function QueuedMessagesPreview() {
             color={tokens.colors.text.disabled}
             _hover={{ color: tokens.colors.accent.red, bg: tokens.colors.accent.redSubtle }}
             transition={tokens.transition.fast}
-            onClick={() => removeFromQueue(cmd.id)}
+            onClick={() => removeFromQueue([cmd])}
           >
             <FiX size={12} />
           </Box>
