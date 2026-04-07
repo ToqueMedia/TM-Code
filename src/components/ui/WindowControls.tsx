@@ -1,3 +1,4 @@
+import type { CSSProperties, MouseEvent, ReactNode } from 'react'
 import { HStack, Box, Text } from '@chakra-ui/react'
 import { tokens } from '../../theme/tokens'
 import { IS_MAC } from '../../utils/platform'
@@ -19,6 +20,76 @@ interface WindowControlsProps {
 	onClose: () => void
 	onMinimize: () => void
 	onMaximize: () => void
+}
+
+// Swallow the mousedown before it bubbles to the title bar's onMouseDown handler.
+// Without this, the title bar's custom shouldStartDrag logic could race the click
+// and (on Windows especially) start a native drag before the `click` event ever
+// reaches the button's onClick handler, making the button feel dead.
+function swallowMouseDown(e: MouseEvent<HTMLButtonElement>) {
+	e.stopPropagation()
+}
+
+// Shared style object for the Windows/Linux title-bar buttons. Using a real
+// <button> rather than a <div> ensures the element is semantically interactive:
+// shouldStartDrag() short-circuits on interactive tags, and the title-bar drag
+// handler walks up the DOM from the event target — a button stops that walk
+// before it ever reaches a drag region.
+const winBtnStyle: CSSProperties = {
+	display: 'flex',
+	alignItems: 'center',
+	justifyContent: 'center',
+	width: '36px',
+	height: '28px',
+	cursor: 'pointer',
+	background: 'transparent',
+	border: 'none',
+	padding: 0,
+	margin: 0,
+	color: tokens.colors.text.secondary,
+	transition: 'all 0.15s',
+	// Ensure the button intercepts pointer events (safety against any parent
+	// CSS that sets pointer-events: none on drag regions).
+	pointerEvents: 'auto',
+}
+
+// Windows/Linux title-bar button. Proper <button> element with hover state
+// handled inline so we don't depend on Chakra pseudo props working across
+// reset styles.
+function WinBarButton({
+	ariaLabel,
+	onClick,
+	hoverBg,
+	hoverColor = tokens.colors.text.primary,
+	children,
+}: {
+	ariaLabel: string
+	onClick: () => void
+	hoverBg: string
+	hoverColor?: string
+	children: ReactNode
+}) {
+	return (
+		<button
+			type="button"
+			aria-label={ariaLabel}
+			data-tauri-drag-region="false"
+			data-no-drag
+			onMouseDown={swallowMouseDown}
+			onClick={onClick}
+			style={winBtnStyle}
+			onMouseEnter={e => {
+				e.currentTarget.style.background = hoverBg
+				e.currentTarget.style.color = hoverColor
+			}}
+			onMouseLeave={e => {
+				e.currentTarget.style.background = 'transparent'
+				e.currentTarget.style.color = tokens.colors.text.secondary
+			}}
+		>
+			{children}
+		</button>
+	)
 }
 
 const WindowControls = ({ onClose, onMinimize, onMaximize }: WindowControlsProps) => {
@@ -80,34 +151,20 @@ const WindowControls = ({ onClose, onMinimize, onMaximize }: WindowControlsProps
 		)
 	}
 
-	// Windows/Linux: icon-based buttons
+	// Windows/Linux: icon-based real <button> elements
 	return (
-		<HStack gap={0} data-tauri-drag-region="false">
-			<Box
-				display="flex"
-				alignItems="center"
-				justifyContent="center"
-				width="36px"
-				height="28px"
-				cursor="pointer"
-				color={tokens.colors.text.secondary}
-				transition="all 0.15s"
-				_hover={{ bg: 'rgba(255,255,255,0.08)', color: tokens.colors.text.primary }}
+		<HStack gap={0} data-tauri-drag-region="false" data-no-drag>
+			<WinBarButton
+				ariaLabel="Minimize"
 				onClick={onMinimize}
+				hoverBg="rgba(255,255,255,0.08)"
 			>
 				<Text fontSize="16px" lineHeight="1" mt="-2px" fontWeight="300">&#x2013;</Text>
-			</Box>
-			<Box
-				display="flex"
-				alignItems="center"
-				justifyContent="center"
-				width="36px"
-				height="28px"
-				cursor="pointer"
-				color={tokens.colors.text.secondary}
-				transition="all 0.15s"
-				_hover={{ bg: 'rgba(255,255,255,0.08)', color: tokens.colors.text.primary }}
+			</WinBarButton>
+			<WinBarButton
+				ariaLabel="Maximize"
 				onClick={onMaximize}
+				hoverBg="rgba(255,255,255,0.08)"
 			>
 				<Box
 					width="9px"
@@ -115,21 +172,15 @@ const WindowControls = ({ onClose, onMinimize, onMaximize }: WindowControlsProps
 					border="1px solid currentColor"
 					borderRadius="1px"
 				/>
-			</Box>
-			<Box
-				display="flex"
-				alignItems="center"
-				justifyContent="center"
-				width="36px"
-				height="28px"
-				cursor="pointer"
-				color={tokens.colors.text.secondary}
-				transition="all 0.15s"
-				_hover={{ bg: '#e81123', color: '#fff' }}
+			</WinBarButton>
+			<WinBarButton
+				ariaLabel="Close"
 				onClick={onClose}
+				hoverBg="#e81123"
+				hoverColor="#fff"
 			>
 				<Text fontSize="16px" lineHeight="1" fontWeight="300">&#x2715;</Text>
-			</Box>
+			</WinBarButton>
 		</HStack>
 	)
 }

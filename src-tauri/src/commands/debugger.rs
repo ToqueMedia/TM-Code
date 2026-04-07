@@ -115,7 +115,10 @@ async fn check_node_availability() -> Result<String, DebuggerError> {
     let mut probe = TokioCommand::new("node");
     probe.arg("--version");
     super::hide_console_window_tokio(&mut probe);
-    let output = probe.output().await.map_err(|_| DebuggerError::NodeNotFound)?;
+    let output = probe
+        .output()
+        .await
+        .map_err(|_| DebuggerError::NodeNotFound)?;
 
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();

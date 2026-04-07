@@ -137,8 +137,8 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
     let full_pattern = format!("{}/{}", directory, pattern);
 
     // Canonicalize directory to compare results against
-    let canonical_dir =
-        canonicalize_path(std::path::Path::new(&directory)).map_err(|e| format!("Invalid directory: {}", e))?;
+    let canonical_dir = canonicalize_path(std::path::Path::new(&directory))
+        .map_err(|e| format!("Invalid directory: {}", e))?;
 
     let mut results = Vec::new();
 
