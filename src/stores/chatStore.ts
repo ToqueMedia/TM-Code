@@ -87,7 +87,7 @@ interface ChatActions {
 }
 
 let idCounter = 0
-function generateId(prefix: string): string {
+export function generateId(prefix: string): string {
   idCounter++
   return `${prefix}-${Date.now()}-${idCounter}`
 }

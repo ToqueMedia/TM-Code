@@ -23,6 +23,7 @@ import {
 } from '../services/agent/messageQueue'
 import { getQueryGuard } from '../services/agent/queryGuard'
 import { processQueueIfReady } from '../services/agent/queueProcessor'
+import { usePermissionStore } from '../stores/permissionStore'
 import type { QueuedCommand } from '../types/messageQueueTypes'
 
 type UseQueueProcessorParams = {
@@ -41,6 +42,7 @@ type UseQueueProcessorParams = {
  *
  * Processing triggers when:
  * - No query active (queryGuard, reactive via useSyncExternalStore)
+ * - No permission dialog open (would render a new turn under a modal)
  * - Queue has items
  */
 export function useQueueProcessor({
@@ -62,15 +64,22 @@ export function useQueueProcessor({
     getCommandQueueSnapshot,
   )
 
+  // Block draining while a permission dialog is open. Without this, the
+  // queue could fire a new turn while the user is still mid-decision on
+  // the previous turn's permission prompt — the new turn would either
+  // collide with the open dialog or auto-fire another one.
+  const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
+
   useEffect(() => {
     if (isQueryActive) return
+    if (hasPendingPermission) return
     if (queueSnapshot.length === 0) return
 
-    // Reservation is owned by executeQueuedInput → handlePromptSubmit →
-    // queryGuard.reserve()/tryStart(). The sync chain runs before the first
-    // real await, so by the time React re-runs this effect (due to the
+    // Reservation is owned by executeQueuedInput → runAgentLoop →
+    // queryGuard.tryStart(). The sync chain runs before the first real
+    // await, so by the time React re-runs this effect (due to the
     // dequeue-triggered snapshot change), isQueryActive is already true
     // (dispatching) and the guard above returns early.
     processQueueIfReady({ executeInput: executeQueuedInput })
-  }, [queueSnapshot, isQueryActive, executeQueuedInput])
+  }, [queueSnapshot, isQueryActive, hasPendingPermission, executeQueuedInput])
 }

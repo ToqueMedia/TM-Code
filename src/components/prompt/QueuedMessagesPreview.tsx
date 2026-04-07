@@ -10,7 +10,6 @@ import { FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import {
   getCommandQueueSnapshot,
-  isQueuedCommandVisible,
   remove as removeFromQueue,
   subscribeToCommandQueue,
 } from '@/services/agent/messageQueue'
@@ -21,9 +20,10 @@ function QueuedMessagesPreview() {
     getCommandQueueSnapshot,
   )
 
-  // Filter to only commands that should render in the preview — system
-  // notifications and meta messages stay hidden (matches Claude Code).
-  const visibleCommands = queuedCommands.filter(isQueuedCommandVisible)
+  // TM Code currently only enqueues 'prompt' mode commands so every
+  // queued item is user-visible. When task notifications are added,
+  // re-introduce the isQueuedCommandVisible filter from Claude Code.
+  const visibleCommands = queuedCommands
 
   if (visibleCommands.length === 0) return null
 

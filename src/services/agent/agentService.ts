@@ -129,11 +129,6 @@ class AgentService {
   private static instance: AgentService
   private abortController: AbortController | null = null
   private isRunning = false
-  /** Generation number returned by queryGuard.tryStart(). Used by the
-   *  finally block in runAgentLoop to call queryGuard.end(generation) so
-   *  that stale finally blocks from cancelled queries are skipped (matches
-   *  Claude Code's QueryGuard contract). */
-  private currentGeneration: number | null = null
   private toolExecutor: ToolExecutor
   private tools: OpenAIToolDefinition[]
   private systemPrompt: string = ''
@@ -317,8 +312,14 @@ class AgentService {
       // Atomically transition the QueryGuard to running. tryStart() returns
       // a generation number we capture for end() so a stale finally from a
       // cancelled query (whose generation was bumped by forceEnd) is skipped.
+      // If tryStart returns null, another runAgentLoop is already running —
+      // refuse to enter to avoid leaving the guard pinned in 'running' forever.
       myGeneration = getQueryGuard().tryStart()
-      this.currentGeneration = myGeneration
+      if (myGeneration === null) {
+        logger.warn('agent', 'tryStart() returned null — concurrent runAgentLoop detected, aborting')
+        this.isRunning = false
+        return
+      }
     } else if (!this.abortController) {
       this.abortController = new AbortController()
     }
@@ -647,15 +648,12 @@ class AgentService {
     } finally {
       this.isRunning = false
       // Signal that the main agent is idle (triggers queue processing).
-      // end(myGeneration) returns false if forceEnd() bumped the generation
+      // end(myGeneration) is a no-op if forceEnd() bumped the generation
       // (i.e. cancelLoop ran) — in that case the cancel path already moved
       // the guard to idle and a fresh runAgentLoop may already have started,
-      // so we MUST NOT touch the guard here.
+      // so the QueryGuard contract guarantees we won't disturb it.
       if (!this.lightweightOptions && myGeneration !== null) {
-        const stillCurrent = getQueryGuard().end(myGeneration)
-        if (stillCurrent && this.currentGeneration === myGeneration) {
-          this.currentGeneration = null
-        }
+        getQueryGuard().end(myGeneration)
       }
     }
   }
@@ -1155,7 +1153,6 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     // without racing the cancelled loop's late finally.
     if (!this.lightweightOptions) {
       getQueryGuard().forceEnd()
-      this.currentGeneration = null
     }
   }
 

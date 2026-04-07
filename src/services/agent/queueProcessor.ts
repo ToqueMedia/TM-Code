@@ -63,15 +63,12 @@ function isSlashCommand(cmd: QueuedCommand): boolean {
 export function processQueueIfReady({
   executeInput,
 }: ProcessQueueParams): ProcessQueueResult {
-  // This processor runs between turns on the main thread. Skip anything
-  // addressed to a subagent — an unfiltered peek() returning a subagent
-  // notification would set targetMode, dequeueAllMatching would find nothing
-  // matching that mode with agentId===undefined, and we'd return processed:
-  // false with the queue unchanged → the React effect never re-fires and any
-  // queued user prompt stalls permanently.
-  const isMainThread = (cmd: QueuedCommand) => cmd.agentId === undefined
-
-  const next = peek(isMainThread)
+  // Note: Claude Code's processor filters by `agentId === undefined` to
+  // skip commands addressed to subagents. TM Code does not yet have
+  // subagents, so the filter is omitted. When subagents are added,
+  // re-introduce an `isMainThread` filter and pass it to peek/dequeue/
+  // dequeueAllMatching.
+  const next = peek()
   if (!next) {
     return { processed: false }
   }
@@ -79,7 +76,7 @@ export function processQueueIfReady({
   // Slash commands and bash-mode commands are processed individually.
   // Bash commands need per-command error isolation, exit codes, and progress UI.
   if (isSlashCommand(next) || next.mode === 'bash') {
-    const cmd = dequeue(isMainThread)!
+    const cmd = dequeue()!
     void executeInput([cmd])
     return { processed: true }
   }
@@ -87,7 +84,7 @@ export function processQueueIfReady({
   // Drain all non-slash-command items with the same mode at once.
   const targetMode = next.mode
   const commands = dequeueAllMatching(
-    cmd => isMainThread(cmd) && !isSlashCommand(cmd) && cmd.mode === targetMode,
+    cmd => !isSlashCommand(cmd) && cmd.mode === targetMode,
   )
   if (commands.length === 0) {
     return { processed: false }

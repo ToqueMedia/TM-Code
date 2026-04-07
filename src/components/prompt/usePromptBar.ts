@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
@@ -31,7 +31,6 @@ export function usePromptBar() {
   const setInput = useChatStore(s => s.setDraftInput)
   const [devCommand, setDevCommand] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const runningRef = useRef(false)
   /** Abort controller for the queue processing loop — allows handleStop to cancel it. */
   const queueAbortRef = useRef<AbortController | null>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -611,7 +610,7 @@ export function usePromptBar() {
         value: prompt,
         mode: 'prompt',
         priority: 'next',
-        uuid: crypto.randomUUID(),
+        uuid: generateId('queued'),
         ...(attachments.length > 0 && { pastedContents: attachments }),
       })
 
@@ -624,26 +623,22 @@ export function usePromptBar() {
     }
 
     // === Agent is idle — run directly ===
+    //
+    // No local re-entry guard needed. The QueryGuard inside runAgentLoop
+    // (tryStart) is the single source of truth: a second send slipping
+    // through during the sync setup will get null from tryStart and abort
+    // cleanly with a warning.
+    useChatStore.getState().setDraftInput('')
+    const attachments = useChatStore.getState().draftAttachments
+    clearDraftAttachments()
 
-    // Non-reentrant guard: prevent overlapping sends
-    if (runningRef.current) return
-    runningRef.current = true
-
-    try {
-      useChatStore.getState().setDraftInput('')
-      const attachments = useChatStore.getState().draftAttachments
-      clearDraftAttachments()
-
-      // Switch to chat so the user sees the agent working
-      const layoutStore = useLayoutStore.getState()
-      if (layoutStore.viewMode !== 'chat') {
-        layoutStore.setViewMode('chat')
-      }
-
-      await runAgentForPrompt(prompt, attachments)
-    } finally {
-      runningRef.current = false
+    // Switch to chat so the user sees the agent working
+    const layoutStore = useLayoutStore.getState()
+    if (layoutStore.viewMode !== 'chat') {
+      layoutStore.setViewMode('chat')
     }
+
+    await runAgentForPrompt(prompt, attachments)
   }, [currentProject, devCommand, isAgentBusy, runAgentForPrompt])
 
   const handleStop = useCallback(() => {
@@ -679,9 +674,7 @@ export function usePromptBar() {
   // that was enqueued while we were running. No manual dequeueAll loop
   // is needed here — the React effect IS the loop.
   const executeQueuedInput = useCallback(async (commands: QueuedCommand[]) => {
-    if (runningRef.current) return
     if (commands.length === 0) return
-    runningRef.current = true
 
     // Create an abort controller so handleStop can cancel the loop
     const abortController = new AbortController()
@@ -722,7 +715,6 @@ export function usePromptBar() {
       // user-visible error is already in the chat transcript.
     } finally {
       queueAbortRef.current = null
-      runningRef.current = false
     }
   }, [runAgentForPrompt])
 
