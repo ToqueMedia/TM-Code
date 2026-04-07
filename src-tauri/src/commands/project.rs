@@ -317,11 +317,10 @@ pub fn open_project(path: String, init_git: Option<bool>) -> Result<ProjectInfo>
         let mut initialized = false;
 
         for git_bin in &git_candidates {
-            if let Ok(output) = std::process::Command::new(git_bin)
-                .args(["init"])
-                .current_dir(project_path)
-                .output()
-            {
+            let mut cmd = std::process::Command::new(git_bin);
+            cmd.args(["init"]).current_dir(project_path);
+            super::hide_console_window(&mut cmd);
+            if let Ok(output) = cmd.output() {
                 if output.status.success() {
                     initialized = true;
                     break;
@@ -1138,8 +1137,9 @@ fn update_recent_projects(project_info: &ProjectInfo) -> Result<()> {
 }
 
 fn is_system_folder(path: &Path) -> bool {
-    // Canonicalize to resolve symlinks and normalize the path
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // Canonicalize to resolve symlinks and normalize the path.
+    // Uses our helper to strip Windows UNC `\\?\` prefix.
+    let canonical = super::canonicalize_path(path).unwrap_or_else(|_| path.to_path_buf());
     let path_str = canonical.to_string_lossy();
 
     let system_paths = [
@@ -1301,8 +1301,9 @@ pub fn delete_project(project_id: String, project_path: String) -> Result<()> {
     let path = Path::new(&project_path);
 
     if path.exists() && path.is_dir() {
-        // Canonicalize to resolve symlinks before safety checks
-        let canonical = fs::canonicalize(path)
+        // Canonicalize to resolve symlinks before safety checks.
+        // Uses our helper to strip Windows UNC `\\?\` prefix.
+        let canonical = super::canonicalize_path(path)
             .map_err(|e| ProjectError::Io(format!("Cannot resolve path: {}", e)))?;
 
         // Safety: don't delete system folders

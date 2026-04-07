@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-use super::normalize_path_for_frontend;
+use super::{canonicalize_path, normalize_path_for_frontend};
 
 /// Validates that a template ID contains only safe characters (alphanumeric, hyphens).
 /// Prevents path traversal via crafted IDs like "../../../etc".
@@ -80,7 +80,7 @@ pub async fn copy_directory(source: String, destination: String) -> Result<(), S
 
     // Canonicalize to prevent path traversal via symlinks in the source arg
     let canonical_source =
-        std::fs::canonicalize(source_path).map_err(|e| format!("Invalid source path: {}", e))?;
+        canonicalize_path(source_path).map_err(|e| format!("Invalid source path: {}", e))?;
 
     let mut visited = HashSet::new();
     copy_dir_safe(&canonical_source, dest_path, &mut visited)
@@ -95,7 +95,7 @@ fn copy_dir_safe(src: &Path, dst: &Path, visited: &mut HashSet<PathBuf>) -> std:
     }
 
     // Track canonical path to detect cycles
-    if let Ok(canonical) = std::fs::canonicalize(src) {
+    if let Ok(canonical) = canonicalize_path(src) {
         if !visited.insert(canonical) {
             // Already visited this directory — cycle detected, skip
             return Ok(());
@@ -138,7 +138,7 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
 
     // Canonicalize directory to compare results against
     let canonical_dir =
-        std::fs::canonicalize(&directory).map_err(|e| format!("Invalid directory: {}", e))?;
+        canonicalize_path(std::path::Path::new(&directory)).map_err(|e| format!("Invalid directory: {}", e))?;
 
     let mut results = Vec::new();
 
@@ -148,8 +148,8 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
         match entry {
             Ok(path) => {
                 // Verify result is within directory (defense in depth)
-                if let Ok(canonical_path) = std::fs::canonicalize(&path) {
-                    if !canonical_path.starts_with(&canonical_dir) {
+                if let Ok(canonical_p) = canonicalize_path(&path) {
+                    if !canonical_p.starts_with(&canonical_dir) {
                         continue;
                     }
                 }
