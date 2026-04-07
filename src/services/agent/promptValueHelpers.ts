@@ -18,18 +18,29 @@
  * React renderer.
  */
 
+import { t } from '../../i18n'
 import type { Attachment, ContentPart, ConversationMessage } from '../../types/chat'
 import type { ContentBlock, PromptValue } from '../../types/messageQueueTypes'
 import type { OpenAIContentPart } from './agentService'
 
 /**
- * Hard cap on the total bytes of image data URIs in a single multimodal
- * payload. 10 MB matches the comfort zone for most vision providers
- * (Qwen and Kimi reject larger; OpenAI's vision endpoint also has a
- * per-message limit around this range). When exceeded, buildContentParts
+ * Per-image cap on the data URI byte length. Individual images larger
+ * than this are dropped from the multimodal payload (replaced by an
+ * `<attached_image>` text fallback so the model still knows the image
+ * existed). 5 MB of base64 ≈ 3.7 MB of original image bytes — matches
+ * Anthropic Claude's per-image limit and is comfortably under Kimi K2.5
+ * and Qwen3 Plus per-image limits.
+ */
+export const MAX_PER_IMAGE_BYTES = 5 * 1024 * 1024
+
+/**
+ * Hard cap on the TOTAL bytes of image data URIs in a single multimodal
+ * payload. 20 MB matches Gemini's per-message inline limit and is
+ * conservative for OpenAI / DashScope / Kimi. When the surviving images
+ * (after the per-image filter) still exceed this, buildContentParts
  * returns null so the caller falls back to the text path.
  */
-export const MAX_MULTIMODAL_PAYLOAD_BYTES = 10 * 1024 * 1024
+export const MAX_MULTIMODAL_PAYLOAD_BYTES = 20 * 1024 * 1024
 
 // === Resolver function shapes ===
 //
@@ -91,7 +102,7 @@ export async function buildAugmentedPrompt(
   const { resolveMentions, resolveAttachmentXml } = resolvers
 
   if (typeof value === 'string') {
-    let augmented = value || 'Analyze the attached files.'
+    let augmented = value || t('prompt.fallbackAnalyzeFiles')
     const mentionContext = await resolveMentions(augmented, projectPath)
     if (mentionContext) augmented += mentionContext
     return augmented
@@ -109,7 +120,7 @@ export async function buildAugmentedPrompt(
       if (xml) parts.push(xml.trim())
     }
   }
-  if (parts.length === 0) return 'Analyze the attached files.'
+  if (parts.length === 0) return t('prompt.fallbackAnalyzeFiles')
   return parts.join('\n')
 }
 
@@ -125,12 +136,22 @@ export async function buildAugmentedPrompt(
  * fall back to `buildAugmentedPrompt` in that case (no reason to pay
  * the overhead of the array shape for a purely text message).
  */
+export type BuildContentPartsOptions = {
+  /** Override the per-image byte cap. Defaults to MAX_PER_IMAGE_BYTES. */
+  maxPerImageBytes?: number
+  /** Override the total payload cap. Defaults to MAX_MULTIMODAL_PAYLOAD_BYTES. */
+  maxTotalBytes?: number
+}
+
 export async function buildContentParts(
   value: PromptValue,
   projectPath: string,
   resolvers: PromptResolvers,
+  options: BuildContentPartsOptions = {},
 ): Promise<OpenAIContentPart[] | null> {
   const { resolveMentions, resolveAttachmentXml, resolveImageDataUri } = resolvers
+  const maxPerImage = options.maxPerImageBytes ?? MAX_PER_IMAGE_BYTES
+  const maxTotal = options.maxTotalBytes ?? MAX_MULTIMODAL_PAYLOAD_BYTES
 
   const blocks: ContentBlock[] = typeof value === 'string'
     ? (value.length > 0 ? [{ type: 'text', text: value }] : [])
@@ -149,11 +170,13 @@ export async function buildContentParts(
       const att = block.attachment
       if (att.type === 'image') {
         const dataUri = await resolveImageDataUri(att)
-        if (dataUri) {
+        if (dataUri && dataUri.length <= maxPerImage) {
+          // Image fits the per-image budget — embed as image_url part.
           parts.push({ type: 'image_url', image_url: { url: dataUri } })
           hasImage = true
         } else {
-          // Image read failed — fall back to textual placeholder so
+          // Either the image read failed OR the image is too large for
+          // the per-image budget. Fall back to textual placeholder so
           // the model at least knows an image was intended.
           const xml = await resolveAttachmentXml([att])
           if (xml) parts.push({ type: 'text', text: xml.trim() })
@@ -168,17 +191,17 @@ export async function buildContentParts(
 
   if (!hasImage) return null
 
-  // Payload size guard. Vision providers and the backend proxy have
-  // request body limits; an over-budget multimodal payload typically
-  // returns an opaque 413 or upstream timeout. Cap the total size of
-  // image_url data URIs and downgrade to the text path if exceeded —
+  // Total payload guard. Even after the per-image filter, the cumulative
+  // size of image_url data URIs can exceed what providers / the backend
+  // proxy will accept. Over-budget multimodal payloads typically return
+  // an opaque 413 or upstream timeout. Downgrade to the text path so
   // the user gets a working (text-only) request instead of a confusing
   // failure.
   const totalImageBytes = parts.reduce(
     (sum, p) => sum + (p.type === 'image_url' ? p.image_url.url.length : 0),
     0,
   )
-  if (totalImageBytes > MAX_MULTIMODAL_PAYLOAD_BYTES) {
+  if (totalImageBytes > maxTotal) {
     return null
   }
 
@@ -189,7 +212,7 @@ export async function buildContentParts(
     p => p.type === 'text' && p.text.trim().length > 0,
   )
   if (!hasNonEmptyText) {
-    parts.unshift({ type: 'text', text: 'Analyze the attached image(s).' })
+    parts.unshift({ type: 'text', text: t('prompt.fallbackAnalyzeImages') })
   }
 
   return parts
@@ -237,8 +260,9 @@ export function downgradeHistoryToText(
       return msg as ConversationMessage
     }
     const parts = msg.content as ContentPart[]
+    const placeholder = t('prompt.imageStripped')
     const text = parts
-      .map(p => (p.type === 'text' ? p.text : '[image attached — switch to a multimodal model to view]'))
+      .map(p => (p.type === 'text' ? p.text : placeholder))
       .join('\n')
     return { ...msg, content: text }
   })

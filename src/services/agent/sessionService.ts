@@ -298,6 +298,21 @@ class SessionService {
       })
     }
 
+    // Persist promptBlocks the same way — preserve the interleaved
+    // ordering, but strip base64 from any attachment blocks. On reload
+    // the block ordering is intact (so the bubble can still derive a
+    // correct display) but image content has to be re-resolved from
+    // disk via attachment.path if multimodal is needed.
+    if (msg.promptBlocks?.length) {
+      sanitized.promptBlocks = msg.promptBlocks.map(block => {
+        if (block.type === 'attachment') {
+          const { base64: _base64, ...rest } = block.attachment
+          return { type: 'attachment' as const, attachment: rest }
+        }
+        return block
+      })
+    }
+
     if (msg.codeBlocks?.length) {
       sanitized.codeBlocks = msg.codeBlocks
     }

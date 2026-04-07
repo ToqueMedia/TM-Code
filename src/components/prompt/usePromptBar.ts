@@ -457,7 +457,11 @@ export function usePromptBar() {
     // The augmented version (with file contents) is only sent to the model.
     // Skip if caller already added the message (e.g. queued commands).
     if (!skipUserMessage) {
-      chatStore.addUserMessage(display.text, display.attachments)
+      // Pass the original block representation through so follow-up
+      // turns reconstruct content parts in the correct order, not the
+      // lossy text-then-images fallback.
+      const blocks = typeof content === 'string' ? undefined : content
+      chatStore.addUserMessage(display.text, display.attachments, blocks)
     }
     chatStore.startAssistantMessage()
     agentStore.setStatus('thinking')
@@ -772,10 +776,13 @@ export function usePromptBar() {
       if (abortController.signal.aborted) return
 
       // Extract a clean text + attachments view for the chat bubble.
-      // The block representation lives only at the agent boundary —
-      // the chat UI renders text and attachments separately as today.
+      // The bubble UI renders text and attachments separately as today,
+      // but we ALSO persist the original block array as `promptBlocks`
+      // so rebuildConversationHistory can reconstruct the correct
+      // ordering for follow-up turns.
       const display = extractDisplayFromValue(mergedValue)
-      useChatStore.getState().addUserMessage(display.text, display.attachments)
+      const blocks = typeof mergedValue === 'string' ? undefined : mergedValue
+      useChatStore.getState().addUserMessage(display.text, display.attachments, blocks)
 
       await runAgentForPrompt(mergedValue, true)
       // Result intentionally ignored: if the agent errored, the next batch

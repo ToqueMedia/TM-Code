@@ -12,7 +12,9 @@ import {
   downgradeHistoryToText,
   extractDisplayFromValue,
   MAX_MULTIMODAL_PAYLOAD_BYTES,
+  MAX_PER_IMAGE_BYTES,
 } from '../promptValueHelpers'
+import { t } from '../../../i18n'
 import type { Attachment, ContentPart, ConversationMessage } from '../../../types/chat'
 import type { ContentBlock } from '../../../types/messageQueueTypes'
 
@@ -33,20 +35,34 @@ const mkFile = (id: string): Attachment => ({
 })
 
 // Mock resolvers — deterministic, no Tauri calls.
-const noMentions = async () => ''
-const xmlForAttachments = async (atts: Attachment[]) =>
-  atts.length === 0
-    ? ''
-    : '\n\n<attachments>\n' +
-      atts.map(a => `<${a.type} name="${a.name}" />`).join('\n') +
-      '\n</attachments>'
-const dataUriForImage = async (att: Attachment) => att.base64 ?? null
-
-const defaultResolvers = {
-  resolveMentions: noMentions,
-  resolveAttachmentXml: xmlForAttachments,
-  resolveImageDataUri: dataUriForImage,
+//
+// Reconstructed in beforeEach so any future jest.spyOn / mockImplementation
+// is scoped to a single test, never leaking to siblings. The shared
+// `defaultResolvers` reference is replaced fresh each time.
+let noMentions: (text: string, projectPath: string) => Promise<string>
+let xmlForAttachments: (atts: Attachment[]) => Promise<string>
+let dataUriForImage: (att: Attachment) => Promise<string | null>
+let defaultResolvers: {
+  resolveMentions: typeof noMentions
+  resolveAttachmentXml: typeof xmlForAttachments
+  resolveImageDataUri: typeof dataUriForImage
 }
+
+beforeEach(() => {
+  noMentions = async () => ''
+  xmlForAttachments = async (atts: Attachment[]) =>
+    atts.length === 0
+      ? ''
+      : '\n\n<attachments>\n' +
+        atts.map(a => `<${a.type} name="${a.name}" />`).join('\n') +
+        '\n</attachments>'
+  dataUriForImage = async (att: Attachment) => att.base64 ?? null
+  defaultResolvers = {
+    resolveMentions: noMentions,
+    resolveAttachmentXml: xmlForAttachments,
+    resolveImageDataUri: dataUriForImage,
+  }
+})
 
 describe('extractDisplayFromValue', () => {
   it('returns the string unchanged with no attachments', () => {
@@ -100,7 +116,7 @@ describe('buildAugmentedPrompt — string path', () => {
 
   it('falls back to a placeholder for empty strings', async () => {
     const result = await buildAugmentedPrompt('', '/proj', defaultResolvers)
-    expect(result).toBe('Analyze the attached files.')
+    expect(result).toBe(t('prompt.fallbackAnalyzeFiles'))
   })
 })
 
@@ -129,7 +145,7 @@ describe('buildAugmentedPrompt — block path', () => {
 
   it('falls back to placeholder when blocks produce no text', async () => {
     const result = await buildAugmentedPrompt([], '/proj', defaultResolvers)
-    expect(result).toBe('Analyze the attached files.')
+    expect(result).toBe(t('prompt.fallbackAnalyzeFiles'))
   })
 })
 
@@ -251,7 +267,7 @@ describe('buildContentParts — multimodal vision path', () => {
     expect(result!.length).toBe(2)
     expect(result![0]).toEqual({
       type: 'text',
-      text: 'Analyze the attached image(s).',
+      text: t('prompt.fallbackAnalyzeImages'),
     })
     expect(result![1].type).toBe('image_url')
   })
@@ -291,20 +307,83 @@ describe('buildContentParts — multimodal vision path', () => {
     // Whitespace text was kept (length > 0) but a fallback was prepended.
     expect(result!.length).toBeGreaterThanOrEqual(2)
     const firstText = result!.find(p => p.type === 'text') as { type: 'text'; text: string }
-    expect(firstText.text).toBe('Analyze the attached image(s).')
+    expect(firstText.text).toBe(t('prompt.fallbackAnalyzeImages'))
   })
 
-  it('returns null when total image bytes exceed the payload guard', async () => {
-    // Build an "image" with a base64 longer than the payload limit.
-    const oversizedBase64 = 'data:image/png;base64,' + 'A'.repeat(MAX_MULTIMODAL_PAYLOAD_BYTES + 10)
-    const oversized = mkImage('big', oversizedBase64)
+  it('drops a single image that exceeds the per-image cap, falls back to XML', async () => {
+    // Test with TINY caps so we don't allocate real megabytes.
+    const tinyOptions = { maxPerImageBytes: 50, maxTotalBytes: 1000 }
+
+    // Resolver returns a 60-byte fake data URI for the "big" image,
+    // exceeding the 50-byte per-image cap. The "small" image fits.
+    const sizedResolver = async (att: Attachment) =>
+      att.id === 'big' ? 'X'.repeat(60) : 'a'.repeat(40)
+    const resolvers = { ...defaultResolvers, resolveImageDataUri: sizedResolver }
+
     const value: ContentBlock[] = [
-      { type: 'text', text: 'analyze this' },
-      { type: 'attachment', attachment: oversized },
+      { type: 'text', text: 'compare' },
+      { type: 'attachment', attachment: mkImage('big') },
+      { type: 'attachment', attachment: mkImage('small') },
+    ]
+    const result = await buildContentParts(value, '/proj', resolvers, tinyOptions)
+
+    expect(result).not.toBeNull()
+    const imageParts = result!.filter(p => p.type === 'image_url')
+    expect(imageParts.length).toBe(1) // only "small" survived
+    // "big" became a text fallback containing its name.
+    const textParts = result!.filter(p => p.type === 'text')
+    expect(textParts.some(p => p.type === 'text' && p.text.includes('big'))).toBe(true)
+  })
+
+  it('returns null when ALL images exceed the per-image cap', async () => {
+    const tinyOptions = { maxPerImageBytes: 50, maxTotalBytes: 1000 }
+    // Every image resolves to oversized.
+    const oversizedResolver = async () => 'X'.repeat(60)
+    const resolvers = { ...defaultResolvers, resolveImageDataUri: oversizedResolver }
+
+    const value: ContentBlock[] = [
+      { type: 'text', text: 'analyze' },
+      { type: 'attachment', attachment: mkImage('a') },
+      { type: 'attachment', attachment: mkImage('b') },
+    ]
+    const result = await buildContentParts(value, '/proj', resolvers, tinyOptions)
+
+    // No images survived → null (caller falls back to text path).
+    expect(result).toBeNull()
+  })
+
+  it('returns null when surviving images exceed the total payload cap', async () => {
+    // Per-image cap allows each image, but the sum exceeds the total cap.
+    const tinyOptions = { maxPerImageBytes: 100, maxTotalBytes: 250 }
+    // Each image is 100 bytes; 3 images = 300 > 250 total.
+    const sized = async () => 'X'.repeat(100)
+    const resolvers = { ...defaultResolvers, resolveImageDataUri: sized }
+
+    const value: ContentBlock[] = [
+      { type: 'text', text: 'all of these' },
+      { type: 'attachment', attachment: mkImage('a') },
+      { type: 'attachment', attachment: mkImage('b') },
+      { type: 'attachment', attachment: mkImage('c') },
+    ]
+    const result = await buildContentParts(value, '/proj', resolvers, tinyOptions)
+
+    expect(result).toBeNull()
+  })
+
+  it('uses default caps when options are omitted', async () => {
+    // Sanity check that the default exports are wired correctly. We
+    // don't actually exercise the cap here — just verify the call
+    // shape with no options compiles and runs.
+    const value: ContentBlock[] = [
+      { type: 'text', text: 'small' },
+      { type: 'attachment', attachment: mkImage('tiny') },
     ]
     const result = await buildContentParts(value, '/proj', defaultResolvers)
 
-    expect(result).toBeNull()
+    expect(result).not.toBeNull()
+    expect(MAX_MULTIMODAL_PAYLOAD_BYTES).toBeGreaterThan(0)
+    expect(MAX_PER_IMAGE_BYTES).toBeGreaterThan(0)
+    expect(MAX_PER_IMAGE_BYTES).toBeLessThanOrEqual(MAX_MULTIMODAL_PAYLOAD_BYTES)
   })
 })
 
@@ -363,7 +442,11 @@ describe('downgradeHistoryToText', () => {
     const result = downgradeHistoryToText(history)
     expect(typeof result[0].content).toBe('string')
     expect(result[0].content).toContain('olha esta imagem')
-    expect(result[0].content).toContain('[image attached')
+    // The placeholder text should match the i18n value (or contain its
+    // distinguishing prefix). We assert non-empty + recognisable shape.
+    expect(typeof result[0].content).toBe('string')
+    expect((result[0].content as string).length).toBeGreaterThan(0)
+    expect(result[0].content).toContain(t('prompt.imageStripped'))
   })
 
   it('does not mutate the input history', () => {

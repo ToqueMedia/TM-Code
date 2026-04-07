@@ -13,10 +13,23 @@ export interface Attachment {
   base64?: string
 }
 
-/** Ordered content block — tracks interleaving of text and tool calls */
+/** Ordered content block — tracks interleaving of text and tool calls
+ *  in assistant messages. Used by the chat bubble for inline rendering. */
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; toolCallId: string }
+
+/** Ordered prompt block — tracks the interleaving of user text and
+ *  attachments in a SINGLE user message (or coalesced batch). The
+ *  message queue carries this as `value`; the chat bubble derives
+ *  `(text, attachments)` from it for display, and the agent boundary
+ *  derives either an interleaved text prompt or an OpenAI content
+ *  parts array depending on model capability. Defined here so both
+ *  the queue layer and the chat store can produce/consume it without
+ *  cross-imports. */
+export type PromptBlock =
+  | { type: 'text'; text: string }
+  | { type: 'attachment'; attachment: Attachment }
 
 /** Message format for OpenAI-compatible conversation history */
 /**
@@ -94,6 +107,16 @@ export interface ChatMessage {
   card?: ChatMessageCard
   /** Attachments included with this message (metadata only — content is resolved into message.content at send-time) */
   attachments?: Attachment[]
+  /**
+   * Original interleaved order of text and attachments at enqueue/send
+   * time. When present, this is the canonical source for reconstructing
+   * the message: rebuildConversationHistory walks promptBlocks in order
+   * to produce content parts that preserve the user's original sequence
+   * (vs the lossy text-then-attachments fallback derived from
+   * `content` + `attachments`). Stripped of base64 at disk persistence;
+   * in-memory image blocks carry base64 for follow-up turn fidelity.
+   */
+  promptBlocks?: PromptBlock[]
 }
 
 export interface CodeBlock {

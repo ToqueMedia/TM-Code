@@ -23,35 +23,23 @@
  *   the dual-source-of-truth problem.
  */
 
-import type { Attachment } from './chat'
+import type { PromptBlock } from './chat'
 
 // === Content blocks ===
+//
+// The block type is defined in types/chat.ts as `PromptBlock` so the
+// chat store layer can produce/consume it without importing from the
+// queue layer (avoids a name collision with the existing assistant
+// `ContentBlock` type). The queue layer re-exports it as `ContentBlock`
+// for back-compat with the existing call sites.
 
 /**
  * Inline content blocks for queued commands. Mirrors Claude Code's
  * `ContentBlockParam[]` shape (Anthropic SDK) but defined locally so the
  * queue layer does not depend on the SDK. The agentService translates
  * to/from the SDK type at the API boundary.
- *
- * Two variants today:
- *  - `text` — a chunk of user text
- *  - `attachment` — a file/image attached at this position in the message
- *
- * The point of having blocks (rather than `value: string` + a flat
- * `pastedContents` array) is to preserve **ordering** when multiple
- * messages are coalesced into one turn. Without blocks, three messages
- * each with their own image collapse to "all text, then all images" and
- * the model loses the correspondence between text and image.
- *
- * Today TM Code's agent service does not yet send images to the model
- * (the multimodal model providers are listed in modelProfiles.ts but not
- * wired in agentService). The interleaving is preserved in the textual
- * `<attached_image .../>` placeholder representation so that when real
- * multimodal support lands, the queue layer is already correct.
  */
-export type ContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'attachment'; attachment: Attachment }
+export type ContentBlock = PromptBlock
 
 /** Either a plain string or a list of content blocks. */
 export type PromptValue = string | ContentBlock[]

@@ -398,6 +398,10 @@ const en = {
   'prompt.send': 'Send message',
   'prompt.sendToQueue': 'Send to queue',
   'prompt.attach': 'Attach files',
+  'prompt.fallbackAnalyzeImages': 'Analyze the attached image(s).',
+  'prompt.fallbackAnalyzeFiles': 'Analyze the attached files.',
+  'prompt.imageStripped': '[image attached — switch to a multimodal model to view]',
+  'prompt.modelTextOnlyWarning': 'This model cannot view images. Switch to a multimodal model (Kimi, Qwen3 Plus, Step3.5) to send images.',
 
   // ── Views ──────────────────────────────────────────
   'view.toggleProjects': 'Toggle projects sidebar',
@@ -1033,6 +1037,10 @@ const pt: Record<keyof typeof en, string> = {
   'prompt.send': 'Enviar mensagem',
   'prompt.sendToQueue': 'Enviar para fila',
   'prompt.attach': 'Anexar ficheiros',
+  'prompt.fallbackAnalyzeImages': 'Analisa a(s) imagem(ns) anexada(s).',
+  'prompt.fallbackAnalyzeFiles': 'Analisa os ficheiros anexados.',
+  'prompt.imageStripped': '[imagem anexada — muda para um modelo multimodal para a ver]',
+  'prompt.modelTextOnlyWarning': 'Este modelo não vê imagens. Muda para um modelo multimodal (Kimi, Qwen3 Plus, Step3.5) para enviar imagens.',
   'view.toggleProjects': 'Alternar barra de projetos',
   'view.attachContainer': 'Anexar contentor',
   'view.newChat': 'Novo Chat',
