@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::normalize_path_for_frontend;
+use super::{canonicalize_path, normalize_path_for_frontend};
 
 // File tree node types
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -87,20 +87,20 @@ pub const MAX_DECOMPRESS_SIZE: usize = 100 * 1024 * 1024;
 /// Prevents path traversal attacks (e.g., "../../etc/passwd").
 #[allow(dead_code)]
 pub fn validate_path_within_root(path: &Path, root: &Path) -> Result<PathBuf> {
-    let canonical_root = std::fs::canonicalize(root).map_err(|_| {
+    let canonical_root = canonicalize_path(root).map_err(|_| {
         FileTreeError::PathNotFound(format!("Root path not found: {}", root.display()))
     })?;
 
     // For paths that don't exist yet (create operations), canonicalize the parent
     let canonical_path = if path.exists() {
-        std::fs::canonicalize(path).map_err(|_| {
+        canonicalize_path(path).map_err(|_| {
             FileTreeError::PathNotFound(format!("Path not found: {}", path.display()))
         })?
     } else {
         let parent = path.parent().ok_or_else(|| {
             FileTreeError::InvalidOperation("Cannot resolve parent directory".to_string())
         })?;
-        let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
+        let canonical_parent = canonicalize_path(parent).map_err(|_| {
             FileTreeError::PathNotFound(format!("Parent path not found: {}", parent.display()))
         })?;
         let file_name = path
@@ -132,7 +132,7 @@ fn validate_path_safe(path: &Path) -> Result<PathBuf> {
     }
 
     if path.exists() {
-        std::fs::canonicalize(path)
+        canonicalize_path(path)
             .map_err(|_| FileTreeError::PathNotFound(format!("{}", path.display())))
     } else {
         // For new files, canonicalize the parent
@@ -144,7 +144,7 @@ fn validate_path_safe(path: &Path) -> Result<PathBuf> {
                 "Cannot resolve path without parent directory".to_string(),
             ));
         }
-        let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
+        let canonical_parent = canonicalize_path(parent).map_err(|_| {
             FileTreeError::PathNotFound(format!("Parent not found: {}", parent.display()))
         })?;
         let file_name = path
@@ -213,7 +213,7 @@ pub fn build_file_tree(root_path: String, filter: Option<FileTreeFilter>) -> Res
     }
 
     let canonical_root =
-        std::fs::canonicalize(path).map_err(|_| FileTreeError::PathNotFound(root_path.clone()))?;
+        canonicalize_path(path).map_err(|_| FileTreeError::PathNotFound(root_path.clone()))?;
 
     let mut visited = HashSet::new();
     visited.insert(canonical_root.clone());
@@ -296,7 +296,7 @@ fn build_tree_node(
         // Detect symlinks and prevent infinite loops
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
-            if let Ok(canonical) = std::fs::canonicalize(&entry_path) {
+            if let Ok(canonical) = canonicalize_path(&entry_path) {
                 if !visited.insert(canonical) {
                     // Already visited this target — skip to prevent cycle
                     continue;

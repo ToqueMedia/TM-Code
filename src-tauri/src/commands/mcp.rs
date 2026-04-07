@@ -88,10 +88,11 @@ pub async fn mcp_start_server(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    // Prevent visible console window on Windows
+    // Prevent visible console window on Windows.
+    // tokio::process::Command has an inherent `creation_flags` method on Windows,
+    // so no `use CommandExt` import is needed.
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }

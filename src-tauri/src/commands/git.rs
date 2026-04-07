@@ -1,25 +1,97 @@
 use serde::Serialize;
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use super::terminal::get_user_path;
 
+/// Resolve a usable `git` binary path. On Windows, GUI apps launched from
+/// Explorer may not inherit the Git for Windows install dir on PATH, so we
+/// fall back to standard install locations.
+fn resolve_git_binary() -> &'static str {
+    static GIT_BIN: OnceLock<String> = OnceLock::new();
+    GIT_BIN
+        .get_or_init(|| {
+            // Default: rely on PATH lookup
+            let default = "git".to_string();
+
+            #[cfg(target_os = "windows")]
+            {
+                // Try `git --version` from PATH first; if it fails, search known dirs
+                let path_works = silent_command("git")
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if path_works {
+                    return default;
+                }
+                let candidates = [
+                    r"C:\Program Files\Git\bin\git.exe",
+                    r"C:\Program Files\Git\cmd\git.exe",
+                    r"C:\Program Files (x86)\Git\bin\git.exe",
+                    r"C:\Program Files (x86)\Git\cmd\git.exe",
+                ];
+                for candidate in &candidates {
+                    if PathBuf::from(candidate).exists() {
+                        eprintln!("[git] Using fallback git binary: {}", candidate);
+                        return (*candidate).to_string();
+                    }
+                }
+            }
+            default
+        })
+        .as_str()
+}
+
+/// Create a Command that does NOT show a console window on Windows.
+#[cfg(target_os = "windows")]
+fn silent_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+fn silent_command(program: &str) -> Command {
+    Command::new(program)
+}
+
 /// Create a git Command with the user's full PATH (so git installed
-/// via brew/xcode-select is found even without a login shell).
+/// via brew/xcode-select is found even without a login shell). On Windows,
+/// suppresses the brief console window flash and falls back to standard
+/// Git for Windows install paths if `git` is not on PATH.
 fn git_cmd(cwd: &str) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = Command::new(resolve_git_binary());
     cmd.current_dir(cwd);
     if let Some(path) = get_user_path() {
         cmd.env("PATH", path);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
 }
 
 /// Same as git_cmd but accepts a Path
 fn git_cmd_path(cwd: &std::path::Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = Command::new(resolve_git_binary());
     cmd.current_dir(cwd);
     if let Some(path) = get_user_path() {
         cmd.env("PATH", path);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
 }

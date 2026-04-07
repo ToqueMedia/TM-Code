@@ -142,6 +142,9 @@ fn test_docker_connection() -> bool {
 pub fn docker_cmd() -> Command {
     let mut cmd = Command::new("docker");
 
+    // Hide the brief CMD flash on Windows whenever docker is invoked.
+    super::hide_console_window(&mut cmd);
+
     // Docker Desktop: standard socket, no --host needed (Unix only)
     #[cfg(unix)]
     if Path::new("/var/run/docker.sock").exists() {
@@ -377,8 +380,10 @@ pub async fn create_project_container(
         .unwrap_or_else(|| WORKSPACE_PATH.to_string());
 
     // ── Build docker create args ─────────────────────────────────────────
-    // Resolve symlinks in project_path to prevent mounting arbitrary host dirs
-    let resolved_project_path = std::fs::canonicalize(&project_path)
+    // Resolve symlinks in project_path to prevent mounting arbitrary host dirs.
+    // Uses our helper to strip Windows UNC `\\?\` prefix (Docker Desktop on
+    // Windows can't mount UNC-prefixed paths).
+    let resolved_project_path = super::canonicalize_path(std::path::Path::new(&project_path))
         .map_err(|e| format!("Failed to resolve project path: {}", e))?;
     let resolved_project_str = resolved_project_path.to_string_lossy().to_string();
 

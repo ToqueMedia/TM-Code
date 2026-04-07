@@ -149,6 +149,47 @@ fn hide_console_window(cmd: &mut Command) {
     }
 }
 
+/// Pick a real interactive shell for `start_interactive_shell`.
+///
+/// On Windows, prefer PowerShell 7 (`pwsh`) > Windows PowerShell (`powershell`) > `cmd`.
+/// `cmd /C` is NOT interactive — it runs a command and exits — so we use `cmd` with no
+/// flags or PowerShell with `-NoLogo -NoExit`.
+///
+/// On Unix, use the user's `$SHELL` (or `/bin/bash`) with `-i`.
+fn pick_interactive_shell() -> (String, Vec<String>) {
+    #[cfg(target_os = "windows")]
+    {
+        // Try pwsh (PowerShell 7+, cross-platform) first
+        let mut pwsh_probe = Command::new("pwsh");
+        pwsh_probe
+            .arg("-Version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        hide_console_window(&mut pwsh_probe);
+        if pwsh_probe.status().map(|s| s.success()).unwrap_or(false) {
+            return ("pwsh".to_string(), vec!["-NoLogo".to_string()]);
+        }
+        // Fall back to Windows PowerShell (always available on Win 10/11)
+        let mut ps_probe = Command::new("powershell");
+        ps_probe
+            .arg("-Command")
+            .arg("$PSVersionTable.PSVersion")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        hide_console_window(&mut ps_probe);
+        if ps_probe.status().map(|s| s.success()).unwrap_or(false) {
+            return ("powershell".to_string(), vec!["-NoLogo".to_string()]);
+        }
+        // Last resort: cmd.exe with no /C flag (interactive)
+        return ("cmd".to_string(), vec![]);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        (shell, vec!["-i".to_string()])
+    }
+}
+
 /// Build a command with sandbox if enabled, otherwise plain host command.
 pub fn build_sandboxed_host_command(command: &str, project_path: &PathBuf) -> Command {
     if let Some(cmd) = super::sandbox::sandboxed_command(command, project_path, &[]) {
@@ -423,9 +464,10 @@ pub(crate) fn kill_process_tree(pid: u32) {
 
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .output();
+        let mut tk = Command::new("taskkill");
+        tk.args(["/T", "/F", "/PID", &pid.to_string()]);
+        hide_console_window(&mut tk);
+        let _ = tk.output();
     }
 }
 
@@ -1034,12 +1076,7 @@ pub async fn start_interactive_shell(
             None => PathBuf::from(&ap.project_path),
         };
 
-        let (shell_cmd, shell_args) = if cfg!(target_os = "windows") {
-            ("cmd".to_string(), vec!["/C".to_string()])
-        } else {
-            let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            (shell, vec!["-i".to_string()])
-        };
+        let (shell_cmd, shell_args) = pick_interactive_shell();
 
         let mut cmd = Command::new(&shell_cmd);
         cmd.args(&shell_args)
@@ -1076,12 +1113,7 @@ pub async fn start_interactive_shell(
         }
     };
 
-    let (shell_cmd, shell_args) = if cfg!(target_os = "windows") {
-        ("cmd".to_string(), vec!["/C".to_string()])
-    } else {
-        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        (shell, vec!["-i".to_string()])
-    };
+    let (shell_cmd, shell_args) = pick_interactive_shell();
 
     let mut cmd = Command::new(&shell_cmd);
     cmd.args(&shell_args)
@@ -1219,9 +1251,10 @@ pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Resul
         // NOTE: removed port-based kill (lsof -ti:7773 | kill) — it was killing
         // Colima's SSH port forwarding process, crashing the Docker VM.
     } else {
-        let _ = Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .output();
+        let mut tk = Command::new("taskkill");
+        tk.args(["/T", "/F", "/PID", &pid.to_string()]);
+        hide_console_window(&mut tk);
+        let _ = tk.output();
     }
 
     {
@@ -1269,7 +1302,7 @@ pub async fn change_directory(
         return Err(format!("Path is not a directory: {}", new_path.display()));
     }
 
-    let canonical = std::fs::canonicalize(&new_path)
+    let canonical = super::canonicalize_path(&new_path)
         .map_err(|e| format!("Failed to resolve directory: {}", e))?;
 
     // After canonicalization, re-check that we're still inside the project

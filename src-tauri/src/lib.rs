@@ -574,14 +574,49 @@ pub fn run() {
             #[cfg(not(dev))]
             let main_url = WebviewUrl::External("http://localhost:14300".parse().unwrap());
 
-            WebviewWindowBuilder::new(app, "main", main_url)
+            // Build the main window with platform-aware decorations.
+            //
+            // macOS: frameless transparent window with rounded glassmorphism.
+            //   - decorations(false) hides the title bar (we render our own)
+            //   - transparent(true) enables the rounded background blur
+            //   - accept_first_mouse(true) lets a focus-stealing click also activate widgets
+            //
+            // Windows: frameless OPAQUE window. We can't use transparent(true) because:
+            //   - It disables Windows 11 Snap Layouts (no layout overlay on the maximize hover)
+            //   - It removes the native DWM drop shadow
+            //   - It breaks DWM rounded corners on Windows 11
+            //   - It can cause black-box rendering bugs in Webview2
+            //   The custom title bar still works because decorations(false) is honored.
+            //
+            // Linux: frameless OPAQUE window (transparency requires a compositor and is
+            //   inconsistent across distros).
+            #[allow(unused_mut)]
+            let mut builder = WebviewWindowBuilder::new(app, "main", main_url)
                 .title("TM Code")
                 .icon(icon.clone())
                 .expect("Failed to set window icon")
                 .inner_size(1250.0, 850.0)
-                .decorations(false)
-                .transparent(true)
-                .accept_first_mouse(true)
+                .min_inner_size(900.0, 600.0)
+                .decorations(false);
+
+            #[cfg(target_os = "macos")]
+            {
+                builder = builder.transparent(true).accept_first_mouse(true);
+            }
+
+            // On Windows/Linux we don't use transparent(true), so the WebView
+            // shows its default background (white on Webview2). Combined with
+            // `body { background-color: transparent }` in theme.ts, that white
+            // bleeds through and the user sees a fully blank screen until React
+            // mounts. Force the WebView's underlying background to the same dark
+            // color the app uses (#0a0a0a = tokens.colors.bg.welcome).
+            #[cfg(not(target_os = "macos"))]
+            {
+                use tauri::utils::config::Color;
+                builder = builder.background_color(Color(10, 10, 10, 255));
+            }
+
+            builder
                 // Allow ALL navigations including iframes to localhost dev servers
                 .on_navigation(|url| {
                     let host = url.host_str().unwrap_or("");

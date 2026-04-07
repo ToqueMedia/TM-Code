@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::normalize_str_for_frontend;
+use super::{canonicalize_path, hide_console_window_tokio, normalize_str_for_frontend};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchOptions {
@@ -81,15 +81,15 @@ pub async fn search_in_files(
         ));
     }
 
-    let directory_path = std::fs::canonicalize(&directory_path)
+    let directory_path = canonicalize_path(&directory_path)
         .map_err(|e| format!("Failed to resolve directory path: {}", e))?;
 
     // Security: reject search outside the user's home directory to prevent
     // path traversal attacks (e.g. searching /etc/passwd via the agent).
-    // Canonicalize home too — on Windows, canonicalize() returns UNC paths (\\?\C:\...)
-    // which won't match non-canonicalized paths from dirs::home_dir().
+    // canonicalize_path strips the Windows UNC \\?\ prefix so prefix matching
+    // works consistently across platforms.
     if let Some(home) = dirs::home_dir() {
-        let canonical_home = std::fs::canonicalize(&home).unwrap_or(home);
+        let canonical_home = canonicalize_path(&home).unwrap_or(home);
         if !directory_path.starts_with(&canonical_home) {
             return Err(format!(
                 "Search directory must be within home directory: {}",
@@ -100,8 +100,10 @@ pub async fn search_in_files(
 
     let directory = directory_path.to_string_lossy().to_string();
 
-    let has_rg = tokio::process::Command::new("rg")
-        .arg("--version")
+    let mut rg_probe = tokio::process::Command::new("rg");
+    rg_probe.arg("--version");
+    hide_console_window_tokio(&mut rg_probe);
+    let has_rg = rg_probe
         .output()
         .await
         .map(|o| o.status.success())
@@ -123,6 +125,7 @@ pub async fn search_in_files(
 
     // Build ripgrep command — non-blocking via tokio::process
     let mut cmd = tokio::process::Command::new("rg");
+    hide_console_window_tokio(&mut cmd);
 
     cmd.arg("--json")
         .arg("--line-number")
@@ -507,10 +510,11 @@ async fn search_with_findstr(
     // findstr pattern and file spec
     cmd.arg(query).arg(format!("{}\\*", directory));
 
-    // Hide console window on Windows
+    // Hide console window on Windows.
+    // tokio::process::Command has an inherent `creation_flags` method on Windows,
+    // so no `use CommandExt` import is needed.
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
@@ -623,11 +627,12 @@ pub async fn replace_in_files(
         ));
     }
 
-    let directory_path = std::fs::canonicalize(&directory_path)
+    let directory_path = canonicalize_path(&directory_path)
         .map_err(|e| format!("Failed to resolve directory path: {}", e))?;
     let directory = directory_path.to_string_lossy().to_string();
 
     let mut cmd = tokio::process::Command::new("rg");
+    hide_console_window_tokio(&mut cmd);
     cmd.arg("--files-with-matches");
 
     if !options.case_sensitive {
@@ -703,8 +708,9 @@ pub async fn replace_in_files(
 
     for file_path in &files {
         // Canonicalize to match directory_path (which is canonicalized).
-        // On Windows, canonicalize returns UNC paths (\\?\C:\...) — both must match.
-        let path = std::fs::canonicalize(file_path).unwrap_or_else(|_| PathBuf::from(file_path));
+        // canonicalize_path strips the Windows UNC \\?\ prefix.
+        let path = canonicalize_path(std::path::Path::new(file_path))
+            .unwrap_or_else(|_| PathBuf::from(file_path));
         if !path.starts_with(&directory_path) {
             continue;
         }
@@ -732,11 +738,10 @@ pub async fn replace_in_files(
 
 #[tauri::command]
 pub async fn check_ripgrep_available() -> Result<bool, String> {
-    match tokio::process::Command::new("rg")
-        .arg("--version")
-        .output()
-        .await
-    {
+    let mut probe = tokio::process::Command::new("rg");
+    probe.arg("--version");
+    hide_console_window_tokio(&mut probe);
+    match probe.output().await {
         Ok(output) => Ok(output.status.success()),
         Err(_) => Ok(false),
     }

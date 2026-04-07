@@ -112,8 +112,10 @@ impl Default for DebuggerState {
 
 // Helper function to check if Node.js is available
 async fn check_node_availability() -> Result<String, DebuggerError> {
-    let output = TokioCommand::new("node")
-        .arg("--version")
+    let mut probe = TokioCommand::new("node");
+    probe.arg("--version");
+    super::hide_console_window_tokio(&mut probe);
+    let output = probe
         .output()
         .await
         .map_err(|_| DebuggerError::NodeNotFound)?;
@@ -243,8 +245,8 @@ pub async fn launch_debug_session(
     if !config.cwd.is_empty() && !config.program.is_empty() {
         let cwd_path = std::path::Path::new(&config.cwd);
         let program_path = cwd_path.join(&config.program);
-        if let Ok(canonical_program) = std::fs::canonicalize(&program_path) {
-            if let Ok(canonical_cwd) = std::fs::canonicalize(cwd_path) {
+        if let Ok(canonical_program) = super::canonicalize_path(&program_path) {
+            if let Ok(canonical_cwd) = super::canonicalize_path(cwd_path) {
                 if !canonical_program.starts_with(&canonical_cwd) {
                     return Err(DebuggerError::InvalidConfig(
                         "Program path must be within the project directory".to_string(),
@@ -268,6 +270,7 @@ pub async fn launch_debug_session(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .stdin(Stdio::piped());
+            super::hide_console_window_tokio(&mut node_cmd);
             node_cmd
         }
         _ => {
