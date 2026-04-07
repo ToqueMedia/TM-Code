@@ -218,7 +218,7 @@ const MINIMAX_M2_5: ModelProfile = {
   persona: { name: 'Ekuikui II', tagline: 'O mais forte em engenharia complexa — resolve o que outros não conseguem. Custo: 2x' },
   modelId: 'minimax-m2.5',
   contextWindow: 196_608,
-  maxOutputTokens: 65_536,
+  maxOutputTokens: 32_768,
 
   // MiniMax default: temp=0.9, top_p=0.95
   temperature: 0.9,
