@@ -152,9 +152,12 @@ function ProfileSection() {
   const user = useAuthStore(s => s.user)
   const plan = useBillingStore(s => s.plan)
   const billingLoaded = useBillingStore(s => s.isLoaded)
-  const creditsRemaining = useBillingStore(s => s.creditsRemaining)
+  const consumedPct = useBillingStore(s => s.consumedPct)
+  const tokensConsumed = useBillingStore(s => s.tokensConsumed)
+  const tokenBudget = useBillingStore(s => s.tokenBudget)
+  const cycleEnd = useBillingStore(s => s.cycleEnd)
+  const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const noCredits = useBillingStore(s => s.noCredits)
-  const planCapacity = useBillingStore(s => s.planCapacity)
   const appLanguage = useSettingsStore(s => s.appLanguage)
   const agentLanguage = useSettingsStore(s => s.agentLanguage)
   const setAppLanguage = useSettingsStore(s => s.setAppLanguage)
@@ -255,7 +258,7 @@ function ProfileSection() {
           )}
         </Flex>
 
-        {/* Credits bar */}
+        {/* Cycle budget bar */}
         <Box>
           <Flex justify="space-between" align="center" mb={1.5}>
             <Text fontSize="12px" color={tokens.colors.text.secondary}>{t("settings.creditsRemaining")}</Text>
@@ -263,21 +266,44 @@ function ProfileSection() {
               fontSize="13px" fontWeight="700" fontFamily={tokens.fontFamily.mono}
               color={noCredits ? tokens.colors.accent.red : tokens.colors.text.primary}
             >
-              {creditsRemaining !== null ? `${creditsRemaining.toLocaleString()} / ${planCapacity.toLocaleString()}` : '—'}
+              {billingLoaded && tokenBudget > 0
+                ? `${Math.round(consumedPct * 100)}%`
+                : '—'}
             </Text>
           </Flex>
-          {creditsRemaining !== null && (
-            <Box h="3px" borderRadius="full" bg={tokens.colors.border.subtle} overflow="hidden">
-              <Box
-                h="100%" borderRadius="full"
-                bg={noCredits
-                  ? tokens.colors.accent.red
-                  : `linear-gradient(90deg, ${tokens.colors.accent.primary}, ${tokens.colors.accent.purple})`
-                }
-                width={`${Math.min(100, Math.max(2, ((creditsRemaining ?? 0) / Math.max(1, planCapacity)) * 100))}%`}
-                transition="width 0.5s ease"
-              />
-            </Box>
+          {billingLoaded && tokenBudget > 0 && (
+            <>
+              <Box h="3px" borderRadius="full" bg={tokens.colors.border.subtle} overflow="hidden">
+                <Box
+                  h="100%" borderRadius="full"
+                  bg={consumedPct >= 1
+                    ? tokens.colors.accent.red
+                    : consumedPct >= 0.95
+                    ? tokens.colors.accent.orange
+                    : consumedPct >= 0.80
+                    ? '#f0b429'
+                    : `linear-gradient(90deg, ${tokens.colors.accent.primary}, ${tokens.colors.accent.purple})`
+                  }
+                  width={`${Math.min(100, Math.max(2, consumedPct * 100))}%`}
+                  transition="width 0.5s ease"
+                />
+              </Box>
+              <Flex justify="space-between" align="center" mt={1}>
+                <Text fontSize="10px" color={tokens.colors.text.disabled}>
+                  {(tokensConsumed / 1_000_000).toFixed(2)}M / {(tokenBudget / 1_000_000).toFixed(2)}M tokens
+                </Text>
+                {cycleEnd && (
+                  <Text fontSize="10px" color={tokens.colors.text.disabled}>
+                    {t('settings.resetsOn' as any)} {cycleEnd}
+                  </Text>
+                )}
+              </Flex>
+              {tmsRemaining > 0 && (
+                <Text fontSize="11px" color={tokens.colors.accent.orange} mt={1.5}>
+                  +{tmsRemaining} {t('settings.overageCredits' as any)}
+                </Text>
+              )}
+            </>
           )}
           {noCredits && (
             <Text fontSize="11px" color={tokens.colors.accent.red} mt={1.5}>

@@ -1304,17 +1304,23 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
         )
       }
       if (response.status === 429) {
-        // Parse rate limit headers so UI can show envelope state
+        // Parse cost-budget headers so UI can show post-rejection state
         useBillingStore.getState().updateFromHeaders(response.headers)
 
-        const envelopeStatus = response.headers.get('x-tm-ratelimit-status')
-        const tmsStatus = response.headers.get('x-tm-ratelimit-tms-status')
+        const budgetStatus = response.headers.get('X-Budget-Status')
 
-        if (envelopeStatus === 'rejected' && tmsStatus === 'rejected') {
+        if (budgetStatus === 'rejected') {
+          // Cycle budget exhausted AND no overage credits. Trigger a fresh
+          // /v1/me fetch in the background so the store fully syncs (the
+          // headers give the immediate post-rejection view but /v1/me has
+          // the canonical state including any concurrent purchases).
+          import('../auth/firebaseAuth').then(m => {
+            m.default.getInstance().fetchBillingInfo().catch(() => {})
+          })
           throw new ServiceError(
-            'Envelope de tokens esgotado. Aguarda o reset ou compra TMS.',
-            'ENVELOPE_EXHAUSTED',
-            false  // No retry — user must wait for reset or buy TMS
+            'Sem créditos disponíveis. Aguarda o reset do ciclo ou compra créditos extra.',
+            'BUDGET_EXHAUSTED',
+            false  // No retry — user must wait for cycle reset or buy credits
           )
         }
 
@@ -1438,20 +1444,14 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
           case 'billing': {
             useBillingStore.getState().updateFromSSE({
               type: 'billing',
-              credits_remaining: event.creditsRemaining,
-              credits_used: event.creditsUsed,
+              consumed_pct: event.consumedPct,
+              status: event.status,
               tokens_used: event.tokensUsed,
-              plan: event.plan,
-              source: event.source,
-              envelope_5h_utilization: event.envelope5hUtilization,
-              envelope_5h_reset: event.envelope5hReset,
-              envelope_7d_utilization: event.envelope7dUtilization,
-              envelope_7d_reset: event.envelope7dReset,
-              envelope_status: event.envelopeStatus as any,
-              tms_status: event.tmsStatus as any,
+              tokens_consumed: event.tokensConsumed,
+              cycle_end: event.cycleEnd,
               tms_remaining: event.tmsRemaining,
-              model_multiplier: event.modelMultiplier,
-              effective_tokens: event.effectiveTokens,
+              plan: event.plan,
+              used_overage: event.usedOverage,
             })
             break
           }

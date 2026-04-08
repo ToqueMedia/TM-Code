@@ -8,7 +8,7 @@ import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { useBillingStore, getEffectiveUtilization, type UserPlanName } from '../../stores/billingStore'
+import { useBillingStore, isInOverageState, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
 import MessageBubble from '../chat/MessageBubble'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
@@ -33,33 +33,12 @@ function ChatView() {
   const scaffoldMessage = useLayoutStore(s => s.scaffoldMessage)
   const billingPlan = useBillingStore(s => s.plan)
   const noCredits = useBillingStore(s => s.noCredits)
-  const raw5hUtil = useBillingStore(s => s.envelope5hUtilization)
-  const raw7dUtil = useBillingStore(s => s.envelope7dUtilization)
-  const envelope5hReset = useBillingStore(s => s.envelope5hReset)
-  const envelope7dReset = useBillingStore(s => s.envelope7dReset)
-  const envelopeMonthlyConsumed = useBillingStore(s => s.envelopeMonthlyConsumed)
-  const envelopeMonthlyLimit = useBillingStore(s => s.envelopeMonthlyLimit)
-  // Force re-render when a window expires so utilization drops to 0.
-  // Capped at 1 hour — longer durations are handled by the next API call.
-  const MAX_TIMER_MS = 60 * 60 * 1000
-  const [, forceRender] = useState(0)
-  useEffect(() => {
-    const nowSecs = Math.floor(Date.now() / 1000)
-    const resets = [envelope5hReset, envelope7dReset].filter(r => r > nowSecs)
-    if (resets.length === 0) return
-    const nearest = Math.min(...resets)
-    const msUntilExpiry = (nearest - nowSecs) * 1000 + 500
-    if (msUntilExpiry > MAX_TIMER_MS) return // too far — next API call will handle it
-    const timer = setTimeout(() => forceRender(n => n + 1), msUntilExpiry)
-    return () => clearTimeout(timer)
-  }, [envelope5hReset, envelope7dReset])
-  // Effective utilization — returns 0 if window has expired
-  const envelope5hUtil = getEffectiveUtilization(raw5hUtil, envelope5hReset)
-  const envelope7dUtil = getEffectiveUtilization(raw7dUtil, envelope7dReset)
-  const envelopeStatus = useBillingStore(s => s.envelopeStatus)
-  const tmsStatus = useBillingStore(s => s.tmsStatus)
+  const consumedPct = useBillingStore(s => s.consumedPct)
+  const tokensConsumed = useBillingStore(s => s.tokensConsumed)
+  const tokenBudget = useBillingStore(s => s.tokenBudget)
+  const cycleEnd = useBillingStore(s => s.cycleEnd)
+  const billingStatus = useBillingStore(s => s.status)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
-  const usingTmsOverage = useBillingStore(s => s.usingTmsOverage)
   const [showAttachDialog, setShowAttachDialog] = useState(false)
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
@@ -160,16 +139,12 @@ function ChatView() {
             plan={billingPlan}
             noCredits={noCredits}
             isStreaming={isStreaming}
-            envelope5hUtil={envelope5hUtil}
-            envelope7dUtil={envelope7dUtil}
-            envelope5hReset={envelope5hReset}
-            envelope7dReset={envelope7dReset}
-            envelopeMonthlyConsumed={envelopeMonthlyConsumed}
-            envelopeMonthlyLimit={envelopeMonthlyLimit}
-            envelopeStatus={envelopeStatus}
-            tmsStatus={tmsStatus}
+            consumedPct={consumedPct}
+            tokensConsumed={tokensConsumed}
+            tokenBudget={tokenBudget}
+            cycleEnd={cycleEnd}
+            status={billingStatus}
             tmsRemaining={tmsRemaining}
-            usingTmsOverage={usingTmsOverage}
           />
           {sandboxEnabled && (
             <IsolationPill
@@ -318,44 +293,41 @@ function CreditIndicator(props: {
   plan: UserPlanName
   noCredits: boolean
   isStreaming: boolean
-  envelope5hUtil: number
-  envelope7dUtil: number
-  envelope5hReset: number
-  envelope7dReset: number
-  envelopeMonthlyConsumed: number
-  envelopeMonthlyLimit: number
-  envelopeStatus: string
-  tmsStatus: string
+  consumedPct: number       // 0–1 normal, > 1 overage
+  tokensConsumed: number
+  tokenBudget: number
+  cycleEnd: string          // "YYYY-MM-DD"
+  status: CostBudgetStatus
   tmsRemaining: number
-  usingTmsOverage: boolean
 }) {
   const [showDetail, setShowDetail] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-  const prev5hRef = useRef(0)
+  const prevPctRef = useRef(0)
   const [flash, setFlash] = useState(false)
-  // Tick every 30s while dropdown is open to keep reset times fresh
-  const [, setTick] = useState(0)
-  useEffect(() => {
-    if (!showDetail) return
-    const interval = setInterval(() => setTick(t => t + 1), 30_000)
-    return () => clearInterval(interval)
-  }, [showDetail])
+  // Debounce the refresh button so spam-clicks don't hammer Firestore
+  const lastRefreshAt = useRef(0)
+  const REFRESH_DEBOUNCE_MS = 1000
 
   const planInfo = PLAN_DISPLAY[props.plan] || PLAN_DISPLAY.explorer
-  const h5Pct = Math.round(props.envelope5hUtil * 100)
-  const d7Pct = Math.round(props.envelope7dUtil * 100)
-  const maxUtil = Math.max(props.envelope5hUtil, props.envelope7dUtil)
-  const isBlocked = props.envelopeStatus === 'rejected' && props.tmsStatus === 'rejected'
+  const pct = Math.round(props.consumedPct * 100)
+  // Cycle bar width is capped at 100 — overflow goes to the overage segment
+  const cycleBarPct = Math.min(100, pct)
+  // Overage segment shows excess beyond 100 (e.g. consumedPct=1.05 → 5%)
+  const overagePct = Math.max(0, props.consumedPct - 1)
+  // Show overage UI when EITHER the request was charged to TMS overage OR
+  // the cycle is exhausted (consumed_pct > 1, includes spillover requests).
+  const isInOverage = isInOverageState(props.status, props.consumedPct)
+  const isBlocked = props.status === 'rejected'
 
-  // Flash animation when 5h utilization increases
+  // Flash animation when consumedPct increases
   useEffect(() => {
-    if (props.envelope5hUtil > prev5hRef.current && prev5hRef.current > 0) {
+    if (props.consumedPct > prevPctRef.current && prevPctRef.current > 0) {
       setFlash(true)
       const timer = setTimeout(() => setFlash(false), 600)
       return () => clearTimeout(timer)
     }
-    prev5hRef.current = props.envelope5hUtil
-  }, [props.envelope5hUtil])
+    prevPctRef.current = props.consumedPct
+  }, [props.consumedPct])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -367,42 +339,44 @@ function CreditIndicator(props: {
     return () => document.removeEventListener('mousedown', handler)
   }, [showDetail])
 
-  // Color based on envelope status
-  function getBarColor(util: number): string {
-    if (util >= 1) return tokens.colors.accent.red
-    if (util >= 0.8) return tokens.colors.accent.orange
+  // Color based on cost-budget status
+  function getBarColor(p: number): string {
+    if (p >= 1) return tokens.colors.accent.red
+    if (p >= 0.95) return tokens.colors.accent.orange
+    if (p >= 0.80) return '#f0b429' // yellow
     return `linear-gradient(90deg, ${tokens.colors.accent.primary}, ${tokens.colors.accent.purple})`
   }
 
   const pillBg = isBlocked
     ? 'rgba(248, 81, 73, 0.08)'
-    : props.usingTmsOverage
+    : isInOverage
     ? 'rgba(247, 127, 0, 0.08)'
     : 'rgba(255, 255, 255, 0.04)'
 
   const pillBorder = showDetail
     ? 'rgba(255, 255, 255, 0.15)'
     : isBlocked ? 'rgba(248, 81, 73, 0.2)'
-    : props.usingTmsOverage ? 'rgba(247, 127, 0, 0.2)'
+    : isInOverage ? 'rgba(247, 127, 0, 0.2)'
     : 'rgba(255, 255, 255, 0.06)'
 
-  // Format reset: "4h 52min" for <24h, "Wed, 11:49" for >=24h
+  // Format the cycle reset date — "DD MMM" or relative "in N days"
   const appLang = useSettingsStore(s => s.appLanguage)
-  function formatReset(epoch: number): string {
-    if (!epoch) return ''
-    const diff = epoch - Math.floor(Date.now() / 1000)
-    if (diff <= 0) return appLang === 'pt' ? 'agora' : 'now'
-    if (diff < 86400) {
-      const h = Math.floor(diff / 3600)
-      const m = Math.ceil((diff % 3600) / 60)
-      return h > 0 ? `${h}h ${m}min` : `${m}min`
-    }
-    const locale = appLang === 'pt' ? 'pt' : 'en'
-    const resetDate = new Date(epoch * 1000)
-    const weekday = resetDate.toLocaleDateString(locale, { weekday: 'short' }).replace('.', '')
-    const time = resetDate.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })
-    return `${weekday}, ${time}`
+  function formatCycleEnd(yyyymmdd: string): string {
+    if (!yyyymmdd) return ''
+    try {
+      const date = new Date(`${yyyymmdd}T23:59:59Z`)
+      const locale = appLang === 'pt' ? 'pt' : 'en'
+      return date.toLocaleDateString(locale, { day: '2-digit', month: 'short' })
+    } catch { return yyyymmdd }
   }
+  function daysUntil(yyyymmdd: string): number {
+    if (!yyyymmdd) return 0
+    try {
+      const date = new Date(`${yyyymmdd}T23:59:59Z`)
+      return Math.max(0, Math.ceil((date.getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
+    } catch { return 0 }
+  }
+  const maxUtil = props.consumedPct
 
   return (
     <Box position="relative" ref={ref}>
@@ -424,12 +398,12 @@ function CreditIndicator(props: {
           {planInfo.label}
         </Text>
 
-        {/* 5h + 7d utilization compact */}
+        {/* Single % indicator */}
         <Text
           fontSize="10px"
           fontWeight="600"
           fontFamily={tokens.fontFamily.mono}
-          color={maxUtil >= 1 ? tokens.colors.accent.red : maxUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}
+          color={maxUtil >= 1 ? tokens.colors.accent.red : maxUtil >= 0.95 ? tokens.colors.accent.orange : maxUtil >= 0.80 ? '#f0b429' : tokens.colors.text.secondary}
           css={flash ? {
             animation: 'creditFlash 0.6s ease',
             '@keyframes creditFlash': {
@@ -439,21 +413,22 @@ function CreditIndicator(props: {
             }
           } : undefined}
         >
-          {props.usingTmsOverage ? `TMS: ${props.tmsRemaining}` : props.envelope5hReset > 0 ? `${h5Pct}%` : ''}
+          {props.tokenBudget > 0 ? `${pct}%` : ''}
         </Text>
 
-        {/* Mini dual progress bars — empty when no active session, fills as tokens are used */}
+        {/* Mini cycle progress bar (with overage segment if > 100) */}
         <VStack gap="1px" flexShrink={0}>
-          <Box w="20px" h="2px" borderRadius="full" bg="rgba(255, 255, 255, 0.08)" overflow="hidden">
-            {props.envelope5hReset > 0 && (
-              <Box h="100%" borderRadius="full" bg={getBarColor(props.envelope5hUtil)} width={`${Math.max(2, h5Pct)}%`} transition="width 0.5s ease" />
+          <Box w="28px" h="3px" borderRadius="full" bg="rgba(255, 255, 255, 0.08)" overflow="hidden" position="relative">
+            {props.tokenBudget > 0 && (
+              <Box h="100%" borderRadius="full" bg={getBarColor(props.consumedPct)} width={`${Math.max(2, cycleBarPct)}%`} transition="width 0.5s ease" />
             )}
           </Box>
-          <Box w="20px" h="2px" borderRadius="full" bg="rgba(255, 255, 255, 0.08)" overflow="hidden">
-            {props.envelope7dReset > 0 && (
-              <Box h="100%" borderRadius="full" bg={getBarColor(props.envelope7dUtil)} width={`${Math.max(2, d7Pct)}%`} transition="width 0.5s ease" />
-            )}
-          </Box>
+          {/* Overage segment — only when consumedPct > 1 */}
+          {overagePct > 0 && (
+            <Box w="28px" h="2px" borderRadius="full" bg="rgba(247, 127, 0, 0.15)" overflow="hidden">
+              <Box h="100%" borderRadius="full" bg={tokens.colors.accent.orange} width={`${Math.min(100, Math.max(2, overagePct * 100))}%`} transition="width 0.5s ease" />
+            </Box>
+          )}
         </VStack>
 
         {/* Streaming pulse */}
@@ -471,7 +446,7 @@ function CreditIndicator(props: {
       {/* Detail dropdown */}
       {showDetail && (
         <VStack
-          position="absolute" top="calc(100% + 4px)" right={0} minW="240px"
+          position="absolute" top="calc(100% + 4px)" right={0} minW="260px"
           bg={tokens.colors.bg.overlay} border="1px solid" borderColor={tokens.colors.border.panel}
           borderRadius="8px" boxShadow="0 8px 24px rgba(0,0,0,0.4)" py={2} px={3} gap={2}
           zIndex={tokens.zIndex.dropdown}
@@ -482,137 +457,102 @@ function CreditIndicator(props: {
               <Box w="6px" h="6px" borderRadius="full" bg={planInfo.color} />
               <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary}>{planInfo.label}</Text>
             </HStack>
-            {props.usingTmsOverage && (
+            {isInOverage && (
               <Text fontSize="9px" fontWeight="700" color={tokens.colors.accent.orange} textTransform="uppercase">
                 {t('chat.tmsOverage')}
               </Text>
             )}
           </Flex>
 
-          {/* 5h session window — bar shows USAGE (0→100%) */}
-          {(() => {
-            const hasActiveSession = props.envelope5hReset > 0
-            return (
-              <VStack gap={0.5} align="stretch" w="100%">
-                <Flex justify="space-between" w="100%">
-                  <Text fontSize="10px" color={tokens.colors.text.muted}>{t('chat.sessionCurrent')}</Text>
-                  {hasActiveSession ? (
-                    <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
-                      color={props.envelope5hUtil >= 1 ? tokens.colors.accent.red : props.envelope5hUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}>
-                      {h5Pct}%
-                    </Text>
-                  ) : (
-                    <Text fontSize="10px" color={tokens.colors.accent.greenBright}>{t('chat.available')}</Text>
-                  )}
-                </Flex>
-                <Box w="100%" h="3px" borderRadius="full" bg="rgba(255, 255, 255, 0.06)" overflow="hidden">
-                  {hasActiveSession && (
-                    <Box h="100%" borderRadius="full"
-                      bg={getBarColor(props.envelope5hUtil)}
-                      width={`${Math.max(2, h5Pct)}%`}
-                      transition="width 0.5s ease" />
-                  )}
-                </Box>
-                <Text fontSize="9px" color={tokens.colors.text.disabled}>
-                  {hasActiveSession ? `${t('chat.resetsIn')} ${formatReset(props.envelope5hReset)}` : t('chat.noActiveSession')}
+          {/* Cycle progress — single primary metric */}
+          {props.tokenBudget > 0 && (
+            <VStack gap={0.5} align="stretch" w="100%">
+              <Flex justify="space-between" w="100%">
+                <Text fontSize="10px" color={tokens.colors.text.muted}>{t('chat.sessionMonthly')}</Text>
+                <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
+                  color={props.consumedPct >= 1 ? tokens.colors.accent.red : props.consumedPct >= 0.95 ? tokens.colors.accent.orange : props.consumedPct >= 0.80 ? '#f0b429' : tokens.colors.text.secondary}>
+                  {pct}%
                 </Text>
-              </VStack>
-            )
-          })()}
-
-          {/* 7d weekly window — bar shows USAGE (0→100%) */}
-          {(() => {
-            const hasActiveWeek = props.envelope7dReset > 0
-            return (
-              <VStack gap={0.5} align="stretch" w="100%">
-                <Flex justify="space-between" w="100%">
-                  <Text fontSize="10px" color={tokens.colors.text.muted}>{t('chat.sessionWeekly')}</Text>
-                  {hasActiveWeek ? (
-                    <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
-                      color={props.envelope7dUtil >= 1 ? tokens.colors.accent.red : props.envelope7dUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}>
-                      {d7Pct}%
-                    </Text>
-                  ) : (
-                    <Text fontSize="10px" color={tokens.colors.accent.greenBright}>{t('chat.available')}</Text>
-                  )}
-                </Flex>
-                <Box w="100%" h="3px" borderRadius="full" bg="rgba(255, 255, 255, 0.06)" overflow="hidden">
-                  {hasActiveWeek && (
-                    <Box h="100%" borderRadius="full"
-                      bg={getBarColor(props.envelope7dUtil)}
-                      width={`${Math.max(2, d7Pct)}%`}
-                      transition="width 0.5s ease" />
-                  )}
-                </Box>
-                <Text fontSize="9px" color={tokens.colors.text.disabled}>
-                  {hasActiveWeek ? `${t('chat.resetsIn')} ${formatReset(props.envelope7dReset)}` : t('chat.noActiveSession')}
-                </Text>
-              </VStack>
-            )
-          })()}
-
-          {/* Monthly envelope — primary metric users intuitively understand */}
-          {props.envelopeMonthlyLimit > 0 && (() => {
-            const monthlyUtil = Math.min(1, props.envelopeMonthlyConsumed / props.envelopeMonthlyLimit)
-            const monthlyPct = Math.round(monthlyUtil * 100)
-            const consumedM = (props.envelopeMonthlyConsumed / 1_000_000).toFixed(2)
-            const limitM = (props.envelopeMonthlyLimit / 1_000_000).toFixed(0)
-            return (
-              <VStack gap={0.5} align="stretch" w="100%">
-                <Flex justify="space-between" w="100%">
-                  <Text fontSize="10px" color={tokens.colors.text.muted}>{t('chat.sessionMonthly')}</Text>
-                  <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
-                    color={monthlyUtil >= 1 ? tokens.colors.accent.red : monthlyUtil >= 0.8 ? tokens.colors.accent.orange : tokens.colors.text.secondary}>
-                    {monthlyPct}%
-                  </Text>
-                </Flex>
-                <Box w="100%" h="3px" borderRadius="full" bg="rgba(255, 255, 255, 0.06)" overflow="hidden">
+              </Flex>
+              {/* Cycle bar (capped at 100%) */}
+              <Box w="100%" h="4px" borderRadius="full" bg="rgba(255, 255, 255, 0.06)" overflow="hidden">
+                <Box h="100%" borderRadius="full"
+                  bg={getBarColor(props.consumedPct)}
+                  width={`${Math.max(2, cycleBarPct)}%`}
+                  transition="width 0.5s ease" />
+              </Box>
+              {/* Overage bar (only if consumedPct > 1) */}
+              {overagePct > 0 && (
+                <Box w="100%" h="3px" borderRadius="full" bg="rgba(247, 127, 0, 0.12)" overflow="hidden" mt={0.5}>
                   <Box h="100%" borderRadius="full"
-                    bg={getBarColor(monthlyUtil)}
-                    width={`${Math.max(2, monthlyPct)}%`}
+                    bg={tokens.colors.accent.orange}
+                    width={`${Math.min(100, Math.max(2, overagePct * 100))}%`}
                     transition="width 0.5s ease" />
                 </Box>
-                <Text fontSize="9px" color={tokens.colors.text.disabled}>
-                  {consumedM}M / {limitM}M {t('chat.tokensMonth')}
-                </Text>
-              </VStack>
-            )
-          })()}
-
-          {/* TMS overage info (only when active) */}
-          {props.usingTmsOverage && (
-            <>
-              <Box w="100%" h="1px" bg="rgba(247, 127, 0, 0.15)" />
+              )}
               <Flex justify="space-between" w="100%">
-                <Text fontSize="10px" color={tokens.colors.accent.orange}>{t('chat.tmsRemaining')}</Text>
-                <Text fontSize="10px" fontWeight="700" fontFamily={tokens.fontFamily.mono} color={tokens.colors.accent.orange}>
+                <Text fontSize="9px" color={tokens.colors.text.disabled}>
+                  {(props.tokensConsumed / 1_000_000).toFixed(2)}M / {(props.tokenBudget / 1_000_000).toFixed(2)}M tokens
+                </Text>
+                {props.cycleEnd && (
+                  <Text fontSize="9px" color={tokens.colors.text.disabled}>
+                    {t('chat.resetsIn')} {formatCycleEnd(props.cycleEnd)} ({daysUntil(props.cycleEnd)}d)
+                  </Text>
+                )}
+              </Flex>
+            </VStack>
+          )}
+
+          {/* TMS overage credits — always shown if user has any */}
+          {props.tmsRemaining > 0 && (
+            <>
+              <Box w="100%" h="1px" bg={isInOverage ? 'rgba(247, 127, 0, 0.15)' : 'rgba(255, 255, 255, 0.06)'} />
+              <Flex justify="space-between" w="100%">
+                <Text fontSize="10px" color={isInOverage ? tokens.colors.accent.orange : tokens.colors.text.muted}>
+                  {t('chat.tmsRemaining')}
+                </Text>
+                <Text fontSize="10px" fontWeight="700" fontFamily={tokens.fontFamily.mono}
+                  color={isInOverage ? tokens.colors.accent.orange : tokens.colors.text.primary}>
                   {props.tmsRemaining}
                 </Text>
               </Flex>
             </>
           )}
 
-          {/* Blocked warning */}
+          {/* Blocked warning — clickable, opens studio for upgrade/purchase */}
           {isBlocked && (
             <>
               <Box w="100%" h="1px" bg="rgba(248, 81, 73, 0.15)" />
-              <Text fontSize="10px" color={tokens.colors.accent.red}>
-                {props.plan === 'explorer' ? t('settings.upgradeForMore') : t('chat.buyTms')}
-              </Text>
+              <Box
+                as="button" w="100%" py="4px" fontSize="10px"
+                color={tokens.colors.accent.red}
+                cursor="pointer"
+                textAlign="left"
+                transition={`opacity ${tokens.transition.fast}`}
+                _hover={{ opacity: 0.8 }}
+                onClick={() => {
+                  import('@tauri-apps/plugin-opener').then(opener => {
+                    opener.openUrl('https://studio.toquemedia.net').catch(() => {})
+                  })
+                }}
+              >
+                {props.plan === 'explorer' ? t('settings.upgradeForMore') : t('chat.buyTms')} →
+              </Box>
             </>
           )}
 
-          {/* Refresh button */}
+          {/* Refresh button — debounced to prevent spam */}
           <Box w="100%" h="1px" bg="rgba(255, 255, 255, 0.06)" />
           <Box
             as="button" w="100%" py="4px" fontSize="10px" color={tokens.colors.text.disabled}
             cursor="pointer" transition={`color ${tokens.transition.fast}`}
             _hover={{ color: tokens.colors.text.secondary }}
             onClick={() => {
+              const now = Date.now()
+              if (now - lastRefreshAt.current < REFRESH_DEBOUNCE_MS) return
+              lastRefreshAt.current = now
               import('../../services/auth/firebaseAuth').then(m => {
-                const auth = m.default.getInstance()
-                ;(auth as any).lastBillingFetchMs = 0
-                ;(auth as any).fetchBillingInfo(Date.now())
+                m.default.getInstance().fetchBillingInfo()
               })
             }}
           >

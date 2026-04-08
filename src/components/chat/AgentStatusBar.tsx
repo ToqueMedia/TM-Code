@@ -7,7 +7,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useContainerStore } from '../../stores/containerStore'
-import { useBillingStore, getEffectiveUtilization } from '../../stores/billingStore'
+import { useBillingStore, isInOverageState } from '../../stores/billingStore'
 import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
@@ -37,17 +37,13 @@ function AgentStatusBar() {
   const isolationMode = useContainerStore(s => s.isolationMode)
   const billingPlan = useBillingStore(s => s.plan)
   const noCredits = useBillingStore(s => s.noCredits)
-  const raw5hUtil = useBillingStore(s => s.envelope5hUtilization)
-  const envelope5hReset = useBillingStore(s => s.envelope5hReset)
-  const raw7dUtil = useBillingStore(s => s.envelope7dUtilization)
-  const envelope7dReset = useBillingStore(s => s.envelope7dReset)
-  const envelope5hUtil = getEffectiveUtilization(raw5hUtil, envelope5hReset)
-  const envelope7dUtil = getEffectiveUtilization(raw7dUtil, envelope7dReset)
-  const envelopeStatus = useBillingStore(s => s.envelopeStatus)
-  const tmsStatus = useBillingStore(s => s.tmsStatus)
+  const isActive = useBillingStore(s => s.isActive)
+  const consumedPct = useBillingStore(s => s.consumedPct)
+  const billingStatus = useBillingStore(s => s.status)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
-  const usingTmsOverage = useBillingStore(s => s.usingTmsOverage)
-  const representativeClaim = useBillingStore(s => s.representativeClaim)
+  // Overage UI fires for either explicit overage status OR cycle exhausted (spillover)
+  const usingTmsOverage = isInOverageState(billingStatus, consumedPct)
+  const isBudgetBlocked = billingStatus === 'rejected'
   const queuePosition = useAgentStore(s => s.queuePosition)
   const bgRunning = useBackgroundAgentStore(s => s.getRunningCount())
   const bgTotal = useBackgroundAgentStore(s => s.getAll().length)
@@ -70,17 +66,13 @@ function AgentStatusBar() {
     error: { color: tokens.colors.accent.red, label: error || 'Error', pulse: false },
   }
 
-  // Status priority: queue > envelope exhausted > no credits > agent status
-  const isEnvelopeBlocked = envelopeStatus === 'rejected' && tmsStatus === 'rejected'
-  const blockedLabel = representativeClaim === 'monthly'
-    ? t('chat.noTokens') + ' (mensal)'
-    : representativeClaim === '7d'
-    ? t('chat.noTokens') + ' (7d)'
-    : t('chat.noTokens') + ' (5h)'
+  // Status priority: queue > inactive > budget blocked > overage > no credits > agent status
   const config = queuePosition
     ? { color: tokens.colors.accent.orange, label: `${t('chat.inQueue')}: ${queuePosition.position} / ${queuePosition.total}`, pulse: true }
-    : (isEnvelopeBlocked && status === 'idle')
-    ? { color: tokens.colors.accent.red, label: blockedLabel, pulse: false }
+    : (!isActive && status === 'idle')
+    ? { color: tokens.colors.accent.red, label: t('chat.accountInactive'), pulse: false }
+    : (isBudgetBlocked && status === 'idle')
+    ? { color: tokens.colors.accent.red, label: t('chat.noCredits'), pulse: false }
     : (usingTmsOverage && status === 'idle')
     ? { color: tokens.colors.accent.orange, label: t('chat.usingTmsOverage'), pulse: false }
     : (noCredits && status === 'idle')
@@ -88,15 +80,15 @@ function AgentStatusBar() {
     : (statusConfig[status] || statusConfig.idle)
   const totalTokens = totalTokensUsed.input + totalTokensUsed.output
 
-  // Build info segments — show usage % (0→100 as tokens are consumed)
+  // Build info segments — show single % indicator (cycle 0–100, > 100 means overage)
   const infoSegments: string[] = []
-  const h5Used = Math.round(envelope5hUtil * 100)
-  const d7Used = Math.round(envelope7dUtil * 100)
-  // Only show window % when session is active (has reset epoch)
-  if (envelope5hReset > 0) infoSegments.push(`5h: ${h5Used}%`)
-  if (envelope7dReset > 0) infoSegments.push(`7d: ${d7Used}%`)
-  if (usingTmsOverage) {
-    infoSegments.push(`TMS: ${tmsRemaining}`)
+  // Display the cycle %. Beyond 100% means overage usage.
+  const pctDisplay = Math.round(consumedPct * 100)
+  if (consumedPct > 0) {
+    infoSegments.push(consumedPct >= 1 ? `${pctDisplay}% (overage)` : `${pctDisplay}%`)
+  }
+  if (usingTmsOverage || tmsRemaining > 0) {
+    infoSegments.push(`Credits: ${tmsRemaining}`)
   }
   if (billingPlan) {
     infoSegments.push(billingPlan)

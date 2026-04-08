@@ -4,6 +4,8 @@
 // data: {"id":"...","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
 // data: [DONE]
 
+import type { CostBudgetStatus, UserPlanName } from '../../stores/billingStore'
+
 export type StreamEvent =
   | { type: 'text_delta'; content: string }
   | { type: 'reasoning_delta'; content: string }
@@ -13,12 +15,14 @@ export type StreamEvent =
   | { type: 'usage'; promptTokens: number; completionTokens: number }
   | {
       type: 'billing'
-      creditsRemaining: number; creditsUsed: number; tokensUsed: number; plan: string; source: string
-      // Token envelope fields
-      envelope5hUtilization: number; envelope5hReset: number | undefined
-      envelope7dUtilization: number; envelope7dReset: number | undefined
-      envelopeStatus: string; tmsStatus: string; tmsRemaining: number
-      modelMultiplier: number; effectiveTokens: number
+      consumedPct: number
+      status: CostBudgetStatus
+      tokensUsed: number       // raw tokens THIS request
+      tokensConsumed: number   // cumulative cycle total (post-commit prediction)
+      cycleEnd: string
+      tmsRemaining: number
+      plan: UserPlanName
+      usedOverage: boolean
     }
   | { type: 'error'; message: string }
   | { type: 'done' }
@@ -54,21 +58,14 @@ function processSSELines(
     if (json.type === 'billing') {
       callbacks.onEvent({
         type: 'billing',
-        creditsRemaining: json.credits_remaining ?? 0,
-        creditsUsed: json.credits_used ?? 0,
+        consumedPct: typeof json.consumed_pct === 'number' ? json.consumed_pct : 0,
+        status: (json.status ?? 'allowed') as CostBudgetStatus,
         tokensUsed: json.tokens_used ?? 0,
-        plan: json.plan ?? '',
-        source: json.source ?? '',
-        // Token envelope fields (graceful — defaults for old backends)
-        envelope5hUtilization: json.envelope_5h_utilization ?? 0,
-        envelope5hReset: json.envelope_5h_reset ?? undefined,
-        envelope7dUtilization: json.envelope_7d_utilization ?? 0,
-        envelope7dReset: json.envelope_7d_reset ?? undefined,
-        envelopeStatus: json.envelope_status ?? 'allowed',
-        tmsStatus: json.tms_status ?? 'allowed',
+        tokensConsumed: json.tokens_consumed ?? 0,
+        cycleEnd: json.cycle_end ?? '',
         tmsRemaining: json.tms_remaining ?? 0,
-        modelMultiplier: json.model_multiplier ?? 1,
-        effectiveTokens: json.effective_tokens ?? 0,
+        plan: (json.plan ?? 'explorer') as UserPlanName,
+        usedOverage: Boolean(json.used_overage),
       })
       continue
     }
