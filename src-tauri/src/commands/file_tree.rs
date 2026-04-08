@@ -513,6 +513,30 @@ pub async fn write_file(path: String, content: String) -> Result<()> {
         .map_err(FileTreeError::from)
 }
 
+// Append to a file (creates parent dirs and the file if needed). Used for
+// JSONL operation logs (e.g. queue operations) where each call writes one
+// line and we never want to read+write the whole file.
+#[tauri::command]
+pub async fn append_file(path: String, content: String) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    if let Some(parent) = canonical.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&canonical)
+        .await?;
+
+    file.write_all(content.as_bytes()).await?;
+    Ok(())
+}
+
 // Create a new file
 #[tauri::command]
 pub fn create_file(path: String, content: Option<String>) -> Result<()> {

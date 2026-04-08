@@ -1,12 +1,14 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ConversationMessage, SessionSummary, ToolCallDisplay } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, ToolCallDisplay } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
 import { useCheckpointStore } from './checkpointStore'
 import { usePermissionStore } from './permissionStore'
-import { clearQueue as clearMessageQueue } from '../services/agent/messageQueue'
+import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
+import { setQueueLogContext } from '../services/agent/queueOperationLog'
 import { logger } from '../utils/logger'
+import { t } from '../i18n'
 
 interface ChatState {
   sessions: Map<string, ChatSession>
@@ -31,7 +33,7 @@ interface ChatActions {
   createSession: (projectPath: string) => string
   getActiveSession: () => ChatSession | null
   setActiveSession: (sessionId: string) => void
-  addUserMessage: (content: string, attachments?: Attachment[]) => string
+  addUserMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
   addSystemMessage: (content: string) => void
   startAssistantMessage: () => string
   finalizeAssistantMessage: () => void
@@ -86,7 +88,7 @@ interface ChatActions {
 }
 
 let idCounter = 0
-function generateId(prefix: string): string {
+export function generateId(prefix: string): string {
   idCounter++
   return `${prefix}-${Date.now()}-${idCounter}`
 }
@@ -223,6 +225,94 @@ export function flushBufferedDeltas() {
 // Per-result truncation for very large tool outputs (e.g. read_file on huge files)
 const MAX_TOOL_RESULT_CHARS = 4000
 
+/** One-shot warning so we don't spam the log on every reload. */
+let _warnedAboutMissingBase64 = false
+
+/**
+ * Build a `ContentPart[]` for a user message with image attachments.
+ *
+ * Two paths:
+ *  1. **Block path (preferred)** — when `msg.promptBlocks` is present,
+ *     walk it in order. This preserves the original interleaving the
+ *     user typed (text → image → text → image), matching what the
+ *     model saw on the first turn.
+ *  2. **Fallback path** — derive content parts from `msg.content` +
+ *     `msg.attachments` as text-first-then-images. Used when the
+ *     message was created before the block path existed (older
+ *     sessions, or paths that didn't pass promptBlocks).
+ *
+ * Returns `null` if the message has no image attachments OR none of
+ * the image attachments have base64 cached (e.g. message was loaded
+ * from disk where base64 is stripped). The caller falls back to plain
+ * text content with the model still seeing the textual
+ * `<attached_image>` placeholder via the existing path.
+ */
+function userMessageToContentParts(msg: ChatMessage): ContentPart[] | null {
+  // === Block path ===
+  if (msg.promptBlocks?.length) {
+    const parts: ContentPart[] = []
+    let hasImage = false
+    let hasNonEmptyText = false
+    for (const block of msg.promptBlocks) {
+      if (block.type === 'text') {
+        if (block.text.trim().length > 0) {
+          parts.push({ type: 'text', text: block.text })
+          hasNonEmptyText = true
+        }
+      } else {
+        const att = block.attachment
+        if (att.type === 'image' && att.base64) {
+          parts.push({ type: 'image_url', image_url: { url: att.base64 } })
+          hasImage = true
+        }
+      }
+    }
+    if (!hasImage) return null
+    if (!hasNonEmptyText) {
+      parts.unshift({ type: 'text', text: t('prompt.fallbackAnalyzeImages') })
+    }
+    return parts
+  }
+
+  // === Fallback path ===
+  const imageAttachments = msg.attachments?.filter(a => a.type === 'image' && a.base64)
+  if (!imageAttachments || imageAttachments.length === 0) {
+    // Detect silent degradation: message has image attachments but
+    // none have base64 cached (likely loaded from disk where base64
+    // is stripped). Warn once per session so developers know follow-up
+    // turns are degraded to text-only for these messages.
+    const hasImagesWithoutBase64 = msg.attachments?.some(
+      a => a.type === 'image' && !a.base64,
+    )
+    if (hasImagesWithoutBase64 && !_warnedAboutMissingBase64) {
+      _warnedAboutMissingBase64 = true
+      logger.warn(
+        'chat',
+        'A user message has image attachments without cached base64 — ' +
+        'multimodal context for this message has degraded to text. This ' +
+        'usually happens after reloading a session from disk (base64 is ' +
+        'stripped at persistence time to keep session files small).',
+      )
+    }
+    return null
+  }
+
+  const parts: ContentPart[] = []
+  const text = msg.content.trim()
+  if (text.length > 0) {
+    parts.push({ type: 'text', text: msg.content })
+  } else {
+    parts.push({ type: 'text', text: t('prompt.fallbackAnalyzeImages') })
+  }
+  for (const img of imageAttachments) {
+    parts.push({
+      type: 'image_url',
+      image_url: { url: img.base64! },
+    })
+  }
+  return parts
+}
+
 function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessage[] {
   const history: ConversationMessage[] = []
 
@@ -232,7 +322,14 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
     if (msg.role === 'system') continue
 
     if (msg.role === 'user') {
-      history.push({ role: 'user', content: msg.content })
+      // Reconstruct content parts when the message had images with base64
+      // cached in memory. This makes follow-up turns with vision-capable
+      // models continue to see images from earlier turns.
+      const parts = userMessageToContentParts(msg)
+      history.push({
+        role: 'user',
+        content: parts ?? msg.content,
+      })
     } else if (msg.role === 'assistant') {
       if (msg.toolCalls?.length) {
         // Assistant message with tool calls (preserve reasoning for multi-turn)
@@ -361,6 +458,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
       })
 
+      // Scope the queue operation log to this project + session.
+      setQueueLogContext(projectPath, sessionId)
+
       return sessionId
     },
 
@@ -372,16 +472,28 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     setActiveSession: (sessionId: string) => {
       set({ activeSessionId: sessionId })
+      // Re-scope the queue log to the newly-active session.
+      const session = get().sessions.get(sessionId)
+      if (session) setQueueLogContext(session.projectPath, sessionId)
     },
 
-    addUserMessage: (content: string, attachments?: Attachment[]) => {
+    addUserMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
         role: 'user',
         content,
         timestamp: Date.now(),
-        attachments: attachments?.length ? attachments.map(a => ({ ...a, base64: undefined })) : undefined,
+        // Keep base64 in the in-memory ChatMessage so follow-up turns
+        // (rebuildConversationHistory) can reconstruct content parts
+        // for vision-capable models. Disk persistence strips base64
+        // separately in sessionService.sanitizeMessageForSave.
+        attachments: attachments?.length ? attachments : undefined,
+        // Optional prompt block representation — present when the
+        // caller has the original interleaved order. Used by
+        // userMessageToContentParts to preserve text↔image ordering
+        // across batched messages.
+        promptBlocks: promptBlocks?.length ? promptBlocks : undefined,
       }
 
       set(state => {
@@ -1281,6 +1393,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           pendingDiffs: [],
         }
       })
+
+      // Scope the queue operation log to the new project + session.
+      setQueueLogContext(projectPath, session.id)
 
       sessionService.startAutoSave(30000)
       return session.id

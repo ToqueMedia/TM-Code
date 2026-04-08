@@ -1,7 +1,10 @@
 import { memo } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
-import { FiX, FiFile, FiFolder, FiImage } from 'react-icons/fi'
+import { FiX, FiFile, FiFolder, FiImage, FiAlertTriangle } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { getModelProfile } from '@/services/agent/modelProfiles'
 import type { Attachment } from '../../types/chat'
 
 interface AttachmentChipsProps {
@@ -16,10 +19,39 @@ const typeIcons = {
 }
 
 function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
+  // Subscribe to the active model so the warning re-renders when the
+  // user switches mid-input. Reading via the selector keeps re-renders
+  // localised to model changes.
+  const agentModel = useSettingsStore(s => s.agentModel)
+  const activeProfile = getModelProfile(agentModel)
+  const hasImages = attachments.some(a => a.type === 'image')
+  const showTextOnlyWarning = hasImages && !activeProfile.supportsAttachments
+
   if (attachments.length === 0) return null
 
   return (
-    <Flex px={3} pb={1} pt={0.5} gap={1.5} flexWrap="wrap">
+    <>
+      {showTextOnlyWarning && (
+        <Flex
+          px={3}
+          py={1.5}
+          mx={3}
+          mb={1}
+          align="center"
+          gap={2}
+          bg="rgba(247, 127, 0, 0.08)"
+          border={`1px solid rgba(247, 127, 0, 0.2)`}
+          borderRadius="8px"
+        >
+          <Box color={tokens.colors.accent.orange} flexShrink={0} display="flex" alignItems="center">
+            <FiAlertTriangle size={13} />
+          </Box>
+          <Text fontSize="11.5px" color={tokens.colors.text.secondary} lineHeight="1.4">
+            {t('prompt.modelTextOnlyWarning')}
+          </Text>
+        </Flex>
+      )}
+      <Flex px={3} pb={1} pt={0.5} gap={1.5} flexWrap="wrap">
       {attachments.map(att => {
         const Icon = typeIcons[att.type]
         return (
@@ -84,7 +116,8 @@ function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
           </Flex>
         )
       })}
-    </Flex>
+      </Flex>
+    </>
   )
 }
 

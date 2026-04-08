@@ -729,6 +729,7 @@ pub fn run() {
             rename_file_or_directory,
             read_file,
             write_file,
+            append_file,
             create_file,
             copy_file_or_directory,
             create_directories_all,

@@ -1,6 +1,6 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
@@ -14,10 +14,23 @@ import ContextBuilder from '../../services/agent/contextBuilder'
 import MCPService from '../../services/mcp/mcpService'
 import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
-import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, extractAndResolveMentions } from '../../services/attachmentService'
-import type { Attachment } from '../../types/chat'
-import { enqueue as enqueueMessage, clearQueue as clearMessageQueue, dequeueAll, type QueuedCommand } from '../../services/agent/messageQueue'
-import { useQueryGuard } from '../../services/agent/queryGuard'
+import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../../services/attachmentService'
+import {
+  enqueue as enqueueMessage,
+  clearCommandQueue as clearMessageQueue,
+  joinPromptValues,
+} from '../../services/agent/messageQueue'
+import type { OpenAIContentPart } from '../../services/agent/agentService'
+import { getModelProfile } from '../../services/agent/modelProfiles'
+import {
+  buildAugmentedPrompt,
+  buildContentParts,
+  downgradeHistoryToText,
+  extractDisplayFromValue,
+} from '../../services/agent/promptValueHelpers'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { getQueryGuard } from '../../services/agent/queryGuard'
+import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { logger } from '../../utils/logger'
 
@@ -26,7 +39,6 @@ export function usePromptBar() {
   const setInput = useChatStore(s => s.setDraftInput)
   const [devCommand, setDevCommand] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const runningRef = useRef(false)
   /** Abort controller for the queue processing loop — allows handleStop to cancel it. */
   const queueAbortRef = useRef<AbortController | null>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -35,7 +47,10 @@ export function usePromptBar() {
   const navigatingHistoryRef = useRef(false)
   const isStreaming = useChatStore(s => s.isStreaming)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
-  const isAgentBusy = useQueryGuard()
+  // Subscribe to the QueryGuard via useSyncExternalStore — same pattern
+  // Claude Code uses. Re-renders when reserve/tryStart/end/forceEnd fires.
+  const queryGuard = getQueryGuard()
+  const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewServerRunning = useLayoutStore(s => s.isPreviewServerRunning)
@@ -361,14 +376,24 @@ export function usePromptBar() {
   }, [])
 
   /**
-   * Core send logic — runs the agent loop for a given prompt.
-   * Extracted so both handleSend (direct) and executeQueuedInput (from queue) can use it.
+   * Core send logic — runs the agent loop for a given content value.
+   *
+   * The `content` parameter can be either:
+   *  - A plain string (direct path from handleSend with no attachments,
+   *    or coalesced batch of text-only commands)
+   *  - A ContentBlock[] preserving the order of text and attachments
+   *    (single message with attachments, or coalesced batch with images
+   *    interleaved across messages)
+   *
+   * For blocks, the augmented prompt is built by walking the blocks in
+   * order, producing text + per-attachment XML markers inline. This
+   * preserves the correspondence "this text refers to this image" that
+   * a flat "all-text-then-all-attachments" representation would lose.
    *
    * @param skipUserMessage - If true, don't add user message to chat (already added by caller).
    */
   const runAgentForPrompt = useCallback(async (
-    prompt: string,
-    attachments: Attachment[],
+    content: PromptValue,
     skipUserMessage = false,
   ) => {
     let chatStore = useChatStore.getState()
@@ -389,28 +414,54 @@ export function usePromptBar() {
       layoutStore.setViewMode('chat')
     }
 
-    // Resolve @mentions from text + chip attachments
     const projectPath = currentProject?.path || ''
     const projectType = currentProject?.projectType || 'unknown'
-    let augmentedPrompt = prompt || 'Analyze the attached files.'
 
-    // Extract inline @mentions from the prompt text
-    const mentionContext = await extractAndResolveMentions(augmentedPrompt, projectPath)
-    if (mentionContext) {
-      augmentedPrompt = augmentedPrompt + mentionContext
+    // Split on model capability. Vision-capable models (Kimi K2.5,
+    // Qwen3 Plus, Step3.5 — flagged `supportsAttachments: true`)
+    // receive an OpenAI-compatible content parts array with real
+    // image_url parts. Text-only models receive a flattened string
+    // with `<attached_image .../>` placeholders.
+    //
+    // The split happens at this boundary (not in the queue layer) so
+    // the queue stays provider-agnostic — it carries blocks, the
+    // boundary decides how to ship them.
+    const display = extractDisplayFromValue(content)
+    const activeModelId = useSettingsStore.getState().agentModel
+    const activeProfile = getModelProfile(activeModelId)
+
+    let userContent: string | OpenAIContentPart[] | null = null
+
+    // Bundle the Tauri-backed resolvers once — both helpers consume the
+    // same shape, so call sites are immune to argument reordering.
+    const promptResolvers = {
+      resolveMentions: extractAndResolveMentions,
+      resolveAttachmentXml: resolveAttachments,
+      resolveImageDataUri: resolveImageToDataUri,
     }
 
-    // Resolve chip attachments (images, files from paperclip button)
-    if (attachments.length > 0) {
-      const attachmentContext = await resolveAttachments(attachments)
-      augmentedPrompt = augmentedPrompt + attachmentContext
+    if (activeProfile.supportsAttachments && display.attachments.some(a => a.type === 'image')) {
+      // Multimodal path — build content parts. If buildContentParts
+      // returns null (no images survived disk read / size limits / size
+      // budget), fall through to the text path.
+      const parts = await buildContentParts(content, projectPath, promptResolvers)
+      if (parts) userContent = parts
+    }
+
+    if (userContent === null) {
+      // Text-only path — interleaved `<attached_image>` placeholders.
+      userContent = await buildAugmentedPrompt(content, projectPath, promptResolvers)
     }
 
     // Display the original prompt (without file contents) in the chat bubble.
     // The augmented version (with file contents) is only sent to the model.
     // Skip if caller already added the message (e.g. queued commands).
     if (!skipUserMessage) {
-      chatStore.addUserMessage(prompt, attachments)
+      // Pass the original block representation through so follow-up
+      // turns reconstruct content parts in the correct order, not the
+      // lossy text-then-images fallback.
+      const blocks = typeof content === 'string' ? undefined : content
+      chatStore.addUserMessage(display.text, display.attachments, blocks)
     }
     chatStore.startAssistantMessage()
     agentStore.setStatus('thinking')
@@ -441,11 +492,17 @@ export function usePromptBar() {
       const coreToolCount = ToolExecutor.getInstance().getCoreToolCount()
       const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount)
 
-      const history = useChatStore.getState().conversationHistory
+      const rawHistory = useChatStore.getState().conversationHistory
+      // The history is canonical (carries content parts when previous
+      // turns had images). Downgrade to text if the active model is
+      // text-only — its API cannot consume the array form.
+      const history = activeProfile.supportsAttachments
+        ? rawHistory
+        : downgradeHistoryToText(rawHistory)
       const agentService = AgentService.getInstance()
       agentService.setSystemPrompt(systemPrompt)
 
-      await agentService.runAgentLoop(augmentedPrompt, history, {
+      await agentService.runAgentLoop(userContent, history, {
         onTextDelta: (delta) => {
           agentStore.setStatus('generating')
           appendTextDeltaBuffered(delta)
@@ -596,9 +653,28 @@ export function usePromptBar() {
     if (isAgentBusy) {
       const attachments = [...useChatStore.getState().draftAttachments]
 
-      // Enqueue with attachments — message will be added to chat when processed.
-      // Until then, it's visible in QueuedMessagesPreview above the input.
-      enqueueMessage(prompt, attachments.length > 0 ? attachments : undefined)
+      // Build the queued value. Plain text → string. With attachments →
+      // ContentBlock[] interleaving text + attachments. The block form
+      // is what lets joinPromptValues preserve ordering when several
+      // queued commands are coalesced into a single agent turn.
+      let value: PromptValue
+      if (attachments.length === 0) {
+        value = prompt
+      } else {
+        const blocks: ContentBlock[] = []
+        if (prompt.length > 0) blocks.push({ type: 'text', text: prompt })
+        for (const att of attachments) {
+          blocks.push({ type: 'attachment', attachment: att })
+        }
+        value = blocks
+      }
+
+      enqueueMessage({
+        value,
+        mode: 'prompt',
+        priority: 'next',
+        uuid: generateId('queued'),
+      })
 
       // Clear input
       useChatStore.getState().setDraftInput('')
@@ -609,26 +685,36 @@ export function usePromptBar() {
     }
 
     // === Agent is idle — run directly ===
+    //
+    // No local re-entry guard needed. The QueryGuard inside runAgentLoop
+    // (tryStart) is the single source of truth: a second send slipping
+    // through during the sync setup will get null from tryStart and abort
+    // cleanly with a warning.
+    useChatStore.getState().setDraftInput('')
+    const directAttachments = useChatStore.getState().draftAttachments
+    clearDraftAttachments()
 
-    // Non-reentrant guard: prevent overlapping sends
-    if (runningRef.current) return
-    runningRef.current = true
-
-    try {
-      useChatStore.getState().setDraftInput('')
-      const attachments = useChatStore.getState().draftAttachments
-      clearDraftAttachments()
-
-      // Switch to chat so the user sees the agent working
-      const layoutStore = useLayoutStore.getState()
-      if (layoutStore.viewMode !== 'chat') {
-        layoutStore.setViewMode('chat')
-      }
-
-      await runAgentForPrompt(prompt, attachments)
-    } finally {
-      runningRef.current = false
+    // Switch to chat so the user sees the agent working
+    const layoutStore = useLayoutStore.getState()
+    if (layoutStore.viewMode !== 'chat') {
+      layoutStore.setViewMode('chat')
     }
+
+    // Build a PromptValue: plain string when no attachments, else
+    // ContentBlock[] interleaving the prompt and the attachments.
+    let directContent: PromptValue
+    if (directAttachments.length === 0) {
+      directContent = prompt
+    } else {
+      const blocks: ContentBlock[] = []
+      if (prompt.length > 0) blocks.push({ type: 'text', text: prompt })
+      for (const att of directAttachments) {
+        blocks.push({ type: 'attachment', attachment: att })
+      }
+      directContent = blocks
+    }
+
+    await runAgentForPrompt(directContent)
   }, [currentProject, devCommand, isAgentBusy, runAgentForPrompt])
 
   const handleStop = useCallback(() => {
@@ -648,9 +734,23 @@ export function usePromptBar() {
   }, [])
 
   // === Queue processor — runs queued commands when agent becomes idle ===
+  //
+  // `commands` is whatever processQueueIfReady decided to drain:
+  //  - Slash/bash modes: a single command (one at a time).
+  //  - Prompt mode: all consecutive prompt-mode commands batched together.
+  //  - Task notifications: all task-notification commands batched together.
+  //
+  // For prompt mode we additionally coalesce the values into a single
+  // agent turn (Claude Code's joinPromptValues), so 3 quick messages
+  // become ONE round-trip to the model instead of three. Attachments
+  // from all batched commands are concatenated.
+  //
+  // After the agent loop returns, the QueryGuard transitions back to
+  // idle and useQueueProcessor's effect re-fires, picking up anything
+  // that was enqueued while we were running. No manual dequeueAll loop
+  // is needed here — the React effect IS the loop.
   const executeQueuedInput = useCallback(async (commands: QueuedCommand[]) => {
-    if (runningRef.current) return
-    runningRef.current = true
+    if (commands.length === 0) return
 
     // Create an abort controller so handleStop can cancel the loop
     const abortController = new AbortController()
@@ -663,32 +763,33 @@ export function usePromptBar() {
         layoutStore.setViewMode('chat')
       }
 
-      // Process each command individually — preserves per-message @mention resolution
-      // and correct attachment binding. Each command becomes a user message + agent loop.
-      let pending = commands
-      outer: while (pending.length > 0) {
-        for (const cmd of pending) {
-          // Check if Stop was pressed — abort remaining commands
-          if (abortController.signal.aborted) break outer
+      const head = commands[0]!
+      // Coalesce prompt-mode batches into a single turn. joinPromptValues
+      // handles both string-only and block-mixed inputs:
+      //   - all strings → single newline-joined string
+      //   - any blocks  → concatenated block array (order preserved)
+      const mergedValue: PromptValue =
+        head.mode === 'prompt' && commands.length > 1
+          ? joinPromptValues(commands.map(c => c.value))
+          : head.value
 
-          // Add user message to chat now (was only in QueuedMessagesPreview until now)
-          useChatStore.getState().addUserMessage(cmd.value, cmd.attachments)
+      if (abortController.signal.aborted) return
 
-          const ok = await runAgentForPrompt(cmd.value, cmd.attachments || [], true)
-          // Stop processing on error — remaining commands would likely fail too
-          // (e.g. rate limit, network error). The queue is already drained so
-          // they won't retry automatically; the user can re-send manually.
-          if (!ok) break outer
-        }
-        // If aborted, don't drain more from the queue
-        if (abortController.signal.aborted) break
-        // Check if new messages arrived while we were processing.
-        // This handles the case where the user enqueues during the loop.
-        pending = dequeueAll()
-      }
+      // Extract a clean text + attachments view for the chat bubble.
+      // The bubble UI renders text and attachments separately as today,
+      // but we ALSO persist the original block array as `promptBlocks`
+      // so rebuildConversationHistory can reconstruct the correct
+      // ordering for follow-up turns.
+      const display = extractDisplayFromValue(mergedValue)
+      const blocks = typeof mergedValue === 'string' ? undefined : mergedValue
+      useChatStore.getState().addUserMessage(display.text, display.attachments, blocks)
+
+      await runAgentForPrompt(mergedValue, true)
+      // Result intentionally ignored: if the agent errored, the next batch
+      // (if any) will be picked up by the effect when it re-fires. The
+      // user-visible error is already in the chat transcript.
     } finally {
       queueAbortRef.current = null
-      runningRef.current = false
     }
   }, [runAgentForPrompt])
 

@@ -8,18 +8,32 @@ import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore
 import { useBillingStore } from '../../stores/billingStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
-import { reserve as queryGuardReserve, end as queryGuardEnd } from './queryGuard'
+import { getQueryGuard } from './queryGuard'
+import { contentAsText } from './promptValueHelpers'
+import type { ContentPart } from '../../types/chat'
 import type { StreamEvent } from './streamParser'
 
 // === Types ===
 
+/**
+ * OpenAI / OpenAI-compatible content parts for multimodal user messages.
+ * Re-exported from types/chat.ts as `OpenAIContentPart` for the existing
+ * external import paths in usePromptBar / promptValueHelpers.
+ *
+ * Defined in types/chat.ts so the chatStore layer can construct content
+ * parts without importing from a service.
+ */
+export type OpenAIContentPart = ContentPart
+
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content?: string | null
+  /** Plain string for text-only messages, array of parts for multimodal user messages. */
+  content?: string | ContentPart[] | null
   reasoning_content?: string | null
   tool_calls?: OpenAIToolCall[]
   tool_call_id?: string
 }
+
 
 interface OpenAIToolCall {
   id: string
@@ -298,18 +312,28 @@ class AgentService {
   }
 
   async runAgentLoop(
-    userMessage: string,
-    conversationHistory: Array<{ role: string; content: string | null; tool_calls?: OpenAIToolCall[]; tool_call_id?: string }>,
+    userMessage: string | ContentPart[],
+    conversationHistory: Array<{ role: string; content: string | ContentPart[] | null; tool_calls?: OpenAIToolCall[]; tool_call_id?: string }>,
     callbacks: AgentCallbacks
   ): Promise<void> {
     if (this.isRunning && !this.lightweightOptions) {
       this.cancelLoop()
     }
     this.isRunning = true
+    let myGeneration: number | null = null
     if (!this.lightweightOptions) {
       this.abortController = new AbortController()
-      // Signal that the main agent is actively running (enables message queuing)
-      queryGuardReserve()
+      // Atomically transition the QueryGuard to running. tryStart() returns
+      // a generation number we capture for end() so a stale finally from a
+      // cancelled query (whose generation was bumped by forceEnd) is skipped.
+      // If tryStart returns null, another runAgentLoop is already running —
+      // refuse to enter to avoid leaving the guard pinned in 'running' forever.
+      myGeneration = getQueryGuard().tryStart()
+      if (myGeneration === null) {
+        logger.warn('agent', 'tryStart() returned null — concurrent runAgentLoop detected, aborting')
+        this.isRunning = false
+        return
+      }
     } else if (!this.abortController) {
       this.abortController = new AbortController()
     }
@@ -405,10 +429,14 @@ class AgentService {
         // for future LLM summarization (which needs full detail).
         const apiMessages = this.microcompactToolResults(messages)
 
-        // Telemetry: log microcompaction savings (only when compaction actually ran)
+        // Telemetry: log microcompaction savings (only when compaction actually ran).
+        // contentAsText handles both string and ContentPart[] shapes; for
+        // multimodal messages this counts the text length of the parts
+        // (image_url URLs are excluded — they're huge data URIs that
+        // would distort the metric).
         if (apiMessages !== messages) {
-          const originalSize = messages.reduce((s, m) => s + (m.content?.length || 0), 0)
-          const compactedSize = apiMessages.reduce((s, m) => s + (m.content?.length || 0), 0)
+          const originalSize = messages.reduce((s, m) => s + contentAsText(m.content).length, 0)
+          const compactedSize = apiMessages.reduce((s, m) => s + contentAsText(m.content).length, 0)
           logger.info('agent', `Microcompaction: ${originalSize - compactedSize} chars saved (${originalSize} → ${compactedSize})`)
         }
 
@@ -637,9 +665,13 @@ class AgentService {
       callbacks.onError(error instanceof Error ? error : new Error(String(error)))
     } finally {
       this.isRunning = false
-      // Signal that the main agent is idle (triggers queue processing)
-      if (!this.lightweightOptions) {
-        queryGuardEnd()
+      // Signal that the main agent is idle (triggers queue processing).
+      // end(myGeneration) is a no-op if forceEnd() bumped the generation
+      // (i.e. cancelLoop ran) — in that case the cancel path already moved
+      // the guard to idle and a fresh runAgentLoop may already have started,
+      // so the QueryGuard contract guarantees we won't disturb it.
+      if (!this.lightweightOptions && myGeneration !== null) {
+        getQueryGuard().end(myGeneration)
       }
     }
   }
@@ -715,13 +747,18 @@ class AgentService {
    */
   private serializeMessagesForSummary(messages: OpenAIMessage[]): string {
     return messages.map(msg => {
+      // Flatten content to text — multimodal user messages have
+      // ContentPart[] which would otherwise stringify as "[object Object]".
+      // Image parts become `[image]` markers in the summary.
+      const text = contentAsText(msg.content)
+
       if (msg.role === 'user') {
-        return `[USER]\n${msg.content}`
+        return `[USER]\n${text}`
       }
 
       if (msg.role === 'assistant') {
         const parts: string[] = []
-        if (msg.content) parts.push(`[ASSISTANT]\n${msg.content}`)
+        if (text) parts.push(`[ASSISTANT]\n${text}`)
         if (msg.tool_calls) {
           for (const tc of msg.tool_calls) {
             parts.push(`[TOOL CALL: ${tc.function.name}]\n${tc.function.arguments}`)
@@ -731,10 +768,10 @@ class AgentService {
       }
 
       if (msg.role === 'tool') {
-        return `[TOOL RESULT${msg.tool_call_id ? ` (${msg.tool_call_id})` : ''}]\n${msg.content}`
+        return `[TOOL RESULT${msg.tool_call_id ? ` (${msg.tool_call_id})` : ''}]\n${text}`
       }
 
-      return `[${msg.role}]\n${msg.content}`
+      return `[${msg.role}]\n${text}`
     }).join('\n\n---\n\n')
   }
 
@@ -842,7 +879,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     for (const msg of messages) {
       // Capture user requests
       if (msg.role === 'user' && msg.content) {
-        const text = msg.content.slice(0, 300)
+        const text = contentAsText(msg.content).slice(0, 300)
         if (!text.startsWith('[Compressed context')) {
           userRequests.push(text)
         }
@@ -850,7 +887,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
       // Capture assistant narration (first 200 chars per message)
       if (msg.role === 'assistant' && msg.content) {
-        assistantNarration.push(msg.content.slice(0, 200))
+        assistantNarration.push(contentAsText(msg.content).slice(0, 200))
       }
 
       // Extract tool call details
@@ -874,13 +911,16 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
         }
       }
 
-      // Capture tool results (both success and error)
+      // Capture tool results (both success and error).
+      // Tool messages are always string content — contentAsText is a no-op
+      // but keeps the narrow typed so TS is happy with the union.
       if (msg.role === 'tool' && msg.content) {
-        if (msg.content.startsWith('Error:')) {
-          errors.push(msg.content.slice(0, 300))
-        } else if (msg.content.length < 300) {
+        const text = contentAsText(msg.content)
+        if (text.startsWith('Error:')) {
+          errors.push(text.slice(0, 300))
+        } else if (text.length < 300) {
           // Short results are likely meaningful (e.g., "File updated: /path/to/file")
-          toolResults.push(msg.content)
+          toolResults.push(text)
         }
       }
     }
@@ -940,7 +980,10 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
    */
   private summarizeToolResult(toolMsg: OpenAIMessage, msgIndex: number, messages: OpenAIMessage[]): string {
     const toolCallId = toolMsg.tool_call_id
-    const content = toolMsg.content || ''
+    // Tool results are always string content (tools return strings); the
+    // union-type cast here is just to satisfy the new PromptValue-aware
+    // content type without restructuring the tool handling path.
+    const content = contentAsText(toolMsg.content) || ''
 
     // Short content or errors — keep as-is
     if (content.length < 200) return content
@@ -1133,9 +1176,12 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     // Unblock any pending diff approval waits
     resolveAllPendingDiffApprovals(false)
     this.isRunning = false
-    // Signal idle — allows queue processing to start
+    // forceEnd() bumps the QueryGuard's generation so the cancelled loop's
+    // finally block sees a stale generation and skips its end() call.
+    // This allows queue processing (or a fresh runAgentLoop) to start
+    // without racing the cancelled loop's late finally.
     if (!this.lightweightOptions) {
-      queryGuardEnd()
+      getQueryGuard().forceEnd()
     }
   }
 
@@ -1258,17 +1304,23 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
         )
       }
       if (response.status === 429) {
-        // Parse rate limit headers so UI can show envelope state
+        // Parse cost-budget headers so UI can show post-rejection state
         useBillingStore.getState().updateFromHeaders(response.headers)
 
-        const envelopeStatus = response.headers.get('x-tm-ratelimit-status')
-        const tmsStatus = response.headers.get('x-tm-ratelimit-tms-status')
+        const budgetStatus = response.headers.get('X-Budget-Status')
 
-        if (envelopeStatus === 'rejected' && tmsStatus === 'rejected') {
+        if (budgetStatus === 'rejected') {
+          // Cycle budget exhausted AND no overage credits. Trigger a fresh
+          // /v1/me fetch in the background so the store fully syncs (the
+          // headers give the immediate post-rejection view but /v1/me has
+          // the canonical state including any concurrent purchases).
+          import('../auth/firebaseAuth').then(m => {
+            m.default.getInstance().fetchBillingInfo().catch(() => {})
+          })
           throw new ServiceError(
-            'Envelope de tokens esgotado. Aguarda o reset ou compra TMS.',
-            'ENVELOPE_EXHAUSTED',
-            false  // No retry — user must wait for reset or buy TMS
+            'Sem créditos disponíveis. Aguarda o reset do ciclo ou compra créditos extra.',
+            'BUDGET_EXHAUSTED',
+            false  // No retry — user must wait for cycle reset or buy credits
           )
         }
 
@@ -1392,20 +1444,14 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
           case 'billing': {
             useBillingStore.getState().updateFromSSE({
               type: 'billing',
-              credits_remaining: event.creditsRemaining,
-              credits_used: event.creditsUsed,
+              consumed_pct: event.consumedPct,
+              status: event.status,
               tokens_used: event.tokensUsed,
-              plan: event.plan,
-              source: event.source,
-              envelope_5h_utilization: event.envelope5hUtilization,
-              envelope_5h_reset: event.envelope5hReset,
-              envelope_7d_utilization: event.envelope7dUtilization,
-              envelope_7d_reset: event.envelope7dReset,
-              envelope_status: event.envelopeStatus as any,
-              tms_status: event.tmsStatus as any,
+              tokens_consumed: event.tokensConsumed,
+              cycle_end: event.cycleEnd,
               tms_remaining: event.tmsRemaining,
-              model_multiplier: event.modelMultiplier,
-              effective_tokens: event.effectiveTokens,
+              plan: event.plan,
+              used_overage: event.usedOverage,
             })
             break
           }

@@ -1,320 +1,213 @@
 import { create } from 'zustand'
 
-// ── Types (aligned with backend types.ts) ──
+// ── Types (mirrored from backend types.ts) ──
 
 export type UserPlanName = 'explorer' | 'pro' | 'business-4x' | 'business-8x'
-export type RateLimitStatus = 'allowed' | 'allowed_warning' | 'rejected'
-export type TmsOverageStatus = 'allowed' | 'rejected'
 
+export type CostBudgetStatus =
+  | 'allowed'
+  | 'allowed_warning'
+  | 'allowed_critical'
+  | 'allowed_overage'
+  | 'rejected'
+
+/** Shape of the SSE event injected by the worker at the end of /v1/chat/completions */
 export interface BillingSSEEvent {
   type: 'billing'
-  // Legacy
-  credits_remaining: number
-  credits_used: number
-  tokens_used: number
-  plan: string
-  source: string
-  // Token envelope
-  envelope_5h_utilization?: number
-  envelope_5h_reset?: number
-  envelope_7d_utilization?: number
-  envelope_7d_reset?: number
-  envelope_status?: RateLimitStatus
-  tms_status?: TmsOverageStatus
-  tms_remaining?: number
-  model_multiplier?: number
-  effective_tokens?: number
+  consumed_pct: number       // 0–1 normal cycle, > 1 in overage
+  status: CostBudgetStatus
+  tokens_used: number        // raw tokens consumed in THIS request
+  tokens_consumed: number    // cumulative cycle total (post-commit prediction)
+  cycle_end: string          // "YYYY-MM-DD"
+  tms_remaining: number      // overage credits after this request
+  plan: UserPlanName
+  used_overage: boolean      // request charged to TMS overage (vs cycle)
+}
+
+/** Shape of the /v1/me response body */
+export interface MeResponse {
+  plan: UserPlanName
+  isActive: boolean
+  billing: {
+    consumedPct: number
+    tokensConsumed: number
+    tokenBudget: number
+    cycleEnd: string
+    tmsPurchased: number
+    status: CostBudgetStatus
+  }
 }
 
 // ── Store ──
 //
-// The backend is the source of truth for credit calculations.
-// This store receives data from:
-//   1. /v1/me endpoint on login (via fetchBillingInfo in firebaseAuth)
-//   2. Response headers (X-Credits-Remaining, X-Plan, x-tm-ratelimit-*) — before streaming starts
-//   3. SSE billing event — after streaming ends (exact, post-token-extras)
+// The backend is the source of truth. The store receives data from:
+//   1. /v1/me on app launch + window focus + post-purchase deep link
+//      (event-driven, NEVER polling — see memory feedback_no_polling.md)
+//   2. SSE billing event injected at the end of every /v1/chat/completions
+//   3. Response headers (X-Budget-Pct, X-Budget-Status, X-Cycle-End, X-Tms-Remaining)
 
 interface BillingState {
-  // Core
+  // Identity
   plan: UserPlanName
   isActive: boolean
   isLoaded: boolean
 
-  // Credits / TMS (backend is source of truth)
-  creditsRemaining: number | null
-  planCapacity: number
-  noCredits: boolean
+  // Cost budget
+  consumedPct: number        // 0–1 normal, > 1 overage
+  tokensConsumed: number     // raw tokens in current cycle
+  tokenBudget: number        // plan budget (depends on plan)
+  cycleEnd: string           // "YYYY-MM-DD"
+  status: CostBudgetStatus
 
-  // SSE live tracking (updated during streaming)
-  lastCreditsUsed: number
-  lastTokensUsed: number
-  lastSource: string
-
-  // Token envelope (rate limit windows)
-  envelope5hUtilization: number       // 0.0-1.0
-  envelope5hReset: number             // epoch seconds
-  envelope7dUtilization: number       // 0.0-1.0
-  envelope7dReset: number             // epoch seconds
-  envelopeStatus: RateLimitStatus
-  representativeClaim: '5h' | '7d' | 'monthly'
-  tmsStatus: TmsOverageStatus
+  // Overage credits (canonical: tmsQuota.purchasedBalance on the backend)
   tmsRemaining: number
-  usingTmsOverage: boolean
-  modelMultiplier: number
-  lastEffectiveTokens: number
 
-  // Envelope monthly (from /v1/me)
-  envelopeMonthlyLimit: number
-  envelopeMonthlyConsumed: number
+  // Last request stats (for UI feedback)
+  lastTokensUsed: number
+  lastUsedOverage: boolean
+
+  // Emergency stop
+  noCredits: boolean
 }
 
 interface BillingActions {
   updateFromSSE: (data: BillingSSEEvent) => void
   updateFromHeaders: (headers: Headers) => void
-  setEnvelopeFromMe: (data: {
-    envelope?: {
-      monthlyLimit: number; monthlyConsumed: number
-      fiveHourUtilization: number; fiveHourResetEpoch: number
-      sevenDayUtilization: number; sevenDayResetEpoch: number
-    }
-    tmsRemaining?: number
-  }) => void
+  updateFromMe: (data: MeResponse) => void
   setNoCredits: () => void
+  /** Clear noCredits flag without changing the underlying status — used by
+   *  agentService before each request as an optimistic "maybe it's resolved" reset.
+   *  The next response (headers + SSE) will set the real state. */
   clearNoCredits: () => void
   reset: () => void
-}
-
-/**
- * Returns effective utilization — 0 if the window has expired (resetEpoch in the past).
- * Prevents the display from showing stale high utilization after a window resets
- * without a new API call.
- */
-export function getEffectiveUtilization(utilization: number, resetEpoch: number): number {
-  if (resetEpoch <= 0) return 0 // no active window
-  const nowSecs = Math.floor(Date.now() / 1000)
-  if (nowSecs >= resetEpoch) return 0 // window expired
-  return utilization
 }
 
 const INITIAL_STATE: BillingState = {
   plan: 'explorer',
   isActive: true,
   isLoaded: false,
-  creditsRemaining: null,
-  planCapacity: 10,
-  noCredits: false,
-  lastCreditsUsed: 0,
-  lastTokensUsed: 0,
-  lastSource: '',
-  // Envelope defaults
-  envelope5hUtilization: 0,
-  envelope5hReset: 0,
-  envelope7dUtilization: 0,
-  envelope7dReset: 0,
-  envelopeStatus: 'allowed',
-  representativeClaim: '5h',
-  tmsStatus: 'allowed',
+  consumedPct: 0,
+  tokensConsumed: 0,
+  tokenBudget: 0,
+  cycleEnd: '',
+  status: 'allowed',
   tmsRemaining: 0,
-  usingTmsOverage: false,
-  modelMultiplier: 1,
-  lastEffectiveTokens: 0,
-  envelopeMonthlyLimit: 0,
-  envelopeMonthlyConsumed: 0,
+  lastTokensUsed: 0,
+  lastUsedOverage: false,
+  noCredits: false,
 }
 
-export const useBillingStore = create<BillingState & BillingActions>((set, get) => ({
+/** Check if a status reflects "no more service available". */
+export function isBlocked(status: CostBudgetStatus): boolean {
+  return status === 'rejected'
+}
+
+/** Check if the user is in overage mode (cycle exhausted, paying via credits). */
+export function isInOverage(status: CostBudgetStatus): boolean {
+  return status === 'allowed_overage'
+}
+
+/**
+ * Should the UI render overage indicators? True when EITHER the request was
+ * charged to TMS overage (status='allowed_overage') OR the cycle counter has
+ * exceeded 100% from a spillover request (consumedPct > 1). Both cases mean
+ * the cycle bar should show the > 100% segment.
+ */
+export function isInOverageState(status: CostBudgetStatus, consumedPct: number): boolean {
+  return status === 'allowed_overage' || consumedPct > 1
+}
+
+export const useBillingStore = create<BillingState & BillingActions>((set) => ({
   ...INITIAL_STATE,
 
+  /**
+   * Apply an SSE billing event from /v1/chat/completions. The backend sends
+   * monotonically-correct values (computed with atomic Firestore ops), so the
+   * IDE just trusts and applies. Includes tokens_consumed (cumulative total)
+   * directly — no derivation from consumedPct × tokenBudget.
+   */
   updateFromSSE: (data) => {
-    const current = get()
-    const plan = (data.plan || current.plan) as UserPlanName
-    // credits_remaining is the legacy field that maps to TMS remaining.
-    // Same monotonic + purchase-detection rule as tmsRemaining.
-    let newCreditsRemaining = data.credits_remaining
-    if (current.creditsRemaining !== null && current.creditsRemaining > 0) {
-      const increase = data.credits_remaining - current.creditsRemaining
-      const isPurchase = increase > Math.max(current.creditsRemaining * 0.1, 3)
-      newCreditsRemaining = isPurchase ? data.credits_remaining : Math.min(data.credits_remaining, current.creditsRemaining)
-    }
-    const updates: Partial<BillingState> = {
-      creditsRemaining: newCreditsRemaining,
-      plan,
-      lastCreditsUsed: data.credits_used,
+    set({
+      consumedPct: data.consumed_pct,
+      tokensConsumed: data.tokens_consumed,
+      status: data.status,
+      cycleEnd: data.cycle_end,
+      tmsRemaining: data.tms_remaining,
+      plan: data.plan,
       lastTokensUsed: data.tokens_used,
-      lastSource: data.source,
-      noCredits: newCreditsRemaining <= 0,
-    }
-
-    // Token envelope fields (graceful — old backends won't send these).
-    // Utilization is monotonically increasing within a window — never accept a LOWER
-    // value than the current one (prevents stale reads from resetting the display).
-    // Exception: when reset epoch changes, a new window has started → accept the new value.
-    // Utilization rules:
-    // 1. Same window (epoch unchanged): monotonic increasing (Math.max)
-    // 2. New window (epoch changed) with utilization > 0: accept (real consumption in new window)
-    // 3. New window with utilization = 0: only accept if current utilization is also 0 or
-    //    current window already expired. This prevents the "flash to 0%" that happens when
-    //    headers arrive with util=0 before the SSE billing event reports actual consumption.
-    if (data.envelope_5h_utilization !== undefined) {
-      const newWindow = data.envelope_5h_reset !== undefined && data.envelope_5h_reset !== current.envelope5hReset
-      if (!newWindow) {
-        updates.envelope5hUtilization = Math.max(data.envelope_5h_utilization, current.envelope5hUtilization)
-      } else if (data.envelope_5h_utilization > 0 || current.envelope5hUtilization === 0) {
-        updates.envelope5hUtilization = data.envelope_5h_utilization
-      }
-      // else: new window with util=0 but current > 0 → skip (wait for SSE with real value)
-      // DEBUG: trace resets
-      if ((updates.envelope5hUtilization ?? current.envelope5hUtilization) < current.envelope5hUtilization) {
-        console.warn(`[billing-debug] SSE 5h DECREASED: ${current.envelope5hUtilization} → ${updates.envelope5hUtilization}, newWindow=${newWindow}, incoming=${data.envelope_5h_utilization}, reset=${data.envelope_5h_reset}, currentReset=${current.envelope5hReset}`)
-      }
-    }
-    if (data.envelope_5h_reset && data.envelope_5h_reset > 0) updates.envelope5hReset = data.envelope_5h_reset
-    if (data.envelope_7d_utilization !== undefined) {
-      const newWindow = data.envelope_7d_reset !== undefined && data.envelope_7d_reset !== current.envelope7dReset
-      if (!newWindow) {
-        updates.envelope7dUtilization = Math.max(data.envelope_7d_utilization, current.envelope7dUtilization)
-      } else if (data.envelope_7d_utilization > 0 || current.envelope7dUtilization === 0) {
-        updates.envelope7dUtilization = data.envelope_7d_utilization
-      }
-    }
-    if (data.envelope_7d_reset && data.envelope_7d_reset > 0) updates.envelope7dReset = data.envelope_7d_reset
-    if (data.envelope_status !== undefined) updates.envelopeStatus = data.envelope_status
-    if (data.tms_status !== undefined) updates.tmsStatus = data.tms_status
-    // TMS decreases during usage — reject stale higher values (Firestore eventual consistency).
-    // But ACCEPT significant increases (>10% jump) which indicate a TMS purchase.
-    if (data.tms_remaining !== undefined) {
-      if (current.tmsRemaining <= 0) {
-        updates.tmsRemaining = data.tms_remaining
-      } else {
-        const increase = data.tms_remaining - current.tmsRemaining
-        const isPurchase = increase > Math.max(current.tmsRemaining * 0.1, 3)
-        updates.tmsRemaining = isPurchase
-          ? data.tms_remaining          // purchase — accept the higher value
-          : Math.min(data.tms_remaining, current.tmsRemaining)  // normal usage — only decrease
-      }
-    }
-    if (data.model_multiplier !== undefined) updates.modelMultiplier = data.model_multiplier
-    if (data.effective_tokens !== undefined) updates.lastEffectiveTokens = data.effective_tokens
-
-    // Derive usingTmsOverage
-    if (data.envelope_status === 'rejected' && data.tms_status === 'allowed') {
-      updates.usingTmsOverage = true
-    } else if (data.envelope_status !== undefined) {
-      updates.usingTmsOverage = false
-    }
-
-    set(updates)
+      lastUsedOverage: data.used_overage,
+      noCredits: data.status === 'rejected',
+    })
   },
 
+  /**
+   * Apply rate-limit headers from a /v1/chat/completions response. These arrive
+   * BEFORE the SSE billing event, so they reflect the pre-stream state. The
+   * SSE event arrives later with the post-commit state and supersedes.
+   *
+   * Updates BOTH consumedPct AND tokensConsumed (from X-Tokens-Consumed) so
+   * the dropdown's absolute count stays consistent with the % indicator.
+   */
   updateFromHeaders: (headers) => {
     const updates: Partial<BillingState> = {}
 
-    // Legacy headers — same monotonic rule as SSE
-    const current = get()
-    const remaining = headers.get('X-Credits-Remaining')
+    const pctRaw = headers.get('X-Budget-Pct')
+    if (pctRaw) {
+      const pct = parseFloat(pctRaw)
+      if (!isNaN(pct)) updates.consumedPct = pct
+    }
+
+    const tokensRaw = headers.get('X-Tokens-Consumed')
+    if (tokensRaw) {
+      const tokens = parseInt(tokensRaw, 10)
+      if (!isNaN(tokens)) updates.tokensConsumed = tokens
+    }
+
+    const statusRaw = headers.get('X-Budget-Status')
+    if (statusRaw) {
+      updates.status = statusRaw as CostBudgetStatus
+      updates.noCredits = statusRaw === 'rejected'
+    }
+
+    const cycleEnd = headers.get('X-Cycle-End')
+    if (cycleEnd) updates.cycleEnd = cycleEnd
+
+    const tmsRaw = headers.get('X-Tms-Remaining')
+    if (tmsRaw) {
+      const tms = parseInt(tmsRaw, 10)
+      if (!isNaN(tms)) updates.tmsRemaining = tms
+    }
+
     const planHeader = headers.get('X-Plan')
     if (planHeader) updates.plan = planHeader as UserPlanName
-    if (remaining !== null) {
-      const parsed = parseInt(remaining, 10)
-      if (!isNaN(parsed)) {
-        if (current.creditsRemaining !== null && current.creditsRemaining > 0) {
-          const increase = parsed - current.creditsRemaining
-          const isPurchase = increase > Math.max(current.creditsRemaining * 0.1, 3)
-          updates.creditsRemaining = isPurchase ? parsed : Math.min(parsed, current.creditsRemaining)
-        } else {
-          updates.creditsRemaining = parsed
-        }
-        updates.noCredits = (updates.creditsRemaining ?? parsed) <= 0
-      }
-    }
-
-    // Rate limit headers (x-tm-ratelimit-*)
-    // Monotonic rule: never accept lower utilization within the same window.
-    const rlStatus = headers.get('x-tm-ratelimit-status')
-    if (rlStatus) updates.envelopeStatus = rlStatus as RateLimitStatus
-
-    const h5resetRaw = headers.get('x-tm-ratelimit-5h-reset')
-    const h5resetParsed = h5resetRaw ? parseInt(h5resetRaw, 10) : 0
-    if (h5resetParsed > 0) updates.envelope5hReset = h5resetParsed
-
-    const h5util = headers.get('x-tm-ratelimit-5h-utilization')
-    if (h5util) {
-      const val = parseFloat(h5util)
-      const newWindow = h5resetParsed > 0 && h5resetParsed !== current.envelope5hReset
-      if (!newWindow) {
-        updates.envelope5hUtilization = Math.max(val, current.envelope5hUtilization)
-      } else if (val > 0 || current.envelope5hUtilization === 0) {
-        updates.envelope5hUtilization = val
-      }
-      // DEBUG: trace resets
-      if ((updates.envelope5hUtilization ?? current.envelope5hUtilization) < current.envelope5hUtilization) {
-        console.warn(`[billing-debug] HEADERS 5h DECREASED: ${current.envelope5hUtilization} → ${updates.envelope5hUtilization}, newWindow=${newWindow}, val=${val}, h5reset=${h5resetParsed}, currentReset=${current.envelope5hReset}`)
-      }
-    }
-
-    const d7resetRaw = headers.get('x-tm-ratelimit-7d-reset')
-    const d7resetParsed = d7resetRaw ? parseInt(d7resetRaw, 10) : 0
-    if (d7resetParsed > 0) updates.envelope7dReset = d7resetParsed
-
-    const d7util = headers.get('x-tm-ratelimit-7d-utilization')
-    if (d7util) {
-      const val = parseFloat(d7util)
-      const newWindow = d7resetParsed > 0 && d7resetParsed !== current.envelope7dReset
-      if (!newWindow) {
-        updates.envelope7dUtilization = Math.max(val, current.envelope7dUtilization)
-      } else if (val > 0 || current.envelope7dUtilization === 0) {
-        updates.envelope7dUtilization = val
-      }
-    }
-
-    const claim = headers.get('x-tm-ratelimit-representative-claim')
-    if (claim) updates.representativeClaim = claim as '5h' | '7d' | 'monthly'
-
-    const tmsStatus = headers.get('x-tm-ratelimit-tms-status')
-    if (tmsStatus) updates.tmsStatus = tmsStatus as TmsOverageStatus
-
-    const tmsRem = headers.get('x-tm-ratelimit-tms-remaining')
-    if (tmsRem) {
-      const val = parseInt(tmsRem, 10)
-      if (current.tmsRemaining <= 0) {
-        updates.tmsRemaining = val
-      } else {
-        const increase = val - current.tmsRemaining
-        const isPurchase = increase > Math.max(current.tmsRemaining * 0.1, 3)
-        updates.tmsRemaining = isPurchase ? val : Math.min(val, current.tmsRemaining)
-      }
-    }
-
-    // Derive usingTmsOverage from headers
-    if (rlStatus === 'rejected' && tmsStatus === 'allowed') {
-      updates.usingTmsOverage = true
-    } else if (rlStatus) {
-      updates.usingTmsOverage = false
-    }
 
     if (Object.keys(updates).length > 0) set(updates)
   },
 
-  setEnvelopeFromMe: (data) => {
-    const updates: Partial<BillingState> = {}
-    if (data.envelope) {
-      updates.envelopeMonthlyLimit = data.envelope.monthlyLimit
-      updates.envelopeMonthlyConsumed = data.envelope.monthlyConsumed
-      updates.envelope5hUtilization = data.envelope.fiveHourUtilization
-      updates.envelope7dUtilization = data.envelope.sevenDayUtilization
-      if (data.envelope.fiveHourResetEpoch > 0) updates.envelope5hReset = data.envelope.fiveHourResetEpoch
-      if (data.envelope.sevenDayResetEpoch > 0) updates.envelope7dReset = data.envelope.sevenDayResetEpoch
-    }
-    if (data.tmsRemaining !== undefined) updates.tmsRemaining = data.tmsRemaining
-    if (Object.keys(updates).length > 0) set(updates)
+  /**
+   * Bootstrap from /v1/me. Called on app launch, window focus, and post-purchase
+   * deep link callbacks. Backend authoritative — overwrites local state.
+   */
+  updateFromMe: (data) => {
+    set({
+      plan: data.plan,
+      isActive: data.isActive,
+      isLoaded: true,
+      consumedPct: data.billing.consumedPct,
+      tokensConsumed: data.billing.tokensConsumed,
+      tokenBudget: data.billing.tokenBudget,
+      cycleEnd: data.billing.cycleEnd,
+      status: data.billing.status,
+      tmsRemaining: data.billing.tmsPurchased,
+      noCredits: data.billing.status === 'rejected',
+    })
   },
 
-  setNoCredits: () => set({ noCredits: true, creditsRemaining: 0 }),
+  setNoCredits: () => set({ noCredits: true, status: 'rejected' }),
 
   clearNoCredits: () => set({ noCredits: false }),
 
   reset: () => {
-    console.warn('[billing-debug] FULL RESET called', new Error().stack?.split('\n').slice(1, 4).join(' ← '))
     set({ ...INITIAL_STATE })
   },
 }))

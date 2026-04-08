@@ -13,15 +13,45 @@ export interface Attachment {
   base64?: string
 }
 
-/** Ordered content block — tracks interleaving of text and tool calls */
+/** Ordered content block — tracks interleaving of text and tool calls
+ *  in assistant messages. Used by the chat bubble for inline rendering. */
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; toolCallId: string }
 
+/** Ordered prompt block — tracks the interleaving of user text and
+ *  attachments in a SINGLE user message (or coalesced batch). The
+ *  message queue carries this as `value`; the chat bubble derives
+ *  `(text, attachments)` from it for display, and the agent boundary
+ *  derives either an interleaved text prompt or an OpenAI content
+ *  parts array depending on model capability. Defined here so both
+ *  the queue layer and the chat store can produce/consume it without
+ *  cross-imports. */
+export type PromptBlock =
+  | { type: 'text'; text: string }
+  | { type: 'attachment'; attachment: Attachment }
+
 /** Message format for OpenAI-compatible conversation history */
+/**
+ * OpenAI / OpenAI-compatible content parts for multimodal user messages.
+ *
+ * Mirrors the shape consumed by vision-capable providers (Qwen3 Plus,
+ * Kimi K2.5, Step3.5, etc.) via the backend proxy. Used wherever a
+ * message's content can carry images interleaved with text — chiefly
+ * the queue → agent boundary and the conversationHistory shape so
+ * follow-up turns continue to see images from earlier turns.
+ *
+ * Defined in types/chat.ts (rather than agentService.ts) so the
+ * stores layer can construct it without importing from a service.
+ */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } }
+
 export interface ConversationMessage {
   role: 'user' | 'assistant' | 'system' | 'tool'
-  content: string | null
+  /** String for text-only messages, ContentPart[] for multimodal user messages. */
+  content: string | ContentPart[] | null
   /** Reasoning/thinking content from reasoning models (Step 3.5 Flash, Qwen3, DeepSeek). Preserved across turns so the model can continue reasoning. */
   reasoning_content?: string | null
   tool_calls?: Array<{
@@ -77,6 +107,16 @@ export interface ChatMessage {
   card?: ChatMessageCard
   /** Attachments included with this message (metadata only — content is resolved into message.content at send-time) */
   attachments?: Attachment[]
+  /**
+   * Original interleaved order of text and attachments at enqueue/send
+   * time. When present, this is the canonical source for reconstructing
+   * the message: rebuildConversationHistory walks promptBlocks in order
+   * to produce content parts that preserve the user's original sequence
+   * (vs the lossy text-then-attachments fallback derived from
+   * `content` + `attachments`). Stripped of base64 at disk persistence;
+   * in-memory image blocks carry base64 for follow-up turn fidelity.
+   */
+  promptBlocks?: PromptBlock[]
 }
 
 export interface CodeBlock {

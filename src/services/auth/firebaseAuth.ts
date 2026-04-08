@@ -309,10 +309,18 @@ class FirebaseAuthService {
     await signOut(getFirebaseAuth())
   }
 
-  /** Fetch billing info from backend /v1/me endpoint. Retries once on failure. */
-  private async fetchBillingInfo(gen: number): Promise<void> {
+  /**
+   * Fetch billing info from backend /v1/me endpoint. Retries once on failure.
+   *
+   * Public so it can be called from event-driven hooks (window focus, post-purchase
+   * deep link, network reconnect). NEVER from a polling loop — see
+   * `~/.claude/projects/.../memory/feedback_no_polling.md`.
+   */
+  async fetchBillingInfo(gen?: number): Promise<void> {
     const MAX_ATTEMPTS = 2
     const RETRY_DELAY = 3000
+    // When called externally (no gen), use the current generation
+    const targetGen = gen ?? this.authGeneration
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
@@ -321,7 +329,7 @@ class FirebaseAuthService {
           console.warn('[billing] No token available — user not authenticated')
           return
         }
-        if (gen !== this.authGeneration) return
+        if (targetGen !== this.authGeneration) return
 
         const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
         const res = await tauriFetch(`${workerUrl}/v1/me`, {
@@ -329,6 +337,16 @@ class FirebaseAuthService {
         })
 
         if (!res.ok) {
+          // 403 = inactive account. Won't recover via retry. Mark loaded with
+          // isActive=false so the UI can render the right state instead of
+          // staying in loading state forever.
+          if (res.status === 403) {
+            console.warn('[billing] /v1/me returned 403 — account inactive')
+            useBillingStore.setState({ isLoaded: true, isActive: false, noCredits: true })
+            return
+          }
+          // 401 = token expired. Retry with forceRefresh on next iteration.
+          // 5xx = server issue. Retry.
           console.warn(`[billing] /v1/me returned ${res.status} (attempt ${attempt}/${MAX_ATTEMPTS})`)
           if (attempt < MAX_ATTEMPTS) {
             await new Promise(r => setTimeout(r, RETRY_DELAY))
@@ -336,35 +354,17 @@ class FirebaseAuthService {
           }
           return
         }
-        if (gen !== this.authGeneration) return
+        if (targetGen !== this.authGeneration) return
 
-        const data = await res.json() as {
-          plan: string
-          creditsRemaining: number
-          planCapacity: number
-          isActive: boolean
-          envelope?: { monthlyLimit: number; monthlyConsumed: number; fiveHourUtilization: number; fiveHourResetEpoch: number; sevenDayUtilization: number; sevenDayResetEpoch: number }
-          tmsRemaining?: number
-        }
+        const data = await res.json() as import('../../stores/billingStore').MeResponse
 
-        console.info(`[billing] Plan: ${data.plan}, Credits: ${data.creditsRemaining}/${data.planCapacity}, Active: ${data.isActive}`)
+        console.info(
+          `[billing] Plan: ${data.plan}, Active: ${data.isActive}, ` +
+          `Consumed: ${(data.billing.consumedPct * 100).toFixed(1)}%, ` +
+          `TMS: ${data.billing.tmsPurchased}, Status: ${data.billing.status}`
+        )
 
-        useBillingStore.setState({
-          plan: (data.plan || 'explorer') as import('../../stores/billingStore').UserPlanName,
-          isActive: data.isActive,
-          isLoaded: true,
-          creditsRemaining: data.creditsRemaining,
-          planCapacity: data.planCapacity || 10,
-          noCredits: data.creditsRemaining <= 0,
-        })
-
-        // Token envelope state (graceful — old backends won't send this)
-        if (data.envelope || data.tmsRemaining !== undefined) {
-          useBillingStore.getState().setEnvelopeFromMe({
-            envelope: data.envelope,
-            tmsRemaining: data.tmsRemaining,
-          })
-        }
+        useBillingStore.getState().updateFromMe(data)
         return // success
       } catch (err) {
         console.warn(`[billing] Fetch failed (attempt ${attempt}/${MAX_ATTEMPTS}):`, err)

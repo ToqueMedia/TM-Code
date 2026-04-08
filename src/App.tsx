@@ -22,6 +22,7 @@ import { useLayoutStore } from './stores/layoutStore';
 import { logger } from './utils/logger';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNativeMenu } from './hooks/useNativeMenu';
+import { useBillingRefresh } from './hooks/useBillingRefresh';
 import { useEffect, useRef, useState } from 'react';
 import { Box, Flex } from '@chakra-ui/react';
 import { LoadingSpinner } from './components/ui/LoadingSpinner';
@@ -39,6 +40,8 @@ function App() {
 	// Set up keyboard shortcuts + native macOS menu handler
 	useKeyboardShortcuts();
 	useNativeMenu();
+	// Refresh billing state on window focus / network reconnect (no polling)
+	useBillingRefresh();
 
 	// Initialize Firebase Auth listener
 	useEffect(() => {
