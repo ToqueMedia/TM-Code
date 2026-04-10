@@ -3,8 +3,7 @@ import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiX, FiFile, FiFolder, FiImage, FiAlertTriangle } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
-import { useSettingsStore } from '@/stores/settingsStore'
-import { getModelProfile } from '@/services/agent/modelProfiles'
+import { useBillingStore } from '@/stores/billingStore'
 import type { Attachment } from '../../types/chat'
 
 interface AttachmentChipsProps {
@@ -19,13 +18,11 @@ const typeIcons = {
 }
 
 function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
-  // Subscribe to the active model so the warning re-renders when the
-  // user switches mid-input. Reading via the selector keeps re-renders
-  // localised to model changes.
-  const agentModel = useSettingsStore(s => s.agentModel)
-  const activeProfile = getModelProfile(agentModel)
+  // Model is now decided by the backend based on the user's plan.
+  // Kimi K2.5 (paid) supports multimodal; DeepSeek V3 (free) doesn't.
+  const billingPlan = useBillingStore(s => s.plan)
   const hasImages = attachments.some(a => a.type === 'image')
-  const showTextOnlyWarning = hasImages && !activeProfile.supportsAttachments
+  const showTextOnlyWarning = hasImages && billingPlan === 'explorer'
 
   if (attachments.length === 0) return null
 

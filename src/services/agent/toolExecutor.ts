@@ -26,6 +26,16 @@ export interface ToolDefinition {
     properties: Record<string, unknown>
     required?: string[]
   }
+  /**
+   * True iff this tool can run in parallel with other concurrency-safe tools
+   * without risking races or correctness bugs. Read-only operations
+   * (read_file, list_directory, glob, web_fetch, etc.) are safe. Anything that
+   * mutates the filesystem, spawns processes, or mutates agent state is not.
+   *
+   * Default: false (serial). Used by safeToolPool to gate parallel execution.
+   * Not sent to the API — getToolDefinitions() only copies name/description/parameters.
+   */
+  concurrencySafe?: boolean
 }
 
 export interface OpenAIToolDefinition {
@@ -44,6 +54,29 @@ export interface OpenAIToolDefinition {
 interface ToolEntry {
   definition: ToolDefinition
   execute: (input: Record<string, unknown>) => Promise<string>
+}
+
+// === Abort helpers ===
+
+/**
+ * Create a child AbortController linked to an optional parent signal.
+ * When the parent fires, the child fires too. If the parent is already
+ * aborted at call time, the child is aborted immediately.
+ *
+ * Used by research, verify, and spawn_background_agent to propagate
+ * the per-call abort signal to sub-agent loops without duplicating the
+ * 5-line linking pattern at each call site.
+ */
+function createLinkedAbortController(parentSignal?: AbortSignal): AbortController {
+  const child = new AbortController()
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      child.abort()
+    } else {
+      parentSignal.addEventListener('abort', () => child.abort(), { once: true })
+    }
+  }
+  return child
 }
 
 // === Tool Executor ===
@@ -78,17 +111,24 @@ class ToolExecutor {
     this._installedDepsCache = undefined
   }
 
-  /** Optional context for the current tool execution (set by agent service). */
-  private currentToolCallId: string | null = null
-
-  setCurrentToolCallId(id: string | null): void {
-    this.currentToolCallId = id
-  }
-
-  async execute(toolName: string, input: Record<string, unknown>, toolCallId?: string): Promise<string> {
+  async execute(
+    toolName: string,
+    input: Record<string, unknown>,
+    toolCallId?: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const tool = this.tools.get(toolName)
     if (!tool) {
       throw new Error(`Unknown tool: ${toolName}`)
+    }
+
+    // Phase B: pre-check abort signal at entry. If the loop already cancelled
+    // before this tool got dispatched (e.g., user hit ESC during streaming),
+    // skip permission prompts and execution entirely. Tools that have
+    // expensive side effects (subprocess spawn, network) check the signal
+    // again mid-execution via input._abortSignal — that's their job.
+    if (signal?.aborted) {
+      return `Tool ${toolName} aborted before execution (user cancelled).`
     }
 
     // .env files are ALWAYS blocked — read, write, edit, delete
@@ -130,29 +170,39 @@ class ToolExecutor {
       }
     }
 
-    // Inject toolCallId for tools that need per-call context (parallel sub-agents)
-    const execInput = toolCallId ? { ...input, _toolCallId: toolCallId } : input
+    // Inject per-call context. Tools read these out of `input` when they
+    // need them — no singleton state on ToolExecutor, so concurrent
+    // invocations don't race.
+    //   _toolCallId  → for checkpoint/progress reporting
+    //   _abortSignal → for tools that can honor mid-flight cancellation
+    //                  (execute_command, web_fetch, install commands).
+    //                  Fast read-only tools just check it once at entry.
+    const execInput: Record<string, unknown> = { ...input }
+    if (toolCallId) execInput._toolCallId = toolCallId
+    if (signal) execInput._abortSignal = signal
 
-    // Set tool call ID context just before execution (after async permission check)
-    // Tools capture this synchronously at the start of their execute function.
-    if (toolCallId) this.currentToolCallId = toolCallId
+    const result = await tool.execute(execInput)
+    // Diff results must never be truncated — the UI needs full JSON for InlineDiff,
+    // and agentService needs it for approval and readFileTimestamps updates.
     try {
-      const result = await tool.execute(execInput)
-      // Diff results must never be truncated — the UI needs full JSON for InlineDiff,
-      // and agentService needs it for approval and readFileTimestamps updates.
-      try {
-        const parsed = JSON.parse(result)
-        if (parsed?.type === 'diff') return result
-      } catch { /* not JSON — proceed to truncation */ }
-      return this.truncateResult(result)
-    } finally {
-      if (toolCallId) this.currentToolCallId = null
-    }
+      const parsed = JSON.parse(result)
+      if (parsed?.type === 'diff') return result
+    } catch { /* not JSON — proceed to truncation */ }
+    return this.truncateResult(result)
   }
 
   /** Number of core (non-MCP) tools registered. */
   getCoreToolCount(): number {
     return Array.from(this.tools.keys()).filter(k => !k.startsWith('mcp__')).length
+  }
+
+  /**
+   * Returns true iff the tool is safe to execute in parallel with other
+   * concurrency-safe tools. Used by safeToolPool to gate parallel dispatch.
+   * Unknown tools default to false (serial) — defensive.
+   */
+  isConcurrencySafe(toolName: string): boolean {
+    return this.tools.get(toolName)?.definition.concurrencySafe === true
   }
 
   getToolDefinitions(): OpenAIToolDefinition[] {
@@ -187,6 +237,10 @@ class ToolExecutor {
           name: fullName,
           description: `[MCP: ${tool.serverName}] ${tool.description}`,
           input_schema: tool.inputSchema as ToolDefinition['input_schema'],
+          // MCP spec annotations.readOnlyHint → safe to run in parallel with
+          // other read-only tools. Defensive default: serial when unset, so
+          // mutating MCP tools never accidentally race.
+          concurrencySafe: tool.readOnlyHint === true,
         },
         execute: async (input: Record<string, unknown>) => {
           return await callToolFn(tool.serverName, tool.name, input)
@@ -237,8 +291,9 @@ class ToolExecutor {
     cwd: string,
     installKey: string,
     toolCallId?: string,
+    abortSignal?: AbortSignal,
   ): Promise<string> {
-    const tcId = toolCallId || this.currentToolCallId
+    const tcId = toolCallId
     const allOutput: string[] = []
 
     // Register listeners BEFORE spawning
@@ -305,9 +360,11 @@ class ToolExecutor {
         timeoutTimer = setTimeout(() => reject(new Error(`Install timed out after ${INSTALL_TIMEOUT / 1000}s`)), INSTALL_TIMEOUT)
       })
 
-      // Listen for agent abort (user clicked Stop)
-      const { default: AgentService } = await import('./agentService')
-      const abortSignal = AgentService.getInstance().getAbortController()?.signal
+      // Phase B: honor the per-call abort signal threaded through `execute()`.
+      // Replaces the brittle global `AgentService.getInstance().getAbortController()`
+      // lookup, which couldn't distinguish parent vs sub-agent loops and
+      // would race on instance reassignment. The signal is now per-call so
+      // sub-agents and background agents get their own correct controller.
       const abortPromise = abortSignal
         ? new Promise<number>((_, reject) => {
             if (abortSignal.aborted) reject(new Error('aborted'))
@@ -325,7 +382,7 @@ class ToolExecutor {
         try { await invoke('kill_process', { pid: targetPid }) } catch { /* best effort */ }
         const msg = raceErr instanceof Error ? raceErr.message : String(raceErr)
         if (msg === 'aborted') {
-          return `Install cancelled by user.\nExit code: 1`
+          return `Install cancelled by user.\nExit code: 1\n\nThe install process was killed mid-execution. Dependencies in node_modules/ (or equivalent) may be partially installed or in an inconsistent state. Run the install command again to ensure all packages are correctly resolved before proceeding.`
         }
         return `TIMEOUT: ${msg}\n${allOutput.join('')}\nThe install process was killed.\n\nIMPORTANT: The install timed out. Tell the user to install dependencies manually by running the install command in the integrated terminal. Do NOT retry the install automatically.`
       }
@@ -356,7 +413,7 @@ class ToolExecutor {
   private handleInstallOutput(
     data: string,
     allOutput: string[],
-    toolCallId: string | null,
+    toolCallId: string | null | undefined,
   ): void {
     allOutput.push(data)
     if (!toolCallId) return
@@ -507,6 +564,11 @@ class ToolExecutor {
    * All commands that always require explicit Yes/No approval.
    * The Settings UI imports this list directly — no separate list to maintain.
    * User can block individual commands in Settings > Sandbox > Dangerous Commands.
+   *
+   * IMPORTANT: this list is "needs approval", NOT "mutates state". Some entries
+   * here are safe when read-only (`sudo cat`, `docker ps`, `kill -0`, `systemctl status`).
+   * For state-mutation detection (used by mid-flight cancellation warnings to decide
+   * whether the model should avoid auto-retrying), use STATE_MUTATING_COMMANDS below.
    */
   static readonly DANGEROUS_COMMANDS = [
     // Filesystem — destructive
@@ -531,16 +593,60 @@ class ToolExecutor {
   ]
 
   /**
+   * Strict subset of DANGEROUS_COMMANDS that ACTUALLY mutate state. Used by
+   * mid-flight cancellation (execute_command) to decide whether to emit the
+   * strong "DO NOT auto-retry — partial side effects may exist" warning.
+   *
+   * Exclusions from DANGEROUS_COMMANDS (these are read-safe and require
+   * approval for other reasons like privilege or network):
+   *   - `sudo`, `su`, `doas`, `pkexec` — privilege wrappers; mutation depends on the wrapped command
+   *   - `docker`, `docker-compose` — `docker ps`/`docker logs` are read-only
+   *   - `kill`, `pkill`, `killall` — `kill -0 $PID` is a signal existence check, read-only
+   *   - `wget` — downloads content but with abort mid-flight, file is incomplete not mutated
+   *   - `launchctl`, `systemctl` — `list`/`status` subcommands are read-only
+   *
+   * WRITE_COMMAND_PATTERNS (below) covers the filesystem-mutation shell
+   * patterns (redirects, sed -i, tee, etc.) that aren't caught by the
+   * single-word list.
+   */
+  static readonly STATE_MUTATING_COMMANDS = [
+    // Filesystem — unambiguously destructive
+    'rm', 'rmdir', 'mv', 'cp', 'chmod', 'chown', 'ln',
+    'mkfs', 'dd', 'shutdown', 'reboot',
+    // Git — all mutate working tree or remote state
+    'git push', 'git reset', 'git checkout', 'git merge', 'git rebase',
+    'git stash', 'git clean', 'git commit',
+    // Package managers — remove (install is handled via executeInstallStreaming with PID kill)
+    'npm uninstall', 'yarn remove', 'pnpm remove',
+  ]
+
+  /**
    * Check if a command contains any dangerous command from the list.
    * Returns the matched command name, or null if not dangerous.
    */
   private matchDangerousCommand(command: string): string | null {
+    return this.matchAnyInList(command, ToolExecutor.DANGEROUS_COMMANDS)
+  }
+
+  /**
+   * Check if a command contains any STATE-MUTATING command (a strict subset
+   * of DANGEROUS_COMMANDS — excludes sudo/docker/kill/wget/launchctl/systemctl
+   * which may be read-only depending on the subcommand). Used by mid-flight
+   * cancellation to decide whether the model should be warned against
+   * auto-retry.
+   */
+  private matchStateMutatingCommand(command: string): string | null {
+    return this.matchAnyInList(command, ToolExecutor.STATE_MUTATING_COMMANDS)
+  }
+
+  /** Internal: word-boundary match against a list of command tokens. */
+  private matchAnyInList(command: string, list: readonly string[]): string | null {
     if (!command) return null
     const cmdLower = command.toLowerCase()
-    for (const dangerous of ToolExecutor.DANGEROUS_COMMANDS) {
-      const escaped = dangerous.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    for (const token of list) {
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       const pattern = new RegExp(`(?:^|[;&|\\s(\`$])${escaped}(?:\\s|$|[;&|)\`])`, 'i')
-      if (pattern.test(` ${cmdLower} `)) return dangerous
+      if (pattern.test(` ${cmdLower} `)) return token
     }
     return null
   }
@@ -783,7 +889,8 @@ class ToolExecutor {
             path: { type: 'string', description: 'Absolute path to the file to read' }
           },
           required: ['path']
-        }
+        },
+        concurrencySafe: true,
       },
       execute: async (input) => {
         const filePath = input.path as string
@@ -822,7 +929,8 @@ class ToolExecutor {
             maxDepth: { type: 'number', description: 'Maximum depth to traverse. Default: 3' }
           },
           required: ['path']
-        }
+        },
+        concurrencySafe: true,
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.path as string)
@@ -847,7 +955,8 @@ class ToolExecutor {
             includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' }
           },
           required: ['query', 'directory']
-        }
+        },
+        concurrencySafe: true,
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.directory as string)
@@ -1011,8 +1120,9 @@ class ToolExecutor {
       execute: async (input) => {
         this.validatePathWithinProject(input.path as string)
 
-        // Capture checkpoint before deleting (capture ID locally for parallel safety)
-        const tcId = this.currentToolCallId
+        // Capture checkpoint before deleting. Use injected _toolCallId so
+        // concurrent invocations don't race a shared field.
+        const tcId = input._toolCallId as string | undefined
         if (tcId) {
           try {
             const content = await invoke<string>('read_file', { path: input.path as string })
@@ -1056,8 +1166,9 @@ class ToolExecutor {
           throw new Error('Access denied: new name cannot contain path separators or "..".')
         }
 
-        // Capture checkpoint before renaming (capture ID locally for parallel safety)
-        const tcId = this.currentToolCallId
+        // Capture checkpoint before renaming. Use injected _toolCallId so
+        // concurrent invocations don't race a shared field.
+        const tcId = input._toolCallId as string | undefined
         if (tcId) {
           try {
             const content = await invoke<string>('read_file', { path: input.oldPath as string })
@@ -1168,7 +1279,8 @@ class ToolExecutor {
             directory: { type: 'string', description: 'Absolute path to search from. Default: project root' }
           },
           required: ['pattern']
-        }
+        },
+        concurrencySafe: true,
       },
       execute: async (input) => {
         const pattern = input.pattern as string
@@ -1201,11 +1313,13 @@ class ToolExecutor {
             maxLength: { type: 'number', description: 'Maximum characters to return. Default: 50000' }
           },
           required: ['url']
-        }
+        },
+        concurrencySafe: true,
       },
       execute: async (input) => {
         const url = input.url as string
         const maxLength = (input.maxLength as number) || 50000
+        const signal = input._abortSignal as AbortSignal | undefined
 
         const firebaseAuth = FirebaseAuthService.getInstance()
         const idToken = await firebaseAuth.getIdToken()
@@ -1216,14 +1330,23 @@ class ToolExecutor {
 
         const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
 
-        const response = await tauriFetch(`${workerUrl}/v1/web-fetch`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${idToken}`
-          },
-          body: JSON.stringify({ url, maxLength }),
-        })
+        let response: Awaited<ReturnType<typeof tauriFetch>>
+        try {
+          response = await tauriFetch(`${workerUrl}/v1/web-fetch`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${idToken}`
+            },
+            body: JSON.stringify({ url, maxLength }),
+            signal,
+          })
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            return `Web fetch cancelled by user (${url}).`
+          }
+          throw err
+        }
 
         if (!response.ok) {
           return `Error: Failed to fetch ${url} (status: ${response.status})`
@@ -1297,19 +1420,103 @@ class ToolExecutor {
           return `SKIPPED: "${installBaseCmd}" already completed successfully in ${effectiveCwd}. Dependencies are installed.\nExit code: 0`
         }
 
-        // For install commands: use streaming so the user sees real-time logs in the chat
+        // For install commands: use streaming so the user sees real-time logs in the chat.
+        // Note: the outer guard at execute() entry already returns early on
+        // pre-aborted signals — no inner re-check needed (was R2 critique
+        // about duplicate-with-divergent-message).
+        const callSignal = input._abortSignal as AbortSignal | undefined
+
         if (isInstallCmd) {
-          return this.executeInstallStreaming(cmd, cwd, installKey, input._toolCallId as string | undefined)
+          return this.executeInstallStreaming(
+            cmd,
+            cwd,
+            installKey,
+            input._toolCallId as string | undefined,
+            callSignal,
+          )
         }
 
         // Agent default: 120s. Clamp to max 600s.
         const timeoutSecs = Math.min(Number(input.timeout_secs) || 120, 600)
 
-        const result = await invoke<{ stdout: string; stderr: string; exitCode: number; success: boolean; timedOut: boolean }>('execute_command', {
+        // Phase B caveat: short execute_command does NOT have PID-based
+        // cancellation. The Tauri `execute_command` invoke is fire-and-forget
+        // from JS — once it starts on the Rust side, we cannot kill it.
+        //
+        // We race it against the abort signal so the agent loop returns
+        // immediately on user ESC, but the Rust-side command continues until
+        // natural completion or its timeoutSecs limit. The cancellation
+        // message below makes this dangerous-state explicit so the model
+        // does NOT blindly retry — partial side effects (file writes, network
+        // calls) may have already happened.
+        //
+        // For true mid-execution kill, install commands use the streaming
+        // path which DOES expose a PID and call kill_process via the
+        // existing executeInstallStreaming infrastructure.
+        const invokePromise = invoke<{ stdout: string; stderr: string; exitCode: number; success: boolean; timedOut: boolean }>('execute_command', {
           command: cmd,
           cwd,
           timeoutSecs,
         })
+
+        // Critical: catch any late rejection from invokePromise so an aborted
+        // race doesn't leave an unhandled promise rejection on the event loop.
+        // Without this, when the abort race wins and we return the cancellation
+        // string, invokePromise stays pending and may eventually reject — that
+        // rejection has no handler and surfaces as "Uncaught (in promise)".
+        invokePromise.catch(() => { /* discarded — abort race won */ })
+
+        let result: { stdout: string; stderr: string; exitCode: number; success: boolean; timedOut: boolean }
+        if (callSignal) {
+          try {
+            result = await Promise.race([
+              invokePromise,
+              new Promise<never>((_, reject) => {
+                callSignal.addEventListener(
+                  'abort',
+                  () => reject(new Error('aborted')),
+                  { once: true },
+                )
+              }),
+            ])
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            if (msg === 'aborted') {
+              // R2-5 / R3-2: tune the cancellation message to the command's
+              // risk profile. Strong "DO NOT retry" only when the command
+              // actually mutates state. Uses STATE_MUTATING_COMMANDS (strict
+              // subset of DANGEROUS_COMMANDS that excludes sudo/docker/kill/
+              // wget/launchctl/systemctl — those require approval for other
+              // reasons like privilege or network, but may be read-only
+              // depending on the subcommand). Plus WRITE_COMMAND_PATTERNS
+              // for shell-level writes (redirects, sed -i, tee, etc.).
+              //
+              // Read-safe examples (get the light message):
+              //   pnpm test, tsc --noEmit, eslint src, grep foo .,
+              //   sudo cat /etc/passwd, docker ps, kill -0 $PID,
+              //   systemctl status nginx, wget -q -O /dev/null url
+              //
+              // Mutating examples (get the strong message):
+              //   rm -rf node_modules, mv foo bar, git push,
+              //   npm uninstall react, echo x > file, sed -i 's/a/b/' f
+              const isMutating = this.matchStateMutatingCommand(cmd) !== null
+              const hasWritePattern = ToolExecutor.WRITE_COMMAND_PATTERNS.some(p => p.test(cmd))
+              const couldMutate = isMutating || hasWritePattern
+
+              const truncated = cmd.length > 80 ? cmd.slice(0, 80) + '…' : cmd
+              if (couldMutate) {
+                // Strong wording: partial side effects may exist; ask first.
+                return `Command CANCELLED by user mid-execution: ${truncated}\nExit code: 1\n\nWARNING: this command can mutate state (matches a state-mutating pattern or write operation). The Rust subprocess could not be killed cleanly — it may still be running in the background until natural completion or its ${timeoutSecs}s timeout. Any partial side effects (file writes, mv/rm, package mutations) MAY have already occurred.\n\nDO NOT auto-retry. Ask the user what they observed before deciding the next step.`
+              }
+              // Light wording: command is read-only, safe for the model to
+              // retry or move on without user dialogue.
+              return `Command cancelled by user: ${truncated}\nExit code: 1\n\nThe command was non-mutating (read-only / diagnostic). Safe to retry if needed, or move on.`
+            }
+            throw err
+          }
+        } else {
+          result = await invokePromise
+        }
 
         if (result.timedOut) {
           return `TIMEOUT: Command exceeded ${timeoutSecs}s limit and was terminated.\nFor long-running processes, use start_dev_server instead.\nSTDERR:\n${result.stderr}`
@@ -1387,7 +1594,10 @@ class ToolExecutor {
             path: { type: 'string', description: 'Absolute path to a TS/JS file or the project root. If a file, checks only that file. If a directory, checks the whole project.' }
           },
           required: ['path']
-        }
+        },
+        // Spawns `npx tsc --noEmit` via execute_command. Read-only — no side effects on
+        // the user's project. Safe to run in parallel with other read-only tools.
+        concurrencySafe: true,
       },
       execute: async (input) => {
         const filePath = input.path as string
@@ -1444,7 +1654,8 @@ class ToolExecutor {
             limit: { type: 'number', description: 'Maximum characters to return. Default: 10000. Max: 30000.' }
           },
           required: ['id']
-        }
+        },
+        concurrencySafe: true,
       },
       execute: async (input) => {
         const id = input.id as string
@@ -1479,7 +1690,8 @@ class ToolExecutor {
             level: { type: 'string', enum: ['all', 'error', 'warn'], description: 'Filter by log level. "error" shows only errors. "warn" shows errors and warnings. "all" shows everything. Default: all.' }
           },
           required: []
-        }
+        },
+        concurrencySafe: true,
       },
       execute: async (input) => {
         const { useLayoutStore } = await import('../../stores/layoutStore')
@@ -1550,12 +1762,12 @@ class ToolExecutor {
           subAgentToolNames.has(t.function.name)
         )
 
-        // Get the main agent's abort controller so sub-agent stops when parent stops
-        const mainAgent = AgentService.getInstance()
+        // Phase B: derive the sub-agent's abort from the per-call signal.
+        const subAbort = createLinkedAbortController(input._abortSignal as AbortSignal | undefined)
         const subAgent = AgentService.createLightweight({
           tools: subAgentTools,
           readOnly: false,
-          abortController: mainAgent.getAbortController() || undefined,
+          abortController: subAbort,
         })
 
         const projectRoot = this.getProjectRoot()
@@ -1572,8 +1784,7 @@ Project root: ${projectRoot}`
         let result = ''
         let totalTokens = 0
         let toolsCalled = 0
-        // Use injected ID for parallel execution, fall back to singleton for sequential
-        const toolCallId = (input._toolCallId as string) || this.currentToolCallId
+        const toolCallId = input._toolCallId as string | undefined
 
         const updateProgress = (status: string) => {
           if (toolCallId) {
@@ -1655,13 +1866,8 @@ Project root: ${projectRoot}`
           bgToolNames.has(t.function.name)
         )
 
-        // Own abort controller, linked to parent
-        const bgAbort = new AbortController()
-        const mainAgent = AgentService.getInstance()
-        const parentAbort = mainAgent.getAbortController()
-        if (parentAbort) {
-          parentAbort.signal.addEventListener('abort', () => bgAbort.abort(), { once: true })
-        }
+        // Phase B: derive bg agent abort from the per-call signal.
+        const bgAbort = createLinkedAbortController(input._abortSignal as AbortSignal | undefined)
 
         const subAgent = AgentService.createLightweight({
           tools: bgTools,
@@ -1872,12 +2078,13 @@ Project root: ${projectRoot}`
             return t
           })
 
-        const mainAgent = AgentService.getInstance()
+        // Phase B: derive verify agent abort from the per-call signal.
+        const verifyAbort = createLinkedAbortController(input._abortSignal as AbortSignal | undefined)
         const subAgent = AgentService.createLightweight({
           tools: verifierTools,
           readOnly: true,
           maxTurns: 30,
-          abortController: mainAgent.getAbortController() || undefined,
+          abortController: verifyAbort,
         })
 
         const projectRoot = this.getProjectRoot()
@@ -1944,7 +2151,7 @@ Verify this implementation. Run tests, type checks, and any other relevant valid
         let result = ''
         let totalTokens = 0
         let toolsCalled = 0
-        const toolCallId = (input._toolCallId as string) || this.currentToolCallId
+        const toolCallId = input._toolCallId as string | undefined
 
         const updateProgress = (status: string) => {
           if (toolCallId) {

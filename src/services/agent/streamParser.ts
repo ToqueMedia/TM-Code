@@ -1,24 +1,51 @@
-// SSE Stream Parser for OpenAI-compatible streaming responses
+// SSE Stream Parser for Anthropic Messages API streaming responses
 //
-// Parses chunks like:
-// data: {"id":"...","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
-// data: [DONE]
+// Anthropic SSE uses event: + data: lines (unlike OpenAI which is just data:):
+//
+//   event: message_start
+//   data: {"type":"message_start","message":{"id":"msg_1",...}}
+//
+//   event: content_block_start
+//   data: {"type":"content_block_start","index":0,"content_block":{"type":"text",...}}
+//
+//   event: content_block_delta
+//   data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+//
+//   event: content_block_stop
+//   data: {"type":"content_block_stop","index":0}
+//
+//   event: message_delta
+//   data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}
+//
+//   event: message_stop
+//   data: {"type":"message_stop"}
+//
+// The billing event is a TM Code extension passed through as bare `data:` line
+// (no event: prefix) — handled inline.
 
 import type { CostBudgetStatus, UserPlanName } from '../../stores/billingStore'
 
 export type StreamEvent =
+  // Content events
   | { type: 'text_delta'; content: string }
   | { type: 'reasoning_delta'; content: string }
-  | { type: 'tool_call_start'; index: number; id: string; name: string }
-  | { type: 'tool_call_args_delta'; index: number; argsDelta: string }
-  | { type: 'finish'; reason: string }
+  // Tool events — Phase D uses content_block_stop as authoritative dispatch signal
+  | { type: 'content_block_start'; index: number; blockType: 'text' | 'tool_use' | 'thinking'; toolId?: string; toolName?: string }
+  | { type: 'tool_input_delta'; index: number; partialJson: string }
+  | { type: 'content_block_stop'; index: number }
+  // Message lifecycle
+  | { type: 'message_start'; messageId: string; inputTokens: number }
+  | { type: 'message_delta'; stopReason: string; outputTokens: number }
+  | { type: 'message_stop' }
+  // Usage (emitted from message_start and message_delta)
   | { type: 'usage'; promptTokens: number; completionTokens: number }
+  // Billing (TM Code extension — bare data: line from billingStream)
   | {
       type: 'billing'
       consumedPct: number
       status: CostBudgetStatus
-      tokensUsed: number       // raw tokens THIS request
-      tokensConsumed: number   // cumulative cycle total (post-commit prediction)
+      tokensUsed: number
+      tokensConsumed: number
       cycleEnd: string
       tmsRemaining: number
       plan: UserPlanName
@@ -31,50 +58,12 @@ interface StreamParserCallbacks {
   onEvent: (event: StreamEvent) => void
 }
 
-function processSSELines(
-  rawText: string,
-  callbacks: StreamParserCallbacks
-): boolean {
-  const lines = rawText.split('\n')
-  for (const line of lines) {
-    const trimmed = line.trim()
-
-    if (trimmed === '') continue
-    if (trimmed === 'data: [DONE]') {
-      callbacks.onEvent({ type: 'done' })
-      return true // stream finished
-    }
-    if (!trimmed.startsWith('data: ')) continue
-
-    let json: any
-    try {
-      json = JSON.parse(trimmed.slice(6))
-    } catch {
-      // Skip malformed JSON — don't swallow callback errors
-      continue
-    }
-
-    // Billing event from Worker (appended after provider stream ends)
-    if (json.type === 'billing') {
-      callbacks.onEvent({
-        type: 'billing',
-        consumedPct: typeof json.consumed_pct === 'number' ? json.consumed_pct : 0,
-        status: (json.status ?? 'allowed') as CostBudgetStatus,
-        tokensUsed: json.tokens_used ?? 0,
-        tokensConsumed: json.tokens_consumed ?? 0,
-        cycleEnd: json.cycle_end ?? '',
-        tmsRemaining: json.tms_remaining ?? 0,
-        plan: (json.plan ?? 'explorer') as UserPlanName,
-        usedOverage: Boolean(json.used_overage),
-      })
-      continue
-    }
-
-    processChunk(json, callbacks)
-  }
-  return false
-}
-
+/**
+ * Parse an Anthropic SSE stream from the worker's /v1/messages endpoint.
+ *
+ * Handles both event:+data: Anthropic events AND bare data: billing events
+ * (TM Code extension injected by billingStream before the converter).
+ */
 export async function parseSSEStream(
   response: Response,
   callbacks: StreamParserCallbacks,
@@ -83,9 +72,9 @@ export async function parseSSEStream(
   const reader = response.body!.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+
   try {
     while (true) {
-      // Check abort before each read to prevent consuming data after cancel
       if (signal?.aborted) return
 
       const { done, value } = await reader.read()
@@ -93,100 +82,198 @@ export async function parseSSEStream(
 
       buffer += decoder.decode(value, { stream: true })
 
-      // Split keeping the last (possibly incomplete) line in the buffer
       const lastNewline = buffer.lastIndexOf('\n')
       if (lastNewline === -1) continue
 
       const complete = buffer.slice(0, lastNewline)
       buffer = buffer.slice(lastNewline + 1)
 
-      if (processSSELines(complete, callbacks)) return
+      const lines = complete.split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed === '') continue
+
+        // Anthropic event type line
+        if (trimmed.startsWith('event: ')) {
+          // event: line — we don't need to track it because the
+          // Anthropic converter embeds the type in the data JSON payload
+          continue
+        }
+
+        // Data line
+        if (trimmed.startsWith('data: ')) {
+          const rawData = trimmed.slice(6)
+
+          let json: any
+          try {
+            json = JSON.parse(rawData)
+          } catch {
+            continue // malformed JSON — skip
+          }
+
+          // TM Code billing extension (bare data: line, no event: prefix)
+          if (json.type === 'billing') {
+            callbacks.onEvent({
+              type: 'billing',
+              consumedPct: typeof json.consumed_pct === 'number' ? json.consumed_pct : 0,
+              status: (json.status ?? 'allowed') as CostBudgetStatus,
+              tokensUsed: json.tokens_used ?? 0,
+              tokensConsumed: json.tokens_consumed ?? 0,
+              cycleEnd: json.cycle_end ?? '',
+              tmsRemaining: json.tms_remaining ?? 0,
+              plan: (json.plan ?? 'explorer') as UserPlanName,
+              usedOverage: Boolean(json.used_overage),
+            })
+            // (event type is in data.type)
+            continue
+          }
+
+          // Process Anthropic event based on the type field in the data
+          processAnthropicEvent(json, callbacks)
+        }
+      }
     }
 
-    // Process any remaining data in the buffer after stream ends
+    // Flush remaining
     if (buffer.trim()) {
-      processSSELines(buffer, callbacks)
+      const lines = buffer.split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed.startsWith('data: ')) {
+          try {
+            const json = JSON.parse(trimmed.slice(6))
+            if (json.type === 'billing') continue
+            processAnthropicEvent(json, callbacks)
+          } catch { /* ignore */ }
+        }
+      }
     }
   } finally {
     reader.releaseLock()
   }
 }
 
-function processChunk(
-  chunk: any,
-  callbacks: StreamParserCallbacks
+function processAnthropicEvent(
+  data: any,
+  callbacks: StreamParserCallbacks,
 ): void {
-  const choice = chunk.choices?.[0]
-  if (!choice) {
-    // Usage-only chunk (no choices)
-    if (chunk.usage) {
+  switch (data.type) {
+    case 'message_start': {
+      const msg = data.message
+      const inputTokens = msg?.usage?.input_tokens ?? 0
+      callbacks.onEvent({
+        type: 'message_start',
+        messageId: msg?.id ?? '',
+        inputTokens,
+      })
       callbacks.onEvent({
         type: 'usage',
-        promptTokens: chunk.usage.prompt_tokens || 0,
-        completionTokens: chunk.usage.completion_tokens || 0,
+        promptTokens: inputTokens,
+        completionTokens: 0,
       })
+      break
     }
-    return
-  }
 
-  const delta = choice.delta
-  if (!delta) return
-
-  // Text content
-  if (delta.content) {
-    callbacks.onEvent({ type: 'text_delta', content: delta.content })
-  }
-
-  // Reasoning (native field: Qwen/DeepSeek use reasoning_content, StepFun uses reasoning)
-  if (delta.reasoning_content) {
-    callbacks.onEvent({ type: 'reasoning_delta', content: delta.reasoning_content })
-  } else if (delta.reasoning) {
-    callbacks.onEvent({ type: 'reasoning_delta', content: delta.reasoning })
-  }
-
-  // Tool calls (incremental)
-  if (delta.tool_calls) {
-    for (const tc of delta.tool_calls) {
-      if (tc.id && tc.function?.name) {
+    case 'content_block_start': {
+      const block = data.content_block
+      const index = data.index ?? 0
+      if (block?.type === 'tool_use') {
         callbacks.onEvent({
-          type: 'tool_call_start',
-          index: tc.index,
-          id: tc.id,
-          name: tc.function.name,
+          type: 'content_block_start',
+          index,
+          blockType: 'tool_use',
+          toolId: block.id,
+          toolName: block.name,
+        })
+      } else if (block?.type === 'thinking') {
+        callbacks.onEvent({
+          type: 'content_block_start',
+          index,
+          blockType: 'thinking',
+        })
+      } else {
+        // text block (or unknown type — treat as text)
+        callbacks.onEvent({
+          type: 'content_block_start',
+          index,
+          blockType: 'text',
         })
       }
-      if (tc.function?.arguments) {
+      break
+    }
+
+    case 'content_block_delta': {
+      const delta = data.delta
+      const index = data.index ?? 0
+      if (delta?.type === 'text_delta') {
+        callbacks.onEvent({ type: 'text_delta', content: delta.text ?? '' })
+      } else if (delta?.type === 'thinking_delta') {
+        callbacks.onEvent({ type: 'reasoning_delta', content: delta.thinking ?? '' })
+      } else if (delta?.type === 'input_json_delta') {
         callbacks.onEvent({
-          type: 'tool_call_args_delta',
-          index: tc.index,
-          argsDelta: tc.function.arguments,
+          type: 'tool_input_delta',
+          index,
+          partialJson: delta.partial_json ?? '',
         })
       }
+      break
     }
-  }
 
-  // Finish reason
-  if (choice.finish_reason) {
-    callbacks.onEvent({ type: 'finish', reason: choice.finish_reason })
-  }
+    case 'content_block_stop': {
+      // Phase D: this is the authoritative signal that a tool's arguments
+      // are complete. The frontend dispatches the tool to the pool on this
+      // event — no heuristic sealing, no false positives.
+      callbacks.onEvent({
+        type: 'content_block_stop',
+        index: data.index ?? 0,
+      })
+      break
+    }
 
-  // Usage (appears in last chunk for some providers)
-  if (chunk.usage) {
-    callbacks.onEvent({
-      type: 'usage',
-      promptTokens: chunk.usage.prompt_tokens || 0,
-      completionTokens: chunk.usage.completion_tokens || 0,
-    })
+    case 'message_delta': {
+      const stopReason = data.delta?.stop_reason ?? 'end_turn'
+      const outputTokens = data.usage?.output_tokens ?? 0
+      callbacks.onEvent({
+        type: 'message_delta',
+        stopReason,
+        outputTokens,
+      })
+      callbacks.onEvent({
+        type: 'usage',
+        promptTokens: 0,
+        completionTokens: outputTokens,
+      })
+      break
+    }
+
+    case 'message_stop': {
+      callbacks.onEvent({ type: 'done' })
+      break
+    }
+
+    case 'error': {
+      callbacks.onEvent({
+        type: 'error',
+        message: data.error?.message ?? JSON.stringify(data),
+      })
+      break
+    }
   }
 }
 
-// Returns the length of the longest suffix of `str` that is a prefix of `tag`
+// ── Thinking detector (for DashScope reasoning via <think> tags) ─────────
+//
+// DashScope's reasoning content arrives as text with <think>...</think> tags
+// (not as native Anthropic thinking blocks). This detector extracts thinking
+// from text deltas when the backend emits reasoning as text_delta.
+//
+// Used by processStreamedTurn when the backend emits reasoning_content as
+// text instead of a native thinking block.
+
 function partialTagMatch(str: string, tag: string): number {
   const maxLen = Math.min(str.length, tag.length - 1)
   for (let len = maxLen; len > 0; len--) {
-    if (str.endsWith(tag.slice(0, len))) {
-      return len
-    }
+    if (str.endsWith(tag.slice(0, len))) return len
   }
   return 0
 }
@@ -194,8 +281,6 @@ function partialTagMatch(str: string, tag: string): number {
 const OPEN_TAG = '<think>'
 const CLOSE_TAG = '</think>'
 
-// Detects <think>...</think> blocks in content stream
-// Handles partial tags split across chunks (e.g. "<thi" + "nk>...")
 export function createThinkingDetector(): {
   process: (text: string) => { reasoning: string; content: string }
 } {
@@ -213,7 +298,6 @@ export function createThinkingDetector(): {
         if (isInsideThink) {
           const closeIdx = buffer.indexOf(CLOSE_TAG)
           if (closeIdx === -1) {
-            // Check if buffer ends with a partial </think> match
             const partial = partialTagMatch(buffer, CLOSE_TAG)
             if (partial > 0) {
               reasoning += buffer.slice(0, buffer.length - partial)
@@ -231,7 +315,6 @@ export function createThinkingDetector(): {
         } else {
           const openIdx = buffer.indexOf(OPEN_TAG)
           if (openIdx === -1) {
-            // Check if buffer ends with a partial <think> match
             const partial = partialTagMatch(buffer, OPEN_TAG)
             if (partial > 0) {
               content += buffer.slice(0, buffer.length - partial)

@@ -48,18 +48,22 @@ export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } }
 
+/**
+ * Anthropic Messages API content block — matches the format used by
+ * agentService and chatStore for conversation history.
+ */
+export type AnthropicContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string }
+  | { type: 'thinking'; thinking: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } }
+
 export interface ConversationMessage {
-  role: 'user' | 'assistant' | 'system' | 'tool'
-  /** String for text-only messages, ContentPart[] for multimodal user messages. */
-  content: string | ContentPart[] | null
-  /** Reasoning/thinking content from reasoning models (Step 3.5 Flash, Qwen3, DeepSeek). Preserved across turns so the model can continue reasoning. */
-  reasoning_content?: string | null
-  tool_calls?: Array<{
-    id: string
-    type: 'function'
-    function: { name: string; arguments: string }
-  }>
-  tool_call_id?: string
+  role: 'user' | 'assistant'
+  /** String for text-only messages, AnthropicContentBlock[] for structured messages
+   *  (tool_use blocks, tool_result blocks, thinking blocks, image parts). */
+  content: string | AnthropicContentBlock[] | null
 }
 
 export interface ToolCallDisplay {

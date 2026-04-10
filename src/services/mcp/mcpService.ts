@@ -25,6 +25,13 @@ export interface MCPTool {
   description: string
   inputSchema: Record<string, unknown>
   serverName: string
+  /**
+   * MCP spec annotation: tool does not modify its environment.
+   * When true, the tool can run in parallel with other read-only tools
+   * (mapped to OpenAIToolDefinition.concurrencySafe in toolExecutor.registerMCPTools).
+   * Undefined or false → tool runs serially (defensive default).
+   */
+  readOnlyHint?: boolean
 }
 
 interface MCPConfigFile {
@@ -175,12 +182,19 @@ class MCPService {
 
     const toolList = (result as { tools?: Array<Record<string, unknown>> })?.tools || []
 
-    return toolList.map((t) => ({
-      name: (t.name as string) || '',
-      description: (t.description as string) || '',
-      inputSchema: (t.inputSchema as Record<string, unknown>) || { type: 'object', properties: {} },
-      serverName,
-    }))
+    return toolList.map((t) => {
+      // MCP spec: annotations.readOnlyHint is optional. Capture it so the agent's
+      // safe-tool pool can run multiple read-only MCP tools in parallel without
+      // regressing today's Promise.all behavior to serial.
+      const annotations = (t.annotations as { readOnlyHint?: boolean } | undefined)
+      return {
+        name: (t.name as string) || '',
+        description: (t.description as string) || '',
+        inputSchema: (t.inputSchema as Record<string, unknown>) || { type: 'object', properties: {} },
+        serverName,
+        readOnlyHint: annotations?.readOnlyHint === true ? true : undefined,
+      }
+    })
   }
 
   /**
@@ -399,6 +413,7 @@ class MCPService {
         description: t.description || '',
         inputSchema: t.inputSchema || { type: 'object', properties: {} },
         serverName: name,
+        readOnlyHint: t.readOnlyHint,
       }))
 
       for (const tool of mcpTools) {

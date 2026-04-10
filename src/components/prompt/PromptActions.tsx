@@ -1,10 +1,8 @@
-import { memo, useState, useRef, useEffect } from 'react'
+import { memo } from 'react'
 import { Box, Flex, IconButton, Text } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiMonitor, FiPaperclip, FiChevronUp } from 'react-icons/fi'
+import { FiSend, FiSquare, FiCode, FiMonitor, FiPaperclip } from 'react-icons/fi'
 import { useLayoutStore } from '../../stores/layoutStore'
-import { useSettingsStore, type AgentModelId } from '../../stores/settingsStore'
 import { useBillingStore } from '../../stores/billingStore'
-import { getModelsForPlan, getDefaultModelForPlan, getModelProfile, type ModelProfile } from '../../services/agent/modelProfiles'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -35,145 +33,28 @@ function PromptActions({
 }: PromptActionsProps) {
   const isPreviewActive = viewMode === 'preview'
   const isPreviewLoading = useLayoutStore(s => s.isPreviewServerLoading)
-  const agentModel = useSettingsStore(s => s.agentModel)
-  const setAgentModel = useSettingsStore(s => s.setAgentModel)
   const billingPlan = useBillingStore(s => s.plan)
-  const billingLoaded = useBillingStore(s => s.isLoaded)
-  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
-  const modelMenuRef = useRef<HTMLDivElement>(null)
-  const profiles = getModelsForPlan(billingPlan)
-  const isAvailable = profiles.some(p => p.id === agentModel)
-
-  // While billing is loading, show the user's persisted model (don't filter by plan yet).
-  // After billing loads, enforce plan restrictions.
-  const activeProfile = !billingLoaded
-    ? getModelProfile(agentModel)
-    : (profiles.find(p => p.id === agentModel) || profiles.find(p => p.id === getDefaultModelForPlan(billingPlan)) || profiles[0])
-
-  // Persist the corrected model to settings — only AFTER billing data is loaded
-  // to avoid resetting a paid user's model to free before /v1/me returns.
-  useEffect(() => {
-    if (!billingLoaded) return
-    if (!isAvailable) {
-      setAgentModel(getDefaultModelForPlan(billingPlan) as AgentModelId)
-    }
-  }, [billingPlan, billingLoaded, isAvailable, setAgentModel])
-
-  useEffect(() => {
-    if (!isModelMenuOpen) return
-    const handleClick = (e: MouseEvent) => {
-      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
-        setIsModelMenuOpen(false)
-      }
-    }
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setIsModelMenuOpen(false)
-    }
-    document.addEventListener('mousedown', handleClick)
-    document.addEventListener('keydown', handleEsc)
-    return () => {
-      document.removeEventListener('mousedown', handleClick)
-      document.removeEventListener('keydown', handleEsc)
-    }
-  }, [isModelMenuOpen])
+  // Plan label via i18n — falls back to raw plan name for unknown plans
+  const planLabel = t(`prompt.planLabel.${billingPlan}` as any) || billingPlan
 
   return (
     <Flex align="center" justify="space-between" px={3} py={2}>
       <Flex align="center" gap={1}>
-        {/* Model persona selector */}
-        <Box ref={modelMenuRef} position="relative">
-          <Flex
-            as="button"
-            align="center"
-            gap="4px"
-            px={2}
-            py="5px"
-            borderRadius="6px"
-            cursor={isStreaming ? 'default' : 'pointer'}
-            opacity={isStreaming ? 0.5 : 1}
-            color={tokens.colors.text.secondary}
-            _hover={isStreaming ? {} : { bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
-            transition={`all ${tokens.transition.fast}`}
-            onClick={() => { if (!isStreaming) setIsModelMenuOpen(!isModelMenuOpen) }}
-          >
-            <Text fontSize="11px" fontWeight={600} letterSpacing="0.02em">
-              {(() => {
-                const parts = activeProfile.persona.name.split(' ')
-                const last = parts[parts.length - 1]
-                // Roman numeral suffixes (II, III, IV) — include preceding word
-                if (parts.length > 1 && /^[IVX]+$/.test(last)) return parts.slice(-2).join(' ')
-                return last || activeProfile.persona.name
-              })()}
-            </Text>
-            <FiChevronUp size={10} style={{
-              transform: isModelMenuOpen ? 'rotate(180deg)' : 'none',
-              transition: 'transform 0.15s ease',
-            }} />
-          </Flex>
+        {/* Plan badge — model is decided by the backend based on the user's plan */}
+        <Flex
+          align="center"
+          px={2}
+          py="5px"
+          borderRadius="6px"
+          color={tokens.colors.text.secondary}
+        >
+          <Text fontSize="11px" fontWeight={600} letterSpacing="0.02em">
+            {planLabel}
+          </Text>
+        </Flex>
 
-          {isModelMenuOpen && (
-            <Box
-              position="absolute"
-              bottom="calc(100% + 6px)"
-              left={0}
-              bg={tokens.colors.bg.overlay}
-              border={`1px solid ${tokens.colors.border.panel}`}
-              borderRadius="10px"
-              py={1}
-              zIndex={tokens.zIndex.dropdown}
-              minW="260px"
-              boxShadow={tokens.shadow.overlay}
-              overflow="hidden"
-            >
-              {profiles.map((profile: ModelProfile) => {
-                const isActive = profile.id === agentModel
-                return (
-                  <Flex
-                    key={profile.id}
-                    as="button"
-                    w="100%"
-                    px={3}
-                    py="8px"
-                    align="center"
-                    gap="10px"
-                    cursor="pointer"
-                    bg={isActive ? tokens.colors.bg.hoverSubtle : 'transparent'}
-                    _hover={{ bg: tokens.colors.bg.hoverSubtle }}
-                    transition={`background ${tokens.transition.fast}`}
-                    onClick={() => {
-                      setAgentModel(profile.id as AgentModelId)
-                      setIsModelMenuOpen(false)
-                    }}
-                  >
-                    {/* Active indicator dot */}
-                    <Box
-                      w="6px"
-                      h="6px"
-                      borderRadius="full"
-                      bg={isActive ? tokens.colors.accent.primary : 'transparent'}
-                      flexShrink={0}
-                    />
-                    <Flex direction="column" align="flex-start" gap="2px" flex={1} textAlign="left">
-                      <Text
-                        fontSize="12px"
-                        fontWeight={600}
-                        color={isActive ? tokens.colors.accent.primary : tokens.colors.text.primary}
-                      >
-                        {profile.persona.name}
-                      </Text>
-                      <Text fontSize="10px" color={tokens.colors.text.disabled} lineHeight="1.3" textAlign="left">
-                        {profile.persona.tagline}
-                      </Text>
-                    </Flex>
-                  </Flex>
-                )
-              })}
-            </Box>
-          )}
-        </Box>
-
-        {/* Attach files — only for multimodal models */}
-        {activeProfile.supportsAttachments && (
+        {/* Attach files — Kimi K2.5 (paid tier) supports multimodal */}
+        {billingPlan !== 'explorer' && (
           <IconButton
             aria-label={t("prompt.attach")}
             size="sm"

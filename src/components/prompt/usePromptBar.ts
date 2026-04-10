@@ -21,14 +21,14 @@ import {
   joinPromptValues,
 } from '../../services/agent/messageQueue'
 import type { OpenAIContentPart } from '../../services/agent/agentService'
-import { getModelProfile } from '../../services/agent/modelProfiles'
+// getModelProfile removed — model decided by backend based on plan
 import {
   buildAugmentedPrompt,
   buildContentParts,
   downgradeHistoryToText,
   extractDisplayFromValue,
 } from '../../services/agent/promptValueHelpers'
-import { useSettingsStore } from '../../stores/settingsStore'
+// useSettingsStore removed — agentModel no longer in settings
 import { getQueryGuard } from '../../services/agent/queryGuard'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
@@ -427,8 +427,11 @@ export function usePromptBar() {
     // the queue stays provider-agnostic — it carries blocks, the
     // boundary decides how to ship them.
     const display = extractDisplayFromValue(content)
-    const activeModelId = useSettingsStore.getState().agentModel
-    const activeProfile = getModelProfile(activeModelId)
+    // Model is decided by the backend. Multimodal support depends on the
+    // plan: paid plans use Kimi K2.5 (multimodal), free uses DeepSeek (text-only).
+    const { useBillingStore } = await import('../../stores/billingStore')
+    const billingPlan = useBillingStore.getState().plan
+    const supportsAttachments = billingPlan !== 'explorer'
 
     let userContent: string | OpenAIContentPart[] | null = null
 
@@ -440,7 +443,7 @@ export function usePromptBar() {
       resolveImageDataUri: resolveImageToDataUri,
     }
 
-    if (activeProfile.supportsAttachments && display.attachments.some(a => a.type === 'image')) {
+    if (supportsAttachments && display.attachments.some(a => a.type === 'image')) {
       // Multimodal path — build content parts. If buildContentParts
       // returns null (no images survived disk read / size limits / size
       // budget), fall through to the text path.
@@ -496,7 +499,7 @@ export function usePromptBar() {
       // The history is canonical (carries content parts when previous
       // turns had images). Downgrade to text if the active model is
       // text-only — its API cannot consume the array form.
-      const history = activeProfile.supportsAttachments
+      const history = supportsAttachments
         ? rawHistory
         : downgradeHistoryToText(rawHistory)
       const agentService = AgentService.getInstance()

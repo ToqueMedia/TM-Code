@@ -10,6 +10,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
 import { getQueryGuard } from './queryGuard'
 import { contentAsText } from './promptValueHelpers'
+import { StreamingSafeToolPool } from './safeToolPool'
+import type { PoolToolResult } from './safeToolPool'
 import type { ContentPart } from '../../types/chat'
 import type { StreamEvent } from './streamParser'
 
@@ -25,23 +27,15 @@ import type { StreamEvent } from './streamParser'
  */
 export type OpenAIContentPart = ContentPart
 
-interface OpenAIMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool'
-  /** Plain string for text-only messages, array of parts for multimodal user messages. */
-  content?: string | ContentPart[] | null
-  reasoning_content?: string | null
-  tool_calls?: OpenAIToolCall[]
-  tool_call_id?: string
-}
+// ── Anthropic Messages API types ──────────────────────────────────────────
+// Canonical types live in types/chat.ts (AnthropicContentBlock) to avoid
+// duplication between agentService, chatStore, and other consumers.
 
+import type { AnthropicContentBlock } from '../../types/chat'
 
-interface OpenAIToolCall {
-  id: string
-  type: 'function'
-  function: {
-    name: string
-    arguments: string
-  }
+interface AnthropicMessage {
+  role: 'user' | 'assistant'
+  content: string | AnthropicContentBlock[]
 }
 
 // === Config ===
@@ -164,6 +158,10 @@ class AgentService {
   private filesEditedThisSession: Set<string> = new Set()
   /** Timestamp of the last approved file change — used to filter dev server errors in COMPLETION_BLOCKED. */
   private lastFileChangeTimestamp = 0
+  /** Cumulative count of times the pool blocked a tool from starting due to
+   *  an in-flight non-concurrency-safe sibling. The "would-have-been-a-race"
+   *  metric, surfaced in Settings → Experimental telemetry. Reset per session. */
+  private poolConcurrencyConflictsAvoided = 0
 
   private constructor(options?: LightweightAgentOptions) {
     this.toolExecutor = ToolExecutor.getInstance()
@@ -252,36 +250,53 @@ class AgentService {
    * Build the JSON request body for the chat completion API,
    * including model-specific sampling and thinking parameters.
    */
-  private async buildRequestBody(messages: OpenAIMessage[]): Promise<Record<string, unknown>> {
+  /**
+   * Build the Anthropic Messages API request body.
+   *
+   * Format: { system, messages, tools, max_tokens, stream, temperature, ... }
+   * The system prompt is a top-level field (not in the messages array).
+   * Tools use { name, description, input_schema } (not OpenAI's function wrapper).
+   * The backend converts this to OpenAI format for DashScope internally.
+   */
+  private async buildRequestBody(messages: AnthropicMessage[]): Promise<Record<string, unknown>> {
     try {
-      const { getModelProfile, buildSamplingParams, buildThinkingParam } = await import('./modelProfiles')
-      const { useSettingsStore } = await import('../../stores/settingsStore')
-      const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
-      const profile = getModelProfile(modelId)
+      const { getProfileForPlan, buildSamplingParams, buildThinkingParam } = await import('./modelProfiles')
+      const { useBillingStore } = await import('../../stores/billingStore')
+      const plan = useBillingStore.getState().plan
+      const profile = getProfileForPlan(plan)
 
       // Filter request_thinking tool: only show for toggleable models
-      const tools = profile.thinkingMode === 'toggleable'
+      const toolDefs = profile.thinkingMode === 'toggleable'
         ? this.tools
         : this.tools.filter(t => t.function.name !== 'request_thinking')
 
+      // Convert tools from OpenAI format → Anthropic format
+      // { type: 'function', function: { name, description, parameters } }
+      //   → { name, description, input_schema }
+      const anthropicTools = toolDefs.map(t => ({
+        name: t.function.name,
+        description: t.function.description,
+        input_schema: t.function.parameters,
+      }))
+
+      // Anthropic Messages API body — system is top-level, not in messages
       const body: Record<string, unknown> = {
+        system: this.systemPrompt,
         messages,
-        tools,
+        tools: anthropicTools,
+        max_tokens: MAX_OUTPUT_TOKENS,
         stream: true,
-        stream_options: { include_usage: true },
-        model: profile.modelId,
       }
 
       // Lightweight sub-agents — no thinking, no sampling config
       if (this.lightweightOptions) {
-        body.max_tokens = MAX_OUTPUT_TOKENS
         return body
       }
 
       this.contextWindowSize = profile.contextWindow
 
       // Thinking decision based on model category:
-      // - 'toggleable': Turn 1 ON (model reasons about whether to keep it), Turn 2+ per model decision
+      // - 'toggleable': Turn 1 ON (model reasons), Turn 2+ per model decision
       // - 'mandatory': always ON
       // - 'none': always OFF
       const isThinking = profile.thinkingMode === 'mandatory'
@@ -301,11 +316,15 @@ class AgentService {
       return body
     } catch {
       const body: Record<string, unknown> = {
+        system: this.systemPrompt,
         messages,
-        tools: this.tools,
-        stream: true,
-        stream_options: { include_usage: true },
+        tools: this.tools.map(t => ({
+          name: t.function.name,
+          description: t.function.description,
+          input_schema: t.function.parameters,
+        })),
         max_tokens: MAX_OUTPUT_TOKENS,
+        stream: true,
       }
       return body
     }
@@ -313,7 +332,7 @@ class AgentService {
 
   async runAgentLoop(
     userMessage: string | ContentPart[],
-    conversationHistory: Array<{ role: string; content: string | ContentPart[] | null; tool_calls?: OpenAIToolCall[]; tool_call_id?: string }>,
+    conversationHistory: Array<{ role: string; content: string | AnthropicContentBlock[] | null }>,
     callbacks: AgentCallbacks
   ): Promise<void> {
     if (this.isRunning && !this.lightweightOptions) {
@@ -347,22 +366,37 @@ class AgentService {
       useAgentStore.getState().clearTasks()
     } catch { /* non-critical */ }
 
-    // Reset stale compression state for fresh conversations (new session)
+    // Reset stale compression state for fresh conversations (new session).
+    // Sub-agents always pass conversationHistory=[] (createLightweight
+    // callsites in toolExecutor.ts), but they do NOT represent a "new
+    // session" semantically — they're nested calls inside the parent
+    // agent's session. Combine the gates so the UI counter only resets
+    // when the MAIN agent starts a new chat.
+    const isMainAgentNewSession = !this.lightweightOptions && conversationHistory.length === 0
     if (conversationHistory.length === 0) {
       this.lastPromptTokens = 0
       this.fileAccessLog = []
       this.summarizationFailures = 0
+      this.poolConcurrencyConflictsAvoided = 0
       this.toolExecutor.resetSessionState()
     }
+    if (isMainAgentNewSession) {
+      // Reset the UI mirror counter so the Experimental tab shows a fresh
+      // count for the new session.
+      try {
+        const { useAgentStore } = await import('../../stores/agentStore')
+        useAgentStore.getState().resetPoolConflictsAvoided()
+      } catch { /* non-critical */ }
+    }
 
-    // Initialize context window from model profile BEFORE the turn loop
-    // so compression threshold is correct from the first turn.
+    // Initialize context window from plan's model profile BEFORE the turn
+    // loop so compression threshold is correct from the first turn.
     if (!this.lightweightOptions) {
       try {
-        const { getModelProfile } = await import('./modelProfiles')
-        const { useSettingsStore } = await import('../../stores/settingsStore')
-        const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
-        const profile = getModelProfile(modelId)
+        const { getProfileForPlan } = await import('./modelProfiles')
+        const { useBillingStore } = await import('../../stores/billingStore')
+        const plan = useBillingStore.getState().plan
+        const profile = getProfileForPlan(plan)
         this.contextWindowSize = profile.contextWindow
         this.preserveReasoningBetweenTurns = profile.preserveReasoning
       } catch { /* keep default */ }
@@ -376,18 +410,15 @@ class AgentService {
       this.currentTurnInLoop = 0
     }
 
-    const messages: OpenAIMessage[] = [
-      { role: 'system', content: this.systemPrompt },
-      ...conversationHistory.map(m => {
-        const msg: OpenAIMessage = {
-          role: m.role as OpenAIMessage['role'],
-          content: m.content
-        }
-        if (m.tool_calls) msg.tool_calls = m.tool_calls
-        if (m.tool_call_id) msg.tool_call_id = m.tool_call_id
-        return msg
-      }),
-      { role: 'user', content: userMessage }
+    // Build Anthropic messages array. System prompt is NOT in the messages
+    // array — it goes as a top-level `system` field in buildRequestBody().
+    // Conversation history arrives already in Anthropic format from chatStore.
+    const messages: AnthropicMessage[] = [
+      ...conversationHistory.map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content as string | AnthropicContentBlock[],
+      })),
+      { role: 'user', content: userMessage as string }
     ]
 
     let turnCount = 0
@@ -435,16 +466,30 @@ class AgentService {
         // (image_url URLs are excluded — they're huge data URIs that
         // would distort the metric).
         if (apiMessages !== messages) {
-          const originalSize = messages.reduce((s, m) => s + contentAsText(m.content).length, 0)
-          const compactedSize = apiMessages.reduce((s, m) => s + contentAsText(m.content).length, 0)
+          const originalSize = messages.reduce((s: number, m: any) => s + contentAsText(m.content).length, 0)
+          const compactedSize = apiMessages.reduce((s: number, m: any) => s + contentAsText(m.content).length, 0)
           logger.info('agent', `Microcompaction: ${originalSize - compactedSize} chars saved (${originalSize} → ${compactedSize})`)
         }
 
         // Get streaming response
         const response = await this.callAPI(apiMessages)
 
-        // Process the stream (text deltas are emitted during this call)
-        const turnResult = await this.processStreamedTurn(response, callbacks)
+        // Phase D: create streaming pool BEFORE processing the stream.
+        // processStreamedTurn calls pool.addTool() on each content_block_stop
+        // so tools start executing DURING streaming, not after.
+        const streamingPool = new StreamingSafeToolPool(
+          this.toolExecutor,
+          this.abortController?.signal,
+          (tc, raw, isError) => {
+            callbacks.onToolResult(tc.id, tc.name, raw, isError)
+          },
+        )
+
+        // Process the stream (text deltas + tool dispatch emitted during this call)
+        const turnResult = await this.processStreamedTurn(response, callbacks, streamingPool)
+
+        // Seal the pool — no more tools will be added after the stream ends
+        streamingPool.seal()
 
         if (this.abortController?.signal.aborted) return
 
@@ -460,13 +505,18 @@ class AgentService {
         // seamlessly appending text to the same streaming message in the UI.
         if (turnResult.finishReason === 'length' && continuationCount < MAX_CONTINUATIONS) {
           continuationCount++
-          // Add partial assistant response (without any incomplete tool calls)
+          // Add partial assistant response in Anthropic format
+          const partialBlocks: AnthropicContentBlock[] = []
+          if (this.preserveReasoningBetweenTurns && turnResult.reasoningContent) {
+            partialBlocks.push({ type: 'thinking', thinking: turnResult.reasoningContent })
+          }
+          if (turnResult.textContent) {
+            partialBlocks.push({ type: 'text', text: turnResult.textContent })
+          }
           messages.push({
             role: 'assistant',
-            content: turnResult.textContent || null,
-            ...(this.preserveReasoningBetweenTurns && turnResult.reasoningContent && { reasoning_content: turnResult.reasoningContent }),
+            content: partialBlocks.length > 0 ? partialBlocks : turnResult.textContent || '',
           })
-          // Prompt continuation — the model will resume from where it stopped
           messages.push({
             role: 'user',
             content: 'Continue from where you left off. Do not repeat what you already said.',
@@ -475,25 +525,34 @@ class AgentService {
           continue
         }
 
-        // Add assistant message to history (preserve reasoning only for models that document it)
-        const assistantMsg: OpenAIMessage = {
-          role: 'assistant',
-          content: turnResult.textContent || null,
-          ...(this.preserveReasoningBetweenTurns && turnResult.reasoningContent && { reasoning_content: turnResult.reasoningContent }),
+        // Add assistant message to history in Anthropic content blocks format.
+        // Anthropic: tool_calls → tool_use blocks inside the content array.
+        // Thinking → thinking blocks. Text → text blocks.
+        const assistantBlocks: AnthropicContentBlock[] = []
+        if (this.preserveReasoningBetweenTurns && turnResult.reasoningContent) {
+          assistantBlocks.push({ type: 'thinking', thinking: turnResult.reasoningContent })
         }
-        if (turnResult.toolCalls.length > 0) {
-          assistantMsg.tool_calls = turnResult.toolCalls.map(tc => ({
+        if (turnResult.textContent) {
+          assistantBlocks.push({ type: 'text', text: turnResult.textContent })
+        }
+        for (const tc of turnResult.toolCalls) {
+          assistantBlocks.push({
+            type: 'tool_use',
             id: tc.id,
-            type: 'function' as const,
-            function: { name: tc.name, arguments: JSON.stringify(tc.args) },
-          }))
+            name: tc.name,
+            input: tc.args,
+          })
         }
-        messages.push(assistantMsg)
+        messages.push({
+          role: 'assistant',
+          content: assistantBlocks.length > 0 ? assistantBlocks : turnResult.textContent || '',
+        })
 
         // If no tool calls, the model wants to stop. But first, enforce completion checks.
+        // Anthropic stop_reason: 'tool_use' = has tools, 'end_turn' = done, 'max_tokens' = overflow
         if (
           turnResult.toolCalls.length === 0 ||
-          (turnResult.finishReason !== 'tool_calls' && turnResult.finishReason !== 'function_call')
+          turnResult.finishReason !== 'tool_use'
         ) {
           // Completion enforcement — only for the main agent, not sub-agents
           if (!this.lightweightOptions) {
@@ -534,122 +593,144 @@ class AgentService {
           return
         }
 
-        // Execute ALL tool calls in parallel (like Claude Code).
-        // Each tool gets its own toolCallId for checkpoint tracking and progress.
-        // Diff approvals are per-tool — multiple InlineDiffs can appear simultaneously.
+        // Tool execution: concurrency-safety-aware pool.
+        //
+        // Read tools (read_file, glob, search_files, web_fetch, etc.) run in
+        // parallel up to MAX_PARALLEL=10. Write tools (write_file, edit_file,
+        // execute_command, etc.) run serially — no two mutating tools overlap.
+        // Writes are fast (compute diff JSON only, no disk write) so serial
+        // execution adds <60ms total even for 3 writes.
+        //
+        // After all tools' execute() returns, diff approvals are batched via
+        // Promise.all so the user sees multiple InlineDiffs together and can
+        // decide as a batch.
 
-        // Show all tool calls as pending simultaneously
-        for (const tc of turnResult.toolCalls) {
-          callbacks.onToolCallPending(tc.id, tc.name)
-          callbacks.onToolCallStart(tc.id, tc.name, tc.args)
+        // Phase D: drain results from the streaming pool. Tools may have
+        // started executing DURING the stream (via addTool in processStreamedTurn).
+        // Now we collect their results and handle diff approval.
+        // onToolResult callbacks were already fired by the pool during execution.
+        const poolResults: PoolToolResult[] = []
+        for await (const result of streamingPool.getRemainingResults()) {
+          poolResults.push(result)
         }
 
-        // Execute all in parallel
-        const toolResults = await Promise.all(turnResult.toolCalls.map(async (toolCall) => {
-          if (this.abortController?.signal.aborted) return null
-
+        // Telemetry
+        const telemetry = streamingPool.getTelemetry()
+        logger.info('agent', `tool_pool_turn_done: tools=${turnResult.toolCalls.length} duration=${telemetry.totalDurationMs}ms conflictsAvoided=${telemetry.concurrencyConflictsAvoided}`)
+        this.poolConcurrencyConflictsAvoided += telemetry.concurrencyConflictsAvoided
+        if (turnResult.toolCalls.length > 1) {
+          import('../../services/analytics').then(({ trackEvent }) => {
+            trackEvent('tool_pool_turn', {
+              total_tools: turnResult.toolCalls.length,
+              duration_ms: telemetry.totalDurationMs,
+              conflicts_avoided: telemetry.concurrencyConflictsAvoided,
+            })
+          }).catch(() => {})
+        }
+        if (telemetry.concurrencyConflictsAvoided > 0) {
           try {
-            const TOOL_TIMEOUT = 300_000 // 5 minutes max per tool execution
-            let timeoutHandle: ReturnType<typeof setTimeout> | undefined
-            const result = await Promise.race([
-              this.toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id),
-              new Promise<never>((_, reject) => {
-                timeoutHandle = setTimeout(() => reject(new Error(`Tool "${toolCall.name}" timed out after 5 minutes`)), TOOL_TIMEOUT)
-              }),
-            ]).finally(() => clearTimeout(timeoutHandle))
+            const { useAgentStore } = await import('../../stores/agentStore')
+            useAgentStore.getState().bumpPoolConflictsAvoided(telemetry.concurrencyConflictsAvoided)
+          } catch { /* non-critical */ }
+        }
+
+        // Approval phase (batched): all diff approvals run concurrently
+        type DrainEntry = { toolCall: { id: string; name: string; args: Record<string, unknown> }; content: string; isError: boolean }
+        const toolResults: (DrainEntry | null)[] = await Promise.all(
+          poolResults.map(async (entry): Promise<DrainEntry | null> => {
+            if (!entry) return null
             if (this.abortController?.signal.aborted) return null
 
-            // Check if the result is a diff (from write_file / edit_file / create_file)
-            let parsedDiff: { type: string; path: string; isNewFile: boolean } | null = null
-            try {
-              const parsed = JSON.parse(result)
-              if (parsed.type === 'diff') parsedDiff = parsed
-            } catch {
-              // Not JSON
+            const { toolCall, rawResult, isError, parsedDiff } = entry
+
+            if (isError) {
+              return { toolCall, content: `Error: ${rawResult}`, isError: true }
             }
 
-            // Notify UI (renders InlineDiff for diffs)
-            callbacks.onToolResult(toolCall.id, toolCall.name, result, false)
-
-            let llmResult: string
             if (parsedDiff && !this.lightweightOptions?.readOnly) {
-              // Wait for user to approve/reject the file change
               const approved = await createDiffApprovalPromise(toolCall.id)
               if (this.abortController?.signal.aborted) return null
               if (approved) {
-                llmResult = `File ${parsedDiff.isNewFile ? 'created' : 'updated'}: ${parsedDiff.path}`
-                // Track approved file edit for verify enforcement (only count approved writes)
                 if (!this.lightweightOptions) {
                   this.filesEditedThisSession.add(parsedDiff.path)
                   this.lastFileChangeTimestamp = Date.now()
                 }
-                // Update read state so the model can edit this file again without re-reading.
-                // The file now has newContent on disk — sync the hash.
-                try {
-                  const parsed = JSON.parse(result)
-                  if (parsed.newContent !== undefined) {
-                    this.toolExecutor.updateReadStateAfterWrite(parsed.path, parsed.newContent)
-                  }
-                } catch { /* non-critical — model just needs to re-read */ }
-              } else {
-                llmResult = `User rejected the file change: ${parsedDiff.path}. Ask the user what they want instead.`
+                if (parsedDiff.newContent !== undefined) {
+                  this.toolExecutor.updateReadStateAfterWrite(parsedDiff.path, parsedDiff.newContent)
+                }
+                return {
+                  toolCall,
+                  content: `File ${parsedDiff.isNewFile ? 'created' : 'updated'}: ${parsedDiff.path}`,
+                  isError: false,
+                }
               }
-            } else if (parsedDiff) {
-              llmResult = `File ${parsedDiff.isNewFile ? 'created' : 'updated'}: ${parsedDiff.path}`
-            } else {
-              llmResult = result
+              return {
+                toolCall,
+                content: `User rejected the file change: ${parsedDiff.path}. Ask the user what they want instead.`,
+                isError: false,
+              }
             }
 
-            // Track file access for post-compaction re-reading
-            this.trackFileAccess(toolCall.name, toolCall.args)
+            if (parsedDiff) {
+              return {
+                toolCall,
+                content: `File ${parsedDiff.isNewFile ? 'created' : 'updated'}: ${parsedDiff.path}`,
+                isError: false,
+              }
+            }
 
-            return { toolCall, content: llmResult, isError: false }
-          } catch (error) {
-            if (this.abortController?.signal.aborted) return null
-            const errorMsg = error instanceof Error ? error.message : String(error)
-            callbacks.onToolResult(toolCall.id, toolCall.name, errorMsg, true)
-            return { toolCall, content: `Error: ${errorMsg}`, isError: true }
-          }
-        }))
+            return { toolCall, content: rawResult, isError: false }
+          }),
+        )
 
-        // Add all results to messages (order doesn't matter — API matches by tool_call_id)
-        // Wrap content with boundary markers to prevent tool result injection
+        // Track file access for post-compaction re-reading
         for (const entry of toolResults) {
-          if (!entry) continue
-          messages.push({
-            role: 'tool',
-            tool_call_id: entry.toolCall.id,
-            content: `[TOOL_RESULT:${entry.toolCall.name}]\n${entry.content}\n[/TOOL_RESULT]`,
-          })
-
-          // Track verify calls for completion enforcement (tool-level, not approval-dependent)
-          if (!this.lightweightOptions && entry.toolCall.name === 'verify') {
+          if (entry && !entry.isError) {
+            this.trackFileAccess(entry.toolCall.name, entry.toolCall.args)
           }
         }
 
-        // Closed-loop feedback: auto-inject dev server errors after file modifications.
-        // The brain (model) must see what the body (IDE) observed — build errors,
-        // type errors, crashes — even if the model forgot to call read_dev_server_logs.
+        // Add all tool results to messages in Anthropic format.
+        // Anthropic uses role:'user' with tool_result content blocks (NOT role:'tool').
+        // Multiple tool_results from the same turn are merged into ONE user message.
+        // Dev server feedback is also merged here to avoid creating consecutive
+        // user messages (Anthropic requires strictly alternating user/assistant).
+        const toolResultBlocks: AnthropicContentBlock[] = []
+        for (const entry of toolResults) {
+          if (!entry) continue
+          toolResultBlocks.push({
+            type: 'tool_result',
+            tool_use_id: entry.toolCall.id,
+            content: `[TOOL_RESULT:${entry.toolCall.name}]\n${entry.content}\n[/TOOL_RESULT]`,
+          })
+        }
+
+        // Closed-loop feedback: auto-inject dev server errors INSIDE the same
+        // user message as tool_results. Merging prevents consecutive user messages
+        // which Anthropic rejects.
         if (!this.lightweightOptions) {
           const hasFileChanges = toolResults.some(r =>
             r && !r.isError && ['write_file', 'edit_file', 'create_file'].includes(r.toolCall.name)
           )
           if (hasFileChanges && devServerManager.isActive()) {
-            // Wait for hot-reload + component mount + runtime execution.
-            // 800ms was too short — runtime errors (e.g., bad API call in useEffect)
-            // only appear after React mounts the component (~500-1000ms after HMR).
-            // 1500ms catches both build errors AND runtime errors reliably.
             await new Promise(r => setTimeout(r, 1500))
             if (!this.abortController?.signal.aborted) {
               const devErrors = await this.getRecentDevServerErrors()
               if (devErrors) {
-                messages.push({
-                  role: 'user',
-                  content: `[DEV_SERVER_FEEDBACK]\nThe dev server detected errors after your file changes:\n\n${devErrors}\n\nFix these errors before continuing. Use read_dev_server_logs for full output if needed.\n[/DEV_SERVER_FEEDBACK]`,
-                })
+                toolResultBlocks.push({
+                  type: 'text',
+                  text: `[DEV_SERVER_FEEDBACK]\nThe dev server detected errors after your file changes:\n\n${devErrors}\n\nFix these errors before continuing. Use read_dev_server_logs for full output if needed.\n[/DEV_SERVER_FEEDBACK]`,
+                } as AnthropicContentBlock)
               }
             }
           }
+        }
+
+        if (toolResultBlocks.length > 0) {
+          messages.push({
+            role: 'user',
+            content: toolResultBlocks,
+          })
         }
 
         if (this.abortController?.signal.aborted) return
@@ -664,6 +745,17 @@ class AgentService {
       if (error instanceof DOMException && error.name === 'AbortError') return
       callbacks.onError(error instanceof Error ? error : new Error(String(error)))
     } finally {
+      // Pool telemetry: log + analytics for the entire agent loop.
+      if (!this.lightweightOptions) {
+        logger.info('agent', `tool_pool_loop_done: conflictsAvoided=${this.poolConcurrencyConflictsAvoided}`)
+        if (this.poolConcurrencyConflictsAvoided > 0) {
+          import('../../services/analytics').then(({ trackEvent }) => {
+            trackEvent('tool_pool_loop_done', {
+              conflicts_avoided: this.poolConcurrencyConflictsAvoided,
+            })
+          }).catch(() => {})
+        }
+      }
       this.isRunning = false
       // Signal that the main agent is idle (triggers queue processing).
       // end(myGeneration) is a no-op if forceEnd() bumped the generation
@@ -688,7 +780,7 @@ class AgentService {
    * 4. Replace old turns with a single summary message
    * 5. Return [system, summary, ...recentTurns]
    */
-  private async compressContext(messages: OpenAIMessage[]): Promise<OpenAIMessage[]> {
+  private async compressContext(messages: AnthropicMessage[]): Promise<AnthropicMessage[]> {
     const systemMsg = messages[0]
     const rest = messages.slice(1)
 
@@ -745,33 +837,47 @@ class AgentService {
    * Serializes messages into a human-readable format for the summarizer.
    * Preserves ALL content — tool arguments, results, narration, errors.
    */
-  private serializeMessagesForSummary(messages: OpenAIMessage[]): string {
-    return messages.map(msg => {
-      // Flatten content to text — multimodal user messages have
-      // ContentPart[] which would otherwise stringify as "[object Object]".
-      // Image parts become `[image]` markers in the summary.
-      const text = contentAsText(msg.content)
+  /**
+   * Serialize Anthropic messages to readable text for the LLM summarizer.
+   * Iterates content blocks to extract text, tool_use, tool_result, thinking.
+   */
+  private serializeMessagesForSummary(messages: AnthropicMessage[]): string {
+    return messages.map((msg: any) => {
+      const content = msg.content
 
-      if (msg.role === 'user') {
-        return `[USER]\n${text}`
+      // Simple string content
+      if (typeof content === 'string') {
+        return `[${msg.role.toUpperCase()}]\n${content}`
       }
 
-      if (msg.role === 'assistant') {
+      // Array of Anthropic content blocks
+      if (Array.isArray(content)) {
         const parts: string[] = []
-        if (text) parts.push(`[ASSISTANT]\n${text}`)
-        if (msg.tool_calls) {
-          for (const tc of msg.tool_calls) {
-            parts.push(`[TOOL CALL: ${tc.function.name}]\n${tc.function.arguments}`)
+        for (const block of content) {
+          switch (block.type) {
+            case 'text':
+              parts.push(block.text)
+              break
+            case 'thinking':
+              parts.push(`[THINKING]\n${block.thinking}`)
+              break
+            case 'tool_use':
+              parts.push(`[TOOL CALL: ${block.name}]\n${JSON.stringify(block.input)}`)
+              break
+            case 'tool_result':
+              parts.push(`[TOOL RESULT (${block.tool_use_id})]\n${typeof block.content === 'string' ? block.content : JSON.stringify(block.content)}`)
+              break
+            case 'image_url':
+              parts.push('[image]')
+              break
+            default:
+              parts.push(JSON.stringify(block))
           }
         }
-        return parts.join('\n')
+        return `[${msg.role.toUpperCase()}]\n${parts.join('\n')}`
       }
 
-      if (msg.role === 'tool') {
-        return `[TOOL RESULT${msg.tool_call_id ? ` (${msg.tool_call_id})` : ''}]\n${text}`
-      }
-
-      return `[${msg.role}]\n${text}`
+      return `[${msg.role.toUpperCase()}]\n${String(content || '')}`
     }).join('\n\n---\n\n')
   }
 
@@ -779,7 +885,7 @@ class AgentService {
    * Calls the dedicated /v1/summarize endpoint on the worker.
    * This endpoint: no streaming, no thinking (enable_thinking off), JSON response.
    */
-  private async callSummarizationAPI(messages: OpenAIMessage[]): Promise<string> {
+  private async callSummarizationAPI(messages: AnthropicMessage[]): Promise<string> {
     const serialized = this.serializeMessagesForSummary(messages)
 
     const summaryPrompt = `You are a context compressor for a coding agent. Summarize the conversation below into structured bullet points that a coding agent can use to continue its work without the full history.
@@ -867,7 +973,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
    * Fallback if the LLM summarization call fails.
    * Extracts basic facts mechanically — lower fidelity but always works.
    */
-  private mechanicalFallback(messages: OpenAIMessage[]): string {
+  private mechanicalFallback(messages: AnthropicMessage[]): string {
     const filesRead = new Set<string>()
     const filesModified = new Set<string>()
     const commandsRun: string[] = []
@@ -890,37 +996,40 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
         assistantNarration.push(contentAsText(msg.content).slice(0, 200))
       }
 
-      // Extract tool call details
-      if (msg.role === 'assistant' && msg.tool_calls) {
-        for (const tc of msg.tool_calls) {
-          try {
-            const args = JSON.parse(tc.function.arguments)
-            const path = (args.path as string) || ''
-            switch (tc.function.name) {
-              case 'read_file': filesRead.add(path); break
-              case 'write_file': case 'create_file': case 'edit_file':
-                filesModified.add(path); break
-              case 'execute_command':
-                commandsRun.push((args.command as string)?.slice(0, 150) || ''); break
-              case 'search_files':
-                toolResults.push(`Searched for "${args.query}" in ${args.directory || 'project'}`); break
-              case 'start_dev_server':
-                toolResults.push(`Started dev server: ${args.command || ''}`); break
-            }
-          } catch { /* skip */ }
+      // Extract tool call details from Anthropic content blocks
+      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+        for (const block of msg.content as Array<{ type: string; name?: string; input?: Record<string, unknown>; id?: string }>) {
+          if (block.type === 'tool_use' && block.name && block.input) {
+            try {
+              const args = block.input
+              const path = (args.path as string) || ''
+              switch (block.name) {
+                case 'read_file': filesRead.add(path); break
+                case 'write_file': case 'create_file': case 'edit_file':
+                  filesModified.add(path); break
+                case 'execute_command':
+                  commandsRun.push((args.command as string)?.slice(0, 150) || ''); break
+                case 'search_files':
+                  toolResults.push(`Searched for "${args.query}" in ${args.directory || 'project'}`); break
+                case 'start_dev_server':
+                  toolResults.push(`Started dev server: ${args.command || ''}`); break
+              }
+            } catch { /* skip */ }
+          }
         }
       }
 
-      // Capture tool results (both success and error).
-      // Tool messages are always string content — contentAsText is a no-op
-      // but keeps the narrow typed so TS is happy with the union.
-      if (msg.role === 'tool' && msg.content) {
-        const text = contentAsText(msg.content)
-        if (text.startsWith('Error:')) {
-          errors.push(text.slice(0, 300))
-        } else if (text.length < 300) {
-          // Short results are likely meaningful (e.g., "File updated: /path/to/file")
-          toolResults.push(text)
+      // Capture tool results from Anthropic user messages with tool_result blocks
+      if (msg.role === 'user' && Array.isArray(msg.content)) {
+        for (const block of msg.content as Array<{ type: string; content?: string }>) {
+          if (block.type === 'tool_result' && block.content) {
+            const text = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+            if (text.startsWith('Error:')) {
+              errors.push(text.slice(0, 300))
+            } else if (text.length < 300) {
+              toolResults.push(text)
+            }
+          }
         }
       }
     }
@@ -949,61 +1058,73 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
    * Keeps only the last N tool results in full — older ones get compacted.
    * Returns a COPY — the original messages array is not modified.
    */
-  private microcompactToolResults(messages: OpenAIMessage[]): OpenAIMessage[] {
-    // Find all indices of tool result messages
-    const toolIndices: number[] = []
+  /**
+   * Microcompact old tool results in Anthropic message format.
+   *
+   * In Anthropic format, tool_results are content blocks inside role:'user'
+   * messages (not separate role:'tool' messages). This method finds user
+   * messages that contain tool_result blocks, counts them, and replaces
+   * old ones (beyond the last N) with one-line summaries.
+   */
+  private microcompactToolResults(messages: AnthropicMessage[]): AnthropicMessage[] {
+    // Collect indices of user messages that contain tool_result blocks
+    const toolResultMsgIndices: number[] = []
     for (let i = 0; i < messages.length; i++) {
-      if (messages[i].role === 'tool') {
-        toolIndices.push(i)
+      const msg = messages[i]
+      if (msg.role === 'user' && Array.isArray(msg.content)) {
+        const hasToolResult = msg.content.some((b: any) => b.type === 'tool_result')
+        if (hasToolResult) toolResultMsgIndices.push(i)
       }
     }
 
-    // If fewer tool results than the threshold, no compaction needed
-    if (toolIndices.length <= MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS) {
+    if (toolResultMsgIndices.length <= MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS) {
       return messages
     }
 
-    // Indices to compact (all except the last N)
-    const compactUpTo = toolIndices.length - MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS
-    const indicesToCompact = new Set(toolIndices.slice(0, compactUpTo))
+    const compactUpTo = toolResultMsgIndices.length - MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS
+    const indicesToCompact = new Set(toolResultMsgIndices.slice(0, compactUpTo))
 
     return messages.map((msg, idx) => {
       if (!indicesToCompact.has(idx)) return msg
-      const summary = this.summarizeToolResult(msg, idx, messages)
-      return { ...msg, content: summary }
+      if (!Array.isArray(msg.content)) return msg
+
+      // Replace each tool_result block's content with a one-line summary
+      const compactedContent = msg.content.map((block: any) => {
+        if (block.type !== 'tool_result') return block
+        const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+        if (content.length < 200) return block
+        // Find matching tool_use in preceding assistant message to get tool name
+        const toolName = this.findToolNameForResult(block.tool_use_id, idx, messages)
+        const summary = toolName
+          ? this.buildToolSummaryLine(toolName, '{}', content)
+          : content.slice(0, 150) + ' [... compacted]'
+        return { ...block, content: summary }
+      })
+
+      return { ...msg, content: compactedContent }
     })
   }
 
   /**
-   * Generates a one-line summary for a tool result message.
-   * Accepts msgIndex directly to avoid O(n) indexOf lookup.
+   * Find the tool name for a given tool_use_id by searching backwards through
+   * assistant messages for a matching tool_use content block.
    */
-  private summarizeToolResult(toolMsg: OpenAIMessage, msgIndex: number, messages: OpenAIMessage[]): string {
-    const toolCallId = toolMsg.tool_call_id
-    // Tool results are always string content (tools return strings); the
-    // union-type cast here is just to satisfy the new PromptValue-aware
-    // content type without restructuring the tool handling path.
-    const content = contentAsText(toolMsg.content) || ''
-
-    // Short content or errors — keep as-is
-    if (content.length < 200) return content
-    if (content.startsWith('Error:')) return content
-
-    // Find the matching tool call in a preceding assistant message
-    if (toolCallId) {
-      for (let i = msgIndex - 1; i >= 0; i--) {
-        const msg = messages[i]
-        if (msg.role === 'assistant' && msg.tool_calls) {
-          const tc = msg.tool_calls.find(t => t.id === toolCallId)
-          if (tc) {
-            return this.buildToolSummaryLine(tc.function.name, tc.function.arguments, content)
+  private findToolNameForResult(toolUseId: string, fromIndex: number, messages: AnthropicMessage[]): string | null {
+    for (let i = fromIndex - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === 'tool_use' && block.id === toolUseId) {
+            return block.name
           }
         }
       }
     }
-
-    return content.slice(0, 150) + ' [... compacted]'
+    return null
   }
+
+  // summarizeToolResult removed — replaced by inline compaction in
+  // microcompactToolResults using findToolNameForResult for Anthropic format.
 
   /**
    * Builds a contextual one-line summary based on the tool type.
@@ -1109,7 +1230,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
    * Layer 2b: After LLM compaction, re-reads recently accessed files
    * and injects their content so the model recovers file-level knowledge.
    */
-  private async injectFileReReadings(messages: OpenAIMessage[]): Promise<void> {
+  private async injectFileReReadings(messages: AnthropicMessage[]): Promise<void> {
     const recentFiles = this.getRecentFiles()
     if (recentFiles.length === 0) return
 
@@ -1156,6 +1277,18 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     }
     parts.push('\n[Continue from where you left off without asking the user any further questions.]')
 
+    // Anthropic requires strictly alternating user/assistant messages.
+    // If the last message is already user (e.g., tool_results from the
+    // turn that triggered compaction), we must insert a dummy assistant
+    // message before adding another user message.
+    const lastMsg = messages[messages.length - 1]
+    if (lastMsg?.role === 'user') {
+      messages.push({
+        role: 'assistant',
+        content: 'Understood. I\'ll continue working with the recovered context.',
+      })
+    }
+
     messages.push({
       role: 'user',
       content: parts.join('\n'),
@@ -1185,7 +1318,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     }
   }
 
-  private async callAPI(messages: OpenAIMessage[]): Promise<Response> {
+  private async callAPI(messages: AnthropicMessage[]): Promise<Response> {
     const MAX_RETRIES = 3
     const RETRY_DELAYS = [3000, 5000, 10000] // default backoff for network errors
 
@@ -1221,8 +1354,11 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     throw new ServiceError('Max retries exceeded', 'NETWORK_ERROR', false)
   }
 
-  private async callAPIOnce(messages: OpenAIMessage[]): Promise<Response> {
-    const url = `${WORKER_URL}/v1/chat/completions`
+  private async callAPIOnce(messages: AnthropicMessage[]): Promise<Response> {
+    // Anthropic Messages API endpoint — the worker converts to OpenAI
+    // format internally for DashScope, and converts the response back
+    // to Anthropic SSE with content_block_stop events for Phase D.
+    const url = `${WORKER_URL}/v1/messages`
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     }
@@ -1365,37 +1501,62 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     return response
   }
 
+  /**
+   * Process a streaming Anthropic SSE response.
+   *
+   * Anthropic events: message_start → content_block_start → content_block_delta
+   *   → content_block_stop → message_delta → message_stop.
+   *
+   * Phase D: each content_block_stop for a tool_use block immediately fires
+   * onToolCallPending + onToolCallStart so the pool can dispatch the tool
+   * during the stream (before all tools are known).
+   */
   private async processStreamedTurn(
     response: Response,
-    callbacks: AgentCallbacks
+    callbacks: AgentCallbacks,
+    streamingPool?: StreamingSafeToolPool,
   ): Promise<TurnResult> {
     let textContent = ''
     let reasoningContent = ''
     let finishReason = ''
     let usage: { promptTokens: number; completionTokens: number } | null = null
 
-    // Tool calls accumulator
-    const toolCallsMap = new Map<number, {
-      id: string
-      name: string
-      argsStr: string
+    // Per-block accumulator — keyed by Anthropic content block index
+    const blocks = new Map<number, {
+      type: 'text' | 'tool_use' | 'thinking'
+      text: string           // for text blocks
+      toolId: string         // for tool_use blocks
+      toolName: string
+      argsJson: string       // accumulated partial JSON for tool_use
     }>()
 
-    // Detector for <think> blocks
+    // Completed tool calls (sealed by content_block_stop)
+    const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
+
+    // Detector for <think> blocks embedded in text (DashScope reasoning via text_delta)
     const thinkingDetector = createThinkingDetector()
 
     await parseSSEStream(response, {
       onEvent: (event: StreamEvent) => {
         switch (event.type) {
+          case 'content_block_start': {
+            blocks.set(event.index, {
+              type: event.blockType,
+              text: '',
+              toolId: event.toolId || '',
+              toolName: event.toolName || '',
+              argsJson: '',
+            })
+            break
+          }
+
           case 'text_delta': {
+            // Text may contain <think>...</think> tags from DashScope reasoning
             const { reasoning, content } = thinkingDetector.process(event.content)
-
-
             if (reasoning) {
               reasoningContent += reasoning
               callbacks.onReasoningDelta(reasoning)
             }
-
             if (content) {
               textContent += content
               callbacks.onTextDelta(content)
@@ -1409,34 +1570,50 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
             break
           }
 
-          case 'tool_call_start': {
-            toolCallsMap.set(event.index, {
-              id: event.id,
-              name: event.name,
-              argsStr: '',
-            })
-            // Don't add to UI here — tool calls are shown AFTER text
-            // narration completes (in runAgentLoop, after processStreamedTurn)
-            break
-          }
-
-          case 'tool_call_args_delta': {
-            const tc = toolCallsMap.get(event.index)
-            if (tc) {
-              tc.argsStr += event.argsDelta
+          case 'tool_input_delta': {
+            const block = blocks.get(event.index)
+            if (block) {
+              block.argsJson += event.partialJson
             }
             break
           }
 
-          case 'finish': {
-            finishReason = event.reason
+          case 'content_block_stop': {
+            // Phase D: authoritative signal that a content block is complete.
+            // For tool_use blocks, parse args, fire UI callbacks, and dispatch
+            // to the streaming pool IMMEDIATELY — during the stream.
+            const completed = blocks.get(event.index)
+            if (completed?.type === 'tool_use') {
+              let args: Record<string, unknown> = {}
+              try {
+                args = JSON.parse(completed.argsJson)
+              } catch {
+                args = { _raw: completed.argsJson, _parseError: true }
+              }
+              const toolCall = { id: completed.toolId, name: completed.toolName, args }
+              toolCalls.push(toolCall)
+              // Fire UI callbacks
+              callbacks.onToolCallPending(completed.toolId, completed.toolName)
+              callbacks.onToolCallStart(completed.toolId, completed.toolName, args)
+              // Phase D: dispatch to pool DURING stream — tool starts
+              // executing immediately if concurrency conditions allow.
+              if (streamingPool) {
+                streamingPool.addTool(toolCall)
+              }
+            }
+            break
+          }
+
+          case 'message_delta': {
+            finishReason = event.stopReason
             break
           }
 
           case 'usage': {
+            // Accumulate — message_start has input_tokens, message_delta has output_tokens
             usage = {
-              promptTokens: event.promptTokens,
-              completionTokens: event.completionTokens,
+              promptTokens: event.promptTokens || usage?.promptTokens || 0,
+              completionTokens: event.completionTokens || usage?.completionTokens || 0,
             }
             break
           }
@@ -1461,23 +1638,13 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
             break
           }
 
-          case 'done': {
+          case 'done':
+          case 'message_start':
+          case 'message_stop':
             break
-          }
         }
       },
     }, this.abortController?.signal)
-
-    // Parse tool call arguments (now JSON is complete)
-    const toolCalls = Array.from(toolCallsMap.values()).map(tc => {
-      let args: Record<string, unknown> = {}
-      try {
-        args = JSON.parse(tc.argsStr)
-      } catch {
-        args = { _raw: tc.argsStr, _parseError: true }
-      }
-      return { id: tc.id, name: tc.name, args }
-    })
 
     return {
       textContent,

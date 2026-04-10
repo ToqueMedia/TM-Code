@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, ToolCallDisplay } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
@@ -313,79 +313,104 @@ function userMessageToContentParts(msg: ChatMessage): ContentPart[] | null {
   return parts
 }
 
+/**
+ * Rebuild conversation history in Anthropic Messages API format.
+ *
+ * Anthropic format differences from OpenAI:
+ *   - No role:'system' (system prompt is top-level in the request body)
+ *   - No role:'tool' — tool results are content blocks inside role:'user' messages
+ *   - Assistant tool_calls → tool_use content blocks inside role:'assistant' content array
+ *   - Thinking/reasoning → thinking content blocks
+ *   - Strictly alternating user/assistant messages (no consecutive same-role)
+ */
 function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessage[] {
   const history: ConversationMessage[] = []
 
   for (const msg of messages) {
-    // System messages are UI-only status lines (e.g. "Installing dependencies...")
-    // — never send them to the LLM.
+    // System messages are UI-only status lines — never send to the LLM
     if (msg.role === 'system') continue
 
     if (msg.role === 'user') {
-      // Reconstruct content parts when the message had images with base64
-      // cached in memory. This makes follow-up turns with vision-capable
-      // models continue to see images from earlier turns.
       const parts = userMessageToContentParts(msg)
       history.push({
         role: 'user',
         content: parts ?? msg.content,
       })
     } else if (msg.role === 'assistant') {
+      // Build Anthropic content blocks array
+      const blocks: AnthropicContentBlock[] = []
+
+      // Thinking/reasoning → thinking block
+      if (msg.reasoningContent) {
+        blocks.push({ type: 'thinking', thinking: msg.reasoningContent })
+      }
+
+      // Text → text block
+      if (msg.content) {
+        blocks.push({ type: 'text', text: msg.content })
+      }
+
+      // Tool calls → tool_use blocks
       if (msg.toolCalls?.length) {
-        // Assistant message with tool calls (preserve reasoning for multi-turn)
-        history.push({
-          role: 'assistant',
-          content: msg.content || null,
-          ...(msg.reasoningContent && { reasoning_content: msg.reasoningContent }),
-          tool_calls: msg.toolCalls.map(tc => ({
+        for (const tc of msg.toolCalls) {
+          blocks.push({
+            type: 'tool_use',
             id: tc.id,
-            type: 'function' as const,
-            function: { name: tc.toolName, arguments: JSON.stringify(tc.input) },
-          })),
-        })
+            name: tc.toolName,
+            input: tc.input || {},
+          })
+        }
+      }
+
+      history.push({
+        role: 'assistant',
+        content: blocks.length > 0 ? blocks : msg.content || '',
+      })
+
+      // Tool results → single user message with tool_result content blocks
+      // (Anthropic requires tool_results in a role:'user' message, not role:'tool')
+      if (msg.toolCalls?.length) {
+        const toolResultBlocks: AnthropicContentBlock[] = []
 
         for (const tc of msg.toolCalls) {
-          // Orphan tool call: agent was cancelled mid-execution.
-          // Must still emit a tool result — the API rejects assistant messages
-          // with tool_calls that lack matching tool results.
+          // Orphan tool call: agent was cancelled mid-execution
           if (tc.status === 'running' || tc.result === undefined) {
-            history.push({
-              role: 'tool',
+            toolResultBlocks.push({
+              type: 'tool_result',
+              tool_use_id: tc.id,
               content: 'Tool call was interrupted.',
-              tool_call_id: tc.id,
             })
             continue
           }
 
           let resultContent = tc.result || ''
 
-          // Sanitize diff JSON: send short summary instead of full file content
+          // Sanitize diff JSON
           try {
             const parsed = JSON.parse(resultContent)
             if (parsed.type === 'diff') {
               resultContent = `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
             }
-          } catch {
-            // Not JSON, use as-is
-          }
+          } catch { /* not JSON */ }
 
-          // Truncate large tool results to prevent context overflow
+          // Truncate large results
           if (resultContent.length > MAX_TOOL_RESULT_CHARS) {
             resultContent = resultContent.slice(0, MAX_TOOL_RESULT_CHARS) + '\n[... truncated]'
           }
 
-          history.push({
-            role: 'tool',
+          toolResultBlocks.push({
+            type: 'tool_result',
+            tool_use_id: tc.id,
             content: resultContent,
-            tool_call_id: tc.id,
           })
         }
-      } else {
-        history.push({
-          role: 'assistant',
-          content: msg.content,
-          ...(msg.reasoningContent && { reasoning_content: msg.reasoningContent }),
-        })
+
+        if (toolResultBlocks.length > 0) {
+          history.push({
+            role: 'user',
+            content: toolResultBlocks,
+          })
+        }
       }
     } else {
       history.push({ role: msg.role, content: msg.content })

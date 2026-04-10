@@ -14,7 +14,8 @@ export interface AutocompleteSettings {
   ollamaUrl: string
 }
 
-export type AgentModelId = 'mimo-v2-flash' | 'deepseek-v3.2' | 'glm-5' | 'kimi-k2.5' | 'qwen3-coder-next' | 'minimax-m2.5' | 'qwen3.6-plus' | 'gemini-3-flash'
+// AgentModelId removed — model selection moved to backend (decided by plan).
+// Dead code reference for migration: was 'mimo-v2-flash' | 'deepseek-v3.2' | etc.
 
 export type AppLanguage = 'en' | 'pt'
 export type AgentLanguage = 'en' | 'pt' | 'zh' | 'es' | 'fr' | 'de' | 'ja'
@@ -66,7 +67,6 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
 interface SettingsState {
   editor: EditorIndentationSettings
   autocomplete: AutocompleteSettings
-  agentModel: AgentModelId
   formatOnSave: boolean
   appLanguage: AppLanguage
   agentLanguage: AgentLanguage
@@ -88,7 +88,6 @@ interface SettingsActions {
   setSandboxEnabled: (enabled: boolean) => void
   setFlaggedCommands: (commands: string[]) => void
   toggleFlaggedCommand: (command: string) => void
-  setAgentModel: (model: AgentModelId) => void
   setFormatOnSave: (value: boolean) => void
   setAppLanguage: (lang: AppLanguage) => void
   setAgentLanguage: (lang: AgentLanguage) => void
@@ -108,7 +107,6 @@ const DEFAULTS: SettingsState = {
     model: 'qwen2.5-coder:7b',
     ollamaUrl: 'http://localhost:11434',
   },
-  agentModel: 'deepseek-v3.2' as AgentModelId,
   formatOnSave: false,
   appLanguage: 'en',
   agentLanguage: 'en',
@@ -197,10 +195,6 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         })
       },
 
-      setAgentModel: (model: AgentModelId) => {
-        set(() => ({ agentModel: model }))
-      },
-
       setFormatOnSave: (value: boolean) => {
         set(() => ({ formatOnSave: !!value }))
       },
@@ -238,7 +232,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, agentModel: state.agentModel, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands }
+        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -247,7 +241,6 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           ...current,
           editor: { ...DEFAULTS.editor, ...p.editor },
           autocomplete: { ...DEFAULTS.autocomplete, ...p.autocomplete },
-          agentModel: p.agentModel ?? DEFAULTS.agentModel,
           formatOnSave: p.formatOnSave ?? DEFAULTS.formatOnSave,
           appLanguage: p.appLanguage ?? DEFAULTS.appLanguage,
           agentLanguage: p.agentLanguage ?? DEFAULTS.agentLanguage,

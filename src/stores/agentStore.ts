@@ -20,6 +20,14 @@ interface AgentState {
   queuePosition: QueuePositionInfo | null
   /** Tasks the agent is tracking for the current message. Displayed in the chat UI. */
   tasks: AgentTask[]
+  /**
+   * Phase A telemetry: cumulative count of times the safe tool pool blocked
+   * a tool from starting because of an in-flight non-concurrency-safe sibling.
+   * Each increment represents a "would-have-been-a-race" today's Promise.all
+   * dispatch could not have prevented. Surfaced in Settings → Experimental
+   * for dogfood validation. Reset on session start.
+   */
+  poolConcurrencyConflictsAvoided: number
 }
 
 interface AgentActions {
@@ -30,6 +38,9 @@ interface AgentActions {
   setTasks: (tasks: AgentTask[]) => void
   updateTaskStatus: (taskId: string, status: AgentTaskStatus) => void
   clearTasks: () => void
+  // Phase A telemetry mirror
+  bumpPoolConflictsAvoided: (delta: number) => void
+  resetPoolConflictsAvoided: () => void
   reset: () => void
 }
 
@@ -38,6 +49,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   error: null,
   queuePosition: null,
   tasks: [],
+  poolConcurrencyConflictsAvoided: 0,
 
   setStatus: (status: AgentStatus) => {
     set({ status })
@@ -67,12 +79,22 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
     set({ tasks: [] })
   },
 
+  bumpPoolConflictsAvoided: (delta: number) => {
+    if (delta <= 0) return
+    set(state => ({ poolConcurrencyConflictsAvoided: state.poolConcurrencyConflictsAvoided + delta }))
+  },
+
+  resetPoolConflictsAvoided: () => {
+    set({ poolConcurrencyConflictsAvoided: 0 })
+  },
+
   reset: () => {
     set({
       status: 'idle',
       error: null,
       queuePosition: null,
       tasks: [],
+      poolConcurrencyConflictsAvoided: 0,
     })
   },
 }))

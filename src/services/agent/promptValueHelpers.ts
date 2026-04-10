@@ -230,11 +230,30 @@ export async function buildContentParts(
  * to safely extract text from messages whose content can be either
  * shape after the multimodal refactor.
  */
-export function contentAsText(content: string | ContentPart[] | null | undefined): string {
+/**
+ * Extract text from message content, which may be:
+ *   - string (plain text)
+ *   - ContentPart[] (OpenAI multimodal — text + image_url parts)
+ *   - AnthropicContentBlock[] (text, tool_use, tool_result, thinking blocks)
+ *   - null/undefined
+ */
+export function contentAsText(content: string | unknown[] | null | undefined): string {
   if (content == null) return ''
   if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return String(content)
   return content
-    .map(part => (part.type === 'text' ? part.text : '[image]'))
+    .map((part: any) => {
+      if (typeof part === 'string') return part
+      switch (part.type) {
+        case 'text': return part.text ?? ''
+        case 'thinking': return part.thinking ?? ''
+        case 'tool_use': return `[tool: ${part.name}(${JSON.stringify(part.input || {})})]`
+        case 'tool_result': return typeof part.content === 'string' ? part.content : JSON.stringify(part.content || '')
+        case 'image_url': return '[image]'
+        default: return ''
+      }
+    })
+    .filter(Boolean)
     .join('\n')
 }
 

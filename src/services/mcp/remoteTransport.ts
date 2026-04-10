@@ -61,17 +61,39 @@ export async function sendRemoteMCPRequest(request: RemoteMCPRequest): Promise<u
 
 /**
  * Discover tools from a remote MCP server.
+ *
+ * MCP spec: each tool may carry an optional `annotations.readOnlyHint` flag
+ * indicating the tool does not modify its environment. We surface this so the
+ * agent's concurrency-safe tool pool can run multiple read-only MCP tools in
+ * parallel.
  */
 export async function discoverRemoteTools(
   serverUrl: string
-): Promise<Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>> {
+): Promise<Array<{
+  name: string
+  description: string
+  inputSchema: Record<string, unknown>
+  readOnlyHint?: boolean
+}>> {
   const result = (await sendRemoteMCPRequest({
     serverUrl,
     method: 'tools/list',
     params: {},
-  })) as { tools?: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> }
+  })) as {
+    tools?: Array<{
+      name: string
+      description: string
+      inputSchema: Record<string, unknown>
+      annotations?: { readOnlyHint?: boolean }
+    }>
+  }
 
-  return result?.tools || []
+  return (result?.tools || []).map((t) => ({
+    name: t.name,
+    description: t.description,
+    inputSchema: t.inputSchema,
+    readOnlyHint: t.annotations?.readOnlyHint === true ? true : undefined,
+  }))
 }
 
 /**

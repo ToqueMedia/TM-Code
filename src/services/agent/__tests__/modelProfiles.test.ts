@@ -1,12 +1,10 @@
 import {
   getModelProfile,
   getAllModelProfiles,
-  getModelsForPlan,
+  getProfileForPlan,
   getDefaultModelForPlan,
-  isModelAvailableForPlan,
   MODEL_PROFILES,
   DEFAULT_MODEL_ID,
-  FREE_MODEL_ID,
 } from '../modelProfiles'
 
 describe('modelProfiles', () => {
@@ -61,59 +59,48 @@ describe('modelProfiles', () => {
     })
   })
 
-  describe('getModelsForPlan', () => {
-    it('explorer (free) only gets mimo-v2-flash', () => {
-      const models = getModelsForPlan('explorer')
-      expect(models.length).toBe(1)
-      expect(models[0].id).toBe(FREE_MODEL_ID)
+  // ─── Plan-based profile lookup (replaces model selector) ───
+  // Model is decided by backend based on plan. Frontend uses getProfileForPlan
+  // to configure thinking/sampling/compression.
+
+  describe('getProfileForPlan', () => {
+    it('explorer (free) returns DeepSeek V3.2', () => {
+      const profile = getProfileForPlan('explorer')
+      expect(profile.id).toBe('deepseek-v3.2')
+      expect(profile.thinkingMode).toBe('toggleable')
     })
 
-    it('pro gets all models EXCEPT mimo', () => {
-      const models = getModelsForPlan('pro')
-      expect(models.every(m => m.id !== FREE_MODEL_ID)).toBe(true)
-      expect(models.length).toBe(8)
+    it('pro returns Kimi K2.5', () => {
+      const profile = getProfileForPlan('pro')
+      expect(profile.id).toBe('kimi-k2.5')
+      expect(profile.preserveReasoning).toBe(true)
+      expect(profile.supportsAttachments).toBe(true)
     })
 
-    it('business-4x gets all models EXCEPT mimo', () => {
-      const models = getModelsForPlan('business-4x')
-      expect(models.every(m => m.id !== FREE_MODEL_ID)).toBe(true)
-      expect(models.length).toBe(8)
+    it('business plans return Kimi K2.5', () => {
+      expect(getProfileForPlan('business-4x').id).toBe('kimi-k2.5')
+      expect(getProfileForPlan('business-8x').id).toBe('kimi-k2.5')
     })
 
-    it('business-8x gets all models EXCEPT mimo', () => {
-      const models = getModelsForPlan('business-8x')
-      expect(models.every(m => m.id !== FREE_MODEL_ID)).toBe(true)
-      expect(models.length).toBe(8)
-    })
-  })
-
-  describe('getDefaultModelForPlan', () => {
-    it('explorer defaults to mimo-v2-flash', () => {
-      expect(getDefaultModelForPlan('explorer')).toBe(FREE_MODEL_ID)
+    it('Kimi K2.5 has temperature 1.0 per benchmark docs', () => {
+      const profile = getProfileForPlan('pro')
+      expect(profile.temperature).toBe(1.0)
+      expect(profile.topP).toBe(0.95)
     })
 
-    it('paid plans default to deepseek-v3.2', () => {
-      expect(getDefaultModelForPlan('pro')).toBe(DEFAULT_MODEL_ID)
-      expect(getDefaultModelForPlan('business-4x')).toBe(DEFAULT_MODEL_ID)
-      expect(getDefaultModelForPlan('business-8x')).toBe(DEFAULT_MODEL_ID)
+    it('both models have toggleable thinking', () => {
+      expect(getProfileForPlan('explorer').thinkingMode).toBe('toggleable')
+      expect(getProfileForPlan('pro').thinkingMode).toBe('toggleable')
     })
   })
 
-  describe('isModelAvailableForPlan', () => {
-    it('mimo only available for explorer', () => {
-      expect(isModelAvailableForPlan('mimo-v2-flash', 'explorer')).toBe(true)
-      expect(isModelAvailableForPlan('mimo-v2-flash', 'pro')).toBe(false)
-      expect(isModelAvailableForPlan('mimo-v2-flash', 'business-8x')).toBe(false)
+  describe('getDefaultModelForPlan (compat)', () => {
+    it('explorer defaults to deepseek-v3.2', () => {
+      expect(getDefaultModelForPlan('explorer')).toBe('deepseek-v3.2')
     })
 
-    it('deepseek not available for explorer', () => {
-      expect(isModelAvailableForPlan('deepseek-v3.2', 'explorer')).toBe(false)
-    })
-
-    it('deepseek available for all paid plans', () => {
-      expect(isModelAvailableForPlan('deepseek-v3.2', 'pro')).toBe(true)
-      expect(isModelAvailableForPlan('deepseek-v3.2', 'business-4x')).toBe(true)
-      expect(isModelAvailableForPlan('deepseek-v3.2', 'business-8x')).toBe(true)
+    it('paid plans default to kimi-k2.5', () => {
+      expect(getDefaultModelForPlan('pro')).toBe('kimi-k2.5')
     })
   })
 })

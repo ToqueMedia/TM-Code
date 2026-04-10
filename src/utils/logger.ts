@@ -30,7 +30,11 @@ class Logger {
   private constructor() {
     this.config = {
       level: process.env.NODE_ENV === 'development' ? LogLevel.DEBUG : LogLevel.WARN,
-      enabledCategories: new Set(['error', 'warn']),
+      // enabledCategories is DEPRECATED — the category gate was removed from
+      // shouldLog (it was a systemic bug; see shouldLog comment). The Set is
+      // kept alive only for getStats() backward compat — it's never checked
+      // in the hot path.
+      enabledCategories: new Set<string>(),
       maxLogsPerSecond: process.env.NODE_ENV === 'development' ? 10 : 3,
       enableConsole: true,
       enableFileWatcher: false, // Disabled by default to reduce noise
@@ -38,12 +42,6 @@ class Logger {
       enableWindowService: false, // Disabled by default to reduce noise
       enableTerminalFit: false    // Disabled by default to reduce noise
     };
-
-    // In development, allow more verbose logging with categories
-    if (process.env.NODE_ENV === 'development') {
-      this.config.enabledCategories.add('info');
-      this.config.enabledCategories.add('debug');
-    }
   }
 
   static getInstance(): Logger {
@@ -54,17 +52,28 @@ class Logger {
   }
 
   private shouldLog(category: string, level: LogLevel): boolean {
-    // Check log level
+    // Check log level — the primary verbosity gate.
+    // Production: WARN (only error + warn pass).
+    // Development: DEBUG (everything passes).
     if (level > this.config.level) {
       return false;
     }
 
-    // Check if category is enabled
-    if (!this.config.enabledCategories.has(category)) {
-      return false;
-    }
+    // NOTE: the previous `enabledCategories.has(category)` gate was REMOVED
+    // because it was a systemic bug. The default set was {'error', 'warn'}
+    // (production) / {'error', 'warn', 'info', 'debug'} (dev) — those are
+    // LEVEL names, not real category names. None of the 40+ actual categories
+    // used in the codebase ('agent', 'chat', 'editor', 'checkpoint', etc.)
+    // were in the set. Result: EVERY logger.info/warn/error call with a real
+    // category was silently dropped in every environment since the logger's
+    // creation. The level check above is the correct verbosity gate; the
+    // category filter was redundant (and broken). enableCategory() /
+    // disableCategory() are kept as no-ops for backward compatibility.
 
-    // Special handling for noisy categories
+    // Special handling for noisy categories — opt-OUT mutes for categories
+    // that are too verbose even at the enabled log level. These dedicated
+    // boolean flags are the correct mechanism for per-category control
+    // (unlike the removed enabledCategories gate which was opt-IN).
     if (category === 'file-watcher' && !this.config.enableFileWatcher) {
       return false;
     }
@@ -178,12 +187,20 @@ class Logger {
     this.config.level = level;
   }
 
-  enableCategory(category: string): void {
-    this.config.enabledCategories.add(category);
+  /**
+   * @deprecated No-op since the enabledCategories gate was removed (it was
+   * a systemic bug — see shouldLog comment). Kept for backward compat so
+   * existing callers don't crash. New code should NOT call this; use the
+   * per-category boolean flags (enableFileWatcher, enableThemeLogger, etc.)
+   * for opt-OUT muting of noisy categories.
+   */
+  enableCategory(_category: string): void {
+    // intentional no-op
   }
 
-  disableCategory(category: string): void {
-    this.config.enabledCategories.delete(category);
+  /** @deprecated See enableCategory. */
+  disableCategory(_category: string): void {
+    // intentional no-op
   }
 
   // Diagnostic method to show current state

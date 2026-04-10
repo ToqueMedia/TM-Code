@@ -463,7 +463,7 @@ describe('downgradeHistoryToText', () => {
 
   it('preserves null content', () => {
     const history: ConversationMessage[] = [
-      { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'foo', arguments: '{}' } }] },
+      { role: 'assistant', content: null },
     ]
     const result = downgradeHistoryToText(history)
     expect(result[0].content).toBeNull()

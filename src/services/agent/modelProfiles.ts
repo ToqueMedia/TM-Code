@@ -166,21 +166,26 @@ const KIMI_K2_5: ModelProfile = {
   contextWindow: 262_144,
   maxOutputTokens: 65_536,
 
-  // Moonshot docs: K2.5 temperature and top_p are immutable (API ignores overrides)
-  // Values set here for frontend display; DashScope endpoint ignores them.
-  temperature: 0.6,
+  // Kimi K2.5 benchmark best practices: temperature=1.0, top_p=0.95.
+  // These are recommended by Moonshot for best reasoning quality.
+  temperature: 1.0,
   reasoningTemperature: null,
   topP: 0.95,
   topK: null,
 
-  // Routed via DashScope (not native Moonshot API), so uses enable_thinking format
+  // Thinking is TOGGLEABLE: Turn 1 ON so the model reasons about the task,
+  // then the model itself decides via request_thinking whether to keep it ON
+  // for subsequent turns based on the complexity of the user's request.
+  // Routed via DashScope (not native Moonshot API), so uses enable_thinking format.
   thinkingMode: 'toggleable',
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
   thinkingBudget: null,
   thinkingMandatory: false,
 
-  preserveReasoning: true, // Moonshot docs: REQUIRED during tool calling — API returns 400 if reasoning_content missing
+  // CRITICAL: Moonshot docs require reasoning_content in assistant messages
+  // during tool calling sequences. API returns 400 if stripped.
+  preserveReasoning: true,
   skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (MoonViT)
   modelSpecificPrompt: '',
@@ -337,42 +342,44 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
 }
 
 export const DEFAULT_MODEL_ID = 'deepseek-v3.2'
-export const FREE_MODEL_ID = 'mimo-v2-flash'
 
+// Dead code — kept for potential reactivation
+export const FREE_MODEL_ID = 'mimo-v2-flash'
 export function getModelProfile(modelId: string): ModelProfile {
   return MODEL_PROFILES[modelId] || MODEL_PROFILES[DEFAULT_MODEL_ID]
 }
-
-const ALL_PROFILES: ModelProfile[] = Object.values(MODEL_PROFILES)
-
 export function getAllModelProfiles(): ModelProfile[] {
-  return ALL_PROFILES
+  return Object.values(MODEL_PROFILES)
 }
 
 // ─────────────────────────────────────────────────
-// Plan-based model filtering
-// Free (explorer): only mimo-v2-flash
-// Pro / Business: all models EXCEPT mimo-v2-flash
+// Plan-based profile lookup (replaces model selector)
+// The model is decided by the backend based on the user's plan.
+// The frontend uses this to configure thinking/sampling/compression.
+//
+//   explorer (free)     → DeepSeek V3.2 (no thinking, 131K context)
+//   pro / business-*x   → Kimi K2.5 (mandatory thinking, 262K context, multimodal)
 // ─────────────────────────────────────────────────
 
-const PAID_MODELS = ALL_PROFILES.filter(p => p.id !== FREE_MODEL_ID)
-const FREE_MODELS = [MIMO_V2_FLASH]
-
-export function getModelsForPlan(plan: UserPlanName): ModelProfile[] {
-  if (plan === 'explorer') return FREE_MODELS
-  return PAID_MODELS
+/**
+ * Returns the model profile for the user's billing plan.
+ * Used by the frontend to configure thinking params, sampling, and
+ * compression thresholds — NOT to select a model (the backend does that).
+ */
+export function getProfileForPlan(plan: UserPlanName): ModelProfile {
+  if (plan === 'explorer') return DEEPSEEK_V3_2
+  // All paid plans (pro, business-4x, business-8x, and any future plan)
+  // use Kimi K2.5. If an unknown plan name arrives, Kimi is the safe
+  // default (paid model is more capable than free).
+  return KIMI_K2_5
 }
 
-export function getDefaultModelForPlan(plan: UserPlanName): string {
-  if (plan === 'explorer') return FREE_MODEL_ID
-  return DEFAULT_MODEL_ID
-}
-
-/** Check if a model is available for a given plan */
-export function isModelAvailableForPlan(modelId: string, plan: UserPlanName): boolean {
-  if (plan === 'explorer') return modelId === FREE_MODEL_ID
-  return modelId !== FREE_MODEL_ID
-}
+/** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
+export function getModelsForPlan(_plan: UserPlanName): ModelProfile[] { return [DEEPSEEK_V3_2, KIMI_K2_5] }
+/** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
+export function getDefaultModelForPlan(plan: UserPlanName): string { return plan === 'explorer' ? 'deepseek-v3.2' : 'kimi-k2.5' }
+/** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
+export function isModelAvailableForPlan(_modelId: string, _plan: UserPlanName): boolean { return true }
 
 /**
  * Build the thinking parameter object for the API request.

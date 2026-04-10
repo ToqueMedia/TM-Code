@@ -78,13 +78,13 @@ class ContextBuilder {
       ? 'Respond in English.'
       : `Always respond in ${agentLangMap[agentLang] || agentLangMap.en}. All explanations, comments, and messages must be in ${agentLangMap[agentLang] || agentLangMap.en}. Code identifiers remain in English.`
 
-    // Load model profile for model-specific behavior
+    // Load model profile for model-specific behavior (based on plan, not user choice)
     let modelProfile: import('./modelProfiles').ModelProfile | null = null
     try {
-      const { getModelProfile } = await import('./modelProfiles')
-      const { useSettingsStore } = await import('../../stores/settingsStore')
-      const modelId = useSettingsStore.getState().agentModel || 'deepseek-v3.2'
-      modelProfile = getModelProfile(modelId)
+      const { getProfileForPlan } = await import('./modelProfiles')
+      const { useBillingStore } = await import('../../stores/billingStore')
+      const plan = useBillingStore.getState().plan
+      modelProfile = getProfileForPlan(plan)
     } catch { /* fallback: no profile */ }
 
     // Minimal prompt for models that degrade with verbose system prompts
