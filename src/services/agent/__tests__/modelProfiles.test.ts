@@ -67,29 +67,29 @@ describe('modelProfiles', () => {
     it('explorer (free) returns DeepSeek V3.2', () => {
       const profile = getProfileForPlan('explorer')
       expect(profile.id).toBe('deepseek-v3.2')
-      expect(profile.thinkingMode).toBe('toggleable')
+      expect(profile.thinkingMode).toBe('none')
+      expect(profile.supportsThinking).toBe(false)
     })
 
-    it('pro returns Kimi K2.5', () => {
+    it('pro returns Qwen 3.6 Plus', () => {
       const profile = getProfileForPlan('pro')
-      expect(profile.id).toBe('kimi-k2.5')
-      expect(profile.preserveReasoning).toBe(true)
+      expect(profile.id).toBe('qwen3.6-plus')
+      // Qwen3 official: do NOT preserve reasoning in multi-turn history
+      expect(profile.preserveReasoning).toBe(false)
       expect(profile.supportsAttachments).toBe(true)
     })
 
-    it('business plans return Kimi K2.5', () => {
-      expect(getProfileForPlan('business-4x').id).toBe('kimi-k2.5')
-      expect(getProfileForPlan('business-8x').id).toBe('kimi-k2.5')
+    it('business plans return Qwen 3.6 Plus', () => {
+      expect(getProfileForPlan('business-4x').id).toBe('qwen3.6-plus')
+      expect(getProfileForPlan('business-8x').id).toBe('qwen3.6-plus')
     })
 
-    it('Kimi K2.5 has temperature 1.0 per benchmark docs', () => {
-      const profile = getProfileForPlan('pro')
-      expect(profile.temperature).toBe(1.0)
-      expect(profile.topP).toBe(0.95)
+    it('Qwen 3.6 Plus has 1M context window', () => {
+      expect(getProfileForPlan('pro').contextWindow).toBe(1_000_000)
     })
 
-    it('both models have toggleable thinking', () => {
-      expect(getProfileForPlan('explorer').thinkingMode).toBe('toggleable')
+    it('DeepSeek has no thinking, Qwen has toggleable', () => {
+      expect(getProfileForPlan('explorer').thinkingMode).toBe('none')
       expect(getProfileForPlan('pro').thinkingMode).toBe('toggleable')
     })
   })
@@ -99,8 +99,8 @@ describe('modelProfiles', () => {
       expect(getDefaultModelForPlan('explorer')).toBe('deepseek-v3.2')
     })
 
-    it('paid plans default to kimi-k2.5', () => {
-      expect(getDefaultModelForPlan('pro')).toBe('kimi-k2.5')
+    it('paid plans default to qwen3.6-plus', () => {
+      expect(getDefaultModelForPlan('pro')).toBe('qwen3.6-plus')
     })
   })
 })

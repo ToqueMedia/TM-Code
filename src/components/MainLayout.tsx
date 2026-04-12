@@ -245,7 +245,7 @@ function MainLayout() {
             <PermissionDialog
               toolName={pendingPermission.toolName}
               args={pendingPermission.args}
-              sensitive={pendingPermission.sensitive}
+              promptReason={pendingPermission.promptReason}
               onApprove={() => usePermissionStore.getState().approve()}
               onApproveAll={() => usePermissionStore.getState().approveAll()}
               onDeny={() => usePermissionStore.getState().deny()}

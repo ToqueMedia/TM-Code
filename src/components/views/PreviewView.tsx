@@ -2,7 +2,7 @@ import { memo, useRef, useEffect, useCallback, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiMonitor, FiServer, FiLock, FiGlobe } from 'react-icons/fi'
+import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2 } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { useLayoutStore, type DevServerLogEntry } from '../../stores/layoutStore'
 import { usePermissionStore } from '../../stores/permissionStore'
@@ -44,6 +44,10 @@ function PreviewView() {
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const devServerLogs = useLayoutStore(s => s.devServerLogs)
   const isConsoleVisible = useLayoutStore(s => s.isConsoleVisible)
+  const previewServerTimedOut = useLayoutStore(s => s.previewServerTimedOut)
+  const isPreviewServerLoading = useLayoutStore(s => s.isPreviewServerLoading)
+
+  const [isChatCollapsed, setIsChatCollapsed] = useState(false)
 
   const chatScrollRef = useRef<HTMLDivElement>(null)
   const handleRef = useRef<HTMLDivElement>(null)
@@ -245,15 +249,18 @@ function PreviewView() {
 
   return (
     <Flex flex="1" overflow="hidden">
-      {/* Left: Full chat sidebar (messages + prompt) */}
+      {/* Left: Full chat sidebar (messages + prompt) — collapsible with animation */}
       <Flex
         direction="column"
-        w={`${chatWidth}px`}
-        minW={`${MIN_WIDTH}px`}
-        maxW={`${MAX_WIDTH}px`}
+        w={isChatCollapsed ? '0px' : `${chatWidth}px`}
+        minW={isChatCollapsed ? '0px' : `${MIN_WIDTH}px`}
+        maxW={isChatCollapsed ? '0px' : `${MAX_WIDTH}px`}
         overflow="hidden"
         bg={tokens.colors.bg.mainLayout}
         flexShrink={0}
+        transition="width 0.25s ease, min-width 0.25s ease, max-width 0.25s ease"
+        opacity={isChatCollapsed ? 0 : 1}
+        css={{ transition: 'width 0.25s ease, min-width 0.25s ease, max-width 0.25s ease, opacity 0.2s ease' }}
       >
         {/* Chat messages */}
         <Flex
@@ -308,7 +315,7 @@ function PreviewView() {
           <PermissionDialog
             toolName={pendingPermission.toolName}
             args={pendingPermission.args}
-            sensitive={pendingPermission.sensitive}
+            promptReason={pendingPermission.promptReason}
             onApprove={() => usePermissionStore.getState().approve()}
             onApproveAll={() => usePermissionStore.getState().approveAll()}
             onDeny={() => usePermissionStore.getState().deny()}
@@ -319,18 +326,19 @@ function PreviewView() {
         <PromptBar />
       </Flex>
 
-      {/* Resize handle (horizontal) */}
+      {/* Resize handle (horizontal) — hidden when chat is collapsed */}
       <Box
         ref={handleRef}
-        w="4px"
+        w={isChatCollapsed ? '0px' : '4px'}
         cursor="col-resize"
         flexShrink={0}
         bg={isResizing ? tokens.colors.accent.primary : 'transparent'}
-        transition={isResizing ? 'none' : `background ${tokens.transition.fast}`}
-        _hover={{ bg: tokens.colors.accent.primary }}
-        onPointerDown={handleResizeStart}
+        transition={isResizing ? 'none' : `all ${tokens.transition.fast}`}
+        _hover={!isChatCollapsed ? { bg: tokens.colors.accent.primary } : {}}
+        onPointerDown={isChatCollapsed ? undefined : handleResizeStart}
         position="relative"
         zIndex={2}
+        overflow="hidden"
       />
 
       {/* Right: Preview webview + console */}
@@ -398,20 +406,18 @@ function PreviewView() {
 
           {/* Right actions */}
           <HStack gap={0}>
-            {/* Mode toggle (preview ↔ HTTP client) */}
-            {previewMode !== 'static' && previewUrl && (
-              <IconButton
-                aria-label={previewMode === 'api' ? t('view.switchToPreview') : t('view.switchToHttpClient')}
-                size="xs"
-                variant="ghost"
-                color={previewMode === 'api' ? tokens.colors.accent.purple : tokens.colors.text.secondary}
-                _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-                borderRadius="6px"
-                onClick={() => useLayoutStore.getState().togglePreviewMode()}
-              >
-                {previewMode === 'api' ? <FiMonitor size={13} /> : <FiServer size={13} />}
-              </IconButton>
-            )}
+            {/* Expand/collapse chat sidebar */}
+            <IconButton
+              aria-label={isChatCollapsed ? 'Show chat' : 'Full preview'}
+              size="xs"
+              variant="ghost"
+              color={isChatCollapsed ? tokens.colors.accent.primary : tokens.colors.text.secondary}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+              borderRadius="6px"
+              onClick={() => setIsChatCollapsed(!isChatCollapsed)}
+            >
+              {isChatCollapsed ? <FiMinimize2 size={13} /> : <FiMaximize2 size={13} />}
+            </IconButton>
 
             {/* Console */}
             <IconButton
@@ -473,21 +479,82 @@ function PreviewView() {
         ) : (
           <Box flex="1" bg={tokens.colors.text.inverse} position="relative">
             {hasPreview ? (
-              <TauriWebview
-                url={previewMode === 'server' ? previewUrl! : undefined}
-                html={previewMode === 'static' ? previewHtmlContent! : undefined}
-                reloadKey={previewReloadKey}
-                frozen={isResizing || isResizingConsole}
-              />
+              <Box position="relative" w="100%" h="100%">
+                <TauriWebview
+                  url={previewMode === 'server' ? previewUrl! : undefined}
+                  html={previewMode === 'static' ? previewHtmlContent! : undefined}
+                  reloadKey={previewReloadKey}
+                  frozen={isResizing || isResizingConsole}
+                />
+                {/* Semi-transparent overlay during resize — replaces blank screen */}
+                {(isResizing || isResizingConsole) && (
+                  <Box
+                    position="absolute"
+                    inset={0}
+                    bg="rgba(10, 10, 10, 0.6)"
+                    display="flex"
+                    alignItems="center"
+                    justifyContent="center"
+                    zIndex={5}
+                    pointerEvents="none"
+                  >
+                    <Text fontSize="11px" color={tokens.colors.text.disabled} fontWeight="500">
+                      Resizing...
+                    </Text>
+                  </Box>
+                )}
+              </Box>
             ) : (
-              <Flex flex="1" align="center" justify="center" direction="column" gap={2}>
-                {devServerLogs.some(l => l.level === 'error') ? (
+              <Flex flex="1" align="center" justify="center" direction="column" gap={3}>
+                {previewServerTimedOut ? (
+                  <>
+                    <Text fontSize={tokens.fontSize.sm} color={tokens.colors.accent.orange} fontWeight="500">
+                      Server did not respond in time
+                    </Text>
+                    <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled} maxW="300px" textAlign="center">
+                      The dev server may still be starting. Check the console for errors.
+                    </Text>
+                    <Box
+                      as="button"
+                      mt={1}
+                      px={4}
+                      py="6px"
+                      borderRadius="6px"
+                      fontSize="12px"
+                      fontWeight="600"
+                      bg={tokens.colors.accent.primary}
+                      color="#fff"
+                      cursor="pointer"
+                      transition={`all ${tokens.transition.fast}`}
+                      _hover={{ opacity: 0.85 }}
+                      onClick={() => {
+                        useLayoutStore.getState().setPreviewServerTimedOut(false)
+                        useLayoutStore.getState().reloadPreview()
+                      }}
+                    >
+                      Retry
+                    </Box>
+                  </>
+                ) : devServerLogs.some(l => l.level === 'error') ? (
                   <>
                     <Text fontSize={tokens.fontSize.sm} color={tokens.colors.accent.red} fontWeight="500">
                       {t("view.devServerFailed")}
                     </Text>
                     <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
                       Check the console below for details
+                    </Text>
+                  </>
+                ) : isPreviewServerLoading ? (
+                  <>
+                    <Box
+                      w="20px" h="20px" borderRadius="full"
+                      border="2px solid" borderColor={tokens.colors.border.panel}
+                      borderTopColor={tokens.colors.accent.primary}
+                      animation="spin 0.8s linear infinite"
+                      css={{ '@keyframes spin': { '0%': { transform: 'rotate(0deg)' }, '100%': { transform: 'rotate(360deg)' } } }}
+                    />
+                    <Text fontSize={tokens.fontSize.sm} color={tokens.colors.text.disabled}>
+                      Starting preview server...
                     </Text>
                   </>
                 ) : (

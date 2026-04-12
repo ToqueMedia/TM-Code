@@ -308,8 +308,18 @@ class DevServerManager {
       await new Promise(r => setTimeout(r, READY_POLL_INTERVAL))
     }
 
+    // Check if timeout expired without server becoming reachable
+    const timedOut = Date.now() - start >= READY_TIMEOUT
+    if (timedOut && gen === this.generation && this.currentServer) {
+      layoutStore.addDevServerLog(
+        `Server did not respond within ${READY_TIMEOUT / 1000}s. The server may still be starting — click Reload in the preview to retry.`,
+        'error',
+      )
+      layoutStore.setPreviewServerTimedOut(true)
+    }
+
     // Detect whether this is a frontend SPA or backend API server
-    if (gen === this.generation && this.currentServer) {
+    if (!timedOut && gen === this.generation && this.currentServer) {
       const serverType = this.serverTypeHint === 'frontend' ? 'server'
         : this.serverTypeHint === 'backend' ? 'api'
         : await this.detectServerType(url)

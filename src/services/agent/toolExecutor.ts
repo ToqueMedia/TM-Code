@@ -154,7 +154,7 @@ class ToolExecutor {
           return `Blocked: "${dangerousMatch}" is blocked in your Settings. The developer disabled this command. Ask the developer to unblock it in Settings > Sandbox if needed.`
         }
         // Not blocked but dangerous → always ask (forcePrompt bypasses Accept All)
-        const approved = await usePermissionStore.getState().requestPermission(toolName, input, true)
+        const approved = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command')
         if (!approved) {
           return `Permission denied by user for ${dangerousMatch}. Ask the user what they want instead.`
         }
@@ -162,8 +162,16 @@ class ToolExecutor {
       }
     }
 
-    if (!dangerousAlreadyApproved) {
-      const approved = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive)
+    // Agent-internal tools: bypass permission entirely. These are autonomous
+    // decisions (the agent activates reasoning or updates its own task list)
+    // — never surface a permission prompt to the user.
+    const PERMISSION_EXEMPT_TOOLS = new Set([
+      'update_tasks',
+      'check_background_agents',
+    ])
+
+    if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
+      const approved = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false)
       if (!approved) {
         const target = (input.path || input.command || input.name || '') as string
         return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}. Ask the user what they want instead or suggest an alternative approach.`
@@ -1694,13 +1702,74 @@ class ToolExecutor {
         concurrencySafe: true,
       },
       execute: async (input) => {
-        const { useLayoutStore } = await import('../../stores/layoutStore')
+        const { useLayoutStore, DEV_LOG_EVENT } = await import('../../stores/layoutStore')
+
+        if (!devServerManager.isActive()) {
+          return 'No dev server is running. Start one with start_dev_server.'
+        }
+
+        // Event-driven wait for runtime errors. Browser runtime errors
+        // (uncaught exceptions, SyntaxError from bad imports) arrive via the
+        // preview WebView's IPC → CustomEvent → addDevServerLog pipeline.
+        // This pipeline has latency: browser loads → executes JS → throws
+        // → dispatches IPC → addDevServerLog fires event.
+        //
+        // Strategy:
+        //   1. Check for RECENT errors (last 5s) — not stale ones from
+        //      previous deploys that are already fixed.
+        //   2. Only wait if the dev server reloaded recently (last 5s) —
+        //      if the server has been stable for a while, no point waiting.
+        //   3. Subscribe to DEV_LOG_EVENT and return immediately when an
+        //      error arrives. Timeout after 3s.
+        //   4. Re-check after subscribing to close the race window between
+        //      the initial check and the addEventListener.
+        const RECENCY_WINDOW = 5000
+        const now = Date.now()
+
+        const hasRecentErrors = () =>
+          useLayoutStore.getState().devServerLogs.some(
+            l => l.level === 'error' && l.timestamp > now - RECENCY_WINDOW,
+          )
+
+        // Only wait if: no recent errors AND server had recent activity
+        // (a log was added in the last 5s — proxy for "just reloaded").
+        const hasRecentActivity = () => {
+          const logs = useLayoutStore.getState().devServerLogs
+          return logs.length > 0 && logs[logs.length - 1].timestamp > now - RECENCY_WINDOW
+        }
+
+        if (!hasRecentErrors() && hasRecentActivity()) {
+          await new Promise<void>(resolve => {
+            let timer: ReturnType<typeof setTimeout>
+            const handler = (e: Event) => {
+              const detail = (e as CustomEvent<{ level: string }>).detail
+              if (detail.level === 'error') {
+                clearTimeout(timer)
+                window.removeEventListener(DEV_LOG_EVENT, handler)
+                resolve()
+              }
+            }
+            window.addEventListener(DEV_LOG_EVENT, handler)
+
+            // Re-check: error may have arrived between hasRecentErrors()
+            // and addEventListener — close the race window.
+            if (hasRecentErrors()) {
+              clearTimeout(timer!)
+              window.removeEventListener(DEV_LOG_EVENT, handler)
+              resolve()
+              return
+            }
+
+            timer = setTimeout(() => {
+              window.removeEventListener(DEV_LOG_EVENT, handler)
+              resolve()
+            }, 3000)
+          })
+        }
+
         const logs = useLayoutStore.getState().devServerLogs
 
         if (logs.length === 0) {
-          if (!devServerManager.isActive()) {
-            return 'No dev server is running. Start one with start_dev_server.'
-          }
           return 'Dev server is running but has produced no output yet.'
         }
 
@@ -1941,23 +2010,8 @@ Project root: ${projectRoot}`
       }
     })
 
-    // === request_thinking ===
-    this.tools.set('request_thinking', {
-      definition: {
-        name: 'request_thinking',
-        description: 'Activate deep reasoning mode for the current task. Call this when you determine the task requires complex logic, multi-step planning, architecture decisions, or careful debugging. Once activated, reasoning stays on for all remaining turns of this message. Do not call for simple tasks (renaming, small edits, direct questions).',
-        input_schema: {
-          type: 'object',
-          properties: {},
-          required: [],
-        },
-      },
-      execute: async () => {
-        const { default: AgentService } = await import('./agentService')
-        AgentService.getInstance().enableThinkingForLoop()
-        return 'Reasoning mode activated. Your next turns will use deep thinking. Continue with the task.'
-      }
-    })
+    // request_thinking tool REMOVED — thinking is now user-controlled via
+    // Settings → thinkingEnabled toggle. The agent no longer decides thinking mode.
 
     // === update_tasks ===
     this.tools.set('update_tasks', {
@@ -2037,7 +2091,7 @@ Project root: ${projectRoot}`
     this.tools.set('verify', {
       definition: {
         name: 'verify',
-        description: 'Launch an independent verification agent that checks your implementation by running tests, reading code, and executing diagnostic commands. The verifier CANNOT edit files — it can only read and execute. Use after completing non-trivial changes (3+ files, backend/API work, complex logic) to catch issues before reporting done. Returns a verdict: PASS, FAIL, or PARTIAL.',
+        description: 'Launch an independent verification agent that checks your implementation by running tests, reading code, and executing diagnostic commands. The verifier CANNOT edit files — it can only read and execute. Use after completing non-trivial changes (3+ files, backend/API work, complex logic) to catch issues before reporting done. Returns a verdict: PASS, FAIL, or PARTIAL. NOTE: For quick TypeScript type checking, prefer execute_command("npx tsc --noEmit 2>&1") instead — it is faster and more direct than launching the full verify sub-agent.',
         input_schema: {
           type: 'object',
           properties: {

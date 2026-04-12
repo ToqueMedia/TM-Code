@@ -4,6 +4,9 @@ export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings'
 export type PreviewMode = 'server' | 'static' | 'api'
 export type DevLogLevel = 'info' | 'warn' | 'error'
 
+/** Event name for dev server log additions — shared between layoutStore (emit) and toolExecutor (listen). */
+export const DEV_LOG_EVENT = 'devserver-log-added'
+
 export interface DevServerLogEntry {
   id: number
   level: DevLogLevel
@@ -33,6 +36,8 @@ interface LayoutState {
   /** Dev server console output */
   devServerLogs: DevServerLogEntry[]
   isConsoleVisible: boolean
+  /** True when the server poll timed out without becoming reachable */
+  previewServerTimedOut: boolean
   /** Current phase of the post-scaffold pipeline */
   scaffoldPhase: ScaffoldPhase
   scaffoldMessage: string
@@ -45,6 +50,7 @@ interface LayoutActions {
   setShowTemplateSelector: (show: boolean) => void
   setPreviewServerLoading: (loading: boolean) => void
   setPreviewServer: (url: string, pid: number, mode?: PreviewMode) => void
+  setPreviewServerTimedOut: (timedOut: boolean) => void
   setStaticPreview: (html: string, sourcePath: string) => void
   clearPreviewServer: () => void
   reloadPreview: () => void
@@ -71,6 +77,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   previewHtmlContent: null,
   previewSourcePath: null,
   previewReloadKey: 0,
+  previewServerTimedOut: false,
   devServerLogs: [],
   isConsoleVisible: false,
   scaffoldPhase: null,
@@ -131,12 +138,17 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set({
       isPreviewServerRunning: true,
       isPreviewServerLoading: false,
+      previewServerTimedOut: false,
       previewUrl: url,
       previewServerPid: pid,
       previewMode: mode || 'server',
       previewHtmlContent: null,
       previewSourcePath: null,
     })
+  },
+
+  setPreviewServerTimedOut: (timedOut: boolean) => {
+    set({ previewServerTimedOut: timedOut })
   },
 
   setStaticPreview: (html: string, sourcePath: string) => {
@@ -158,6 +170,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set({
       isPreviewServerRunning: false,
       isPreviewServerLoading: false,
+      previewServerTimedOut: false,
       previewUrl: null,
       previewServerPid: null,
       previewMode: 'server',
@@ -189,6 +202,9 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
       const trimmed = logs.length >= MAX_LOG_ENTRIES ? logs.slice(-MAX_LOG_ENTRIES + 1) : logs
       return { devServerLogs: [...trimmed, entry] }
     })
+    // Notify any waiters (e.g., read_dev_server_logs tool waiting for
+    // runtime errors to arrive from the preview WebView IPC pipeline).
+    window.dispatchEvent(new CustomEvent(DEV_LOG_EVENT, { detail: { level } }))
   },
 
   clearDevServerLogs: () => {

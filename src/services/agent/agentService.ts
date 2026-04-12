@@ -231,19 +231,13 @@ class AgentService {
     this.contextWindowSize = DEFAULT_CONTEXT_WINDOW
   }
 
-  /** Whether thinking was enabled for the current agent loop (activated by model via request_thinking tool). */
-  private thinkingEnabledForLoop = false
-  /** Current turn number in the active loop — used by buildRequestBody for Turn 1 thinking. */
-  private currentTurnInLoop = 0
+  // thinkingEnabledForLoop and currentTurnInLoop removed — thinking is now
+  // user-controlled via useSettingsStore.thinkingEnabled, not agent-controlled.
   /** Whether reasoning_content should be preserved in conversation history between turns.
    *  Set per-loop from the model profile. Default: false (strip reasoning). */
   private preserveReasoningBetweenTurns = false
 
-  /** Called by request_thinking tool — enables thinking for remaining turns in this loop. */
-  enableThinkingForLoop(): void {
-    this.thinkingEnabledForLoop = true
-    logger.info('agent', 'Thinking mode activated by model for this loop')
-  }
+  // enableThinkingForLoop removed — thinking is user-controlled via Settings.
 
 
   /**
@@ -262,18 +256,17 @@ class AgentService {
     try {
       const { getProfileForPlan, buildSamplingParams, buildThinkingParam } = await import('./modelProfiles')
       const { useBillingStore } = await import('../../stores/billingStore')
+      const { useSettingsStore } = await import('../../stores/settingsStore')
       const plan = useBillingStore.getState().plan
       const profile = getProfileForPlan(plan)
 
-      // Filter request_thinking tool: only show for toggleable models
-      const toolDefs = profile.thinkingMode === 'toggleable'
-        ? this.tools
-        : this.tools.filter(t => t.function.name !== 'request_thinking')
+      // Thinking is controlled by the user in Settings — not by the agent.
+      // Qwen3 has thinking ON by default (official docs). The user can
+      // toggle it off for faster, more direct responses.
+      const isThinking = useSettingsStore.getState().thinkingEnabled
 
-      // Convert tools from OpenAI format → Anthropic format
-      // { type: 'function', function: { name, description, parameters } }
-      //   → { name, description, input_schema }
-      const anthropicTools = toolDefs.map(t => ({
+      // Convert tools to Anthropic format
+      const anthropicTools = this.tools.map(t => ({
         name: t.function.name,
         description: t.function.description,
         input_schema: t.function.parameters,
@@ -295,16 +288,7 @@ class AgentService {
 
       this.contextWindowSize = profile.contextWindow
 
-      // Thinking decision based on model category:
-      // - 'toggleable': Turn 1 ON (model reasons), Turn 2+ per model decision
-      // - 'mandatory': always ON
-      // - 'none': always OFF
-      const isThinking = profile.thinkingMode === 'mandatory'
-        ? true
-        : profile.thinkingMode === 'toggleable'
-          ? (this.currentTurnInLoop <= 1 || this.thinkingEnabledForLoop)
-          : false
-
+      // Sampling: thinking ON → temp 0.6 (Qwen3 default), OFF → temp 0.7
       const sampling = buildSamplingParams(profile, isThinking)
       Object.assign(body, sampling)
 
@@ -398,16 +382,15 @@ class AgentService {
         const plan = useBillingStore.getState().plan
         const profile = getProfileForPlan(plan)
         this.contextWindowSize = profile.contextWindow
+        // Currently false for all active models:
+        //   Qwen3 official: "store only final output, not thinking, in history"
+        //   DeepSeek: rejects reasoning_content with 400
+        // The field + checks remain for potential future models that require it.
         this.preserveReasoningBetweenTurns = profile.preserveReasoning
       } catch { /* keep default */ }
 
-      // Thinking starts OFF — the model activates it via request_thinking if needed.
-      // Turn 1 always has thinking ON so the model can reason about the decision.
-      this.thinkingEnabledForLoop = false
-      this.currentTurnInLoop = 0
     } else {
-      this.thinkingEnabledForLoop = false
-      this.currentTurnInLoop = 0
+      // Sub-agents: no special init needed
     }
 
     // Build Anthropic messages array. System prompt is NOT in the messages
@@ -418,8 +401,17 @@ class AgentService {
         role: m.role as 'user' | 'assistant',
         content: m.content as string | AnthropicContentBlock[],
       })),
-      { role: 'user', content: userMessage as string }
     ]
+
+    // Anthropic requires strictly alternating user/assistant. The conversation
+    // history may end with a user message (tool_results from the previous turn).
+    // If so, we must NOT push another user message directly — instead insert
+    // a dummy assistant turn to maintain alternation.
+    const lastMsg = messages[messages.length - 1]
+    if (lastMsg?.role === 'user') {
+      messages.push({ role: 'assistant', content: 'Understood. What would you like me to do next?' })
+    }
+    messages.push({ role: 'user', content: userMessage as string })
 
     let turnCount = 0
     let continuationCount = 0
@@ -432,7 +424,7 @@ class AgentService {
         if (this.abortController?.signal.aborted) return
 
         turnCount++
-        this.currentTurnInLoop = turnCount
+        // turnCount tracked for telemetry and max-turns enforcement
 
         // Layer 2: Compress context if approaching token limit (percentage-based)
         const compressionThreshold = Math.floor(this.contextWindowSize * COMPRESSION_THRESHOLD_PCT)
@@ -470,6 +462,17 @@ class AgentService {
           const compactedSize = apiMessages.reduce((s: number, m: any) => s + contentAsText(m.content).length, 0)
           logger.info('agent', `Microcompaction: ${originalSize - compactedSize} chars saved (${originalSize} → ${compactedSize})`)
         }
+
+        // Diagnostic: dump messages state before each API call so we can verify
+        // tool_results are in the conversation. Remove after debugging.
+        logger.info('agent', `[TURN ${turnCount}] messages=${apiMessages.length} roles=[${apiMessages.map((m: any) => {
+          const role = m.role
+          if (Array.isArray(m.content)) {
+            const types = m.content.map((b: any) => b.type).join(',')
+            return `${role}(${types})`
+          }
+          return role
+        }).join(' → ')}]`)
 
         // Get streaming response
         const response = await this.callAPI(apiMessages)

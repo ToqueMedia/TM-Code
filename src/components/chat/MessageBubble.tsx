@@ -21,6 +21,11 @@ interface MessageBubbleProps {
 }
 
 const markdownStyles = {
+  // Prevent long unbreakable strings (URLs, file paths, tool output) from
+  // causing horizontal scroll on the entire chat view.
+  overflowWrap: 'anywhere' as const,
+  wordBreak: 'break-word' as const,
+
   '& p': {
     margin: '0 0 10px 0',
     lineHeight: '1.75',
@@ -297,6 +302,8 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       borderRadius="12px"
       mb={1}
       className="group"
+      minW={0}
+      overflow="hidden"
     >
       {/* Role header */}
       <Flex align="center" gap={2.5} mb={isUser ? 1.5 : 2.5}>

@@ -39,7 +39,10 @@ export interface ModelProfile {
   temperature: number
   /** Temperature for reasoning mode (null = same as temperature) */
   reasoningTemperature: number | null
+  /** Top-P for thinking mode (Qwen3: 0.95) */
   topP: number
+  /** Top-P for non-thinking mode (Qwen3: 0.8). undefined/null = same as topP */
+  topPNonThinking?: number | null
   topK: number | null
   /** Additional sampling params sent as-is in the request body */
   extraSamplingParams?: Record<string, unknown>
@@ -92,6 +95,7 @@ const MIMO_V2_FLASH: ModelProfile = {
   temperature: 0.3,
   reasoningTemperature: null,
   topP: 0.95,
+  topPNonThinking: null,
   topK: null,
 
   // Thinking supported but DEGRADES quality at all temperatures — keep OFF
@@ -120,14 +124,17 @@ const DEEPSEEK_V3_2: ModelProfile = {
   topP: 1.0,
   topK: null,
 
-  thinkingMode: 'toggleable',
-  supportsThinking: true,
-  thinkingParam: 'enable_thinking',
-  thinkingBudget: 4096,
+  // DeepSeek V3.2 on DashScope does NOT support thinking — the backend
+  // strips enable_thinking/thinking/thinking_budget for this model
+  // (proxy.ts MODELS_NO_THINKING). Profile must reflect reality.
+  thinkingMode: 'none',
+  supportsThinking: false,
+  thinkingParam: null,
+  thinkingBudget: null,
   thinkingMandatory: false,
 
-  preserveReasoning: false, // DeepSeek docs: "API will return 400 if reasoning_content included" (DashScope proxy patches with '')
-  skipSystemPromptInThinking: true,
+  preserveReasoning: false, // DeepSeek docs: "API will return 400 if reasoning_content included"
+  skipSystemPromptInThinking: false,
   supportsAttachments: false,
   modelSpecificPrompt: '',
 }
@@ -248,22 +255,31 @@ const QWEN3_6_PLUS: ModelProfile = {
   name: 'Qwen 3.6 Plus',
   persona: { name: 'Hoji Ya Henda', tagline: 'O mais completo — vê imagens, lê projectos inteiros e executa com decisão. Custo: 2x' },
   modelId: 'qwen3.6-plus',
-  contextWindow: 262_144,
+  // DashScope official: 1M context window (confirmed via help.aliyun.com model listing)
+  contextWindow: 1_000_000,
   maxOutputTokens: 65_536,
 
-  // Qwen3 official: temp=0.6 thinking / 0.7 non-thinking, top_p=0.95/0.8, top_k=20
+  // Qwen3 official (HuggingFace Qwen/Qwen3-235B-A22B):
+  //   Thinking: temp=0.6, top_p=0.95, top_k=20
+  //   Non-thinking: temp=0.7, top_p=0.8, top_k=20
   temperature: 0.7,
   reasoningTemperature: 0.6,
   topP: 0.95,
+  topPNonThinking: 0.8,
   topK: 20,
 
+  // Thinking is user-controlled via Settings toggle (not agent-controlled).
+  // Qwen3 has thinking ON by default per official docs.
   thinkingMode: 'toggleable',
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
   thinkingBudget: null,
   thinkingMandatory: false,
 
-  preserveReasoning: true, // DashScope docs: supports preserve_thinking=true (only qwen3.6-plus)
+  // Qwen3 official (HuggingFace): "In multi-turn conversations, store only
+  // the final output (not thinking content) in conversation history."
+  // This means reasoning_content should NOT be preserved between turns.
+  preserveReasoning: false,
   skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (text + vision)
   modelSpecificPrompt: `Be decisive and direct. Reach conclusions quickly — do not overthink simple tasks. Output only changed code, never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
@@ -368,16 +384,14 @@ export function getAllModelProfiles(): ModelProfile[] {
  */
 export function getProfileForPlan(plan: UserPlanName): ModelProfile {
   if (plan === 'explorer') return DEEPSEEK_V3_2
-  // All paid plans (pro, business-4x, business-8x, and any future plan)
-  // use Kimi K2.5. If an unknown plan name arrives, Kimi is the safe
-  // default (paid model is more capable than free).
-  return KIMI_K2_5
+  // All paid plans use Qwen 3.6 Plus.
+  return QWEN3_6_PLUS
 }
 
 /** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
-export function getModelsForPlan(_plan: UserPlanName): ModelProfile[] { return [DEEPSEEK_V3_2, KIMI_K2_5] }
+export function getModelsForPlan(_plan: UserPlanName): ModelProfile[] { return [DEEPSEEK_V3_2, QWEN3_6_PLUS] }
 /** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
-export function getDefaultModelForPlan(plan: UserPlanName): string { return plan === 'explorer' ? 'deepseek-v3.2' : 'kimi-k2.5' }
+export function getDefaultModelForPlan(plan: UserPlanName): string { return plan === 'explorer' ? 'deepseek-v3.2' : 'qwen3.6-plus' }
 /** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
 export function isModelAvailableForPlan(_modelId: string, _plan: UserPlanName): boolean { return true }
 
@@ -415,7 +429,11 @@ export function buildSamplingParams(
     temperature: isThinking && profile.reasoningTemperature !== null
       ? profile.reasoningTemperature
       : profile.temperature,
-    top_p: profile.topP,
+    // Qwen3: top_p changes between thinking (0.95) and non-thinking (0.8).
+    // Other models: topPNonThinking is null/undefined → use topP for both.
+    top_p: (!isThinking && profile.topPNonThinking != null)
+      ? profile.topPNonThinking
+      : profile.topP,
     max_tokens: profile.maxOutputTokens,
   }
 

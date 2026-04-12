@@ -32,6 +32,35 @@ import {
 import { getQueryGuard } from '../../services/agent/queryGuard'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
+
+/**
+ * Detect the dev command for a project by checking manifest and package.json.
+ * Extracted as a standalone function so it can be called both from the
+ * useEffect (periodic re-detection) AND from togglePreview (just-in-time
+ * when the user clicks the preview button before detection ran).
+ */
+async function detectDevCommand(projectPath: string): Promise<string | null> {
+  // 1. Check .toquemedia-template manifest
+  try {
+    const raw = await invoke<string>('read_file', { path: `${projectPath}/.toquemedia-template` })
+    if (raw) {
+      const manifest = JSON.parse(raw)
+      if (manifest.devCommand) return manifest.devCommand
+    }
+  } catch { /* no manifest */ }
+
+  // 2. Check package.json for "dev" or "start" script
+  try {
+    const raw = await invoke<string>('read_file', { path: `${projectPath}/package.json` })
+    if (raw) {
+      const pkg = JSON.parse(raw)
+      if (pkg.scripts?.dev) return 'npm run dev'
+      if (pkg.scripts?.start) return 'npm start'
+    }
+  } catch { /* no package.json */ }
+
+  return null
+}
 import { logger } from '../../utils/logger'
 
 export function usePromptBar() {
@@ -62,7 +91,13 @@ export function usePromptBar() {
   const isDisabled = hasPendingPermission
   // Send is only blocked during scaffolding (deps install / server start).
   const isSendBlocked = isScaffolding
-  const hasPreview = isPreviewServerRunning || !!previewHtmlContent || !!devCommand
+  // Preview button is ALWAYS visible when a project is open.
+  // It serves dual purpose:
+  //   - If dev server is running: switches to preview/HTTP client view
+  //   - If dev server is NOT running: starts the server (if devCommand detected)
+  //   - If no devCommand: switches to preview view (shows "Waiting..." with instructions)
+  // This ensures the user can always manually initiate the dev server.
+  const hasPreview = !!currentProject?.path || isPreviewServerRunning || !!previewHtmlContent || !!devCommand
 
   // Slash command menu state
   const [showCommandMenu, setShowCommandMenu] = useState(false)
@@ -100,43 +135,15 @@ export function usePromptBar() {
     }
 
     let cancelled = false
-    const projectPath = currentProject.path
 
-    async function detect() {
-      // 1. Check .toquemedia-template manifest
-      try {
-        const raw = await invoke<string>('read_file', { path: `${projectPath}/.toquemedia-template` })
-        if (!cancelled && raw) {
-          const manifest = JSON.parse(raw)
-          if (manifest.devCommand) {
-            setDevCommand(manifest.devCommand)
-            return
-          }
-        }
-      } catch { /* no manifest */ }
+    detectDevCommand(currentProject.path).then(cmd => {
+      if (!cancelled) setDevCommand(cmd)
+    })
 
-      // 2. Check package.json for "dev" or "start" script
-      try {
-        const raw = await invoke<string>('read_file', { path: `${projectPath}/package.json` })
-        if (!cancelled && raw) {
-          const pkg = JSON.parse(raw)
-          if (pkg.scripts?.dev) {
-            setDevCommand('npm run dev')
-            return
-          }
-          if (pkg.scripts?.start) {
-            setDevCommand('npm start')
-            return
-          }
-        }
-      } catch { /* no package.json */ }
-
-      if (!cancelled) setDevCommand(null)
-    }
-
-    detect()
     return () => { cancelled = true }
-  }, [currentProject?.path])
+    // Re-run when agent finishes a session — the agent may have created
+    // package.json with a "dev" script during scaffolding.
+  }, [currentProject?.path, isAgentBusy])
 
   // Auto-resize textarea (runs on every input change AND on mount so the
   // preview PromptBar gets the correct height when it mounts with existing text)
@@ -963,17 +970,29 @@ export function usePromptBar() {
     // If server is already starting, don't restart
     if (devServerManager.isActive()) return
 
-    // No server running — start one if we have a devCommand
-    if (devCommand && currentProject?.path) {
-      const layout = useLayoutStore.getState()
-      layout.addDevServerLog(`Starting dev server (${devCommand})...`, 'info')
+    // No server running — try to start one.
+    // If devCommand is null (detection hasn't run yet or package.json was
+    // created after the last detection), do just-in-time detection now.
+    let cmd = devCommand
+    if (!cmd && currentProject?.path) {
+      cmd = await detectDevCommand(currentProject.path)
+      if (cmd) setDevCommand(cmd)
+    }
+
+    const layout = useLayoutStore.getState()
+    layout.setViewMode('preview')
+
+    if (cmd && currentProject?.path) {
+      layout.addDevServerLog(`Starting dev server (${cmd})...`, 'info')
       try {
-        await devServerManager.start(currentProject.path, devCommand)
+        await devServerManager.start(currentProject.path, cmd)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         layout.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
       }
     }
+    // If no cmd found: preview opens with "Waiting..." — user can ask
+    // the agent to set up and start the server.
   }, [devCommand, currentProject?.path])
 
   return {

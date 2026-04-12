@@ -24,12 +24,15 @@ function getToolScope(toolName: string): 'core' | 'mcp' {
   return toolName.startsWith('mcp__') ? 'mcp' : 'core'
 }
 
+/** Why this permission requires a forced prompt (bypasses "Accept All") */
+type PromptReason = 'sensitive_file' | 'dangerous_command' | null
+
 interface PendingPermission {
   id: string
   toolName: string
   args: Record<string, unknown>
-  /** File contains secrets — show warning in permission dialog */
-  sensitive?: boolean
+  /** Why this prompt was forced — null means normal permission flow */
+  promptReason: PromptReason
   resolve: (approved: boolean) => void
 }
 
@@ -45,7 +48,7 @@ interface PermissionState {
 }
 
 interface PermissionActions {
-  requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean) => Promise<boolean>
+  requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason) => Promise<boolean>
   approve: () => void
   approveAll: () => void
   deny: () => void
@@ -67,7 +70,7 @@ function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionSt
   const remaining = [...permissionQueue]
   while (remaining.length > 0) {
     const next = remaining.shift()!
-    if (next.sensitive) {
+    if (next.promptReason) {
       // Flagged command or sensitive file — must show dialog every time
       set(() => ({ pendingPermission: next, permissionQueue: remaining }))
       return
@@ -95,6 +98,11 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   requestPermission: (toolName, args, forcePrompt) => {
     // forcePrompt (sensitive files, flagged commands) ALWAYS shows the dialog.
     // It bypasses scope auto-approval — the user must approve every time.
+    // Accepts boolean (legacy compat) or a PromptReason string.
+    const promptReason: PromptReason = typeof forcePrompt === 'string'
+      ? forcePrompt
+      : forcePrompt === true ? 'sensitive_file' : null
+
     if (!forcePrompt) {
       const scope = getToolScope(toolName)
 
@@ -110,7 +118,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         id: crypto.randomUUID(),
         toolName,
         args,
-        sensitive: !!forcePrompt,
+        promptReason,
         resolve,
       }
 
@@ -148,7 +156,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       // but KEEP sensitive/flagged ones — they must always prompt individually.
       const remaining: PendingPermission[] = []
       for (const queued of permissionQueue) {
-        if (queued.sensitive) {
+        if (queued.promptReason) {
           // Flagged command or sensitive file — never auto-approve
           remaining.push(queued)
         } else {

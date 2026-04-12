@@ -8,39 +8,27 @@ import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { useBillingStore, isInOverageState } from '../../stores/billingStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
-function formatTokens(count: number): string {
-  if (count === 0) return '0'
-  if (count < 1000) return String(count)
-  if (count < 1_000_000) {
-    const k = count / 1000
-    return k >= 100 ? `${Math.round(k)}k` : k >= 10 ? `${Math.round(k)}k` : `${k.toFixed(1)}k`
-  }
-  const m = count / 1_000_000
-  return m >= 10 ? `${Math.round(m)}M` : `${m.toFixed(1)}M`
-}
+// formatTokens removed — token/credit display removed from status bar.
 
 function AgentStatusBar() {
   const status = useAgentStore(s => s.status)
   const error = useAgentStore(s => s.error)
   const isStreaming = useChatStore(s => s.isStreaming)
-  const totalTokensUsed = useChatStore(s => s.totalTokensUsed)
-  const currentTurnCount = useChatStore(s => s.currentTurnCount)
   const skillCount = useSkillStore(s => s.skills.length)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const runningServers = useMcpStore(s => s.getRunningServers())
   const totalMcpTools = useMcpStore(s => s.getTotalToolCount())
   const isolationMode = useContainerStore(s => s.isolationMode)
-  const billingPlan = useBillingStore(s => s.plan)
   const noCredits = useBillingStore(s => s.noCredits)
   const isActive = useBillingStore(s => s.isActive)
   const consumedPct = useBillingStore(s => s.consumedPct)
   const billingStatus = useBillingStore(s => s.status)
-  const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   // Overage UI fires for either explicit overage status OR cycle exhausted (spillover)
   const usingTmsOverage = isInOverageState(billingStatus, consumedPct)
   const isBudgetBlocked = billingStatus === 'rejected'
@@ -78,21 +66,16 @@ function AgentStatusBar() {
     : (noCredits && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.noCredits'), pulse: false }
     : (statusConfig[status] || statusConfig.idle)
-  const totalTokens = totalTokensUsed.input + totalTokensUsed.output
+  // Thinking indicator — user-controlled in Settings.
+  // Only meaningful for paid plans (Qwen3.6+ supports thinking).
+  // Free plan (DeepSeek) ignores thinking param on the backend.
+  const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
+  const toggleThinking = useSettingsStore(s => s.setThinkingEnabled)
+  const billingPlan = useBillingStore(s => s.plan)
+  const thinkingSupported = billingPlan !== 'explorer'
 
-  // Build info segments — show single % indicator (cycle 0–100, > 100 means overage)
+  // Build info segments
   const infoSegments: string[] = []
-  // Display the cycle %. Beyond 100% means overage usage.
-  const pctDisplay = Math.round(consumedPct * 100)
-  if (consumedPct > 0) {
-    infoSegments.push(consumedPct >= 1 ? `${pctDisplay}% (overage)` : `${pctDisplay}%`)
-  }
-  if (usingTmsOverage || tmsRemaining > 0) {
-    infoSegments.push(`Credits: ${tmsRemaining}`)
-  }
-  if (billingPlan) {
-    infoSegments.push(billingPlan)
-  }
   if (skillCount > 0) infoSegments.push(`${skillCount} ${t("chat.skills")}`)
   if (mcpIsInitializing) {
     infoSegments.push(t('chat.mcpStarting'))
@@ -106,8 +89,6 @@ function AgentStatusBar() {
     if (bgDone > 0) parts.push(`${bgDone} done`)
     infoSegments.push(`bg: ${parts.join(', ')}`)
   }
-  infoSegments.push(`${t('chat.session')}: ${formatTokens(totalTokens)}`)
-  infoSegments.push(`${currentTurnCount} turns`)
 
   const isolationBadge = isolationMode === 'docker'
     ? { icon: FiBox, label: t('chat.dockerIsolation'), color: tokens.colors.accent.greenBright, bg: tokens.colors.accent.greenSubtle }
@@ -202,6 +183,29 @@ function AgentStatusBar() {
       </Flex>
 
       <Flex align="center" gap={3}>
+        {/* Thinking mode toggle — only for paid plans (Qwen3.6+ supports it) */}
+        {thinkingSupported && (
+          <Flex
+            as="button"
+            align="center"
+            gap="4px"
+            px="6px"
+            py="2px"
+            borderRadius="4px"
+            cursor="pointer"
+            bg={thinkingEnabled ? 'rgba(163, 113, 247, 0.1)' : 'transparent'}
+            color={thinkingEnabled ? tokens.colors.accent.purple : tokens.colors.text.disabled}
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ bg: thinkingEnabled ? 'rgba(163, 113, 247, 0.15)' : tokens.colors.bg.hoverSubtle }}
+            onClick={() => toggleThinking(!thinkingEnabled)}
+            title={thinkingEnabled ? 'Thinking ON (click to disable)' : 'Thinking OFF (click to enable)'}
+          >
+            <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
+              {thinkingEnabled ? '⚡ Thinking' : 'Thinking OFF'}
+            </Text>
+          </Flex>
+        )}
+
         <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
           {infoSegments.join(' \u00B7 ')}
         </Text>

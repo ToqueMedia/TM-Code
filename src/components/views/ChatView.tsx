@@ -40,6 +40,9 @@ function ChatView() {
   const billingStatus = useBillingStore(s => s.status)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const [showAttachDialog, setShowAttachDialog] = useState(false)
+  const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
+  const setThinkingEnabled = useSettingsStore(s => s.setThinkingEnabled)
+  const thinkingSupported = billingPlan !== 'explorer'
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
   const streamingVersion = useChatStore(s => s.streamingVersion)
@@ -135,6 +138,33 @@ function ChatView() {
 
         {/* Credits + Isolation + MCP indicators */}
         <HStack gap={1.5}>
+          {/* Thinking toggle — only for paid plans */}
+          {thinkingSupported && (
+            <Flex
+              as="button"
+              align="center"
+              gap="4px"
+              px="6px"
+              py="3px"
+              borderRadius="5px"
+              cursor="pointer"
+              bg={thinkingEnabled ? 'rgba(163, 113, 247, 0.1)' : 'transparent'}
+              border="1px solid"
+              borderColor={thinkingEnabled ? 'rgba(163, 113, 247, 0.25)' : tokens.colors.border.default}
+              color={thinkingEnabled ? tokens.colors.accent.purple : tokens.colors.text.disabled}
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{
+                bg: thinkingEnabled ? 'rgba(163, 113, 247, 0.15)' : tokens.colors.bg.hoverSubtle,
+                borderColor: thinkingEnabled ? 'rgba(163, 113, 247, 0.35)' : tokens.colors.border.subtle,
+              }}
+              onClick={() => setThinkingEnabled(!thinkingEnabled)}
+              title={thinkingEnabled ? 'Thinking ON — click to disable for faster responses' : 'Thinking OFF — click to enable deep reasoning'}
+            >
+              <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
+                {thinkingEnabled ? '⚡ Thinking' : 'Thinking'}
+              </Text>
+            </Flex>
+          )}
           <CreditIndicator
             plan={billingPlan}
             noCredits={noCredits}
@@ -224,12 +254,13 @@ function ChatView() {
         )}
       </AnimatePresence>
 
+        <Box position="relative" flex="1" overflow="hidden">
         <Box
           ref={scrollRef}
           role="log"
           aria-live="polite"
           aria-label={t("chat.messages")}
-          flex="1"
+          h="100%"
           overflowY="auto"
           pl={4}
           pr="22px"
@@ -269,6 +300,35 @@ function ChatView() {
               </Box>
             )}
           </Box>
+        </Box>
+
+        {/* Scroll-to-bottom anchor button — shows when user scrolls up */}
+        {!isAtBottom && (
+          <Box
+            as="button"
+            position="absolute"
+            bottom="8px"
+            left="50%"
+            transform="translateX(-50%)"
+            px={3}
+            py="6px"
+            borderRadius="full"
+            bg={tokens.colors.bg.overlay}
+            border="1px solid"
+            borderColor={tokens.colors.border.panel}
+            color={tokens.colors.text.secondary}
+            fontSize="11px"
+            fontWeight="600"
+            cursor="pointer"
+            boxShadow="0 4px 12px rgba(0,0,0,0.3)"
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+            onClick={() => scrollToBottom()}
+            zIndex={10}
+          >
+            ↓
+          </Box>
+        )}
         </Box>
 
       {/* Attach Container Dialog */}
@@ -464,7 +524,7 @@ function CreditIndicator(props: {
             )}
           </Flex>
 
-          {/* Cycle progress — single primary metric */}
+          {/* Cycle progress */}
           {props.tokenBudget > 0 && (
             <VStack gap={0.5} align="stretch" w="100%">
               <Flex justify="space-between" w="100%">
@@ -490,20 +550,18 @@ function CreditIndicator(props: {
                     transition="width 0.5s ease" />
                 </Box>
               )}
-              <Flex justify="space-between" w="100%">
-                <Text fontSize="9px" color={tokens.colors.text.disabled}>
-                  {(props.tokensConsumed / 1_000_000).toFixed(2)}M / {(props.tokenBudget / 1_000_000).toFixed(2)}M tokens
-                </Text>
-                {props.cycleEnd && (
+              {/* Cycle reset date — token counts removed */}
+              {props.cycleEnd && (
+                <Flex justify="flex-end" w="100%">
                   <Text fontSize="9px" color={tokens.colors.text.disabled}>
                     {t('chat.resetsIn')} {formatCycleEnd(props.cycleEnd)} ({daysUntil(props.cycleEnd)}d)
                   </Text>
-                )}
-              </Flex>
+                </Flex>
+              )}
             </VStack>
           )}
 
-          {/* TMS overage credits — always shown if user has any */}
+          {/* TMS overage credits */}
           {props.tmsRemaining > 0 && (
             <>
               <Box w="100%" h="1px" bg={isInOverage ? 'rgba(247, 127, 0, 0.15)' : 'rgba(255, 255, 255, 0.06)'} />

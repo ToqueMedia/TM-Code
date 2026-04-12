@@ -4,17 +4,22 @@ import { FiAlertTriangle, FiShield } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
+type PromptReason = 'sensitive_file' | 'dangerous_command' | null
+
 interface PermissionDialogProps {
   toolName: string
   args: Record<string, unknown>
+  promptReason?: PromptReason
+  /** @deprecated Use promptReason instead. Kept for compat. */
   sensitive?: boolean
   onApprove: () => void
   onApproveAll: () => void
   onDeny: () => void
 }
 
-function getToolLabel(toolName: string, sensitive?: boolean): string {
-  if (sensitive) return t('perm.readSensitive')
+function getToolLabel(toolName: string, promptReason?: PromptReason): string {
+  if (promptReason === 'sensitive_file') return t('perm.readSensitive')
+  if (promptReason === 'dangerous_command') return t('perm.dangerousCommand')
   switch (toolName) {
     case 'read_file': return t('perm.readFile')
     case 'write_file': return t('perm.writeFile')
@@ -76,7 +81,7 @@ const buttonBase: React.CSSProperties = {
   transition: 'all 0.15s ease',
 }
 
-function PermissionDialog({ toolName, args, sensitive, onApprove, onApproveAll, onDeny }: PermissionDialogProps) {
+function PermissionDialog({ toolName, args, promptReason, sensitive, onApprove, onApproveAll, onDeny }: PermissionDialogProps) {
   // Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -136,15 +141,22 @@ function PermissionDialog({ toolName, args, sensitive, onApprove, onApproveAll, 
           />
         )}
         <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
-          {t("perm.agentWantsTo")} {getToolLabel(toolName, sensitive)}
+          {t("perm.agentWantsTo")} {getToolLabel(toolName, promptReason || (sensitive ? 'sensitive_file' : null))}
         </Text>
       </Flex>
 
-      {/* Sensitive file warning */}
-      {sensitive && (
+      {/* Context warning based on prompt reason */}
+      {(promptReason === 'sensitive_file' || (sensitive && !promptReason)) && (
         <Box px={4} pb={2}>
           <Text fontSize="11px" color={tokens.colors.accent.orange}>
             {t("perm.sensitiveWarning")}
+          </Text>
+        </Box>
+      )}
+      {promptReason === 'dangerous_command' && (
+        <Box px={4} pb={2}>
+          <Text fontSize="11px" color={tokens.colors.accent.orange}>
+            {t("perm.dangerousWarning")}
           </Text>
         </Box>
       )}
