@@ -13,6 +13,7 @@ pub mod project;
 pub mod sandbox;
 pub mod search;
 pub mod terminal;
+pub mod version;
 
 /// Strip the Windows UNC prefix (`\\?\`) from a string path if present.
 /// `std::fs::canonicalize` on Windows always returns UNC paths, but most

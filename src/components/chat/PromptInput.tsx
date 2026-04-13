@@ -226,7 +226,7 @@ function PromptInput() {
           borderTop="1px solid rgba(255, 255, 255, 0.03)"
         >
           <Text fontSize="10px" color="rgba(255,255,255,0.15)" letterSpacing="0.02em">
-            {navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'} + Enter to send
+            Enter to send, Shift + Enter for new line
           </Text>
         </Flex>
       </Box>

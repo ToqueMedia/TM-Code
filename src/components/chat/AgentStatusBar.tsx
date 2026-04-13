@@ -10,6 +10,7 @@ import { useContainerStore } from '../../stores/containerStore'
 import { useBillingStore, isInOverageState } from '../../stores/billingStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
+import { getCommandQueueSnapshot } from '../../services/agent/messageQueue'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -32,13 +33,14 @@ function AgentStatusBar() {
   // Overage UI fires for either explicit overage status OR cycle exhausted (spillover)
   const usingTmsOverage = isInOverageState(billingStatus, consumedPct)
   const isBudgetBlocked = billingStatus === 'rejected'
-  const queuePosition = useAgentStore(s => s.queuePosition)
   const bgRunning = useBackgroundAgentStore(s => s.getRunningCount())
   const bgTotal = useBackgroundAgentStore(s => s.getAll().length)
   const agentTasks = useAgentStore(s => s.tasks)
+  const queueLength = getCommandQueueSnapshot().length
 
   const handleStop = () => {
     usePermissionStore.getState().clearPending()
+    usePermissionStore.getState().resetAutoApprove()
     resolveAllPendingDiffApprovals(false)
     AgentService.getInstance().cancelLoop()
     useAgentStore.getState().setStatus('idle')
@@ -54,10 +56,8 @@ function AgentStatusBar() {
     error: { color: tokens.colors.accent.red, label: error || 'Error', pulse: false },
   }
 
-  // Status priority: queue > inactive > budget blocked > overage > no credits > agent status
-  const config = queuePosition
-    ? { color: tokens.colors.accent.orange, label: `${t('chat.inQueue')}: ${queuePosition.position} / ${queuePosition.total}`, pulse: true }
-    : (!isActive && status === 'idle')
+  // Status priority: inactive > budget blocked > overage > no credits > agent status
+  const config = (!isActive && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.accountInactive'), pulse: false }
     : (isBudgetBlocked && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.noCredits'), pulse: false }
@@ -73,9 +73,12 @@ function AgentStatusBar() {
   const toggleThinking = useSettingsStore(s => s.setThinkingEnabled)
   const billingPlan = useBillingStore(s => s.plan)
   const thinkingSupported = billingPlan !== 'explorer'
+  const autoApproveDiffs = usePermissionStore(s => s.autoApproveDiffs)
 
   // Build info segments
   const infoSegments: string[] = []
+  if (autoApproveDiffs) infoSegments.push('⚡ Auto-approve ON')
+  if (queueLength > 0) infoSegments.push(`${queueLength} queued`)
   if (skillCount > 0) infoSegments.push(`${skillCount} ${t("chat.skills")}`)
   if (mcpIsInitializing) {
     infoSegments.push(t('chat.mcpStarting'))

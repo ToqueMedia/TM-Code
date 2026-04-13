@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   Box,
   Flex,
@@ -17,7 +17,20 @@ import {
   LuChevronRight,
   LuSettings,
 } from 'react-icons/lu'
+import { invoke } from '@tauri-apps/api/core'
 import { tokens } from '@/theme/tokens'
+
+// Cache the version promise — it never changes during the session.
+// Avoids repeated IPC calls on every WelcomeSidebar mount.
+let versionPromise: Promise<string> | null = null
+function getAppVersion(): Promise<string> {
+  if (!versionPromise) {
+    versionPromise = invoke<string>('get_app_version')
+      .then(v => `v${v}`)
+      .catch(() => '')
+  }
+  return versionPromise
+}
 
 interface RecentProject {
   id?: string
@@ -49,6 +62,12 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   onOpenProject,
   onSettings,
 }) => {
+  const [appVersion, setAppVersion] = useState('')
+
+  useEffect(() => {
+    getAppVersion().then(setAppVersion)
+  }, [])
+
   const handleAction = (id: string) => {
     if (id === 'new') onNewProject()
     else if (id === 'open') onOpenFolder()
@@ -271,7 +290,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
           </Icon>
         </Flex>
         <Text fontSize="10px" color={tokens.colors.text.muted} opacity={0.5}>
-          v0.1.5
+          {appVersion}
         </Text>
       </Flex>
     </Box>

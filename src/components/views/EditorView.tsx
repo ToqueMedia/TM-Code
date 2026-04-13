@@ -210,7 +210,6 @@ function EditorView() {
               <EmptyEditorState
                 onBackToChat={() => useLayoutStore.getState().goBack()}
                 onToggleExplorer={() => handleSelectPanel(activeSidebarPanel === 'explorer' ? null : 'explorer')}
-                onToggleTerminal={toggleBottomPanel}
               />
             )}
           </Flex>

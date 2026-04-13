@@ -117,7 +117,6 @@ const FileTree: React.FC<FileTreeProps> = ({ rootPath, onFileSelect, onRefresh }
         onRename={actions.beginRename} onDelete={actions.handleDeleteFromMenu} onReveal={actions.handleReveal} onCopyPath={actions.handleCopyPath}
         onCopyRelativePath={actions.handleCopyRelativePath}
         onOpenToSide={actions.handleOpenToSide}
-        onOpenInTerminal={actions.handleOpenInTerminal}
         onFindInFolder={actions.handleFindInFolder}
       />
 

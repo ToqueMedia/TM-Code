@@ -36,6 +36,15 @@ export interface ToolDefinition {
    * Not sent to the API — getToolDefinitions() only copies name/description/parameters.
    */
   concurrencySafe?: boolean
+  /**
+   * True iff this tool is handled server-side by the AI provider (e.g.
+   * DashScope native web_search). The frontend registers the schema so
+   * the model can call it, but no execute handler runs locally. If the
+   * provider doesn't handle it, a skip notice is returned.
+   *
+   * Default: false (local execution). Not sent to the API.
+   */
+  passive?: boolean
 }
 
 export interface OpenAIToolDefinition {
@@ -129,6 +138,17 @@ class ToolExecutor {
     // again mid-execution via input._abortSignal — that's their job.
     if (signal?.aborted) {
       return `Tool ${toolName} aborted before execution (user cancelled).`
+    }
+
+    // Passive tools: handled server-side by the provider (DashScope/Qwen native tools).
+    // The `passive` flag on the tool definition declares this — no hardcoded Set to maintain.
+    // These are defined in the tool schema so the model can call them, but the
+    // provider executes them internally — the frontend never runs an execute handler.
+    // When the model calls a passive tool, the provider returns results directly
+    // in the API response. If we reach here, it means the model called a passive
+    // tool but the provider didn't handle it (e.g., wrong model). Return a skip notice.
+    if (tool.definition.passive) {
+      return `Tool ${toolName} is a server-side tool managed by the AI provider. It was not executed locally. Ensure the active model supports this tool natively (e.g., Qwen 3.6 on DashScope).`
     }
 
     // .env files are ALWAYS blocked — read, write, edit, delete
@@ -1309,6 +1329,28 @@ class ToolExecutor {
       }
     })
 
+    // === web_search (DashScope/Qwen native tool — handled server-side) ===
+    // Qwen 3.6 on DashScope has native web_search. The model calls this tool,
+    // DashScope executes the search internally, and returns results directly.
+    // No execute handler needed — passive tools are skipped in execute().
+    this.tools.set('web_search', {
+      definition: {
+        name: 'web_search',
+        description: 'Search the internet for up-to-date information. Returns search results with titles, snippets, URLs, and metadata. Use this to look up documentation, find solutions to errors, research technical topics, or get current information. This tool is handled natively by the AI provider (DashScope/Qwen) — the model calls it, the provider executes.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'The search query' },
+            max_results: { type: 'number', description: 'Maximum number of results. Default: 5' },
+          },
+          required: ['query']
+        },
+        concurrencySafe: true,
+        passive: true,  // handled server-side by DashScope via enable_search
+      },
+      execute: async () => 'web_search is a native DashScope/Qwen tool. Results are returned by the provider directly.'
+    })
+
     // === web_fetch ===
     this.tools.set('web_fetch', {
       definition: {
@@ -1805,7 +1847,7 @@ class ToolExecutor {
     this.tools.set('research', {
       definition: {
         name: 'research',
-        description: 'Delegate a task to a parallel sub-agent that can read, create, edit, and search files. Use to investigate code, refactor in parallel, or handle independent sub-tasks. Multiple research calls run concurrently. The sub-agent returns a text summary of what it did.',
+        description: 'Delegate a task to a parallel sub-agent that can read, create, edit, search files, AND search the internet. Use to investigate code, refactor in parallel, research technical topics online, or handle independent sub-tasks. Multiple research calls run concurrently. The sub-agent returns a text summary of what it did.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1822,10 +1864,12 @@ class ToolExecutor {
         // Lazy import to avoid circular dependency
         const { default: AgentService } = await import('./agentService')
 
-        // Sub-agent tools: read, write, create, edit, search, glob, diagnostics
+        // Sub-agent tools: read, write, create, edit, search, glob, diagnostics + web research
         const subAgentToolNames = new Set([
           'read_file', 'write_file', 'create_file', 'edit_file',
           'list_directory', 'search_files', 'glob', 'get_diagnostics',
+          'web_search',   // passive — DashScope executes (query-based)
+          'web_fetch',    // active — frontend fetches specific URLs
         ])
         const subAgentTools = this.getToolDefinitions().filter(t =>
           subAgentToolNames.has(t.function.name)
@@ -1840,7 +1884,15 @@ class ToolExecutor {
         })
 
         const projectRoot = this.getProjectRoot()
-        const systemPrompt = `You are a sub-agent inside TM Code. Complete the task using the available tools. You can read, create, edit, and search files. Be thorough but concise.
+        const systemPrompt = `You are a sub-agent inside TM Code. Complete the task using the available tools. You can read, create, edit, and search files, AND search the internet for information.
+
+Available tools:
+- File operations: read_file, write_file, create_file, edit_file
+- Search: search_files (ripgrep), glob, list_directory
+- Web: web_search (search engine), web_fetch (fetch specific URLs)
+- Diagnostics: get_diagnostics
+
+Be thorough but concise. Use web_search for looking up documentation, error solutions, or technical research. Use web_fetch when you need to read specific URL content.
 
 Project root: ${projectRoot}`
 
@@ -1877,6 +1929,7 @@ Project root: ${projectRoot}`
             const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.query as string)
               || (args.pattern as string)
+              || (args.url as string)
               || ''
             updateProgress(`${toolName}: ${target}`)
           },

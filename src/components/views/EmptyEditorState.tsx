@@ -11,7 +11,6 @@ const shift = isMac ? '⇧' : 'Shift'
 interface Props {
   onBackToChat: () => void
   onToggleExplorer: () => void
-  onToggleTerminal: () => void
 }
 
 function Kbd({ children }: { children: string }) {
@@ -72,13 +71,12 @@ function ShortcutRow({ label, keys, onClick }: { label: string; keys: string[]; 
   )
 }
 
-function EmptyEditorState({ onBackToChat, onToggleExplorer, onToggleTerminal }: Props) {
+function EmptyEditorState({ onBackToChat, onToggleExplorer }: Props) {
   return (
     <Flex flex="1" align="center" justify="center" direction="column" gap={5} bg={tokens.colors.bg.app}>
       <ShortcutRow label={t("view.backToChat")} keys={[mod, 'L']} onClick={onBackToChat} />
       <ShortcutRow label={t("view.openFile")} keys={[mod, 'P']} onClick={() => window.dispatchEvent(new CustomEvent('quickopen:toggle'))} />
       <ShortcutRow label={t("view.toggleExplorer")} keys={[mod, 'B']} onClick={onToggleExplorer} />
-      <ShortcutRow label={t("view.toggleTerminal")} keys={[mod, 'J']} onClick={onToggleTerminal} />
       <ShortcutRow label={t("view.showAllCommands")} keys={[shift, mod, 'P']} onClick={() => window.dispatchEvent(new CustomEvent('command:palette'))} />
     </Flex>
   )

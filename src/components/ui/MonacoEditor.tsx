@@ -1,7 +1,8 @@
-import React, { useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react';
 import Editor, { Monaco, loader } from '@monaco-editor/react';
 import * as monacoEditor from 'monaco-editor';
 import type { editor, IDisposable } from 'monaco-editor';
+import { Box } from '@chakra-ui/react';
 
 // Use local monaco-editor instead of CDN
 loader.config({ monaco: monacoEditor });
@@ -828,8 +829,19 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     return () => window.removeEventListener('git:refreshGutter', handler);
   }, [updateGitGutter]);
 
+  // SVG toggle state — MUST be before any early returns (rules of hooks)
+  const [svgViewMode, setSvgViewMode] = useState<'image' | 'code'>('image')
+
+  // Reset view mode when file changes
   const store = useEditorRepository.getState();
   const file = store.openFiles.find(f => f.path === path);
+  const isSvgFile = file?.isImage && file.mimeType === 'image/svg+xml'
+  useEffect(() => {
+    if (!isSvgFile) {
+      setSvgViewMode('image')
+    }
+  }, [path, isSvgFile])
+
   if (!file) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: tokens.colors.text.secondary, fontSize: '14px', flexDirection: 'column', gap: '8px' }}>
@@ -855,6 +867,106 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
           modifiedPath={file.diff.relPath}
         />
       </React.Suspense>
+    );
+  }
+
+  // Image preview — render full-size image centered
+  if (file.isImage && file.mimeType && file.base64) {
+    const isSvg = file.mimeType === 'image/svg+xml'
+
+    return (
+      <div
+        style={{
+          height: '100%',
+          width: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        {/* SVG toggle — top-right corner */}
+        {isSvg && (
+          <Box
+            position="absolute"
+            top={8}
+            right={12}
+            zIndex={20}
+            display="flex"
+            borderRadius={tokens.radius.md}
+            overflow="hidden"
+            border={`1px solid ${tokens.colors.border.subtle}`}
+            bg={tokens.colors.bg.overlay}
+            backdropFilter="blur(8px)"
+          >
+            {(['image', 'code'] as const).map(mode => (
+              <Box
+                key={mode}
+                as="button"
+                px={3}
+                py={1.5}
+                fontSize="11px"
+                fontWeight="500"
+                cursor="pointer"
+                bg={svgViewMode === mode ? tokens.colors.accent.primarySubtle : 'transparent'}
+                color={svgViewMode === mode ? tokens.colors.accent.primary : tokens.colors.text.muted}
+                border="none"
+                transition={tokens.transition.fast}
+                _hover={{
+                  bg: svgViewMode === mode ? tokens.colors.accent.primaryHover : tokens.colors.bg.hoverSubtle,
+                  color: tokens.colors.text.primary,
+                }}
+                onClick={() => setSvgViewMode(mode)}
+              >
+                {mode === 'image' ? t('explorer.image') : t('explorer.code')}
+              </Box>
+            ))}
+          </Box>
+        )}
+
+        {isSvg && svgViewMode === 'code' ? (
+          /* SVG source code view */
+          <div style={{ height: '100%', width: '100%' }}>
+            <Editor
+              height="100%"
+              defaultLanguage="xml"
+              defaultValue={file.content}
+              beforeMount={handleBeforeMount}
+              onMount={handleMount}
+              options={options}
+              theme="toquemedia-vibrant"
+              loading={
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: tokens.colors.text.secondary, fontSize: '14px' }}>
+                  {t("explorer.loadingEditor")}
+                </div>
+              }
+            />
+          </div>
+        ) : (
+          /* Image preview (all formats) */
+          <div
+            style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              overflow: 'auto',
+              background: `repeating-conic-gradient(#1a1a1a 0% 25%, #141414 0% 50%) 50% / 20px 20px`,
+            }}
+          >
+            <img
+              src={`data:${file.mimeType};base64,${file.base64}`}
+              alt={path.split('/').pop()}
+              style={{
+                maxWidth: 'calc(100% - 40px)',
+                maxHeight: 'calc(100% - 40px)',
+                objectFit: 'contain',
+                borderRadius: '4px',
+                boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+              }}
+            />
+          </div>
+        )}
+      </div>
     );
   }
 

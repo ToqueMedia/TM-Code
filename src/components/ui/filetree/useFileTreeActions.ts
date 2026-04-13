@@ -149,13 +149,6 @@ export function useFileTreeActions(
     closeContextMenu();
   }
 
-  function handleOpenInTerminal(): void {
-    if (!menuNode) return;
-    const dir = menuNode.type === 'directory' ? menuNode.path : menuNode.path.substring(0, menuNode.path.lastIndexOf('/'));
-    window.dispatchEvent(new CustomEvent('terminal:open-at', { detail: { path: dir } }));
-    closeContextMenu();
-  }
-
   function handleFindInFolder(): void {
     if (!menuNode || menuNode.type !== 'directory') return;
     window.dispatchEvent(new CustomEvent('search:open', { detail: { folder: menuNode.path } }));
@@ -197,7 +190,6 @@ export function useFileTreeActions(
     handleNewFile,
     handleNewFolder,
     handleOpenToSide,
-    handleOpenInTerminal,
     handleFindInFolder,
   };
 }

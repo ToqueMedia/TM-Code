@@ -78,9 +78,10 @@ interface SettingsState {
   flaggedCommands: string[]
   /**
    * Thinking/reasoning mode for the AI agent.
-   * When ON: model uses deep reasoning (Qwen3 enable_thinking=true, temp=0.6).
-   * When OFF: model responds directly without reasoning (temp=0.7).
-   * Qwen3 has thinking ON by default per official docs — we mirror that.
+   * When ON: model uses deep reasoning (param varies by model — GLM-5.1
+   * uses OpenRouter `reasoning`, Qwen3 uses `enable_thinking`).
+   * When OFF: model responds directly without reasoning.
+   * Default: ON. Ignored for free plan (DeepSeek has no thinking mode).
    * Toggled by user in Settings or via the chat status bar indicator.
    */
   thinkingEnabled: boolean
@@ -123,7 +124,8 @@ const DEFAULTS: SettingsState = {
   hasCompletedOnboarding: false,
   sandboxEnabled: false,
   flaggedCommands: [],
-  // Qwen3 has thinking ON by default (official docs: enable_thinking=True is default)
+  // Thinking/reasoning ON by default for paid plans.
+  // Free plan (DeepSeek) ignores thinking param entirely.
   thinkingEnabled: true,
 }
 

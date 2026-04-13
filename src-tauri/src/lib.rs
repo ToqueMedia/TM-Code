@@ -14,6 +14,7 @@ use commands::project::*;
 use commands::sandbox::*;
 use commands::search::*;
 use commands::terminal::*;
+use commands::version::*;
 
 use tauri::image::Image;
 #[cfg(target_os = "macos")]
@@ -394,6 +395,7 @@ pub fn run() {
         .build()
         .expect("Failed to create HTTP client");
     let fim_state = commands::ai_completion::FimState::new();
+    let pty_map: commands::terminal::PtySessionMap = std::sync::Mutex::new(std::collections::HashMap::new());
 
     tauri::Builder::default()
         .manage(command_history)
@@ -404,6 +406,7 @@ pub fn run() {
         .manage(mcp_state)
         .manage(http_client)
         .manage(fim_state)
+        .manage(pty_map)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -736,7 +739,10 @@ pub fn run() {
             execute_command,
             run_streaming_command,
             start_dev_server,
-            start_interactive_shell,
+            start_pty_shell,
+            write_to_pty,
+            resize_pty,
+            kill_pty_session,
             kill_process,
             kill_port,
             check_server_health,
@@ -819,7 +825,8 @@ pub fn run() {
             sandbox_check_deps,
             open_preview_webview,
             close_preview_webview,
-            resize_preview_webview
+            resize_preview_webview,
+            get_app_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

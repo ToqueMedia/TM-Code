@@ -424,18 +424,18 @@ export function usePromptBar() {
     const projectPath = currentProject?.path || ''
     const projectType = currentProject?.projectType || 'unknown'
 
-    // Split on model capability. Vision-capable models (Kimi K2.5,
-    // Qwen3 Plus, Step3.5 — flagged `supportsAttachments: true`)
-    // receive an OpenAI-compatible content parts array with real
-    // image_url parts. Text-only models receive a flattened string
-    // with `<attached_image .../>` placeholders.
+    // Split on model capability. Vision-capable models (Qwen 3.6 Plus
+    // for image analysis, GLM-5.1 as primary) receive an OpenAI-compatible
+    // content parts array with real image_url parts. Text-only models
+    // receive a flattened string with `<attached_image .../>` placeholders.
     //
     // The split happens at this boundary (not in the queue layer) so
     // the queue stays provider-agnostic — it carries blocks, the
     // boundary decides how to ship them.
     const display = extractDisplayFromValue(content)
     // Model is decided by the backend. Multimodal support depends on the
-    // plan: paid plans use Kimi K2.5 (multimodal), free uses DeepSeek (text-only).
+    // plan: paid plans use GLM-5.1 (primary) + Qwen 3.6 Plus (image analysis),
+    // free uses DeepSeek V3.2 (text-only).
     const { useBillingStore } = await import('../../stores/billingStore')
     const billingPlan = useBillingStore.getState().plan
     const supportsAttachments = billingPlan !== 'explorer'
@@ -606,6 +606,15 @@ export function usePromptBar() {
     return !hadError
   }, [currentProject, devCommand])
 
+  /**
+   * handleSend — Claude Code style: ALL messages go through the queue first.
+   *
+   * The queue processor (useQueueProcessor) decides when to dequeue:
+   *   - Agent idle → dequeue immediately
+   *   - Agent busy → wait for query to end, then dequeue
+   *
+   * Slash commands are executed directly (never queued).
+   */
   const handleSend = useCallback(async () => {
     const prompt = useChatStore.getState().draftInput.trim()
     const hasAttachments = useChatStore.getState().draftAttachments.length > 0
@@ -625,7 +634,7 @@ export function usePromptBar() {
     // Close command menu
     setShowCommandMenu(false)
 
-    // Check if it's a slash command — these are never queued
+    // === Slash commands: execute directly (never queued) ===
     if (slashCommandRegistry.isSlashCommand(prompt)) {
       const command = slashCommandRegistry.getCommand(prompt)
       if (!command) return
@@ -659,73 +668,38 @@ export function usePromptBar() {
       return
     }
 
-    // === Agent is busy — enqueue the message ===
-    if (isAgentBusy) {
-      const attachments = [...useChatStore.getState().draftAttachments]
+    // === ALL other messages: ALWAYS enqueue first ===
+    // The queue processor will dequeue when the agent is idle.
+    // This matches Claude Code's behavior — no conditional gating on isAgentBusy.
+    const attachments = [...useChatStore.getState().draftAttachments]
 
-      // Build the queued value. Plain text → string. With attachments →
-      // ContentBlock[] interleaving text + attachments. The block form
-      // is what lets joinPromptValues preserve ordering when several
-      // queued commands are coalesced into a single agent turn.
-      let value: PromptValue
-      if (attachments.length === 0) {
-        value = prompt
-      } else {
-        const blocks: ContentBlock[] = []
-        if (prompt.length > 0) blocks.push({ type: 'text', text: prompt })
-        for (const att of attachments) {
-          blocks.push({ type: 'attachment', attachment: att })
-        }
-        value = blocks
-      }
-
-      enqueueMessage({
-        value,
-        mode: 'prompt',
-        priority: 'next',
-        uuid: generateId('queued'),
-      })
-
-      // Clear input
-      useChatStore.getState().setDraftInput('')
-      clearDraftAttachments()
-
-      logger.info('queue', `Message enqueued: "${prompt.slice(0, 50)}..."`)
-      return
-    }
-
-    // === Agent is idle — run directly ===
-    //
-    // No local re-entry guard needed. The QueryGuard inside runAgentLoop
-    // (tryStart) is the single source of truth: a second send slipping
-    // through during the sync setup will get null from tryStart and abort
-    // cleanly with a warning.
-    useChatStore.getState().setDraftInput('')
-    const directAttachments = useChatStore.getState().draftAttachments
-    clearDraftAttachments()
-
-    // Switch to chat so the user sees the agent working
-    const layoutStore = useLayoutStore.getState()
-    if (layoutStore.viewMode !== 'chat') {
-      layoutStore.setViewMode('chat')
-    }
-
-    // Build a PromptValue: plain string when no attachments, else
-    // ContentBlock[] interleaving the prompt and the attachments.
-    let directContent: PromptValue
-    if (directAttachments.length === 0) {
-      directContent = prompt
+    // Build the queued value. Plain text → string. With attachments →
+    // ContentBlock[] interleaving text + attachments.
+    let value: PromptValue
+    if (attachments.length === 0) {
+      value = prompt
     } else {
       const blocks: ContentBlock[] = []
       if (prompt.length > 0) blocks.push({ type: 'text', text: prompt })
-      for (const att of directAttachments) {
+      for (const att of attachments) {
         blocks.push({ type: 'attachment', attachment: att })
       }
-      directContent = blocks
+      value = blocks
     }
 
-    await runAgentForPrompt(directContent)
-  }, [currentProject, devCommand, isAgentBusy, runAgentForPrompt])
+    enqueueMessage({
+      value,
+      mode: 'prompt',
+      priority: 'next',
+      uuid: generateId('queued'),
+    })
+
+    // Clear input immediately — message is in the queue
+    useChatStore.getState().setDraftInput('')
+    clearDraftAttachments()
+
+    logger.info('queue', `Message enqueued: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
+  }, [currentProject, devCommand, runAgentForPrompt])
 
   const handleStop = useCallback(() => {
     // Clear the message queue BEFORE cancelling — prevents useQueueProcessor
@@ -819,7 +793,7 @@ export function usePromptBar() {
           setSelectedMentionIndex(prev => prev >= filteredMentions.length - 1 ? 0 : prev + 1)
           return
         }
-        if (e.key === 'Tab' || (e.key === 'Enter' && !e.metaKey && !e.ctrlKey)) {
+        if (e.key === 'Tab' || e.key === 'Enter') {
           e.preventDefault()
           const selected = filteredMentions[selectedMentionIndex]
           if (selected) handleMentionSelect(selected)
@@ -923,7 +897,7 @@ export function usePromptBar() {
           )
           return
         }
-        if (e.key === 'Tab' || (e.key === 'Enter' && !e.metaKey && !e.ctrlKey)) {
+        if (e.key === 'Tab' || e.key === 'Enter') {
           e.preventDefault()
           const selected = filteredCommands[selectedCommandIndex]
           if (selected) handleCommandSelect(selected)
@@ -936,7 +910,7 @@ export function usePromptBar() {
         }
       }
 
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
         handleSend()
       }

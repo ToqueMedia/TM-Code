@@ -1,12 +1,10 @@
-import { memo, useCallback, useState, useEffect, useRef } from 'react'
+import { memo, useCallback, useState } from 'react'
 import {
   Flex,
   HStack,
   IconButton,
-  Box
 } from '@chakra-ui/react'
 import {
-  FiTerminal,
   FiList,
   FiX,
   FiMinus,
@@ -14,7 +12,6 @@ import {
   FiCode
 } from 'react-icons/fi'
 import { PanelTab } from './PanelTab'
-import TerminalV3 from './TerminalV3'
 import ProblemsContent from './ProblemsContent'
 import OutputContent from './OutputContent'
 import DebugConsoleContent from './DebugConsoleContent'
@@ -28,60 +25,14 @@ interface BottomPanelProps {
   onClose: () => void
 }
 
-const TerminalContent = memo(() => {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    let timeoutId: NodeJS.Timeout;
-
-    const resizeObserver = new ResizeObserver((entries) => {
-      clearTimeout(timeoutId);
-
-      timeoutId = setTimeout(() => {
-        for (const entry of entries) {
-          if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
-            const resizeEvent = new CustomEvent('terminalResize', {
-              detail: {
-                width: entry.contentRect.width,
-                height: entry.contentRect.height,
-                timestamp: Date.now()
-              }
-            });
-            window.dispatchEvent(resizeEvent);
-            break;
-          }
-        }
-      }, 50);
-    });
-
-    resizeObserver.observe(containerRef.current);
-
-    return () => {
-      resizeObserver.disconnect();
-      clearTimeout(timeoutId);
-    };
-  }, []);
-
-  return (
-    <Box ref={containerRef} height="100%" width="100%">
-      <TerminalV3 />
-    </Box>
-  );
-})
-
-TerminalContent.displayName = 'TerminalContent'
-
 function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
-  const [activePanel, setActivePanel] = useState('terminal')
+  const [activePanel, setActivePanel] = useState('problems')
   const errorCount = useProblemsStore(selectErrorCount)
   const warningCount = useProblemsStore(selectWarningCount)
   const totalProblems = errorCount + warningCount
   const t = useTranslation()
 
   const panels = [
-    { id: 'terminal', label: t('panel.terminal'), icon: FiTerminal },
     { id: 'problems', label: t('panel.problems'), icon: FiList, badge: totalProblems > 0 ? totalProblems : undefined, badgeVariant: errorCount > 0 ? 'error' as const : 'warning' as const },
     { id: 'output', label: t('panel.output'), icon: FiRefreshCw },
     { id: 'debug-console', label: t('panel.debugConsole'), icon: FiCode },
@@ -93,8 +44,6 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
 
   const renderPanelContent = () => {
     switch (activePanel) {
-      case 'terminal':
-        return <TerminalContent />
       case 'output':
         return <OutputContent />
       case 'problems':
@@ -102,7 +51,7 @@ function BottomPanel({ isVisible, onToggle, onClose }: BottomPanelProps) {
       case 'debug-console':
         return <DebugConsoleContent />
       default:
-        return <TerminalContent />
+        return <ProblemsContent />
     }
   }
 

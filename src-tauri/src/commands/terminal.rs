@@ -2,6 +2,7 @@ use super::container::{
     clamp_to_project, docker_cmd, host_to_container_path, recover_colima, ActiveProjectState,
     WORKSPACE_PATH,
 };
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -34,6 +35,85 @@ pub struct ProcessInfo {
 // Estado global para manter histórico de comandos
 type CommandHistory = Mutex<Vec<String>>;
 pub type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
+
+// ─── PTY Session Management ──────────────────────────────────────────────────
+
+/// Holds a live PTY session: the master PTY, a writer for sending input,
+/// a reader thread for streaming output, and a handle to kill the child.
+pub struct PtySession {
+    pub master: Box<dyn portable_pty::MasterPty + Send>,
+    pub writer: Box<dyn std::io::Write + Send>,
+    pub child: Box<dyn portable_pty::Child + Send>,
+    pub session_id: String,
+}
+
+unsafe impl Send for PtySession {}
+unsafe impl Sync for PtySession {}
+
+pub type PtySessionMap = Mutex<HashMap<String, Arc<Mutex<PtySession>>>>;
+
+// Default terminal dimensions (used until first resize event from xterm.js)
+const DEFAULT_PTY_COLS: u16 = 120;
+const DEFAULT_PTY_ROWS: u16 = 30;
+
+// ─── Docker PTY wrappers ─────────────────────────────────────────────────────
+
+/// Dummy MasterPty for Docker mode (resize not applicable).
+struct DummyMaster;
+
+impl portable_pty::MasterPty for DummyMaster {
+    fn resize(&self, _size: PtySize) -> std::result::Result<(), anyhow::Error> {
+        Ok(()) // Docker PTY resize is handled by the container runtime
+    }
+
+    fn get_size(&self) -> std::result::Result<PtySize, anyhow::Error> {
+        Ok(PtySize { rows: DEFAULT_PTY_ROWS, cols: DEFAULT_PTY_COLS, pixel_width: 0, pixel_height: 0 })
+    }
+
+    fn try_clone_reader(&self) -> std::result::Result<Box<dyn std::io::Read + Send>, anyhow::Error> {
+        // Docker output is streamed via separate thread, not through this reader
+        Ok(Box::new(std::io::empty()))
+    }
+
+    fn take_writer(&self) -> std::result::Result<Box<dyn std::io::Write + Send>, anyhow::Error> {
+        Err(anyhow::anyhow!("Docker mode: use DockerWriter instead"))
+    }
+
+    #[cfg(unix)]
+    fn process_group_leader(&self) -> Option<libc::pid_t> {
+        None
+    }
+
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        None
+    }
+}
+
+/// Writer that sends data to Docker's stdin.
+struct DockerWriter {
+    stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
+}
+
+impl std::io::Write for DockerWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut guard = self.stdin.lock().map_err(|_| std::io::ErrorKind::Other)?;
+        if let Some(ref mut stdin) = *guard {
+            stdin.write(buf)
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Docker stdin closed"))
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut guard = self.stdin.lock().map_err(|_| std::io::ErrorKind::Other)?;
+        if let Some(ref mut stdin) = *guard {
+            stdin.flush()
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Docker stdin closed"))
+        }
+    }
+}
 
 // ─── Shared execution engine ─────────────────────────────────────────────────
 
@@ -1022,17 +1102,25 @@ pub async fn start_dev_server(
     Ok(pid)
 }
 
+/// PTY-based interactive shell — returns a session ID instead of a PID.
+/// The shell runs inside a real pseudo-terminal so it knows its dimensions
+/// and can format output correctly (tables, progress bars, etc.).
 #[tauri::command]
-pub async fn start_interactive_shell(
+pub async fn start_pty_shell(
+    session_id: String,
     cwd: Option<String>,
-    process_map: State<'_, ProcessMap>,
+    pty_map: State<'_, PtySessionMap>,
     active_project: State<'_, ActiveProjectState>,
-) -> Result<ProcessInfo, String> {
+    app: tauri::AppHandle,
+) -> Result<String, String> {
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
-    if let Some(ref ap) = project {
+    let pty_system = native_pty_system();
+
+    let (shell_cmd, shell_args, working_dir) = if let Some(ref ap) = project {
         if let Some(ref container_name) = ap.container_name {
-            // Docker mode: prefer bash if available, fallback to sh
+            // Docker mode: use docker exec with -t for pseudo-terminal allocation.
+            // Docker's PTY is handled by the container runtime; we stream output directly.
             let workdir = match &cwd {
                 Some(dir) => host_to_container_path(dir, &ap.project_path),
                 None => WORKSPACE_PATH.to_string(),
@@ -1049,7 +1137,7 @@ pub async fn start_interactive_shell(
             let shell = if has_bash { "bash" } else { "sh" };
 
             let child = docker_cmd()
-                .args(["exec", "-i", "-w", &workdir, container_name, shell])
+                .args(["exec", "-it", "-w", &workdir, container_name, shell])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1057,17 +1145,50 @@ pub async fn start_interactive_shell(
                 .map_err(|e| format!("Failed to start shell in container: {}", e))?;
 
             let pid = child.id();
-            process_map
-                .lock()
-                .map_err(|_| "Failed to lock process map")?
-                .insert(pid, child);
+            let docker_pid = pid;
 
-            return Ok(ProcessInfo {
-                pid,
-                command: "docker".to_string(),
-                args: vec!["exec".into(), container_name.clone(), shell.into()],
-                cwd: workdir,
+            // Store stdin for Docker so we can write to it later
+            let stdin = child.stdin.expect("Docker child should have stdin");
+
+            // Spawn a thread to pump Docker stdout/stderr -> Tauri events
+            let sid = session_id.clone();
+            let app_clone = app.clone();
+            std::thread::spawn(move || {
+                let mut stdout = child.stdout.expect("Docker child should have stdout");
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stdout.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let _ = app_clone.emit("pty-output", PtyOutputEvent {
+                                session_id: sid.clone(),
+                                data: text,
+                            });
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = app_clone.emit("pty-exit", PtyExitEvent {
+                    session_id: sid,
+                    exit_code: 0,
+                });
             });
+
+            // Store a minimal session for Docker (resize not applicable, kill via DockerChild)
+            let session = PtySession {
+                master: Box::new(DummyMaster),
+                writer: Box::new(DockerWriter { stdin: Arc::new(Mutex::new(Some(stdin))) }),
+                child: Box::new(DockerChild { pid: docker_pid }),
+                session_id: session_id.clone(),
+            };
+
+            pty_map
+                .lock()
+                .map_err(|_| "Failed to lock PTY map")?
+                .insert(session_id.clone(), Arc::new(Mutex::new(session)));
+
+            return Ok(session_id);
         }
 
         // App-level isolation: clamp cwd
@@ -1077,69 +1198,221 @@ pub async fn start_interactive_shell(
         };
 
         let (shell_cmd, shell_args) = pick_interactive_shell();
+        (shell_cmd, shell_args, working_dir.to_string_lossy().to_string())
+    } else {
+        // No active project: unrestricted
+        let working_dir = match cwd {
+            Some(dir) => dir,
+            None => {
+                env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .map_err(|e| format!("Failed to get current directory: {}", e))?
+            }
+        };
 
-        let mut cmd = Command::new(&shell_cmd);
-        cmd.args(&shell_args)
-            .current_dir(&working_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        hide_console_window(&mut cmd);
-
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to start interactive shell: {}", e))?;
-
-        let pid = child.id();
-        process_map
-            .lock()
-            .map_err(|_| "Failed to lock process map")?
-            .insert(pid, child);
-
-        return Ok(ProcessInfo {
-            pid,
-            command: shell_cmd,
-            args: shell_args,
-            cwd: working_dir.to_string_lossy().to_string(),
-        });
-    }
-
-    // No active project: unrestricted
-    let working_dir = match cwd {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?
-        }
+        let (shell_cmd, shell_args) = pick_interactive_shell();
+        (shell_cmd, shell_args, working_dir)
     };
 
-    let (shell_cmd, shell_args) = pick_interactive_shell();
+    // Build command for portable-pty
+    let mut cmd = CommandBuilder::new(&shell_cmd);
+    cmd.args(&shell_args);
+    cmd.cwd(&working_dir);
 
-    let mut cmd = Command::new(&shell_cmd);
-    cmd.args(&shell_args)
-        .current_dir(&working_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    // Inherit environment
+    for (k, v) in env::vars() {
+        cmd.env(k, v);
+    }
 
-    hide_console_window(&mut cmd);
+    // Create PTY with default dimensions
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: DEFAULT_PTY_ROWS,
+            cols: DEFAULT_PTY_COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("Failed to create PTY: {}", e))?;
 
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start interactive shell: {}", e))?;
+    // Spawn the shell inside the PTY (on the slave side)
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| format!("Failed to spawn shell in PTY: {}", e))?;
 
-    let pid = child.id();
-    process_map
+    // Get reader from master for output streaming
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("Failed to get PTY reader: {}", e))?;
+
+    // Get writer from master for sending input
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("Failed to get PTY writer: {}", e))?;
+
+    let master = pair.master;
+
+    // Spawn reader thread: pump PTY output -> Tauri events
+    let sid = session_id.clone();
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let _ = app_clone.emit("pty-output", PtyOutputEvent {
+                        session_id: sid.clone(),
+                        data: text,
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = app_clone.emit("pty-exit", PtyExitEvent {
+            session_id: sid,
+            exit_code: 0,
+        });
+    });
+
+    let session = PtySession {
+        master,
+        writer,
+        child,
+        session_id: session_id.clone(),
+    };
+
+    pty_map
         .lock()
-        .map_err(|_| "Failed to lock process map")?
-        .insert(pid, child);
+        .map_err(|_| "Failed to lock PTY map")?
+        .insert(session_id.clone(), Arc::new(Mutex::new(session)));
 
-    Ok(ProcessInfo {
-        pid,
-        command: shell_cmd,
-        args: shell_args,
-        cwd: working_dir.to_string_lossy().to_string(),
+    Ok(session_id)
+}
+
+/// Write input data to a PTY session.
+#[tauri::command]
+pub async fn write_to_pty(
+    session_id: String,
+    data: String,
+    pty_map: State<'_, PtySessionMap>,
+) -> Result<(), String> {
+    let map = pty_map.lock().map_err(|_| "Failed to lock PTY map")?;
+    let session = map.get(&session_id).ok_or_else(|| "PTY session not found".to_string())?;
+    let mut s = session.lock().map_err(|_| "Failed to lock session")?;
+
+    use std::io::Write as _;
+    let writer: &mut dyn std::io::Write = &mut *s.writer;
+    writer.write_all(data.as_bytes())
+        .map_err(|e| format!("Failed to write to PTY: {}", e))?;
+    writer.flush()
+        .map_err(|e| format!("Failed to flush PTY: {}", e))?;
+
+    Ok(())
+}
+
+/// Resize a PTY session (called when xterm.js container is resized).
+#[tauri::command]
+pub async fn resize_pty(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    pty_map: State<'_, PtySessionMap>,
+) -> Result<(), String> {
+    let map = pty_map.lock().map_err(|_| "Failed to lock PTY map")?;
+    let session = map.get(&session_id).ok_or_else(|| "PTY session not found".to_string())?;
+    let s = session.lock().map_err(|_| "Failed to lock session")?;
+
+    s.master.resize(PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
     })
+    .map_err(|e| format!("Failed to resize PTY: {}", e))?;
+
+    Ok(())
+}
+
+/// Kill a PTY session.
+#[tauri::command]
+pub async fn kill_pty_session(
+    session_id: String,
+    pty_map: State<'_, PtySessionMap>,
+) -> Result<(), String> {
+    let mut map = pty_map.lock().map_err(|_| "Failed to lock PTY map")?;
+    if let Some(session) = map.remove(&session_id) {
+        let mut s = session.lock().map_err(|_| "Failed to lock session")?;
+        let _ = s.child.kill();
+    }
+    Ok(())
+}
+
+/// Event payload for PTY output streaming.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PtyOutputEvent {
+    pub session_id: String,
+    pub data: String,
+}
+
+/// Event payload for PTY exit.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PtyExitEvent {
+    pub session_id: String,
+    pub exit_code: i32,
+}
+
+/// Wrapper for Docker child process (portable_pty::Child trait).
+struct DockerChild {
+    pid: u32,
+}
+
+impl std::fmt::Debug for DockerChild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DockerChild").field("pid", &self.pid).finish()
+    }
+}
+
+impl portable_pty::Child for DockerChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        // Docker child: we can't easily poll, assume running
+        Ok(None)
+    }
+
+    fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+        // Block until Docker container exits
+        Ok(portable_pty::ExitStatus::with_exit_code(0))
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        Some(self.pid)
+    }
+}
+
+impl portable_pty::ChildKiller for DockerChild {
+    fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            let _ = kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM);
+        }
+        #[cfg(windows)]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &self.pid.to_string()])
+                .output();
+        }
+        Ok(())
+    }
+
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(DockerChild { pid: self.pid })
+    }
 }
 
 /// Check if a URL is reachable (TCP connection accepted + HTTP response).

@@ -21,7 +21,6 @@ interface DiffLine {
 }
 
 function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
-  const fileName = diff.filePath.split('/').pop() || diff.filePath
   const language = useMemo(() => detectLanguage(diff.filePath), [diff.filePath])
 
   const changes = useMemo(() =>
@@ -70,90 +69,82 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
 
   return (
     <Box
-      border="1px solid rgba(255, 255, 255, 0.06)"
-      borderRadius="10px"
+      mb={2}
+      bg={tokens.colors.bg.app}
+      border={`1px solid ${tokens.colors.border.subtle}`}
       overflow="hidden"
-      mb={3}
-      bg={tokens.colors.bg.codeBlock}
     >
-      {/* Header */}
+      {/* Editor-like title bar — flat, no border-radius */}
       <Flex
         align="center"
         justify="space-between"
         px={3}
-        py="8px"
-        bg="rgba(255, 255, 255, 0.03)"
-        borderBottom="1px solid rgba(255, 255, 255, 0.05)"
+        py={1}
+        bg={tokens.colors.bg.titlebar}
+        borderBottom={`1px solid ${tokens.colors.border.subtle}`}
+        minH="30px"
       >
-        <Flex align="center" gap={2}>
-          <Image src={getFileIconUrl(diff.filePath)} w="15px" h="15px" flexShrink={0} />
+        <Flex align="center" gap={2} minW={0}>
+          <Image src={getFileIconUrl(diff.filePath)} w="14px" h="14px" flexShrink={0} />
           <Text
             fontSize="12px"
-            color={tokens.colors.accent.primary}
+            color={tokens.colors.text.primary}
             fontFamily={tokens.fontFamily.mono}
-            fontWeight="500"
+            fontWeight="400"
+            whiteSpace="nowrap"
+            overflow="hidden"
+            textOverflow="ellipsis"
           >
-            {fileName}
+            {diff.filePath}
           </Text>
-          {diff.isNewFile ? (
-            <Text
-              fontSize="10px"
-              color={tokens.colors.accent.green}
-              fontWeight="600"
-              bg="rgba(46, 160, 67, 0.1)"
-              px="6px"
-              py="1px"
-              borderRadius="4px"
-              textTransform="uppercase"
-              letterSpacing="0.03em"
-            >
-              new
-            </Text>
-          ) : (
-            <Flex align="center" gap={1.5}>
+          <Flex align="center" gap={1} ml={1} flexShrink={0}>
+            {diff.isNewFile ? (
               <Text
                 fontSize="10px"
-                color={tokens.colors.text.muted}
+                color={tokens.colors.accent.green}
                 fontWeight="500"
-                bg="rgba(255, 255, 255, 0.05)"
-                px="6px"
-                py="1px"
-                borderRadius="4px"
+                bg="rgba(46, 160, 67, 0.1)"
+                px={1}
+                borderRadius="3px"
+                letterSpacing="0.02em"
               >
-                modified
+                new
               </Text>
-              {addedCount > 0 && (
-                <Text fontSize="10px" color={tokens.colors.diff.addedText} fontFamily={tokens.fontFamily.mono}>
-                  +{addedCount}
-                </Text>
-              )}
-              {removedCount > 0 && (
-                <Text fontSize="10px" color={tokens.colors.diff.removedText} fontFamily={tokens.fontFamily.mono}>
-                  -{removedCount}
-                </Text>
-              )}
-            </Flex>
-          )}
+            ) : (
+              <>
+                {addedCount > 0 && (
+                  <Text fontSize="10px" color={tokens.colors.diff.addedText} fontFamily={tokens.fontFamily.mono} fontWeight="500">
+                    +{addedCount}
+                  </Text>
+                )}
+                {removedCount > 0 && (
+                  <Text fontSize="10px" color={tokens.colors.diff.removedText} fontFamily={tokens.fontFamily.mono} fontWeight="500">
+                    -{removedCount}
+                  </Text>
+                )}
+              </>
+            )}
+          </Flex>
         </Flex>
 
-        <Flex gap="6px">
+        {/* Inline action buttons — editor code-lens style */}
+        <Flex gap={0} align="center">
           <Box
             as="button"
             display="flex"
             alignItems="center"
-            gap="5px"
-            px="10px"
-            py="4px"
+            gap="4px"
+            px={2}
+            py="3px"
             bg="transparent"
-            border="1px solid rgba(248, 81, 73, 0.2)"
-            borderRadius="6px"
+            border="none"
             color={tokens.colors.accent.red}
             fontSize="11px"
-            fontWeight="500"
+            fontWeight="400"
             cursor="pointer"
-            transition="all 0.15s"
-            _hover={{ bg: 'rgba(248, 81, 73, 0.1)', borderColor: 'rgba(248, 81, 73, 0.35)' }}
-            _active={{ transform: 'scale(0.97)' }}
+            opacity={0.7}
+            _hover={{ opacity: 1, bg: 'rgba(248, 81, 73, 0.08)' }}
+            _active={{ opacity: 1 }}
             onClick={() => onReject(diff.id)}
           >
             <FiX size={12} /> Reject
@@ -162,19 +153,18 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
             as="button"
             display="flex"
             alignItems="center"
-            gap="5px"
-            px="10px"
-            py="4px"
-            bg="rgba(46, 160, 67, 0.1)"
-            border="1px solid rgba(46, 160, 67, 0.2)"
-            borderRadius="6px"
+            gap="4px"
+            px={2}
+            py="3px"
+            bg="transparent"
+            border="none"
             color={tokens.colors.accent.green}
             fontSize="11px"
-            fontWeight="500"
+            fontWeight="400"
             cursor="pointer"
-            transition="all 0.15s"
-            _hover={{ bg: 'rgba(46, 160, 67, 0.18)', borderColor: 'rgba(46, 160, 67, 0.35)' }}
-            _active={{ transform: 'scale(0.97)' }}
+            opacity={0.7}
+            _hover={{ opacity: 1, bg: 'rgba(46, 160, 67, 0.08)' }}
+            _active={{ opacity: 1 }}
             onClick={() => onAccept(diff.id)}
           >
             <FiCheck size={12} /> Accept
@@ -182,9 +172,9 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
         </Flex>
       </Flex>
 
-      {/* Diff content with line numbers + syntax highlighting */}
+      {/* Diff content — flat, editor-style gutter + code */}
       <Box
-        maxH="340px"
+        maxH="400px"
         overflowY="auto"
         overflowX="auto"
         fontSize="12px"
@@ -192,7 +182,7 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
         lineHeight="20px"
         css={{
           '&::-webkit-scrollbar': { width: '4px', height: '4px' },
-          '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.1)', borderRadius: '2px' },
+          '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.08)', borderRadius: '2px' },
         }}
       >
         {allLines.map((line, i) => {
@@ -200,15 +190,15 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
           let prefixChar = '\u00A0'
 
           if (line.type === 'added') {
-            bg = 'rgba(46, 160, 67, 0.08)'
+            bg = 'rgba(46, 160, 67, 0.06)'
             prefixChar = '+'
           } else if (line.type === 'removed') {
-            bg = 'rgba(248, 81, 73, 0.08)'
+            bg = 'rgba(248, 81, 73, 0.06)'
             prefixChar = '-'
           }
 
-          const gutterTextColor = line.type === 'normal' ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.25)'
-          const gutterBg = line.type === 'removed' ? 'rgba(248, 81, 73, 0.06)' : line.type === 'added' ? 'rgba(46, 160, 67, 0.04)' : 'transparent'
+          const gutterTextColor = line.type === 'normal' ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.2)'
+          const gutterBg = line.type === 'removed' ? 'rgba(248, 81, 73, 0.04)' : line.type === 'added' ? 'rgba(46, 160, 67, 0.03)' : 'transparent'
           const lineTokens = getLineTokens(line)
 
           return (
@@ -235,7 +225,7 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
                 align="center"
                 pr="8px"
                 bg={gutterBg}
-                borderRight={`1px solid ${line.type === 'added' ? 'rgba(46, 160, 67, 0.15)' : line.type === 'removed' ? 'rgba(248, 81, 73, 0.15)' : 'rgba(255,255,255,0.06)'}`}
+                borderRight={`1px solid ${line.type === 'added' ? 'rgba(46, 160, 67, 0.12)' : line.type === 'removed' ? 'rgba(248, 81, 73, 0.12)' : 'rgba(255,255,255,0.04)'}`}
                 userSelect="none"
               >
                 <Text fontSize="10px" color={gutterTextColor}>
@@ -244,7 +234,7 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
               </Flex>
               {/* Prefix */}
               <Flex
-                w="22px"
+                w="20px"
                 flexShrink={0}
                 justify="center"
                 align="center"
@@ -253,7 +243,7 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
                 <Text
                   fontSize="11px"
                   color={line.type === 'added' ? tokens.colors.diff.addedText : line.type === 'removed' ? tokens.colors.diff.removedText : 'transparent'}
-                  fontWeight="700"
+                  fontWeight="600"
                 >
                   {prefixChar}
                 </Text>
@@ -269,18 +259,6 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
             </Flex>
           )
         })}
-      </Box>
-
-      {/* File path footer */}
-      <Box
-        px={3}
-        py="5px"
-        bg="rgba(255, 255, 255, 0.02)"
-        borderTop="1px solid rgba(255, 255, 255, 0.04)"
-      >
-        <Text fontSize="10px" color="rgba(255,255,255,0.18)" fontFamily={tokens.fontFamily.mono}>
-          {diff.filePath}
-        </Text>
       </Box>
     </Box>
   )

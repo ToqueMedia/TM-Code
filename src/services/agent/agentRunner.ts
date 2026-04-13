@@ -6,9 +6,6 @@ import AgentService from './agentService'
 import ContextBuilder from './contextBuilder'
 import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
-import { needsQueue, waitForSlot } from '../queueService'
-import FirebaseAuthService from '../auth/firebaseAuth'
-import { t } from '@/i18n'
 
 interface RunAgentOptions {
   /** Whether to add a user message to the chat. Default: true */
@@ -99,52 +96,6 @@ async function runAgentInternal(
 
   const agentService = AgentService.getInstance()
   agentService.setSystemPrompt(systemPrompt)
-
-  // Free-tier: wait for queue slot before sending request.
-  // Create a dedicated AbortController since agentService's controller
-  // doesn't exist yet (it's created inside runAgentLoop).
-  // Wire the agent's cancelLoop to also abort the queue wait.
-  if (needsQueue()) {
-    const user = FirebaseAuthService.getInstance().getCurrentUser()
-    if (user) {
-      const queueAbort = new AbortController()
-
-      // Allow the stop button to cancel the queue wait
-      const originalCancel = agentService.cancelLoop.bind(agentService)
-      agentService.cancelLoop = () => {
-        queueAbort.abort()
-        originalCancel()
-      }
-
-      try {
-        agentStore.setQueuePosition({ position: 0, total: 5 })
-        await waitForSlot(
-          user.uid,
-          queueAbort.signal,
-          (pos) => {
-            agentStore.setQueuePosition(pos)
-          },
-        )
-      } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') {
-          agentStore.setStatus('idle')
-          agentStore.setQueuePosition(null)
-          useChatStore.getState().finalizeAssistantMessage()
-          return
-        }
-        // Queue error — don't send the request, report user-friendly error
-        agentStore.setStatus('error')
-        agentStore.setError(t('chat.queueError'))
-        agentStore.setQueuePosition(null)
-        useChatStore.getState().finalizeAssistantMessage()
-        return
-      } finally {
-        // Restore original cancelLoop
-        agentService.cancelLoop = originalCancel
-        agentStore.setQueuePosition(null)
-      }
-    }
-  }
 
   // Guard against double-finalization (onDone and onError can't both finalize)
   let finalized = false

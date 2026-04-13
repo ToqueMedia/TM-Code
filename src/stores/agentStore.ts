@@ -1,11 +1,6 @@
 import { create } from 'zustand'
 import { AgentStatus } from '../types/agent'
 
-export interface QueuePositionInfo {
-  position: number
-  total: number
-}
-
 export type AgentTaskStatus = 'pending' | 'in_progress' | 'completed'
 
 export interface AgentTask {
@@ -17,7 +12,6 @@ export interface AgentTask {
 interface AgentState {
   status: AgentStatus
   error: string | null
-  queuePosition: QueuePositionInfo | null
   /** Tasks the agent is tracking for the current message. Displayed in the chat UI. */
   tasks: AgentTask[]
   /**
@@ -33,7 +27,6 @@ interface AgentState {
 interface AgentActions {
   setStatus: (status: AgentStatus) => void
   setError: (error: string | null) => void
-  setQueuePosition: (pos: QueuePositionInfo | null) => void
   // Task management
   setTasks: (tasks: AgentTask[]) => void
   updateTaskStatus: (taskId: string, status: AgentTaskStatus) => void
@@ -47,7 +40,6 @@ interface AgentActions {
 export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   status: 'idle',
   error: null,
-  queuePosition: null,
   tasks: [],
   poolConcurrencyConflictsAvoided: 0,
 
@@ -57,10 +49,6 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
 
   setError: (error: string | null) => {
     set({ error })
-  },
-
-  setQueuePosition: (pos: QueuePositionInfo | null) => {
-    set({ queuePosition: pos })
   },
 
   setTasks: (tasks: AgentTask[]) => {
@@ -92,7 +80,6 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
     set({
       status: 'idle',
       error: null,
-      queuePosition: null,
       tasks: [],
       poolConcurrencyConflictsAvoided: 0,
     })

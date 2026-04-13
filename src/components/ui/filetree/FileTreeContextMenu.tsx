@@ -2,7 +2,7 @@ import React from 'react';
 import { HStack, Menu, Portal } from '@chakra-ui/react';
 import {
   FiFolderPlus, FiFilePlus, FiTrash2, FiEdit2, FiCopy,
-  FiExternalLink, FiTerminal, FiSearch, FiScissors, FiClipboard, FiLink
+  FiExternalLink, FiSearch, FiScissors, FiClipboard, FiLink
 } from 'react-icons/fi';
 import { tokens } from '@/theme/tokens';
 import type { FileTreeNode } from '@/types/fileTree'
@@ -22,7 +22,6 @@ interface FileTreeContextMenuProps {
   onCopyPath: () => void;
   onCopyRelativePath?: () => void;
   onOpenToSide?: () => void;
-  onOpenInTerminal?: () => void;
   onFindInFolder?: () => void;
   onCut?: () => void;
   onPaste?: () => void;
@@ -46,7 +45,6 @@ const FileTreeContextMenu: React.FC<FileTreeContextMenuProps> = ({
   onCopyPath,
   onCopyRelativePath,
   onOpenToSide,
-  onOpenInTerminal,
   onFindInFolder,
   onCut,
   onPaste,
@@ -146,15 +144,7 @@ const FileTreeContextMenu: React.FC<FileTreeContextMenuProps> = ({
 
             <Menu.Separator borderColor={tokens.colors.menu.separator} />
 
-            {/* Directory-specific: Open in Terminal, Find in Folder */}
-            {node?.type === 'directory' && onOpenInTerminal && (
-              <Menu.Item value="open-terminal" onClick={(e) => { e.stopPropagation(); onOpenInTerminal(); }} _hover={{ bg: hoverAccent }}>
-                <HStack gap={2}>
-                  <FiTerminal size={14} />
-                  <span>{t("filetree.openInTerminal")}</span>
-                </HStack>
-              </Menu.Item>
-            )}
+            {/* Directory-specific: Find in Folder */}
             {node?.type === 'directory' && onFindInFolder && (
               <Menu.Item value="find-in-folder" onClick={(e) => { e.stopPropagation(); onFindInFolder(); }} _hover={{ bg: hoverAccent }}>
                 <HStack gap={2}>
@@ -163,7 +153,7 @@ const FileTreeContextMenu: React.FC<FileTreeContextMenuProps> = ({
                 </HStack>
               </Menu.Item>
             )}
-            {node?.type === 'directory' && (onOpenInTerminal || onFindInFolder) && (
+            {node?.type === 'directory' && onFindInFolder && (
               <Menu.Separator borderColor={tokens.colors.menu.separator} />
             )}
 

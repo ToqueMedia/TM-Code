@@ -76,9 +76,9 @@ export type PromptInputMode = 'bash' | 'prompt'
  *
  *  - `now`   — Interrupt and send immediately. Aborts any in-flight tool
  *              call. Currently unused; reserved.
- *  - `next`  — Default for user input. Mid-turn drain in Claude Code; in
- *              TM Code collapses to between-turn drain because the agent
- *              loop does not yet support mid-turn injection.
+ *  - `next`  — Default for user input. Mid-turn drain injects these
+ *              between agent turns — the model sees queued messages
+ *              and responds before deciding to stop.
  *  - `later` — End-of-turn drain. Reserved for future system notifications.
  *
  * The priority field is still respected for ordering — `now` items are
