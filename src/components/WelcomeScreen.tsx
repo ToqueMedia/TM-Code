@@ -1,20 +1,17 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Box, Flex, useDialog } from '@chakra-ui/react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-// tauriMessage removed — templates disabled
 import { useProjectStore } from '../stores/projectStore'
-// Template import removed — templates disabled
-// environmentCheck removed — templates disabled
-// postScaffoldPipeline removed — templates disabled
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { WelcomeSidebar, WelcomeHero, CloneDialog } from './welcome'
-// RequirementsDialog removed — templates disabled
-// TemplateSelector removed — all projects start from scratch
 import SettingsView from './views/SettingsView'
 import WindowControls from './ui/WindowControls'
 import { IS_MAC } from '@/utils/platform'
+import { CmdModeView } from './cmd-mode'
+import { useWindowControls } from '../hooks/useWindowControls'
+import { WindowTitleManager } from '../utils/windowTitleManager'
 
 interface WelcomeScreenProps {
   onOpenProject: (path?: string, options?: { initGit?: boolean }) => void
@@ -22,11 +19,17 @@ interface WelcomeScreenProps {
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   const cloneDialog = useDialog()
-  const { recentProjects, loadRecentProjects } = useProjectStore()
+  const { recentProjects, loadRecentProjects, cmdModeProjectPath, cmdModeProjectPaths, setCmdModeProjectPath, removeCmdModePath } = useProjectStore()
   const [showSettings, setShowSettings] = useState(false)
+
+  // Window controls — shared hook eliminates duplication
+  const { handleClose, handleMinimize, handleFullToggle } = useWindowControls()
 
   useEffect(() => {
     loadRecentProjects()
+    const manager = WindowTitleManager.getInstance()
+    manager.startManaging()
+    return () => manager.stopManaging()
   }, [loadRecentProjects])
 
   const handleDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -38,28 +41,6 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     if (t.closest?.('[data-no-drag]')) return
     getCurrentWindow().startDragging().catch(() => {})
   }, [])
-
-  async function handleClose() {
-    try { await getCurrentWindow().close() } catch { /* noop */ }
-  }
-
-  async function handleMinimize() {
-    try { await getCurrentWindow().minimize() } catch { /* noop */ }
-  }
-
-  async function handleFullToggle() {
-    try {
-      const win = getCurrentWindow()
-      if (/Mac/.test(navigator.platform || '')) {
-        const fs = await win.isFullscreen()
-        await win.setFullscreen(!fs)
-      } else {
-        const isMax = await win.isMaximized()
-        if (isMax) await win.unmaximize()
-        else await win.maximize()
-      }
-    } catch { /* noop */ }
-  }
 
   const handleOpenFolder = async () => {
     try {
@@ -93,14 +74,30 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     }
   }
 
-  // All projects start from scratch — 3 options: New Project, Open Project, Clone Repository.
+  const handleCmdMode = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        directory: true,
+        title: t('misc.chooseFolder'),
+      })
+      if (selected) {
+        setCmdModeProjectPath(selected as string)
+      }
+    } catch (error: unknown) {
+      logger.error('ui', 'Failed to open directory dialog:', error)
+    }
+  }
+
+  // 4 options available: New Project, Open Project, Clone Repository, CMD Mode.
 
   return (
     <Flex
-      minHeight="100vh"
+      height="100vh"
+      overflow="hidden"
       bg="#0a0a0a"
       color={tokens.colors.text.primary}
-      onMouseDown={handleDrag}
+      onMouseDown={cmdModeProjectPath ? undefined : handleDrag}
       position="relative"
     >
       {/* Window controls — macOS: top-left, Windows/Linux: top-right */}
@@ -122,22 +119,36 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         </Box>
       )}
 
-      <WelcomeSidebar
-        recentProjects={recentProjects}
-        onNewProject={handleNewProject}
-        onOpenFolder={handleOpenFolder}
-        onCloneRepository={() => cloneDialog.setOpen(true)}
-        onOpenProject={onOpenProject}
-        onSettings={() => setShowSettings(true)}
-      />
+      {!cmdModeProjectPath && (
+        <WelcomeSidebar
+          recentProjects={recentProjects}
+          cmdModeProjectPaths={cmdModeProjectPaths}
+          onNewProject={handleNewProject}
+          onOpenFolder={handleOpenFolder}
+          onCloneRepository={() => cloneDialog.setOpen(true)}
+          onCmdMode={handleCmdMode}
+          onOpenCmdProject={setCmdModeProjectPath}
+          onOpenCmdProjectAsIde={(path) => { removeCmdModePath(path); onOpenProject(path) }}
+          onOpenProject={onOpenProject}
+          onSettings={() => setShowSettings(true)}
+        />
+      )}
 
-      {showSettings ? (
+      {cmdModeProjectPath ? (
+        <Box flex="1" minH={0} display="flex" flexDirection="column">
+          <CmdModeView
+            projectPath={cmdModeProjectPath}
+            onBack={() => setCmdModeProjectPath(null)}
+          />
+        </Box>
+      ) : showSettings ? (
         <SettingsView onBack={() => setShowSettings(false)} />
       ) : (
         <WelcomeHero
           onNewProject={handleNewProject}
           onOpenFolder={handleOpenFolder}
           onCloneRepository={() => cloneDialog.setOpen(true)}
+          onCmdMode={handleCmdMode}
         />
       )}
 

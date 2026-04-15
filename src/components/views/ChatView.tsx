@@ -12,7 +12,6 @@ import { useBillingStore, isInOverageState, type UserPlanName, type CostBudgetSt
 import MessageBubble from '../chat/MessageBubble'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
-import AttachContainerDialog from '../chat/AttachContainerDialog'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
 import { tokens } from '@/theme/tokens'
@@ -39,7 +38,6 @@ function ChatView() {
   const cycleEnd = useBillingStore(s => s.cycleEnd)
   const billingStatus = useBillingStore(s => s.status)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
-  const [showAttachDialog, setShowAttachDialog] = useState(false)
   const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
   const setThinkingEnabled = useSettingsStore(s => s.setThinkingEnabled)
   const [copied, setCopied] = useState(false)
@@ -407,11 +405,6 @@ function ChatView() {
         )}
         </Box>
 
-      {/* Attach Container Dialog */}
-      <AttachContainerDialog
-        isOpen={showAttachDialog}
-        onClose={() => setShowAttachDialog(false)}
-      />
     </Flex>
   )
 }

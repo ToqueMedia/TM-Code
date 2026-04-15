@@ -3,7 +3,6 @@ use commands::ai_completion::*;
 use commands::checkpoint::*;
 use commands::container::*;
 use commands::debugger::*;
-use commands::devcontainer::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
 use commands::git::*;
@@ -386,7 +385,7 @@ pub fn run() {
     commands::terminal::init_user_path();
 
     let (command_history, process_map) = commands::terminal::init_terminal_state();
-    let (container_map, active_container) = commands::container::init_container_state();
+    let active_container = commands::container::init_container_state();
     let debugger_state = commands::debugger::DebuggerState::new();
     let mcp_state = commands::mcp::McpState::new();
 
@@ -400,7 +399,6 @@ pub fn run() {
     tauri::Builder::default()
         .manage(command_history)
         .manage(process_map)
-        .manage(container_map)
         .manage(active_container)
         .manage(debugger_state)
         .manage(mcp_state)
@@ -791,19 +789,8 @@ pub fn run() {
             load_checkpoint_index,
             delete_checkpoint_files,
             delete_checkpoint_session,
-            check_docker_available,
-            create_project_container,
-            stop_project_container,
-            remove_project_container,
-            get_container_status,
-            get_active_container_info,
             set_active_project,
             clear_active_project,
-            cleanup_orphaned_containers,
-            detect_devcontainer,
-            list_running_containers,
-            attach_to_container,
-            is_attached_container,
             fim_completion,
             git_diff_lines,
             git_status_files,

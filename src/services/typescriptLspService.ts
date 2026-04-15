@@ -1,7 +1,6 @@
 import * as monaco from 'monaco-editor';
 import { FileTreeService } from './fileTreeService';
 import { FileService } from './fileService';
-import type { FileTreeNode } from '../types/fileTree';
 import { FileTreeIndexer } from '../utils/fileTreeIndex';
 import { logger } from '../utils/logger';
 
@@ -14,6 +13,10 @@ class TypeScriptLspService {
   private projectFiles: Map<string, string> = new Map();
   private models: Map<string, monaco.editor.ITextModel> = new Map();
   private isInitialized = false;
+  /** Prevents concurrent initialize() calls from running global setup twice. */
+  private isInitializing = false;
+  /** Global Monaco setup (compiler options + providers) — runs once per app lifetime. */
+  private globalSetupDone = false;
   private rootPath: string | null = null;
   private indexer = FileTreeIndexer.getInstance();
   private disposables: monaco.IDisposable[] = [];
@@ -31,21 +34,37 @@ class TypeScriptLspService {
     if (this.isInitialized && this.rootPath === projectRoot) {
       return;
     }
+    // Guard against concurrent calls (e.g. two useEffect hooks firing for the same project).
+    // Without this, both calls bypass the isInitialized check and both invoke
+    // setupLanguageService() → setCompilerOptions(), which re-subscribes Monaco's
+    // TypeScript worker to all existing models. Doing this N times creates N listener
+    // copies per model, eventually hitting Monaco's 1000-listener leak threshold.
+    if (this.isInitializing) {
+      return;
+    }
 
+    this.isInitializing = true;
     try {
       this.rootPath = projectRoot;
-      // Load all TypeScript/JavaScript files in the project
-      await this.loadProjectFiles(projectRoot);
-      
-      // Set up Monaco TypeScript language service
-      this.setupLanguageService();
+      // Build the file index for path completion (does NOT create Monaco models)
+      await this.buildFileIndex(projectRoot);
 
-      // Register path completion providers
-      this.registerPathCompletionProviders();
-      
+      // Global Monaco setup: compiler options + completion providers.
+      // These configure Monaco-wide state (not per-project), so they must
+      // only run ONCE per app lifetime. Running them on every initialize()
+      // call causes Monaco's TS worker to re-subscribe to all models each
+      // time, accumulating O(N * calls) listeners and eventually freezing.
+      if (!this.globalSetupDone) {
+        this.setupLanguageService();
+        this.registerPathCompletionProviders();
+        this.globalSetupDone = true;
+      }
+
       this.isInitialized = true;
     } catch (error: unknown) {
       logger.error('editor', 'Failed to initialize TypeScript LSP service:', error);
+    } finally {
+      this.isInitializing = false;
     }
   }
 
@@ -76,45 +95,22 @@ class TypeScriptLspService {
     this.models.set(filePath, model);
   }
 
-  private async loadProjectFiles(projectRoot: string) {
+  private async buildFileIndex(projectRoot: string) {
     try {
-      // Build file tree (Rust side). Note: current Rust implementation doesn't filter by extensions.
+      // Build file tree for fast path lookups (used by path completion providers).
+      // We do NOT create Monaco models here — models are only created when the user
+      // actually opens a file in the editor. Pre-creating models for every project
+      // file causes Monaco's observable system to accumulate 200+ listeners on shared
+      // events, which freezes the app in projects with many TypeScript files.
       const fileTree = await FileTreeService.buildFileTree(projectRoot, {
         showHidden: false,
         extensions: ['.ts', '.tsx', '.js', '.jsx', '.json', '.html', '.css'],
         maxDepth: undefined
       });
 
-      // Build index for fast path lookups
       this.indexer.buildIndex(fileTree);
-
-      // Allowed extensions and excluded directories to avoid creating excessive Monaco models
-      const allowed = new Set(['ts', 'tsx', 'js', 'jsx', 'json', 'html', 'css']);
-      const excludedDirs = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.turbo']);
-      const MODEL_LIMIT = 1000;
-      let modelCount = 0;
-
-      // Traverse the file tree and load only relevant files
-      const traverse = async (node: FileTreeNode) => {
-        if (node.type === 'file') {
-          const ext = node.extension ? node.extension.toLowerCase() : '';
-          if (!allowed.has(ext)) return;
-          if (modelCount >= MODEL_LIMIT) return;
-          await this.loadFileContent(node.path);
-          modelCount++;
-        } else if (node.type === 'directory' && node.children) {
-          // Skip heavy/common build folders
-          const name = node.name.toLowerCase();
-          if (excludedDirs.has(name)) return;
-          for (const child of node.children) {
-            await traverse(child);
-          }
-        }
-      };
-
-      await traverse(fileTree);
     } catch (error: unknown) {
-      logger.error('editor', 'Failed to load project files:', error);
+      logger.error('editor', 'Failed to build file index:', error);
     }
   }
 
@@ -377,20 +373,23 @@ class TypeScriptLspService {
   }
 
   reset() {
-    // Clear all files
+    // Clear per-project files and their Monaco models.
+    // Disposing a model removes its internal listeners from Monaco's global
+    // event emitters — this is the correct cleanup path.
     this.projectFiles.clear();
     this.models.forEach(m => m.dispose());
     this.models.clear();
-    
-    // Reset Monaco's extra libraries
-    monacoTs.typescriptDefaults.setExtraLibs([]);
 
-    // Dispose providers
-    this.disposables.forEach(d => d.dispose());
-    this.disposables = [];
-    
+    // NOTE: We intentionally do NOT:
+    //   - Call monacoTs.typescriptDefaults.setExtraLibs([]) — extra libs (DOM types)
+    //     are global and survive project switches.
+    //   - Dispose this.disposables (completion providers) — they're global providers
+    //     that read this.rootPath at call-time, so they work for any project.
+    //   - Reset globalSetupDone — compiler options and providers must not be re-applied.
+
     this.isInitialized = false;
     this.rootPath = null;
+    // isInitializing stays false — reset() is never called while initialize() is running.
   }
 }
 

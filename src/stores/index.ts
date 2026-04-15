@@ -16,8 +16,6 @@ export type { FileNode, FileTreeIndex } from './fileTreeWorkerStore'
 
 export { useAuthStore } from './authStore'
 
-export { useTerminalStore } from './terminalStore'
-
 export { useSettingsStore } from './settingsStore'
 export type { EditorIndentationSettings } from './settingsStore'
 

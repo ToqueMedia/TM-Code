@@ -98,6 +98,12 @@ class ToolExecutor {
   /** Tracks when files were last read by the model — for read-before-write enforcement.
    *  Stores timestamp + a simple content hash to detect concurrent modifications. */
   private readFileTimestamps: Map<string, { timestamp: number; hash: number }> = new Map()
+  /**
+   * CMD mode CWD — when set, the executor operates like Claude Code CLI:
+   * no project required, file writes go directly to disk (no diff/approval),
+   * and path validation is scoped to this directory instead of a project root.
+   */
+  private cmdModeCwd: string | null = null
 
   private constructor() {
     this.registerTools()
@@ -108,6 +114,16 @@ class ToolExecutor {
       ToolExecutor.instance = new ToolExecutor()
     }
     return ToolExecutor.instance
+  }
+
+  /** Enable CLI/CMD mode: file ops write directly to disk, no project required. */
+  enableCmdMode(cwd: string): void {
+    this.cmdModeCwd = cwd
+  }
+
+  /** Disable CLI/CMD mode and return to IDE diff mode. */
+  disableCmdMode(): void {
+    this.cmdModeCwd = null
   }
 
   /** Clears session-scoped state (e.g., install command cache). Call on new sessions. */
@@ -477,6 +493,7 @@ class ToolExecutor {
   }
 
   private getProjectRoot(): string {
+    if (this.cmdModeCwd) return this.cmdModeCwd
     const project = useProjectStore.getState().currentProject
     if (!project?.path) {
       throw new Error('No project is open. Cannot perform file operations without an active project.')
@@ -491,7 +508,8 @@ class ToolExecutor {
     const normalizedRoot = this.normalizePath(projectRoot)
 
     if (!normalizedPath.startsWith(normalizedRoot + '/') && normalizedPath !== normalizedRoot) {
-      throw new Error(`Access denied: path "${filePath}" is outside the project directory.`)
+      const label = this.cmdModeCwd ? 'working directory' : 'project directory'
+      throw new Error(`Access denied: path "${filePath}" is outside the ${label}.`)
     }
   }
 
@@ -616,8 +634,6 @@ class ToolExecutor {
     'wget',
     // System services
     'launchctl', 'systemctl',
-    // Docker
-    'docker', 'docker-compose',
   ]
 
   /**
@@ -1049,6 +1065,16 @@ class ToolExecutor {
           }
         }
 
+        // CMD mode: write directly to disk, no diff/approval needed
+        if (this.cmdModeCwd) {
+          const dir = path.slice(0, path.lastIndexOf('/'))
+          if (dir) await invoke('create_directories_all', { path: dir })
+          await invoke('write_file', { path, content: newContent })
+          this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
+          this.refreshFileTree()
+          return `File ${isNewFile ? 'created' : 'written'}: ${path}`
+        }
+
         // Check for uninstalled package imports before generating diff
         const missingPkgs = await this.checkMissingImports(newContent, path)
         if (missingPkgs.length > 0) {
@@ -1092,6 +1118,16 @@ class ToolExecutor {
           return `Error: File already exists: ${path}. Use write_file to overwrite or edit_file for small changes.`
         } catch {
           // File doesn't exist — good, proceed
+        }
+
+        // CMD mode: write directly to disk
+        if (this.cmdModeCwd) {
+          const dir = path.slice(0, path.lastIndexOf('/'))
+          if (dir) await invoke('create_directories_all', { path: dir })
+          await invoke('write_file', { path, content })
+          this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(content) })
+          this.refreshFileTree()
+          return `File created: ${path}`
         }
 
         // Check for uninstalled package imports before generating diff
@@ -1276,6 +1312,16 @@ class ToolExecutor {
         }
 
         const newContent = content.replace(oldStr, newStr)
+
+        // CMD mode: write directly to disk
+        if (this.cmdModeCwd) {
+          const dir = path.slice(0, path.lastIndexOf('/'))
+          if (dir) await invoke('create_directories_all', { path: dir })
+          await invoke('write_file', { path, content: newContent })
+          this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
+          this.refreshFileTree()
+          return `File edited: ${path}`
+        }
 
         // Check for uninstalled package imports in the NEW PART only (not the whole file).
         // Checking the whole file would flag pre-existing imports that already work.

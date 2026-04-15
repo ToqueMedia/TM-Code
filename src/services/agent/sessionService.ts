@@ -341,13 +341,14 @@ class SessionService {
     return sanitized
   }
 
-  private async updateIndex(projectPath: string, session: ChatSession): Promise<void> {
+  async updateIndex(projectPath: string, session: ChatSession): Promise<void> {
     try {
       const summaries = await this.listSessions(projectPath)
       const lastMsg = session.messages[session.messages.length - 1]
 
       const summary: SessionSummary = {
         id: session.id,
+        name: session.name,
         projectPath: session.projectPath,
         messageCount: session.messages.length,
         lastMessage: lastMsg?.content?.slice(0, 100) ?? '',
@@ -396,10 +397,19 @@ class SessionService {
     }
   }
 
+  async renameSession(session: ChatSession, name: string): Promise<void> {
+    session.name = name
+    await this.updateIndex(session.projectPath, session)
+  }
+
   async cleanupEmptySessions(projectPath: string): Promise<void> {
+    // Read the active session FIRST so we never delete it, even if it has 0 messages.
+    // Deleting the active session causes a PathNotFound error on the next startup
+    // because active_session.json still points to it.
+    const activeId = await this.getActiveSessionId(projectPath)
     const summaries = await this.listSessions(projectPath)
     for (const summary of summaries) {
-      if (summary.messageCount === 0) {
+      if (summary.messageCount === 0 && summary.id !== activeId) {
         await this.deleteSession(projectPath, summary.id)
       }
     }

@@ -94,58 +94,58 @@ function WinBarButton({
 
 const WindowControls = ({ onClose, onMinimize, onMaximize }: WindowControlsProps) => {
 	if (IS_MAC) {
-		// macOS: traffic-light circles with Finder-style icons on hover
+		// macOS: traffic-light circles with native-style icons on hover
 		return (
 			<HStack
-				gap={2}
+				gap="8px"
 				data-tauri-drag-region="false"
 				role="group"
 				css={{
-					'& .mac-dot-icon': { opacity: 0, transition: 'opacity 0.15s' },
+					'& .mac-dot-icon': { 
+						opacity: 0, 
+						transition: 'opacity 0.15s',
+						pointerEvents: 'none'
+					},
 					'&:hover .mac-dot-icon': { opacity: 1 },
 				}}
 			>
+				{/* Close */}
 				<Box
 					{...macDotBase}
-					bg={tokens.colors.windowControl.close}
+					bg="#ff5f56"
+					border="0.5px solid rgba(0,0,0,0.12)"
 					onClick={onClose}
-					_active={{ transform: 'scale(0.85)' }}
+					_active={{ bg: '#bf4740' }}
 				>
-					<Text className="mac-dot-icon" fontSize="9px" lineHeight="1" color="rgba(80,0,0,0.8)" fontWeight="700" mt="-1px">
-						&#x2715;
-					</Text>
+					<svg className="mac-dot-icon" width="6" height="6" viewBox="0 0 6 6" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<path d="M1.05 1.05L4.95 4.95M4.95 1.05L1.05 4.95" stroke="rgba(0,0,0,0.5)" strokeWidth="1.2" strokeLinecap="round"/>
+					</svg>
 				</Box>
+
+				{/* Minimize */}
 				<Box
 					{...macDotBase}
-					bg={tokens.colors.windowControl.minimize}
+					bg="#ffbd2e"
+					border="0.5px solid rgba(0,0,0,0.12)"
 					onClick={onMinimize}
-					_active={{ transform: 'scale(0.85)' }}
+					_active={{ bg: '#bf8e22' }}
 				>
-					<Text className="mac-dot-icon" fontSize="12px" lineHeight="1" color="rgba(120,70,0,0.8)" fontWeight="700" mt="-2px">
-						&#x2013;
-					</Text>
+					<svg className="mac-dot-icon" width="6" height="1" viewBox="0 0 6 1" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<path d="M0 0.5H6" stroke="rgba(0,0,0,0.5)" strokeWidth="1.2" strokeLinecap="round"/>
+					</svg>
 				</Box>
+
+				{/* Full Screen / Maximize */}
 				<Box
 					{...macDotBase}
-					bg={tokens.colors.windowControl.maximize}
+					bg="#27c93f"
+					border="0.5px solid rgba(0,0,0,0.12)"
 					onClick={onMaximize}
-					_active={{ transform: 'scale(0.85)' }}
+					_active={{ bg: '#1d962f' }}
 				>
-					{/* Diagonal arrows like Finder fullscreen icon */}
-					<Box className="mac-dot-icon" position="relative" w="7px" h="7px">
-						<Box
-							position="absolute" top="0" left="0"
-							w="0" h="0"
-							borderLeft="3.5px solid rgba(0,80,0,0.8)"
-							borderBottom="3.5px solid transparent"
-						/>
-						<Box
-							position="absolute" bottom="0" right="0"
-							w="0" h="0"
-							borderRight="3.5px solid rgba(0,80,0,0.8)"
-							borderTop="3.5px solid transparent"
-						/>
-					</Box>
+					<svg className="mac-dot-icon" width="6" height="6" viewBox="0 0 6 6" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<path d="M3.5 1H5V2.5M2.5 5H1V3.5M1.2 4.8L4.8 1.2" stroke="rgba(0,0,0,0.5)" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round"/>
+					</svg>
 				</Box>
 			</HStack>
 		)

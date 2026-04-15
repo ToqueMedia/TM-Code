@@ -42,8 +42,14 @@ export class WindowTitleManager {
 
   private updateWindowTitle() {
     try {
-      const { currentProject } = useProjectStore.getState();
+      const { currentProject, cmdModeProjectPath } = useProjectStore.getState();
       const { activeFile, openFiles } = useEditorRepository.getState();
+
+      if (cmdModeProjectPath) {
+        const folderName = cmdModeProjectPath.split(/[\/\\]/).pop() || cmdModeProjectPath;
+        document.title = `${folderName} [CMD Mode] - TM Code`;
+        return;
+      }
 
       if (!currentProject) {
         document.title = 'TM Code';

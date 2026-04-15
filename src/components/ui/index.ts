@@ -20,7 +20,6 @@ export { default as TabContextMenu } from './TabContextMenu'
 // Panels & Content
 export { default as SearchPanel } from './SearchPanel'
 export { default as FileTree } from './FileTree'
-export { default as TerminalV3 } from './TerminalV3'
 export { default as QuickOpen } from './QuickOpen'
 export { default as CommandPalette } from './CommandPalette'
 export { default as ProjectMenu } from './ProjectMenu'

@@ -14,7 +14,19 @@ export class ProjectFileWatcher {
   async startWatching(projectPath: string) {
     // Stop watching any previous project
     this.stopWatching();
-    
+
+    // Safety guard: refuse to watch overly broad paths (home dir, drive root, etc.).
+    // Watching /Users/ithustle recursively with FSEvents would scan millions of files
+    // and cause an immediate app freeze + CPU storm.
+    // A valid project path must be at least 3 components deep on Unix: /Users/name/project
+    const normalised = projectPath.replace(/\\/g, '/').replace(/\/$/, '');
+    const depth = normalised.split('/').filter(Boolean).length;
+    if (depth < 3) {
+      logger.warn('file-watcher', `Refusing to watch broad path (depth=${depth}): ${projectPath}. Open a project subdirectory instead.`);
+      this.unwatch = () => {};
+      return;
+    }
+
     try {
       // Start watching the project directory
       this.unwatch = await this.fileWatcher.watch(projectPath, this.handleFileEvent.bind(this));

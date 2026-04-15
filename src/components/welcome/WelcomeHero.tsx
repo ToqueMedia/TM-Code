@@ -12,6 +12,7 @@ import {
   LuRocket,
   LuFolderOpen,
   LuGitBranch,
+  LuTerminal,
 } from 'react-icons/lu'
 import { tokens } from '@/theme/tokens'
 import { useSettingsStore, matchesBinding, type ShortcutId } from '@/stores/settingsStore'
@@ -21,6 +22,7 @@ interface WelcomeHeroProps {
   onNewProject: () => void
   onOpenFolder: () => void
   onCloneRepository: () => void
+  onCmdMode: () => void
 }
 
 const featureCards: {
@@ -55,15 +57,24 @@ const featureCards: {
     shortcutId: null,
     color: tokens.colors.accent.purple,
   },
+  {
+    id: 'cmd',
+    icon: LuTerminal,
+    title: 'CMD Mode',
+    description: 'A powerful terminal-style interface for agentic tasks.',
+    shortcutId: null,
+    color: tokens.colors.accent.purple,
+  },
 ]
 
-const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onCloneRepository }) => {
+const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onCloneRepository, onCmdMode }) => {
   const shortcuts = useSettingsStore(s => s.shortcuts)
 
   const cardActions: Record<string, () => void> = {
     new: onNewProject,
     open: onOpenFolder,
     clone: onCloneRepository,
+    cmd: onCmdMode,
   }
 
   // Keyboard shortcuts active on WelcomeScreen (no project open, useKeyboardShortcuts won't handle these)

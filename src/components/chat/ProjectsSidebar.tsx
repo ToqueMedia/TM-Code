@@ -82,9 +82,14 @@ async function showProjectContextMenu(project: RecentProject) {
 }
 
 function ProjectsSidebar() {
-  const recentProjects = useProjectStore(s => s.recentProjects)
+  const allRecentProjects = useProjectStore(s => s.recentProjects)
+  const cmdModeProjectPaths = useProjectStore(s => s.cmdModeProjectPaths)
   const currentProject = useProjectStore(s => s.currentProject)
   const loadRecentProjects = useProjectStore(s => s.loadRecentProjects)
+
+  // CMD mode projects are terminal-only — exclude them from the IDE sidebar
+  const cmdPathSet = new Set(cmdModeProjectPaths)
+  const recentProjects = allRecentProjects.filter(p => !cmdPathSet.has(p.path))
 
   useEffect(() => {
     loadRecentProjects()

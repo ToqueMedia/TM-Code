@@ -1,7 +1,4 @@
-use super::container::{
-    clamp_to_project, docker_cmd, host_to_container_path, recover_colima, ActiveProjectState,
-    WORKSPACE_PATH,
-};
+use super::container::{clamp_to_project, ActiveProjectState};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,64 +53,6 @@ pub type PtySessionMap = Mutex<HashMap<String, Arc<Mutex<PtySession>>>>;
 const DEFAULT_PTY_COLS: u16 = 120;
 const DEFAULT_PTY_ROWS: u16 = 30;
 
-// ─── Docker PTY wrappers ─────────────────────────────────────────────────────
-
-/// Dummy MasterPty for Docker mode (resize not applicable).
-struct DummyMaster;
-
-impl portable_pty::MasterPty for DummyMaster {
-    fn resize(&self, _size: PtySize) -> std::result::Result<(), anyhow::Error> {
-        Ok(()) // Docker PTY resize is handled by the container runtime
-    }
-
-    fn get_size(&self) -> std::result::Result<PtySize, anyhow::Error> {
-        Ok(PtySize { rows: DEFAULT_PTY_ROWS, cols: DEFAULT_PTY_COLS, pixel_width: 0, pixel_height: 0 })
-    }
-
-    fn try_clone_reader(&self) -> std::result::Result<Box<dyn std::io::Read + Send>, anyhow::Error> {
-        // Docker output is streamed via separate thread, not through this reader
-        Ok(Box::new(std::io::empty()))
-    }
-
-    fn take_writer(&self) -> std::result::Result<Box<dyn std::io::Write + Send>, anyhow::Error> {
-        Err(anyhow::anyhow!("Docker mode: use DockerWriter instead"))
-    }
-
-    #[cfg(unix)]
-    fn process_group_leader(&self) -> Option<libc::pid_t> {
-        None
-    }
-
-    #[cfg(unix)]
-    fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
-        None
-    }
-}
-
-/// Writer that sends data to Docker's stdin.
-struct DockerWriter {
-    stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
-}
-
-impl std::io::Write for DockerWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut guard = self.stdin.lock().map_err(|_| std::io::ErrorKind::Other)?;
-        if let Some(ref mut stdin) = *guard {
-            stdin.write(buf)
-        } else {
-            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Docker stdin closed"))
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        let mut guard = self.stdin.lock().map_err(|_| std::io::ErrorKind::Other)?;
-        if let Some(ref mut stdin) = *guard {
-            stdin.flush()
-        } else {
-            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Docker stdin closed"))
-        }
-    }
-}
 
 // ─── Shared execution engine ─────────────────────────────────────────────────
 
@@ -348,58 +287,6 @@ fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
     cmd
 }
 
-/// Ensure a Docker container is running. If Docker is unreachable
-/// (Colima stale after sleep/wake), triggers automatic recovery.
-fn ensure_container_running(container_name: &str) {
-    let inspect = docker_cmd()
-        .args(["inspect", "-f", "{{.State.Running}}", container_name])
-        .output();
-
-    match inspect {
-        Ok(out) if out.status.success() => {
-            let running = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if running != "true" {
-                let _ = docker_cmd().args(["start", container_name]).output();
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-        }
-        _ => {
-            // Docker unreachable — try Colima recovery
-            if recover_colima() {
-                // Docker recovered — try to start the container
-                let _ = docker_cmd().args(["start", container_name]).output();
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-        }
-    }
-}
-
-/// Build a `docker exec` command that runs inside a container.
-fn build_container_command(command: &str, workdir: &str, container_name: &str) -> Command {
-    let mut cmd = docker_cmd();
-    let home_env = format!("HOME={}", workdir);
-    cmd.args([
-        "exec",
-        "-e",
-        &home_env,
-        "-w",
-        workdir,
-        container_name,
-        "sh",
-        "-c",
-        command,
-    ])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-
-    cmd
-}
 
 /// Spawn a command, stream its output into buffers, and wait with a timeout.
 /// Returns `CommandResult` on completion or timeout.
@@ -556,9 +443,8 @@ pub(crate) fn kill_process_tree(pid: u32) {
 /// Execute a one-shot command with project isolation.
 ///
 /// Routing logic (transparent to all frontend callers):
-///   1. Docker container active → `docker exec` inside container
-///   2. App-level isolation (no Docker) → host shell, cwd clamped to project
-///   3. No active project → host shell, unrestricted (shouldn't happen)
+///   1. Active project → host shell, cwd clamped to project directory
+///   2. No active project → host shell, unrestricted
 #[tauri::command]
 pub async fn execute_command(
     command: String,
@@ -571,33 +457,10 @@ pub async fn execute_command(
     }
 
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
-
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
     if let Some(ref ap) = project {
-        if let Some(ref container_name) = ap.container_name {
-            // ── Docker mode: try container, fall back to host if Docker is unavailable
-            ensure_container_running(container_name);
-            let workdir = match &cwd {
-                Some(dir) => host_to_container_path(dir, &ap.project_path),
-                None => WORKSPACE_PATH.to_string(),
-            };
-            let cmd = build_container_command(&command, &workdir, container_name);
-            match run_command_with_timeout(cmd, timeout).await {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    eprintln!("[exec] Docker exec failed ({}), falling back to host", e);
-                    let working_dir = match &cwd {
-                        Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
-                        None => PathBuf::from(&ap.project_path),
-                    };
-                    let fallback = build_host_command(&command, &working_dir);
-                    return run_command_with_timeout(fallback, timeout).await;
-                }
-            }
-        }
-
-        // ── App-level isolation: sandbox the command to the project directory
+        // App-level isolation: sandbox the command to the project directory
         let working_dir = match &cwd {
             Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
             None => PathBuf::from(&ap.project_path),
@@ -606,14 +469,13 @@ pub async fn execute_command(
         return run_command_with_timeout(cmd, timeout).await;
     }
 
-    // ── No active project: unrestricted host execution ───────────────
+    // No active project: unrestricted host execution
     let working_dir = match cwd {
         Some(dir) => PathBuf::from(dir),
         None => {
             env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?
         }
     };
-
     let cmd = build_host_command(&command, &working_dir);
     run_command_with_timeout(cmd, timeout).await
 }
@@ -728,39 +590,13 @@ pub async fn run_streaming_command(
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
     let mut cmd = if let Some(ref ap) = project {
-        if let Some(ref container_name) = ap.container_name {
-            let workdir = host_to_container_path(&cwd, &ap.project_path);
-            build_container_command(&command, &workdir, container_name)
-        } else {
-            let working_dir = PathBuf::from(clamp_to_project(&cwd, &ap.project_path));
-            build_sandboxed_host_command(&command, &working_dir)
-        }
+        let working_dir = PathBuf::from(clamp_to_project(&cwd, &ap.project_path));
+        build_sandboxed_host_command(&command, &working_dir)
     } else {
         build_host_command(&command, &PathBuf::from(&cwd))
     };
 
-    // Try to spawn; if Docker mode fails (daemon not running), fall back to host
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            if let Some(ref ap) = project {
-                if ap.container_name.is_some() {
-                    eprintln!(
-                        "[cmd] Docker exec failed ({}), falling back to host execution",
-                        e
-                    );
-                    let working_dir = PathBuf::from(clamp_to_project(&cwd, &ap.project_path));
-                    build_host_command(&command, &working_dir)
-                        .spawn()
-                        .map_err(|e2| format!("Failed to start command (host fallback): {}", e2))?
-                } else {
-                    return Err(format!("Failed to start command: {}", e));
-                }
-            } else {
-                return Err(format!("Failed to start command: {}", e));
-            }
-        }
-    };
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to start command: {}", e))?;
 
     let pid = child.id();
 
@@ -796,8 +632,8 @@ pub async fn run_streaming_command(
 /// frontend via Tauri events (`dev-server-output` and `dev-server-exit`).
 ///
 /// Routing:
-///   - Docker mode → `docker exec` (ports already forwarded on container)
-///   - App-level / no project → host shell (cwd clamped when isolated)
+///   - Active project → host shell, cwd clamped to project directory
+///   - No active project → host shell, unrestricted
 #[tauri::command]
 pub async fn start_dev_server(
     app: tauri::AppHandle,
@@ -816,102 +652,15 @@ pub async fn start_dev_server(
 
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
-    // Quick Docker availability check — skip Docker entirely if daemon is unreachable.
-    // This prevents ensure_container_running from blocking for 30+ seconds
-    // trying to auto-start Colima when it's intentionally stopped.
-    let docker_reachable = docker_cmd()
-        .args(["info", "--format", "{{.ID}}"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
     let mut cmd = if let Some(ref ap) = project {
-        if let Some(ref container_name) = ap.container_name {
-            if !docker_reachable {
-                eprintln!("[dev-server] Docker not reachable, using host mode");
-                let clamped = clamp_to_project(&cwd, &ap.project_path);
-                let (shell, flag) = if cfg!(target_os = "windows") {
-                    ("cmd", "/C")
-                } else {
-                    ("sh", "-c")
-                };
-                let mut c = Command::new(shell);
-                c.arg(flag)
-                    .arg(&command)
-                    .current_dir(&clamped)
-                    .env("FORCE_COLOR", "0")
-                    .env("NO_COLOR", "1")
-                    .env("PORT", &port_str)
-                    .env("BROWSER", "none")
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                if let Some(path) = get_user_path() {
-                    c.env("PATH", path);
-                }
-                hide_console_window(&mut c);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    c.process_group(0);
-                }
-                c
-            } else {
-                // Docker mode — ensure container is running first
-                ensure_container_running(container_name);
-
-                let workdir = host_to_container_path(&cwd, &ap.project_path);
-                let mut c = docker_cmd();
-                // Kill any orphaned dev server on the target port inside the container,
-                // then run the actual command. Use fuser (busybox-compatible) instead of lsof.
-                let wrapped = format!("fuser -k {}/tcp 2>/dev/null; {}", server_port, command);
-                let port_env = format!("PORT={}", server_port);
-                c.args([
-                    "exec",
-                    "-w",
-                    &workdir,
-                    "-e",
-                    "FORCE_COLOR=0",
-                    "-e",
-                    "NO_COLOR=1",
-                    "-e",
-                    &port_env,
-                    "-e",
-                    "BROWSER=none",
-                    // Bind to 0.0.0.0 so port mapping works from host.
-                    // Different frameworks read different vars (Vite: HOST, Next: HOSTNAME).
-                    "-e",
-                    "HOST=0.0.0.0",
-                    "-e",
-                    "HOSTNAME=0.0.0.0",
-                    container_name,
-                    "sh",
-                    "-c",
-                    &wrapped,
-                ]);
-
-                // MUST set own process group so kill_process doesn't kill the IDE
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    c.process_group(0);
-                }
-
-                c.stdout(Stdio::piped()).stderr(Stdio::piped());
-                c
-            } // end docker_reachable else
-        } else {
-            // App-level isolation: sandbox the dev server command
-            let clamped = clamp_to_project(&cwd, &ap.project_path);
-            let mut c = build_sandboxed_host_command(&command, &PathBuf::from(&clamped));
-            c.env("FORCE_COLOR", "0")
-                .env("NO_COLOR", "1")
-                .env("PORT", &port_str)
-                .env("BROWSER", "none");
-
-            c
-        }
+        // App-level isolation: sandbox the dev server command
+        let clamped = clamp_to_project(&cwd, &ap.project_path);
+        let mut c = build_sandboxed_host_command(&command, &PathBuf::from(&clamped));
+        c.env("FORCE_COLOR", "0")
+            .env("NO_COLOR", "1")
+            .env("PORT", &port_str)
+            .env("BROWSER", "none");
+        c
     } else {
         // No active project
         let (shell, flag) = if cfg!(target_os = "windows") {
@@ -944,52 +693,7 @@ pub async fn start_dev_server(
         c
     };
 
-    // Try to spawn; if Docker mode fails (daemon not running), fall back to host
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            if let Some(ref ap) = project {
-                if ap.container_name.is_some() {
-                    eprintln!(
-                        "[dev-server] Docker exec failed ({}), falling back to host",
-                        e
-                    );
-                    let (shell, flag) = if cfg!(target_os = "windows") {
-                        ("cmd", "/C")
-                    } else {
-                        ("sh", "-c")
-                    };
-                    let mut fallback = Command::new(shell);
-                    fallback
-                        .arg(flag)
-                        .arg(&command)
-                        .current_dir(&ap.project_path)
-                        .env("FORCE_COLOR", "0")
-                        .env("NO_COLOR", "1")
-                        .env("PORT", &port_str)
-                        .env("BROWSER", "none")
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped());
-                    if let Some(path) = get_user_path() {
-                        fallback.env("PATH", path);
-                    }
-                    hide_console_window(&mut fallback);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::process::CommandExt;
-                        fallback.process_group(0);
-                    }
-                    fallback.spawn().map_err(|e2| {
-                        format!("Failed to start dev server (host fallback): {}", e2)
-                    })?
-                } else {
-                    return Err(format!("Failed to start dev server: {}", e));
-                }
-            } else {
-                return Err(format!("Failed to start dev server: {}", e));
-            }
-        }
-    };
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to start dev server: {}", e))?;
 
     let pid = child.id();
 
@@ -1118,80 +822,7 @@ pub async fn start_pty_shell(
     let pty_system = native_pty_system();
 
     let (shell_cmd, shell_args, working_dir) = if let Some(ref ap) = project {
-        if let Some(ref container_name) = ap.container_name {
-            // Docker mode: use docker exec with -t for pseudo-terminal allocation.
-            // Docker's PTY is handled by the container runtime; we stream output directly.
-            let workdir = match &cwd {
-                Some(dir) => host_to_container_path(dir, &ap.project_path),
-                None => WORKSPACE_PATH.to_string(),
-            };
-
-            let has_bash = docker_cmd()
-                .args(["exec", container_name, "which", "bash"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-
-            let shell = if has_bash { "bash" } else { "sh" };
-
-            let child = docker_cmd()
-                .args(["exec", "-it", "-w", &workdir, container_name, shell])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to start shell in container: {}", e))?;
-
-            let pid = child.id();
-            let docker_pid = pid;
-
-            // Store stdin for Docker so we can write to it later
-            let stdin = child.stdin.expect("Docker child should have stdin");
-
-            // Spawn a thread to pump Docker stdout/stderr -> Tauri events
-            let sid = session_id.clone();
-            let app_clone = app.clone();
-            std::thread::spawn(move || {
-                let mut stdout = child.stdout.expect("Docker child should have stdout");
-                let mut buf = [0u8; 4096];
-                loop {
-                    match stdout.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                            let _ = app_clone.emit("pty-output", PtyOutputEvent {
-                                session_id: sid.clone(),
-                                data: text,
-                            });
-                        }
-                        Err(_) => break,
-                    }
-                }
-                let _ = app_clone.emit("pty-exit", PtyExitEvent {
-                    session_id: sid,
-                    exit_code: 0,
-                });
-            });
-
-            // Store a minimal session for Docker (resize not applicable, kill via DockerChild)
-            let session = PtySession {
-                master: Box::new(DummyMaster),
-                writer: Box::new(DockerWriter { stdin: Arc::new(Mutex::new(Some(stdin))) }),
-                child: Box::new(DockerChild { pid: docker_pid }),
-                session_id: session_id.clone(),
-            };
-
-            pty_map
-                .lock()
-                .map_err(|_| "Failed to lock PTY map")?
-                .insert(session_id.clone(), Arc::new(Mutex::new(session)));
-
-            return Ok(session_id);
-        }
-
-        // App-level isolation: clamp cwd
+        // App-level isolation: clamp cwd to project directory
         let working_dir = match &cwd {
             Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
             None => PathBuf::from(&ap.project_path),
@@ -1366,54 +997,6 @@ pub struct PtyExitEvent {
     pub exit_code: i32,
 }
 
-/// Wrapper for Docker child process (portable_pty::Child trait).
-struct DockerChild {
-    pid: u32,
-}
-
-impl std::fmt::Debug for DockerChild {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DockerChild").field("pid", &self.pid).finish()
-    }
-}
-
-impl portable_pty::Child for DockerChild {
-    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
-        // Docker child: we can't easily poll, assume running
-        Ok(None)
-    }
-
-    fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
-        // Block until Docker container exits
-        Ok(portable_pty::ExitStatus::with_exit_code(0))
-    }
-
-    fn process_id(&self) -> Option<u32> {
-        Some(self.pid)
-    }
-}
-
-impl portable_pty::ChildKiller for DockerChild {
-    fn kill(&mut self) -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            use nix::sys::signal::{kill, Signal};
-            use nix::unistd::Pid;
-            let _ = kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM);
-        }
-        #[cfg(windows)]
-        {
-            let _ = Command::new("taskkill")
-                .args(["/F", "/PID", &self.pid.to_string()])
-                .output();
-        }
-        Ok(())
-    }
-
-    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
-        Box::new(DockerChild { pid: self.pid })
-    }
-}
 
 /// Check if a URL is reachable (TCP connection accepted + HTTP response).
 /// Used to poll dev server readiness from the Rust side, bypassing WebView restrictions.
@@ -1521,8 +1104,8 @@ pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Resul
                 .output();
         }
 
-        // NOTE: removed port-based kill (lsof -ti:7773 | kill) — it was killing
-        // Colima's SSH port forwarding process, crashing the Docker VM.
+        // NOTE: port-based kill (lsof -ti:7773 | kill) is intentionally avoided
+        // as it can terminate unrelated processes bound to the same port.
     } else {
         let mut tk = Command::new("taskkill");
         tk.args(["/T", "/F", "/PID", &pid.to_string()]);
@@ -1592,22 +1175,8 @@ pub async fn command_exists(
     command: String,
     active_project: State<'_, ActiveProjectState>,
 ) -> Result<bool, String> {
-    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+    let _project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
-    // Docker mode: check inside container (use which as separate arg, no shell interpolation)
-    if let Some(ref ap) = project {
-        if let Some(ref container_name) = ap.container_name {
-            let output = docker_cmd()
-                .args(["exec", container_name, "which", &command])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map_err(|e| format!("Failed to check command in container: {}", e))?;
-            return Ok(output.success());
-        }
-    }
-
-    // Host execution (app-level or no isolation)
     // Must use the user's full PATH (from login shell) so tools installed
     // via brew, corepack, npm -g, volta, nvm are found.
     if cfg!(target_os = "windows") {
@@ -1655,33 +1224,9 @@ pub async fn get_environment_variables(
         "SIGNING",
     ];
 
-    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+    let _project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
-    // Docker mode: read env from container
-    if let Some(ref ap) = project {
-        if let Some(ref container_name) = ap.container_name {
-            let output = docker_cmd()
-                .args(["exec", container_name, "env"])
-                .output()
-                .map_err(|e| format!("Failed to get container env: {}", e))?;
-
-            if output.status.success() {
-                let mut env_vars = HashMap::new();
-                for line in String::from_utf8_lossy(&output.stdout).lines() {
-                    if let Some((key, value)) = line.split_once('=') {
-                        let upper = key.to_uppercase();
-                        let is_sensitive = sensitive_patterns.iter().any(|pat| upper.contains(pat));
-                        if !is_sensitive {
-                            env_vars.insert(key.to_string(), value.to_string());
-                        }
-                    }
-                }
-                return Ok(env_vars);
-            }
-        }
-    }
-
-    // Host env (app-level or no isolation)
+    // Host env
     let mut env_vars = HashMap::new();
 
     for (key, value) in env::vars() {
@@ -1710,46 +1255,6 @@ pub async fn get_completions(
         (None, Some(ap)) => PathBuf::from(&ap.project_path),
         (None, None) => env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?,
     };
-
-    // Docker mode: use compgen inside container
-    if let Some(ref ap) = project {
-        if let Some(ref container_name) = ap.container_name {
-            let workdir = match &cwd {
-                Some(dir) => host_to_container_path(dir, &ap.project_path),
-                None => WORKSPACE_PATH.to_string(),
-            };
-            // Use bash compgen for smart completion inside container
-            // Shell-escape partial to prevent command injection
-            let safe_partial = partial.replace('\'', "'\\''");
-            let safe_workdir = workdir.replace('\'', "'\\''");
-            let script = format!(
-                "cd '{}' 2>/dev/null; compgen -f -- '{}' 2>/dev/null | head -20",
-                safe_workdir, safe_partial
-            );
-            let output = docker_cmd()
-                .args([
-                    "exec",
-                    "-w",
-                    &workdir,
-                    container_name,
-                    "bash",
-                    "-c",
-                    &script,
-                ])
-                .output()
-                .map_err(|e| format!("Docker completion failed: {}", e))?;
-
-            if output.status.success() {
-                let mut completions: Vec<String> = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|s| s.to_string())
-                    .collect();
-                completions.sort();
-                return Ok(completions);
-            }
-        }
-    }
 
     // Host mode: resolve path-aware completion
     // The partial may be a bare name ("src") or a path ("src/comp")

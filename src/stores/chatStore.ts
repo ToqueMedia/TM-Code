@@ -1,11 +1,12 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
 import { useCheckpointStore } from './checkpointStore'
 import { usePermissionStore } from './permissionStore'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
+export { clearMessageQueue }
 import { setQueueLogContext } from '../services/agent/queueOperationLog'
 import { logger } from '../utils/logger'
 import { t } from '../i18n'
@@ -43,7 +44,7 @@ interface ChatActions {
    *   (not: user_msg → assistant_response → queued_user_msg)
    */
   insertUserMessageBeforeAssistant: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
-  addSystemMessage: (content: string) => void
+  addSystemMessage: (content: string, level?: SystemMessageLevel) => void
   startAssistantMessage: () => string
   finalizeAssistantMessage: () => void
   addCodeBlockToMessage: (messageId: string, block: CodeBlock) => void
@@ -51,6 +52,8 @@ interface ChatActions {
   setStreaming: (streaming: boolean) => void
   setError: (error: string | null) => void
   clearSession: (sessionId: string) => void
+  /** Clear messages within a session but keep the session alive. Also resets tokens and turn count. */
+  clearSessionMessages: (sessionId: string) => void
   // Streaming actions
   appendTextDelta: (delta: string) => void
   appendReasoningDelta: (delta: string) => void
@@ -83,6 +86,7 @@ interface ChatActions {
   listProjectSessions: (projectPath: string) => Promise<SessionSummary[]>
   createNewSession: (projectPath: string) => Promise<string>
   switchSession: (projectPath: string, sessionId: string) => Promise<void>
+  renameSession: (name: string) => void
   deleteSessionFromDisk: (projectPath: string, sessionId: string) => Promise<void>
   initPersistence: (projectPath: string) => Promise<void>
   cleanupOnExit: (projectPath: string) => Promise<void>
@@ -689,13 +693,14 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       return messageId
     },
 
-    addSystemMessage: (content: string) => {
+    addSystemMessage: (content: string, level?: SystemMessageLevel) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
         role: 'system',
         content,
         timestamp: Date.now(),
+        ...(level && { level }),
       }
 
       set(state => {
@@ -1328,6 +1333,34 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
     },
 
+    clearSessionMessages: (sessionId: string) => {
+      // Clear module-level debounce timer
+      if (saveTimeout) {
+        clearTimeout(saveTimeout)
+        saveTimeout = null
+      }
+      set(state => {
+        const sessions = new Map(state.sessions)
+        const session = sessions.get(sessionId)
+        if (session) {
+          sessions.set(sessionId, {
+            ...session,
+            messages: [],
+            updatedAt: Date.now(),
+          })
+        }
+
+        return {
+          sessions,
+          conversationHistory: [],
+          currentTurnCount: 0,
+          totalTokensUsed: { input: 0, output: 0 },
+        }
+      })
+      // Mark dirty so the cleared state is persisted
+      sessionService.markDirty()
+    },
+
     updateConversationHistory: (messages: ConversationMessage[]) => {
       set({ conversationHistory: messages })
     },
@@ -1492,7 +1525,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (!activeId) return false
 
         const session = await sessionService.loadSession(projectPath, activeId)
-        if (!session || session.messages.length === 0) return false
+        if (!session) {
+          // Session file missing (e.g. app crashed before save) — clear the stale
+          // active-session pointer so the same PathNotFound is not repeated on restart.
+          await sessionService.setActiveSessionId(projectPath, '')
+          return false
+        }
+        if (session.messages.length === 0) return false
 
         // Strip ephemeral system messages but keep card messages
         session.messages = session.messages.filter(m => m.role !== 'system' || m.card)
@@ -1581,6 +1620,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     switchSession: async (projectPath: string, sessionId: string) => {
       set({ isLoadingSession: true })
       try {
+        // Finalize any streaming message before saving — avoids partial/corrupt saves
+        get().finalizeAssistantMessage()
+
         // Save current session before switching
         const state = get()
         const currentSession = state.getActiveSession()
@@ -1599,10 +1641,24 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         usePermissionStore.getState().resetAutoApprove()
 
         // loadSessionFromDisk already initializes checkpoints for the session
+        const beforeSessionId = get().activeSessionId
         await get().loadSessionFromDisk(projectPath, sessionId)
+
+        // Verify the session was actually loaded — loadSessionFromDisk silently
+        // returns if the file doesn't exist, leaving the old session active.
+        if (get().activeSessionId === beforeSessionId && beforeSessionId !== sessionId) {
+          throw new Error(`Session "${sessionId}" not found on disk.`)
+        }
       } finally {
         set({ isLoadingSession: false })
       }
+    },
+
+    renameSession: (name: string) => {
+      const session = get().getActiveSession()
+      if (!session) return
+      session.name = name
+      // Name is persisted on next saveSessionToDisk() call via updateIndex
     },
 
     deleteSessionFromDisk: async (projectPath: string, sessionId: string) => {

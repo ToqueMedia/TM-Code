@@ -36,6 +36,15 @@ export default class QuickOpenService {
   async buildIndex(): Promise<void> {
     if (!this.rootPath) return
     if (this.building) return
+
+    // Safety guard: refuse to index overly broad paths (home dir, drive root, etc.)
+    // Indexing /Users/ithustle would fire thousands of readDir IPC calls.
+    const normalised = this.rootPath.replace(/\\/g, '/').replace(/\/$/, '')
+    const depth = normalised.split('/').filter(Boolean).length
+    if (depth < 3) {
+      return
+    }
+
     this.building = true
     const targetRoot = this.rootPath
     try {
