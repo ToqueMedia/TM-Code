@@ -1,63 +1,83 @@
 <p align="center">
-  <img src="logo.svg" width="140" alt="TM Code" />
+  <img src="src-tauri/icons/128x128@2x.png" width="120" alt="TM Code" />
 </p>
 
 <h1 align="center">TM Code</h1>
 
 <p align="center">
-  <strong>The Agent-First IDE by Toque Media</strong>
+  <strong>O IDE onde a IA programa por ti.</strong>
 </p>
 
 <p align="center">
-  Chat with AI. Watch it code. Ship faster.
+  Descreve o que queres. Vê o código nascer. Entrega mais rápido.
 </p>
 
 <p align="center">
   <a href="https://github.com/ToqueMedia/TM-Code/releases/latest"><img src="https://img.shields.io/github/v/release/ToqueMedia/TM-Code?style=flat-square&color=FE1063" alt="Release" /></a>
   <a href="https://github.com/ToqueMedia/TM-Code/releases"><img src="https://img.shields.io/github/downloads/ToqueMedia/TM-Code/total?style=flat-square&color=a371f7" alt="Downloads" /></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-333?style=flat-square" alt="Platforms" />
+  <img src="https://img.shields.io/badge/plataforma-macOS%20%7C%20Windows%20%7C%20Linux-333?style=flat-square" alt="Plataformas" />
 </p>
 
 ---
 
-## What is TM Code?
+## E se programar fosse uma conversa?
 
-TM Code is a **chat-first desktop IDE** where the AI agent is the primary interface. Unlike traditional IDEs with AI sidebars, TM Code starts with a conversational interface where the agent writes code, shows diffs inline, runs terminal commands, and opens live previews — all without leaving the chat.
+A maioria dos IDEs foi feita para escrever código. O TM Code foi feito para **pensar código**.
 
-**The developer drives. The agent builds.**
+Tu descreves o que precisas — numa conversa natural, como farias com um colega. O agente de IA escreve o código, mostra-te as alterações linha a linha, corre o projecto e abre uma pré-visualização ao vivo. Tudo acontece na mesma janela, sem trocar de separador.
 
-## Key Features
+Quando quiseres mexer no código com as tuas próprias mãos, o editor completo está a um clique. Mas provavelmente vais preferir continuar a conversa.
 
-- **Chat-First UX** — Start in chat, the agent writes code, you review
-- **Live Preview** — See your app running in real-time as the agent builds it
-- **Inline Diffs** — Accept or reject code changes directly in the chat
-- **Multi-Model Support** — DeepSeek, GLM-5, Kimi K2.5, Qwen3, MiniMax, Gemini, and more
-- **MCP Integration** — Connect external tools via Model Context Protocol
-- **Built-in Terminal** — Full PTY support with xterm.js
-- **Monaco Editor** — VS Code editing experience with split panes and formatting
-- **Project Templates** — React, Next.js, Vue, Svelte, Angular, Express, NestJS
-- **Docker Isolation** — Run projects in isolated containers
-- **Auto-Updates** — Seamless in-app updates
+## O que muda na forma como trabalhas
 
-## Download
+**Tu dizes. O agente constrói.**
 
-| Platform | Download |
-|----------|----------|
-| macOS (Apple Silicon) | [Download .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
-| macOS (Intel) | [Download .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
-| Windows | [Download .exe](https://github.com/ToqueMedia/TM-Code/releases/latest) |
-| Linux (Ubuntu/Debian) | [Download .deb](https://github.com/ToqueMedia/TM-Code/releases/latest) |
+- **Começa pelo chat** — Não precisas de abrir ficheiros nem lembrar-te de sintaxe. Diz o que queres e vê acontecer.
+- **Pré-visualização ao vivo** — Vê a tua aplicação a correr em tempo real enquanto o agente escreve cada linha.
+- **Alterações visíveis** — Cada mudança no código aparece como um diff que podes aceitar ou rejeitar antes de aplicar.
+- **Vários modelos de IA** — Escolhe entre múltiplos modelos de linguagem, cada um com os seus pontos fortes.
+- **Terminal integrado** — O agente corre comandos por ti, mas tens sempre acesso ao terminal quando precisares.
+- **Ferramentas externas (MCP)** — Liga bases de dados, APIs e serviços directamente ao fluxo de trabalho do agente.
+- **Projectos prontos a usar** — Começa com templates para React, Next.js, Vue, Svelte, Angular, Express, NestJS e mais.
+- **Isolamento por projecto** — Cada projecto pode correr no seu próprio ambiente isolado, sem conflitos.
 
-## Plans
+## Para quem é o TM Code?
 
-| | Free | Pro | Business |
+- **Programadores que querem entregar mais rápido** — Menos tempo a configurar, mais tempo a criar.
+- **Quem está a aprender** — Descreve o que queres e aprende com o código que o agente gera.
+- **Equipas pequenas que fazem o trabalho de equipas grandes** — Um agente que multiplica a tua capacidade.
+- **Criadores que pensam em produto, não em sintaxe** — Foca-te no "quê" e deixa o "como" para o agente.
+
+## Transferir
+
+| Plataforma | |
+|---|---|
+| macOS (Apple Silicon) | [Transferir .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
+| macOS (Intel) | [Transferir .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
+| Windows | [Transferir .exe](https://github.com/ToqueMedia/TM-Code/releases/latest) |
+| Linux (Ubuntu/Debian) | [Transferir .deb](https://github.com/ToqueMedia/TM-Code/releases/latest) |
+
+## Planos
+
+| | Grátis | Pro | Business |
 |---|---|---|---|
-| **Models** | MiMo V2 Flash | All models | All models |
-| **Credits** | 10/day | Monthly pool | Monthly pool (4x/8x) |
-| **Price** | $0 | Coming soon | Coming soon |
+| **Modelos** | MiMo V2 Flash | Todos os modelos | Todos os modelos |
+| **Créditos** | 10/dia | Pool mensal | Pool mensal (4x/8x) |
+| **Fila** | Máx. 5 em simultâneo | Ilimitado | Ilimitado |
+| **Preço** | $0 | Em breve | Em breve |
+
+## Contribuir
+
+O TM Code é open-source. Se quiseres contribuir, abre uma issue ou envia um pull request.
+
+```bash
+# Pré-requisitos: Node >= 20, Rust, Yarn
+yarn install
+npm run tauri dev
+```
 
 ---
 
 <p align="center">
-  Built by <a href="https://toquemedia.com">Toque Media</a>
+  Feito por <a href="https://toquemedia.com">Toque Media</a>
 </p>
