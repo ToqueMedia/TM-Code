@@ -14,6 +14,7 @@ import ContextBuilder from '../../services/agent/contextBuilder'
 import MCPService from '../../services/mcp/mcpService'
 import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
+import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../../services/attachmentService'
 import {
   enqueue as enqueueMessage,
@@ -186,41 +187,28 @@ export function usePromptBar() {
     }
     setShowCommandMenu(false)
 
-    // @mention detection — scan backward from cursor to find '@' trigger
+    // @mention detection — unicode-safe, shared parser. Directories included
+    // so users can reference dirs like @src/components/ for listing.
     requestAnimationFrame(() => {
       const textarea = textareaRef.current
       if (!textarea) return
 
-      const cursorPos = textarea.selectionStart
-      const val = textarea.value
-
-      // Scan backward from cursor to find '@'
-      let atIndex = -1
-      for (let i = cursorPos - 1; i >= 0; i--) {
-        const ch = val[i]
-        if (ch === '@') {
-          if (i === 0 || /\s/.test(val[i - 1])) {
-            atIndex = i
-          }
-          break
-        }
-        if (/\s/.test(ch)) break
-      }
-
-      if (atIndex === -1) {
+      const mention = findMentionAtCursor(textarea.value, textarea.selectionStart)
+      if (!mention) {
         setShowMentionMenu(false)
         return
       }
 
-      const query = val.slice(atIndex + 1, cursorPos)
       const qs = QuickOpenService.getInstance()
-      const results = query.length === 0 ? qs.list(8) : qs.search(query, 8)
+      const results = mention.query.length === 0
+        ? qs.list(30, true)
+        : qs.search(mention.query, 30, true)
 
       if (results.length > 0) {
         setFilteredMentions(results)
         setShowMentionMenu(true)
         setSelectedMentionIndex(0)
-        mentionStartRef.current = atIndex
+        mentionStartRef.current = mention.atIndex
       } else {
         setShowMentionMenu(false)
       }
@@ -241,32 +229,37 @@ export function usePromptBar() {
     }, 150)
   }, [])
 
-  // @mention selection: insert @path as text in the textarea (like reference impl)
+  // @mention selection: insert @path as text in the textarea, replacing the
+  // full mention token (not just up to the cursor) so mid-token edits don't
+  // leave trailing garbage.
   const handleMentionSelect = useCallback((item: QuickOpenItem) => {
     const currentInput = useChatStore.getState().draftInput
     const start = mentionStartRef.current
     if (start < 0) return
 
-    const cursorPos = textareaRef.current?.selectionStart ?? currentInput.length
+    const tokenEnd = findMentionTokenEnd(currentInput, start + 1)
     const before = currentInput.slice(0, start)
-    const after = currentInput.slice(cursorPos)
+    const after = currentInput.slice(tokenEnd)
 
-    // Get relative path from project root
-    const projectPath = useProjectStore.getState().currentProject?.path || ''
-    const relativePath = item.path.startsWith(projectPath + '/')
-      ? item.path.slice(projectPath.length + 1)
-      : item.path
+    // Relative path: normalise separators so Windows ("\") doesn't slip into prompt.
+    const projectPath = (useProjectStore.getState().currentProject?.path || '')
+      .replace(/\\/g, '/').replace(/\/+$/, '')
+    const normItem = item.path.replace(/\\/g, '/')
+    const relativePath = normItem.startsWith(projectPath + '/')
+      ? normItem.slice(projectPath.length + 1)
+      : normItem
 
-    const insertion = `@${relativePath} `
+    const suffix = item.isDirectory ? '/' : ''
+    const insertion = `@${relativePath}${suffix} `
     const newValue = before + insertion + after
     const newCursor = before.length + insertion.length
 
-    // Update store directly (bypass handleInputChange to avoid re-triggering detection)
+    QuickOpenService.getInstance().markUsed(item.path)
+
     useChatStore.getState().setDraftInput(newValue)
     mentionStartRef.current = -1
     setShowMentionMenu(false)
 
-    // Set cursor position after React re-renders
     requestAnimationFrame(() => {
       const textarea = textareaRef.current
       if (textarea) {

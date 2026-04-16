@@ -19,6 +19,7 @@ import { t } from '@/i18n'
 function AgentStatusBar() {
   const status = useAgentStore(s => s.status)
   const error = useAgentStore(s => s.error)
+  const modelName = useAgentStore(s => s.modelName)
   const isStreaming = useChatStore(s => s.isStreaming)
   const skillCount = useSkillStore(s => s.skills.length)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
@@ -78,6 +79,7 @@ function AgentStatusBar() {
   const bgRunning = Array.from(bgAgents.values()).filter(a => a.status === 'running').length
 
   const infoSegments: string[] = []
+  if (modelName) infoSegments.push(modelName)
   if (autoApproveDiffs) infoSegments.push('⚡ Auto-approve ON')
   if (queueLength > 0) infoSegments.push(`${queueLength} queued`)
   if (skillCount > 0) infoSegments.push(`${skillCount} ${t("chat.skills")}`)

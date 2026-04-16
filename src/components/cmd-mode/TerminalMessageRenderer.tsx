@@ -1,7 +1,8 @@
 import { memo, useMemo } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import ReactMarkdown from 'react-markdown'
-import type { ChatMessage, ContentBlock, ToolCallDisplay } from '../../types/chat'
+import { FiFile, FiFolder, FiImage } from 'react-icons/fi'
+import type { ChatMessage, ContentBlock, ToolCallDisplay, Attachment } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { terminalMarkdownComponents } from './terminalHelpers'
 import { TerminalToolCall } from './TerminalToolCall'
@@ -26,10 +27,15 @@ function ContentBlocksRenderer({
       {blocks.map((block, i) => {
         if (block.type === 'text') {
           return (
-            <Box key={`text-${i}`} mb={1}>
-              <Text fontSize="13px" color={tokens.colors.terminal.foreground} lineHeight="1.5">
-                <ReactMarkdown components={terminalMarkdownComponents}>{block.text}</ReactMarkdown>
-              </Text>
+            <Box
+              key={`text-${i}`}
+              mb={1}
+              fontSize="14px"
+              color={tokens.colors.terminal.foreground}
+              lineHeight="1.55"
+              css={{ '& > span:last-child': { marginBottom: 0 } }}
+            >
+              <ReactMarkdown components={terminalMarkdownComponents}>{block.text}</ReactMarkdown>
             </Box>
           )
         }
@@ -40,6 +46,76 @@ function ContentBlocksRenderer({
         return null
       })}
     </>
+  )
+}
+
+// ─── UserMessageAttachments — inline thumbnails for terminal output ───
+
+const attachmentIcons = {
+  file: FiFile,
+  folder: FiFolder,
+  image: FiImage,
+}
+
+function UserMessageAttachments({ attachments }: { attachments: Attachment[] }) {
+  if (attachments.length === 0) return null
+
+  return (
+    <Flex gap={2} flexWrap="wrap" mt={1.5} ml={4}>
+      {attachments.map(att => {
+        const Icon = attachmentIcons[att.type]
+        const isImage = att.type === 'image'
+
+        return (
+          <Flex
+            key={att.id}
+            align="center"
+            gap={1.5}
+            pl={isImage && att.base64 ? 0 : 1.5}
+            pr={2}
+            py={isImage && att.base64 ? 0 : '2px'}
+            bg="rgba(255, 255, 255, 0.03)"
+            border="1px solid rgba(255, 255, 255, 0.06)"
+            borderRadius="5px"
+            maxW="200px"
+            overflow="hidden"
+          >
+            {isImage && att.base64 ? (
+              <Box
+                w="28px"
+                h="28px"
+                borderRadius="4px 0 0 4px"
+                overflow="hidden"
+                flexShrink={0}
+              >
+                <img
+                  src={att.base64}
+                  alt={att.name}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              </Box>
+            ) : (
+              <Icon size={11} color={tokens.colors.text.muted} style={{ flexShrink: 0 }} />
+            )}
+            <Text
+              fontSize="10px"
+              fontFamily={tokens.fontFamily.mono}
+              color={tokens.colors.text.muted}
+              truncate
+              maxW="140px"
+              lineHeight="1.3"
+            >
+              {att.name}
+            </Text>
+          </Flex>
+        )
+      })}
+    </Flex>
   )
 }
 
@@ -56,30 +132,36 @@ function TerminalMessageRendererInner({
 }: TerminalMessageRendererProps) {
   // ── User message ──
   if (message.role === 'user') {
+    const hasAttachments = message.attachments && message.attachments.length > 0
+
     return (
       <Box mb={4}>
         <Flex gap={1.5} align="flex-start">
           <Text
             fontFamily={tokens.fontFamily.mono}
-            fontSize="13px"
+            fontSize="14px"
             color={tokens.colors.accent.purple}
             fontWeight="700"
-            lineHeight="1.5"
+            lineHeight="1.55"
             flexShrink={0}
             userSelect="none"
           >
             ❯
           </Text>
-          <Text
-            fontSize="13px"
-            color="#ffffff"
-            whiteSpace="pre-wrap"
-            lineHeight="1.5"
-            flex="1"
-            fontWeight="500"
-          >
-            {message.content}
-          </Text>
+          <Box flex="1">
+            <Text
+              fontSize="14px"
+              color="#ffffff"
+              whiteSpace="pre-wrap"
+              lineHeight="1.55"
+              fontWeight="500"
+            >
+              {message.content}
+            </Text>
+            {hasAttachments && (
+              <UserMessageAttachments attachments={message.attachments!} />
+            )}
+          </Box>
         </Flex>
       </Box>
     )
@@ -101,10 +183,10 @@ function TerminalMessageRendererInner({
     return (
       <Box mb={3} py="2px">
         <Flex gap={1.5} align="flex-start">
-          <Text fontSize="11px" color={color} fontFamily={tokens.fontFamily.mono} flexShrink={0} lineHeight="1.5" userSelect="none">
+          <Text fontSize="12px" color={color} fontFamily={tokens.fontFamily.mono} flexShrink={0} lineHeight="1.55" userSelect="none">
             {prefix}
           </Text>
-          <Text fontSize="12px" color={color} fontFamily={tokens.fontFamily.mono} whiteSpace="pre-wrap" lineHeight="1.5" opacity={0.85}>
+          <Text fontSize="13px" color={color} fontFamily={tokens.fontFamily.mono} whiteSpace="pre-wrap" lineHeight="1.55" opacity={0.9}>
             {text}
           </Text>
         </Flex>
@@ -142,10 +224,10 @@ function TerminalMessageRendererInner({
       {/* Reasoning block — collapsed during streaming, shown after */}
       {message.reasoningContent && !isStreaming && (
         <Box mb={1.5} pl={2} borderLeft={`2px solid ${tokens.colors.accent.purpleMuted}`}>
-          <Text fontSize="10px" color={tokens.colors.accent.purple} fontWeight="700" mb="3px" fontFamily={tokens.fontFamily.mono} letterSpacing="0.06em">
+          <Text fontSize="10px" color={tokens.colors.accent.purple} fontWeight="700" mb="3px" fontFamily={tokens.fontFamily.mono} letterSpacing="0.08em">
             THINKING
           </Text>
-          <Text fontSize="11px" color={tokens.colors.text.secondary} whiteSpace="pre-wrap" lineHeight="1.5">
+          <Text fontSize="12px" color={tokens.colors.text.secondary} whiteSpace="pre-wrap" lineHeight="1.55">
             {message.reasoningContent}
           </Text>
         </Box>
@@ -159,10 +241,14 @@ function TerminalMessageRendererInner({
         <>
           {message.toolCalls?.map(tc => <TerminalToolCall key={tc.id} toolCall={tc} />)}
           {message.content && (
-            <Box mb={1}>
-              <Text fontSize="13px" color={tokens.colors.terminal.foreground} lineHeight="1.5">
-                <ReactMarkdown components={terminalMarkdownComponents}>{message.content}</ReactMarkdown>
-              </Text>
+            <Box
+              mb={1}
+              fontSize="14px"
+              color={tokens.colors.terminal.foreground}
+              lineHeight="1.55"
+              css={{ '& > span:last-child': { marginBottom: 0 } }}
+            >
+              <ReactMarkdown components={terminalMarkdownComponents}>{message.content}</ReactMarkdown>
             </Box>
           )}
           {message.codeBlocks?.map(b => <TerminalCodeBlock key={b.id} block={b} />)}

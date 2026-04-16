@@ -1,14 +1,19 @@
 import { memo, useImperativeHandle, forwardRef } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
+import { FiPaperclip } from 'react-icons/fi'
 import { useCmdPromptLogic } from '../../hooks/useCmdPromptLogic'
 import SlashCommandMenu from '../chat/SlashCommandMenu'
 import { TerminalMentionMenu } from './TerminalMentionMenu'
+import CmdAttachmentBar from './CmdAttachmentBar'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import type { QueuedCommand } from '../../types/messageQueueTypes'
 
 export interface CmdModePromptInputRef {
   focus: () => void
   hasText: () => boolean
+  isMenuOpen: () => boolean
+  clearAttachments: () => void
 }
 
 // ─── Terminal-style queued messages ───
@@ -26,44 +31,26 @@ const QueuedMessagesTerminal = memo(function QueuedMessagesTerminal({
   if (commands.length === 0) return null
 
   return (
-    <Box px={2} pb={1} borderTop="1px solid rgba(255,255,255,0.04)">
+    <Box px={3} py={3}>
+      <Text
+        fontSize="12px"
+        color={tokens.colors.text.muted}
+        fontFamily={tokens.fontFamily.mono}
+        mb={1}
+      >
+        Queued (press ↑ to edit):
+      </Text>
       {commands.map((cmd, i) => (
-        <Flex
+        <Text
           key={cmd.uuid ?? `q-${i}`}
-          align="center"
-          gap={2}
-          py="2px"
+          fontSize="13px"
+          color={tokens.colors.text.muted}
+          fontFamily={tokens.fontFamily.mono}
+          ml={2}
+          opacity={0.8}
         >
-          {/* Queued indicator */}
-          <Flex align="center" gap={1} flexShrink={0}>
-            <Box
-              w="4px"
-              h="4px"
-              borderRadius="full"
-              bg={tokens.colors.accent.purple}
-              opacity={0.5}
-              css={{
-                animation: 'qPulse 2s ease-in-out infinite',
-                '@keyframes qPulse': { '0%, 100%': { opacity: 0.3 }, '50%': { opacity: 0.8 } },
-              }}
-            />
-            <Text fontSize="9px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} fontWeight="600" letterSpacing="0.08em">
-              queued
-            </Text>
-          </Flex>
-
-          {/* Message preview */}
-          <Text
-            fontSize="11px"
-            color={tokens.colors.text.muted}
-            fontFamily={tokens.fontFamily.mono}
-            flex="1"
-            lineClamp={1}
-            opacity={0.8}
-          >
-            {previewText(cmd.value)}
-          </Text>
-        </Flex>
+          {previewText(cmd.value)}
+        </Text>
       ))}
     </Box>
   )
@@ -80,6 +67,8 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     showMentionMenu,
     filteredMentions,
     selectedMentionIndex,
+    mentionQuery,
+    quickOpenBuilding,
     textareaRef,
     isStreaming,
     queuedCommands,
@@ -90,12 +79,26 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     handleKeyDown,
     handleFocus,
     handleBlur,
+    // Attachments
+    draftAttachments,
+    removeAttachment,
+    clearAttachments,
+    showImageWarning,
+    handlePaste,
+    handleDragOver,
+    handleDragEnter,
+    handleDragLeave,
+    handleDrop,
+    isDragging,
+    handleAttachFiles,
   } = useCmdPromptLogic()
 
   useImperativeHandle(ref, () => ({
     focus: () => textareaRef.current?.focus(),
     hasText: () => (textareaRef.current?.value.trim().length ?? 0) > 0,
-  }), [textareaRef])
+    isMenuOpen: () => showCommandMenu || showMentionMenu,
+    clearAttachments,
+  }), [textareaRef, showCommandMenu, showMentionMenu, clearAttachments])
 
   return (
     <Box
@@ -103,7 +106,35 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
       borderTop="1px solid rgba(255, 255, 255, 0.05)"
       position="relative"
       data-no-drag
+      onDragOver={handleDragOver}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
+      {/* Drop overlay */}
+      {isDragging && (
+        <Flex
+          position="absolute"
+          inset={0}
+          zIndex={10}
+          align="center"
+          justify="center"
+          bg="rgba(163, 113, 247, 0.06)"
+          border="2px dashed rgba(163, 113, 247, 0.3)"
+          borderRadius="4px"
+          pointerEvents="none"
+        >
+          <Text
+            fontSize="12px"
+            fontFamily={tokens.fontFamily.mono}
+            color={tokens.colors.accent.purple}
+            fontWeight="600"
+          >
+            {t('cmdMode.dropToAttach')}
+          </Text>
+        </Flex>
+      )}
+
       {/* Slash command autocomplete */}
       {showCommandMenu && (
         <SlashCommandMenu
@@ -123,11 +154,21 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
           selectedIndex={selectedMentionIndex}
           onSelect={handleMentionSelect}
           projectPath={projectPath}
+          query={mentionQuery}
+          isBuilding={quickOpenBuilding}
+          limit={50}
         />
       )}
 
       {/* Queued messages — terminal style */}
       <QueuedMessagesTerminal commands={queuedCommands} />
+
+      {/* Attachment bar — thumbnails, billing warning, remove buttons */}
+      <CmdAttachmentBar
+        attachments={draftAttachments}
+        onRemove={removeAttachment}
+        showImageWarning={showImageWarning}
+      />
 
       {/* Prompt bar */}
       <Flex
@@ -158,6 +199,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             value={input}
             onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             onFocus={handleFocus}
             onBlur={handleBlur}
             placeholder={isStreaming ? '' : 'Type a command or message…'}
@@ -183,6 +225,34 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             }}
           />
         </Box>
+
+        {/* Attach button */}
+        {!isStreaming && (
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            w="24px"
+            h="24px"
+            mt="2px"
+            ml={1}
+            borderRadius="4px"
+            cursor="pointer"
+            color={tokens.colors.text.muted}
+            transition="all 0.15s"
+            flexShrink={0}
+            _hover={{
+              color: tokens.colors.accent.purple,
+              bg: 'rgba(163, 113, 247, 0.08)',
+            }}
+            onClick={handleAttachFiles}
+            aria-label={t('cmdMode.attachTooltip')}
+            title={t('cmdMode.attachTooltip')}
+          >
+            <FiPaperclip size={13} />
+          </Box>
+        )}
 
         {/* Streaming indicator — keyboard: Esc to stop */}
         {isStreaming && (

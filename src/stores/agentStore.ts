@@ -14,6 +14,10 @@ interface AgentState {
   error: string | null
   /** Tasks the agent is tracking for the current message. Displayed in the chat UI. */
   tasks: AgentTask[]
+  /** Model name reported by the backend via X-Model-Name header. */
+  modelName: string | null
+  /** Provider name reported by the backend via X-Model-Provider header. */
+  modelProvider: string | null
   /**
    * Phase A telemetry: cumulative count of times the safe tool pool blocked
    * a tool from starting because of an in-flight non-concurrency-safe sibling.
@@ -27,6 +31,8 @@ interface AgentState {
 interface AgentActions {
   setStatus: (status: AgentStatus) => void
   setError: (error: string | null) => void
+  // Model metadata from backend response headers
+  setModelInfo: (name: string | null, provider: string | null) => void
   // Task management
   setTasks: (tasks: AgentTask[]) => void
   updateTaskStatus: (taskId: string, status: AgentTaskStatus) => void
@@ -41,6 +47,8 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   status: 'idle',
   error: null,
   tasks: [],
+  modelName: null,
+  modelProvider: null,
   poolConcurrencyConflictsAvoided: 0,
 
   setStatus: (status: AgentStatus) => {
@@ -49,6 +57,10 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
 
   setError: (error: string | null) => {
     set({ error })
+  },
+
+  setModelInfo: (name, provider) => {
+    set({ modelName: name, modelProvider: provider })
   },
 
   setTasks: (tasks: AgentTask[]) => {
@@ -81,6 +93,8 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       status: 'idle',
       error: null,
       tasks: [],
+      modelName: null,
+      modelProvider: null,
       poolConcurrencyConflictsAvoided: 0,
     })
   },

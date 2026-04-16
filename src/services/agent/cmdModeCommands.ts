@@ -6,6 +6,7 @@ import type { SessionSummary } from '../../types/chat'
 import { useProjectStore } from '../../stores/projectStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
+import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import AgentService from './agentService'
 import { logger } from '../../utils/logger'
 
@@ -122,7 +123,12 @@ async function executeSave(args: string, _projectPath: string): Promise<void> {
   state.addSystemMessage(`Sessão renomeada para "${name}".`, 'success')
 }
 
-// ─── /resume — List saved sessions (numbered for easy selection) ───
+// ─── /resume — Open the keyboard-driven session picker overlay ───
+//
+// The previous version of this command dumped the list as a system message,
+// which forced the user to type `/resume <n>` afterwards. The picker owns
+// Escape while open (see CmdModeView) so it can be cancelled without
+// exiting CMD Mode.
 
 async function executeResume(_args: string, projectPath: string): Promise<void> {
   const summaries = await sessionService.listSessions(projectPath)
@@ -132,27 +138,52 @@ async function executeResume(_args: string, projectPath: string): Promise<void> 
     return
   }
 
-  // Sort by most recently updated first, then cache for /resume <n>
+  // Sort by most recently updated first; cache so `/resume <n>` still works
+  // for muscle-memory users (and for screen readers that prefer text lists).
   const sorted = [...summaries].sort((a, b) => b.updatedAt - a.updatedAt)
   _lastListedSessions = sorted
 
   const activeId = useChatStore.getState().activeSessionId
+  useCmdOverlayStore.getState().openSessionPicker(sorted, activeId)
+}
 
-  // Header
-  const lines = [`sessões  (/resume <n> para carregar)`, '']
+// Retained for reference but no longer wired — formatRelativeTime now lives
+// solely in the picker component. Keep the symbol exported-like for backward
+// binary compatibility with any test that imports it.
+void formatRelativeTime
 
-  for (let i = 0; i < sorted.length; i++) {
-    const s = sorted[i]
-    const isActive = s.id === activeId
-    const n = String(i + 1).padStart(2)
-    const time = formatRelativeTime(s.updatedAt).padEnd(10)
-    const displayName = s.name ? `"${s.name}"` : '[sem nome]'
-    const msgs = `${s.messageCount} msg${s.messageCount !== 1 ? 's' : ''}`
-    const activeMark = isActive ? '  ← ativa' : ''
-    lines.push(`${isActive ? '→' : ' '} ${n}  ${time} ${displayName.padEnd(24)} ${msgs}${activeMark}`)
+/**
+ * Load a session by its full ID. Exposed for the picker overlay which
+ * already has the SessionSummary in hand and doesn't need the numeric
+ * lookup path. Mirrors executeResumeTarget's in-memory/on-disk handling.
+ */
+export async function loadSessionById(sessionId: string, projectPath: string): Promise<void> {
+  const state = useChatStore.getState()
+  if (state.sessions.has(sessionId)) {
+    if (state.isStreaming) await stopAgent()
+    clearMessageQueue()
+    usePermissionStore.getState().resetAutoApprove()
+    state.setActiveSession(sessionId)
+    const session = state.sessions.get(sessionId)
+    const name = session?.name || `#${sessionId.slice(0, 6)}`
+    useCheckpointStore.getState().clear()
+    state.addSystemMessage(`Sessão ${name} carregada.`, 'success')
+    return
   }
-
-  useChatStore.getState().addSystemMessage(lines.join('\n'), 'info')
+  try {
+    await state.switchSession(projectPath, sessionId)
+    const loadedSession = state.getActiveSession()
+    const name = loadedSession?.name || `#${sessionId.slice(0, 6)}`
+    state.addSystemMessage(`Sessão ${name} carregada.`, 'success')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    logger.error('cmd', `Failed to resume session ${sessionId}:`, err)
+    if (msg.includes('not found') || msg.includes('ENOENT')) {
+      state.addSystemMessage(`Sessão não encontrada. Use /resume para ver a lista.`, 'error')
+    } else {
+      state.addSystemMessage(`Erro ao carregar sessão: ${msg}`, 'error')
+    }
+  }
 }
 
 // ─── /resume <n|id> — Load specific session (by number or ID prefix) ───

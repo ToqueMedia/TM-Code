@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
 import { usePermissionStore } from '../../stores/permissionStore'
-import { stopAgent } from '../../services/agent/cmdModeCommands'
+import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
+import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands'
 import CmdModePromptInput, { type CmdModePromptInputRef } from './CmdModePromptInput'
 import { TerminalTitleBar } from './TerminalTitleBar'
 import { TerminalStatusLine } from './TerminalStatusLine'
@@ -11,6 +12,7 @@ import { TerminalGreeting } from './TerminalGreeting'
 import { BillingOverageBanner } from './BillingOverageBanner'
 import { ErrorBoundary } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
+import { TerminalSessionPicker } from './TerminalSessionPicker'
 import { useCmdScrollFollow } from '../../hooks/useCmdScrollFollow'
 import { tokens } from '@/theme/tokens'
 
@@ -31,10 +33,19 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
 
+  const sessionPickerOpen = useCmdOverlayStore(s => s.sessionPickerOpen)
+  const sessionPickerItems = useCmdOverlayStore(s => s.sessionPickerItems)
+  const sessionPickerActiveId = useCmdOverlayStore(s => s.sessionPickerActiveId)
+
   const promptInputRef = useRef<CmdModePromptInputRef>(null)
   const isStreamingRef = useRef(isStreaming)
   const pendingPermissionRef = useRef(pendingPermission)
   const prevPendingPermissionRef = useRef(pendingPermission)
+  const sessionPickerOpenRef = useRef(sessionPickerOpen)
+
+  useEffect(() => {
+    sessionPickerOpenRef.current = sessionPickerOpen
+  }, [sessionPickerOpen])
 
   useEffect(() => {
     isStreamingRef.current = isStreaming
@@ -87,12 +98,27 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
     }
   }, [pendingPermission])
 
-  // Unified Escape handler. Priority: permission prompt → stop streaming → back to welcome.
-  // Permission prompt owns Escape while it is visible; view handler yields to it.
+  // Unified Escape handler. Priority:
+  //   1. Permission prompt owns Escape while visible (handled by the prompt itself)
+  //   2. Session picker owns Escape (closes picker, does NOT exit CMD Mode)
+  //   3. Open menus (slash / @mention) own Escape to close themselves
+  //   4. Streaming → stop agent
+  //   5. Typing with text → let the textarea handle it
+  //   6. Idle → exit to welcome
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       if (pendingPermissionRef.current) return
+      // Picker's own onKeyDown also handles Esc, but a click elsewhere can
+      // defocus the overlay — intercept here too so Escape never leaks out
+      // of CMD Mode while the picker is open.
+      if (sessionPickerOpenRef.current) {
+        e.preventDefault()
+        e.stopPropagation()
+        useCmdOverlayStore.getState().closeSessionPicker()
+        return
+      }
+      if (promptInputRef.current?.isMenuOpen?.()) return
       if (isStreamingRef.current) {
         e.preventDefault()
         e.stopPropagation()
@@ -112,6 +138,25 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
     return () => window.removeEventListener('keydown', handler, true)
   }, [onBack])
 
+  // Close the session picker automatically if the user leaves CMD Mode.
+  useEffect(() => {
+    return () => { useCmdOverlayStore.getState().closeSessionPicker() }
+  }, [])
+
+  const handlePickSession = useCallback(async (session: { id: string }) => {
+    useCmdOverlayStore.getState().closeSessionPicker()
+    // Clear draft attachments when switching sessions
+    promptInputRef.current?.clearAttachments()
+    await loadSessionById(session.id, projectPath)
+    // Restore focus to the prompt after the picker unmounts.
+    setTimeout(() => promptInputRef.current?.focus(), 40)
+  }, [projectPath])
+
+  const handleClosePicker = useCallback(() => {
+    useCmdOverlayStore.getState().closeSessionPicker()
+    setTimeout(() => promptInputRef.current?.focus(), 40)
+  }, [])
+
   // Scroll to bottom after session load or when user sends.
   useEffect(() => {
     stickToBottom()
@@ -125,7 +170,7 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
       bg={tokens.colors.terminal.background}
       color={tokens.colors.terminal.foreground}
       fontFamily={tokens.fontFamily.mono}
-      fontSize="13px"
+      fontSize="14px"
       position="relative"
       overflow="hidden"
       data-cmd-mode-root
@@ -183,6 +228,15 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
           onApprove={() => usePermissionStore.getState().approve()}
           onApproveAll={() => usePermissionStore.getState().approveAll()}
           onDeny={() => usePermissionStore.getState().deny()}
+        />
+      )}
+
+      {sessionPickerOpen && (
+        <TerminalSessionPicker
+          items={sessionPickerItems}
+          activeSessionId={sessionPickerActiveId}
+          onSelect={handlePickSession}
+          onClose={handleClosePicker}
         />
       )}
 

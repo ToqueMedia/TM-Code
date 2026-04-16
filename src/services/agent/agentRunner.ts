@@ -3,16 +3,25 @@ import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, fl
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useProblemsStore } from '../../stores/problemsStore'
+import { useBillingStore } from '../../stores/billingStore'
 import AgentService from './agentService'
+import type { OpenAIContentPart } from './agentService'
 import ContextBuilder from './contextBuilder'
 import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
+import { resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../attachmentService'
+import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText } from './promptValueHelpers'
+import type { Attachment, PromptBlock } from '../../types/chat'
 
 interface RunAgentOptions {
   /** Whether to add a user message to the chat. Default: true */
   addUserMessage?: boolean
   /** Text to show in the user bubble. Defaults to the prompt itself. */
   userMessageText?: string
+  /** Attachments to display alongside the user message in the chat bubble. */
+  userMessageAttachments?: Attachment[]
+  /** Original prompt blocks for preserving attachment order in conversation history. */
+  userMessageBlocks?: PromptBlock[]
   /** Use existing conversation history instead of empty. Default: false */
   useConversationHistory?: boolean
   /**
@@ -23,8 +32,16 @@ interface RunAgentOptions {
   cmdOnlyMode?: boolean
 }
 
-/** Non-reentrancy guard — prevents overlapping agent invocations. */
-let running = false
+/**
+ * Serialization chain — each invocation awaits the previous one to fully
+ * settle before starting. We *cannot* simply drop concurrent calls: the
+ * message queue dispatches a queued prompt as soon as `queryGuard` reports
+ * idle, but the previous invocation's `finally` (cleanup, CMD-mode disable)
+ * may still be running. With a boolean "running" guard the queued prompt
+ * would be dropped silently and never appear in the message list. Chaining
+ * ensures every call actually runs while still preventing overlap.
+ */
+let lastRun: Promise<void> = Promise.resolve()
 
 /**
  * Shared agent invocation — wires up all the chatStore/agentStore callbacks.
@@ -34,14 +51,15 @@ export async function runAgentWithCallbacks(
   prompt: string,
   options: RunAgentOptions = {}
 ): Promise<void> {
-  if (running) return
-  running = true
-
-  try {
+  const prev = lastRun
+  const run = (async () => {
+    // Swallow prior errors — one failed turn must not starve the queue.
+    try { await prev } catch { /* ignore */ }
     await runAgentInternal(prompt, options)
-  } finally {
-    running = false
-  }
+  })()
+  // Store a never-rejecting version so the next caller's `await prev` never throws.
+  lastRun = run.catch(() => {})
+  return run
 }
 
 async function runAgentInternal(
@@ -51,6 +69,8 @@ async function runAgentInternal(
   const {
     addUserMessage = true,
     userMessageText,
+    userMessageAttachments,
+    userMessageBlocks,
     useConversationHistory = false,
     cmdOnlyMode = false,
   } = options
@@ -83,9 +103,13 @@ async function runAgentInternal(
     sessionId = chatStore.createSession(cmdCwd || projectPath)
   }
 
-  // Add user message to chat
+  // Add user message to chat (with optional attachments and block order)
   if (addUserMessage) {
-    chatStore.addUserMessage(userMessageText || prompt)
+    chatStore.addUserMessage(
+      userMessageText || prompt,
+      userMessageAttachments,
+      userMessageBlocks,
+    )
   }
 
   // Start assistant message
@@ -127,18 +151,57 @@ async function runAgentInternal(
   }
 
   // Get conversation history
-  const history = useConversationHistory
+  const rawHistory = useConversationHistory
     ? useChatStore.getState().conversationHistory
     : []
 
   const agentService = AgentService.getInstance()
   agentService.setSystemPrompt(systemPrompt)
 
+  // ── Build user content (text-only or multimodal) ──
+  // Same split as usePromptBar: paid plans send real image_url content parts,
+  // free plans receive flattened text with <attached_image>/<attached_file> XML.
+  //
+  // The gate is `hasAnyAttachments` (not just images) so file/folder attachments
+  // are also resolved via buildAugmentedPrompt → resolveAttachmentXml. Without
+  // this, non-image attachments would be visible in the chat bubble but their
+  // content would never reach the model.
+  const billingPlan = useBillingStore.getState().plan
+  const supportsMultimodal = billingPlan !== 'explorer'
+  const hasAnyAttachments = (userMessageAttachments?.length ?? 0) > 0
+  const hasImageAttachments = userMessageAttachments?.some(a => a.type === 'image') ?? false
+
+  let userContent: string | OpenAIContentPart[] = prompt
+
+  if (hasAnyAttachments && userMessageBlocks) {
+    const promptResolvers = {
+      resolveMentions: extractAndResolveMentions,
+      resolveAttachmentXml: resolveAttachments,
+      resolveImageDataUri: resolveImageToDataUri,
+    }
+
+    // Multimodal path — only when there are actual images AND the plan supports it.
+    if (hasImageAttachments && supportsMultimodal) {
+      const parts = await buildContentParts(userMessageBlocks, projectPath, promptResolvers)
+      if (parts) userContent = parts
+    }
+
+    // Text fallback — handles file/folder attachments (resolveAttachmentXml)
+    // AND image placeholders when multimodal isn't available or failed.
+    if (typeof userContent === 'string') {
+      userContent = await buildAugmentedPrompt(userMessageBlocks, projectPath, promptResolvers)
+    }
+  }
+
+  const history = supportsMultimodal
+    ? rawHistory
+    : downgradeHistoryToText(rawHistory)
+
   // Guard against double-finalization (onDone and onError can't both finalize)
   let finalized = false
 
   try {
-    await agentService.runAgentLoop(prompt, history, {
+    await agentService.runAgentLoop(userContent, history, {
       onTextDelta: (delta) => {
         agentStore.setStatus('generating')
         appendTextDeltaBuffered(delta)

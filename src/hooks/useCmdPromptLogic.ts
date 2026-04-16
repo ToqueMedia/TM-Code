@@ -7,13 +7,18 @@ import { CMD_MODE_COMMANDS } from '../services/agent/cmdModeCommands'
 import { runAgentWithCallbacks } from '../services/agent/agentRunner'
 import {
   enqueue,
+  remove,
   getCommandQueueSnapshot,
   subscribeToCommandQueue,
 } from '../services/agent/messageQueue'
 import { useQueueProcessor } from './useQueueProcessor'
+import { useAttachments } from './useAttachments'
 import QuickOpenService, { type QuickOpenItem } from '../services/quickOpenService'
 import { extractAndResolveMentions } from '../services/attachmentService'
-import type { QueuedCommand } from '../types/messageQueueTypes'
+import { findMentionAtCursor, findMentionTokenEnd } from '../utils/mentionParser'
+import type { ContentBlock, PromptValue, QueuedCommand } from '../types/messageQueueTypes'
+
+const MENTION_MENU_LIMIT = 50
 
 /**
  * CMD-mode prompt logic — slash commands, message queue, @mention support.
@@ -33,6 +38,14 @@ export function useCmdPromptLogic() {
   const [filteredMentions, setFilteredMentions] = useState<QuickOpenItem[]>([])
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0)
   const mentionStartRef = useRef(-1)
+  const [mentionQuery, setMentionQuery] = useState('')
+
+  // Subscribe to QuickOpen index state so the menu updates as soon as indexing finishes
+  const quickOpenVersion = useSyncExternalStore(
+    (listener) => QuickOpenService.getInstance().subscribe(listener),
+    () => QuickOpenService.getInstance().getVersion(),
+  )
+  const quickOpenBuilding = QuickOpenService.getInstance().isBuilding()
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -45,6 +58,23 @@ export function useCmdPromptLogic() {
   const projectPath = currentProject?.path || cmdModePath || ''
 
   const queuedCommands = useSyncExternalStore(subscribeToCommandQueue, getCommandQueueSnapshot)
+
+  // Attachment handling — uses local state (CMD mode manages its own lifecycle)
+  const {
+    attachments: draftAttachments,
+    removeAttachment,
+    clearAttachments,
+    supportsImages,
+    showImageWarning,
+    billingPlan,
+    handlePaste,
+    handleDragOver,
+    handleDragEnter,
+    handleDragLeave,
+    handleDrop,
+    isDragging,
+    handleAttachFiles,
+  } = useAttachments({ localState: true, textareaRef })
 
   const allCommands = useMemo(() => {
     const globalCmds = slashCommandRegistry.listCommands()
@@ -80,12 +110,17 @@ export function useCmdPromptLogic() {
     return parts.slice(1).join(' ')
   }, [])
 
-  const executePrompt = useCallback(async (prompt: string): Promise<void> => {
+  const executePrompt = useCallback(async (promptValue: PromptValue): Promise<void> => {
     const path = currentProject?.path || useProjectStore.getState().cmdModeProjectPath || ''
 
+    // Extract text for slash/shell dispatch (attachments only go through agent path)
+    const textPrompt = typeof promptValue === 'string'
+      ? promptValue
+      : promptValue.filter(b => b.type === 'text').map(b => b.text).join(' ')
+
     // ── ! prefix: run shell command directly, output injected into conversation ──
-    if (prompt.startsWith('! ')) {
-      const command = prompt.slice(2).trim()
+    if (textPrompt.startsWith('! ')) {
+      const command = textPrompt.slice(2).trim()
       if (!command) return
       try {
         const { invoke } = await import('@tauri-apps/api/core')
@@ -106,10 +141,6 @@ export function useCmdPromptLogic() {
         const output = [result.stdout, result.stderr].filter(s => s.trim()).join('\n') || '(no output)'
         const msgContent = `$ ${command}\n\`\`\`\n${output}\n\`\`\``
         useChatStore.getState().addUserMessage(msgContent)
-        // DO NOT call updateConversationHistory here — rebuildConversationHistory
-        // runs after each agent response and reconstructs from session.messages,
-        // which already includes this message via addUserMessage. A manual update
-        // here would create consecutive user turns that the Anthropic API rejects.
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         useChatStore.getState().addSystemMessage(`$ ${command}: ${msg}`, 'error')
@@ -118,13 +149,13 @@ export function useCmdPromptLogic() {
     }
 
     // ── Slash command dispatch ──
-    const command = findCommand(prompt, allCommands)
+    const command = findCommand(textPrompt, allCommands)
     if (command) {
       if (!command.enabled) {
         useChatStore.getState().addSystemMessage(`Command ${command.name} is not yet available.`, 'warn')
         return
       }
-      await command.execute(extractArgs(prompt), path)
+      await command.execute(extractArgs(textPrompt), path)
       return
     }
 
@@ -136,14 +167,21 @@ export function useCmdPromptLogic() {
     }
 
     // Resolve @mentions before sending — appends <mentioned_files> context to the prompt
-    const mentionContext = path ? await extractAndResolveMentions(prompt, path) : ''
-    const fullPrompt = mentionContext ? `${prompt}\n\n${mentionContext}` : prompt
+    const mentionContext = path ? await extractAndResolveMentions(textPrompt, path) : ''
+    const fullPrompt = mentionContext ? `${textPrompt}\n\n${mentionContext}` : textPrompt
+
+    // Extract attachments from blocks for the user message display
+    const attachments = typeof promptValue === 'string'
+      ? undefined
+      : promptValue.filter(b => b.type === 'attachment').map(b => b.attachment)
 
     await runAgentWithCallbacks(fullPrompt, {
       addUserMessage: true,
-      userMessageText: prompt, // show the original prompt in the UI, not the expanded version
+      userMessageText: textPrompt,
+      userMessageAttachments: attachments,
+      userMessageBlocks: typeof promptValue === 'string' ? undefined : promptValue,
       useConversationHistory: true,
-      cmdOnlyMode: true, // CMD Mode always uses CLI behavior regardless of project state
+      cmdOnlyMode: true,
     })
   }, [allCommands, findCommand, extractArgs, currentProject])
 
@@ -151,10 +189,10 @@ export function useCmdPromptLogic() {
 
   const executeQueuedInput = useCallback(async (commands: QueuedCommand[]): Promise<void> => {
     for (const cmd of commands) {
-      const prompt = typeof cmd.value === 'string'
-        ? cmd.value
-        : cmd.value.map(b => (b.type === 'text' ? b.text : '')).join(' ')
-      await executePrompt(prompt.trim())
+      // Pass the full PromptValue through — executePrompt handles both
+      // string and ContentBlock[] (extracting text for slash/shell dispatch,
+      // passing attachments to the agent boundary).
+      await executePrompt(cmd.value)
     }
   }, [executePrompt])
 
@@ -168,15 +206,28 @@ export function useCmdPromptLogic() {
     if (start < 0 || !textarea) return
 
     const val = textarea.value
-    const cursorPos = textarea.selectionStart ?? val.length
+    // Replace the WHOLE mention token — not just up to the cursor — so a user
+    // who was editing in the middle (e.g. "@App|Tsx", selects "App.tsx")
+    // doesn't end up with trailing garbage ("@App.tsx Tsx").
+    const tokenEnd = findMentionTokenEnd(val, start + 1)
     const before = val.slice(0, start)
-    const after = val.slice(cursorPos)
-    const relativePath = item.path.startsWith(projectPath)
-      ? item.path.slice(projectPath.length + 1)
-      : item.path
-    const insertion = `@${relativePath} `
+    const after = val.slice(tokenEnd)
+
+    // Derive a relative path. item.path is absolute from the index; strip the
+    // project root with correct separator handling for Win / Posix.
+    const normRoot = projectPath.replace(/\\/g, '/').replace(/\/+$/, '')
+    const normItem = item.path.replace(/\\/g, '/')
+    const relativePath = normItem.startsWith(normRoot + '/')
+      ? normItem.slice(normRoot.length + 1)
+      : normItem
+
+    const suffix = item.isDirectory ? '/' : ''
+    const insertion = `@${relativePath}${suffix} `
     const newValue = before + insertion + after
     const newCursor = before.length + insertion.length
+
+    // Nudge recency so this entry floats to the top of the next `@` list.
+    QuickOpenService.getInstance().markUsed(item.path)
 
     setInput(newValue)
     mentionStartRef.current = -1
@@ -205,37 +256,30 @@ export function useCmdPromptLogic() {
     }
     setShowCommandMenu(false)
 
-    // @mention detection — synchronous, reads cursor position directly from the DOM
-    // (selectionStart is valid during onChange before React re-renders)
+    // @mention detection — unicode-safe, shared with chat prompt & resolver.
     const cursorPos = textareaRef.current?.selectionStart ?? value.length
+    const mention = findMentionAtCursor(value, cursorPos)
 
-    let atIndex = -1
-    for (let i = cursorPos - 1; i >= 0; i--) {
-      const ch = value[i]
-      if (ch === '@') {
-        if (i === 0 || /\s/.test(value[i - 1])) atIndex = i
-        break
-      }
-      if (/\s/.test(ch)) break
-    }
-
-    if (atIndex === -1) {
+    if (!mention) {
       setShowMentionMenu(false)
+      setMentionQuery('')
+      mentionStartRef.current = -1
       return
     }
 
-    const query = value.slice(atIndex + 1, cursorPos)
+    const { atIndex, query } = mention
     const svc = QuickOpenService.getInstance()
-    const results = query.length === 0 ? svc.list(20) : svc.search(query, 20)
+    const results = query.length === 0
+      ? svc.list(MENTION_MENU_LIMIT, true)
+      : svc.search(query, MENTION_MENU_LIMIT, true)
 
-    if (results.length > 0) {
-      setFilteredMentions(results)
-      setShowMentionMenu(true)
-      setSelectedMentionIndex(0)
-      mentionStartRef.current = atIndex
-    } else {
-      setShowMentionMenu(false)
-    }
+    // Always open the menu when an @-mention is in progress — empty results
+    // are rendered as an "indexing…" / "no matches" state inside the menu.
+    setFilteredMentions(results)
+    setShowMentionMenu(true)
+    setSelectedMentionIndex(0)
+    setMentionQuery(query)
+    mentionStartRef.current = atIndex
   }, [allCommands, filterCommands])
 
   const handleCommandSelect = useCallback((command: SlashCommand) => {
@@ -251,7 +295,8 @@ export function useCmdPromptLogic() {
 
   const handleSend = useCallback(async () => {
     const prompt = input.trim()
-    if (!prompt) return
+    const hasAttachments = draftAttachments.length > 0
+    if (!prompt && !hasAttachments) return
 
     setInput('')
     setShowCommandMenu(false)
@@ -260,37 +305,54 @@ export function useCmdPromptLogic() {
     historyRef.current = [prompt, ...historyRef.current.filter(h => h !== prompt)].slice(0, 100)
     historyIndexRef.current = -1
 
+    // Build value: plain string or ContentBlock[] with attachments
+    let value: PromptValue
+    if (hasAttachments) {
+      const blocks: ContentBlock[] = []
+      if (prompt.length > 0) blocks.push({ type: 'text', text: prompt })
+      for (const att of draftAttachments) {
+        blocks.push({ type: 'attachment', attachment: att })
+      }
+      value = blocks
+      clearAttachments()
+    } else {
+      value = prompt
+    }
+
     if (isStreaming) {
-      enqueue({ value: prompt, mode: 'prompt', priority: 'next', uuid: crypto.randomUUID() })
+      enqueue({ value, mode: 'prompt', priority: 'next', uuid: crypto.randomUUID() })
       return
     }
 
-    await executePrompt(prompt)
-  }, [input, isStreaming, executePrompt])
+    await executePrompt(value)
+  }, [input, isStreaming, executePrompt, draftAttachments, clearAttachments])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       // @mention menu navigation — takes priority when open
-      if (showMentionMenu && filteredMentions.length > 0) {
-        if (e.key === 'ArrowUp') {
-          e.preventDefault()
-          setSelectedMentionIndex(prev => (prev <= 0 ? filteredMentions.length - 1 : prev - 1))
-          return
-        }
-        if (e.key === 'ArrowDown') {
-          e.preventDefault()
-          setSelectedMentionIndex(prev => (prev >= filteredMentions.length - 1 ? 0 : prev + 1))
-          return
-        }
-        if (e.key === 'Tab' || e.key === 'Enter') {
-          e.preventDefault()
-          handleMentionSelect(filteredMentions[selectedMentionIndex])
-          return
-        }
+      if (showMentionMenu) {
         if (e.key === 'Escape') {
           e.preventDefault()
+          e.stopPropagation()
           setShowMentionMenu(false)
           return
+        }
+        if (filteredMentions.length > 0) {
+          if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            setSelectedMentionIndex(prev => (prev <= 0 ? filteredMentions.length - 1 : prev - 1))
+            return
+          }
+          if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            setSelectedMentionIndex(prev => (prev >= filteredMentions.length - 1 ? 0 : prev + 1))
+            return
+          }
+          if (e.key === 'Tab' || e.key === 'Enter') {
+            e.preventDefault()
+            handleMentionSelect(filteredMentions[selectedMentionIndex])
+            return
+          }
         }
       }
 
@@ -322,6 +384,20 @@ export function useCmdPromptLogic() {
       // History navigation (when menus are closed)
       if (!showCommandMenu && !showMentionMenu) {
         if (e.key === 'ArrowUp') {
+          // Priority 1: Edit queued message if one exists and input is empty
+          if (input.length === 0 && queuedCommands.length > 0) {
+            e.preventDefault()
+            const lastQueued = queuedCommands[queuedCommands.length - 1]!
+            const val = typeof lastQueued.value === 'string'
+              ? lastQueued.value
+              : lastQueued.value.map(b => (b.type === 'text' ? b.text : '')).join(' ')
+            
+            remove([lastQueued as QueuedCommand])
+            setInput(val)
+            return
+          }
+
+          // Priority 2: Standard history navigation
           const history = historyRef.current
           if (history.length === 0) return
           e.preventDefault()
@@ -381,7 +457,20 @@ export function useCmdPromptLogic() {
     textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`
   }, [input])
 
-  const canSend = input.trim().length > 0
+  // Re-run @mention search when the QuickOpen index finishes building (or
+  // when live watcher events mutate the index).
+  useEffect(() => {
+    if (!showMentionMenu) return
+    const svc = QuickOpenService.getInstance()
+    const results = mentionQuery.length === 0
+      ? svc.list(MENTION_MENU_LIMIT, true)
+      : svc.search(mentionQuery, MENTION_MENU_LIMIT, true)
+    setFilteredMentions(results)
+    setSelectedMentionIndex(0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quickOpenVersion, showMentionMenu, mentionQuery])
+
+  const canSend = input.trim().length > 0 || draftAttachments.length > 0
 
   return {
     input,
@@ -392,6 +481,8 @@ export function useCmdPromptLogic() {
     showMentionMenu,
     filteredMentions,
     selectedMentionIndex,
+    mentionQuery,
+    quickOpenBuilding,
     textareaRef,
     isStreaming,
     canSend,
@@ -404,5 +495,19 @@ export function useCmdPromptLogic() {
     handleKeyDown,
     handleFocus,
     handleBlur,
+    // Attachments
+    draftAttachments,
+    removeAttachment,
+    clearAttachments,
+    supportsImages,
+    showImageWarning,
+    billingPlan,
+    handlePaste,
+    handleDragOver,
+    handleDragEnter,
+    handleDragLeave,
+    handleDrop,
+    isDragging,
+    handleAttachFiles,
   }
 }

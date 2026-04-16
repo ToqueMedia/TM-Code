@@ -400,6 +400,15 @@ const en = {
   'prompt.planLabel.business-4x': 'Business 4x',
   'prompt.planLabel.business-8x': 'Business 8x',
 
+  // ── CMD Mode Attachments ──────────────────────────
+  'cmdMode.attach': 'Attach',
+  'cmdMode.attachTooltip': 'Attach files or images',
+  'cmdMode.dropToAttach': 'Drop to attach',
+  'cmdMode.imageNotSupported': 'Images require a paid plan.',
+  'cmdMode.upgradeToPro': 'Upgrade to Pro',
+  'cmdMode.pastedImage': 'pasted image',
+  'cmdMode.removeAttachment': 'Remove',
+
   // ── Views ──────────────────────────────────────────
   'view.toggleProjects': 'Toggle projects sidebar',
   'view.newChat': 'New Chat',
@@ -1035,6 +1044,13 @@ const pt: Record<keyof typeof en, string> = {
   'prompt.planLabel.pro': 'Pro',
   'prompt.planLabel.business-4x': 'Business 4x',
   'prompt.planLabel.business-8x': 'Business 8x',
+  'cmdMode.attach': 'Anexar',
+  'cmdMode.attachTooltip': 'Anexar ficheiros ou imagens',
+  'cmdMode.dropToAttach': 'Largar para anexar',
+  'cmdMode.imageNotSupported': 'Imagens requerem um plano pago.',
+  'cmdMode.upgradeToPro': 'Upgrade para Pro',
+  'cmdMode.pastedImage': 'imagem colada',
+  'cmdMode.removeAttachment': 'Remover',
   'view.toggleProjects': 'Alternar barra de projetos',
   'view.newChat': 'Novo Chat',
   'view.toggleSessions': 'Alternar lista de sessões',

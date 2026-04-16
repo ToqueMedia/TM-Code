@@ -6,6 +6,7 @@ import { ServiceError } from '../../utils/errors'
 import { parseSSEStream, createThinkingDetector } from './streamParser'
 import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
+import { useAgentStore } from '../../stores/agentStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
 import { getQueryGuard } from './queryGuard'
@@ -1640,6 +1641,12 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     if (contextWindow) {
       const parsed = parseInt(contextWindow, 10)
       if (parsed > 0) this.contextWindowSize = parsed
+    }
+
+    const modelName = response.headers.get('X-Model-Name')
+    const modelProvider = response.headers.get('X-Model-Provider')
+    if (modelName || modelProvider) {
+      useAgentStore.getState().setModelInfo(modelName, modelProvider)
     }
 
     // Read billing info from response headers

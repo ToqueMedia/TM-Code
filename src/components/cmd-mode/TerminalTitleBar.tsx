@@ -58,8 +58,9 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
       pl={IS_MAC ? '80px' : 3}
       userSelect="none"
       flexShrink={0}
+      data-tauri-drag-region
     >
-      {/* Left: label + project path — drag region lives here only */}
+      {/* Left: label + project path */}
       <Flex align="center" gap={2} overflow="hidden" flex="1" minW={0} data-tauri-drag-region>
         <Text
           fontSize="10px"

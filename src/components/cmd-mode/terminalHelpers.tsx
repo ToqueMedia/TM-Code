@@ -42,7 +42,7 @@ const inlineCodeStyle: React.CSSProperties = {
 
 export const terminalMarkdownComponents: Components = {
   p: ({ children }) => (
-    <span style={{ whiteSpace: 'pre-wrap' }}>{children}</span>
+    <span style={{ display: 'block', whiteSpace: 'pre-wrap', marginBottom: '8px' }}>{children}</span>
   ),
   code: ({ className, children, ...rest }: ComponentProps<'code'> & { className?: string }) => {
     const isInline = !className

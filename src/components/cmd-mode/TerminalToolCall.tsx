@@ -1,77 +1,119 @@
 import { memo, useMemo } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { diffLines } from 'diff'
 import type { ToolCallDisplay } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
+import { TerminalStructuredDiff } from './TerminalStructuredDiff'
+import { getToolDisplay, getToolSubtitle, shortenPath } from './toolDisplay'
 
 interface TerminalToolCallProps {
   toolCall: ToolCallDisplay
 }
 
-// Truncate long tool arg strings for compact display
-function truncateArg(val: unknown, max = 60): string {
-  const s = typeof val === 'string' ? val : JSON.stringify(val)
-  return s.length > max ? s.slice(0, max) + '…' : s
+const READ_TOOLS = new Set([
+  'read_file',
+  'list_directory',
+  'glob',
+  'search_files',
+  'get_diagnostics',
+  'read_large_result',
+  'read_dev_server_logs',
+  'check_background_agents',
+])
+
+const RESULT_PREVIEW_CHARS = 1400
+
+function buildReadSummary(toolName: string, result: string | undefined): string | null {
+  if (!result) return null
+  if (toolName === 'read_file') {
+    const lines = result.split('\n').length
+    return `${lines} line${lines !== 1 ? 's' : ''}`
+  }
+  if (toolName === 'list_directory') {
+    const entries = result.split('\n').filter(Boolean).length
+    return `${entries} entr${entries !== 1 ? 'ies' : 'y'}`
+  }
+  if (toolName === 'search_files' || toolName === 'glob') {
+    const matches = result.split('\n').filter(Boolean).length
+    return `${matches} result${matches !== 1 ? 's' : ''}`
+  }
+  if (toolName === 'get_diagnostics') {
+    const problems = result.split('\n').filter(Boolean).length
+    return `${problems} diagnostic${problems !== 1 ? 's' : ''}`
+  }
+  return null
 }
 
 export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: TerminalToolCallProps) {
   const isError = toolCall.isError || toolCall.status === 'failed'
   const isRunning = toolCall.status === 'running'
   const hasDiff = toolCall.diffOldContent !== undefined || toolCall.diffNewContent !== undefined
+  const isReadTool = READ_TOOLS.has(toolCall.toolName)
 
-  const diffResult = useMemo(() => {
-    if (!hasDiff) return null
-    return diffLines(toolCall.diffOldContent || '', toolCall.diffNewContent || '')
-  }, [hasDiff, toolCall.diffOldContent, toolCall.diffNewContent])
+  const display = getToolDisplay(toolCall.toolName)
+  const verb = isRunning ? display.running : isError ? display.failed : display.done
+  const subtitle = useMemo(
+    () => getToolSubtitle(toolCall.toolName, toolCall.input),
+    [toolCall.toolName, toolCall.input],
+  )
 
-  const diffHunks = useMemo(() => {
-    if (!diffResult) return null
-    const filtered = diffResult.filter(p => p.added || p.removed)
-    return { lines: filtered.slice(0, 80), totalCount: filtered.length }
-  }, [diffResult])
+  const filePath = typeof toolCall.input?.file_path === 'string'
+    ? (toolCall.input.file_path as string)
+    : typeof toolCall.input?.path === 'string'
+      ? (toolCall.input.path as string)
+      : null
 
-  // Determine primary display: file path or tool name
-  const filePath = toolCall.input?.file_path ? String(toolCall.input.file_path) : null
-  const fileName = filePath ? filePath.split('/').pop() : null
-
-  // Status symbol
-  const statusSymbol = isRunning ? '⟳' : isError ? '✗' : '✓'
   const statusColor = isRunning
     ? tokens.colors.toolCall.runningText
     : isError
-    ? tokens.colors.accent.red
-    : tokens.colors.accent.green
+      ? tokens.colors.accent.red
+      : tokens.colors.accent.green
 
-  // Build a compact args string when no diff and no file path
-  const argsStr = useMemo(() => {
-    if (!toolCall.input || hasDiff || filePath) return null
-    const entries = Object.entries(toolCall.input).slice(0, 3)
-    return entries.map(([k, v]) => `${k}=${truncateArg(v)}`).join('  ')
-  }, [toolCall.input, hasDiff, filePath])
+  const readSummary = useMemo(
+    () => isReadTool && !isRunning ? buildReadSummary(toolCall.toolName, toolCall.result) : null,
+    [isReadTool, isRunning, toolCall.toolName, toolCall.result],
+  )
+
+  const showResult = toolCall.result && !hasDiff && !isReadTool
 
   return (
-    <Box my={1} fontFamily={tokens.fontFamily.mono}>
-      {/* Header line: ✓ tool_name  file/args  [NEW] */}
+    <Box my={1.5} fontFamily={tokens.fontFamily.mono}>
+      {/* Header: ● Verb(path)  or  ● Verb subtitle */}
       <Flex align="center" gap={1.5} wrap="wrap">
-        <Text fontSize="12px" fontWeight="700" color={statusColor} flexShrink={0}
-          css={isRunning ? {
-            display: 'inline-block',
-            animation: 'toolSpin 1.2s linear infinite',
-            '@keyframes toolSpin': { '0%': { transform: 'rotate(0deg)' }, '100%': { transform: 'rotate(360deg)' } }
-          } : undefined}
+        <Text
+          fontSize="11px"
+          fontWeight="700"
+          color={statusColor}
+          flexShrink={0}
+          lineHeight="1"
+          css={
+            isRunning
+              ? {
+                  display: 'inline-block',
+                  animation: 'toolSpin 1.1s linear infinite',
+                  '@keyframes toolSpin': {
+                    '0%': { transform: 'rotate(0deg)' },
+                    '100%': { transform: 'rotate(360deg)' },
+                  },
+                }
+              : undefined
+          }
         >
-          {statusSymbol}
+          {isRunning ? '⟳' : '●'}
         </Text>
 
-        <Text fontSize="12px" fontWeight="600" color={tokens.colors.terminal.foreground} flexShrink={0}>
-          {toolCall.toolName}
+        <Text
+          fontSize="13px"
+          fontWeight="600"
+          color={tokens.colors.terminal.foreground}
+          flexShrink={0}
+        >
+          {verb}
+          {subtitle && (
+            <Text as="span" color={tokens.colors.text.muted} fontWeight="400">
+              ({subtitle.length > 70 ? shortenPath(subtitle) : subtitle})
+            </Text>
+          )}
         </Text>
-
-        {filePath && (
-          <Text fontSize="12px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
-            {filePath}
-          </Text>
-        )}
 
         {toolCall.isNewFile && (
           <Text
@@ -79,76 +121,112 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
             color={tokens.colors.accent.green}
             border="1px solid"
             borderColor="rgba(46,160,67,0.35)"
-            px="4px"
+            px="5px"
             py="0px"
-            borderRadius="2px"
+            borderRadius="3px"
             fontWeight="700"
-            letterSpacing="0.06em"
+            letterSpacing="0.08em"
           >
             NEW
           </Text>
         )}
-
-        {argsStr && !hasDiff && (
-          <Text fontSize="11px" color={tokens.colors.text.disabled}>
-            {argsStr}
-          </Text>
-        )}
       </Flex>
 
-      {/* Body: indented under the header line */}
-      <Box pl={4} mt="2px" borderLeft={`1px solid ${isError ? 'rgba(248,81,73,0.2)' : 'rgba(255,255,255,0.06)'}`}>
-        {/* Diff hunk */}
-        {diffHunks && (
-          <Box my={1} borderRadius="2px" overflow="hidden" border="1px solid rgba(255,255,255,0.05)">
-            <Box px={2} py="3px" borderBottom="1px solid rgba(255,255,255,0.04)" bg="rgba(255,255,255,0.02)">
-              <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-                {toolCall.isNewFile ? '--- /dev/null' : `--- ${fileName}`}
-                {'  '}
-                {`+++ ${fileName}`}
+      {/* Body — indented connector */}
+      <Box
+        pl={4}
+        mt="1px"
+        borderLeft={`1px solid ${
+          isError ? 'rgba(248,81,73,0.18)'
+          : isRunning ? 'rgba(240,192,0,0.18)'
+          : 'rgba(255,255,255,0.05)'
+        }`}
+      >
+        {/* Read tool: compact summary, no content */}
+        {isReadTool && !isRunning && readSummary && (
+          <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt="1px">
+            {readSummary}
+          </Text>
+        )}
+
+        {/* Structured diff for write/edit tools */}
+        {hasDiff && (
+          <TerminalStructuredDiff
+            filePath={filePath || 'file'}
+            oldContent={toolCall.diffOldContent || ''}
+            newContent={toolCall.diffNewContent || ''}
+            isNewFile={toolCall.isNewFile}
+            maxLines={20}
+          />
+        )}
+
+        {/* Tool result for non-read, non-diff tools (execute_command, etc.) */}
+        {showResult && (
+          <Box
+            mt="3px"
+            px={2}
+            py="4px"
+            borderRadius="3px"
+            bg={isError ? 'rgba(248,81,73,0.04)' : 'rgba(255,255,255,0.015)'}
+            border={`1px solid ${isError ? 'rgba(248,81,73,0.12)' : 'rgba(255,255,255,0.04)'}`}
+          >
+            <Text
+              fontSize="12px"
+              color={isError ? tokens.colors.accent.red : tokens.colors.text.secondary}
+              whiteSpace="pre-wrap"
+              lineHeight="1.5"
+              fontFamily={tokens.fontFamily.mono}
+            >
+              {toolCall.result!.length > RESULT_PREVIEW_CHARS
+                ? toolCall.result!.slice(0, RESULT_PREVIEW_CHARS)
+                : toolCall.result}
+            </Text>
+            {toolCall.result!.length > RESULT_PREVIEW_CHARS && (
+              <Text
+                mt="2px"
+                fontSize="10px"
+                color={tokens.colors.text.disabled}
+                fontFamily={tokens.fontFamily.mono}
+                fontStyle="italic"
+              >
+                … {toolCall.result!.length - RESULT_PREVIEW_CHARS} more chars
               </Text>
-            </Box>
-            <Box fontSize="11px" fontFamily={tokens.fontFamily.mono} lineHeight="1.35">
-              {diffHunks.lines.map((part, i) => (
-                <Text
-                  key={i}
-                  px={2}
-                  color={part.added ? tokens.colors.diff.addedText : tokens.colors.diff.removedText}
-                  bg={part.added ? tokens.colors.diff.addedBg : tokens.colors.diff.removedBg}
-                  whiteSpace="pre-wrap"
-                  wordBreak="break-all"
-                >
-                  {part.added ? '+' : '-'}{part.value.trimEnd()}
-                </Text>
-              ))}
-              {diffHunks.totalCount > 80 && (
-                <Text px={2} color={tokens.colors.text.disabled} fontSize="10px">
-                  … {diffHunks.totalCount - 80} more hunks
-                </Text>
-              )}
-            </Box>
+            )}
           </Box>
         )}
 
-        {/* Tool result */}
-        {toolCall.result && !hasDiff && (
+        {/* Error result for read tools — still show the error */}
+        {isReadTool && isError && toolCall.result && (
           <Text
             fontSize="11px"
-            color={isError ? tokens.colors.accent.red : tokens.colors.text.secondary}
-            whiteSpace="pre-wrap"
+            color={tokens.colors.accent.red}
+            fontFamily={tokens.fontFamily.mono}
             mt="2px"
-            lineHeight="1.45"
           >
-            {toolCall.result.slice(0, 1200)}
-            {toolCall.result.length > 1200 ? '\n… (truncated)' : ''}
+            {toolCall.result.slice(0, 200)}
           </Text>
         )}
 
-        {/* Progress text */}
+        {/* Live progress */}
         {toolCall.progressText && (
-          <Text fontSize="11px" color={tokens.colors.toolCall.runningText} mt="2px">
-            ⟳ {toolCall.progressText}
-          </Text>
+          <Flex align="center" gap={1.5} mt="3px">
+            <Box
+              w="6px"
+              h="6px"
+              borderRadius="full"
+              bg={tokens.colors.toolCall.runningText}
+              css={{
+                animation: 'toolProgressPulse 1.4s ease-in-out infinite',
+                '@keyframes toolProgressPulse': {
+                  '0%, 100%': { opacity: 0.35, transform: 'scale(0.9)' },
+                  '50%': { opacity: 1, transform: 'scale(1.1)' },
+                },
+              }}
+            />
+            <Text fontSize="11px" color={tokens.colors.toolCall.runningText} fontFamily={tokens.fontFamily.mono}>
+              {toolCall.progressText}
+            </Text>
+          </Flex>
         )}
       </Box>
     </Box>
