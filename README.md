@@ -60,5 +60,5 @@ Quando quiseres mexer no código com as tuas próprias mãos, o editor completo 
 ---
 
 <p align="center">
-  Feito por <a href="https://toquemedia.com">Toque Media</a>
+  Feito por <a href="https://toquemedia.net">Toque Media, Lda.</a>
 </p>
