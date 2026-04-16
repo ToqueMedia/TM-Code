@@ -65,7 +65,6 @@ Built with:
 | Platform | Download |
 |----------|----------|
 | macOS (Apple Silicon) | [Download .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
-| macOS (Intel) | [Download .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
 | Windows | [Download .exe](https://github.com/ToqueMedia/TM-Code/releases/latest) |
 | Linux (Ubuntu/Debian) | [Download .deb](https://github.com/ToqueMedia/TM-Code/releases/latest) |
 
