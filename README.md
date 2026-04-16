@@ -53,7 +53,6 @@ Quando quiseres mexer no código com as tuas próprias mãos, o editor completo 
 | Plataforma | |
 |---|---|
 | macOS (Apple Silicon) | [Transferir .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
-| macOS (Intel) | [Transferir .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
 | Windows | [Transferir .exe](https://github.com/ToqueMedia/TM-Code/releases/latest) |
 | Linux (Ubuntu/Debian) | [Transferir .deb](https://github.com/ToqueMedia/TM-Code/releases/latest) |
 
