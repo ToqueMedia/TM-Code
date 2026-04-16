@@ -53,7 +53,6 @@ pub type PtySessionMap = Mutex<HashMap<String, Arc<Mutex<PtySession>>>>;
 const DEFAULT_PTY_COLS: u16 = 120;
 const DEFAULT_PTY_ROWS: u16 = 30;
 
-
 // ─── Shared execution engine ─────────────────────────────────────────────────
 
 /// Build a host-local shell command.
@@ -286,7 +285,6 @@ fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
 
     cmd
 }
-
 
 /// Spawn a command, stream its output into buffers, and wait with a timeout.
 /// Returns `CommandResult` on completion or timeout.
@@ -596,7 +594,9 @@ pub async fn run_streaming_command(
         build_host_command(&command, &PathBuf::from(&cwd))
     };
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to start command: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start command: {}", e))?;
 
     let pid = child.id();
 
@@ -693,7 +693,9 @@ pub async fn start_dev_server(
         c
     };
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to start dev server: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start dev server: {}", e))?;
 
     let pid = child.id();
 
@@ -829,16 +831,18 @@ pub async fn start_pty_shell(
         };
 
         let (shell_cmd, shell_args) = pick_interactive_shell();
-        (shell_cmd, shell_args, working_dir.to_string_lossy().to_string())
+        (
+            shell_cmd,
+            shell_args,
+            working_dir.to_string_lossy().to_string(),
+        )
     } else {
         // No active project: unrestricted
         let working_dir = match cwd {
             Some(dir) => dir,
-            None => {
-                env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .map_err(|e| format!("Failed to get current directory: {}", e))?
-            }
+            None => env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .map_err(|e| format!("Failed to get current directory: {}", e))?,
         };
 
         let (shell_cmd, shell_args) = pick_interactive_shell();
@@ -896,18 +900,24 @@ pub async fn start_pty_shell(
                 Ok(0) => break, // EOF
                 Ok(n) => {
                     let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let _ = app_clone.emit("pty-output", PtyOutputEvent {
-                        session_id: sid.clone(),
-                        data: text,
-                    });
+                    let _ = app_clone.emit(
+                        "pty-output",
+                        PtyOutputEvent {
+                            session_id: sid.clone(),
+                            data: text,
+                        },
+                    );
                 }
                 Err(_) => break,
             }
         }
-        let _ = app_clone.emit("pty-exit", PtyExitEvent {
-            session_id: sid,
-            exit_code: 0,
-        });
+        let _ = app_clone.emit(
+            "pty-exit",
+            PtyExitEvent {
+                session_id: sid,
+                exit_code: 0,
+            },
+        );
     });
 
     let session = PtySession {
@@ -933,14 +943,18 @@ pub async fn write_to_pty(
     pty_map: State<'_, PtySessionMap>,
 ) -> Result<(), String> {
     let map = pty_map.lock().map_err(|_| "Failed to lock PTY map")?;
-    let session = map.get(&session_id).ok_or_else(|| "PTY session not found".to_string())?;
+    let session = map
+        .get(&session_id)
+        .ok_or_else(|| "PTY session not found".to_string())?;
     let mut s = session.lock().map_err(|_| "Failed to lock session")?;
 
     use std::io::Write as _;
     let writer: &mut dyn std::io::Write = &mut *s.writer;
-    writer.write_all(data.as_bytes())
+    writer
+        .write_all(data.as_bytes())
         .map_err(|e| format!("Failed to write to PTY: {}", e))?;
-    writer.flush()
+    writer
+        .flush()
         .map_err(|e| format!("Failed to flush PTY: {}", e))?;
 
     Ok(())
@@ -955,16 +969,19 @@ pub async fn resize_pty(
     pty_map: State<'_, PtySessionMap>,
 ) -> Result<(), String> {
     let map = pty_map.lock().map_err(|_| "Failed to lock PTY map")?;
-    let session = map.get(&session_id).ok_or_else(|| "PTY session not found".to_string())?;
+    let session = map
+        .get(&session_id)
+        .ok_or_else(|| "PTY session not found".to_string())?;
     let s = session.lock().map_err(|_| "Failed to lock session")?;
 
-    s.master.resize(PtySize {
-        rows,
-        cols,
-        pixel_width: 0,
-        pixel_height: 0,
-    })
-    .map_err(|e| format!("Failed to resize PTY: {}", e))?;
+    s.master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("Failed to resize PTY: {}", e))?;
 
     Ok(())
 }
@@ -996,7 +1013,6 @@ pub struct PtyExitEvent {
     pub session_id: String,
     pub exit_code: i32,
 }
-
 
 /// Check if a URL is reachable (TCP connection accepted + HTTP response).
 /// Used to poll dev server readiness from the Rust side, bypassing WebView restrictions.

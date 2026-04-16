@@ -394,7 +394,8 @@ pub fn run() {
         .build()
         .expect("Failed to create HTTP client");
     let fim_state = commands::ai_completion::FimState::new();
-    let pty_map: commands::terminal::PtySessionMap = std::sync::Mutex::new(std::collections::HashMap::new());
+    let pty_map: commands::terminal::PtySessionMap =
+        std::sync::Mutex::new(std::collections::HashMap::new());
 
     tauri::Builder::default()
         .manage(command_history)
