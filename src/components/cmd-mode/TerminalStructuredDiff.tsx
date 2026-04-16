@@ -30,8 +30,10 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
   maxLines = 20,
 }: TerminalStructuredDiffProps) {
   const { rows, addedTotal, removedTotal, overflowCount } = useMemo(() => {
-    const oldText = oldContent ?? ''
-    const newText = newContent ?? ''
+    // Normalize CRLF → LF so Windows files don't render with stray \r glyphs
+    // and so the line counter matches what the user sees in the editor.
+    const oldText = (oldContent ?? '').replace(/\r\n/g, '\n')
+    const newText = (newContent ?? '').replace(/\r\n/g, '\n')
 
     if (isNewFile || oldText === '') {
       const lines = newText.split('\n')

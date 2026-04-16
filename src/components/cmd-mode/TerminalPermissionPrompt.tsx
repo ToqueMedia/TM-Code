@@ -16,17 +16,32 @@ interface TerminalPermissionPromptProps {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getArgPreview(toolName: string, args: Record<string, unknown>): string | null {
+  // Pick the first non-empty string from a list of candidate keys.
+  const pick = (...keys: string[]): string | null => {
+    for (const k of keys) {
+      const v = args[k]
+      if (typeof v === 'string' && v.length > 0) return v
+    }
+    return null
+  }
   switch (toolName) {
     case 'read_file':
     case 'write_file':
     case 'create_file':
     case 'delete_file':
+    case 'edit_file':
     case 'create_directory':
-      return (args.path as string) || null
-    case 'rename_file':
-      return `${args.oldPath} → ${args.newName}`
+      return pick('file_path', 'path')
+    case 'rename_file': {
+      const from = pick('file_path', 'oldPath', 'old_path', 'path')
+      const to = pick('new_path', 'newPath', 'newName')
+      return from && to ? `${from} → ${to}` : from || to
+    }
     case 'execute_command':
-      return (args.command as string) || null
+      return pick('command')
+    case 'web_fetch':
+    case 'web_search':
+      return pick('url', 'query')
     default: {
       const first = Object.values(args)[0]
       if (typeof first === 'string') return first.length > 80 ? first.slice(0, 80) + '…' : first

@@ -2,6 +2,7 @@ import { lazy, memo, Suspense, useCallback, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import type { CodeBlock } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
+import { basename } from '@/utils/platform'
 
 // Prism + vscDarkPlus theme are heavy. Defer until a code block actually renders.
 const LazyHighlighter = lazy(async () => {
@@ -42,7 +43,7 @@ export const TerminalCodeBlock = memo(function TerminalCodeBlock({ block }: Term
   }, [block.code])
 
   const lang = block.language || 'text'
-  const file = block.filePath ? String(block.filePath).split('/').pop() : null
+  const file = block.filePath ? basename(String(block.filePath)) : null
 
   return (
     <Box my={1.5} pl={2} borderLeft={`2px solid rgba(255,255,255,0.08)`} data-no-focus-steal>

@@ -4,6 +4,7 @@
  * (path, query, command) so the user sees intent at a glance instead
  * of a wall of underscored identifiers.
  */
+import { basename as pathBasename, shortenPath as pathShorten } from '@/utils/platform'
 
 export type ToolDisplay = {
   /** Verb shown while the tool is running (present continuous) */
@@ -87,13 +88,12 @@ export function getToolSubtitle(toolName: string, input: Record<string, unknown>
 
 export function shortenPath(path: string): string {
   // Always keep filename and at most 2 parent folders for context.
-  const parts = path.split('/').filter(Boolean)
-  if (parts.length <= 3) return path
-  return `…/${parts.slice(-3).join('/')}`
+  // Cross-platform: handles both `/` and `\` separators.
+  return pathShorten(path, 3)
 }
 
 export function basename(path: string): string {
-  return path.split('/').filter(Boolean).pop() || path
+  return pathBasename(path)
 }
 
 function truncate(s: string, max: number): string {

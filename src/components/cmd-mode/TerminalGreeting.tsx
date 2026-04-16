@@ -4,6 +4,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { CMD_MODE_COMMANDS } from '../../services/agent/cmdModeCommands'
 import { slashCommandRegistry } from '../../services/agent/slashCommandRegistry'
 import { tokens } from '@/theme/tokens'
+import { basename } from '@/utils/platform'
 
 interface TerminalGreetingProps {
   projectPath: string
@@ -11,7 +12,7 @@ interface TerminalGreetingProps {
 
 export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: TerminalGreetingProps) {
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
-  const projectName = projectPath.split('/').filter(Boolean).pop() || projectPath
+  const projectName = basename(projectPath) || projectPath
 
   const commands = useMemo(() => {
     const entries = [...CMD_MODE_COMMANDS, ...slashCommandRegistry.listCommands()]

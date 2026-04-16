@@ -8,7 +8,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { CreditIndicator } from '../ui/CreditIndicator'
 import { McpIndicator } from '../ui/StatusIndicators'
 import { tokens } from '@/theme/tokens'
-import { IS_MAC } from '@/utils/platform'
+import { IS_MAC, basename } from '@/utils/platform'
 
 interface TerminalTitleBarProps {
   projectPath: string
@@ -44,8 +44,8 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
     }
   }, [projectPath])
 
-  // Show basename prominently, full path dimmed
-  const projectName = projectPath.split('/').filter(Boolean).pop() || projectPath
+  // Show basename prominently, full path dimmed (cross-platform: handles \ and /)
+  const projectName = basename(projectPath) || projectPath
 
   return (
     <Flex
