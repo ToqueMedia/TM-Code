@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src-tauri/icons/128x128@2x.png" width="120" alt="TM Code" />
+  <img src="assets/icon.png" width="120" alt="TM Code" />
 </p>
 
 <h1 align="center">TM Code</h1>
@@ -56,25 +56,6 @@ Quando quiseres mexer no código com as tuas próprias mãos, o editor completo 
 | macOS (Intel) | [Transferir .dmg](https://github.com/ToqueMedia/TM-Code/releases/latest) |
 | Windows | [Transferir .exe](https://github.com/ToqueMedia/TM-Code/releases/latest) |
 | Linux (Ubuntu/Debian) | [Transferir .deb](https://github.com/ToqueMedia/TM-Code/releases/latest) |
-
-## Planos
-
-| | Grátis | Pro | Business |
-|---|---|---|---|
-| **Modelos** | MiMo V2 Flash | Todos os modelos | Todos os modelos |
-| **Créditos** | 10/dia | Pool mensal | Pool mensal (4x/8x) |
-| **Fila** | Máx. 5 em simultâneo | Ilimitado | Ilimitado |
-| **Preço** | $0 | Em breve | Em breve |
-
-## Contribuir
-
-O TM Code é open-source. Se quiseres contribuir, abre uma issue ou envia um pull request.
-
-```bash
-# Pré-requisitos: Node >= 20, Rust, Yarn
-yarn install
-npm run tauri dev
-```
 
 ---
 
