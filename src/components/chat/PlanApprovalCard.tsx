@@ -5,6 +5,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { handlePlanApprove, handlePlanRequestChanges, handlePlanReject } from '../../services/agent/commands/planCommand'
+import { FileService } from '../../services/fileService'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import type { ChatMessageCard } from '../../types/chat'
@@ -37,9 +38,17 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
     handlePlanReject()
   }, [messageId])
 
-  const handleViewPlan = useCallback(() => {
-    const editorStore = useEditorRepository.getState()
-    editorStore.openFile(`${projectPath}/PLAN.md`)
+  const handleViewPlan = useCallback(async () => {
+    const planPath = `${projectPath}/PLAN.md`
+    try {
+      await FileService.readFile(planPath)
+    } catch {
+      useChatStore.getState().addSystemMessage(
+        'PLAN.md is missing. Run /plan again to regenerate it.',
+      )
+      return
+    }
+    useEditorRepository.getState().openFile(planPath)
     useLayoutStore.getState().setViewMode('editor')
   }, [projectPath])
 

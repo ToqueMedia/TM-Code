@@ -961,6 +961,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                 diffOldContent = parsed.oldContent
                 diffNewContent = parsed.newContent
                 isNewFile = parsed.isNewFile
+                // Always start as 'pending'. The "accepted" badge must only
+                // appear after DiffService.acceptDiff actually writes to
+                // disk — otherwise an aborted run or a failed write would
+                // leave the UI claiming the file was saved when it wasn't.
+                // Flicker of Accept/Reject buttons during auto-approve is
+                // handled in InlineDiff via the autoApproveDiffs flag.
                 diffStatus = 'pending'
 
                 // Create DiffResult for DiffService + GeneratingView
