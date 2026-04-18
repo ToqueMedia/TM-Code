@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
-import { useLayoutStore } from '../../stores/layoutStore'
+import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useProblemsStore } from '../../stores/problemsStore'
@@ -83,7 +83,7 @@ export function usePromptBar() {
   const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
-  const isPreviewServerRunning = useLayoutStore(s => s.isPreviewServerRunning)
+  const isPreviewServerRunning = useLayoutStore(selectIsPreviewServerRunning)
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const isScaffolding = scaffoldPhase === 'installing' || scaffoldPhase === 'starting'
@@ -540,7 +540,7 @@ export function usePromptBar() {
           const layoutStore = useLayoutStore.getState()
 
           // If preview server is running, reload and show preview
-          if (layoutStore.isPreviewServerRunning) {
+          if (selectIsPreviewServerRunning(layoutStore)) {
             layoutStore.reloadPreview()
             layoutStore.setViewMode('preview')
             return
@@ -929,7 +929,7 @@ export function usePromptBar() {
     }
 
     // If server is already running or static preview exists, just switch view
-    if (layoutStore.isPreviewServerRunning || layoutStore.previewHtmlContent) {
+    if (selectIsPreviewServerRunning(layoutStore) || layoutStore.previewHtmlContent) {
       layoutStore.setViewMode('preview')
       return
     }

@@ -5,7 +5,7 @@ import { useProjectStore } from '../stores/projectStore'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
-import { WelcomeSidebar, WelcomeHero, CloneDialog } from './welcome'
+import { WelcomeSidebar, WelcomeHero, CloneDialog, StartupRequirementsBanner } from './welcome'
 import SettingsView from './views/SettingsView'
 import WindowControls from './ui/WindowControls'
 import { IS_MAC } from '@/utils/platform'
@@ -153,6 +153,10 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       )}
 
       <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} />
+
+      {/* Non-blocking prereq banner — only shows when a tool is missing/outdated.
+          Positioned absolute near the top so it doesn't reflow the hero layout. */}
+      {!cmdModeProjectPath && !showSettings && <StartupRequirementsBanner />}
     </Flex>
   )
 }

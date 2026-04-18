@@ -5,13 +5,21 @@ import { useChatStore } from '../stores/chatStore'
 import { logger } from '../utils/logger'
 
 type ServerStatus = 'starting' | 'running' | 'stopped' | 'error'
+type ServerType = 'frontend' | 'backend'
 
-interface DevServerState {
+interface DevServerSlot {
   pid: number
   url: string | null
   status: ServerStatus
   projectPath: string
   command: string
+  serverType: ServerType
+  port: number
+  /** Bumped on every start/stop for this slot; guards stale invoke/poll returns. */
+  generation: number
+  /** Separate poll gen so URL changes cancel prior polls without disturbing lifecycle gen. */
+  pollGeneration: number
+  eaddrinuseRetried: boolean
 }
 
 interface DevServerOutputPayload {
@@ -24,32 +32,18 @@ interface DevServerOutputPayload {
 const URL_REGEX = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\[0:0:0:0:0:0:0:1\]):\d+\/?/
 const PORT_REGEX = /(?:listening on|running (?:on|at)|started on|port|server at)\s+(\d{4,5})/i
 
-/** Port used for frontend dev servers — avoids conflict with the IDE's own Vite (5173). */
 const DEV_SERVER_PORT = 7773
-/** Port used for backend/API dev servers. */
 const BACKEND_SERVER_PORT = 7777
 
-/** Max time (ms) to wait for the server to accept connections. */
 const READY_TIMEOUT = 12_000
-/** Interval (ms) between readiness pings. */
 const READY_POLL_INTERVAL = 500
 
 class DevServerManager {
   private static instance: DevServerManager
-  private currentServer: DevServerState | null = null
+  private frontendServer: DevServerSlot | null = null
+  private backendServer: DevServerSlot | null = null
   private unlistenOutput: UnlistenFn | null = null
   private unlistenExit: UnlistenFn | null = null
-  /** Incremented on each start() — lets us detect stale invoke returns. */
-  private generation = 0
-  /** Incremented on each waitForServerReady call — cancels previous polling if URL changes. */
-  private pollGeneration = 0
-  /** Optional hint from the agent about the server type — skips auto-detection. */
-  private serverTypeHint: 'frontend' | 'backend' | null = null
-  /** Resolved port for the current server (7773 for frontend, 7777 for backend). */
-  private serverPort: number = DEV_SERVER_PORT
-  /** Guards against infinite EADDRINUSE retry loops — at most one auto-recovery per start(). */
-  private eaddrinuseRetried = false
-  /** Pending preview-switch subscription — cleaned up on stop(). */
   private unsubPreviewDefer: (() => void) | null = null
 
   static getInstance(): DevServerManager {
@@ -59,21 +53,33 @@ class DevServerManager {
     return DevServerManager.instance
   }
 
+  private slotFor(type: ServerType): DevServerSlot | null {
+    return type === 'frontend' ? this.frontendServer : this.backendServer
+  }
+
+  private setSlot(type: ServerType, slot: DevServerSlot | null): void {
+    if (type === 'frontend') this.frontendServer = slot
+    else this.backendServer = slot
+  }
+
+  /** Find the slot matching this PID (at most one matches since PIDs are unique). */
+  private slotByPid(pid: number): DevServerSlot | null {
+    if (this.frontendServer?.pid === pid) return this.frontendServer
+    if (this.backendServer?.pid === pid) return this.backendServer
+    return null
+  }
+
   /**
    * Inject --port CLI flag for frontend dev servers.
-   * Host binding (0.0.0.0 for Docker) is handled via HOST/HOSTNAME env vars
-   * on the Rust side — NOT via CLI flags, since each framework uses different
-   * flags (Vite: --host, Next: --hostname, Nuxt: --host without value).
+   * Host binding (0.0.0.0 for Docker) is handled via HOST/HOSTNAME env vars on the Rust side.
    */
   private injectPort(command: string, port: number, isBackend: boolean): string {
     if (isBackend) return command
 
-    // Package manager scripts: npm run dev, yarn start, pnpm run dev
     if (/^(npm|yarn|pnpm|bun)\s+(run\s+\w+|start|dev)\b/.test(command)) {
       return `${command} -- --port ${port}`
     }
 
-    // Direct CLI commands: ng serve, next dev, vite, nuxt dev, etc.
     if (/^(npx\s+)?(ng\s+serve|next\s+dev|vite|nuxt\s+dev|astro\s+dev|svelte-kit\s+dev)\b/.test(command)) {
       return `${command} --port ${port}`
     }
@@ -81,107 +87,113 @@ class DevServerManager {
     return command
   }
 
-  /** Normalize dev server URL for iframe compatibility. */
   private normalizeUrl(url: string): string {
-    // Use "localhost" instead of "127.0.0.1" — WKWebView on macOS grants
-    // localhost ATS (App Transport Security) exemption for iframes, but
-    // treats raw IP addresses as untrusted origins.
-    // Docker port-forwarding also binds to localhost on the host.
+    // Keep "localhost" — WKWebView on macOS only grants ATS exemption for
+    // that hostname in iframes (raw IPs treated as untrusted).
     let normalized = url
       .replace('127.0.0.1', 'localhost')
       .replace('0.0.0.0', 'localhost')
       .replace('[::1]', 'localhost')
       .replace('[::1:]', 'localhost')
       .replace('[0:0:0:0:0:0:0:1]', 'localhost')
-    // Ensure trailing slash
     if (!normalized.endsWith('/')) normalized += '/'
     return normalized
   }
 
-  async start(projectPath: string, devCommand: string, serverTypeHint?: 'frontend' | 'backend'): Promise<void> {
-    // Stop any existing server first
-    await this.stop()
+  async start(projectPath: string, devCommand: string, serverTypeHint?: ServerType): Promise<void> {
+    const serverType: ServerType = serverTypeHint || 'frontend'
+    const port = serverType === 'backend' ? BACKEND_SERVER_PORT : DEV_SERVER_PORT
 
-    this.serverTypeHint = serverTypeHint || null
-    this.serverPort = serverTypeHint === 'backend' ? BACKEND_SERVER_PORT : DEV_SERVER_PORT
-    this.eaddrinuseRetried = false
+    // Only stop the same-type slot. The other slot (e.g. backend when starting frontend)
+    // must stay running — this is the core of dual-server fullstack support.
+    await this.stop(serverType)
 
-    // Kill any process occupying our port before starting.
-    // The Rust kill_port command polls until the port is actually free (up to 3s).
     try {
-      await invoke('kill_port', { port: this.serverPort })
-      logger.info('devServer', `Port ${this.serverPort} cleared`)
+      await invoke('kill_port', { port })
+      logger.info('devServer', `Port ${port} cleared for ${serverType}`)
     } catch {
-      // Ignore — port may already be free
+      // Port already free — continue
     }
 
-    const gen = ++this.generation
+    const resolvedCommand = this.injectPort(devCommand, port, serverType === 'backend')
 
-    const resolvedCommand = this.injectPort(devCommand, this.serverPort, this.serverTypeHint === 'backend')
-
-    // Signal loading state to the UI
     useLayoutStore.getState().setPreviewServerLoading(true)
 
-    this.currentServer = {
+    const slot: DevServerSlot = {
       pid: 0,
       url: null,
       status: 'starting',
       projectPath,
       command: devCommand,
+      serverType,
+      port,
+      generation: Date.now() + Math.random(),
+      pollGeneration: 0,
+      eaddrinuseRetried: false,
     }
+    this.setSlot(serverType, slot)
 
-    // Listen for output events before spawning
-    this.unlistenOutput = await listen<DevServerOutputPayload>(
-      'dev-server-output',
-      (event) => this.handleOutput(event.payload),
-    )
-
-    this.unlistenExit = await listen<number>(
-      'dev-server-exit',
-      (event) => this.handleExit(event.payload),
-    )
+    // Attach listeners once; both slots share them and demux by PID.
+    await this.ensureListeners()
 
     try {
       const pid = await invoke<number>('start_dev_server', {
         command: resolvedCommand,
         cwd: projectPath,
-        port: this.serverPort,
+        port,
       })
 
-      // If stop() or another start() was called while we awaited invoke,
-      // the generation has changed — kill the orphaned process.
-      if (gen !== this.generation || !this.currentServer) {
+      // Slot may have been replaced or cleared while invoke was pending.
+      const live = this.slotFor(serverType)
+      if (!live || live.generation !== slot.generation) {
         try { await invoke('kill_process', { pid }) } catch {}
         return
       }
 
-      this.currentServer.pid = pid
-      console.warn(`[dev-server] STARTED: PID=${pid}, command="${resolvedCommand}", port=${this.serverPort}`)
-      logger.info('devServer', `Started dev server (PID ${pid}): ${devCommand}`)
+      live.pid = pid
+      console.warn(`[dev-server] STARTED: type=${serverType}, PID=${pid}, command="${resolvedCommand}", port=${port}`)
+      logger.info('devServer', `Started ${serverType} server (PID ${pid}): ${devCommand}`)
     } catch (error) {
-      // Only clean up if we're still the active generation
-      if (gen === this.generation) {
-        this.currentServer = null
-        this.cleanup()
-        useLayoutStore.getState().setPreviewServerLoading(false)
+      const live = this.slotFor(serverType)
+      if (live && live.generation === slot.generation) {
+        this.setSlot(serverType, null)
+        if (!this.frontendServer && !this.backendServer) {
+          this.cleanup()
+          useLayoutStore.getState().setPreviewServerLoading(false)
+        }
       }
       throw error
     }
   }
 
+  private async ensureListeners(): Promise<void> {
+    if (this.unlistenOutput) return
+    this.unlistenOutput = await listen<DevServerOutputPayload>(
+      'dev-server-output',
+      (event) => this.handleOutput(event.payload),
+    )
+    this.unlistenExit = await listen<number>(
+      'dev-server-exit',
+      (event) => this.handleExit(event.payload),
+    )
+  }
+
   private handleOutput(payload: DevServerOutputPayload): void {
-    if (!this.currentServer) return
-    // When pid is 0 we're still waiting for invoke to return — accept all
-    // events (safe because stop() unlistens before start() re-listens).
-    // Once pid is set, filter to avoid stale events.
-    if (this.currentServer.pid !== 0 && payload.pid !== this.currentServer.pid) return
+    // Demux by PID. For still-starting slots (pid=0) we fall back to the one
+    // that hasn't received a PID yet — safe because only one slot can be in
+    // the pid=0 state at any time (start() awaits before another call can
+    // enter the same path).
+    let slot = this.slotByPid(payload.pid)
+    if (!slot) {
+      if (this.frontendServer?.pid === 0) slot = this.frontendServer
+      else if (this.backendServer?.pid === 0) slot = this.backendServer
+    }
+    if (!slot) return
 
     const line = payload.data
     const layoutStore = useLayoutStore.getState()
 
-    // Classify line level for the console panel.
-    // Many tools (npm, next, tsc) send warnings and info to stderr,
-    // so we classify by content, not by stream.
+    // Many tools (npm, next, tsc) send warnings/info to stderr — classify by content.
     const isWarn = /\bwarn(ing)?\b/i.test(line) || /\bnpm warn\b/i.test(line)
     const isError = !isWarn && (
       /\berror\b/i.test(line)
@@ -191,42 +203,36 @@ class DevServerManager {
     )
     const level = isError ? 'error' : isWarn ? 'warn' : 'info'
 
-    // Push to dev console log store
     if (line.trim()) {
       layoutStore.addDevServerLog(line, level)
     }
 
-    // Detect common fatal errors and provide actionable feedback
     if (/Cannot find module.*rollup|Error:.*optional dependencies/i.test(line)) {
       layoutStore.addDevServerLog(
         'Fix: Run "rm -rf node_modules package-lock.json && npm install" in the terminal to reinstall dependencies for this platform.',
-        'error'
+        'error',
       )
     }
 
-    // Auto-recovery: detect EADDRINUSE, kill the port, and restart (once)
+    // Auto-recovery: one retry per slot on EADDRINUSE
     const eaddrinuse = line.match(/EADDRINUSE.*(?:port|address)[:\s]*(\d+)/i)
       || line.match(/EADDRINUSE.*:::(\d+)/i)
       || line.match(/address already in use\s+(?:::)?(\d+)/i)
-    if (eaddrinuse && !this.eaddrinuseRetried && this.currentServer) {
+    if (eaddrinuse && !slot.eaddrinuseRetried) {
       const blockedPort = parseInt(eaddrinuse[1], 10)
       if (blockedPort > 0) {
-        this.eaddrinuseRetried = true
-        const { projectPath, command } = this.currentServer
-        const hint = this.serverPort === BACKEND_SERVER_PORT ? 'backend' as const : undefined
+        slot.eaddrinuseRetried = true
+        const { projectPath, command, serverType } = slot
         layoutStore.addDevServerLog(
           `Port ${blockedPort} in use — killing and restarting...`,
-          'warn'
+          'warn',
         )
-        // Fire-and-forget: stop current, kill port, restart
-        this.stop().then(async () => {
-          try {
-            await invoke('kill_port', { port: blockedPort })
-          } catch { /* port may already be free */ }
+        this.stop(serverType).then(async () => {
+          try { await invoke('kill_port', { port: blockedPort }) } catch {}
           await new Promise(r => setTimeout(r, 500))
-          // Re-set the flag AFTER start() resets it, to prevent infinite loops
-          await this.start(projectPath, command, hint).catch(() => {})
-          this.eaddrinuseRetried = true
+          await this.start(projectPath, command, serverType).catch(() => {})
+          const s = this.slotFor(serverType)
+          if (s) s.eaddrinuseRetried = true
         })
         return
       }
@@ -234,7 +240,6 @@ class DevServerManager {
 
     // Detect URL in output
     let detectedUrl: string | null = null
-
     const urlMatch = line.match(URL_REGEX)
     const portMatch = line.match(PORT_REGEX)
 
@@ -244,47 +249,40 @@ class DevServerManager {
       detectedUrl = `http://localhost:${portMatch[1]}`
     }
 
-    if (detectedUrl && this.currentServer) {
+    if (detectedUrl) {
       const url = this.normalizeUrl(detectedUrl)
 
-      // Always update to the LATEST detected URL.
-      // Vite/Next.js may report an initial URL then switch ports if occupied.
-      if (this.currentServer.url !== url) {
-        const prevUrl = this.currentServer.url
-        this.currentServer.url = url
-        this.currentServer.status = 'running'
+      // Always track the latest URL — Vite/Next may report initial then switch ports.
+      if (slot.url !== url) {
+        const prevUrl = slot.url
+        slot.url = url
+        slot.status = 'running'
 
         if (prevUrl) {
           layoutStore.addDevServerLog(`[debug] URL changed: ${prevUrl} → ${url}`, 'info')
         }
         layoutStore.addDevServerLog(`Server ready at ${url}`, 'info')
 
-        // Poll until the server actually accepts connections, then show preview
-        this.waitForServerReady(url)
+        this.waitForServerReady(url, slot)
       }
     }
   }
 
   /**
-   * Poll the detected URL until the server accepts connections,
-   * then transition to preview mode.
-   *
-   * Uses `mode: 'no-cors'` because the IDE WebView origin differs from
-   * the dev server origin (different port). In no-cors mode the fetch
-   * succeeds (opaque response) as long as the server is reachable —
-   * we don't need to read the body, just confirm it's accepting
-   * connections.
+   * Poll the detected URL until the server accepts connections, then register
+   * it in layoutStore. `no-cors` opaque responses are enough — we only care
+   * that the server is reachable, not its body.
    */
-  private async waitForServerReady(url: string): Promise<void> {
-    const gen = this.generation
-    const pollGen = ++this.pollGeneration
+  private async waitForServerReady(url: string, slot: DevServerSlot): Promise<void> {
+    const gen = slot.generation
+    const pollGen = ++slot.pollGeneration
     const start = Date.now()
     const layoutStore = useLayoutStore.getState()
     let attempts = 0
 
     while (Date.now() - start < READY_TIMEOUT) {
-      // If server was stopped/restarted, or URL changed (new poll started), bail out
-      if (gen !== this.generation || !this.currentServer || pollGen !== this.pollGeneration) {
+      const live = this.slotFor(slot.serverType)
+      if (!live || live !== slot || live.generation !== gen || live.pollGeneration !== pollGen) {
         logger.info('devServer', `Polling cancelled for ${url}`)
         return
       }
@@ -303,9 +301,10 @@ class DevServerManager {
       await new Promise(r => setTimeout(r, READY_POLL_INTERVAL))
     }
 
-    // Check if timeout expired without server becoming reachable
     const timedOut = Date.now() - start >= READY_TIMEOUT
-    if (timedOut && gen === this.generation && this.currentServer) {
+    const live = this.slotFor(slot.serverType)
+
+    if (timedOut && live === slot) {
       layoutStore.addDevServerLog(
         `Server did not respond within ${READY_TIMEOUT / 1000}s. The server may still be starting — click Reload in the preview to retry.`,
         'error',
@@ -313,21 +312,17 @@ class DevServerManager {
       layoutStore.setPreviewServerTimedOut(true)
     }
 
-    // Detect whether this is a frontend SPA or backend API server
-    if (!timedOut && gen === this.generation && this.currentServer) {
-      const serverType = this.serverTypeHint === 'frontend' ? 'server'
-        : this.serverTypeHint === 'backend' ? 'api'
-        : await this.detectServerType(url)
-      this.serverTypeHint = null
-      layoutStore.setPreviewServer(url, this.currentServer.pid, serverType)
-      logger.info('devServer', `Preview server registered: ${url} (type: ${serverType})`)
+    if (!timedOut && live === slot) {
+      // serverType is authoritative — it was set at start() and never changes.
+      const uiMode = slot.serverType === 'backend' ? 'api' : 'server'
+      layoutStore.setPreviewServer(url, slot.pid, uiMode)
+      logger.info('devServer', `Preview server registered: ${url} (mode: ${uiMode})`)
 
-      // Auto-switch to preview. If the agent is streaming, defer until
-      // streaming ends so we don't yank the user out of the chat mid-response.
+      // Auto-switch to preview. Defer if agent is streaming so we don't yank
+      // the user out of chat mid-response.
       if (!useChatStore.getState().isStreaming) {
         layoutStore.setViewMode('preview')
       } else {
-        // Clean up any previous deferred subscription
         this.unsubPreviewDefer?.()
         const unsub = useChatStore.subscribe((state, prev) => {
           if (prev.isStreaming && !state.isStreaming) {
@@ -338,82 +333,58 @@ class DevServerManager {
         })
         this.unsubPreviewDefer = unsub
       }
-    } else {
+    } else if (!timedOut) {
       logger.warn('devServer', `Polling finished but server no longer active (${attempts} attempts, ${Date.now() - start}ms)`)
     }
   }
 
-  /**
-   * Detect whether the running server is a backend API via HTTP probe.
-   * Only called when no serverTypeHint was provided (callers should use
-   * detectProjectCategory before start() to set the hint when possible).
-   * The user can always toggle manually via the toolbar button.
-   */
-  private async detectServerType(url: string): Promise<'server' | 'api'> {
-    try {
-      const result = await invoke<{
-        status: number
-        headers: [string, string][]
-        body: string
-      }>('http_client_request', {
-        input: {
-          method: 'GET',
-          url,
-          headers: {},
-          body: null,
-          timeoutSecs: 5,
-        },
-      })
-
-      const contentType = (
-        result.headers?.find(([k]) => k.toLowerCase() === 'content-type')?.[1] || ''
-      ).toLowerCase()
-
-      if (contentType.includes('json')) {
-        return 'api'
-      }
-
-      return 'server'
-    } catch {
-      return 'server'
-    }
-  }
-
   private handleExit(pid: number): void {
-    console.warn(`[dev-server] EXIT event received: pid=${pid}, currentPid=${this.currentServer?.pid}, status=${this.currentServer?.status}`)
-    if (!this.currentServer) return
-    if (this.currentServer.pid !== 0 && this.currentServer.pid !== pid) return
+    const slot = this.slotByPid(pid)
+    if (!slot) return
 
-    const wasRunning = this.currentServer.status === 'running'
-    const wasStarting = this.currentServer.status === 'starting'
-    console.warn(`[dev-server] Server exited: wasRunning=${wasRunning}, wasStarting=${wasStarting}`)
-    this.currentServer.status = 'stopped'
-    this.currentServer = null
-    this.cleanup()
+    const wasRunning = slot.status === 'running'
+    const wasStarting = slot.status === 'starting'
+    const type = slot.serverType
+    console.warn(`[dev-server] EXIT: type=${type}, pid=${pid}, wasRunning=${wasRunning}, wasStarting=${wasStarting}`)
+    slot.status = 'stopped'
+    this.setSlot(type, null)
 
     const layoutStore = useLayoutStore.getState()
     if (wasStarting) {
-      layoutStore.addDevServerLog('Dev server exited before becoming ready. Check your dev command and dependencies.', 'error')
-      layoutStore.clearPreviewServer()
+      layoutStore.addDevServerLog(`${type === 'backend' ? 'Backend' : 'Frontend'} server exited before becoming ready. Check your dev command and dependencies.`, 'error')
     } else if (wasRunning) {
-      layoutStore.addDevServerLog('Dev server stopped', 'warn')
-      layoutStore.clearPreviewServer()
+      layoutStore.addDevServerLog(`${type === 'backend' ? 'Backend' : 'Frontend'} server stopped`, 'warn')
+    }
+
+    // Only clear the dying slot — the other keeps running.
+    layoutStore.clearPreviewServer(type)
+
+    if (!this.frontendServer && !this.backendServer) {
+      this.cleanup()
     }
   }
 
-  async stop(): Promise<void> {
-    const server = this.currentServer
-    // Bump generation so any in-flight invoke return kills its process
-    this.generation++
-    this.currentServer = null
-    this.cleanup()
+  async stop(which: ServerType | 'all' = 'all'): Promise<void> {
+    const targets: ServerType[] = which === 'all' ? ['frontend', 'backend'] : [which]
 
-    if (server?.pid) {
-      try {
-        await invoke('kill_process', { pid: server.pid })
-      } catch {
-        // Process may have already exited
+    for (const type of targets) {
+      const slot = this.slotFor(type)
+      if (!slot) continue
+
+      // Bump generation — any in-flight invoke return will kill its orphaned PID.
+      slot.generation = Date.now() + Math.random()
+      const pid = slot.pid
+      this.setSlot(type, null)
+
+      if (pid) {
+        try { await invoke('kill_process', { pid }) } catch {
+          // Process may have already exited
+        }
       }
+    }
+
+    if (!this.frontendServer && !this.backendServer) {
+      this.cleanup()
     }
   }
 
@@ -426,31 +397,34 @@ class DevServerManager {
     this.unsubPreviewDefer = null
   }
 
-  async restart(): Promise<void> {
-    if (!this.currentServer) return
-    const { projectPath, command } = this.currentServer
-    // Preserve server type across restart by deriving from current port
-    const hint = this.serverPort === BACKEND_SERVER_PORT ? 'backend' as const : undefined
-    await this.stop()
-    await this.start(projectPath, command, hint)
+  async restart(which?: ServerType): Promise<void> {
+    const type: ServerType = which || 'frontend'
+    const slot = this.slotFor(type)
+    if (!slot) return
+    const { projectPath, command } = slot
+    await this.stop(type)
+    await this.start(projectPath, command, type)
   }
 
-  getUrl(): string | null {
-    return this.currentServer?.url || null
+  /** Returns URL of a specific slot, or the frontend URL by default. */
+  getUrl(which?: ServerType): string | null {
+    if (which) return this.slotFor(which)?.url || null
+    return this.frontendServer?.url || this.backendServer?.url || null
   }
 
   getProjectPath(): string | null {
-    return this.currentServer?.projectPath || null
+    return this.frontendServer?.projectPath || this.backendServer?.projectPath || null
   }
 
-  /** Server is accepting connections. */
+  /** True when at least one slot is accepting connections. */
   isRunning(): boolean {
-    return this.currentServer?.status === 'running'
+    return this.frontendServer?.status === 'running'
+      || this.backendServer?.status === 'running'
   }
 
-  /** Server exists (starting or running) — guards against double-start. */
+  /** True when at least one slot exists (starting or running). */
   isActive(): boolean {
-    return this.currentServer !== null
+    return !!(this.frontendServer || this.backendServer)
   }
 }
 

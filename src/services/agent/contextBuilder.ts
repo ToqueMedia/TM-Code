@@ -245,11 +245,15 @@ Build on the existing structure. Use the framework's entry points and convention
     // always uses '/' in tool calls, which toolExecutor.normalizePath() handles correctly.
     const normalizedProjectPath = projectPath.replace(/\\/g, '/')
     const osName = IS_WINDOWS ? 'Windows' : IS_MAC ? 'macOS' : 'Linux'
+    const shell = IS_WINDOWS ? 'powershell' : IS_MAC ? 'zsh' : 'bash'
+    const pathSep = IS_WINDOWS ? '\\\\ (backslash)' : '/ (forward slash)'
 
     const envLines = [
       `project_path: ${normalizedProjectPath}`,
       `project_type: ${projectType}`,
       `os: ${osName} (Tauri 2)`,
+      `shell: ${shell}`,
+      `native_path_separator: ${pathSep} — the IDE normalizes forward slashes in tool calls, but shell commands you run via execute_command use the native shell syntax`,
       `package_manager: ${pmDetected}`,
     ]
     if (pkgSummary) {

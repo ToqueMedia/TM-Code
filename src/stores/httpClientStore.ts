@@ -366,7 +366,8 @@ export const useHttpClientStore = create<HttpClientState & HttpClientActions>()(
       set(s => updateActiveTab(s, () => ({ isLoading: true, error: null })))
 
       try {
-        const baseUrl = useLayoutStore.getState().previewUrl
+        const ls = useLayoutStore.getState()
+        const baseUrl = ls.backendServer?.url ?? ls.frontendServer?.url ?? null
         let fullUrl = tab.url
         if (baseUrl && fullUrl.startsWith('/')) {
           fullUrl = baseUrl.replace(/\/$/, '') + fullUrl

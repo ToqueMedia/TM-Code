@@ -75,7 +75,9 @@ function HttpClientPanel() {
   const isHistoryOpen = useHttpClientStore(s => s.isHistoryOpen)
   const tabs = useHttpClientStore(s => s.tabs)
   const activeTabId = useHttpClientStore(s => s.activeTabId)
-  const previewUrl = useLayoutStore(s => s.previewUrl)
+  // HTTP client is backend-oriented — prefer backend URL directly rather than
+  // selectPreviewUrl (which follows previewMode and would return frontend in 'server' mode).
+  const previewUrl = useLayoutStore(s => s.backendServer?.url ?? s.frontendServer?.url ?? null)
 
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')

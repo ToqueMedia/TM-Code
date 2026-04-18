@@ -1659,14 +1659,12 @@ class ToolExecutor {
           } catch { /* detection failure is non-fatal */ }
         }
 
-        // Stop any existing server
-        if (devServerManager.isActive()) {
-          await devServerManager.stop()
-        }
-
+        // Don't pre-stop — start() internally stops only the same-type slot,
+        // which is essential for fullstack: starting a backend must NOT kill
+        // a running frontend (and vice versa).
         try {
           await devServerManager.start(projectRoot, command, serverType)
-          const url = devServerManager.getUrl()
+          const url = devServerManager.getUrl(serverType)
           if (url) {
             return `Dev server started and running at ${url}. The correct preview panel will open automatically.`
           }

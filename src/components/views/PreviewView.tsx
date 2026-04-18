@@ -4,7 +4,7 @@ import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2 } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
-import { useLayoutStore, type DevServerLogEntry } from '../../stores/layoutStore'
+import { useLayoutStore, selectPreviewUrl, type DevServerLogEntry } from '../../stores/layoutStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { devServerManager } from '../../services/devServerManager'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
@@ -36,7 +36,7 @@ function PreviewView() {
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
-  const previewUrl = useLayoutStore(s => s.previewUrl)
+  const previewUrl = useLayoutStore(selectPreviewUrl)
   const previewMode = useLayoutStore(s => s.previewMode)
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const previewSourcePath = useLayoutStore(s => s.previewSourcePath)
