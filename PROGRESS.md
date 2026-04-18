@@ -1,6 +1,6 @@
 # Progresso — Auditoria Windows / Bottlenecks
 
-Branch: `modo-cmd` · Última atualização: 2026-04-18
+Branch: `fix-windows` · Última atualização: 2026-04-18
 
 ## Feito
 
@@ -56,45 +56,47 @@ Não havia verificação global de Node/Git/Python — só por template.
   - Visual alinhado aos tokens (glass, accent orange para o aviso)
 - Integrado em `WelcomeScreen.tsx` + export em `welcome/index.ts`.
 
----
+### 6. Windows UI — audit + SettingsView back button ✅
+Auditoria confirmou que a infra já está em grande parte no sítio:
 
-## Por fazer
+- `WindowControls.tsx` já usa `data-no-drag` + `swallowMouseDown` + `<button>` reais para Win/Linux.
+- `useWindowControls.ts:shouldStartDrag` percorre o DOM a saltar elementos interactivos e `[data-no-drag]`.
+- Guard `depth < 3` presente nos 3 entrypoints do file watcher (`projectFileWatcher.ts:24`, `quickOpenService.ts:156`, `src-tauri/src/commands/project.rs:1185`).
 
-### 6. Windows UI unresponsiveness (NÃO COMEÇADO)
-Items reportados: close buttons, ALT+F4, back do SettingsView, botões do ProjectsSidebar, context menu — todos partidos no Windows.
+**Fix entregue:**
+- `src/components/views/SettingsView.tsx` — o botão "back" do sidebar era um `<Flex>` com `onClick`. Convertido para `<Box as="button">` com `data-no-drag` e `border="none"`, para garantir pointer handling consistente no WebView2 (Windows aceita `<button>` reais muito melhor do que divs clicáveis dentro de drag regions).
 
-**Hipóteses a investigar:**
-- Contenção IPC durante streaming SSE do agent (bloqueia o main thread do WebView2 no Windows)
-- Child webview nativo (wry) a apanhar pointer events por z-order / hit-testing do DirectComposition
-- Drag region do Tauri a intersectar com handlers em certos componentes
-- ALT+F4 precisa de registar `block_close_requested(false)` ou equivalente para deixar o SO fechar a janela
+**Deferido (pede hardware real para validar):**
+- Contenção IPC durante streaming SSE — já existe buffering de 50ms no `streamParser`; medir em Windows antes de introduzir flush interval platform-aware.
+- ALT+F4 — sem bloqueios custom no `on_window_event`; precisa de teste em máquina Windows.
 
-**Próximos passos sugeridos:**
-- Auditar `agentService.ts` (transport SSE) e comandos Rust para chamadas bloqueantes durante streaming
-- Confirmar em hardware real Windows se o freeze ocorre só durante streaming ou também em idle
-- Verificar `data-no-drag` em todas as áreas interactivas do WelcomeScreen / SettingsView
+### 7. Network handling ✅
 
-### 7. Network handling (NÃO COMEÇADO)
-Requisitos: falhas de conexão, connection slow.
+- `src/hooks/useNetworkStatus.ts` (novo) — status `online | offline | slow` via `navigator.onLine` + pings periódicos (30s) ao `WORKER_URL/v1/health` com timeout de 5s e limiar slow de 2.5s. Abort controller cancela pings em voo.
+- `src/components/ui/NetworkStatusBanner.tsx` (novo) — banner glass não-bloqueante, `aria-live="polite"`, botão "Retry" que força um recheck.
+- Integrado em `WelcomeScreen.tsx` (junto ao `StartupRequirementsBanner`) e `CodeEditorNew.tsx` (logo a seguir ao `TitleBar`).
+- `src/services/mcp/remoteTransport.ts` — `sendRemoteMCPRequest` ganha retry com exponential backoff (`500ms → 1500ms → 4000ms`, máx 3 tentativas). Retentativa em `408/429/5xx` e em erros de rede/timeout; fail-fast em auth (`401/403`) e em `Remote MCP error:` (erro JSON-RPC semântico).
+- `agentService.ts` já retentava `NETWORK_ERROR` (3 tentativas com delays `[3s, 5s, 10s]`, 20s em rate limits) — sem alteração.
 
-**Trabalho previsto:**
-- Retries com backoff exponencial no `agentService.ts` (SSE reconnect) e nos `mcp/remoteTransport.ts`
-- Timeouts explícitos em chamadas `invoke` que atingem a rede (`http_client_request`, fetches em `firebaseAuth.ts`)
-- Indicador offline no UI (banner ou badge na status bar) usando `navigator.onLine` + pings periódicos ao backend TMS
-- Mensagens de erro accionáveis ("retry" em vez de um toast que desaparece)
+### 8. Performance — prompt cache + file watcher audit ✅
 
-### 8. Bottlenecks / performance (NÃO COMEÇADO)
-Áreas identificadas durante a auditoria:
+- `src/services/agent/contextBuilder.ts` — `buildSystemPrompt` ganha TTL cache de 30s, chaveado por `projectPath|projectType|coreToolCount|plan|mcpSig`. Cobre ambos os paths (prompt completo e `buildMinimalPrompt`). Método `invalidatePromptCache(projectPath?)` exposto para invalidação dirigida.
+- `src/services/agent/toolExecutor.ts:updateReadStateAfterWrite` invalida o prompt cache sempre que o agent escreve `README.md`, `TMS.md`, `PLAN.md`, `TODO.md`, `package.json` ou `.toquemedia-template` (os únicos ficheiros que o prompt incorpora).
 
-- **Re-renders no streaming**: `streamingVersion` counter força re-render de toda a lista de mensagens em cada delta — candidato a virtualização ou a memoização mais agressiva por bubble.
-- **Autosave triplo**: há três caminhos de autosave (session, draft, messages) que se disparam em sobreposição.
-- **Prompt rebuild por turn**: `contextBuilder.buildSystemPrompt` corre do zero em cada turno — cacheable por project hash.
-- **File watcher scope**: confirmar que o guard de depth < 3 em `/Users/name` está activo em todos os entrypoints (watcher, indexer, `open_project` no Rust).
+**Confirmado já estava bem:**
+- File watcher `depth < 3`: presente nos 3 entrypoints (ver #6).
+- `MessageBubble.memo` faz short-circuit correcto para mensagens não-streaming.
+- Token buffering de 50ms já existe no `scheduleFlush` do `agentService`.
+- Autosave 2s/5s/30s é uma stack intencional (debounced save / streaming save / session sync), não duplicação.
+
+**Deferido:**
+- Flush interval platform-aware (50ms macOS vs ~80ms Windows) — medir em hardware real antes de tocar.
+- Virtualização da lista de mensagens — só vale a pena se o memo do `MessageBubble` continuar a mostrar jank em conversas muito longas (>200 turns).
 
 ---
 
 ## Estado do repositório
 
 - Typecheck: `npx tsc --noEmit` passa limpo.
-- Branch: `modo-cmd` (10 ficheiros modificados no estado inicial, agora + os novos `startupRequirements.ts` e `StartupRequirementsBanner.tsx`).
-- Testar em Windows para validar #2 e #3 antes de entrar no #6.
+- Branch: `fix-windows`.
+- Itens em aberto (deferidos) precisam de bancada Windows para validação — ver notas em #6 e #8.

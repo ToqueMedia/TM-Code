@@ -60,21 +60,28 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
         bg={tokens.colors.bg.sidebar}
         borderRight={`1px solid ${tokens.colors.border.sidebarPanel}`}
       >
-        <Flex
-          align="center"
+        <Box
+          as="button"
+          display="flex"
+          alignItems="center"
           gap={2}
           px={4}
           h="44px"
           cursor="pointer"
           color={tokens.colors.text.secondary}
+          bg="transparent"
+          border="none"
+          textAlign="left"
+          w="100%"
           transition={tokens.transition.fast}
           _hover={{ color: tokens.colors.text.primary, bg: tokens.colors.bg.hoverSubtle }}
           onClick={function () { onBack ? onBack() : useLayoutStore.getState().goBack() }}
           flexShrink={0}
+          data-no-drag
         >
           <FiArrowLeft size={14} />
           <Text fontSize="13px" fontWeight="500">{t('settings.title')}</Text>
-        </Flex>
+        </Box>
 
         <Box h="1px" bg={tokens.colors.border.sidebarPanel} />
 

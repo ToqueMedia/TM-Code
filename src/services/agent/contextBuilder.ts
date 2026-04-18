@@ -29,8 +29,19 @@ function sanitizeProjectContent(content: string): string {
     .replace(/>/g, '＞')
 }
 
+interface PromptCacheEntry {
+  key: string
+  prompt: string
+  expiresAt: number
+}
+
+// Short TTL: long enough to survive rapid successive turns (user follow-ups,
+// retries), short enough that edits to TMS.md/PLAN.md/TODO.md surface quickly.
+const PROMPT_CACHE_TTL_MS = 30_000
+
 class ContextBuilder {
   private static instance: ContextBuilder
+  private promptCache = new Map<string, PromptCacheEntry>()
 
   static getInstance(): ContextBuilder {
     if (!ContextBuilder.instance) {
@@ -39,7 +50,35 @@ class ContextBuilder {
     return ContextBuilder.instance
   }
 
+  /**
+   * Invalidate cached prompts for a project (or all projects if omitted).
+   * Call after write operations that touch README.md, TMS.md, PLAN.md, TODO.md,
+   * package.json, or .toquemedia-template.
+   */
+  invalidatePromptCache(projectPath?: string): void {
+    if (!projectPath) {
+      this.promptCache.clear()
+      return
+    }
+    for (const key of this.promptCache.keys()) {
+      if (key.startsWith(`${projectPath}|`)) this.promptCache.delete(key)
+    }
+  }
+
   async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number): Promise<string> {
+    // Cache key must include everything that affects the prompt shape.
+    // Plan is read below; include it in the key so plan switches bypass the cache.
+    let planKey = 'unknown'
+    try {
+      const { useBillingStore } = await import('../../stores/billingStore')
+      planKey = useBillingStore.getState().plan || 'unknown'
+    } catch { /* non-critical */ }
+    const mcpSig = (mcpTools ?? []).map(t => `${t.serverName}:${t.name}`).sort().join(',')
+    const cacheKey = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${mcpSig}`
+
+    const now = Date.now()
+    const cached = this.promptCache.get(cacheKey)
+    if (cached && cached.expiresAt > now) return cached.prompt
     // Gather context in parallel for speed
     const [treeString, pkgSummary, readme, templateManifest, tmsContent, planContent, todoContent] = await Promise.all([
       this.buildFileTree(projectPath),
@@ -80,7 +119,9 @@ class ContextBuilder {
     // Minimal prompt for models that degrade with verbose system prompts
     const isMinimalPrompt = modelProfile?.skipSystemPromptInThinking && modelProfile?.supportsThinking
     if (isMinimalPrompt) {
-      return this.buildMinimalPrompt(projectPath, pmDetected, pkgSummary, treeString, langInstruction)
+      const minimal = this.buildMinimalPrompt(projectPath, pmDetected, pkgSummary, treeString, langInstruction)
+      this.promptCache.set(cacheKey, { key: cacheKey, prompt: minimal, expiresAt: now + PROMPT_CACHE_TTL_MS })
+      return minimal
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -390,7 +431,9 @@ Git:
 6. .env files are blocked. Use ${pmDetected} for all package operations.
 7. Report outcomes faithfully. Never claim success when output shows errors. If you can't verify, say so.`)
 
-    return sections.join('\n\n')
+    const full = sections.join('\n\n')
+    this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS })
+    return full
   }
 
   /**

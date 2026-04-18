@@ -759,6 +759,10 @@ class ToolExecutor {
     if (path.endsWith('/package.json') || path === 'package.json') {
       this.invalidateDepsCache()
     }
+    // Invalidate the cached system prompt when prompt-relevant files change.
+    if (/(^|\/)(README|TMS|PLAN|TODO)\.md$|(^|\/)package\.json$|(^|\/)\.toquemedia-template$/.test(path)) {
+      import('./contextBuilder').then(m => m.default.getInstance().invalidatePromptCache()).catch(() => { /* non-critical */ })
+    }
   }
 
   /**
