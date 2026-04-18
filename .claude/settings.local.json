@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo --version)",
+      "Bash(rustc --version)",
+      "Bash(cargo check:*)",
+      "Bash(where clang:*)",
+      "Bash(where cl:*)",
+      "Bash(where llvm-config:*)",
+      "Bash(winget --version)",
+      "Bash(choco --version)",
+      "Bash(scoop --version)",
+      "Bash(choco list:*)",
+      "Bash(winget list:*)",
+      "Bash(cargo tree:*)",
+      "Bash(npx tsc:*)",
+      "Bash(echo \"EXIT=$?\")"
+    ]
+  }
+}

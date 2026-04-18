@@ -1,6 +1,6 @@
 [package]
 name = "toquemedia-studio"
-version = "0.2.1"
+version = "0.2.2"
 description = "TM Code — The Agent-First IDE"
 authors = ["Toque Media"]
 edition = "2021"

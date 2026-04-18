@@ -87,6 +87,7 @@ fn open_preview_webview(
 
     // Clone app handle for IPC handler (receives runtime errors from preview JS)
     let app_for_ipc = app.clone();
+    let proxy_target_for_protocol = proxy_target.clone();
 
     let wv = wry::WebViewBuilder::new()
         // Inject error capture script into every page load.
@@ -197,7 +198,7 @@ fn open_preview_webview(
             }
         })
         .with_asynchronous_custom_protocol("tmpreview".into(), move |_webview_id, request, responder| {
-            let target = proxy_target.clone();
+            let target = proxy_target_for_protocol.clone();
             std::thread::spawn(move || {
                 let path = request.uri().path_and_query()
                     .map(|pq| pq.as_str())

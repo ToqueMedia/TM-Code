@@ -93,6 +93,13 @@ Auditoria confirmou que a infra já está em grande parte no sítio:
 - Flush interval platform-aware (50ms macOS vs ~80ms Windows) — medir em hardware real antes de tocar.
 - Virtualização da lista de mensagens — só vale a pena se o memo do `MessageBubble` continuar a mostrar jank em conversas muito longas (>200 turns).
 
+### 9. Version 0.2.2 & Production Build ✅
+
+- Versão bumped de `0.2.1` para `0.2.2` (`package.json`, `tauri.conf.json`, `Cargo.toml`).
+- Fix: `src/services/agent/__tests__/contextBuilder.test.ts` falhava por cache do singleton; adicionado `invalidatePromptCache()` no `beforeEach`.
+- Fix: `src-tauri/src/lib.rs` erro de compilação `borrow of moved value: proxy_target`; corrigido com clone antes da closure.
+- Build de produção: `npm run tauri build` gerou `toquemedia-studio.exe` com sucesso. Bundling MSI falhou por falta de `signtool.exe` / certificado no ambiente, mas o binário está pronto para teste.
+
 ---
 
 ## Estado do repositório

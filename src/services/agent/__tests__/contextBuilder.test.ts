@@ -9,6 +9,7 @@ describe('ContextBuilder', () => {
 
   beforeEach(() => {
     builder = ContextBuilder.getInstance()
+    builder.invalidatePromptCache()
     mockedInvoke.mockReset()
   })
 
@@ -113,7 +114,7 @@ describe('ContextBuilder', () => {
       })
 
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('Could not read project structure')
+      expect(prompt).toContain('(Could not read project structure)')
     })
 
     it('handles missing package.json gracefully', async () => {
