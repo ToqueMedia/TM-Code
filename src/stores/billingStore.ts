@@ -14,14 +14,15 @@ export type CostBudgetStatus =
 /** Shape of the SSE event injected by the worker at the end of /v1/chat/completions */
 export interface BillingSSEEvent {
   type: 'billing'
-  consumed_pct: number       // 0–1 normal cycle, > 1 in overage
+  consumed_pct: number        // 0–1 normal cycle, > 1 in overage
   status: CostBudgetStatus
-  tokens_used: number        // raw tokens consumed in THIS request
-  tokens_consumed: number    // cumulative cycle total (post-commit prediction)
-  cycle_end: string          // "YYYY-MM-DD"
-  tms_remaining: number      // overage credits after this request
+  tokens_used: number         // raw tokens consumed in THIS request
+  tokens_consumed: number     // cumulative cycle total (post-commit prediction)
+  token_budget: number        // plan budget for the cycle (post-commit)
+  cycle_end: string           // "YYYY-MM-DD"
+  extra_usage_balance: number // overage credits after this request
   plan: UserPlanName
-  used_overage: boolean      // request charged to TMS overage (vs cycle)
+  used_overage: boolean       // request charged to overage balance (vs cycle)
 }
 
 /** Shape of the /v1/me response body */
@@ -33,7 +34,7 @@ export interface MeResponse {
     tokensConsumed: number
     tokenBudget: number
     cycleEnd: string
-    tmsPurchased: number
+    extraUsageBalance: number
     status: CostBudgetStatus
   }
 }
@@ -44,7 +45,7 @@ export interface MeResponse {
 //   1. /v1/me on app launch + window focus + post-purchase deep link
 //      (event-driven, NEVER polling — see memory feedback_no_polling.md)
 //   2. SSE billing event injected at the end of every /v1/chat/completions
-//   3. Response headers (X-Budget-Pct, X-Budget-Status, X-Cycle-End, X-Tms-Remaining)
+//   3. Response headers (X-Budget-Pct, X-Budget-Status, X-Cycle-End, X-Extra-Tokens)
 
 interface BillingState {
   // Identity
@@ -132,7 +133,8 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
       tokensConsumed: data.tokens_consumed,
       status: data.status,
       cycleEnd: data.cycle_end,
-      tmsRemaining: data.tms_remaining,
+      tmsRemaining: data.extra_usage_balance,
+      tokenBudget: data.token_budget,
       plan: data.plan,
       lastTokensUsed: data.tokens_used,
       lastUsedOverage: data.used_overage,
@@ -172,7 +174,7 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
     const cycleEnd = headers.get('X-Cycle-End')
     if (cycleEnd) updates.cycleEnd = cycleEnd
 
-    const tmsRaw = headers.get('X-Tms-Remaining')
+    const tmsRaw = headers.get('X-Extra-Tokens')
     if (tmsRaw) {
       const tms = parseInt(tmsRaw, 10)
       if (!isNaN(tms)) updates.tmsRemaining = tms
@@ -198,7 +200,7 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
       tokenBudget: data.billing.tokenBudget,
       cycleEnd: data.billing.cycleEnd,
       status: data.billing.status,
-      tmsRemaining: data.billing.tmsPurchased,
+      tmsRemaining: data.billing.extraUsageBalance,
       noCredits: data.billing.status === 'rejected',
     })
   },

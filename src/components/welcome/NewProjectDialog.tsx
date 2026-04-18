@@ -13,15 +13,6 @@ import {
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
-const templates = [
-  { label: 'React TypeScript', value: 'react-ts' },
-  { label: 'Node.js Express', value: 'node-express' },
-  { label: 'Python FastAPI', value: 'python-fastapi' },
-  { label: 'Vue.js', value: 'vue' },
-  { label: 'Rust', value: 'rust' },
-  { label: 'Empty Project', value: 'empty' },
-]
-
 const inputStyles = {
   bg: tokens.colors.bg.input,
   border: `1px solid ${tokens.colors.border.input}`,
@@ -42,6 +33,15 @@ interface NewProjectDialogProps {
 }
 
 const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ dialog }) => {
+  const templates = [
+    { label: 'React TypeScript', value: 'react-ts' },
+    { label: 'Node.js Express', value: 'node-express' },
+    { label: 'Python FastAPI', value: 'python-fastapi' },
+    { label: 'Vue.js', value: 'vue' },
+    { label: 'Rust', value: 'rust' },
+    { label: t('misc.emptyProject'), value: 'empty' },
+  ]
+
   const handleCreateProject = () => {
     dialog.setOpen(false)
   }
@@ -82,7 +82,7 @@ const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ dialog }) => {
             <Dialog.Body pb={6}>
               <VStack gap={4} align="stretch">
                 <Box>
-                  <Text fontSize="14px" color={tokens.colors.text.primary} mb={2}>Project Name</Text>
+                  <Text fontSize="14px" color={tokens.colors.text.primary} mb={2}>{t('misc.projectName')}</Text>
                   <Input placeholder="my-awesome-project" {...inputStyles} />
                 </Box>
 
@@ -118,7 +118,7 @@ const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ dialog }) => {
                   color: tokens.colors.text.primary,
                 }}
               >
-                Cancel
+                {t('misc.cancel')}
               </Button>
               <Button
                 colorPalette="blue"
@@ -130,7 +130,7 @@ const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ dialog }) => {
                   boxShadow: tokens.shadow.dialogButton,
                 }}
               >
-                Create Project
+                {t('misc.createProject')}
               </Button>
             </Dialog.Footer>
           </Dialog.Content>

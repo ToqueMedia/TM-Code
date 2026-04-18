@@ -1781,8 +1781,9 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
               status: event.status,
               tokens_used: event.tokensUsed,
               tokens_consumed: event.tokensConsumed,
+              token_budget: event.tokenBudget,
               cycle_end: event.cycleEnd,
-              tms_remaining: event.tmsRemaining,
+              extra_usage_balance: event.tmsRemaining,
               plan: event.plan,
               used_overage: event.usedOverage,
             })

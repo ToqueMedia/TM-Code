@@ -20,6 +20,7 @@ import {
 } from 'react-icons/lu'
 import { invoke } from '@tauri-apps/api/core'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 // Cache the version promise — it never changes during the session.
 let versionPromise: Promise<string> | null = null
@@ -55,13 +56,6 @@ interface WelcomeSidebarProps {
   onSettings?: () => void
 }
 
-const actionItems = [
-  { id: 'new', icon: LuFilePlus2, label: 'New Project', color: tokens.colors.accent.primary },
-  { id: 'open', icon: LuFolderOpen, label: 'Open Project', color: tokens.colors.accent.greenBright },
-  { id: 'clone', icon: LuGitBranch, label: 'Clone Repository', color: tokens.colors.accent.purple },
-  { id: 'cmd', icon: LuTerminal, label: 'CMD Mode', color: tokens.colors.accent.purple },
-]
-
 const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   recentProjects,
   cmdModeProjectPaths = [],
@@ -75,6 +69,13 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   onSettings,
 }) => {
   const [appVersion, setAppVersion] = useState('')
+
+  const actionItems = [
+    { id: 'new', icon: LuFilePlus2, label: t('welcome.newProject'), color: tokens.colors.accent.primary },
+    { id: 'open', icon: LuFolderOpen, label: t('welcome.openProject'), color: tokens.colors.accent.greenBright },
+    { id: 'clone', icon: LuGitBranch, label: t('welcome.cloneRepo'), color: tokens.colors.accent.purple },
+    { id: 'cmd', icon: LuTerminal, label: t('welcome.cmdMode'), color: tokens.colors.accent.purple },
+  ]
 
   useEffect(() => {
     getAppVersion().then(setAppVersion)
@@ -164,7 +165,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
           letterSpacing="1px"
           px={2}
         >
-          Start
+          {t('welcome.start')}
         </Text>
 
         {actionItems.map((item) => (
@@ -222,7 +223,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
             color={tokens.colors.text.muted}
             letterSpacing="1px"
           >
-            Recent
+            {t('welcome.recent')}
           </Text>
         </HStack>
 
@@ -243,7 +244,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
         >
           {recentProjects.length === 0 && (
             <Text fontSize="12px" color={tokens.colors.text.muted} px={3} py={4} textAlign="center">
-              No recent projects
+              {t('welcome.noRecent')}
             </Text>
           )}
 
@@ -260,7 +261,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
                 py="4px"
                 opacity={0.7}
               >
-                Terminal
+                {t('welcome.terminal')}
               </Text>
               {cmdProjects.map((project, index) => (
                 <ProjectRow
@@ -294,7 +295,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
                   py="4px"
                   opacity={0.7}
                 >
-                  IDE
+                  {t('welcome.ide')}
                 </Text>
               )}
               {ideProjects.map((project, index) => (
@@ -408,9 +409,9 @@ function ProjectRow({ project, isCmdMode, truncatePath, onClick, onOpenAsIde }: 
           letterSpacing="0.08em"
           flexShrink={0}
           onClick={(e: React.MouseEvent) => { e.stopPropagation(); onOpenAsIde() }}
-          title="Open in full IDE"
+          title={t('welcome.openInIde')}
         >
-          IDE
+          {t('welcome.ide')}
         </Box>
       )}
 
