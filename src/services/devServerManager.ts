@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { useLayoutStore } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'
-import { isContainerActive } from '../stores/containerStore'
 import { logger } from '../utils/logger'
 
 type ServerStatus = 'starting' | 'running' | 'stopped' | 'error'
@@ -87,7 +86,7 @@ class DevServerManager {
     // Use "localhost" instead of "127.0.0.1" — WKWebView on macOS grants
     // localhost ATS (App Transport Security) exemption for iframes, but
     // treats raw IP addresses as untrusted origins.
-    // Docker/Colima port-forwarding also binds to localhost on the host.
+    // Docker port-forwarding also binds to localhost on the host.
     let normalized = url
       .replace('127.0.0.1', 'localhost')
       .replace('0.0.0.0', 'localhost')
@@ -108,16 +107,12 @@ class DevServerManager {
     this.eaddrinuseRetried = false
 
     // Kill any process occupying our port before starting.
-    // Skip in Docker mode — the port is owned by Colima's SSH forwarding.
-    // Orphaned dev servers inside the container are cleaned by fuser in start_dev_server.
     // The Rust kill_port command polls until the port is actually free (up to 3s).
-    if (!isContainerActive()) {
-      try {
-        await invoke('kill_port', { port: this.serverPort })
-        logger.info('devServer', `Port ${this.serverPort} cleared`)
-      } catch {
-        // Ignore — port may already be free
-      }
+    try {
+      await invoke('kill_port', { port: this.serverPort })
+      logger.info('devServer', `Port ${this.serverPort} cleared`)
+    } catch {
+      // Ignore — port may already be free
     }
 
     const gen = ++this.generation

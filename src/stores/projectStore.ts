@@ -8,7 +8,6 @@ import { ProjectFileWatcher } from '../utils/projectFileWatcher';
 import { WindowTitleManager } from '../utils/windowTitleManager';
 import { useEditorRepository } from './editorStore';
 import { useLayoutStore } from './layoutStore';
-import { useContainerStore } from './containerStore';
 import RecoveryService from '../services/recoveryService';
 import WindowService from '../services/windowService';
 import { sessionService } from '../services/agent/sessionService';
@@ -24,6 +23,10 @@ interface ProjectStore {
   windowState: WindowState;
   loading: boolean;
   error: string | null;
+  cmdModeProjectPath: string | null;
+  /** Paths that have been opened at least once in CMD mode — persisted. */
+  cmdModeProjectPaths: string[];
+  hasHydrated: boolean;
 
   // Actions
   openProject: (path: string, options?: { initGit?: boolean }) => Promise<void>;
@@ -38,6 +41,10 @@ interface ProjectStore {
   updateWindowState: () => Promise<void>;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
+  setCmdModeProjectPath: (path: string | null) => void;
+  /** Remove a path from the CMD mode paths list (e.g. user promotes it to an IDE project). */
+  removeCmdModePath: (path: string) => void;
+  setHasHydrated: (hydrated: boolean) => void;
 }
 
 // File watcher instance
@@ -85,11 +92,6 @@ function tearDownProject() {
   // Clear all chat sessions and streaming state
   useChatStore.getState().clearAllSessions();
 
-  // Kill terminal processes and clear sessions
-  import('./terminalStore').then(m => {
-    m.default.getState().clearSessions();
-  }).catch(() => {});
-
   // Clear file tree to free memory (will reload for next project)
   import('./fileTreeStore').then(m => {
     m.useFileTreeRepository.setState({ root: null, searchResults: [], error: null });
@@ -109,12 +111,8 @@ function tearDownProject() {
     layout.setViewMode('chat');
   }
 
-  // Stop Container Code — release project isolation (Docker or app-level)
-  const { projectId: containerProjectId, isolationMode, stopContainer, clear: clearContainer } = useContainerStore.getState();
-  if (isolationMode !== 'none' && containerProjectId) {
-    stopContainer(containerProjectId).catch(() => {});
-  }
-  clearContainer();
+  // Release app-level project isolation
+  invoke('clear_active_project', { projectId: useProjectStore.getState().currentProject?.id || '' }).catch(() => {});
 
   // Clear current project
   useProjectStore.setState({ currentProject: null });
@@ -134,9 +132,32 @@ export const useProjectStore = create<ProjectStore>()(
       },
       loading: false,
       error: null,
+      cmdModeProjectPath: null,
+      cmdModeProjectPaths: [],
+      hasHydrated: false,
+
+      setHasHydrated: (hydrated: boolean) => {
+        set({ hasHydrated: hydrated });
+      },
+
+      setCmdModeProjectPath: (path: string | null) => {
+        if (path) {
+          // Record that this path was opened in CMD mode (deduplicated, max 20)
+          const existing = get().cmdModeProjectPaths.filter(p => p !== path)
+          set({ cmdModeProjectPath: path, cmdModeProjectPaths: [path, ...existing].slice(0, 20) })
+        } else {
+          set({ cmdModeProjectPath: null })
+        }
+      },
+
+      removeCmdModePath: (path: string) => {
+        set(state => ({
+          cmdModeProjectPaths: state.cmdModeProjectPaths.filter(p => p !== path),
+        }))
+      },
 
       openProject: async (path: string, options?: { initGit?: boolean }) => {
-        set({ loading: true, error: null });
+        set({ loading: true, error: null, cmdModeProjectPath: null });
 
         // Clean up previous project's state before loading the new one
         const prevProject = get().currentProject;
@@ -191,12 +212,11 @@ export const useProjectStore = create<ProjectStore>()(
           // Start managing window title
           windowTitleManager.startManaging();
 
-          // Initialize Container Code — run project inside Docker.
-          // MUST await so container is ready before dev server or terminal commands run.
+          // Activate app-level isolation for this project
           try {
-            await useContainerStore.getState().initContainer(projectInfo.id, path);
+            await invoke('set_active_project', { projectId: projectInfo.id, projectPath: path });
           } catch (err) {
-            logger.warn('project', 'Container Code unavailable — running on host:', err);
+            logger.warn('project', 'Failed to activate project isolation:', err);
           }
 
           // Load project state if exists
@@ -247,9 +267,9 @@ export const useProjectStore = create<ProjectStore>()(
           // Start managing window title
           windowTitleManager.startManaging();
 
-          // Initialize Container Code
-          useContainerStore.getState().initContainer(projectInfo.id, path).catch(err => {
-            logger.warn('project', 'Container Code unavailable — running on host:', err);
+          // Activate app-level isolation for this project
+          invoke('set_active_project', { projectId: projectInfo.id, projectPath: path }).catch(err => {
+            logger.warn('project', 'Failed to activate project isolation:', err);
           });
         } catch (error: unknown) {
           set({
@@ -336,9 +356,6 @@ export const useProjectStore = create<ProjectStore>()(
 
           // Remove from persisted recent list so it doesn't reappear on WelcomeScreen
           await invoke('remove_from_recent_projects', { projectId }).catch(() => {});
-
-          // Remove Container Code container entirely
-          await useContainerStore.getState().removeContainer(projectId).catch(() => {});
 
           // Async cleanup: delete sessions and project files from disk
           await sessionService.deleteAllProjectSessions(projectPath);
@@ -468,11 +485,31 @@ export const useProjectStore = create<ProjectStore>()(
       name: 'project-storage',
       partialize: (state) => ({
         recentProjects: state.recentProjects,
-        windowState: state.windowState
+        windowState: state.windowState,
+        cmdModeProjectPath: state.cmdModeProjectPath,
+        cmdModeProjectPaths: state.cmdModeProjectPaths,
       }),
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true);
+      }
     }
   )
 );
+
+// ── DEBUG: log currentProject transitions ─────────────────────────────────
+if (import.meta.env.DEV) {
+  useProjectStore.subscribe((state, prev) => {
+    if (state.currentProject !== prev.currentProject) {
+      console.log(
+        `%c[projectStore] currentProject changed`,
+        'color:#2ea043;font-weight:bold',
+        prev.currentProject?.name ?? null, '→', state.currentProject?.name ?? null,
+        `(loading=${state.loading})`,
+      );
+    }
+  });
+}
+// ──────────────────────────────────────────────────────────────────────────
 
 // Auto-save function — reads from editorStore (single source of truth)
 export function autoSaveProjectState(): void {

@@ -46,6 +46,7 @@ export type StreamEvent =
       status: CostBudgetStatus
       tokensUsed: number
       tokensConsumed: number
+      tokenBudget: number
       cycleEnd: string
       tmsRemaining: number
       plan: UserPlanName
@@ -119,8 +120,9 @@ export async function parseSSEStream(
               status: (json.status ?? 'allowed') as CostBudgetStatus,
               tokensUsed: json.tokens_used ?? 0,
               tokensConsumed: json.tokens_consumed ?? 0,
+              tokenBudget: json.token_budget ?? 0,
               cycleEnd: json.cycle_end ?? '',
-              tmsRemaining: json.tms_remaining ?? 0,
+              tmsRemaining: json.extra_usage_balance ?? 0,
               plan: (json.plan ?? 'explorer') as UserPlanName,
               usedOverage: Boolean(json.used_overage),
             })

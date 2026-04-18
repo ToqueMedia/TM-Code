@@ -1,10 +1,20 @@
 import { invoke } from '@tauri-apps/api/core'
 import { Attachment, AttachmentType } from '../types/chat'
 import type { FileTreeNode } from '../types/fileTree'
+import { extractMentions } from '../utils/mentionParser'
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_FILE_CHARS = 20_000
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'])
+// Treat as binary so we refuse to inline them as text.
+const BINARY_EXTENSIONS = new Set([
+  ...IMAGE_EXTENSIONS,
+  'pdf', 'zip', 'tar', 'gz', 'bz2', '7z', 'rar',
+  'mp3', 'wav', 'flac', 'ogg', 'm4a',
+  'mp4', 'mov', 'webm', 'mkv', 'avi',
+  'ttf', 'otf', 'woff', 'woff2', 'eot',
+  'exe', 'dll', 'so', 'dylib', 'bin',
+])
 
 let idCounter = 0
 function nextId(): string {
@@ -14,6 +24,11 @@ function nextId(): string {
 function getExtension(name: string): string {
   const dot = name.lastIndexOf('.')
   return dot === -1 ? '' : name.slice(dot + 1).toLowerCase()
+}
+
+function getFileName(p: string): string {
+  const parts = p.replace(/\\/g, '/').split('/')
+  return parts[parts.length - 1] || p
 }
 
 function guessTypeFromExtension(path: string): AttachmentType {
@@ -87,31 +102,118 @@ export async function createImageAttachmentFromClipboard(blob: Blob): Promise<At
 }
 
 /**
- * Extracts @path mentions from text, reads file contents, returns context block.
- * E.g. "update @src/App.tsx" → reads src/App.tsx and returns <mentioned_files> block.
+ * Normalise a mention token and check that its resolved filesystem path stays
+ * inside the project root. Returns null when the target escapes the project
+ * (path traversal defence) or is otherwise invalid.
+ *
+ * `projectPath` must be absolute; trailing separators are tolerated.
  */
-export async function extractAndResolveMentions(text: string, projectPath: string): Promise<string> {
-  const regex = /@([\w./\-[\]]+)/g
-  const paths = new Set<string>()
+function resolveMentionTarget(token: string, projectPath: string): {
+  fullPath: string
+  displayPath: string
+  hadTrailingSlash: boolean
+} | null {
+  const hadTrailingSlash = token.endsWith('/') || token.endsWith('\\')
+  const cleaned = token.replace(/[\\/]+$/, '').replace(/\\/g, '/')
+  if (!cleaned) return null
 
-  let match: RegExpExecArray | null
-  while ((match = regex.exec(text)) !== null) {
-    paths.add(match[1])
+  const isAbsolute = cleaned.startsWith('/') || /^[A-Za-z]:\//.test(cleaned)
+  const root = projectPath.replace(/[\\/]+$/, '').replace(/\\/g, '/')
+
+  // Compose candidate and normalise `..` / `.` segments so we can reject
+  // traversals before hitting the filesystem.
+  const raw = isAbsolute ? cleaned : `${root}/${cleaned}`
+  const segments: string[] = []
+  for (const seg of raw.split('/')) {
+    if (!seg || seg === '.') continue
+    if (seg === '..') { segments.pop(); continue }
+    segments.push(seg)
+  }
+  const normalised = (raw.startsWith('/') ? '/' : '') + segments.join('/')
+
+  const rootPrefix = root.endsWith('/') ? root : root + '/'
+  if (normalised !== root && !normalised.startsWith(rootPrefix)) {
+    return null
   }
 
-  if (paths.size === 0) return ''
+  return {
+    fullPath: normalised,
+    displayPath: token,
+    hadTrailingSlash,
+  }
+}
 
-  const parts = await Promise.all(Array.from(paths).map(async (relativePath): Promise<string> => {
-    const isAbsolute = relativePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(relativePath)
-    const fullPath = isAbsolute ? relativePath : `${projectPath}/${relativePath}`
+/**
+ * Extracts @path mentions from text, reads file contents or directory listings,
+ * returns a context block. A trailing "/" on the mention marks it as a directory
+ * (e.g. "@src/components/"); paths without the suffix are probed via stat().
+ *
+ * E.g. "update @src/App.tsx" → reads src/App.tsx and returns <mentioned_files>.
+ *      "explain @src/hooks/" → lists children and returns <mentioned_directory>.
+ */
+export async function extractAndResolveMentions(text: string, projectPath: string): Promise<string> {
+  const mentions = extractMentions(text)
+  if (mentions.length === 0) return ''
+
+  // Deduplicate by token so multiple references in a prompt resolve once.
+  const unique = Array.from(new Set(mentions.map(m => m.token)))
+
+  const parts = await Promise.all(unique.map(async (token): Promise<string> => {
+    const resolved = resolveMentionTarget(token, projectPath)
+    if (!resolved) {
+      return `<mentioned_file path="${token}">\n[Access denied: path resolves outside the project root]\n</mentioned_file>`
+    }
+    const { fullPath, displayPath, hadTrailingSlash } = resolved
+
+    // Images are never useful as truncated UTF-8 — surface a clear note instead.
+    const ext = getExtension(getFileName(fullPath))
+    if (IMAGE_EXTENSIONS.has(ext)) {
+      return `<mentioned_image path="${displayPath}" ext="${ext}">\n[Image referenced — attach via paste / file picker to send it to a multimodal model.]\n</mentioned_image>`
+    }
+    if (BINARY_EXTENSIONS.has(ext)) {
+      return `<mentioned_file path="${displayPath}">\n[Binary file (${ext}) — contents not inlined.]\n</mentioned_file>`
+    }
+
+    // Disambiguate file vs dir. Trailing slash is an authoritative hint.
+    let isDirectory = hadTrailingSlash
+    if (!isDirectory) {
+      try {
+        const { stat } = await import('@tauri-apps/plugin-fs')
+        const info = await stat(fullPath)
+        isDirectory = !!info.isDirectory
+      } catch {
+        // Leave as false; read_file will produce a friendly error below.
+      }
+    }
+
+    if (isDirectory) {
+      try {
+        const tree = await invoke<FileTreeNode>('build_file_tree', {
+          rootPath: fullPath,
+          filter: { showHidden: false },
+        })
+        const children = tree.children || []
+        const listing = children
+          .slice(0, 200)
+          .map(c => `${c.type === 'directory' ? '[d]' : '   '} ${c.name}`)
+          .join('\n') || '(empty directory)'
+        const overflowNote = children.length > 200
+          ? `\n[... ${children.length - 200} more entries]`
+          : ''
+        return `<mentioned_directory path="${displayPath}">\n${listing}${overflowNote}\n</mentioned_directory>`
+      } catch {
+        return `<mentioned_directory path="${displayPath}">\n[Error: could not list directory]\n</mentioned_directory>`
+      }
+    }
+
     try {
       const content = await invoke<string>('read_file', { path: fullPath })
       const truncated = content.length > MAX_FILE_CHARS
         ? content.slice(0, MAX_FILE_CHARS) + '\n[... truncated]'
         : content
-      return `<mentioned_file path="${relativePath}">\n${truncated}\n</mentioned_file>`
+      return `<mentioned_file path="${displayPath}">\n${truncated}\n</mentioned_file>`
     } catch {
-      return `<mentioned_file path="${relativePath}">\n[Error: could not read file]\n</mentioned_file>`
+      return `<mentioned_file path="${displayPath}">\n[Error: could not read file]\n</mentioned_file>`
     }
   }))
 
@@ -138,7 +240,7 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
           filter: { showHidden: false },
         })
         const listing = (tree.children || [])
-          .map(c => `${c.type === 'directory' ? '📁 ' : '  '}${c.name}`)
+          .map(c => `${c.type === 'directory' ? '[d] ' : '    '}${c.name}`)
           .join('\n')
         return `<attached_folder path="${att.path}">\n${listing}\n</attached_folder>`
       } else if (att.type === 'image') {

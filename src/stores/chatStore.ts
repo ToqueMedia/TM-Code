@@ -1,11 +1,12 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
 import { useCheckpointStore } from './checkpointStore'
 import { usePermissionStore } from './permissionStore'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
+export { clearMessageQueue }
 import { setQueueLogContext } from '../services/agent/queueOperationLog'
 import { logger } from '../utils/logger'
 import { t } from '../i18n'
@@ -22,6 +23,8 @@ interface ChatState {
   conversationHistory: ConversationMessage[]
   currentTurnCount: number
   totalTokensUsed: { input: number; output: number }
+  /** Timestamp (ms) when the current agent loop started. Used for elapsed time display. */
+  agentStartTime: number | null
   pendingDiffs: DiffResult[]
   /** Draft prompt text — shared across PromptBar instances (chat + preview) */
   draftInput: string
@@ -34,7 +37,14 @@ interface ChatActions {
   getActiveSession: () => ChatSession | null
   setActiveSession: (sessionId: string) => void
   addUserMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
-  addSystemMessage: (content: string) => void
+  /**
+   * Insert a user message BEFORE the streaming assistant message.
+   * Used by mid-turn drain to keep visual order correct:
+   *   user_msg → queued_user_msg → assistant_response
+   *   (not: user_msg → assistant_response → queued_user_msg)
+   */
+  insertUserMessageBeforeAssistant: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
+  addSystemMessage: (content: string, level?: SystemMessageLevel) => void
   startAssistantMessage: () => string
   finalizeAssistantMessage: () => void
   addCodeBlockToMessage: (messageId: string, block: CodeBlock) => void
@@ -42,6 +52,8 @@ interface ChatActions {
   setStreaming: (streaming: boolean) => void
   setError: (error: string | null) => void
   clearSession: (sessionId: string) => void
+  /** Clear messages within a session but keep the session alive. Also resets tokens and turn count. */
+  clearSessionMessages: (sessionId: string) => void
   // Streaming actions
   appendTextDelta: (delta: string) => void
   appendReasoningDelta: (delta: string) => void
@@ -74,6 +86,7 @@ interface ChatActions {
   listProjectSessions: (projectPath: string) => Promise<SessionSummary[]>
   createNewSession: (projectPath: string) => Promise<string>
   switchSession: (projectPath: string, sessionId: string) => Promise<void>
+  renameSession: (name: string) => void
   deleteSessionFromDisk: (projectPath: string, sessionId: string) => Promise<void>
   initPersistence: (projectPath: string) => Promise<void>
   cleanupOnExit: (projectPath: string) => Promise<void>
@@ -93,7 +106,26 @@ export function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${idCounter}`
 }
 
-// Debounce helper — saves session 2s after last call
+// === Persisted agent start time ===
+// Survives app crash/reload so elapsed time isn't lost.
+const AGENT_START_TIME_KEY = 'chat_agentStartTime'
+function persistAgentStartTime(timestamp: number): void {
+  try { localStorage.setItem(AGENT_START_TIME_KEY, String(timestamp)) } catch { /* storage unavailable */ }
+}
+function restoreAgentStartTime(): number | null {
+  try {
+    const raw = localStorage.getItem(AGENT_START_TIME_KEY)
+    if (raw) {
+      const ts = parseInt(raw, 10)
+      // Sanity check: must be within last 24 hours (stale data)
+      if (Date.now() - ts < 24 * 60 * 60 * 1000) return ts
+    }
+  } catch { /* ignore */ }
+  return null
+}
+function clearAgentStartTime(): void {
+  try { localStorage.removeItem(AGENT_START_TIME_KEY) } catch { /* ignore */ }
+}
 let saveTimeout: ReturnType<typeof setTimeout> | null = null
 function debouncedSave() {
   if (saveTimeout) clearTimeout(saveTimeout)
@@ -129,47 +161,117 @@ function stopStreamingSave() {
 // Used to make the agent wait until the user approves/rejects a file change.
 const pendingDiffApprovals = new Map<string, (approved: boolean) => void>()
 
+// Timeout for diff approvals — 30 minutes. Prevents the agent from
+// being blocked forever if the user walks away with pending diffs.
+const DIFF_APPROVAL_TIMEOUT_MS = 30 * 60 * 1000
+const approvalTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+
+/**
+ * Resolve a diff approval by its diffResultId (not toolCallId).
+ * Used by GeneratingView which only has access to diffResultId.
+ * Finds the associated toolCallId via the session or pendingDiffs store.
+ */
+export function resolveDiffApprovalByResultId(diffResultId: string, approved: boolean): void {
+  // Find the toolCallId from pendingDiffs (authoritative source)
+  const pendingDiffs = useChatStore.getState().pendingDiffs
+  const diff = pendingDiffs.find(d => d.id === diffResultId)
+  if (diff?.toolCallId) {
+    resolveDiffApproval(diff.toolCallId, approved)
+    return
+  }
+  // Fallback: search session messages
+  const session = useChatStore.getState().getActiveSession()
+  if (session) {
+    for (const msg of session.messages) {
+      const tc = msg.toolCalls?.find(t => t.diffResultId === diffResultId)
+      if (tc?.id) {
+        resolveDiffApproval(tc.id, approved)
+        return
+      }
+    }
+  }
+  // Not found — the approval may have already been resolved (race between
+  // GeneratingView and inline approval), or the diffResultId is stale.
+}
+
 export async function createDiffApprovalPromise(toolCallId: string): Promise<boolean> {
   // If auto-approve diffs is enabled (user clicked "Accept All" earlier),
   // accept the diff immediately without blocking the agent.
   if (usePermissionStore.getState().autoApproveDiffs) {
+    // Primary path: search pendingDiffs for the diffResultId (race-safe —
+    // pendingDiffs is populated before the approval promise is created).
+    const pendingDiffs = useChatStore.getState().pendingDiffs
+    const pending = pendingDiffs.find(d => d.toolCallId === toolCallId)
+    if (pending) {
+      try {
+        await DiffService.getInstance().acceptDiff(pending.id)
+      } catch (err) {
+        logger.error('chat', 'Auto-approve acceptDiff failed:', String(err))
+      }
+      useChatStore.getState().syncDiffStatusByResultId(pending.id, 'approved')
+      useChatStore.getState().removePendingDiff(pending.id)
+      return true
+    }
+
+    // Fallback path: search session messages (timing edge case where
+    // pendingDiffs hasn't been added yet — very rare, < 1 frame).
     const session = useChatStore.getState().getActiveSession()
     if (session) {
-      // Find the tool call to get its diffResultId (set by updateToolCallWithResult)
       for (let i = session.messages.length - 1; i >= 0; i--) {
         const tc = session.messages[i].toolCalls?.find(t => t.id === toolCallId)
         if (tc?.diffResultId) {
-          // Write the file via DiffService — AWAIT to ensure file is written
-          // before the agent continues (may read the file in the next turn)
           try {
             await DiffService.getInstance().acceptDiff(tc.diffResultId)
           } catch (err) {
             logger.error('chat', 'Auto-approve acceptDiff failed:', String(err))
           }
-          // Update store: mark as approved and remove from pendingDiffs
           useChatStore.getState().syncDiffStatusByResultId(tc.diffResultId, 'approved')
           useChatStore.getState().removePendingDiff(tc.diffResultId)
-          break
+          return true
         }
       }
     }
+
+    // Neither path found — the tool call may not have a diff yet (should
+    // not happen, but be safe: still return true to avoid blocking the agent).
+    logger.warn('chat', `Auto-approve: no diff found for toolCallId ${toolCallId}`)
     return true
   }
 
   return new Promise(resolve => {
     pendingDiffApprovals.set(toolCallId, resolve)
+    // Set timeout — auto-reject after 30 minutes to prevent the agent
+    // from being blocked forever if the user walks away.
+    const timeout = setTimeout(() => {
+      if (pendingDiffApprovals.has(toolCallId)) {
+        logger.warn('chat', `Diff approval timed out after ${DIFF_APPROVAL_TIMEOUT_MS / 60000}min for toolCallId ${toolCallId}. Auto-rejecting.`)
+        resolve(false)
+        pendingDiffApprovals.delete(toolCallId)
+      }
+      approvalTimeouts.delete(toolCallId)
+    }, DIFF_APPROVAL_TIMEOUT_MS)
+    approvalTimeouts.set(toolCallId, timeout)
   })
 }
 
 export function resolveDiffApproval(toolCallId: string, approved: boolean) {
   const resolve = pendingDiffApprovals.get(toolCallId)
   if (resolve) {
+    // Clear the timeout — no longer needed
+    const timeout = approvalTimeouts.get(toolCallId)
+    if (timeout) { clearTimeout(timeout); approvalTimeouts.delete(toolCallId) }
     resolve(approved)
     pendingDiffApprovals.delete(toolCallId)
   }
 }
 
 export function resolveAllPendingDiffApprovals(approved: boolean) {
+  // Clear all timeouts
+  for (const [, timeout] of approvalTimeouts) {
+    clearTimeout(timeout)
+  }
+  approvalTimeouts.clear()
+
   for (const [, resolve] of pendingDiffApprovals) {
     resolve(approved)
   }
@@ -440,6 +542,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     conversationHistory: [],
     currentTurnCount: 0,
     totalTokensUsed: { input: 0, output: 0 },
+    agentStartTime: restoreAgentStartTime(),
     pendingDiffs: [],
     draftInput: '',
     draftAttachments: [],
@@ -545,13 +648,59 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       return messageId
     },
 
-    addSystemMessage: (content: string) => {
+    insertUserMessageBeforeAssistant: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => {
+      const messageId = generateId('msg')
+      const message: ChatMessage = {
+        id: messageId,
+        role: 'user',
+        content,
+        timestamp: Date.now(),
+        attachments: attachments?.length ? attachments : undefined,
+        promptBlocks: promptBlocks?.length ? promptBlocks : undefined,
+      }
+
+      set(state => {
+        const { activeSessionId, streamingMessageId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        // Find the index of the streaming assistant message
+        const assistantIdx = streamingMessageId
+          ? session.messages.findIndex(m => m.id === streamingMessageId)
+          : -1
+
+        // Insert before the assistant message, or append if not found
+        const insertIdx = assistantIdx >= 0 ? assistantIdx : session.messages.length
+        const newMessages = [...session.messages]
+        newMessages.splice(insertIdx, 0, message)
+
+        const updatedSession: ChatSession = {
+          ...session,
+          messages: newMessages,
+          status: 'running',
+          updatedAt: Date.now(),
+        }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, updatedSession)
+
+        return { sessions: updatedSessions }
+      })
+
+      debouncedSave()
+      return messageId
+    },
+
+    addSystemMessage: (content: string, level?: SystemMessageLevel) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
         role: 'system',
         content,
         timestamp: Date.now(),
+        ...(level && { level }),
       }
 
       set(state => {
@@ -607,8 +756,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           sessions: updatedSessions,
           isStreaming: true,
           streamingMessageId: messageId,
+          agentStartTime: Date.now(),
         }
       })
+
+      // Persist to survive app crash/reload
+      persistAgentStartTime(Date.now())
 
       startStreamingSave()
       return messageId
@@ -1076,8 +1229,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           sessions: updatedSessions,
           isStreaming: false,
           streamingMessageId: null,
+          agentStartTime: null,
         }
       })
+
+      // Clear persisted start time
+      clearAgentStartTime()
 
       // Rebuild conversation history outside set() — avoids blocking
       // render with JSON parsing and string processing on large sessions.
@@ -1174,6 +1331,34 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
         return { sessions, activeSessionId, conversationHistory: [], currentTurnCount: 0 }
       })
+    },
+
+    clearSessionMessages: (sessionId: string) => {
+      // Clear module-level debounce timer
+      if (saveTimeout) {
+        clearTimeout(saveTimeout)
+        saveTimeout = null
+      }
+      set(state => {
+        const sessions = new Map(state.sessions)
+        const session = sessions.get(sessionId)
+        if (session) {
+          sessions.set(sessionId, {
+            ...session,
+            messages: [],
+            updatedAt: Date.now(),
+          })
+        }
+
+        return {
+          sessions,
+          conversationHistory: [],
+          currentTurnCount: 0,
+          totalTokensUsed: { input: 0, output: 0 },
+        }
+      })
+      // Mark dirty so the cleared state is persisted
+      sessionService.markDirty()
     },
 
     updateConversationHistory: (messages: ConversationMessage[]) => {
@@ -1340,7 +1525,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (!activeId) return false
 
         const session = await sessionService.loadSession(projectPath, activeId)
-        if (!session || session.messages.length === 0) return false
+        if (!session) {
+          // Session file missing (e.g. app crashed before save) — clear the stale
+          // active-session pointer so the same PathNotFound is not repeated on restart.
+          await sessionService.setActiveSessionId(projectPath, '')
+          return false
+        }
+        if (session.messages.length === 0) return false
 
         // Strip ephemeral system messages but keep card messages
         session.messages = session.messages.filter(m => m.role !== 'system' || m.card)
@@ -1429,6 +1620,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     switchSession: async (projectPath: string, sessionId: string) => {
       set({ isLoadingSession: true })
       try {
+        // Finalize any streaming message before saving — avoids partial/corrupt saves
+        get().finalizeAssistantMessage()
+
         // Save current session before switching
         const state = get()
         const currentSession = state.getActiveSession()
@@ -1447,10 +1641,24 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         usePermissionStore.getState().resetAutoApprove()
 
         // loadSessionFromDisk already initializes checkpoints for the session
+        const beforeSessionId = get().activeSessionId
         await get().loadSessionFromDisk(projectPath, sessionId)
+
+        // Verify the session was actually loaded — loadSessionFromDisk silently
+        // returns if the file doesn't exist, leaving the old session active.
+        if (get().activeSessionId === beforeSessionId && beforeSessionId !== sessionId) {
+          throw new Error(`Session "${sessionId}" not found on disk.`)
+        }
       } finally {
         set({ isLoadingSession: false })
       }
+    },
+
+    renameSession: (name: string) => {
+      const session = get().getActiveSession()
+      if (!session) return
+      session.name = name
+      // Name is persisted on next saveSessionToDisk() call via updateIndex
     },
 
     deleteSessionFromDisk: async (projectPath: string, sessionId: string) => {
@@ -1531,6 +1739,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         conversationHistory: [],
         isStreaming: false,
         streamingMessageId: null,
+        agentStartTime: null,
         currentTurnCount: 0,
         totalTokensUsed: { input: 0, output: 0 },
         pendingDiffs: [],

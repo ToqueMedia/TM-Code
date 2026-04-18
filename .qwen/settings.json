@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm *)",
+      "Bash(npx *)",
+      "Bash(npm test *)",
+      "Bash(cargo check)",
+      "Bash(npm run *)",
+      "Bash(true)",
+      "Bash(sed *)",
+      "Bash(wrangler *)"
+    ]
+  },
+  "$version": 3
+}

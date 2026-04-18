@@ -6,7 +6,71 @@
 |---------|------|-------------|
 | **TM Code (this repo)** | `~/dev/deskotp/exodus-ide` | Desktop IDE frontend + Tauri Rust backend |
 | **Backend API** | `~/dev/deskotp/toquemedia-studio-api` | Cloudflare Worker API proxy with billing, rate limiting, and AI provider integration |
-| **Claude Code Source** | `~/dev/claude-vaz` | Claude Code Desktop source code (reference for feature inspiration) |
+| **Claude Code Source** | `~/dev/claude-vaz` | Claude Code Desktop source code (reference for message queue and feature architecture) |
+
+## Message Queue Architecture
+
+The message queue system mirrors **Claude Code's architecture** — ALL user messages go through a unified local command queue first, and the queue processor decides when to dequeue based on agent state.
+
+### How It Works
+
+```
+User types message → ALWAYS enqueue() → Queue processor checks: agent idle?
+  → YES: dequeue immediately → executeInput → runAgentLoop
+  → NO: wait for turn to complete → mid-turn drain injects message → agent continues
+```
+
+### Mid-Turn Drain (Mid-Turn Injection)
+
+Ported from Claude Code (`query.ts:1556`). After each turn where the model called tools, queued prompt messages are **appended as a text block to the SAME user message that carries tool results**. This avoids consecutive user messages (Anthropic requires strict alternation) and gives the model the new input alongside the tool results:
+
+1. **Dequeue all** prompt-mode, non-slash commands via `dequeueAllMatching()`
+2. **Coalesce** into a single user message via `joinPromptValues()`
+3. **Add to chat store** so the message appears in the UI as a user bubble
+4. **Append as text block** to `toolResultBlocks`: `[USER_MESSAGE]\n${text}\n[/USER_MESSAGE]`
+5. **Push merged user message**: `{ role: 'user', content: toolResultBlocks }` (tool results + queued text)
+6. **Continue** the loop — the model receives tool results + new input in one message
+
+**Key constraints:**
+- Only fires when `turnResult.toolCalls.length > 0 && finishReason === 'tool_use'` — if the model replied with pure text, it already decided to stop
+- Queued text is appended to the tool_results user message, NOT as a separate user message — this prevents Anthropic's consecutive-user-message rejection
+- If no tool results AND no queued messages, the loop naturally exits
+
+```
+Turn 1: API call → model responds with tool_use → tools execute
+  → toolResultBlocks = [tool_result: write_file, ...]
+  → mid-turn drain: user queued msg found
+  → toolResultBlocks.push({type: 'text', text: '[USER_MESSAGE]\nalso add tests\n[/USER_MESSAGE]'})
+  → messages.push({role: 'user', content: toolResultBlocks})  ← ONE user message
+Turn 2: API call sees tool results + "also add tests" → model responds
+```
+
+### Key Components
+
+| Component | File | Role |
+|-----------|------|------|
+| **Command Queue** | `src/services/agent/messageQueue.ts` | Unified module-level store with priority ordering (`now` > `next` > `later`) |
+| **Queue Processor** | `src/services/agent/queueProcessor.ts` | Decides what to drain: slash/bash one-at-a-time, prompt-mode batched |
+| **Queue Hook** | `src/hooks/useQueueProcessor.ts` | React hook subscribing to QueryGuard + queue snapshot |
+| **Query Guard** | `src/services/agent/queryGuard.ts` | Sync state machine: `idle` → `dispatching` → `running` → `idle` |
+| **Prompt Bar** | `src/components/prompt/usePromptBar.ts` | Entry point — `handleSend` enqueues ALL messages (slash commands execute directly) |
+
+### Priority System
+
+- **`now`** — Interrupt signals (abort current turn)
+- **`next`** — User input (default)
+- **`later`** — Task notifications, background events
+
+### Batching Behavior
+
+When multiple messages arrive while the agent is working:
+- **Slash commands / bash mode**: processed one at a time (error isolation, exit codes)
+- **Prompt mode**: all consecutive prompt commands batched into ONE agent turn via `joinPromptValues()`
+- Different modes (prompt vs task-notification) are never mixed
+
+### Visual Feedback
+
+Queued messages are shown in the status bar as `N queued` — updating reactively as messages are enqueued and processed.
 
 ## Project Overview
 
@@ -170,12 +234,13 @@ Only **two models** are actively configured as defaults:
 | Plan | Default Model | Provider | Context Budget |
 |------|--------------|----------|----------------|
 | **Free (Explorer)** | `deepseek-v3.2` | DashScope (Alibaba Cloud) | 131,072 tokens |
-| **Pro / Business (4x/8x)** | `qwen3.6-plus` | DashScope (Alibaba Cloud) | 1,000,000 tokens |
+| **Pro / Business (4x/8x)** | `glm-5.1` | OpenRouter (Z-AI) | 200,000 tokens |
 
 ### Plan-Specific Configuration
 
 - **Free tier**: Restricted to `deepseek-v3.2` only (efficient, no thinking mode)
-- **Paid tiers**: Use `qwen3.6-plus` with reasoning capabilities and strong tool calling
+- **Paid tiers**: Use `glm-5.1` with toggleable reasoning, strong tool calling, and 200K context
+- **Multimodal (images)**: Paid plans → Qwen 3.6 Plus analyzes images, text description sent to GLM-5.1
 - **`/plan` command**: Uses `deepseek-v3.2` as fallback for all plans (avoids billing leak on free tier)
 
 ### Available Providers (Configured but Not Default)
@@ -185,6 +250,7 @@ The backend supports multiple providers but they're not set as defaults:
 | Provider | Models | API Endpoint |
 |----------|--------|-------------|
 | **DashScope** (Alibaba Cloud) | `deepseek-v3.2`, `qwen3.6-plus`, `glm-5`, `kimi-k2.5`, `qwen3-coder-next`, `MiniMax-M2.5`, `step-3.5-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
+| **OpenRouter** | `glm-5.1` (Z-AI), future models | `https://openrouter.ai/api/v1/chat/completions` |
 | **MiMo** (Xiaomi) | `mimo-v2-flash` | `https://api.xiaomimemo.com/v1/chat/completions` |
 | **Gemini** (Google) | `gemini-3-flash-preview`, `gemini-3-flash` | `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` |
 | **StepFun** | `step-3.5-flash` | `https://api.stepfun.ai/v1/chat/completions` |

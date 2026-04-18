@@ -1,5 +1,14 @@
 import { create } from 'zustand'
 
+/** Persist/reload autoApproveDiffs from localStorage */
+const STORAGE_KEY = 'chat_autoApproveDiffs'
+function loadAutoApproveDiffs(): boolean {
+  try { return localStorage.getItem(STORAGE_KEY) === 'true' } catch { return false }
+}
+function saveAutoApproveDiffs(value: boolean) {
+  try { localStorage.setItem(STORAGE_KEY, String(value)) } catch { /* storage unavailable */ }
+}
+
 const SAFE_TOOLS = new Set([
   'read_file',
   'list_directory',
@@ -91,7 +100,7 @@ function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionSt
 
 export const usePermissionStore = create<PermissionState & PermissionActions>()((set, get) => ({
   approvedScopes: new Set(),
-  autoApproveDiffs: false,
+  autoApproveDiffs: loadAutoApproveDiffs(),
   pendingPermission: null,
   permissionQueue: [],
 
@@ -151,6 +160,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       scopes.add(scope)
       // Auto-approve diffs when core tools are approved
       const autoApproveDiffs = scope === 'core' ? true : get().autoApproveDiffs
+      if (autoApproveDiffs) saveAutoApproveDiffs(true)
 
       // Auto-approve all queued permissions in the same scope,
       // but KEEP sensitive/flagged ones — they must always prompt individually.
@@ -184,10 +194,12 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   },
 
   setAutoApproveDiffs: (value: boolean) => {
+    saveAutoApproveDiffs(value)
     set({ autoApproveDiffs: value })
   },
 
   resetAutoApprove: () => {
+    saveAutoApproveDiffs(false)
     set({ approvedScopes: new Set(), autoApproveDiffs: false })
   },
 

@@ -224,21 +224,11 @@ export function useCodeEditorLayout() {
 		function onSearchOpen() {
 			setActiveActivity('search')
 		}
-		function onTerminalOpenAt(e: Event) {
-			const detail = (e as CustomEvent<{ path: string }>).detail
-			if (!detail?.path) return
-			import('@/stores/terminalStore').then(({ useTerminalStore }) => {
-				useTerminalStore.getState().createSession(undefined, detail.path)
-			}).catch(() => {})
-			setIsBottomPanelVisible(true)
-		}
 		window.addEventListener('panel:toggle-bottom', onToggleEvent)
 		window.addEventListener('search:open', onSearchOpen)
-		window.addEventListener('terminal:open-at', onTerminalOpenAt)
 		return () => {
 			window.removeEventListener('panel:toggle-bottom', onToggleEvent)
 			window.removeEventListener('search:open', onSearchOpen)
-			window.removeEventListener('terminal:open-at', onTerminalOpenAt)
 		}
 	}, [toggleBottomPanel])
 

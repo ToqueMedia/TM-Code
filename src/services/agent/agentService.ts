@@ -6,10 +6,18 @@ import { ServiceError } from '../../utils/errors'
 import { parseSSEStream, createThinkingDetector } from './streamParser'
 import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
+import { useAgentStore } from '../../stores/agentStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
 import { getQueryGuard } from './queryGuard'
 import { contentAsText } from './promptValueHelpers'
+import {
+  hasCommandsInQueue,
+  dequeueAllMatching,
+  isSlashCommand,
+  joinPromptValues,
+} from './messageQueue'
+import type { PromptValue } from '../../types/messageQueueTypes'
 import { StreamingSafeToolPool } from './safeToolPool'
 import type { PoolToolResult } from './safeToolPool'
 import type { ContentPart } from '../../types/chat'
@@ -265,8 +273,19 @@ class AgentService {
       // toggle it off for faster, more direct responses.
       const isThinking = useSettingsStore.getState().thinkingEnabled
 
+      // Filter tools based on model capabilities.
+      // web_search is only supported natively on DashScope Qwen models
+      // (via enable_search:true injected by the backend). Other models
+      // (GLM-5.1, DeepSeek, Kimi, etc.) cannot execute this tool.
+      const filteredTools = this.tools.filter(t => {
+        if (t.function.name === 'web_search') {
+          return profile.supportsSearch
+        }
+        return true
+      })
+
       // Convert tools to Anthropic format
-      const anthropicTools = this.tools.map(t => ({
+      const anthropicTools = filteredTools.map(t => ({
         name: t.function.name,
         description: t.function.description,
         input_schema: t.function.parameters,
@@ -277,7 +296,7 @@ class AgentService {
         system: this.systemPrompt,
         messages,
         tools: anthropicTools,
-        max_tokens: MAX_OUTPUT_TOKENS,
+        max_tokens: MAX_OUTPUT_TOKENS,  // Default; overwritten by buildSamplingParams for main agent
         stream: true,
       }
 
@@ -288,7 +307,9 @@ class AgentService {
 
       this.contextWindowSize = profile.contextWindow
 
-      // Sampling: thinking ON → temp 0.6 (Qwen3 default), OFF → temp 0.7
+      // Sampling params: temperature and top_p vary by model and thinking mode.
+      // GLM-5.1 (official z.ai benchmarks): temp=1.0 for both, top_p=0.95 (thinking) vs 1.0 (non-thinking).
+      // Qwen3: temp=0.6 (thinking) vs 0.7 (non-thinking), top_p=0.95 vs 0.8.
       const sampling = buildSamplingParams(profile, isThinking)
       Object.assign(body, sampling)
 
@@ -299,10 +320,11 @@ class AgentService {
 
       return body
     } catch {
+      const filteredTools = this.tools.filter(t => t.function.name !== 'web_search')
       const body: Record<string, unknown> = {
         system: this.systemPrompt,
         messages,
-        tools: this.tools.map(t => ({
+        tools: filteredTools.map(t => ({
           name: t.function.name,
           description: t.function.description,
           input_schema: t.function.parameters,
@@ -551,51 +573,6 @@ class AgentService {
           content: assistantBlocks.length > 0 ? assistantBlocks : turnResult.textContent || '',
         })
 
-        // If no tool calls, the model wants to stop. But first, enforce completion checks.
-        // Anthropic stop_reason: 'tool_use' = has tools, 'end_turn' = done, 'max_tokens' = overflow
-        if (
-          turnResult.toolCalls.length === 0 ||
-          turnResult.finishReason !== 'tool_use'
-        ) {
-          // Completion enforcement — only for the main agent, not sub-agents
-          if (!this.lightweightOptions) {
-            const enforcements: string[] = []
-
-            // Enforcement: never done with errors — check dev server logs.
-            // Only check errors that appeared AFTER the last file change to avoid
-            // false-blocking on stale errors that were already fixed by hot-reload.
-            if (devServerManager.isActive() && this.lastFileChangeTimestamp > 0) {
-              try {
-                const { useLayoutStore } = await import('../../stores/layoutStore')
-                const logs = useLayoutStore.getState().devServerLogs
-                const errorsAfterLastChange = logs.filter(l =>
-                  l.level === 'error' && l.timestamp > this.lastFileChangeTimestamp
-                )
-                if (errorsAfterLastChange.length > 0) {
-                  const errorText = errorsAfterLastChange.slice(-5).map(e => e.text).join('\n')
-                  enforcements.push(`The dev server is showing errors after your changes:\n${errorText}\n\nFix these errors before reporting completion.`)
-                }
-              } catch { /* non-critical */ }
-            }
-
-            // If any enforcement triggered, push the model back into the loop.
-            // assistantMsg is already in messages (pushed above) — only add the enforcement.
-            // Limited retries prevent infinite loops from persistent server errors.
-            if (enforcements.length > 0 && enforcementRetries < MAX_ENFORCEMENT_RETRIES) {
-              enforcementRetries++
-              messages.push({
-                role: 'user',
-                content: `[COMPLETION_BLOCKED]\n${enforcements.join('\n\n')}\n[/COMPLETION_BLOCKED]`,
-              })
-              callbacks.onTurnComplete(turnCount)
-              continue // Back to loop — model must address the issues
-            }
-          }
-
-          callbacks.onDone(turnResult.textContent || '')
-          return
-        }
-
         // Tool execution: concurrency-safety-aware pool.
         //
         // Read tools (read_file, glob, search_files, web_fetch, etc.) run in
@@ -729,11 +706,177 @@ class AgentService {
           }
         }
 
+        // ── Mid-turn drain: inject queued messages into the tool_results user msg
+        // Ported from Claude Code (query.ts:1556). Queued user messages are appended
+        // as text blocks to the SAME user message that carries tool results. This
+        // avoids consecutive user messages (Anthropic requires strict alternation)
+        // and gives the model the new input alongside the tool results.
+        //
+        // Only fires when there were actual tool calls — if the model replied with
+        // pure text, it already made a "stop" decision.
+        if (
+          !this.lightweightOptions &&
+          turnResult.toolCalls.length > 0 &&
+          turnResult.finishReason === 'tool_use' &&
+          hasCommandsInQueue()
+        ) {
+          const queuedPromptCommands = dequeueAllMatching(
+            cmd => !isSlashCommand(cmd) && cmd.mode === 'prompt',
+          )
+
+          if (queuedPromptCommands.length > 0) {
+            const mergedValue: PromptValue =
+              queuedPromptCommands.length > 1
+                ? joinPromptValues(queuedPromptCommands.map(c => c.value))
+                : queuedPromptCommands[0]!.value
+
+            // Extract display text for UI visibility
+            const displayText = typeof mergedValue === 'string'
+              ? mergedValue
+              : mergedValue
+                  .filter(b => b.type === 'text')
+                  .map(b => b.text)
+                  .join(' ')
+            const displayAttachments = typeof mergedValue === 'string'
+              ? []
+              : mergedValue
+                  .filter(b => b.type === 'attachment')
+                  .map(b => b.attachment)
+
+            // Extract promptBlocks to preserve interleaved text↔image structure
+            // for vision-capable models in follow-up turns
+            const promptBlocksList = typeof mergedValue === 'string'
+              ? undefined
+              : mergedValue
+
+            // Add to chat so the user sees the message — INSERT before the
+            // streaming assistant message to keep visual order correct:
+            //   user_msg → queued_user_msg → assistant_response
+            //   (NOT: user_msg → assistant_response → queued_user_msg)
+            try {
+              const { useChatStore: chatStoreImport } = await import('../../stores/chatStore')
+              chatStoreImport.getState().insertUserMessageBeforeAssistant(
+                displayText,
+                displayAttachments,
+                promptBlocksList,
+              )
+            } catch { /* non-critical */ }
+
+            // Append to the tool_results user message (avoids consecutive user msgs)
+            toolResultBlocks.push({
+              type: 'text',
+              text: `[USER_MESSAGE]\n${displayText}\n[/USER_MESSAGE]`,
+            })
+
+            logger.info(
+              'agent',
+              `[MID-TURN DRAIN] Appended ${queuedPromptCommands.length} queued message(s) to tool_results: "${displayText.slice(0, 80)}${displayText.length > 80 ? '...' : ''}"`,
+            )
+          }
+        }
+        // ── End mid-turn drain ───────────────────────────────────────────
+
         if (toolResultBlocks.length > 0) {
           messages.push({
             role: 'user',
             content: toolResultBlocks,
           })
+        }
+
+        // If no tool calls, the model wants to stop. But first, enforce completion checks.
+        // Anthropic stop_reason: 'tool_use' = has tools, 'end_turn' = done, 'max_tokens' = overflow
+        if (
+          turnResult.toolCalls.length === 0 ||
+          turnResult.finishReason !== 'tool_use'
+        ) {
+          // Completion enforcement — only for the main agent, not sub-agents
+          if (!this.lightweightOptions) {
+            const enforcements: string[] = []
+
+            // Enforcement: never done with errors — check dev server logs.
+            // Only check errors that appeared AFTER the last file change to avoid
+            // false-blocking on stale errors that were already fixed by hot-reload.
+            if (devServerManager.isActive() && this.lastFileChangeTimestamp > 0) {
+              try {
+                const { useLayoutStore } = await import('../../stores/layoutStore')
+                const logs = useLayoutStore.getState().devServerLogs
+                const errorsAfterLastChange = logs.filter(l =>
+                  l.level === 'error' && l.timestamp > this.lastFileChangeTimestamp
+                )
+                if (errorsAfterLastChange.length > 0) {
+                  const errorText = errorsAfterLastChange.slice(-5).map(e => e.text).join('\n')
+                  enforcements.push(`The dev server is showing errors after your changes:\n${errorText}\n\nFix these errors before reporting completion.`)
+                }
+              } catch { /* non-critical */ }
+            }
+
+            // If any enforcement triggered, push the model back into the loop.
+            // assistantMsg is already in messages (pushed above) — only add the enforcement.
+            // Limited retries prevent infinite loops from persistent server errors.
+            if (enforcements.length > 0 && enforcementRetries < MAX_ENFORCEMENT_RETRIES) {
+              enforcementRetries++
+              messages.push({
+                role: 'user',
+                content: `[COMPLETION_BLOCKED]\n${enforcements.join('\n\n')}\n[/COMPLETION_BLOCKED]`,
+              })
+              callbacks.onTurnComplete(turnCount)
+              continue // Back to loop — model must address the issues
+            }
+          }
+
+          callbacks.onDone(turnResult.textContent || '')
+          return
+        }
+
+        // Pre-exit drain: if the model wants to stop but there are queued messages,
+        // inject them before exiting. Without this, queued messages would be left
+        // behind and a new loop would start without the tool results context.
+        if (
+          !this.lightweightOptions &&
+          hasCommandsInQueue()
+        ) {
+          const queuedPromptCommands = dequeueAllMatching(
+            cmd => !isSlashCommand(cmd) && cmd.mode === 'prompt',
+          )
+
+          if (queuedPromptCommands.length > 0) {
+            const mergedValue: PromptValue =
+              queuedPromptCommands.length > 1
+                ? joinPromptValues(queuedPromptCommands.map(c => c.value))
+                : queuedPromptCommands[0]!.value
+
+            const displayText = typeof mergedValue === 'string'
+              ? mergedValue
+              : mergedValue
+                  .filter(b => b.type === 'text')
+                  .map(b => b.text)
+                  .join(' ')
+            const displayAttachments = typeof mergedValue === 'string'
+              ? []
+              : mergedValue
+                  .filter(b => b.type === 'attachment')
+                  .map(b => b.attachment)
+
+            try {
+              const { useChatStore: chatStoreImport } = await import('../../stores/chatStore')
+              chatStoreImport.getState().insertUserMessageBeforeAssistant(displayText, displayAttachments)
+            } catch { /* non-critical */ }
+
+            messages.push({
+              role: 'user',
+              content: `[USER_MESSAGE]\n${displayText}\n[/USER_MESSAGE]`,
+            })
+
+            logger.info(
+              'agent',
+              `[PRE-EXIT DRAIN] Injected ${queuedPromptCommands.length} queued message(s) before exit: "${displayText.slice(0, 80)}${displayText.length > 80 ? '...' : ''}"`,
+            )
+
+            // Continue the loop — do NOT call onTurnComplete here since
+            // no actual turn completed yet (the model was about to stop).
+            // The next loop iteration will call onTurnComplete after the API responds.
+            continue
+          }
         }
 
         if (this.abortController?.signal.aborted) return
@@ -1311,6 +1454,8 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     }
     // Unblock any pending diff approval waits
     resolveAllPendingDiffApprovals(false)
+    // Reset auto-approve diffs so next session requires manual approval
+    import('../../stores/permissionStore').then(m => m.usePermissionStore.getState().resetAutoApprove()).catch(() => {})
     this.isRunning = false
     // forceEnd() bumps the QueryGuard's generation so the cancelled loop's
     // finally block sees a stale generation and skips its end() call.
@@ -1498,6 +1643,12 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       if (parsed > 0) this.contextWindowSize = parsed
     }
 
+    const modelName = response.headers.get('X-Model-Name')
+    const modelProvider = response.headers.get('X-Model-Provider')
+    if (modelName || modelProvider) {
+      useAgentStore.getState().setModelInfo(modelName, modelProvider)
+    }
+
     // Read billing info from response headers
     useBillingStore.getState().updateFromHeaders(response.headers)
 
@@ -1614,9 +1765,11 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
           case 'usage': {
             // Accumulate — message_start has input_tokens, message_delta has output_tokens
+            // Use ?? (nullish coalescing) to handle the case where promptTokens or
+            // completionTokens are legitimately 0 (|| would treat 0 as falsy and fall through)
             usage = {
-              promptTokens: event.promptTokens || usage?.promptTokens || 0,
-              completionTokens: event.completionTokens || usage?.completionTokens || 0,
+              promptTokens: event.promptTokens ?? usage?.promptTokens ?? 0,
+              completionTokens: event.completionTokens ?? usage?.completionTokens ?? 0,
             }
             break
           }
@@ -1628,8 +1781,9 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
               status: event.status,
               tokens_used: event.tokensUsed,
               tokens_consumed: event.tokensConsumed,
+              token_budget: event.tokenBudget,
               cycle_end: event.cycleEnd,
-              tms_remaining: event.tmsRemaining,
+              extra_usage_balance: event.tmsRemaining,
               plan: event.plan,
               used_overage: event.usedOverage,
             })

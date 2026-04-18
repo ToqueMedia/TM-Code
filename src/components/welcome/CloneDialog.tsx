@@ -13,6 +13,7 @@ import {
 import { LuGitBranch, LuFolderOpen, LuLoader, LuCheck, LuCircleAlert } from 'react-icons/lu'
 import { invoke } from '@tauri-apps/api/core'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 type CloneStatus = 'idle' | 'cloning' | 'success' | 'error'
 
@@ -93,7 +94,7 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: 'Choose where to clone',
+        title: t('clone.browseTitle'),
       })
       if (selected) {
         const name = repoName || 'project'
@@ -107,7 +108,7 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
 
     setStatus('cloning')
     setErrorMsg('')
-    setProgress('Connecting to remote...')
+    setProgress(t('clone.connecting'))
 
     try {
       // Shell-escape inputs to prevent command injection
@@ -127,7 +128,7 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
       })
 
       if (!result.success) {
-        const errOutput = result.stderr || result.stdout || 'Clone failed'
+        const errOutput = result.stderr || result.stdout || t('clone.failed')
         throw new Error(errOutput.split('\n').filter(Boolean).pop() || errOutput)
       }
 
@@ -212,10 +213,10 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
               </Flex>
               <Box>
                 <Heading fontSize="17px" fontWeight="700" color="white" lineHeight="1.2">
-                  Clone Repository
+                  {t('clone.title')}
                 </Heading>
                 <Text fontSize="12px" color={tokens.colors.text.muted} mt="2px">
-                  Clone from any Git remote server
+                  {t('clone.subtitle')}
                 </Text>
               </Box>
             </Flex>
@@ -251,19 +252,19 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
                 <Box>
                   <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.muted} mb="6px"
                     textTransform="uppercase" letterSpacing="0.05em">
-                    Repository URL
+                    {t('clone.repoUrl')}
                   </Text>
                   <Input
                     ref={urlInputRef}
                     value={repoUrl}
                     onChange={(e) => setRepoUrl(e.target.value)}
-                    placeholder="https://github.com/user/repo.git"
+                    placeholder={t('clone.repoUrlPlaceholder')}
                     {...inputStyles}
                     borderColor={repoUrl && !isUrlValid ? 'rgba(248, 81, 73, 0.4)' : inputStyles.border}
                   />
                   {repoUrl && !isUrlValid && (
                     <Text fontSize="11px" color={tokens.colors.accent.red} mt={1} opacity={0.8}>
-                      Enter a valid Git repository URL
+                      {t('clone.invalidUrl')}
                     </Text>
                   )}
                 </Box>
@@ -272,14 +273,14 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
                 <Box>
                   <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.muted} mb="6px"
                     textTransform="uppercase" letterSpacing="0.05em">
-                    Destination
+                    {t('clone.destination')}
                   </Text>
                   <Flex gap={2}>
                     <Input
                       flex={1}
                       value={localPath}
                       onChange={(e) => setLocalPath(e.target.value)}
-                      placeholder="~/Projects/repo"
+                      placeholder={t('clone.destinationPlaceholder')}
                       {...inputStyles}
                     />
                     <Button
@@ -307,15 +308,15 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
                 <Box>
                   <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.muted} mb="6px"
                     textTransform="uppercase" letterSpacing="0.05em">
-                    Branch
+                    {t('clone.branch')}
                     <Text as="span" fontWeight="400" textTransform="none" letterSpacing="0" ml={1} opacity={0.6}>
-                      (optional)
+                      {t('clone.optional')}
                     </Text>
                   </Text>
                   <Input
                     value={branch}
                     onChange={(e) => setBranch(e.target.value)}
-                    placeholder="main"
+                    placeholder={t('clone.branchPlaceholder')}
                     {...inputStyles}
                   />
                 </Box>
@@ -335,7 +336,7 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
                       <LuLoader size={14} color={purpleAccent} />
                     </Box>
                     <Text fontSize="12px" color={purpleAccent}>
-                      {progress || 'Cloning repository...'}
+                      {progress || t('clone.cloning')}
                     </Text>
                   </Flex>
                 )}
@@ -352,7 +353,7 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
                   >
                     <LuCheck size={14} color={tokens.colors.accent.green} />
                     <Text fontSize="12px" color={tokens.colors.accent.green}>
-                      Repository cloned successfully. Opening project...
+                      {t('clone.success')}
                     </Text>
                   </Flex>
                 )}
@@ -371,7 +372,7 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
                       <LuCircleAlert size={14} color={tokens.colors.accent.red} />
                     </Box>
                     <Text fontSize="12px" color={tokens.colors.accent.red} lineHeight="1.5">
-                      {errorMsg || 'Clone failed. Check the URL and try again.'}
+                      {errorMsg || t('clone.failed')}
                     </Text>
                   </Flex>
                 )}
@@ -396,7 +397,7 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
                 }}
                 transition="all 0.15s"
               >
-                Cancel
+                {t('misc.cancel')}
               </Button>
               <Button
                 onClick={handleClone}
@@ -416,7 +417,7 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
                 _active={canClone ? { transform: 'scale(0.98)' } : {}}
                 transition="all 0.2s ease"
               >
-                {status === 'cloning' ? 'Cloning...' : 'Clone'}
+                {status === 'cloning' ? t('clone.buttonCloning') : t('clone.buttonClone')}
               </Button>
             </Flex>
           </Dialog.Content>

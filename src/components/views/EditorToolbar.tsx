@@ -1,12 +1,12 @@
 import { memo, useState, useEffect } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
-import { VscComment, VscFiles, VscTerminal, VscRemoteExplorer, VscSourceControl, VscSearch } from 'react-icons/vsc'
+import { VscComment, VscFiles, VscTerminal, VscSourceControl, VscSearch } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { GitService } from '@/services/gitService'
 import { useCurrentProject } from '@/hooks/useProjectState'
 
-export type SidebarPanel = 'explorer' | 'search' | 'sourceControl' | 'containers' | null
+export type SidebarPanel = 'explorer' | 'search' | 'sourceControl' | null
 
 interface ToolbarButtonProps {
   icon: React.ReactNode
@@ -94,7 +94,7 @@ function EditorToolbar({
   onToggleBottomPanel,
   onBackToChat,
 }: EditorToolbarProps) {
-  const toggle = (panel: 'explorer' | 'search' | 'sourceControl' | 'containers') => {
+  const toggle = (panel: 'explorer' | 'search' | 'sourceControl') => {
     onSelectPanel(activePanel === panel ? null : panel)
   }
 
@@ -148,12 +148,6 @@ function EditorToolbar({
           isActive={activePanel === 'sourceControl'}
           badge={gitCount}
           onClick={() => toggle('sourceControl')}
-        />
-        <ToolbarButton
-          icon={<VscRemoteExplorer size={16} />}
-          label={t("view.containers")}
-          isActive={activePanel === 'containers'}
-          onClick={() => toggle('containers')}
         />
       </Flex>
 

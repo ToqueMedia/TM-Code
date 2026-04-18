@@ -1,6 +1,6 @@
 import { memo, useRef, useEffect, useCallback } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, resolveDiffApprovalByResultId, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import MessageBubble from '../chat/MessageBubble'
@@ -25,6 +25,7 @@ function GeneratingView() {
   const status = useAgentStore(s => s.status)
   const isStreaming = useChatStore(s => s.isStreaming)
   const totalTokensUsed = useChatStore(s => s.totalTokensUsed)
+  const agentStartTime = useChatStore(s => s.agentStartTime)
   const currentTurnCount = useChatStore(s => s.currentTurnCount)
 
   const chatScrollRef = useRef<HTMLDivElement>(null)
@@ -76,6 +77,8 @@ function GeneratingView() {
     chatStore.removePendingDiff(diffId)
     // Sync inline diff status in chat messages
     chatStore.syncDiffStatusByResultId(diffId, 'approved')
+    // Unblock the agent if it's waiting for this diff approval
+    resolveDiffApprovalByResultId(diffId, true)
     checkAllDiffsResolved()
   }, [checkAllDiffsResolved])
 
@@ -85,6 +88,8 @@ function GeneratingView() {
     chatStore.removePendingDiff(diffId)
     // Sync inline diff status in chat messages
     chatStore.syncDiffStatusByResultId(diffId, 'denied')
+    // Unblock the agent if it's waiting for this diff approval
+    resolveDiffApprovalByResultId(diffId, false)
     checkAllDiffsResolved()
   }, [checkAllDiffsResolved])
 
@@ -105,6 +110,8 @@ function GeneratingView() {
     for (const diff of pending) {
       chatStore.syncDiffStatusByResultId(diff.id, 'denied')
     }
+    // Unblock the agent — reject all pending approvals
+    resolveAllPendingDiffApprovals(false)
     chatStore.clearPendingDiffs()
     acceptedPathsRef.current = []
     checkAllDiffsResolved()
@@ -123,7 +130,7 @@ function GeneratingView() {
           ))}
         </Box>
         <GeneratingStatusBar status={status} isStreaming={isStreaming}
-          totalTokens={totalTokens} currentTurnCount={currentTurnCount} />
+          totalTokens={totalTokens} currentTurnCount={currentTurnCount} agentStartTime={agentStartTime} />
       </Flex>
 
       {/* Right: Diff panel */}

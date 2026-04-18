@@ -1,7 +1,7 @@
 {
   "name": "toquemedia-studio",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.2.1",
   "type": "module",
   "packageManager": "yarn@1.22.22",
   "engines": {

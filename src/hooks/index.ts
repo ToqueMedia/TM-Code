@@ -63,3 +63,12 @@ export type {
 
 // Dialog
 export { useDialog } from './useDialog'
+
+// Window controls
+export { useWindowControls } from './useWindowControls'
+
+// Prompt logic (shared between chat and cmd mode)
+export { usePromptLogic } from './usePromptLogic'
+
+// CMD-mode scroll follow
+export { useCmdScrollFollow } from './useCmdScrollFollow'

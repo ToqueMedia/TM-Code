@@ -34,9 +34,6 @@ jobs:
           - platform: macos-latest
             args: --target aarch64-apple-darwin
             label: macOS-ARM
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-            label: macOS-Intel
           - platform: ubuntu-22.04
             args: ''
             label: Linux
@@ -57,7 +54,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -150,24 +147,13 @@ jobs:
             gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
           done
 
-          # macOS updater artifact (.app.tar.gz + .sig) — rename per-arch to avoid collision.
-          # Both ARM and Intel builds produce "TM.Code.app.tar.gz" — without renaming the
-          # second upload overwrites the first.
+          # macOS updater artifact (.app.tar.gz + .sig) — only ARM build now
           TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
           TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
           if [ -n "$TAR_GZ" ]; then
-            if echo "$ARGS" | grep -q "aarch64"; then
-              ARCH="aarch64"
-            elif echo "$ARGS" | grep -q "x86_64"; then
-              ARCH="x64"
-            else
-              ARCH="unknown"
-            fi
-            cp "$TAR_GZ" "TM.Code_${ARCH}.app.tar.gz"
-            gh release upload "$VERSION" "TM.Code_${ARCH}.app.tar.gz" --repo ToqueMedia/TM-Code --clobber
+            gh release upload "$VERSION" "$TAR_GZ" --repo ToqueMedia/TM-Code --clobber
             if [ -n "$TAR_SIG" ]; then
-              cp "$TAR_SIG" "TM.Code_${ARCH}.app.tar.gz.sig"
-              gh release upload "$VERSION" "TM.Code_${ARCH}.app.tar.gz.sig" --repo ToqueMedia/TM-Code --clobber
+              gh release upload "$VERSION" "$TAR_SIG" --repo ToqueMedia/TM-Code --clobber
             fi
           fi
 
@@ -198,8 +184,11 @@ jobs:
             if [ -f "sigs/$1" ]; then cat "sigs/$1"; else echo ""; fi
           }
 
-          MAC_ARM_SIG=$(read_sig "TM.Code_aarch64.app.tar.gz.sig")
-          MAC_X64_SIG=$(read_sig "TM.Code_x64.app.tar.gz.sig")
+          # Find the macOS .app.tar.gz.sig filename (no longer renamed per-arch)
+          MAC_SIG_FILE=$(ls sigs/*.app.tar.gz.sig 2>/dev/null | head -1)
+          MAC_SIG=$(if [ -n "$MAC_SIG_FILE" ]; then cat "$MAC_SIG_FILE"; else echo ""; fi)
+          # Resolve the actual .app.tar.gz asset name uploaded to the release
+          MAC_TAR_NAME=$(gh release view "$VERSION" --repo "$REPO" --json assets --jq '.assets[].name | select(endswith(".app.tar.gz"))' | head -1)
           LINUX_APPIMAGE_SIG=$(read_sig "TM.Code_${BARE_VERSION}_amd64.AppImage.sig")
           WIN_NSIS_SIG=$(read_sig "TM.Code_${BARE_VERSION}_x64-setup.exe.sig")
 
@@ -208,19 +197,18 @@ jobs:
             --arg ver "$BARE_VERSION" \
             --arg notes "TM Code $VERSION" \
             --arg date "$PUB_DATE" \
-            --arg mac_arm_sig "$MAC_ARM_SIG" \
-            --arg mac_x64_sig "$MAC_X64_SIG" \
+            --arg mac_sig "$MAC_SIG" \
             --arg linux_sig "$LINUX_APPIMAGE_SIG" \
             --arg win_sig "$WIN_NSIS_SIG" \
             --arg base "$BASE_URL" \
             --arg bv "$BARE_VERSION" \
+            --arg mac_tar "$MAC_TAR_NAME" \
             '{
               version: $ver,
               notes: $notes,
               pub_date: $date,
               platforms: {
-                "darwin-aarch64": { signature: $mac_arm_sig, url: ($base + "/TM.Code_aarch64.app.tar.gz") },
-                "darwin-x86_64":  { signature: $mac_x64_sig, url: ($base + "/TM.Code_x64.app.tar.gz") },
+                "darwin-aarch64": { signature: $mac_sig, url: ($base + "/" + $mac_tar) },
                 "linux-x86_64":   { signature: $linux_sig,   url: ($base + "/TM.Code_" + $bv + "_amd64.AppImage") },
                 "windows-x86_64": { signature: $win_sig,     url: ($base + "/TM.Code_" + $bv + "_x64-setup.exe") }
               }

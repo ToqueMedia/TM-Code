@@ -1,15 +1,15 @@
 import { memo } from 'react'
 import { Flex, Text, Box } from '@chakra-ui/react'
-import { FiSquare, FiBox, FiShield, FiCheckSquare, FiLoader } from 'react-icons/fi'
+import { FiSquare, FiCheckSquare, FiLoader } from 'react-icons/fi'
 import { useAgentStore, type AgentTask } from '../../stores/agentStore'
 import { useChatStore, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore } from '../../stores/mcpStore'
-import { useContainerStore } from '../../stores/containerStore'
 import { useBillingStore, isInOverageState } from '../../stores/billingStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
+import { getCommandQueueSnapshot } from '../../services/agent/messageQueue'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -19,12 +19,12 @@ import { t } from '@/i18n'
 function AgentStatusBar() {
   const status = useAgentStore(s => s.status)
   const error = useAgentStore(s => s.error)
+  const modelName = useAgentStore(s => s.modelName)
   const isStreaming = useChatStore(s => s.isStreaming)
   const skillCount = useSkillStore(s => s.skills.length)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
-  const runningServers = useMcpStore(s => s.getRunningServers())
+  const mcpServers = useMcpStore(s => s.servers)
   const totalMcpTools = useMcpStore(s => s.getTotalToolCount())
-  const isolationMode = useContainerStore(s => s.isolationMode)
   const noCredits = useBillingStore(s => s.noCredits)
   const isActive = useBillingStore(s => s.isActive)
   const consumedPct = useBillingStore(s => s.consumedPct)
@@ -32,13 +32,13 @@ function AgentStatusBar() {
   // Overage UI fires for either explicit overage status OR cycle exhausted (spillover)
   const usingTmsOverage = isInOverageState(billingStatus, consumedPct)
   const isBudgetBlocked = billingStatus === 'rejected'
-  const queuePosition = useAgentStore(s => s.queuePosition)
-  const bgRunning = useBackgroundAgentStore(s => s.getRunningCount())
-  const bgTotal = useBackgroundAgentStore(s => s.getAll().length)
+  const bgAgents = useBackgroundAgentStore(s => s.agents)
   const agentTasks = useAgentStore(s => s.tasks)
+  const queueLength = getCommandQueueSnapshot().length
 
   const handleStop = () => {
     usePermissionStore.getState().clearPending()
+    usePermissionStore.getState().resetAutoApprove()
     resolveAllPendingDiffApprovals(false)
     AgentService.getInstance().cancelLoop()
     useAgentStore.getState().setStatus('idle')
@@ -54,10 +54,8 @@ function AgentStatusBar() {
     error: { color: tokens.colors.accent.red, label: error || 'Error', pulse: false },
   }
 
-  // Status priority: queue > inactive > budget blocked > overage > no credits > agent status
-  const config = queuePosition
-    ? { color: tokens.colors.accent.orange, label: `${t('chat.inQueue')}: ${queuePosition.position} / ${queuePosition.total}`, pulse: true }
-    : (!isActive && status === 'idle')
+  // Status priority: inactive > budget blocked > overage > no credits > agent status
+  const config = (!isActive && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.accountInactive'), pulse: false }
     : (isBudgetBlocked && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.noCredits'), pulse: false }
@@ -73,9 +71,17 @@ function AgentStatusBar() {
   const toggleThinking = useSettingsStore(s => s.setThinkingEnabled)
   const billingPlan = useBillingStore(s => s.plan)
   const thinkingSupported = billingPlan !== 'explorer'
+  const autoApproveDiffs = usePermissionStore(s => s.autoApproveDiffs)
 
-  // Build info segments
+  // Build info segments — derive counts from raw store data (avoids infinite re-render loop)
+  const runningServers = mcpServers.filter(s => s.status === 'running')
+  const bgTotal = bgAgents.size
+  const bgRunning = Array.from(bgAgents.values()).filter(a => a.status === 'running').length
+
   const infoSegments: string[] = []
+  if (modelName) infoSegments.push(modelName)
+  if (autoApproveDiffs) infoSegments.push('⚡ Auto-approve ON')
+  if (queueLength > 0) infoSegments.push(`${queueLength} queued`)
   if (skillCount > 0) infoSegments.push(`${skillCount} ${t("chat.skills")}`)
   if (mcpIsInitializing) {
     infoSegments.push(t('chat.mcpStarting'))
@@ -89,12 +95,6 @@ function AgentStatusBar() {
     if (bgDone > 0) parts.push(`${bgDone} done`)
     infoSegments.push(`bg: ${parts.join(', ')}`)
   }
-
-  const isolationBadge = isolationMode === 'docker'
-    ? { icon: FiBox, label: t('chat.dockerIsolation'), color: tokens.colors.accent.greenBright, bg: tokens.colors.accent.greenSubtle }
-    : isolationMode === 'app-level'
-    ? { icon: FiShield, label: t('chat.appIsolation'), color: '#58a6ff', bg: 'rgba(56, 139, 253, 0.12)' }
-    : null
 
   return (
     <Box borderTop="1px solid rgba(255, 255, 255, 0.04)" bg="rgba(255, 255, 255, 0.02)">
@@ -160,26 +160,6 @@ function AgentStatusBar() {
           {config.label}
         </Text>
 
-        {isolationBadge && (
-          <Flex
-            align="center"
-            gap="4px"
-            px="6px"
-            py="1px"
-            ml={1}
-            borderRadius="3px"
-            bg={isolationBadge.bg}
-            title={isolationMode === 'docker'
-              ? t('chat.dockerTooltip')
-              : t('chat.appTooltip')
-            }
-          >
-            <isolationBadge.icon size={9} color={isolationBadge.color} />
-            <Text fontSize="10px" fontWeight="600" color={isolationBadge.color} letterSpacing="0.02em">
-              {isolationBadge.label}
-            </Text>
-          </Flex>
-        )}
       </Flex>
 
       <Flex align="center" gap={3}>

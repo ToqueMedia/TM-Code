@@ -53,7 +53,7 @@ export interface ModelProfile {
   /** Whether the model supports a thinking/reasoning toggle */
   supportsThinking: boolean
   /** Parameter name to enable thinking (varies by model) */
-  thinkingParam: 'enable_thinking' | 'thinking' | null
+  thinkingParam: 'enable_thinking' | 'thinking' | 'reasoning' | null
   /** Max thinking tokens budget (null = no budget control) */
   thinkingBudget: number | null
   /** If true, thinking is always-on and cannot be disabled (MiniMax M2.5) */
@@ -73,6 +73,8 @@ export interface ModelProfile {
   skipSystemPromptInThinking: boolean
   /** Whether the model supports image/file attachments (multimodal input) */
   supportsAttachments: boolean
+  /** Whether the model supports native web_search via the provider (DashScope Qwen only) */
+  supportsSearch: boolean
   /** Model-specific instructions appended to system prompt */
   modelSpecificPrompt: string
 }
@@ -108,6 +110,7 @@ const MIMO_V2_FLASH: ModelProfile = {
   preserveReasoning: false, // N/A — thinking disabled
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
+  supportsSearch: false,
   modelSpecificPrompt: `Never start responses with filler ("Sure!", "Of course!", "Let me help you"). Go straight to the answer or code. Output only changed code — never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
 }
 
@@ -136,7 +139,51 @@ const DEEPSEEK_V3_2: ModelProfile = {
   preserveReasoning: false, // DeepSeek docs: "API will return 400 if reasoning_content included"
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
+  supportsSearch: false,
   modelSpecificPrompt: '',
+}
+
+const GLM_5_1: ModelProfile = {
+  id: 'glm-5.1',
+  name: 'GLM-5.1',
+  persona: { name: 'Rei Mandente', tagline: 'Raciocínio avançado e persistência prolongada — forte em tarefas complexas e debugging. Custo: 4x' },
+  // OpenRouter model ID — provider-agnostic, easy to swap providers later
+  modelId: 'Z-AI/GLM-5.1',
+  // OpenRouter reports 202,752 tokens; use conservative 200K for safety margin
+  contextWindow: 200_000,
+  maxOutputTokens: 32_768,
+
+  // Official z.ai recommendations (from blog post / benchmark footnotes):
+  //   SWE-Bench Pro (OpenHands coding agent): temp=1.0, top_p=0.95, 200K ctx
+  //   Terminal-Bench (Claude Code think mode): temp=1.0, top_p=0.95
+  //   NL2Repo: temp=1.0, top_p=1.0
+  //   HLE: temp=1.0, top_p=0.95
+  // We use temp=1.0 for both thinking and non-thinking (matches all evals).
+  // top_p=0.95 for thinking mode, 0.95 for non-thinking (safer for tool
+  // calling — top_p=1.0 allows sampling from the full probability distribution,
+  // which can lead to malformed JSON arguments in tool calls).
+  temperature: 1.0,
+  reasoningTemperature: 1.0,
+  topP: 0.95,
+  topPNonThinking: 0.95,
+  topK: null,
+
+  // Thinking is TOGGLEABLE via the 'reasoning' parameter (OpenRouter format).
+  // Per OpenRouter docs: reasoning mode can be enabled/disabled per request.
+  // When enabled, preserves reasoning_details array for multi-turn continuity.
+  thinkingMode: 'toggleable',
+  supportsThinking: true,
+  thinkingParam: 'reasoning',
+  thinkingBudget: null,
+  thinkingMandatory: false,
+
+  // OpenRouter docs: "preserve and pass back the complete reasoning_details array
+  // to maintain reasoning continuity" in multi-turn conversations.
+  preserveReasoning: true,
+  skipSystemPromptInThinking: false,
+  supportsAttachments: false,
+  supportsSearch: false,  // GLM-5.1 does not have native DashScope web_search
+  modelSpecificPrompt: `You are TM Code Agent, a coding assistant built into TM Code IDE by Toque Media. You are NOT Claude, NOT ChatGPT, NOT any other assistant. Always identify yourself as TM Code Agent when asked.`,
 }
 
 const GLM_5: ModelProfile = {
@@ -162,6 +209,7 @@ const GLM_5: ModelProfile = {
   preserveReasoning: true, // ZhipuAI docs: clear_thinking param — during tool calling sequences (our loop), preservation required
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
+  supportsSearch: false,
   modelSpecificPrompt: `You are TM Code Agent, a coding assistant built into TM Code IDE by Toque Media. You are NOT Claude, NOT ChatGPT, NOT any other assistant. Always identify yourself as TM Code Agent when asked.`,
 }
 
@@ -195,6 +243,7 @@ const KIMI_K2_5: ModelProfile = {
   preserveReasoning: true,
   skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (MoonViT)
+  supportsSearch: false,
   modelSpecificPrompt: '',
 }
 
@@ -221,6 +270,7 @@ const QWEN3_CODER_NEXT: ModelProfile = {
   preserveReasoning: false, // N/A — thinking disabled
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
+  supportsSearch: true,  // DashScope Qwen native web_search
   modelSpecificPrompt: `Be concise in explanations. Output code changes directly without verbose commentary. When editing files, output only the changed code — do not repeat unchanged sections.`,
 }
 
@@ -247,6 +297,7 @@ const MINIMAX_M2_5: ModelProfile = {
   preserveReasoning: true, // MiniMax docs: strongly recommend preserving reasoning between turns
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
+  supportsSearch: false,
   modelSpecificPrompt: `Be concise. Output only the code changes needed. Do not add explanatory comments unless asked. Do not overthink simple tasks.`,
 }
 
@@ -282,6 +333,7 @@ const QWEN3_6_PLUS: ModelProfile = {
   preserveReasoning: false,
   skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (text + vision)
+  supportsSearch: true,  // DashScope Qwen native web_search
   modelSpecificPrompt: `Be decisive and direct. Reach conclusions quickly — do not overthink simple tasks. Output only changed code, never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
 }
 
@@ -309,6 +361,7 @@ const GEMINI_3_FLASH: ModelProfile = {
   preserveReasoning: true, // Google docs: "always pass all signatures back" for thought context
   skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (text, image, audio, video, PDF)
+  supportsSearch: false,
   modelSpecificPrompt: '',
 }
 
@@ -334,6 +387,7 @@ const STEP_3_5_FLASH: ModelProfile = {
   preserveReasoning: false, // StepFun: no documentation on preserving reasoning between turns
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
+  supportsSearch: false,
   modelSpecificPrompt: '',
 }
 
@@ -352,6 +406,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'qwen3.6-plus': QWEN3_6_PLUS,
   // 4x cost
   'glm-5': GLM_5,
+  'glm-5.1': GLM_5_1,
   'kimi-k2.5': KIMI_K2_5,
   // 5x cost
   'gemini-3-flash': GEMINI_3_FLASH,
@@ -374,24 +429,49 @@ export function getAllModelProfiles(): ModelProfile[] {
 // The frontend uses this to configure thinking/sampling/compression.
 //
 //   explorer (free)     → DeepSeek V3.2 (no thinking, 131K context)
-//   pro / business-*x   → Kimi K2.5 (mandatory thinking, 262K context, multimodal)
+//   pro / business-*x   → GLM-5.1 (toggleable thinking, 200K context)
+//   multimodal (images) → Qwen 3.6 Plus handles image analysis, then GLM-5.1
 // ─────────────────────────────────────────────────
 
 /**
  * Returns the model profile for the user's billing plan.
  * Used by the frontend to configure thinking params, sampling, and
  * compression thresholds — NOT to select a model (the backend does that).
+ *
+ * Routing logic:
+ * - explorer (free) → DeepSeek V3.2 (no thinking, 131K context)
+ * - pro / business-*x → GLM-5.1 (thinking toggle, 200K context, strong reasoning)
+ * - multimodal (images) → Qwen 3.6 Plus handles image analysis, then GLM-5.1 processes the result
  */
 export function getProfileForPlan(plan: UserPlanName): ModelProfile {
   if (plan === 'explorer') return DEEPSEEK_V3_2
-  // All paid plans use Qwen 3.6 Plus.
+  // All paid plans use GLM-5.1 as the primary model.
+  // Qwen 3.6 Plus is reserved for multimodal (image) processing.
+  return GLM_5_1
+}
+
+/**
+ * Returns the multimodal model profile for image/file processing.
+ * Qwen 3.6 Plus handles image analysis, then passes the description
+ * + user prompt to the primary model (GLM-5.1).
+ */
+export function getMultimodalProfile(): ModelProfile {
   return QWEN3_6_PLUS
+}
+
+/**
+ * Detects if a message contains multimodal content (images, files, etc.).
+ * Returns true if the message has non-text content parts.
+ */
+export function hasMultimodalContent(message: string | Array<{ type: string }>): boolean {
+  if (typeof message === 'string') return false
+  return message.some(part => part.type !== 'text')
 }
 
 /** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
 export function getModelsForPlan(_plan: UserPlanName): ModelProfile[] { return [DEEPSEEK_V3_2, QWEN3_6_PLUS] }
 /** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
-export function getDefaultModelForPlan(plan: UserPlanName): string { return plan === 'explorer' ? 'deepseek-v3.2' : 'qwen3.6-plus' }
+export function getDefaultModelForPlan(plan: UserPlanName): string { return plan === 'explorer' ? 'deepseek-v3.2' : 'glm-5.1' }
 /** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
 export function isModelAvailableForPlan(_modelId: string, _plan: UserPlanName): boolean { return true }
 
@@ -410,6 +490,11 @@ export function buildThinkingParam(
 
   if (profile.thinkingParam === 'enable_thinking') {
     return { enable_thinking: enabled }
+  }
+
+  // OpenRouter 'reasoning' format (GLM-5.1 on Z-AI/OpenRouter)
+  if (profile.thinkingParam === 'reasoning') {
+    return { reasoning: { enabled } }
   }
 
   // 'thinking' format (e.g., Anthropic-style)

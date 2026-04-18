@@ -14,7 +14,6 @@ import EditorSidebar from './EditorSidebar'
 import EditorToolbar, { type SidebarPanel } from './EditorToolbar'
 import EmptyEditorState from './EmptyEditorState'
 import ExplorerPanel from '../ui/ExplorerPanel'
-import ContainersPanel from './ContainersPanel'
 import SourceControlPanel from './SourceControlPanel'
 import SearchPanel from './SearchPanel'
 import SplitEditorLayout from '../editor/SplitEditorLayout'
@@ -56,7 +55,6 @@ function EditorView() {
   const [activeSidebarPanel, setActiveSidebarPanel] = useState<SidebarPanel>(() => {
     try {
       const v = localStorage.getItem(STORAGE_KEY_SIDEBAR_PANEL)
-      if (v === 'containers') return 'containers'
       if (v === 'sourceControl') return 'sourceControl'
       if (v === 'search') return 'search'
       if (v === 'null' || v === '') return null
@@ -191,9 +189,6 @@ function EditorView() {
             {activeSidebarPanel === 'sourceControl' && (
               <SourceControlPanel />
             )}
-            {activeSidebarPanel === 'containers' && (
-              <ContainersPanel />
-            )}
           </EditorSidebar>
         )}
 
@@ -210,7 +205,6 @@ function EditorView() {
               <EmptyEditorState
                 onBackToChat={() => useLayoutStore.getState().goBack()}
                 onToggleExplorer={() => handleSelectPanel(activeSidebarPanel === 'explorer' ? null : 'explorer')}
-                onToggleTerminal={toggleBottomPanel}
               />
             )}
           </Flex>

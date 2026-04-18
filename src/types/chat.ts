@@ -90,9 +90,13 @@ export interface ChatMessageCard {
   status: 'pending' | 'approved' | 'changes_requested' | 'rejected'
 }
 
+export type SystemMessageLevel = 'info' | 'success' | 'error' | 'warn'
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
+  /** For role === 'system': semantic level used for colour-coding in the terminal UI */
+  level?: SystemMessageLevel
   content: string
   timestamp: number
   codeBlocks?: CodeBlock[]
@@ -133,6 +137,7 @@ export interface CodeBlock {
 
 export interface ChatSession {
   id: string
+  name?: string
   projectPath: string
   messages: ChatMessage[]
   status: 'idle' | 'running' | 'paused' | 'completed' | 'error'
@@ -150,6 +155,7 @@ export interface SessionContext {
 
 export interface SessionSummary {
   id: string
+  name?: string
   projectPath: string
   messageCount: number
   lastMessage: string

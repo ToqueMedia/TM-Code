@@ -53,7 +53,7 @@ function PromptActions({
           </Text>
         </Flex>
 
-        {/* Attach files — Kimi K2.5 (paid tier) supports multimodal */}
+        {/* Attach files — paid tiers support multimodal via Qwen 3.6 Plus */}
         {billingPlan !== 'explorer' && (
           <IconButton
             aria-label={t("prompt.attach")}

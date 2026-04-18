@@ -24,18 +24,43 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNativeMenu } from './hooks/useNativeMenu';
 import { useBillingRefresh } from './hooks/useBillingRefresh';
 import { useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { Box, Flex } from '@chakra-ui/react';
 import { LoadingSpinner } from './components/ui/LoadingSpinner';
 import { ToastContainer } from './components/ui/Toast';
 import { tokens } from '@/theme/tokens';
 
+// Debug helper — timestamps relative to app start
+const _t0 = performance.now()
+const _ts = () => `+${(performance.now() - _t0).toFixed(0)}ms`
+
 function App() {
-	const { currentProject, openProject, recentProjects } = useProjectStore();
+	const { currentProject, openProject, hasHydrated } = useProjectStore();
 	const { isAuthenticated, isLoading: authLoading } = useAuthStore();
 	const hasCompletedOnboarding = useSettingsStore(s => s.hasCompletedOnboarding);
 	const [initializing, setInitializing] = useState(true);
+	// True while openProject is in-flight. Keeps the spinner visible even after
+	// setInitializing(false) fires — prevents WelcomeScreen from showing while a
+	// project is actively loading (both on startup auto-open and manual opens).
+	const [isOpeningProject, setIsOpeningProject] = useState(false);
 	const [loginInitialMode, setLoginInitialMode] = useState<'signin' | 'signup'>('signin');
 	const prevProjectRef = useRef<string | null>(null);
+	// Guards against concurrent initializeApp invocations (dependency re-runs while async in progress,
+	// or React StrictMode double-fire). Without this, openProject can be called twice in parallel.
+	const hasStartedInitRef = useRef(false);
+	const renderCountRef = useRef(0);
+
+	// ── DEBUG: log every render with key state ──────────────────────────────
+	renderCountRef.current++;
+	if (import.meta.env.DEV) {
+		const view = (initializing || isOpeningProject) ? 'SPINNER' : !isAuthenticated ? 'LOGIN' : currentProject ? 'MAINLAYOUT' : 'WELCOMESCREEN';
+		console.log(
+			`%c[App #${renderCountRef.current}] ${_ts()} view=${view}`,
+			'color:#fe1063;font-weight:bold',
+			{ initializing, isOpeningProject, currentProject: currentProject?.name ?? null, hasHydrated, authLoading, isAuthenticated },
+		);
+	}
+	// ────────────────────────────────────────────────────────────────────────
 
 	// Set up keyboard shortcuts + native macOS menu handler
 	useKeyboardShortcuts();
@@ -58,35 +83,65 @@ function App() {
 	}, []);
 
 	useEffect(() => {
+		if (import.meta.env.DEV) console.log(`%c[initEffect] ${_ts()} fired`, 'color:#a371f7', { initializing, hasHydrated, authLoading, isAuthenticated, hasStarted: hasStartedInitRef.current });
+
 		// Only auto-open during initial app load, not on subsequent state changes
 		// (e.g. after project deletion sets currentProject to null)
 		if (!initializing) return;
 
-		// Wait for auth to resolve before trying to auto-open project
-		if (authLoading) return;
+		// Wait for store hydration
+		if (!hasHydrated) { if (import.meta.env.DEV) console.log(`[initEffect] ${_ts()} waiting for hydration`); return; }
+
+		// Don't block on Firebase when persisted state already shows authenticated.
+		// Firebase resolves onAuthStateChanged asynchronously — if emulators are
+		// not running or there's no network, this can take 2+ minutes.
+		// If isAuthenticated is already true from the persisted store, proceed
+		// immediately. Firebase will update auth state in the background.
+		if (authLoading && !isAuthenticated) { if (import.meta.env.DEV) console.log(`[initEffect] ${_ts()} waiting for auth`); return; }
 
 		// If not authenticated, stop initializing
 		if (!isAuthenticated) {
+			if (import.meta.env.DEV) console.log(`[initEffect] ${_ts()} not authenticated → setInitializing(false)`);
 			setInitializing(false);
 			return;
 		}
 
+		// Prevent concurrent invocations: openProject updating the Zustand store
+		// (currentProject, recentProjects) triggers this effect to re-run while the
+		// first async call is still in progress. The ref ensures we only start once.
+		if (hasStartedInitRef.current) { if (import.meta.env.DEV) console.log(`[initEffect] ${_ts()} already started, skipping`); return; }
+		hasStartedInitRef.current = true;
+
 		const initializeApp = async () => {
-			if (!currentProject && recentProjects.length > 0) {
-				const lastProject = recentProjects[0];
+			// Read directly from the store — not from the effect closure — to avoid
+			// stale values if the store updated between renders and the effect firing.
+			const { currentProject: proj, cmdModeProjectPath: cmd, recentProjects: recent } = useProjectStore.getState();
+
+			if (import.meta.env.DEV) console.log(`[initializeApp] ${_ts()} start`, { proj: proj?.name ?? null, cmd, recentCount: recent.length });
+
+			if (!proj && !cmd && recent.length > 0) {
+				const lastProject = recent[0];
 				if (lastProject.path) {
+					setIsOpeningProject(true);
 					try {
+						if (import.meta.env.DEV) console.log(`[initializeApp] ${_ts()} calling openProject("${lastProject.path}")`);
 						await openProject(lastProject.path);
+						if (import.meta.env.DEV) console.log(`[initializeApp] ${_ts()} openProject resolved, store.currentProject=`, useProjectStore.getState().currentProject?.name ?? null);
 					} catch (error) {
+						if (import.meta.env.DEV) console.log(`[initializeApp] ${_ts()} openProject THREW:`, error);
 						logger.error('app', 'Failed to open last project:', error);
+					} finally {
+						setIsOpeningProject(false);
 					}
 				}
 			}
+			// Unblock after openProject so the spinner covers the transition.
+			if (import.meta.env.DEV) console.log(`[initializeApp] ${_ts()} calling setInitializing(false), store.currentProject=`, useProjectStore.getState().currentProject?.name ?? null);
 			setInitializing(false);
 		};
 
 		initializeApp();
-	}, [authLoading, isAuthenticated, initializing, currentProject, openProject, recentProjects]);
+	}, [authLoading, isAuthenticated, initializing, hasHydrated, openProject]);
 
 	// Restore session when project changes
 	useEffect(() => {
@@ -237,9 +292,19 @@ function App() {
 		return () => window.removeEventListener('beforeunload', handleBeforeUnload);
 	}, []);
 
-	const handleOpenProject = (path?: string, options?: { initGit?: boolean }) => {
-		if (path) {
-			openProject(path, options);
+	const handleOpenProject = async (path?: string, options?: { initGit?: boolean }) => {
+		if (!path) return;
+		// flushSync forces React to paint the spinner BEFORE openProject starts.
+		// Without it, React 18 automatic batching groups setIsOpeningProject(true)
+		// and setIsOpeningProject(false) into one render — the intermediate spinner
+		// state never paints and WelcomeScreen appears frozen.
+		flushSync(() => setIsOpeningProject(true));
+		try {
+			await openProject(path, options);
+		} catch (error) {
+			logger.error('app', 'Failed to open project:', error);
+		} finally {
+			setIsOpeningProject(false);
 		}
 	};
 
@@ -247,8 +312,12 @@ function App() {
 		setLoginInitialMode(action);
 	};
 
-	// Show loading state while auth or app is initializing
-	if (authLoading || initializing) {
+	// Show loading state while:
+	// - app is bootstrapping (initializing)
+	// - Firebase auth is still resolving and we have no persisted auth
+	// - a project is actively being opened (prevents WelcomeScreen flash while
+	//   openProject is in-flight — both on startup auto-open and manual opens)
+	if (initializing || (authLoading && !isAuthenticated) || isOpeningProject) {
 		return (
 			<Flex
 				justify="center"

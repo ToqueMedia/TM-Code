@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useState, useEffect } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 
@@ -6,6 +6,14 @@ function formatTokens(count: number): string {
   if (count === 0) return '0'
   if (count < 1000) return String(count)
   return `${(count / 1000).toFixed(1)}K`
+}
+
+function formatElapsed(ms: number): string {
+  const totalSec = Math.floor(ms / 1000)
+  if (totalSec < 60) return `${totalSec}s`
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  return `${min}m ${sec}s`
 }
 
 const statusConfig: Record<string, { color: string; label: string }> = {
@@ -21,10 +29,26 @@ interface GeneratingStatusBarProps {
   isStreaming: boolean
   totalTokens: number
   currentTurnCount: number
+  /** Milliseconds when the agent loop started (null when idle) */
+  agentStartTime: number | null
 }
 
-function GeneratingStatusBar({ status, isStreaming, totalTokens, currentTurnCount }: GeneratingStatusBarProps) {
+function GeneratingStatusBar({ status, isStreaming, totalTokens, currentTurnCount, agentStartTime }: GeneratingStatusBarProps) {
   const config = statusConfig[status] || statusConfig.idle
+  const [elapsed, setElapsed] = useState(0)
+
+  // Update elapsed time every second while streaming
+  useEffect(() => {
+    if (!agentStartTime) {
+      setElapsed(0)
+      return
+    }
+    setElapsed(Date.now() - agentStartTime)
+    const interval = setInterval(() => {
+      setElapsed(Date.now() - (agentStartTime ?? Date.now()))
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [agentStartTime])
 
   return (
     <Flex
@@ -55,7 +79,7 @@ function GeneratingStatusBar({ status, isStreaming, totalTokens, currentTurnCoun
         </Text>
       </Flex>
       <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-        {formatTokens(totalTokens)} tokens · Turn {currentTurnCount}
+        {formatTokens(totalTokens)} tokens · {currentTurnCount} steps{elapsed > 0 ? ` · ${formatElapsed(elapsed)}` : ''}
       </Text>
     </Flex>
   )

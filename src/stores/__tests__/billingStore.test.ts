@@ -30,7 +30,7 @@ describe('billingStore', () => {
           tokensConsumed: 4_080_000,
           tokenBudget: 9_716_494,
           cycleEnd: '2026-04-30',
-          tmsPurchased: 3,
+          extraUsageBalance: 3,
           status: 'allowed',
         },
       }
@@ -57,7 +57,7 @@ describe('billingStore', () => {
           tokensConsumed: 10_200_000,
           tokenBudget: 9_716_494,
           cycleEnd: '2026-04-30',
-          tmsPurchased: 0,
+          extraUsageBalance: 0,
           status: 'rejected',
         },
       })
@@ -73,8 +73,9 @@ describe('billingStore', () => {
         status: 'allowed_warning',
         tokens_used: 4521,
         tokens_consumed: 8_259_020, // backend sends this directly
+        token_budget: 9_716_494,
         cycle_end: '2026-04-30',
-        tms_remaining: 3,
+        extra_usage_balance: 3,
         plan: 'pro',
         used_overage: false,
       })
@@ -89,6 +90,7 @@ describe('billingStore', () => {
       expect(state.lastUsedOverage).toBe(false)
       // tokensConsumed comes directly from the backend, no derivation
       expect(state.tokensConsumed).toBe(8_259_020)
+      expect(state.tokenBudget).toBe(9_716_494)
     })
 
     it('handles overage event (consumed_pct > 1)', () => {
@@ -98,8 +100,9 @@ describe('billingStore', () => {
         status: 'allowed_overage',
         tokens_used: 100_000,
         tokens_consumed: 10_500_000,
+        token_budget: 9_716_494,
         cycle_end: '2026-04-30',
-        tms_remaining: 4,
+        extra_usage_balance: 4,
         plan: 'pro',
         used_overage: true,
       })
@@ -119,8 +122,9 @@ describe('billingStore', () => {
         status: 'rejected',
         tokens_used: 100,
         tokens_consumed: 10_000_000,
+        token_budget: 9_716_494,
         cycle_end: '2026-04-30',
-        tms_remaining: 0,
+        extra_usage_balance: 0,
         plan: 'pro',
         used_overage: false,
       })
@@ -136,8 +140,9 @@ describe('billingStore', () => {
         status: 'allowed',
         tokens_used: 100,
         tokens_consumed: 5_000_000,
+        token_budget: 9_716_494,
         cycle_end: '2026-04-30',
-        tms_remaining: 12, // jumped — purchase landed
+        extra_usage_balance: 12, // jumped — purchase landed
         plan: 'pro',
         used_overage: false,
       })
@@ -152,7 +157,7 @@ describe('billingStore', () => {
         'X-Budget-Pct': '0.72',
         'X-Budget-Status': 'allowed',
         'X-Cycle-End': '2026-04-30',
-        'X-Tms-Remaining': '5',
+        'X-Extra-Tokens': '5',
         'X-Plan': 'business-4x',
       })
       useBillingStore.getState().updateFromHeaders(headers)

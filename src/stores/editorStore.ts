@@ -4,6 +4,7 @@ import { FileService } from '../services/fileService';
 import UnsavedChangesService from '../services/unsavedChangesService';
 import { AutoSaveQueue } from '../utils/autoSaveQueue';
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
+import { readFile as tauriReadFile } from '@tauri-apps/plugin-fs';
 import { logger } from '../utils/logger';
 
 interface EditorFile {
@@ -18,6 +19,10 @@ interface EditorFile {
     originalContent: string;
     relPath: string;
   };
+  // Image preview — set when file is a supported image format
+  isImage?: boolean;
+  mimeType?: string;
+  base64?: string;
 }
 
 export interface EditorGroup {
@@ -63,6 +68,38 @@ interface EditorActions {
   openFileInGroup: (path: string, groupId: string) => Promise<void>;
   closeFileInGroup: (path: string, groupId: string) => void;
   moveFileToGroup: (path: string, fromGroupId: string, toGroupId: string) => void;
+}
+
+// Image extensions supported for preview
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg', 'avif']);
+
+/** Convert Uint8Array to base64 string — safe for large files */
+function uint8ToBase64(bytes: Uint8Array): string {
+  // Use built-in btoa with chunked approach to avoid stack overflow
+  let binary = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const end = Math.min(i + chunkSize, bytes.length);
+    for (let j = i; j < end; j++) {
+      binary += String.fromCharCode(bytes[j]);
+    }
+  }
+  return btoa(binary);
+}
+
+/** Get MIME type from image extension */
+function getImageMimeType(ext: string): string {
+  switch (ext) {
+    case 'jpg': case 'jpeg': return 'image/jpeg';
+    case 'svg': return 'image/svg+xml';
+    case 'png': return 'image/png';
+    case 'gif': return 'image/gif';
+    case 'webp': return 'image/webp';
+    case 'bmp': return 'image/bmp';
+    case 'ico': return 'image/x-icon';
+    case 'avif': return 'image/avif';
+    default: return 'image/png';
+  }
 }
 
 // Get language from file extension — comprehensive mapping
@@ -177,6 +214,47 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
 
           // New file — read from disk
           logger.debug('editor', 'Reading file content for:', path);
+
+          // Detect image files — read as binary/base64 instead of text
+          const ext = path.split('.').pop()?.toLowerCase() || '';
+          if (IMAGE_EXTENSIONS.has(ext)) {
+            try {
+              const bytes = await tauriReadFile(path);
+              const mimeType = getImageMimeType(ext);
+              const base64 = uint8ToBase64(bytes);
+
+              // For SVG files, also store the text content so we can show code view
+              let textContent = '';
+              if (ext === 'svg') {
+                try {
+                  textContent = await FileService.readFile(path);
+                } catch { /* ignore — base64 fallback will be used */ }
+              }
+
+              if (!get().openFiles.some(f => f.path === path)) {
+                set(state => ({
+                  openFiles: [
+                    ...state.openFiles,
+                    {
+                      path,
+                      content: textContent,
+                      language: ext === 'svg' ? 'xml' : 'plaintext',
+                      isDirty: false,
+                      isImage: true,
+                      mimeType,
+                      base64,
+                    }
+                  ]
+                }));
+              }
+              logger.debug('editor', `Image loaded: ${path} (${(bytes.length / 1024).toFixed(1)}KB, ${mimeType})`);
+            } catch (error) {
+              logger.error('editor', `Failed to load image ${path}:`, error);
+              throw error;
+            }
+            return;
+          }
+
           const content = await FileService.readFile(path);
           const language = getLanguageFromExtension(path);
           logger.debug('editor', `File loaded successfully: ${path} (${content.length} chars, ${language})`);

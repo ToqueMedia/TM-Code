@@ -153,7 +153,6 @@ function ProfileSection() {
   const plan = useBillingStore(s => s.plan)
   const billingLoaded = useBillingStore(s => s.isLoaded)
   const consumedPct = useBillingStore(s => s.consumedPct)
-  const tokensConsumed = useBillingStore(s => s.tokensConsumed)
   const tokenBudget = useBillingStore(s => s.tokenBudget)
   const cycleEnd = useBillingStore(s => s.cycleEnd)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
@@ -179,7 +178,7 @@ function ProfileSection() {
   async function openStudio() {
     try {
       const opener = await import('@tauri-apps/plugin-opener')
-      await opener.openUrl('https://studio.toquemedia.net')
+      await opener.openUrl('https://studio.toquemedia.net/upgrade')
     } catch {}
   }
 
@@ -289,9 +288,6 @@ function ProfileSection() {
                 />
               </Box>
               <Flex justify="space-between" align="center" mt={1}>
-                <Text fontSize="10px" color={tokens.colors.text.disabled}>
-                  {(tokensConsumed / 1_000_000).toFixed(2)}M / {(tokenBudget / 1_000_000).toFixed(2)}M tokens
-                </Text>
                 {cycleEnd && (
                   <Text fontSize="10px" color={tokens.colors.text.disabled}>
                     {t('settings.resetsOn' as any)} {cycleEnd}

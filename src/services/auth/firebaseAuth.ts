@@ -361,7 +361,7 @@ class FirebaseAuthService {
         console.info(
           `[billing] Plan: ${data.plan}, Active: ${data.isActive}, ` +
           `Consumed: ${(data.billing.consumedPct * 100).toFixed(1)}%, ` +
-          `TMS: ${data.billing.tmsPurchased}, Status: ${data.billing.status}`
+          `Extra: ${data.billing.extraUsageBalance}, Status: ${data.billing.status}`
         )
 
         useBillingStore.getState().updateFromMe(data)

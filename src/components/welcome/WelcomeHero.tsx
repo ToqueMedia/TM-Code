@@ -12,58 +12,70 @@ import {
   LuRocket,
   LuFolderOpen,
   LuGitBranch,
+  LuTerminal,
 } from 'react-icons/lu'
 import { tokens } from '@/theme/tokens'
 import { useSettingsStore, matchesBinding, type ShortcutId } from '@/stores/settingsStore'
 import WelcomeFeatureCard from './WelcomeFeatureCard'
+import { t } from '@/i18n'
 
 interface WelcomeHeroProps {
   onNewProject: () => void
   onOpenFolder: () => void
   onCloneRepository: () => void
+  onCmdMode: () => void
 }
 
-const featureCards: {
-  id: string
-  icon: IconType
-  title: string
-  description: string
-  shortcutId: ShortcutId | null
-  color: string
-}[] = [
-  {
-    id: 'new',
-    icon: LuRocket,
-    title: 'New Project',
-    description: 'Choose a folder and start building with the AI agent.',
-    shortcutId: 'newProject',
-    color: tokens.colors.accent.primary,
-  },
-  {
-    id: 'open',
-    icon: LuFolderOpen,
-    title: 'Open Project',
-    description: 'Open an existing project and start coding immediately.',
-    shortcutId: 'openFile',
-    color: tokens.colors.accent.greenBright,
-  },
-  {
-    id: 'clone',
-    icon: LuGitBranch,
-    title: 'Clone Repository',
-    description: 'Clone from GitHub, GitLab, or any Git remote.',
-    shortcutId: null,
-    color: tokens.colors.accent.purple,
-  },
-]
-
-const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onCloneRepository }) => {
+const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onCloneRepository, onCmdMode }) => {
   const shortcuts = useSettingsStore(s => s.shortcuts)
+
+  const featureCards: {
+    id: string
+    icon: IconType
+    title: string
+    description: string
+    shortcutId: ShortcutId | null
+    color: string
+  }[] = [
+    {
+      id: 'new',
+      icon: LuRocket,
+      title: t('welcome.newProject'),
+      description: t('welcome.newProjectDesc'),
+      shortcutId: 'newProject',
+      color: tokens.colors.accent.primary,
+    },
+    {
+      id: 'open',
+      icon: LuFolderOpen,
+      title: t('welcome.openProject'),
+      description: t('welcome.openProjectDesc'),
+      shortcutId: 'openFile',
+      color: tokens.colors.accent.greenBright,
+    },
+    {
+      id: 'clone',
+      icon: LuGitBranch,
+      title: t('welcome.cloneRepo'),
+      description: t('welcome.cloneRepoDesc'),
+      shortcutId: null,
+      color: tokens.colors.accent.purple,
+    },
+    {
+      id: 'cmd',
+      icon: LuTerminal,
+      title: t('welcome.cmdMode'),
+      description: t('welcome.cmdModeDesc'),
+      shortcutId: null,
+      color: tokens.colors.accent.purple,
+    },
+  ]
 
   const cardActions: Record<string, () => void> = {
     new: onNewProject,
     open: onOpenFolder,
     clone: onCloneRepository,
+    cmd: onCmdMode,
   }
 
   // Keyboard shortcuts active on WelcomeScreen (no project open, useKeyboardShortcuts won't handle these)
@@ -124,7 +136,7 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, o
           mb={3}
           lineHeight="1.1"
         >
-          Welcome to{' '}
+          {t('welcome.title')}{' '}
           <Box
             as="span"
             bgGradient="to-r"
@@ -142,8 +154,9 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, o
           lineHeight="1.6"
           fontWeight="400"
         >
-          A powerful, modern IDE built for today's developers.
-          Create, code, and ship with style.
+          {t('welcome.subtitle')}
+          <br />
+          {t('welcome.subtitle2')}
         </Text>
       </VStack>
 
