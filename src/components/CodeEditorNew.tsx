@@ -12,7 +12,6 @@ import TabContextMenu from './ui/TabContextMenu'
 import { EditorContextMenu } from './editor'
 import PreferencesDialog from './dialogs/PreferencesDialog'
 import StatusBar from './ui/StatusBar'
-import NetworkStatusBanner from './ui/NetworkStatusBanner'
 import ChatPanel from './chat/ChatPanel'
 import { ErrorBoundary } from './ErrorBoundary'
 
@@ -95,7 +94,6 @@ export function CodeEditorNew() {
 			<TabContextMenu />
 			<EditorContextMenu />
 			<PreferencesDialog />
-			<NetworkStatusBanner />
 
 			{/* Main Content Area */}
 			<Flex flex="1" overflow="hidden" minW={0}>

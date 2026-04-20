@@ -10,7 +10,11 @@ import { IS_WINDOWS } from '@/utils/platform'
  * the agent expects them to be present when running shell commands. A missing
  * tool doesn't block launch — we just surface a banner so the user can install.
  */
-export const GLOBAL_REQUIREMENTS: Requirement[] = [
+export interface ExtendedRequirement extends Requirement {
+  mandatory?: boolean
+}
+
+export const GLOBAL_REQUIREMENTS: ExtendedRequirement[] = [
   {
     name: 'Node.js',
     command: 'node',
@@ -18,6 +22,7 @@ export const GLOBAL_REQUIREMENTS: Requirement[] = [
     minVersion: '20.0.0',
     installUrl: 'https://nodejs.org',
     installHint: 'Download from nodejs.org or install via nvm/fnm',
+    mandatory: true,
   },
   {
     name: 'Git',
@@ -29,16 +34,14 @@ export const GLOBAL_REQUIREMENTS: Requirement[] = [
   },
   {
     name: 'Python 3',
-    // Windows Python installer registers both `python` and `python3` from 3.11+.
-    // For older Windows installs we'd need a fallback, but that's uncommon enough
-    // to let the banner surface the install hint rather than silently pass.
-    command: 'python3',
+    command: IS_WINDOWS ? 'python' : 'python3',
     versionFlag: '--version',
     minVersion: '3.8.0',
     installUrl: 'https://www.python.org/downloads/',
     installHint: IS_WINDOWS
       ? 'Download from python.org (check "Add to PATH" during install)'
       : 'Install via your package manager (brew install python3, apt install python3)',
+    mandatory: true,
   },
 ]
 
@@ -78,7 +81,9 @@ function writeCache(result: EnvironmentCheckResult): void {
  * The underlying environmentCheck also has an in-memory 5min cache for same-session reruns.
  */
 export async function checkStartupRequirements(forceRefresh = false): Promise<EnvironmentCheckResult> {
-  if (!forceRefresh) {
+  if (forceRefresh) {
+    clearStartupRequirementsCache()
+  } else {
     const cached = readCache()
     if (cached) return cached
   }

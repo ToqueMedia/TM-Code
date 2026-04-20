@@ -21,7 +21,6 @@ import { formatElapsed, formatTokens } from './terminalHelpers'
 export const TerminalStatusLine = memo(function TerminalStatusLine() {
   const status = useAgentStore(s => s.status)
   const error = useAgentStore(s => s.error)
-  const modelName = useAgentStore(s => s.modelName)
   const isStreaming = useChatStore(s => s.isStreaming)
   const totalTokensUsed = useChatStore(s => s.totalTokensUsed)
   const agentTasks = useAgentStore(s => s.tasks)
@@ -67,7 +66,6 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   // Info segments — compact, terminal style
   const segments = useMemo(() => {
     const out: string[] = []
-    if (modelName) out.push(modelName)
     if (autoApproveDiffs) out.push('auto-approve')
     if (queueLength > 0) out.push(`${queueLength}q`)
     if (skillCount > 0) out.push(`${skillCount} skills`)
@@ -78,7 +76,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
       if (running > 0) out.push(`${running} mcp (${totalMcpTools})`)
     }
     return out
-  }, [modelName, autoApproveDiffs, queueLength, skillCount, mcpIsInitializing, mcpServers, totalMcpTools])
+  }, [autoApproveDiffs, queueLength, skillCount, mcpIsInitializing, mcpServers, totalMcpTools])
 
   return (
     <>

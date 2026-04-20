@@ -29,7 +29,15 @@
       "Bash(curl -s \"http://127.0.0.1:8081/v1/projects/maiplayer-ac56d/databases/\\(default\\)/documents/subscription_plans/explorer\" -H \"Authorization: Bearer owner\")",
       "Bash(curl -s \"http://127.0.0.1:8081/v1/projects/maiplayer-ac56d/databases/\\(default\\)/documents:listCollectionIds\" -X POST -H \"Authorization: Bearer owner\" -H \"Content-Type: application/json\" -d '{}')",
       "Bash(curl -s \"http://127.0.0.1:8081/v1/projects/maiplayer-ac56d/databases/\\(default\\)/documents/subscription_plans\" -H \"Authorization: Bearer owner\")",
-      "Bash(python3 -m json.tool)"
+      "Bash(python3 -m json.tool)",
+      "Bash(cmd *)",
+      "Bash(grep -E \":\\\\d{4,5}\\\\b\")",
+      "Bash(awk '$5 == \"7008\" || $5 == \"1648\" || $5 == \"2004\" || $5 == \"7624\" || $5 == \"6976\" || $5 == \"3672\" || $5 == \"5860\" || $5 == \"10264\"')",
+      "Bash(npx jest *)",
+      "Read(//c/Users/ithustle/dev/APPIA/server/src//**)",
+      "Read(//c/Users/ithustle/dev/APPIA/server/src/**)",
+      "Bash(npm install *)",
+      "Bash(grep -E \"[0-9]{4,}|tokens.zIndex\")"
     ]
   }
 }

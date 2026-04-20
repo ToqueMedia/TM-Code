@@ -241,6 +241,32 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const isSystem = message.role === 'system'
   const updateCodeBlockStatus = useChatStore(s => s.updateCodeBlockStatus)
   const toggleReasoning = useChatStore(s => s.toggleReasoning)
+  const [messageCopied, setMessageCopied] = useState(false)
+
+  // Build plain-text representation of this assistant message for copying.
+  // Combines contentBlocks (text + tool call summaries) and fallback content.
+  const copyableText = useCallback(() => {
+    const parts: string[] = []
+    if (message.reasoningContent) {
+      parts.push(`[Reasoning]\n${message.reasoningContent}`)
+    }
+    if (message.contentBlocks && message.contentBlocks.length > 0) {
+      for (const block of message.contentBlocks) {
+        if (block.type === 'text' && block.text) parts.push(block.text)
+      }
+    } else if (message.content) {
+      parts.push(message.content)
+    }
+    return parts.join('\n\n').trim()
+  }, [message])
+
+  const handleCopyMessage = useCallback(() => {
+    const text = copyableText()
+    if (!text) return
+    navigator.clipboard.writeText(text).catch(() => {})
+    setMessageCopied(true)
+    setTimeout(() => setMessageCopied(false), 2000)
+  }, [copyableText])
 
   const handleApply = useCallback(
     (block: { id: string; code: string }) => {
@@ -432,6 +458,33 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             onCopy={handleCopy}
           />
         ))}
+
+        {/* Copy assistant message — shown after the agent finishes the task */}
+        {!isUser && !isSystem && !isStreaming && copyableText() && (
+          <Flex mt={2} justify="flex-end">
+            <Flex
+              as="button"
+              align="center"
+              gap={1.5}
+              px={2}
+              py="4px"
+              borderRadius="6px"
+              fontSize="11px"
+              color={messageCopied ? tokens.colors.accent.green : tokens.colors.text.disabled}
+              cursor="pointer"
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: messageCopied ? tokens.colors.accent.green : tokens.colors.text.secondary }}
+              onClick={handleCopyMessage}
+              title={messageCopied ? t('chat.copied') : t('chat.copyMessage')}
+              aria-label={messageCopied ? t('chat.copied') : t('chat.copyMessage')}
+            >
+              {messageCopied ? <FiCheck size={12} /> : <FiCopy size={12} />}
+              <Text fontSize="11px" fontWeight={500}>
+                {messageCopied ? t('chat.copied') : t('chat.copyMessage')}
+              </Text>
+            </Flex>
+          </Flex>
+        )}
 
         {/* Activity indicator — shown during tool execution */}
         {isStreaming && !isUser && message.toolCalls?.some(tc => tc.status === 'running') && (

@@ -4,7 +4,6 @@ import {
   getProfileForPlan,
   getMultimodalProfile,
   hasMultimodalContent,
-  getDefaultModelForPlan,
   MODEL_PROFILES,
   DEFAULT_MODEL_ID,
 } from '../modelProfiles'
@@ -141,13 +140,4 @@ describe('modelProfiles', () => {
     })
   })
 
-  describe('getDefaultModelForPlan (compat)', () => {
-    it('explorer defaults to deepseek-v3.2', () => {
-      expect(getDefaultModelForPlan('explorer')).toBe('deepseek-v3.2')
-    })
-
-    it('paid plans default to glm-5.1', () => {
-      expect(getDefaultModelForPlan('pro')).toBe('glm-5.1')
-    })
-  })
 })

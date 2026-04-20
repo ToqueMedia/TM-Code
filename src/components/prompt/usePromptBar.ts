@@ -554,8 +554,16 @@ export function usePromptBar() {
           // Otherwise, try to start preview if we have a dev command
           if (devCommand && currentProject?.path) {
             layoutStore.addDevServerLog(`Starting dev server (${devCommand})...`, 'info')
+            // Detect project kind so fullstack monorepos get dual-port kill
+            // and port-authoritative URL classification (not just 'frontend').
+            let projectKind: 'frontend' | 'backend' | 'fullstack' | undefined
             try {
-              await devServerManager.start(currentProject.path, devCommand)
+              const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
+              const cat = await detectProjectCategory(currentProject.path)
+              projectKind = categoryToServerHint(cat)
+            } catch { /* non-fatal */ }
+            try {
+              await devServerManager.start(currentProject.path, devCommand, { projectKind })
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err)
               layoutStore.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
@@ -951,8 +959,18 @@ export function usePromptBar() {
 
     if (cmd && currentProject?.path) {
       layout.addDevServerLog(`Starting dev server (${cmd})...`, 'info')
+      // Detect project kind (frontend / backend / fullstack) from package.json
+      // deps. Without this, devServerManager defaults to 'frontend' and the
+      // port-authoritative classifier + dual-port kill behaviour never kick in
+      // for fullstack monorepos — resulting in EADDRINUSE on the backend side.
+      let projectKind: 'frontend' | 'backend' | 'fullstack' | undefined
       try {
-        await devServerManager.start(currentProject.path, cmd)
+        const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
+        const cat = await detectProjectCategory(currentProject.path)
+        projectKind = categoryToServerHint(cat)
+      } catch { /* non-fatal — fall through with undefined, start() defaults to frontend */ }
+      try {
+        await devServerManager.start(currentProject.path, cmd, { projectKind })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         layout.addDevServerLog(`Could not start dev server: ${msg}`, 'error')

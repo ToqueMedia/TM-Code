@@ -4,21 +4,25 @@
  * Portas alinhadas com ~/dev/web/toquemedia-studio
  */
 
+import { IS_WINDOWS } from '../../utils/platform'
+
+const EMULATOR_HOST = (import.meta.env.DEV && IS_WINDOWS) ? '192.168.64.1' : '127.0.0.1'
+
 export const EMULATOR_CONFIG = {
   FUNCTIONS: {
-    HOST: '127.0.0.1',
+    HOST: EMULATOR_HOST,
     PORT: 5001,
   },
   FIRESTORE: {
-    HOST: '127.0.0.1',
+    HOST: EMULATOR_HOST,
     PORT: 8081,
   },
   AUTH: {
-    HOST: '127.0.0.1',
+    HOST: EMULATOR_HOST,
     PORT: 9099,
   },
   STORAGE: {
-    HOST: '127.0.0.1',
+    HOST: EMULATOR_HOST,
     PORT: 9199,
   },
 } as const

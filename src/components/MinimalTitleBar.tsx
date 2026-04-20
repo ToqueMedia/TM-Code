@@ -130,6 +130,11 @@ function MinimalTitleBar() {
     const tag = t.tagName?.toLowerCase() || ''
     if (['button', 'input', 'svg', 'path'].includes(tag)) return
     if (t.getAttribute?.('role') === 'button') return
+    // Respect the Tauri drag-region opt-out: any ancestor marked with
+    // data-tauri-drag-region="false" (MenuBar items, user menu avatar, etc.)
+    // should NOT start a window drag — otherwise the click gets eaten by
+    // startDragging() on Windows and onClick never fires.
+    if (t.closest?.('[data-tauri-drag-region="false"]')) return
     // Don't start dragging if clicking inside user menu area
     if (avatarRef.current?.contains(t)) return
     getCurrentWindow().startDragging().catch(() => {})

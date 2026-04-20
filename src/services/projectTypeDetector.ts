@@ -85,11 +85,14 @@ export async function detectProjectCategory(projectPath: string): Promise<Projec
 }
 
 /**
- * Convert a ProjectCategory to the server type hint used by devServerManager.
- * Returns undefined for 'fullstack'/'unknown' — let devServerManager auto-detect.
+ * Convert a ProjectCategory to the project kind used by start_dev_server and
+ * devServerManager. Preserves fullstack semantics so port-authoritative
+ * classification and the HTTP Client drawer are enabled correctly.
+ * Returns undefined for 'unknown' — let the caller apply its own default.
  */
-export function categoryToServerHint(category: ProjectCategory): 'frontend' | 'backend' | undefined {
+export function categoryToServerHint(category: ProjectCategory): 'frontend' | 'backend' | 'fullstack' | undefined {
   if (category === 'backend') return 'backend'
   if (category === 'frontend') return 'frontend'
+  if (category === 'fullstack') return 'fullstack'
   return undefined
 }

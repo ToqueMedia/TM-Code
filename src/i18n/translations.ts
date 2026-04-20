@@ -325,7 +325,7 @@ const en = {
   'chat.noCreditsRemaining': 'No credits remaining.',
   'chat.buyCredits': 'Buy credits',
   'chat.tokensUsed': 'tokens used',
-  'chat.copyMessages': 'Copy agent messages',
+  'chat.copyMessage': 'Copy',
   'chat.copied': 'Copied!',
   'chat.sandboxMode': 'Sandbox Mode',
   'chat.refreshCredits': 'Refresh credits',
@@ -611,6 +611,7 @@ const en = {
   'common.selectProjectDir': 'Select project directory',
   'common.minimizePanel': 'Minimize panel',
   'common.closePanel': 'Close panel',
+  'common.later': 'Later',
 
   // ── Onboarding ────────────────────────────────────
   'onboarding.skip': 'Skip',
@@ -1024,7 +1025,7 @@ const pt: Record<keyof typeof en, string> = {
   'chat.noCreditsRemaining': 'Sem créditos restantes.',
   'chat.buyCredits': 'Comprar créditos',
   'chat.tokensUsed': 'tokens usados',
-  'chat.copyMessages': 'Copiar mensagens do agente',
+  'chat.copyMessage': 'Copiar',
   'chat.copied': 'Copiado!',
   'chat.sandboxMode': 'Modo Sandbox',
   'chat.refreshCredits': 'Actualizar créditos',
@@ -1298,6 +1299,7 @@ const pt: Record<keyof typeof en, string> = {
   'common.selectProjectDir': 'Selecionar pasta do projeto',
   'common.minimizePanel': 'Minimizar painel',
   'common.closePanel': 'Fechar painel',
+  'common.later': 'Mais tarde',
 
   // ── Onboarding ────────────────────────────────────
   'onboarding.skip': 'Saltar',

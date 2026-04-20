@@ -1,11 +1,27 @@
 /**
- * Native preview via wry — zero iframes.
- * The Rust side manages the webview lifecycle. React only sends open/resize/close commands.
- * The webview persists even when this component unmounts temporarily.
+ * Preview webview — platform-specific.
+ *
+ * macOS: uses a native wry child webview. WKWebView's ATS blocks http:// in
+ * iframes, so we need the native path plus the tmpreview:// proxy to show
+ * dev server content. Managed entirely on the Rust side; React sends open/
+ * resize/close IPC commands.
+ *
+ * Windows / Linux: uses a plain <iframe>. WebView2 and WebKitGTK load
+ * http://localhost:PORT in iframes natively — no ATS restriction. The native
+ * child webview path on Windows created a cascade of problems:
+ *   - HWND child sits above DOM → CSS z-index can't layer menus/dialogs above it
+ *   - IPC positioning calls blocked the command thread
+ *   - Creation/destruction was slow and sometimes left zombie native windows
+ *   - The tmpreview:// proxy mangled chunked/compressed responses
+ * An iframe has none of these issues: it's a DOM element, uses the parent
+ * webview's DNS resolver (Chromium Happy Eyeballs handles localhost), and
+ * respects z-index like any other element.
  */
-import { useEffect, useRef, useCallback } from 'react'
+import { memo, useEffect, useRef, useCallback } from 'react'
 import { Box } from '@chakra-ui/react'
 import { invoke } from '@tauri-apps/api/core'
+import { useLayoutStore } from '@/stores/layoutStore'
+import { IS_MAC } from '@/utils/platform'
 import { logger } from '@/utils/logger'
 
 interface TauriWebviewProps {
@@ -19,12 +35,51 @@ function htmlToDataUri(html: string): string {
   return `data:text/html;base64,${btoa(unescape(encodeURIComponent(html)))}`
 }
 
-// Module-level state — survives component unmount/remount
-let previewUrl = ''
+// ═══════════════════════════════════════════════════════════════
+// Windows / Linux — plain iframe
+// ═══════════════════════════════════════════════════════════════
 
-export default function TauriWebview({ url, html, reloadKey = 0, frozen = false }: TauriWebviewProps) {
+const IframePreview = memo(function IframePreview({ url, html, reloadKey = 0 }: TauriWebviewProps) {
+  const resolvedUrl = url || (html ? htmlToDataUri(html) : '')
+
+  return (
+    <Box width="100%" height="100%" bg="#0a0a0a" data-preview-webview position="relative">
+      {resolvedUrl && (
+        <iframe
+          // key forces remount-on-reload when reloadKey changes (hard reload)
+          key={`${resolvedUrl}-${reloadKey}`}
+          src={resolvedUrl}
+          title="Preview"
+          style={{
+            width: '100%',
+            height: '100%',
+            border: 'none',
+            background: '#0a0a0a',
+            display: 'block',
+          }}
+          // Permissive sandbox — the dev server is the developer's own code,
+          // running on their own machine. Sandbox here mainly serves to keep
+          // preview-side errors from breaking the IDE itself.
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-storage-access-by-user-activation allow-downloads"
+          allow="clipboard-read; clipboard-write; camera; microphone"
+        />
+      )}
+    </Box>
+  )
+})
+
+// ═══════════════════════════════════════════════════════════════
+// macOS — native wry child webview
+// ═══════════════════════════════════════════════════════════════
+
+// Module-level state for the native webview — survives component unmount/remount
+let nativePreviewUrl = ''
+
+function MacWebview({ url, html, reloadKey = 0, frozen = false }: TauriWebviewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number>(0)
+  const overlayCount = useLayoutStore(s => s.overlayCount)
+  const maskedByOverlay = overlayCount > 0
 
   const resolvedUrl = url || (html ? htmlToDataUri(html) : '')
 
@@ -37,13 +92,12 @@ export default function TauriWebview({ url, html, reloadKey = 0, frozen = false 
   }
 
   const syncPosition = useCallback(() => {
-    if (!previewUrl) return
+    if (!nativePreviewUrl) return
     const rect = getRect()
     if (!rect) return
     invoke('resize_preview_webview', rect).catch(() => {})
   }, [])
 
-  // Open/update webview
   useEffect(() => {
     if (!resolvedUrl) return
 
@@ -52,7 +106,7 @@ export default function TauriWebview({ url, html, reloadKey = 0, frozen = false 
       if (!rect) return
       try {
         await invoke('open_preview_webview', { url: resolvedUrl, ...rect })
-        previewUrl = resolvedUrl
+        nativePreviewUrl = resolvedUrl
         logger.info('preview', `Webview: ${url || 'static'}`)
       } catch (err) {
         logger.error('preview', 'Failed:', err)
@@ -62,22 +116,18 @@ export default function TauriWebview({ url, html, reloadKey = 0, frozen = false 
     return () => clearTimeout(timer)
   }, [resolvedUrl, reloadKey, syncPosition, url])
 
-  // On unmount: hide webview (move offscreen) so no white flash.
-  // Don't close — it persists for when user returns to preview.
   useEffect(() => {
     return () => {
-      if (previewUrl) {
+      if (nativePreviewUrl) {
         invoke('resize_preview_webview', { x: -9999, y: -9999, width: 1, height: 1 }).catch(() => {})
       }
     }
   }, [])
 
-  // On mount: bring webview back to correct position
   useEffect(() => {
-    if (previewUrl) syncPosition()
+    if (nativePreviewUrl) syncPosition()
   }, [syncPosition])
 
-  // Sync position on resize
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -95,34 +145,41 @@ export default function TauriWebview({ url, html, reloadKey = 0, frozen = false 
     }
   }, [syncPosition])
 
-  // Hide when frozen (during resize), or when component unmounts temporarily
   useEffect(() => {
-    // On mount: show at correct position
     syncPosition()
-
     return () => {
-      // On unmount: hide (move offscreen) but DON'T close
-      if (previewUrl) {
+      if (nativePreviewUrl) {
         invoke('resize_preview_webview', { x: -9999, y: -9999, width: 1, height: 1 }).catch(() => {})
       }
     }
   }, [syncPosition])
 
-  // Frozen state
   useEffect(() => {
-    if (!previewUrl) return
-    if (frozen) {
+    if (!nativePreviewUrl) return
+    if (frozen || maskedByOverlay) {
       invoke('resize_preview_webview', { x: -9999, y: -9999, width: 1, height: 1 }).catch(() => {})
     } else {
       syncPosition()
     }
-  }, [frozen, syncPosition])
+  }, [frozen, maskedByOverlay, syncPosition])
 
   return <Box ref={containerRef} width="100%" height="100%" bg="#0a0a0a" data-preview-webview />
 }
 
-/** Call this to explicitly close the preview webview (e.g., stop server) */
+// ═══════════════════════════════════════════════════════════════
+// Entry — branch by platform
+// ═══════════════════════════════════════════════════════════════
+
+export default function TauriWebview(props: TauriWebviewProps) {
+  if (IS_MAC) return <MacWebview {...props} />
+  return <IframePreview {...props} />
+}
+
+/** Explicitly close the preview webview (e.g., stop server).
+ *  No-op on non-macOS (iframe just unmounts with the React tree). */
 export function closePreviewWebview() {
-  previewUrl = ''
-  invoke('close_preview_webview').catch(() => {})
+  if (IS_MAC && nativePreviewUrl) {
+    nativePreviewUrl = ''
+    invoke('close_preview_webview').catch(() => {})
+  }
 }

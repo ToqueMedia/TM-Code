@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
-import { useLayoutStore } from './layoutStore'
+import { useLayoutStore, selectBackendUrl } from './layoutStore'
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS'
 
@@ -366,8 +366,7 @@ export const useHttpClientStore = create<HttpClientState & HttpClientActions>()(
       set(s => updateActiveTab(s, () => ({ isLoading: true, error: null })))
 
       try {
-        const ls = useLayoutStore.getState()
-        const baseUrl = ls.backendServer?.url ?? ls.frontendServer?.url ?? null
+        const baseUrl = selectBackendUrl(useLayoutStore.getState())
         let fullUrl = tab.url
         if (baseUrl && fullUrl.startsWith('/')) {
           fullUrl = baseUrl.replace(/\/$/, '') + fullUrl

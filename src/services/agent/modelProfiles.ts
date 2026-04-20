@@ -468,13 +468,6 @@ export function hasMultimodalContent(message: string | Array<{ type: string }>):
   return message.some(part => part.type !== 'text')
 }
 
-/** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
-export function getModelsForPlan(_plan: UserPlanName): ModelProfile[] { return [DEEPSEEK_V3_2, QWEN3_6_PLUS] }
-/** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
-export function getDefaultModelForPlan(plan: UserPlanName): string { return plan === 'explorer' ? 'deepseek-v3.2' : 'glm-5.1' }
-/** @deprecated Dead code — model selection moved to backend. Kept for migration compat. */
-export function isModelAvailableForPlan(_modelId: string, _plan: UserPlanName): boolean { return true }
-
 /**
  * Build the thinking parameter object for the API request.
  * Returns null if thinking is not supported or not requested.

@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useEffect, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { useEditorRepository } from '@/stores/editorStore'
@@ -63,7 +63,7 @@ function useMenuDefinitions(): MenuDef[] {
 		items() {
 			const list: ContextMenuItem[] = []
 			list.push({
-				label: t('menu.openFolder'), hint: '⌘O', async action() {
+				label: t('menu.openFolder'), hint: 'Ctrl+O', async action() {
 					try {
 						const { open } = await import('@tauri-apps/plugin-dialog')
 						const selected = await open({ directory: true, multiple: false, title: t('common.selectProjectDir') })
@@ -75,9 +75,9 @@ function useMenuDefinitions(): MenuDef[] {
 				const noEditor = !hasEditor()
 				const noFiles = !hasOpenFiles()
 				list.push(sep())
-				list.push({ label: t('menu.save'), hint: '⌘S', disabled: noEditor, action() { bridgeRun('tmcode.save') } })
+				list.push({ label: t('menu.save'), hint: 'Ctrl+S', disabled: noEditor, action() { bridgeRun('tmcode.save') } })
 				list.push({
-					label: t('menu.saveAll'), hint: '⌘⌥S', disabled: noFiles, action() {
+					label: t('menu.saveAll'), hint: 'Ctrl+Alt+S', disabled: noFiles, action() {
 						const ed = MonacoBridge.getInstance().getCurrentEditor()
 						const { activeFile } = useEditorRepository.getState()
 						if (ed && activeFile) {
@@ -95,7 +95,7 @@ function useMenuDefinitions(): MenuDef[] {
 				})
 				list.push(sep())
 				list.push({
-					label: t('menu.closeTab'), hint: '⌘W', disabled: noFiles, action() {
+					label: t('menu.closeTab'), hint: 'Ctrl+W', disabled: noFiles, action() {
 						const { activeFile, closeFile } = useEditorRepository.getState()
 						if (activeFile) closeFile(activeFile)
 					}
@@ -112,7 +112,7 @@ function useMenuDefinitions(): MenuDef[] {
 				})
 			}
 			list.push(sep())
-			list.push({ label: t('menu.settings'), hint: '⌘,', action() { useLayoutStore.getState().setViewMode('settings') } })
+			list.push({ label: t('menu.settings'), hint: 'Ctrl+,', action() { useLayoutStore.getState().setViewMode('settings') } })
 			return list
 		},
 	}
@@ -122,28 +122,28 @@ function useMenuDefinitions(): MenuDef[] {
 		label: t('menu.view'),
 		items() {
 			const list: ContextMenuItem[] = [
-				{ label: t('menu.commandPalette'), hint: '⌘⇧P', action() { dispatch('command:palette') } },
-				{ label: t('menu.quickOpen'), hint: '⌘P', action() { dispatch('quickopen:toggle') } },
+				{ label: t('menu.commandPalette'), hint: 'Ctrl+Shift+P', action() { dispatch('command:palette') } },
+				{ label: t('menu.quickOpen'), hint: 'Ctrl+P', action() { dispatch('quickopen:toggle') } },
 				sep(),
 				{ label: t('menu.chat'), action() { useLayoutStore.getState().setViewMode('chat') } },
 				{ label: t('menu.editorView'), action() { useLayoutStore.getState().setViewMode('editor') } },
 				{ label: t('menu.preview'), action() { useLayoutStore.getState().setViewMode('preview') } },
 				sep(),
-				{ label: t('menu.toggleSidebar'), hint: '⌘B', action() { dispatch('sidebar:toggle') } },
-				{ label: t('menu.toggleBottomPanel'), hint: '⌃`', action() { dispatch('panel:toggle-bottom') } },
+				{ label: t('menu.toggleSidebar'), hint: 'Ctrl+B', action() { dispatch('sidebar:toggle') } },
+				{ label: t('menu.toggleBottomPanel'), hint: 'Ctrl+`', action() { dispatch('panel:toggle-bottom') } },
 			]
 			if (inEditor) {
 				const noEditor = !hasEditor()
 				list.push(sep())
-				list.push({ label: t('menu.splitEditor'), hint: '⌘\\', action() { dispatch('editor:split') } })
+				list.push({ label: t('menu.splitEditor'), hint: 'Ctrl+\\', action() { dispatch('editor:split') } })
 				list.push(sep())
-				list.push({ label: t('menu.toggleWordWrap'), hint: '⌥Z', disabled: noEditor, action() { bridgeRun('editor.action.toggleWordWrap') } })
+				list.push({ label: t('menu.toggleWordWrap'), hint: 'Alt+Z', disabled: noEditor, action() { bridgeRun('editor.action.toggleWordWrap') } })
 				list.push({ label: t('menu.toggleMinimap'), disabled: noEditor, action() { MonacoBridge.getInstance().toggleOption('minimap') } })
 				list.push({ label: t('menu.toggleStickyScroll'), disabled: noEditor, action() { MonacoBridge.getInstance().toggleOption('stickyScroll') } })
 				list.push(sep())
-				list.push({ label: t('menu.zoomIn'), hint: '⌘=', disabled: noEditor, action() { bridgeRun('editor.action.fontZoomIn') } })
-				list.push({ label: t('menu.zoomOut'), hint: '⌘-', disabled: noEditor, action() { bridgeRun('editor.action.fontZoomOut') } })
-				list.push({ label: t('menu.resetZoom'), hint: '⌘0', disabled: noEditor, action() { bridgeRun('editor.action.fontZoomReset') } })
+				list.push({ label: t('menu.zoomIn'), hint: 'Ctrl+=', disabled: noEditor, action() { bridgeRun('editor.action.fontZoomIn') } })
+				list.push({ label: t('menu.zoomOut'), hint: 'Ctrl+-', disabled: noEditor, action() { bridgeRun('editor.action.fontZoomOut') } })
+				list.push({ label: t('menu.resetZoom'), hint: 'Ctrl+0', disabled: noEditor, action() { bridgeRun('editor.action.fontZoomReset') } })
 			}
 			return list
 		},
@@ -154,7 +154,7 @@ function useMenuDefinitions(): MenuDef[] {
 		label: t('menu.terminal'),
 		items() {
 			return [
-				{ label: t('menu.toggleTerminal'), hint: '⌃`', action() { dispatch('panel:toggle-bottom') } },
+				{ label: t('menu.toggleTerminal'), hint: 'Ctrl+`', action() { dispatch('panel:toggle-bottom') } },
 			]
 		},
 	}
@@ -164,7 +164,7 @@ function useMenuDefinitions(): MenuDef[] {
 		label: t('menu.help'),
 		items() {
 			return [
-				{ label: t('menu.commandPalette'), hint: '⌘⇧P', action() { dispatch('command:palette') } },
+				{ label: t('menu.commandPalette'), hint: 'Ctrl+Shift+P', action() { dispatch('command:palette') } },
 				sep(),
 				{
 					label: t('menu.documentation'), async action() {
@@ -198,21 +198,21 @@ function useMenuDefinitions(): MenuDef[] {
 		items() {
 			const noEditor = !hasEditor()
 			return [
-				{ label: t('menu.undo'), hint: '⌘Z', disabled: noEditor, action() { bridgeTrigger('undo') } },
-				{ label: t('menu.redo'), hint: '⌘⇧Z', disabled: noEditor, action() { bridgeTrigger('redo') } },
+				{ label: t('menu.undo'), hint: 'Ctrl+Z', disabled: noEditor, action() { bridgeTrigger('undo') } },
+				{ label: t('menu.redo'), hint: 'Ctrl+Y', disabled: noEditor, action() { bridgeTrigger('redo') } },
 				sep(),
-				{ label: t('menu.cut'), hint: '⌘X', disabled: noEditor, action() { bridgeTrigger('editor.action.clipboardCutAction') } },
-				{ label: t('menu.copy'), hint: '⌘C', disabled: noEditor, action() { bridgeTrigger('editor.action.clipboardCopyAction') } },
-				{ label: t('menu.paste'), hint: '⌘V', disabled: noEditor, action() { bridgeTrigger('editor.action.clipboardPasteAction') } },
+				{ label: t('menu.cut'), hint: 'Ctrl+X', disabled: noEditor, action() { bridgeTrigger('editor.action.clipboardCutAction') } },
+				{ label: t('menu.copy'), hint: 'Ctrl+C', disabled: noEditor, action() { bridgeTrigger('editor.action.clipboardCopyAction') } },
+				{ label: t('menu.paste'), hint: 'Ctrl+V', disabled: noEditor, action() { bridgeTrigger('editor.action.clipboardPasteAction') } },
 				sep(),
-				{ label: t('menu.find'), hint: '⌘F', disabled: noEditor, action() { bridgeRun('actions.find') } },
-				{ label: t('menu.replace'), hint: '⌘⌥F', disabled: noEditor, action() { bridgeRun('editor.action.startFindReplaceAction') } },
-				{ label: t('menu.findInFiles'), hint: '⌘⇧F', action() { dispatch('search:open') } },
+				{ label: t('menu.find'), hint: 'Ctrl+F', disabled: noEditor, action() { bridgeRun('actions.find') } },
+				{ label: t('menu.replace'), hint: 'Ctrl+H', disabled: noEditor, action() { bridgeRun('editor.action.startFindReplaceAction') } },
+				{ label: t('menu.findInFiles'), hint: 'Ctrl+Shift+F', action() { dispatch('search:open') } },
 				sep(),
-				{ label: t('menu.toggleLineComment'), hint: '⌘/', disabled: noEditor, action() { bridgeRun('editor.action.commentLine') } },
-				{ label: t('menu.toggleBlockComment'), hint: '⇧⌥A', disabled: noEditor, action() { bridgeRun('editor.action.blockComment') } },
+				{ label: t('menu.toggleLineComment'), hint: 'Ctrl+/', disabled: noEditor, action() { bridgeRun('editor.action.commentLine') } },
+				{ label: t('menu.toggleBlockComment'), hint: 'Shift+Alt+A', disabled: noEditor, action() { bridgeRun('editor.action.blockComment') } },
 				sep(),
-				{ label: t('menu.formatDocument'), hint: '⇧⌥F', disabled: noEditor, action() { bridgeRun('editor.action.formatDocument') } },
+				{ label: t('menu.formatDocument'), hint: 'Shift+Alt+F', disabled: noEditor, action() { bridgeRun('editor.action.formatDocument') } },
 			]
 		},
 	}
@@ -223,16 +223,16 @@ function useMenuDefinitions(): MenuDef[] {
 		items() {
 			const noEditor = !hasEditor()
 			return [
-				{ label: t('menu.goToFile'), hint: '⌘P', action() { dispatch('quickopen:toggle') } },
-				{ label: t('menu.goToLine'), hint: '⌘G', disabled: noEditor, action() { dispatch('editor:go-to-line') } },
+				{ label: t('menu.goToFile'), hint: 'Ctrl+P', action() { dispatch('quickopen:toggle') } },
+				{ label: t('menu.goToLine'), hint: 'Ctrl+G', disabled: noEditor, action() { dispatch('editor:go-to-line') } },
 				sep(),
 				{ label: t('menu.goToDefinition'), hint: 'F12', disabled: noEditor, action() { bridgeRun('editor.action.revealDefinition') } },
-				{ label: t('menu.peekDefinition'), hint: '⌥F12', disabled: noEditor, action() { bridgeRun('editor.action.peekDefinition') } },
-				{ label: t('menu.goToReferences'), hint: '⇧F12', disabled: noEditor, action() { bridgeRun('editor.action.goToReferences') } },
+				{ label: t('menu.peekDefinition'), hint: 'Alt+F12', disabled: noEditor, action() { bridgeRun('editor.action.peekDefinition') } },
+				{ label: t('menu.goToReferences'), hint: 'Shift+F12', disabled: noEditor, action() { bridgeRun('editor.action.goToReferences') } },
 				{ label: t('menu.goToTypeDefinition'), disabled: noEditor, action() { bridgeRun('editor.action.goToTypeDefinition') } },
-				{ label: t('menu.goToImplementation'), hint: '⌘F12', disabled: noEditor, action() { bridgeRun('editor.action.goToImplementation') } },
+				{ label: t('menu.goToImplementation'), hint: 'Ctrl+F12', disabled: noEditor, action() { bridgeRun('editor.action.goToImplementation') } },
 				sep(),
-				{ label: t('menu.goToSymbol'), hint: '⌘⇧O', disabled: noEditor, action() { bridgeRun('editor.action.quickOutline') } },
+				{ label: t('menu.goToSymbol'), hint: 'Ctrl+Shift+O', disabled: noEditor, action() { bridgeRun('editor.action.quickOutline') } },
 			]
 		},
 	}
@@ -254,6 +254,17 @@ function MenuBar() {
 	const [openMenuId, setOpenMenuId] = useState<string | null>(null)
 	const [dropdownPos, setDropdownPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
 	const menus = useMenuDefinitions()
+
+	// While a dropdown is open, mask the native preview webview so the dropdown
+	// (pure DOM) is visible above it on Windows/Linux, where the wry child
+	// webview otherwise sits above CSS z-index.
+	useEffect(() => {
+		if (!openMenuId) return
+		useLayoutStore.getState().pushOverlay()
+		return () => {
+			useLayoutStore.getState().popOverlay()
+		}
+	}, [openMenuId])
 
 	const openMenu = useCallback(function open(id: string, el: HTMLElement) {
 		const rect = el.getBoundingClientRect()

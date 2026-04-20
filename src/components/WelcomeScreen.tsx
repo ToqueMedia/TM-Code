@@ -8,7 +8,6 @@ import { t } from '@/i18n'
 import { WelcomeSidebar, WelcomeHero, CloneDialog, StartupRequirementsBanner } from './welcome'
 import SettingsView from './views/SettingsView'
 import WindowControls from './ui/WindowControls'
-import NetworkStatusBanner from './ui/NetworkStatusBanner'
 import { IS_MAC } from '@/utils/platform'
 import { CmdModeView } from './cmd-mode'
 import { useWindowControls } from '../hooks/useWindowControls'
@@ -158,7 +157,6 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       {/* Non-blocking prereq banner — only shows when a tool is missing/outdated.
           Positioned absolute near the top so it doesn't reflow the hero layout. */}
       {!cmdModeProjectPath && !showSettings && <StartupRequirementsBanner />}
-      {!cmdModeProjectPath && !showSettings && <NetworkStatusBanner />}
     </Flex>
   )
 }
