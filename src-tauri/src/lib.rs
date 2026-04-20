@@ -75,14 +75,12 @@ fn open_preview_webview(
 
     // WKWebView blocks HTTP URLs (ATS). Use a custom protocol "tmpreview://"
     // that proxies requests to the dev server via Rust's reqwest.
-    // Normalize "localhost" to "127.0.0.1": on Windows the system resolver
+    // Normalize "localhost" to "192.168.64.1": on Windows the system resolver
     // tries IPv6 [::1] first, which stalls for seconds when the dev server
-    // (Vite/Next) only binds to IPv4 127.0.0.1. This was the root cause of
-    // the Windows "dark preview" symptom — pages loaded, but each asset
-    // request hit a multi-second DNS timeout.
+    // (Vite/Next) only binds to IPv4. Using 192.168.64.1 for UTM host communication.
     let proxy_target = url
         .trim_end_matches('/')
-        .replace("://localhost", "://127.0.0.1");
+        .replace("://localhost", "://192.168.64.1");
     let _proxy_target_for_ws = proxy_target.clone();
 
     // Clone app handle for IPC handler (receives runtime errors from preview JS)

@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
+import { IS_WINDOWS } from '../utils/platform'
 
 export type NetworkStatus = 'online' | 'offline' | 'slow'
 
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+const DEFAULT_WORKER = (import.meta.env.DEV && IS_WINDOWS) ? 'http://192.168.64.1:8787' : 'http://localhost:8787'
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || DEFAULT_WORKER
 const PING_INTERVAL_MS = 30_000
 const PING_TIMEOUT_MS = 5_000
 const SLOW_THRESHOLD_MS = 2_500

@@ -15,6 +15,7 @@ import {
 import { FiArrowLeft, FiPlus, FiTrash2, FiSquare, FiRefreshCw, FiServer, FiExternalLink, FiLogOut } from 'react-icons/fi'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useSettingsStore, DEFAULT_SHORTCUTS, type ShortcutId, type KeyBinding } from '../../stores/settingsStore'
+import { useUpdateStore } from '../../stores/updateStore'
 import KeyBindingDisplay from '../ui/KeyBindingDisplay'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore, McpServerState } from '../../stores/mcpStore'
@@ -407,7 +408,8 @@ function ProfileSection() {
 
 function UpdateSection() {
   const t = useTranslation()
-  const [update, setUpdate] = useState<UpdateInfo | null>(getPendingUpdate)
+  const pendingUpdate = useUpdateStore(s => s.pendingUpdate)
+  const setPendingUpdate = useUpdateStore(s => s.setPendingUpdate)
   const [status, setStatus] = useState<'idle' | 'checking' | 'downloading' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
 
@@ -417,7 +419,6 @@ function UpdateSection() {
     const minDelay = new Promise(r => setTimeout(r, 800))
     try {
       const [result] = await Promise.all([checkForUpdate(), minDelay])
-      setUpdate(result)
       // Persist so the banner survives navigation away from Settings
       setPendingUpdate(result)
       setStatus('idle')
@@ -426,7 +427,7 @@ function UpdateSection() {
       setError(err instanceof Error ? err.message : String(err))
       setStatus('error')
     }
-  }, [])
+  }, [setPendingUpdate])
 
   const handleInstall = useCallback(async () => {
     setStatus('downloading')
@@ -446,7 +447,7 @@ function UpdateSection() {
         {t('settings.appUpdate')}
       </Text>
 
-      {update ? (
+      {pendingUpdate ? (
         <Flex
           align="center" justify="space-between"
           px={4} py={3} borderRadius={tokens.radius.lg}
@@ -455,7 +456,7 @@ function UpdateSection() {
         >
           <Box>
             <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
-              TM Code {update.version} {t('settings.updateAvailable')}
+              TM Code {pendingUpdate.version} {t('settings.updateAvailable')}
             </Text>
             <Text fontSize="11px" color={tokens.colors.text.secondary} mt={0.5}>
               {t('settings.updateRestart')}

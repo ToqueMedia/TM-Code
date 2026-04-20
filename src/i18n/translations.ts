@@ -611,6 +611,7 @@ const en = {
   'common.selectProjectDir': 'Select project directory',
   'common.minimizePanel': 'Minimize panel',
   'common.closePanel': 'Close panel',
+  'common.later': 'Later',
 
   // ── Onboarding ────────────────────────────────────
   'onboarding.skip': 'Skip',
@@ -1298,6 +1299,7 @@ const pt: Record<keyof typeof en, string> = {
   'common.selectProjectDir': 'Selecionar pasta do projeto',
   'common.minimizePanel': 'Minimizar painel',
   'common.closePanel': 'Fechar painel',
+  'common.later': 'Mais tarde',
 
   // ── Onboarding ────────────────────────────────────
   'onboarding.skip': 'Saltar',

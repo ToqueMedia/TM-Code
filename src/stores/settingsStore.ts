@@ -115,7 +115,7 @@ const DEFAULTS: SettingsState = {
   autocomplete: {
     enabled: true,
     model: 'qwen2.5-coder:7b',
-    ollamaUrl: 'http://localhost:11434',
+    ollamaUrl: import.meta.env.VITE_OLLAMA_URL || 'http://localhost:11434',
   },
   formatOnSave: false,
   appLanguage: 'en',
@@ -172,11 +172,11 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
       },
 
       setAutocompleteOllamaUrl: (url: string) => {
-        // Only allow localhost URLs to prevent exfiltration of code context
+        // Only allow localhost or approved dev IPs to prevent exfiltration of code context
         try {
           const parsed = new URL(url)
-          if (!['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(parsed.hostname)) {
-            return // reject non-localhost URLs silently
+          if (!['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '192.168.64.1'].includes(parsed.hostname)) {
+            return // reject non-approved URLs silently
           }
         } catch {
           return // reject invalid URLs
