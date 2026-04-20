@@ -14,7 +14,22 @@
       "Bash(winget list:*)",
       "Bash(cargo tree:*)",
       "Bash(npx tsc:*)",
-      "Bash(echo \"EXIT=$?\")"
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(npx jest *)",
+      "Bash(npx vitest *)",
+      "mcp__plugin_firebase_firebase__firebase_get_environment",
+      "mcp__plugin_firebase_firebase__firestore_get_document",
+      "mcp__plugin_firebase_firebase__firebase_list_projects",
+      "mcp__plugin_firebase_firebase__firestore_list_collections",
+      "Bash(curl -s \"http://localhost:8080/v1/projects/maiplayer-ac56d/databases/\\(default\\)/documents\")",
+      "Bash(lsof -nP -iTCP:8080 -sTCP:LISTEN)",
+      "Bash(lsof -nP -iTCP -sTCP:LISTEN)",
+      "Bash(curl -s \"http://127.0.0.1:8081/v1/projects/maiplayer-ac56d/databases/\\(default\\)/documents:listCollectionIds\" -X POST -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -s \"http://127.0.0.1:8081/v1/projects/maiplayer-ac56d/databases/\\(default\\)/documents/subscription_plans/explorer\")",
+      "Bash(curl -s \"http://127.0.0.1:8081/v1/projects/maiplayer-ac56d/databases/\\(default\\)/documents/subscription_plans/explorer\" -H \"Authorization: Bearer owner\")",
+      "Bash(curl -s \"http://127.0.0.1:8081/v1/projects/maiplayer-ac56d/databases/\\(default\\)/documents:listCollectionIds\" -X POST -H \"Authorization: Bearer owner\" -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -s \"http://127.0.0.1:8081/v1/projects/maiplayer-ac56d/databases/\\(default\\)/documents/subscription_plans\" -H \"Authorization: Bearer owner\")",
+      "Bash(python3 -m json.tool)"
     ]
   }
 }

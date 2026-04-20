@@ -31,7 +31,7 @@ export async function executePlan(args: string, projectPath: string): Promise<vo
   const prevAutoApprove = permStore.autoApproveDiffs
   permStore.setAutoApproveDiffs(true)
 
-  // Run the architect agent with reasoning model (Qwen 3.6 Plus via OpenRouter)
+  // Run the architect agent with reasoning model (Qwen 3.6 Max-Preview via DashScope)
   const agentService = AgentService.getInstance()
   agentService.setRequestType('plan')
   try {
