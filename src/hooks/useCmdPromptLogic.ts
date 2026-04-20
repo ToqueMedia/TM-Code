@@ -25,6 +25,12 @@ const MENTION_MENU_LIMIT = 50
  */
 const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/payments'])
 
+// Control commands that must run immediately even while the agent is streaming.
+// They each stop the agent internally (stopAgent()) before doing their work, so
+// queueing them would defeat their purpose — /exit would wait for the very task
+// it's supposed to cancel.
+const CONTROL_COMMANDS_BYPASS_QUEUE = new Set(['/exit', '/new', '/clear'])
+
 export function useCmdPromptLogic() {
   const [input, setInput] = useState('')
 
@@ -319,7 +325,16 @@ export function useCmdPromptLogic() {
       value = prompt
     }
 
-    if (isStreaming) {
+    // Control commands (/exit, /new, /clear) bypass the queue — they cancel
+    // the running agent as part of their work, so queueing would make them
+    // wait for the very thing they mean to stop.
+    const textForDispatch = typeof value === 'string'
+      ? value
+      : value.filter(b => b.type === 'text').map(b => b.text).join(' ')
+    const firstToken = textForDispatch.trim().split(/\s+/)[0] || ''
+    const isBypassCommand = CONTROL_COMMANDS_BYPASS_QUEUE.has(firstToken)
+
+    if (isStreaming && !isBypassCommand) {
       enqueue({ value, mode: 'prompt', priority: 'next', uuid: crypto.randomUUID() })
       return
     }
@@ -381,8 +396,18 @@ export function useCmdPromptLogic() {
         }
       }
 
-      // History navigation (when menus are closed)
+      // History navigation (when menus are closed).
+      // Terminal UX: ArrowUp only navigates history when the caret is at the
+      // very start of the input (or already browsing history). If the user
+      // is mid-edit, let the textarea handle ArrowUp normally (move cursor
+      // up a line in multi-line input, or to the start on single-line).
       if (!showCommandMenu && !showMentionMenu) {
+        const ta = textareaRef.current
+        const caret = ta?.selectionStart ?? 0
+        const selLen = ta ? ta.selectionEnd - ta.selectionStart : 0
+        const atStart = caret === 0 && selLen === 0
+        const browsingHistory = historyIndexRef.current >= 0
+
         if (e.key === 'ArrowUp') {
           // Priority 1: Edit queued message if one exists and input is empty
           if (input.length === 0 && queuedCommands.length > 0) {
@@ -391,13 +416,18 @@ export function useCmdPromptLogic() {
             const val = typeof lastQueued.value === 'string'
               ? lastQueued.value
               : lastQueued.value.map(b => (b.type === 'text' ? b.text : '')).join(' ')
-            
+
             remove([lastQueued as QueuedCommand])
             setInput(val)
             return
           }
 
-          // Priority 2: Standard history navigation
+          // Priority 2: Standard history navigation — only if caret is at
+          // the start and input is empty, OR the user is already cycling
+          // through history. Otherwise let the textarea handle ArrowUp.
+          if (!browsingHistory && (input.length > 0 || !atStart)) {
+            return
+          }
           const history = historyRef.current
           if (history.length === 0) return
           e.preventDefault()
@@ -407,6 +437,9 @@ export function useCmdPromptLogic() {
           return
         }
         if (e.key === 'ArrowDown') {
+          // Only hijack ArrowDown while actively browsing history — otherwise
+          // it should move the caret normally within the textarea.
+          if (!browsingHistory) return
           e.preventDefault()
           if (historyIndexRef.current <= 0) {
             historyIndexRef.current = -1

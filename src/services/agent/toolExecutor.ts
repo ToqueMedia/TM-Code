@@ -472,21 +472,38 @@ class ToolExecutor {
   }
 
   private detectServerUrl(output: string) {
+    // Fallback path: when the agent ran a raw `execute_command` that happens
+    // to start a server, pick up the URL and register it as a frontend-like
+    // dev server so the preview opens. Prefer `start_dev_server` which gives
+    // proper lifecycle management; this is best-effort.
+    //
+    // CRITICAL: skip entirely when a dev server is already active. Otherwise
+    // any stray URL in command output (e.g. `curl http://localhost:7777/api`,
+    // log lines with API references, build reports) would overwrite the
+    // live dev server URL. This had broken fullstack preview: the agent
+    // would print a backend URL mid-stream and the preview would hop to it.
+    const layoutStore = useLayoutStore.getState()
+    if (layoutStore.devServer) return
+
+    // Positive-readiness patterns ONLY — never match a bare URL in output,
+    // since that catches curl calls, log lines, and docs/comments.
     const serverPatterns = [
       /Local:\s+(https?:\/\/localhost:\d+)/,
       /ready on (https?:\/\/localhost:\d+)/,
       /Server running at (https?:\/\/localhost:\d+)/,
       /listening on (https?:\/\/localhost:\d+)/,
-      /http:\/\/localhost:(\d+)/,
     ]
 
     for (const pattern of serverPatterns) {
       const match = output.match(pattern)
       if (match) {
-        const url = match[1].startsWith('http') ? match[1] : `http://localhost:${match[1]}`
-        const layoutStore = useLayoutStore.getState()
-        layoutStore.setPreviewServer(url, 0)
-        layoutStore.setViewMode('preview')
+        const url = match[1]
+        // Read again just before mutating — another tool call may have started
+        // a real devServer between the early-return above and this point.
+        if (useLayoutStore.getState().devServer) return
+        useLayoutStore.getState().initDevServer({ pid: 0, projectKind: 'frontend' })
+        useLayoutStore.getState().setDevServerFrontendUrl(url)
+        useLayoutStore.getState().setViewMode('preview')
         break
       }
     }
@@ -1638,42 +1655,54 @@ class ToolExecutor {
     this.tools.set('start_dev_server', {
       definition: {
         name: 'start_dev_server',
-        description: 'Start a dev server as a background process. Returns immediately — the server runs in the background and the preview panel opens automatically when it is ready. Use this instead of execute_command for dev servers, watchers, or any long-running process. Only one dev server can run at a time (starting a new one stops the previous). For backend/API servers, the HTTP Client panel opens instead of the iframe preview.',
+        description: 'Start the project\'s dev server as a background process. Returns immediately — the correct preview panel opens automatically when the server is ready. ONE dev server per project.\n\nPass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).\n\nproject_kind: "frontend" (UI-only → iframe preview), "backend" (API-only → HTTP Client panel), "fullstack" (both — iframe + toggleable HTTP Client drawer). Auto-detected if omitted.\n\nPORTS — TWO MODES:\n  • TM Code projects (.toquemedia-id exists): uses reserved ports 7773 (frontend) / 7777 (backend). Omit frontend_port and backend_port.\n  • External projects: inspect the project\'s real ports first (package.json scripts, source code). If they differ from 7773/7777, pass frontend_port and backend_port as overrides so TM Code adapts to the project WITHOUT rewriting user scripts. Never force-migrate an external project\'s ports — adapt instead.',
         input_schema: {
           type: 'object',
           properties: {
-            command: { type: 'string', description: 'Dev server command (e.g., "pnpm run dev", "pnpm start", "npx vite")' },
-            server_type: { type: 'string', enum: ['frontend', 'backend'], description: 'Optional hint: "frontend" for iframe preview (React, Vue, etc.), "backend" for HTTP Client panel (Express, FastAPI, etc.). Auto-detected if omitted.' }
+            command: { type: 'string', description: 'Dev server command (e.g., "npm run dev", "pnpm start", "npx vite"). Pass the top-level command even if it spawns multiple processes.' },
+            project_kind: { type: 'string', enum: ['frontend', 'backend', 'fullstack'], description: '"frontend", "backend", or "fullstack". Auto-detected if omitted.' },
+            frontend_port: { type: 'number', description: 'Port the frontend actually binds to. Omit for TM Code projects (uses 7773). For external projects, pass their real port (e.g., 3000 for Next.js, 5173 for Vite default).' },
+            backend_port: { type: 'number', description: 'Port the backend actually binds to. Omit for TM Code projects (uses 7777). For external projects, pass their real port (e.g., 3001, 8080).' },
+            server_type: { type: 'string', enum: ['frontend', 'backend'], description: 'DEPRECATED — use project_kind instead.' }
           },
           required: ['command']
         }
       },
       execute: async (input) => {
         const command = input.command as string
-        let serverType = input.server_type as 'frontend' | 'backend' | undefined
+        let projectKind = input.project_kind as 'frontend' | 'backend' | 'fullstack' | undefined
+        const legacyServerType = input.server_type as 'frontend' | 'backend' | undefined
+        const frontendPort = typeof input.frontend_port === 'number' ? input.frontend_port : undefined
+        const backendPort = typeof input.backend_port === 'number' ? input.backend_port : undefined
         this.validateCommand(command)
         const projectRoot = this.getProjectRoot()
 
-        // If the agent didn't provide a hint, infer from project files
-        if (!serverType) {
+        // Legacy server_type maps to the new project_kind
+        if (!projectKind && legacyServerType) {
+          projectKind = legacyServerType
+        }
+
+        // Infer from project files if still not provided
+        if (!projectKind) {
           try {
             const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
             const cat = await detectProjectCategory(projectRoot)
-            serverType = categoryToServerHint(cat)
+            const hint = categoryToServerHint(cat)
+            projectKind = hint
           } catch { /* detection failure is non-fatal */ }
         }
+        if (!projectKind) projectKind = 'frontend'
 
-        // Don't pre-stop — start() internally stops only the same-type slot,
-        // which is essential for fullstack: starting a backend must NOT kill
-        // a running frontend (and vice versa).
         try {
-          await devServerManager.start(projectRoot, command, serverType)
-          const url = devServerManager.getUrl(serverType)
+          await devServerManager.start(projectRoot, command, { projectKind, frontendPort, backendPort })
+          const url = devServerManager.getUrl()
+          const portsNote = (frontendPort || backendPort)
+            ? ` [using custom ports: frontend=${frontendPort ?? 7773}, backend=${backendPort ?? 7777}]`
+            : ''
           if (url) {
-            return `Dev server started and running at ${url}. The correct preview panel will open automatically.`
+            return `Dev server started and running at ${url} (${projectKind})${portsNote}. The correct preview panel will open automatically.`
           }
-          const port = serverType === 'backend' ? 7777 : 7773
-          return `Dev server starting with command: ${command}. The preview panel will open automatically when the server is ready (port ${port}).`
+          return `Dev server starting with command: ${command} (${projectKind})${portsNote}. The preview panel will open automatically when the server is ready.`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`

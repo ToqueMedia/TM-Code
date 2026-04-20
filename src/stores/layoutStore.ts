@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 
 export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings'
+/** UI surface in the preview area. Derived from `devServer.projectKind` + static preview state. */
 export type PreviewMode = 'server' | 'static' | 'api'
 export type DevLogLevel = 'info' | 'warn' | 'error'
 
@@ -17,14 +18,29 @@ export interface DevServerLogEntry {
 export type ScaffoldPhase = null | 'installing' | 'starting' | 'ready' | 'error'
 
 /**
- * Information about one running dev server.
- * In fullstack projects both `frontendServer` and `backendServer` can be set
- * simultaneously — the preview routing picks the active one based on
- * `previewMode`.
+ * Classification of the user's project for UI routing.
+ *  - `frontend`  → main area shows iframe preview (Vite, Next, etc.)
+ *  - `backend`   → main area shows HTTP Client panel (Express, Fastify, etc.)
+ *  - `fullstack` → main area shows iframe preview; HTTP Client available as a
+ *                  toggleable bottom drawer (monolithic: same URL; distributed:
+ *                  separate frontend/backend URLs)
  */
-export interface ServerSlot {
-  url: string
+export type ProjectKind = 'frontend' | 'backend' | 'fullstack'
+
+export type DevServerStatus = 'starting' | 'running' | 'stopped' | 'error'
+
+/**
+ * Unified dev-server record. Replaces the legacy dual-slot model
+ * (`frontendServer` + `backendServer`). One process per project. For fullstack
+ * projects, both `frontendUrl` and `backendUrl` may populate from the same PID
+ * (monolithic: equal; distributed: different ports).
+ */
+export interface DevServerInfo {
   pid: number
+  projectKind: ProjectKind
+  frontendUrl: string | null
+  backendUrl: string | null
+  status: DevServerStatus
 }
 
 interface LayoutState {
@@ -36,15 +52,16 @@ interface LayoutState {
   projectsSidebarBeforePreview: boolean | null
   showTemplateSelector: boolean
   isPreviewServerLoading: boolean
-  /** Frontend dev server (7773). When set, PreviewView shows the iframe. */
-  frontendServer: ServerSlot | null
-  /** Backend dev server (7777). When frontend is absent, preview routes to HttpClientPanel. */
-  backendServer: ServerSlot | null
+  /** The single dev server for this project. Null when no server is active. */
+  devServer: DevServerInfo | null
   /**
-   * User-selected preview surface. Default follows priority frontend > backend,
-   * but user can toggle via `togglePreviewMode` when both servers are running.
+   * UI surface for the preview area. Derived from `devServer.projectKind`:
+   *   backend → 'api', frontend | fullstack → 'server'.
+   * `static` is used when viewing a standalone HTML file (no dev server).
    */
   previewMode: PreviewMode
+  /** For fullstack projects: true when the HTTP Client drawer is expanded. */
+  isHttpDrawerOpen: boolean
   previewHtmlContent: string | null
   previewSourcePath: string | null
   /** Incremented to signal the preview iframe should reload */
@@ -54,6 +71,15 @@ interface LayoutState {
   isConsoleVisible: boolean
   /** True when the server poll timed out without becoming reachable */
   previewServerTimedOut: boolean
+  /**
+   * Reference count of open overlays that must cover the native preview webview.
+   * On Windows/Linux the wry child webview is an OS child window that sits ABOVE
+   * the DOM — CSS z-index can't layer HTML overlays (menus, dropdowns, dialogs)
+   * above it. When overlayCount > 0, TauriWebview moves itself off-screen so the
+   * HTML overlay is visible and clickable. Use pushOverlay/popOverlay around the
+   * lifecycle of each HTML overlay that extends into the preview area.
+   */
+  overlayCount: number
   /** Current phase of the post-scaffold pipeline */
   scaffoldPhase: ScaffoldPhase
   scaffoldMessage: string
@@ -65,46 +91,34 @@ interface LayoutActions {
   toggleProjectsSidebar: () => void
   setShowTemplateSelector: (show: boolean) => void
   setPreviewServerLoading: (loading: boolean) => void
-  /**
-   * Register a running dev server in its slot.
-   *
-   * `mode` is only used as a hint when the caller already knows the type:
-   *  - 'server' / 'static' → stores in `frontendServer` (or sets static preview via setStaticPreview)
-   *  - 'api' → stores in `backendServer`
-   *
-   * Preview routing priority: if frontend exists, show PreviewView (iframe).
-   * Only fall back to HttpClientPanel (api mode) when no frontend is running.
-   * User can toggle via `togglePreviewMode` when both slots are populated.
-   */
-  setPreviewServer: (url: string, pid: number, mode?: PreviewMode) => void
+  /** Initialize the dev server record when a process starts. */
+  initDevServer: (info: { pid: number; projectKind: ProjectKind }) => void
+  /** Update the frontend URL (iframe target). Marks devServer status=running. */
+  setDevServerFrontendUrl: (url: string) => void
+  /** Update the backend URL (HTTP Client base). Marks devServer status=running. */
+  setDevServerBackendUrl: (url: string) => void
   setPreviewServerTimedOut: (timedOut: boolean) => void
   setStaticPreview: (html: string, sourcePath: string) => void
-  /**
-   * Clear one or both dev server slots.
-   *  - undefined / 'all': clears both and resets preview
-   *  - 'frontend': clears frontend slot only; preview falls back to backend if present
-   *  - 'backend': clears backend slot only
-   */
-  clearPreviewServer: (which?: 'frontend' | 'backend' | 'all') => void
+  /** Tear down the dev server record. Keeps logs so crash messages stay visible. */
+  clearDevServer: () => void
   reloadPreview: () => void
   addDevServerLog: (text: string, level?: DevLogLevel) => void
+  addDevServerLogs: (entries: Array<{ text: string; level: DevLogLevel }>) => void
   clearDevServerLogs: () => void
+  /** Increment the overlay reference count. Pair with popOverlay in a cleanup. */
+  pushOverlay: () => void
+  /** Decrement the overlay reference count. Must match a prior pushOverlay. */
+  popOverlay: () => void
   toggleConsole: () => void
-  togglePreviewMode: () => void
+  /** Toggle the HTTP Client drawer in fullstack projects. */
+  toggleHttpDrawer: () => void
   goBack: () => void
   setScaffoldPhase: (phase: ScaffoldPhase, message?: string) => void
 }
 
-/** Derive preview mode default from which server slots are active. */
-function defaultModeFor(
-  frontend: ServerSlot | null,
-  backend: ServerSlot | null,
-  staticContent: string | null,
-): PreviewMode {
-  if (staticContent) return 'static'
-  if (frontend) return 'server'
-  if (backend) return 'api'
-  return 'server'
+/** Derive preview mode from project kind. */
+function previewModeFor(kind: ProjectKind): PreviewMode {
+  return kind === 'backend' ? 'api' : 'server'
 }
 
 export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) => ({
@@ -115,15 +129,16 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   projectsSidebarBeforePreview: null,
   showTemplateSelector: false,
   isPreviewServerLoading: false,
-  frontendServer: null,
-  backendServer: null,
+  devServer: null,
   previewMode: 'server',
+  isHttpDrawerOpen: false,
   previewHtmlContent: null,
   previewSourcePath: null,
   previewReloadKey: 0,
   previewServerTimedOut: false,
   devServerLogs: [],
   isConsoleVisible: false,
+  overlayCount: 0,
   scaffoldPhase: null,
   scaffoldMessage: '',
 
@@ -178,36 +193,43 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set({ isPreviewServerLoading: loading })
   },
 
-  setPreviewServer: (url: string, pid: number, mode?: PreviewMode) => {
+  initDevServer: ({ pid, projectKind }) => {
+    set({
+      devServer: {
+        pid,
+        projectKind,
+        frontendUrl: null,
+        backendUrl: null,
+        status: 'starting',
+      },
+      previewMode: previewModeFor(projectKind),
+      isPreviewServerLoading: true,
+      previewServerTimedOut: false,
+      // Backend-only projects have no iframe — don't show a stale static preview.
+      // Frontend/fullstack: clear so the iframe starts clean for the new server.
+      previewHtmlContent: null,
+      previewSourcePath: null,
+    })
+  },
+
+  setDevServerFrontendUrl: (url: string) => {
     set(state => {
-      const slot: ServerSlot = { url, pid }
-      // Route by mode hint: 'api' → backend, anything else → frontend.
-      // Both slots can coexist: starting a frontend does NOT wipe the backend.
-      const frontendServer = mode === 'api' ? state.frontendServer : slot
-      const backendServer = mode === 'api' ? slot : state.backendServer
-
-      // Frontend takes priority: when a frontend just arrived, force 'server'
-      // mode regardless of prior state (this covers the fullstack case where
-      // backend boots first and sets mode='api', then frontend arrives and
-      // must preempt). When only backend arrives with a frontend already
-      // present, preserve the current mode — the user is likely viewing the
-      // frontend and we don't want to yank them away.
-      let nextMode: PreviewMode
-      if (mode === 'api') {
-        nextMode = frontendServer ? state.previewMode : 'api'
-      } else {
-        // frontend arrival (explicit 'server' or no hint)
-        nextMode = 'server'
-      }
-
+      if (!state.devServer) return {}
       return {
-        frontendServer,
-        backendServer,
+        devServer: { ...state.devServer, frontendUrl: url, status: 'running' },
         isPreviewServerLoading: false,
         previewServerTimedOut: false,
-        previewMode: nextMode,
-        previewHtmlContent: null,
-        previewSourcePath: null,
+      }
+    })
+  },
+
+  setDevServerBackendUrl: (url: string) => {
+    set(state => {
+      if (!state.devServer) return {}
+      return {
+        devServer: { ...state.devServer, backendUrl: url, status: 'running' },
+        isPreviewServerLoading: false,
+        previewServerTimedOut: false,
       }
     })
   },
@@ -217,35 +239,25 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   },
 
   setStaticPreview: (html: string, sourcePath: string) => {
-    // Functional set to read state atomically (avoids stale closure on previousViewMode)
     set(state => ({
       previewHtmlContent: html,
       previewSourcePath: sourcePath,
       previewMode: 'static' as const,
-      frontendServer: null,
-      backendServer: null,
+      devServer: null,
       viewMode: 'preview' as const,
       previousViewMode: state.viewMode !== 'preview' ? state.viewMode : state.previousViewMode,
     }))
   },
 
-  clearPreviewServer: (which: 'frontend' | 'backend' | 'all' = 'all') => {
-    set(state => {
-      const frontendServer = which === 'frontend' || which === 'all' ? null : state.frontendServer
-      const backendServer = which === 'backend' || which === 'all' ? null : state.backendServer
-
-      // Resets preview UI state but preserves logs so crash messages stay visible.
-      // Killing the process is devServerManager's job.
-      return {
-        frontendServer,
-        backendServer,
-        isPreviewServerLoading: false,
-        previewServerTimedOut: false,
-        previewMode: defaultModeFor(frontendServer, backendServer, null),
-        previewHtmlContent: which === 'all' ? null : state.previewHtmlContent,
-        previewSourcePath: which === 'all' ? null : state.previewSourcePath,
-        previewReloadKey: which === 'all' ? 0 : state.previewReloadKey,
-      }
+  clearDevServer: () => {
+    set({
+      devServer: null,
+      isPreviewServerLoading: false,
+      previewServerTimedOut: false,
+      // Keep logs and static preview; clearing the live server shouldn't
+      // wipe other preview state.
+      previewMode: 'server',
+      isHttpDrawerOpen: false,
     })
   },
 
@@ -253,18 +265,8 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set(state => ({ previewReloadKey: state.previewReloadKey + 1 }))
   },
 
-  togglePreviewMode: () => {
-    set(state => {
-      // Cycle server ↔ api; 'static' collapses back to whichever slot is populated.
-      if (state.previewMode === 'server') {
-        return { previewMode: state.backendServer ? 'api' : 'server' }
-      }
-      if (state.previewMode === 'api') {
-        return { previewMode: state.frontendServer ? 'server' : 'api' }
-      }
-      // static — fall back to default based on active slots
-      return { previewMode: defaultModeFor(state.frontendServer, state.backendServer, null) }
-    })
+  toggleHttpDrawer: () => {
+    set(state => ({ isHttpDrawerOpen: !state.isHttpDrawerOpen }))
   },
 
   addDevServerLog: (text: string, level: DevLogLevel = 'info') => {
@@ -272,17 +274,50 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
       const MAX_LOG_ENTRIES = 500
       const logs = state.devServerLogs
       const entry = { id: Date.now() + Math.random(), level, text, timestamp: Date.now() }
-      // Trim oldest entries when exceeding limit to prevent memory growth
       const trimmed = logs.length >= MAX_LOG_ENTRIES ? logs.slice(-MAX_LOG_ENTRIES + 1) : logs
       return { devServerLogs: [...trimmed, entry] }
     })
-    // Notify any waiters (e.g., read_dev_server_logs tool waiting for
-    // runtime errors to arrive from the preview WebView IPC pipeline).
+    window.dispatchEvent(new CustomEvent(DEV_LOG_EVENT, { detail: { level } }))
+  },
+
+  addDevServerLogs: (entries) => {
+    if (entries.length === 0) return
+    // Single set() for N entries — critical on Windows, where WebView2
+    // re-renders the PreviewView (subscribed to devServerLogs) on every
+    // change, and that render is O(n) from filter() scans + non-virtualized
+    // map(). Per-line additions would churn the UI even with IPC batching.
+    let hasError = false
+    let hasWarn = false
+    set(state => {
+      const MAX_LOG_ENTRIES = 500
+      const now = Date.now()
+      const created = entries.map((e, i) => {
+        if (e.level === 'error') hasError = true
+        else if (e.level === 'warn') hasWarn = true
+        return { id: now + i + Math.random(), level: e.level, text: e.text, timestamp: now }
+      })
+      const logs = state.devServerLogs
+      const combined = logs.concat(created)
+      const trimmed = combined.length > MAX_LOG_ENTRIES
+        ? combined.slice(combined.length - MAX_LOG_ENTRIES)
+        : combined
+      return { devServerLogs: trimmed }
+    })
+    const level: DevLogLevel = hasError ? 'error' : hasWarn ? 'warn' : 'info'
     window.dispatchEvent(new CustomEvent(DEV_LOG_EVENT, { detail: { level } }))
   },
 
   clearDevServerLogs: () => {
     set({ devServerLogs: [] })
+  },
+
+  pushOverlay: () => {
+    set(state => ({ overlayCount: state.overlayCount + 1 }))
+  },
+
+  popOverlay: () => {
+    // Floor at zero in case of mismatched pairs from component crashes.
+    set(state => ({ overlayCount: Math.max(0, state.overlayCount - 1) }))
   },
 
   toggleConsole: () => {
@@ -306,7 +341,6 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
       scaffoldPhase: phase,
       scaffoldMessage: message || '',
     })
-    // Auto-clear "ready" after 3 seconds
     if (phase === 'ready') {
       setTimeout(() => {
         if (get().scaffoldPhase === 'ready') {
@@ -317,31 +351,48 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   },
 }))
 
-// ── Legacy selectors ──────────────────────────────────────────────────────
-// Computed views of the dual-slot state for components that still use the
-// pre-refactor single-server model. Prefer subscribing directly to
-// `frontendServer` / `backendServer` / `previewMode` in new code.
+// ── Selectors ─────────────────────────────────────────────────────────────
 
 /**
  * Primary preview URL. Resolves based on current `previewMode`:
- *  - 'server' → frontend url
- *  - 'api' → backend url
+ *  - 'server' → frontendUrl (iframe target)
+ *  - 'api'    → backendUrl (HTTP Client base)
  *  - 'static' → null (host uses previewHtmlContent instead)
  */
 export function selectPreviewUrl(state: LayoutState): string | null {
-  if (state.previewMode === 'server') return state.frontendServer?.url ?? null
-  if (state.previewMode === 'api') return state.backendServer?.url ?? null
+  if (state.previewMode === 'server') return state.devServer?.frontendUrl ?? null
+  if (state.previewMode === 'api') return state.devServer?.backendUrl ?? null
   return null
 }
 
-/** PID corresponding to `selectPreviewUrl`. */
-export function selectPreviewServerPid(state: LayoutState): number | null {
-  if (state.previewMode === 'server') return state.frontendServer?.pid ?? null
-  if (state.previewMode === 'api') return state.backendServer?.pid ?? null
-  return null
+/** Backend URL regardless of active preview mode (for HTTP Client baseUrl). */
+export function selectBackendUrl(state: LayoutState): string | null {
+  // Prefer explicit backendUrl; fall back to frontendUrl for monolithic
+  // fullstack (Next.js API routes) where the one URL serves both.
+  return state.devServer?.backendUrl ?? state.devServer?.frontendUrl ?? null
 }
 
-/** True when ANY dev server (frontend or backend) is registered. */
+/** Frontend URL regardless of preview mode. */
+export function selectFrontendUrl(state: LayoutState): string | null {
+  return state.devServer?.frontendUrl ?? null
+}
+
+/** Project kind from the active dev server, or null when no server is running. */
+export function selectProjectKind(state: LayoutState): ProjectKind | null {
+  return state.devServer?.projectKind ?? null
+}
+
+/** PID of the dev server process, or null. */
+export function selectDevServerPid(state: LayoutState): number | null {
+  return state.devServer?.pid ?? null
+}
+
+/** True when the dev server is registered (starting or running). */
 export function selectIsPreviewServerRunning(state: LayoutState): boolean {
-  return !!(state.frontendServer || state.backendServer)
+  return !!state.devServer
+}
+
+/** True when the fullstack drawer should be *available* (project has a backend URL). */
+export function selectHasBackendUrl(state: LayoutState): boolean {
+  return !!state.devServer?.backendUrl
 }

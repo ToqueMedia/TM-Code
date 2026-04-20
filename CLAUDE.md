@@ -90,10 +90,18 @@ Tauri manages shared state via `app.manage()`:
 - Chat sessions: `~/.toquemedia-studio/sessions/{project-hash}/session_*.json`
 - Project ID file: `.toquemedia-id` in project root
 
-### Dev Server Ports
-- Frontend servers (Vite, Next, Nuxt, etc.): port `7773`
-- Backend servers (Express, Fastify, NestJS, etc.): port `7777`
-- Always use `127.0.0.1` (not `localhost`) due to WKWebView IPv6 issues
+### Dev Server Architecture
+- **Single-slot model**: one dev server per project. `layoutStore.devServer` holds `{ pid, projectKind, frontendUrl, backendUrl, status }`. Managed by `devServerManager`.
+- **Project kinds**: `frontend` (UI only → iframe preview), `backend` (API only → HTTP Client panel fills main area), `fullstack` (both — iframe with HTTP Client in a resizable bottom drawer, toggle Cmd/Ctrl+Shift+H).
+- **Reserved ports**: `7773` (frontend/iframe), `7777` (backend/HTTP Client). TM Code tree-kills any process holding these before launching. Also exposes `TM_FRONTEND_PORT` / `TM_BACKEND_PORT` env vars for scripts that want to read them explicitly.
+- **Fullstack wrapper handling**: if the top-level command is a wrapper (`concurrently`, `npm-run-all`, `turbo`, `pnpm -r`, workspaces fanout, or an `npm run <script>` whose script resolves to one via package.json inspection), TM Code skips injecting `PORT` to avoid env inheritance into both children. User scripts must honor `process.env.PORT` (or `TM_BACKEND_PORT`). Otherwise `--port 7773 --host 0.0.0.0` is injected.
+- **Platform-aware host**: macOS uses `localhost` (WKWebView ATS exemption), Windows+Linux use `127.0.0.1` (disambiguates Node 18+ IPv6 resolution). `--host 0.0.0.0` is injected so servers bind to both stacks.
+- **URL classification (fullstack)**: port is AUTHORITATIVE — `:7773` → `frontendUrl`, `:7777` → `backendUrl`, any other port is ignored. For monolithic fullstack (Next.js on 7773 serving HTML + API routes), the 7773 URL is also mirrored into `backendUrl` as a best-guess HTTP Client base. Mirrors are transient: a subsequent real URL on 7777 overwrites them. For `frontend` / `backend` project kinds, the first detected URL wins regardless of port.
+- **Canonical fullstack scaffold** (agent enforces on generated + legacy projects):
+  - Root `"dev"` uses `concurrently -k -n server,client -c blue,magenta "npm run dev:server" "npm run dev:client"` — NEVER `npm run dev --workspaces` (runs sequentially, blocks on the first child).
+  - Client: `"dev": "vite --port 7773 --host 0.0.0.0"` (explicit — wrappers swallow TM Code's CLI injection).
+  - Server: binds with `app.listen(Number(process.env.PORT) || 7777, '0.0.0.0', ...)` and sets CORS for `http://localhost:7773` in dev.
+  - `concurrently` ^9.x in root devDependencies.
 
 ## Tech Stack
 

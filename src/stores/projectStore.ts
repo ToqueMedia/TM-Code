@@ -106,7 +106,7 @@ function tearDownProject() {
   // Stop dev server and clear preview state
   devServerManager.stop().catch(() => {});
   const layout = useLayoutStore.getState();
-  layout.clearPreviewServer();
+  layout.clearDevServer();
   if (layout.viewMode === 'preview' || layout.viewMode === 'generating') {
     layout.setViewMode('chat');
   }
@@ -169,7 +169,7 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'Failed to stop dev server during project switch:', e);
           }
           const layout = useLayoutStore.getState();
-          layout.clearPreviewServer();
+          layout.clearDevServer();
           layout.clearDevServerLogs();
           layout.setScaffoldPhase(null);
           // Reset HTTP Client for the new project context
@@ -345,7 +345,7 @@ export const useProjectStore = create<ProjectStore>()(
           } else if (devServerManager.getProjectPath() === projectPath) {
             // Stop the dev server only if it belongs to the project being deleted
             await devServerManager.stop().catch(() => {});
-            useLayoutStore.getState().clearPreviewServer();
+            useLayoutStore.getState().clearDevServer();
           }
 
           // Remove from recentProjects IMMEDIATELY so App.tsx auto-open

@@ -218,6 +218,11 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
 
       setAgentLanguage: (lang: AgentLanguage) => {
         set(() => ({ agentLanguage: lang }))
+        // Invalidate cached system prompts so the next agent turn picks up
+        // the new language immediately (without waiting for the 30s TTL).
+        void import('../services/agent/contextBuilder').then(mod => {
+          mod.default.getInstance().invalidatePromptCache()
+        }).catch(() => { /* non-critical */ })
       },
 
       setShortcut: (id: ShortcutId, binding: KeyBinding) => {

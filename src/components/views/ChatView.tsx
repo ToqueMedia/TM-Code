@@ -1,7 +1,7 @@
 import { memo, useRef, useEffect, useState, useCallback } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiClipboard } from 'react-icons/fi'
+import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle } from 'react-icons/fi'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -40,7 +40,6 @@ function ChatView() {
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
   const setThinkingEnabled = useSettingsStore(s => s.setThinkingEnabled)
-  const [copied, setCopied] = useState(false)
   const thinkingSupported = billingPlan !== 'explorer'
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
@@ -50,18 +49,7 @@ function ChatView() {
   const messages = session?.messages || []
   const projectPath = currentProject?.path || ''
 
-  const handleCopyMessages = useCallback(() => {
-    const assistantMessages = messages
-      .filter(m => m.role === 'assistant' && m.content?.trim())
-      .map(m => m.content.trim())
-      .join('\n\n---\n\n')
-    if (!assistantMessages) return
-    navigator.clipboard.writeText(assistantMessages)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }, [messages])
-
-  // use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
+// use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
   // streaming content, expanding diffs, and dynamic height changes.
   const { scrollRef, contentRef, scrollToBottom, isAtBottom } = useStickToBottom({
     resize: 'smooth',
@@ -144,24 +132,6 @@ function ChatView() {
             activeSessionId={activeSessionId}
             isStreaming={isStreaming}
           />
-          {/* Copy messages button */}
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            justifyContent="center"
-            w="28px"
-            h="28px"
-            borderRadius="6px"
-            color={copied ? tokens.colors.accent.green : tokens.colors.text.secondary}
-            cursor="pointer"
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: tokens.colors.bg.hoverSubtle, color: copied ? tokens.colors.accent.green : tokens.colors.text.primary }}
-            onClick={handleCopyMessages}
-            title={copied ? t('chat.copied') : t('chat.copyMessages')}
-          >
-            {copied ? <FiCheck size={14} /> : <FiClipboard size={14} />}
-          </Box>
         </Flex>
 
         {/* Credits + Isolation + MCP indicators */}

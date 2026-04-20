@@ -922,14 +922,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       if (!session) return
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
-      if (!msg) return
+      if (!msg || !msg.toolCalls) return
 
-      const tc = msg.toolCalls?.find(t => t.id === toolId)
-      if (tc) {
-        // Mutate in place (same pattern as streaming text deltas for performance)
-        tc.progressText = progressText
-        session.updatedAt = Date.now()
-      }
+      const idx = msg.toolCalls.findIndex(t => t.id === toolId)
+      if (idx < 0) return
+
+      // Replace the tool call with a new reference so memoized consumers
+      // (TerminalToolCall uses default memo) detect the change. The parent
+      // message keeps the same ref — streamingVersion drives parent rerender.
+      const newToolCalls = msg.toolCalls.slice()
+      newToolCalls[idx] = { ...newToolCalls[idx], progressText }
+      msg.toolCalls = newToolCalls
+      session.updatedAt = Date.now()
 
       set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },

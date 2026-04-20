@@ -3,7 +3,7 @@ import { t } from '@/i18n'
 import { Flex, Box, Text, Input } from '@chakra-ui/react'
 import { FiSend, FiClock, FiChevronDown, FiTrash2, FiEye, FiEyeOff, FiAlertCircle, FiCheck, FiPlus, FiX, FiCopy } from 'react-icons/fi'
 import { useHttpClientStore, type HttpMethod, type AuthType, type BodyType, type RequestTab } from '../../stores/httpClientStore'
-import { useLayoutStore } from '../../stores/layoutStore'
+import { useLayoutStore, selectBackendUrl } from '../../stores/layoutStore'
 import KeyValueEditor from './KeyValueEditor'
 import JsonBodyEditor from './JsonBodyEditor'
 import ResponseViewer from './ResponseViewer'
@@ -75,9 +75,9 @@ function HttpClientPanel() {
   const isHistoryOpen = useHttpClientStore(s => s.isHistoryOpen)
   const tabs = useHttpClientStore(s => s.tabs)
   const activeTabId = useHttpClientStore(s => s.activeTabId)
-  // HTTP client is backend-oriented — prefer backend URL directly rather than
-  // selectPreviewUrl (which follows previewMode and would return frontend in 'server' mode).
-  const previewUrl = useLayoutStore(s => s.backendServer?.url ?? s.frontendServer?.url ?? null)
+  // HTTP Client base URL: prefer explicit backendUrl; fall back to frontendUrl
+  // for monolithic fullstack (Next.js API routes) where one URL serves both.
+  const previewUrl = useLayoutStore(selectBackendUrl)
 
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
