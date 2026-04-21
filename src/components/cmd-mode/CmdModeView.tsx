@@ -10,10 +10,12 @@ import { TerminalStatusLine } from './TerminalStatusLine'
 import { TerminalMessageRenderer } from './TerminalMessageRenderer'
 import { TerminalGreeting } from './TerminalGreeting'
 import { BillingOverageBanner } from './BillingOverageBanner'
+import { CanvaConnectBanner } from './CanvaConnectBanner'
 import { ErrorBoundary } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
 import { useCmdScrollFollow } from '../../hooks/useCmdScrollFollow'
+import { useAttachments } from '../../hooks/useAttachments'
 import { tokens } from '@/theme/tokens'
 
 interface CmdModeViewProps {
@@ -77,6 +79,16 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
     streamingVersion,
     messageCount: messages.length,
   })
+
+  // Window-wide drop support — any area of CMD mode (header, banners, scroll
+  // area) becomes a drop target. The visual overlay still lives in the prompt
+  // input; both subscribe to the same cmdAttachmentStore so state stays in sync.
+  const {
+    handleDragOver: onViewDragOver,
+    handleDragEnter: onViewDragEnter,
+    handleDragLeave: onViewDragLeave,
+    handleDrop: onViewDrop,
+  } = useAttachments({ localState: true })
 
   // Focus input only when click lands on the container itself (not on code/copy/mention etc).
   const handleOutputClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -174,9 +186,14 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
       position="relative"
       overflow="hidden"
       data-cmd-mode-root
+      onDragOver={onViewDragOver}
+      onDragEnter={onViewDragEnter}
+      onDragLeave={onViewDragLeave}
+      onDrop={onViewDrop}
     >
       <TerminalTitleBar projectPath={projectPath} onBack={onBack} />
       <BillingOverageBanner />
+      <CanvaConnectBanner />
 
       {/* Output area */}
       <Box

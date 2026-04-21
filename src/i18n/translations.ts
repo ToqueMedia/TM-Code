@@ -405,6 +405,7 @@ const en = {
   'cmdMode.attachTooltip': 'Attach files or images',
   'cmdMode.dropToAttach': 'Drop to attach',
   'cmdMode.imageNotSupported': 'Images require a paid plan.',
+  'cmdMode.imageNotSupportedBlocked': 'Images require a paid plan — remove the image(s) or upgrade before sending.',
   'cmdMode.upgradeToPro': 'Upgrade to Pro',
   'cmdMode.pastedImage': 'pasted image',
   'cmdMode.removeAttachment': 'Remove',
@@ -669,6 +670,8 @@ const en = {
   'welcome.start': 'Start',
   'welcome.recent': 'Recent',
   'welcome.noRecent': 'No recent projects',
+  'welcome.clearRecent': 'Clear',
+  'welcome.clearRecentTitle': 'Clear recent projects list (files are not deleted)',
   'welcome.terminal': 'Terminal',
   'welcome.ide': 'IDE',
   'welcome.openInIde': 'Open in full IDE',
@@ -699,6 +702,31 @@ const en = {
   'clone.failed': 'Clone failed. Check the URL and try again.',
   'clone.buttonCloning': 'Cloning...',
   'clone.buttonClone': 'Clone',
+
+  // ── CMD Mode — Canva MCP integration ───────────────
+  'cmd.canva.alreadyConnected': 'Canva MCP is already connected. Design tools available.',
+  'cmd.canva.homeFailed': 'Could not resolve home directory. Canva MCP not configured.',
+  'cmd.canva.writeFailed': 'Failed to write MCP config: {msg}',
+  'cmd.canva.connecting': 'Connecting to Canva MCP — you will be redirected to canva.com to authenticate on the first tool call.',
+  'cmd.canva.connected': 'Canva MCP connected ({n} tools available). Designs, presentations and exports ready to use.',
+  'cmd.canva.registered': 'Canva MCP registered. The first Canva tool call will open canva.com in your browser to complete authentication.',
+  'cmd.canva.banner.text': 'Canva MCP (optional, free tier) — {cmd} for branded decks; Slidev/markdown is already available for technical decks.',
+  'cmd.canva.banner.dismiss': 'Dismiss (you can re-connect anytime with /canva-connect)',
+
+  // ── CMD Mode — generic MCP install / browse ────────
+  'cmd.mcp.usageInstall': 'Usage: /mcp-install <name>. Run /mcp-browse to see available integrations.',
+  'cmd.mcp.unknown': 'Unknown MCP integration "{name}". Run /mcp-browse to see the registry.',
+  'cmd.mcp.alreadyInstalled': '{label} MCP is already configured.',
+  'cmd.mcp.installing': 'Installing {label} MCP…',
+  'cmd.mcp.installed': '{label} MCP installed ({n} tools). {note}',
+  'cmd.mcp.installedNoTools': '{label} MCP registered. {note}',
+  'cmd.mcp.installFailed': 'Failed to install {label} MCP: {msg}',
+  'cmd.mcp.browseHeader': 'Available MCP integrations (run /mcp-install <name> to connect):',
+  'cmd.mcp.browseEntry': '  {name} — {label} [{category}] — {description}',
+
+  // ── CMD Mode — prompt history ──────────────────────
+  'cmd.history.cleared': 'Prompt history cleared for this project.',
+  'cmd.history.clearFailed': 'Failed to clear prompt history: {msg}',
 } as const
 
 const pt: Record<keyof typeof en, string> = {
@@ -1101,6 +1129,7 @@ const pt: Record<keyof typeof en, string> = {
   'cmdMode.attachTooltip': 'Anexar ficheiros ou imagens',
   'cmdMode.dropToAttach': 'Largar para anexar',
   'cmdMode.imageNotSupported': 'Imagens requerem um plano pago.',
+  'cmdMode.imageNotSupportedBlocked': 'Imagens requerem um plano pago — remove as imagens ou faz upgrade antes de enviar.',
   'cmdMode.upgradeToPro': 'Upgrade para Pro',
   'cmdMode.pastedImage': 'imagem colada',
   'cmdMode.removeAttachment': 'Remover',
@@ -1357,6 +1386,8 @@ const pt: Record<keyof typeof en, string> = {
   'welcome.start': 'Iniciar',
   'welcome.recent': 'Recentes',
   'welcome.noRecent': 'Sem projetos recentes',
+  'welcome.clearRecent': 'Limpar',
+  'welcome.clearRecentTitle': 'Limpar lista de projetos recentes (os ficheiros não são apagados)',
   'welcome.terminal': 'Terminal',
   'welcome.ide': 'IDE',
   'welcome.openInIde': 'Abrir no IDE completo',
@@ -1387,6 +1418,31 @@ const pt: Record<keyof typeof en, string> = {
   'clone.failed': 'Falha ao clonar. Verifique o URL e tente novamente.',
   'clone.buttonCloning': 'A clonar...',
   'clone.buttonClone': 'Clonar',
+
+  // ── CMD Mode — Canva MCP integration ───────────────
+  'cmd.canva.alreadyConnected': 'Canva MCP já está ligado. Design tools disponíveis.',
+  'cmd.canva.homeFailed': 'Não foi possível resolver o diretório home. Canva MCP não foi configurado.',
+  'cmd.canva.writeFailed': 'Falha ao escrever a configuração MCP: {msg}',
+  'cmd.canva.connecting': 'A ligar ao Canva MCP — vais ser redirecionado para o canva.com para autenticar na primeira chamada de ferramenta.',
+  'cmd.canva.connected': 'Canva MCP ligado ({n} tools disponíveis). Designs, apresentações e exports ao teu dispor.',
+  'cmd.canva.registered': 'Canva MCP registado. A primeira chamada de ferramenta Canva vai abrir canva.com no browser para completar a autenticação.',
+  'cmd.canva.banner.text': 'Canva MCP (opcional, free tier) — {cmd} para decks branded; Slidev/markdown já está disponível para decks técnicos.',
+  'cmd.canva.banner.dismiss': 'Dispensar (podes voltar a ligar com /canva-connect)',
+
+  // ── CMD Mode — generic MCP install / browse ────────
+  'cmd.mcp.usageInstall': 'Uso: /mcp-install <nome>. Corre /mcp-browse para ver as integrações disponíveis.',
+  'cmd.mcp.unknown': 'Integração MCP desconhecida "{name}". Corre /mcp-browse para ver o registo.',
+  'cmd.mcp.alreadyInstalled': '{label} MCP já está configurado.',
+  'cmd.mcp.installing': 'A instalar {label} MCP…',
+  'cmd.mcp.installed': '{label} MCP instalado ({n} tools). {note}',
+  'cmd.mcp.installedNoTools': '{label} MCP registado. {note}',
+  'cmd.mcp.installFailed': 'Falha ao instalar {label} MCP: {msg}',
+  'cmd.mcp.browseHeader': 'Integrações MCP disponíveis (corre /mcp-install <nome> para ligar):',
+  'cmd.mcp.browseEntry': '  {name} — {label} [{category}] — {description}',
+
+  // ── CMD Mode — prompt history ──────────────────────
+  'cmd.history.cleared': 'Histórico de prompts limpo para este projeto.',
+  'cmd.history.clearFailed': 'Falha ao limpar histórico de prompts: {msg}',
 }
 
 export type TranslationKey = keyof typeof en

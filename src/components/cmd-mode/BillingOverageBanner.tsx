@@ -16,6 +16,7 @@ export const BillingOverageBanner = memo(function BillingOverageBanner() {
       bg="rgba(247,127,0,0.06)"
       borderBottom="1px solid rgba(247,127,0,0.15)"
       flexShrink={0}
+      data-tauri-drag-region
     >
       <Text fontSize="11px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} fontWeight="700">!</Text>
       <Text fontSize="11px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} opacity={0.9}>

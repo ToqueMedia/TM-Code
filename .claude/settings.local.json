@@ -37,7 +37,15 @@
       "Read(//c/Users/ithustle/dev/APPIA/server/src//**)",
       "Read(//c/Users/ithustle/dev/APPIA/server/src/**)",
       "Bash(npm install *)",
-      "Bash(grep -E \"[0-9]{4,}|tokens.zIndex\")"
+      "Bash(grep -E \"[0-9]{4,}|tokens.zIndex\")",
+      "WebSearch",
+      "Bash(gh api *)",
+      "Read(//tmp/**)",
+      "Bash(npx tsx *)",
+      "WebFetch(domain:developers.gamma.app)",
+      "Bash(git stash *)",
+      "Bash(yarn add *)",
+      "Bash(node --experimental-vm-modules -e ' *)"
     ]
   }
 }

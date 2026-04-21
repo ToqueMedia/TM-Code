@@ -742,6 +742,7 @@ pub fn run() {
             validate_project_location,
             check_project_status,
             remove_from_recent_projects,
+            clear_recent_projects,
             delete_project,
             build_file_tree,
             create_file_or_directory,

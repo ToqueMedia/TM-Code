@@ -1768,6 +1768,34 @@ class ToolExecutor {
       }
     })
 
+    // === read_skill ===
+    this.tools.set('read_skill', {
+      definition: {
+        name: 'read_skill',
+        description: 'Load the full content of a skill (process, examples, install steps, verification) by its name. The system prompt lists each available skill with a one-line description; call this tool ONCE per skill when you decide it is relevant to the current task. Content stays in conversation history afterward — no need to re-read.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Skill name as listed in the "Skills available" section of the system prompt (e.g., "pdf-document", "frontend-design", "slidev-presentation").' }
+          },
+          required: ['name']
+        },
+        concurrencySafe: true,
+      },
+      execute: async (input) => {
+        const name = (input.name as string)?.trim()
+        if (!name) return 'Error: read_skill requires a non-empty "name" argument.'
+        const SkillSvc = (await import('./skillService')).default
+        const svc = SkillSvc.getInstance()
+        const skill = svc.getCachedSkillContent(name)
+        if (!skill) {
+          const available = svc.getCachedSkillNames()
+          return `Error: skill "${name}" is not loaded for the current context. Available skills: ${available.join(', ') || '(none — check the "Skills available" section of the system prompt)'}.`
+        }
+        return svc.formatSkillForReading(skill)
+      }
+    })
+
     // === read_large_result ===
     this.tools.set('read_large_result', {
       definition: {
@@ -1993,16 +2021,43 @@ Project root: ${projectRoot}`
 
         updateProgress('Starting research...')
 
+        // Forward every sub-agent event to the main chatStore so the user sees
+        // the FULL activity in real-time. Visibility logic extracted to a pure
+        // helper — see src/services/agent/subAgentVisibility.ts.
+        const chatStore = useChatStore.getState()
+        const { useAgentStore } = await import('../../stores/agentStore')
+        const agentStore = useAgentStore.getState()
+        const { createSubAgentVisibility } = await import('./subAgentVisibility')
+
+        const visibility = createSubAgentVisibility({
+          parentToolCallId: toolCallId,
+          reasoningLabel: 'research sub-agent',
+          hooks: {
+            appendTextDelta: chatStore.appendTextDelta,
+            appendReasoningDelta: chatStore.appendReasoningDelta,
+            addPendingToolCall: chatStore.addPendingToolCall,
+            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
+            updateToolCallWithResult: chatStore.updateToolCallWithResult,
+            setStatus: (s) => agentStore.setStatus(s),
+          },
+        })
+
         await subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => { result += delta },
-          onReasoningDelta: () => {
+          onTextDelta: (delta) => {
+            result += delta
+            visibility.callbacks.onTextDelta(delta)
+          },
+          onReasoningDelta: (delta) => {
+            visibility.callbacks.onReasoningDelta(delta)
             updateProgress('Thinking...')
           },
-          onToolCallPending: (_toolId, toolName) => {
+          onToolCallPending: (childId, toolName) => {
             toolsCalled++
+            visibility.callbacks.onToolCallPending(childId, toolName)
             updateProgress(`Using ${toolName}...`)
           },
-          onToolCallStart: (_toolId, toolName, args) => {
+          onToolCallStart: (childId, toolName, args) => {
+            visibility.callbacks.onToolCallStart(childId, toolName, args)
             const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.query as string)
               || (args.pattern as string)
@@ -2010,7 +2065,9 @@ Project root: ${projectRoot}`
               || ''
             updateProgress(`${toolName}: ${target}`)
           },
-          onToolResult: () => {},
+          onToolResult: (childId, toolName, res, isError) => {
+            visibility.callbacks.onToolResult(childId, toolName, res, isError)
+          },
           onTurnComplete: () => {},
           onDone: (finalText) => {
             if (finalText && !result) result = finalText
@@ -2018,6 +2075,7 @@ Project root: ${projectRoot}`
           },
           onError: (error) => {
             result = `Research error: ${error.message}`
+            visibility.cleanupOrphans(`aborted: research sub-agent failed — ${error.message}`)
             updateProgress('Error')
           },
           onUsageUpdate: (inputTokens, outputTokens) => {
@@ -2101,39 +2159,75 @@ Project root: ${projectRoot}`
         let tokens = 0
         let calls = 0
 
+        // Forward events to the main chatStore AND the bg store. The key
+        // difference from research/verify: we capture the active `streamingMessageId`
+        // at spawn time and pass it as `targetMessageId` to every chat-store write.
+        // This keeps the sub-agent's tool calls flowing into the SAME assistant
+        // message even after the main turn finalizes (at which point
+        // `streamingMessageId` becomes null). Without this, bg-agent activity
+        // past the main turn end would be invisible in the chat feed.
+        const parentToolCallId = input._toolCallId as string | undefined
+        const chatStore = useChatStore.getState()
+        const targetMessageId = chatStore.streamingMessageId ?? undefined
+        const { useAgentStore } = await import('../../stores/agentStore')
+        const agentStore = useAgentStore.getState()
+        const { createSubAgentVisibility } = await import('./subAgentVisibility')
+
+        const visibility = createSubAgentVisibility({
+          parentToolCallId,
+          reasoningLabel: 'background sub-agent',
+          targetMessageId,
+          hooks: {
+            appendTextDelta: chatStore.appendTextDelta,
+            appendReasoningDelta: chatStore.appendReasoningDelta,
+            addPendingToolCall: chatStore.addPendingToolCall,
+            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
+            updateToolCallWithResult: chatStore.updateToolCallWithResult,
+            setStatus: (s) => agentStore.setStatus(s),
+          },
+        })
+
         subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => { resultText += delta },
-          onReasoningDelta: () => {
+          onTextDelta: (delta) => {
+            resultText += delta
+            visibility.callbacks.onTextDelta(delta)
+          },
+          onReasoningDelta: (delta) => {
+            visibility.callbacks.onReasoningDelta(delta)
             bgStore.updateProgress(agentId, 'Thinking...', calls, tokens)
           },
-          onToolCallPending: (_id, toolName) => {
+          onToolCallPending: (childId, toolName) => {
             calls++
+            visibility.callbacks.onToolCallPending(childId, toolName)
             bgStore.updateProgress(agentId, `Using ${toolName}...`, calls, tokens)
           },
-          onToolCallStart: (_id, toolName, args) => {
+          onToolCallStart: (childId, toolName, args) => {
+            visibility.callbacks.onToolCallStart(childId, toolName, args)
             const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.query as string)
               || (args.pattern as string)
               || ''
             bgStore.updateProgress(agentId, `${toolName}: ${target}`, calls, tokens)
           },
-          onToolResult: () => {},
+          onToolResult: (childId, toolName, res, isError) => {
+            visibility.callbacks.onToolResult(childId, toolName, res, isError)
+          },
           onTurnComplete: () => {},
           onDone: (finalText) => {
             if (finalText && !resultText) resultText = finalText
             useBackgroundAgentStore.getState().completeAgent(agentId, resultText || 'No results found.')
           },
           onError: (error) => {
+            visibility.cleanupOrphans(`aborted: background sub-agent failed — ${error.message}`)
             useBackgroundAgentStore.getState().failAgent(agentId, error.message)
           },
           onUsageUpdate: (inp, out) => {
             tokens += inp + out
           },
         } satisfies AgentCallbacks).catch((err) => {
-          useBackgroundAgentStore.getState().failAgent(
-            agentId,
-            err instanceof Error ? err.message : String(err),
-          )
+          const msg = err instanceof Error ? err.message : String(err)
+          visibility.cleanupOrphans(`aborted: background sub-agent crashed — ${msg}`)
+          useBackgroundAgentStore.getState().failAgent(agentId, msg)
         })
 
         return `Background agent "${agentId}" started for: "${question}". Use check_background_agents to see results when ready.`
@@ -2350,21 +2444,51 @@ Verify this implementation. Run tests, type checks, and any other relevant valid
         // Uses a scoped context ID so concurrent background agents aren't affected.
         const readOnlyId = this.enterReadOnlyMode()
         try {
+        // Forward every sub-agent event to the main chatStore — see
+        // src/services/agent/subAgentVisibility.ts for the shared wiring.
+        const chatStore = useChatStore.getState()
+        const { useAgentStore } = await import('../../stores/agentStore')
+        const agentStore = useAgentStore.getState()
+        const { createSubAgentVisibility } = await import('./subAgentVisibility')
+
+        const visibility = createSubAgentVisibility({
+          parentToolCallId: toolCallId,
+          reasoningLabel: 'verify sub-agent',
+          hooks: {
+            appendTextDelta: chatStore.appendTextDelta,
+            appendReasoningDelta: chatStore.appendReasoningDelta,
+            addPendingToolCall: chatStore.addPendingToolCall,
+            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
+            updateToolCallWithResult: chatStore.updateToolCallWithResult,
+            setStatus: (s) => agentStore.setStatus(s),
+          },
+        })
+
         await subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => { result += delta },
-          onReasoningDelta: () => { updateProgress('Analyzing...') },
-          onToolCallPending: (_toolId, toolName) => {
+          onTextDelta: (delta) => {
+            result += delta
+            visibility.callbacks.onTextDelta(delta)
+          },
+          onReasoningDelta: (delta) => {
+            visibility.callbacks.onReasoningDelta(delta)
+            updateProgress('Analyzing...')
+          },
+          onToolCallPending: (childId, toolName) => {
             toolsCalled++
+            visibility.callbacks.onToolCallPending(childId, toolName)
             updateProgress(`${toolName}...`)
           },
-          onToolCallStart: (_toolId, toolName, args) => {
+          onToolCallStart: (childId, toolName, args) => {
+            visibility.callbacks.onToolCallStart(childId, toolName, args)
             const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.command as string)?.slice(0, 40)
               || (args.query as string)
               || ''
             updateProgress(`${toolName}: ${target}`)
           },
-          onToolResult: () => {},
+          onToolResult: (childId, toolName, res, isError) => {
+            visibility.callbacks.onToolResult(childId, toolName, res, isError)
+          },
           onTurnComplete: () => {},
           onDone: (finalText) => {
             if (finalText && !result) result = finalText
@@ -2372,6 +2496,7 @@ Verify this implementation. Run tests, type checks, and any other relevant valid
           },
           onError: (error) => {
             result = `Verification error: ${error.message}`
+            visibility.cleanupOrphans(`aborted: verify sub-agent failed — ${error.message}`)
             updateProgress('Error')
           },
           onUsageUpdate: (inputTokens, outputTokens) => {

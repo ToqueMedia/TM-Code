@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { IS_MAC } from '../utils/platform'
+import { resolveOllamaUrl, getAutoSelectedOllamaUrls } from '../utils/devUrls'
 
 export interface EditorIndentationSettings {
   tabSize: number
@@ -85,6 +86,12 @@ interface SettingsState {
    * Toggled by user in Settings or via the chat status bar indicator.
    */
   thinkingEnabled: boolean
+  /**
+   * Per-user dismissal of CMD-mode banners that advertise optional integrations.
+   * Currently used by the Canva MCP banner — once the user dismisses it, do not
+   * show again on subsequent sessions. They can still run /canva-connect anytime.
+   */
+  cmdBannerDismissed: { canva?: boolean }
 }
 
 interface SettingsActions {
@@ -104,6 +111,7 @@ interface SettingsActions {
   resetShortcuts: () => void
   completeOnboarding: () => void
   setThinkingEnabled: (enabled: boolean) => void
+  dismissCmdBanner: (key: 'canva') => void
 }
 
 const DEFAULTS: SettingsState = {
@@ -115,7 +123,7 @@ const DEFAULTS: SettingsState = {
   autocomplete: {
     enabled: true,
     model: 'qwen2.5-coder:7b',
-    ollamaUrl: import.meta.env.VITE_OLLAMA_URL || 'http://localhost:11434',
+    ollamaUrl: resolveOllamaUrl(),
   },
   formatOnSave: false,
   appLanguage: 'en',
@@ -127,6 +135,7 @@ const DEFAULTS: SettingsState = {
   // Thinking/reasoning ON by default for paid plans.
   // Free plan (DeepSeek) ignores thinking param entirely.
   thinkingEnabled: true,
+  cmdBannerDismissed: {},
 }
 
 export const useSettingsStore = create<SettingsState & SettingsActions>()(
@@ -250,19 +259,34 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
       setThinkingEnabled: (enabled: boolean) => {
         set(() => ({ thinkingEnabled: enabled }))
       },
+
+      dismissCmdBanner: (key: 'canva') => {
+        set(state => ({
+          cmdBannerDismissed: { ...state.cmdBannerDismissed, [key]: true },
+        }))
+      },
     }),
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands, thinkingEnabled: state.thinkingEnabled }
+        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands, thinkingEnabled: state.thinkingEnabled, cmdBannerDismissed: state.cmdBannerDismissed }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
         const p = persisted as Partial<SettingsState>
+        // Self-heal the ollamaUrl: if the persisted value is one the app
+        // auto-selected in a prior run (and NOT a user override), recompute
+        // from the current platform. This lets a user who switches Mac ↔
+        // Windows pick up the right default without having to reset settings.
+        const persistedOllama = p.autocomplete?.ollamaUrl
+        const autoSelected = getAutoSelectedOllamaUrls()
+        const ollamaUrl = persistedOllama && !autoSelected.has(persistedOllama)
+          ? persistedOllama  // user override — preserve verbatim
+          : resolveOllamaUrl()
         return {
           ...current,
           editor: { ...DEFAULTS.editor, ...p.editor },
-          autocomplete: { ...DEFAULTS.autocomplete, ...p.autocomplete },
+          autocomplete: { ...DEFAULTS.autocomplete, ...p.autocomplete, ollamaUrl },
           formatOnSave: p.formatOnSave ?? DEFAULTS.formatOnSave,
           appLanguage: p.appLanguage ?? DEFAULTS.appLanguage,
           agentLanguage: p.agentLanguage ?? DEFAULTS.agentLanguage,
@@ -270,6 +294,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           sandboxEnabled: p.sandboxEnabled ?? DEFAULTS.sandboxEnabled,
           flaggedCommands: Array.isArray(p.flaggedCommands) ? p.flaggedCommands : DEFAULTS.flaggedCommands,
           thinkingEnabled: p.thinkingEnabled ?? DEFAULTS.thinkingEnabled,
+          cmdBannerDismissed: { ...DEFAULTS.cmdBannerDismissed, ...(p.cmdBannerDismissed || {}) },
           // Merge shortcuts: defaults for new keys, but preserve null (cleared by conflict)
           shortcuts: Object.fromEntries(
             Object.keys(DEFAULT_SHORTCUTS).map(k => [

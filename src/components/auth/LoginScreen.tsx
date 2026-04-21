@@ -88,12 +88,40 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
     setGoogleLoading(true)
     setError(null)
 
+    // Watchdog: in Tauri's WebKit WebView, signInWithPopup can hang forever
+    // when the user closes the Google popup — Firebase's popup.closed polling
+    // doesn't always detect the close across window contexts, so the promise
+    // never resolves/rejects and the `finally` block below never runs. That
+    // leaves `googleLoading=true` and blocks the whole form.
+    //
+    // When the popup closes, focus returns to the main window. If Firebase
+    // hasn't resolved ~1.5s after that focus event (well past any normal
+    // postMessage round-trip), we treat the attempt as cancelled.
+    let settled = false
+    let watchdogTimer: ReturnType<typeof setTimeout> | undefined
+    const handleMainWindowFocus = () => {
+      if (settled) return
+      watchdogTimer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        setGoogleLoading(false)
+        // Silent cancel — the user intentionally closed the popup.
+      }, 1500)
+    }
+    window.addEventListener('focus', handleMainWindowFocus)
+
     try {
       const authService = FirebaseAuthService.getInstance()
       await authService.signInWithGoogle()
+      settled = true
     } catch (err: unknown) {
-      setError(getErrorMessage(err))
+      if (!settled) {
+        settled = true
+        setError(getErrorMessage(err))
+      }
     } finally {
+      window.removeEventListener('focus', handleMainWindowFocus)
+      if (watchdogTimer) clearTimeout(watchdogTimer)
       setGoogleLoading(false)
     }
   }

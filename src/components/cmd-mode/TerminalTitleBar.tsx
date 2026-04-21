@@ -50,7 +50,8 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
   return (
     <Flex
       px={3}
-      py="6px"
+      py="11px"
+      minH="38px"
       bg="rgba(0,0,0,0.45)"
       borderBottom="1px solid rgba(255,255,255,0.05)"
       align="center"

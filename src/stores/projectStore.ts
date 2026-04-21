@@ -13,6 +13,7 @@ import WindowService from '../services/windowService';
 import { sessionService } from '../services/agent/sessionService';
 import { useChatStore } from './chatStore';
 import { useProblemsStore } from './problemsStore';
+import { IS_VITE_DEV } from '../utils/viteEnv';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
 import { t } from '../i18n';
@@ -34,6 +35,7 @@ interface ProjectStore {
   loadRecentProjects: () => Promise<void>;
   closeProject: () => Promise<void>;
   removeFromRecent: (projectId: string) => Promise<void>;
+  clearAllRecent: () => Promise<void>;
   deleteProject: (projectId: string, projectPath: string) => Promise<void>;
   saveProjectState: () => Promise<void>;
   loadProjectState: (projectId: string) => Promise<void>;
@@ -296,6 +298,25 @@ export const useProjectStore = create<ProjectStore>()(
         }
       },
 
+      clearAllRecent: async () => {
+        try {
+          const count = get().recentProjects.length;
+          if (count === 0) return;
+
+          const ok = await tauriConfirm(
+            `Limpar a lista de projectos recentes (${count})?\n\nOs ficheiros dos projectos não são apagados — apenas desaparecem desta lista.`,
+            { title: 'Limpar recentes', kind: 'warning' }
+          );
+          if (!ok) return;
+
+          await invoke('clear_recent_projects');
+          set({ recentProjects: [] });
+        } catch (error) {
+          logger.error('project', 'Failed to clear recent projects:', error);
+          throw error;
+        }
+      },
+
       removeFromRecent: async (projectId: string) => {
         try {
           const project = get().recentProjects.find(p => p.id === projectId);
@@ -497,7 +518,7 @@ export const useProjectStore = create<ProjectStore>()(
 );
 
 // ── DEBUG: log currentProject transitions ─────────────────────────────────
-if (import.meta.env.DEV) {
+if (IS_VITE_DEV) {
   useProjectStore.subscribe((state, prev) => {
     if (state.currentProject !== prev.currentProject) {
       console.log(

@@ -9,6 +9,7 @@ import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
+import { resolveWorkerUrl } from '../../utils/devUrls'
 import { getQueryGuard } from './queryGuard'
 import { contentAsText } from './promptValueHelpers'
 import {
@@ -48,7 +49,9 @@ interface AnthropicMessage {
 
 // === Config ===
 
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+// Resolved via OS-aware helper — on Mac/Linux dev the env's 192.168.64.1 is
+// auto-remapped to localhost. See src/utils/devUrls.ts for rationale.
+const WORKER_URL = resolveWorkerUrl()
 const MAX_OUTPUT_TOKENS = 32768
 // Max auto-continuations when model hits token limit mid-response
 const MAX_CONTINUATIONS = 3

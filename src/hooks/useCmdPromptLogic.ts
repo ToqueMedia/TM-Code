@@ -16,6 +16,14 @@ import { useAttachments } from './useAttachments'
 import QuickOpenService, { type QuickOpenItem } from '../services/quickOpenService'
 import { extractAndResolveMentions } from '../services/attachmentService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../utils/mentionParser'
+import { t } from '../i18n/useTranslation'
+import {
+  loadPromptHistory,
+  savePromptHistory,
+  mergePromptHistory,
+  onHistoryReset,
+  MAX_PROMPT_HISTORY,
+} from '../services/cmdPromptHistory'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../types/messageQueueTypes'
 
 const MENTION_MENU_LIMIT = 50
@@ -55,8 +63,14 @@ export function useCmdPromptLogic() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // History is kept in-memory for instant ArrowUp/Down; IDB is only touched
+  // on mount (load) and send (write). See src/services/cmdPromptHistory.ts.
   const historyRef = useRef<string[]>([])
   const historyIndexRef = useRef(-1)
+  // Track which project the loaded history belongs to — when the user switches
+  // CMD-mode projects (same hook instance on remount is typical, but guard
+  // anyway), we reload to avoid mixing histories.
+  const historyLoadedForRef = useRef<string | null>(null)
 
   const isStreaming = useChatStore(s => s.isStreaming)
   const currentProject = useProjectStore(s => s.currentProject)
@@ -91,6 +105,39 @@ export function useCmdPromptLogic() {
   useEffect(() => {
     if (!projectPath) return
     QuickOpenService.getInstance().initialize(projectPath).catch(() => {})
+  }, [projectPath])
+
+  // Load persisted prompt history from IDB once per project — populates the
+  // in-memory ref used for ArrowUp/Down navigation. Non-blocking: the UI
+  // renders immediately and ArrowUp on an empty history is a no-op anyway.
+  //
+  // Race-safe via `mergePromptHistory`: if the user sent a prompt before the
+  // IDB read finished, those fresh in-memory entries stay at index 0 and the
+  // older persisted entries are appended behind them. The naive "replace when
+  // empty" check from the first iteration lost disk history whenever a send
+  // raced ahead of the load — this merge preserves both sides.
+  useEffect(() => {
+    if (!projectPath) return
+    if (historyLoadedForRef.current === projectPath) return
+    let cancelled = false
+    loadPromptHistory(projectPath).then(persisted => {
+      if (cancelled) return
+      historyRef.current = mergePromptHistory(historyRef.current, persisted)
+      historyLoadedForRef.current = projectPath
+    }).catch(() => { /* IDB unavailable — stay with in-memory */ })
+    return () => { cancelled = true }
+  }, [projectPath])
+
+  // Listen for externally-triggered resets (e.g. the /history-clear command)
+  // so the in-memory ref drops in lock-step with the IDB delete. Without this,
+  // ArrowUp would keep resurrecting cleared prompts until the hook remounts.
+  useEffect(() => {
+    return onHistoryReset((path) => {
+      if (path === projectPath) {
+        historyRef.current = []
+        historyIndexRef.current = -1
+      }
+    })
   }, [projectPath])
 
   // Cleanup blur timeout on unmount
@@ -304,12 +351,28 @@ export function useCmdPromptLogic() {
     const hasAttachments = draftAttachments.length > 0
     if (!prompt && !hasAttachments) return
 
+    // Billing gate for image attachments — the bar already shows a warning,
+    // but prior behaviour silently let the send go through, which either
+    // consumed tokens for nothing (explorer plan strips images) or confused
+    // the user. Block here with an actionable message instead.
+    if (showImageWarning) {
+      useChatStore.getState().addSystemMessage(
+        t('cmdMode.imageNotSupportedBlocked'),
+        'warn',
+      )
+      return
+    }
+
     setInput('')
     setShowCommandMenu(false)
     setShowMentionMenu(false)
 
-    historyRef.current = [prompt, ...historyRef.current.filter(h => h !== prompt)].slice(0, 100)
+    historyRef.current = [prompt, ...historyRef.current.filter(h => h !== prompt)].slice(0, MAX_PROMPT_HISTORY)
     historyIndexRef.current = -1
+    // Persist asynchronously — never blocks send. Never throws (service swallows IDB errors).
+    if (prompt && projectPath) {
+      void savePromptHistory(projectPath, historyRef.current)
+    }
 
     // Build value: plain string or ContentBlock[] with attachments
     let value: PromptValue
@@ -340,7 +403,7 @@ export function useCmdPromptLogic() {
     }
 
     await executePrompt(value)
-  }, [input, isStreaming, executePrompt, draftAttachments, clearAttachments])
+  }, [input, isStreaming, executePrompt, draftAttachments, clearAttachments, showImageWarning])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

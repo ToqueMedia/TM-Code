@@ -19,7 +19,7 @@ interface WelcomeScreenProps {
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   const cloneDialog = useDialog()
-  const { recentProjects, loadRecentProjects, cmdModeProjectPath, cmdModeProjectPaths, setCmdModeProjectPath, removeCmdModePath } = useProjectStore()
+  const { recentProjects, loadRecentProjects, cmdModeProjectPath, cmdModeProjectPaths, setCmdModeProjectPath, removeCmdModePath, clearAllRecent } = useProjectStore()
   const [showSettings, setShowSettings] = useState(false)
 
   // Window controls — shared hook eliminates duplication
@@ -131,6 +131,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
           onOpenCmdProjectAsIde={(path) => { removeCmdModePath(path); onOpenProject(path) }}
           onOpenProject={onOpenProject}
           onSettings={() => setShowSettings(true)}
+          onClearRecent={clearAllRecent}
         />
       )}
 

@@ -15,6 +15,8 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useSkillStore } from '../../stores/skillStore'
 import { stopAgent } from '../../services/agent/cmdModeCommands'
 import { getCommandQueueSnapshot, subscribeToCommandQueue } from '../../services/agent/messageQueue'
+import { usePreflightStatus } from '../../hooks/usePreflightStatus'
+import { countAvailable } from '../../services/preflightService'
 import { tokens } from '@/theme/tokens'
 import { formatElapsed, formatTokens } from './terminalHelpers'
 
@@ -31,6 +33,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   const autoApproveDiffs = usePermissionStore(s => s.autoApproveDiffs)
   const queuedCommands = useSyncExternalStore(subscribeToCommandQueue, getCommandQueueSnapshot)
   const queueLength = queuedCommands.length
+  const preflight = usePreflightStatus()
 
   const [elapsed, setElapsed] = useState(0)
   const startRef = useRef(0)
@@ -62,6 +65,21 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
 
   const totalTok = totalTokensUsed.input + totalTokensUsed.output
   const isSending = status === 'thinking' || status === 'compressing'
+
+  // Toolkit preflight — small "tk 3/3" indicator. Tooltip lists missing pieces.
+  const toolkit = useMemo(() => {
+    if (!preflight.ranAt) return null
+    const { available, total } = countAvailable(preflight)
+    const missing: string[] = []
+    if (!preflight.pandoc.found) missing.push('pandoc')
+    if (!preflight.venv.found) missing.push('python venv')
+    if (!preflight.npx.found) missing.push('npx')
+    const label = `tk ${available}/${total}`
+    const title = missing.length
+      ? `Missing: ${missing.join(', ')}. Some artifact skills (PDF/Word/Excel/PPTX/Slidev) will need installs.`
+      : 'All artifact-generation tooling available.'
+    return { label, title, allGreen: missing.length === 0 }
+  }, [preflight])
 
   // Info segments — compact, terminal style
   const segments = useMemo(() => {
@@ -171,6 +189,17 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
           {segments.length > 0 && (
             <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
               {segments.join(' · ')}
+            </Text>
+          )}
+
+          {toolkit && (
+            <Text
+              fontSize="10px"
+              color={toolkit.allGreen ? tokens.colors.accent.green : tokens.colors.accent.orange}
+              fontFamily={tokens.fontFamily.mono}
+              title={toolkit.title}
+            >
+              {toolkit.label}
             </Text>
           )}
         </Flex>

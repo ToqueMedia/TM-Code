@@ -1,6 +1,8 @@
 import type { SlashCommand } from './slashCommandRegistry'
+import { invoke } from '@tauri-apps/api/core'
 import { useChatStore, clearMessageQueue } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
+import { useMcpStore } from '../../stores/mcpStore'
 import { sessionService } from './sessionService'
 import type { SessionSummary } from '../../types/chat'
 import { useProjectStore } from '../../stores/projectStore'
@@ -8,7 +10,18 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import AgentService from './agentService'
+import MCPService from '../mcp/mcpService'
+import { CANVA_MCP_NAME, isCanvaConnected } from '../../utils/canvaMcp'
+import { MCP_REGISTRY, findRegistryEntry, buildConfigEntry, type McpRegistryEntry } from '../../utils/mcpRegistry'
+import { clearPromptHistory } from '../cmdPromptHistory'
+import { t } from '../../i18n/useTranslation'
+import type { TranslationKey } from '../../i18n/translations'
 import { logger } from '../../utils/logger'
+
+/** Lightweight {placeholder} interpolation for translated strings with named slots. */
+function fmt(template: string, vars: Record<string, string | number>): string {
+  return template.replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? `{${key}}`))
+}
 
 /**
  * CMD-mode-only slash commands — not available in regular chat mode.
@@ -241,6 +254,168 @@ async function executeResumeTarget(target: string, projectPath: string): Promise
   }
 }
 
+// ─── /mcp-install, /mcp-browse, /canva-connect — unified registry-backed install flow ───
+//
+// All three commands funnel through `installRegistryEntry` so there is exactly one
+// read-merge-write + addSingleServer implementation. Canva keeps a dedicated alias
+// (`/canva-connect`) and richer OAuth-upfront messaging via `messageKeys` overrides
+// on its registry entry — no duplicate code path.
+
+type MessageSlot = 'installing' | 'installed' | 'registered' | 'alreadyInstalled'
+
+/** Resolve the i18n key for a slot, honoring per-entry overrides from the registry. */
+function messageKey(entry: McpRegistryEntry, slot: MessageSlot): TranslationKey {
+  const override = entry.messageKeys?.[slot]
+  if (override) return override as TranslationKey
+  const defaults: Record<MessageSlot, TranslationKey> = {
+    installing: 'cmd.mcp.installing',
+    installed: 'cmd.mcp.installed',
+    registered: 'cmd.mcp.installedNoTools',
+    alreadyInstalled: 'cmd.mcp.alreadyInstalled',
+  }
+  return defaults[slot]
+}
+
+/**
+ * Read-merge-write a registry entry into ~/.toquemedia-studio/mcp.json and start it.
+ * Single source of truth for MCP install — shared by /canva-connect and /mcp-install.
+ */
+async function installRegistryEntry(entry: McpRegistryEntry, projectPath: string): Promise<void> {
+  const state = useChatStore.getState()
+
+  // Idempotency — Canva uses URL-based detection to guard against false positives.
+  const getUrl = (name: string) => MCPService.getInstance().getServerUrl(name)
+  const isAlreadyConnected = entry.name === CANVA_MCP_NAME
+    ? isCanvaConnected(useMcpStore.getState().servers, getUrl)
+    : useMcpStore.getState().servers.some(s => s.name === entry.name && s.status === 'running')
+  if (isAlreadyConnected) {
+    state.addSystemMessage(fmt(t(messageKey(entry, 'alreadyInstalled')), { label: entry.label }), 'info')
+    return
+  }
+
+  let globalConfigPath: string
+  try {
+    const homeDir = await invoke<string>('get_home_directory')
+    globalConfigPath = `${homeDir}/.toquemedia-studio/mcp.json`
+  } catch (err) {
+    logger.error('cmd', 'Failed to resolve home directory:', err)
+    state.addSystemMessage(t('cmd.canva.homeFailed'), 'error')
+    return
+  }
+
+  // Read-merge-write so we don't stomp on other MCP entries the user has configured.
+  let existing: { mcpServers?: Record<string, unknown> } = {}
+  try {
+    const raw = await invoke<string>('read_file', { path: globalConfigPath })
+    existing = JSON.parse(raw)
+  } catch {
+    // Config doesn't exist yet — fresh write is fine
+  }
+
+  const updated = {
+    ...existing,
+    mcpServers: {
+      ...(existing.mcpServers || {}),
+      [entry.name]: buildConfigEntry(entry),
+    },
+  }
+
+  try {
+    const dir = globalConfigPath.slice(0, globalConfigPath.lastIndexOf('/'))
+    await invoke('create_directories_all', { path: dir })
+    await invoke('write_file', { path: globalConfigPath, content: JSON.stringify(updated, null, 2) })
+  } catch (err) {
+    logger.error('cmd', `Failed to write ${entry.name} MCP config:`, err)
+    const msg = err instanceof Error ? err.message : String(err)
+    state.addSystemMessage(fmt(t('cmd.canva.writeFailed'), { msg }), 'error')
+    return
+  }
+
+  state.addSystemMessage(fmt(t(messageKey(entry, 'installing')), { label: entry.label }), 'info')
+
+  try {
+    await MCPService.getInstance().addSingleServer(projectPath, entry.name)
+  } catch (err) {
+    logger.error('cmd', `Failed to start ${entry.name} MCP server:`, err)
+    const msg = err instanceof Error ? err.message : String(err)
+    state.addSystemMessage(fmt(t('cmd.mcp.installFailed'), { label: entry.label, msg }), 'error')
+    return
+  }
+
+  const server = useMcpStore.getState().servers.find(s => s.name === entry.name)
+  const note = entry.postInstallNote || ''
+  if (server?.status === 'running') {
+    state.addSystemMessage(
+      fmt(t(messageKey(entry, 'installed')), { label: entry.label, n: server.tools.length, note }),
+      'success',
+    )
+  } else if (server?.status === 'error') {
+    state.addSystemMessage(
+      fmt(t('cmd.mcp.installFailed'), { label: entry.label, msg: server.error || 'unknown error' }),
+      'error',
+    )
+  } else {
+    state.addSystemMessage(
+      fmt(t(messageKey(entry, 'registered')), { label: entry.label, note }),
+      'info',
+    )
+  }
+}
+
+/** /canva-connect — thin alias that delegates to the shared install flow. */
+async function executeCanvaConnect(_args: string, projectPath: string): Promise<void> {
+  const entry = findRegistryEntry(CANVA_MCP_NAME)
+  if (!entry) return  // unreachable — Canva is always in the registry
+  await installRegistryEntry(entry, projectPath)
+}
+
+async function executeMcpInstall(args: string, projectPath: string): Promise<void> {
+  const state = useChatStore.getState()
+  const name = args.trim().toLowerCase()
+  if (!name) {
+    state.addSystemMessage(t('cmd.mcp.usageInstall'), 'info')
+    return
+  }
+  const entry = findRegistryEntry(name)
+  if (!entry) {
+    state.addSystemMessage(fmt(t('cmd.mcp.unknown'), { name }), 'error')
+    return
+  }
+  await installRegistryEntry(entry, projectPath)
+}
+
+async function executeMcpBrowse(_args: string, _projectPath: string): Promise<void> {
+  const state = useChatStore.getState()
+  const header = t('cmd.mcp.browseHeader')
+  const lines = MCP_REGISTRY.map(e =>
+    fmt(t('cmd.mcp.browseEntry'), {
+      name: e.name,
+      label: e.label,
+      category: e.category,
+      description: e.description,
+    }),
+  )
+  state.addSystemMessage([header, '', ...lines].join('\n'), 'info')
+}
+
+// ─── /history-clear — Drop the persisted ArrowUp prompt history for this project ───
+//
+// The `/clear` command wipes the active chat session. This one wipes the
+// *prompt input* history (what ArrowUp recalls). Separated intentionally —
+// users often want to forget a typed command without losing the whole session.
+
+async function executeHistoryClear(_args: string, projectPath: string): Promise<void> {
+  const state = useChatStore.getState()
+  try {
+    await clearPromptHistory(projectPath)
+    state.addSystemMessage(t('cmd.history.cleared'), 'success')
+  } catch (err) {
+    logger.error('cmd', 'Failed to clear prompt history:', err)
+    const msg = err instanceof Error ? err.message : String(err)
+    state.addSystemMessage(fmt(t('cmd.history.clearFailed'), { msg }), 'error')
+  }
+}
+
 // ─── /exit — Save → Stop → Brief feedback → Return to WelcomeScreen ───
 
 async function executeExit(_args: string, _projectPath: string): Promise<void> {
@@ -294,6 +469,30 @@ export const CMD_MODE_COMMANDS: SlashCommand[] = [
         await executeResume('', projectPath)
       }
     },
+  },
+  {
+    name: '/canva-connect',
+    description: 'Ligar Canva MCP — designs, apresentações, export PDF/PPT',
+    enabled: true,
+    execute: executeCanvaConnect,
+  },
+  {
+    name: '/mcp-install',
+    description: 'Instalar integração MCP do registo (ex: /mcp-install gamma)',
+    enabled: true,
+    execute: executeMcpInstall,
+  },
+  {
+    name: '/mcp-browse',
+    description: 'Listar integrações MCP disponíveis',
+    enabled: true,
+    execute: executeMcpBrowse,
+  },
+  {
+    name: '/history-clear',
+    description: 'Limpar histórico de prompts (ArrowUp) deste projeto',
+    enabled: true,
+    execute: executeHistoryClear,
   },
   {
     name: '/exit',

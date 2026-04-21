@@ -60,9 +60,9 @@ interface ChatActions {
   // Reasoning toggle
   toggleReasoning: (messageId: string) => void
   // Tool call actions (pending -> start -> result)
-  addPendingToolCall: (toolId: string, toolName: string) => void
-  updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>) => void
-  updateToolCallWithResult: (toolId: string, result: string, isError: boolean) => void
+  addPendingToolCall: (toolId: string, toolName: string, spawnedBy?: string, targetMessageId?: string) => void
+  updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>, targetMessageId?: string) => void
+  updateToolCallWithResult: (toolId: string, result: string, isError: boolean, targetMessageId?: string) => void
   updateToolCallProgress: (toolId: string, progressText: string) => void
   // Inline diff actions (centralized — handle DiffService + store + agent unblock atomically)
   approveDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => Promise<void>
@@ -852,12 +852,20 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
     },
 
-    addPendingToolCall: (toolId: string, toolName: string) => {
+    addPendingToolCall: (toolId: string, toolName: string, spawnedBy?: string, targetMessageId?: string) => {
       const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      if (!activeSessionId) return
+      // When `targetMessageId` is provided, write to that specific message —
+      // used by background sub-agents that keep running after the main turn
+      // finalizes (streamingMessageId becomes null but the message still exists
+      // in the session and must keep receiving events for full user visibility).
+      const targetId = targetMessageId ?? streamingMessageId
+      if (!targetId) return
 
       const session = sessions.get(activeSessionId)
       if (!session) return
+      // Guard against writes to a message that no longer exists (e.g. session was cleared).
+      if (!session.messages.some(m => m.id === targetId)) return
 
       const toolCall: ToolCallDisplay = {
         id: toolId,
@@ -865,10 +873,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         input: {},
         status: 'running',
         timestamp: Date.now(),
+        ...(spawnedBy ? { spawnedBy } : {}),
       }
 
       const messages = session.messages.map(msg => {
-        if (msg.id !== streamingMessageId) return msg
+        if (msg.id !== targetId) return msg
         // Finalize reasoning timing if tool call arrives before text
         const reasoningDurationMs = (msg.reasoningStartedAt && !msg.reasoningDurationMs)
           ? Date.now() - msg.reasoningStartedAt
@@ -889,15 +898,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       set({ sessions: updatedSessions })
     },
 
-    updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>) => {
+    updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>, targetMessageId?: string) => {
       const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      if (!activeSessionId) return
+      const targetId = targetMessageId ?? streamingMessageId
+      if (!targetId) return
 
       const session = sessions.get(activeSessionId)
       if (!session) return
+      if (!session.messages.some(m => m.id === targetId)) return
 
       const messages = session.messages.map(msg => {
-        if (msg.id !== streamingMessageId) return msg
+        if (msg.id !== targetId) return msg
         const toolCalls = [...(msg.toolCalls || [])]
         for (let i = toolCalls.length - 1; i >= 0; i--) {
           if (toolCalls[i].id === toolId) {
@@ -938,17 +950,20 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },
 
-    updateToolCallWithResult: (toolId: string, result: string, isError: boolean) => {
+    updateToolCallWithResult: (toolId: string, result: string, isError: boolean, targetMessageId?: string) => {
       const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      if (!activeSessionId) return
+      const targetId = targetMessageId ?? streamingMessageId
+      if (!targetId) return
 
       const session = sessions.get(activeSessionId)
       if (!session) return
+      if (!session.messages.some(m => m.id === targetId)) return
 
       let newDiff: DiffResult | null = null
 
       const messages = session.messages.map(msg => {
-        if (msg.id !== streamingMessageId) return msg
+        if (msg.id !== targetId) return msg
         const toolCalls = [...(msg.toolCalls || [])]
         for (let i = toolCalls.length - 1; i >= 0; i--) {
           if (toolCalls[i].id === toolId) {

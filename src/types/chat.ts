@@ -82,6 +82,10 @@ export interface ToolCallDisplay {
   diffResultId?: string
   /** Live progress text shown while tool is running (e.g., sub-agent status). */
   progressText?: string
+  /** Id of the parent tool call that spawned this one (research / verify / bg agent).
+   *  When set, the UI renders this tool call with a nested indent + marker so the
+   *  user sees the full sub-agent activity, not just a progress string. */
+  spawnedBy?: string
 }
 
 export interface ChatMessageCard {

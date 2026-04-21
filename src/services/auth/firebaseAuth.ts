@@ -28,6 +28,7 @@ import { useAuthStore } from '../../stores/authStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
 import { tauriFetch } from '../tauriFetch'
+import { resolveWorkerUrl } from '../../utils/devUrls'
 
 // Firebase config from environment variables — no hardcoded fallbacks.
 // Lazy initialization: validated on first use (not at import time) so tests
@@ -68,7 +69,7 @@ function ensureFirebase() {
         self.FIREBASE_APPCHECK_DEBUG_TOKEN = true
       }
 
-      const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+      const workerUrl = resolveWorkerUrl()
 
       const appCheckProvider = new CustomProvider({
         getToken: async (): Promise<AppCheckToken> => {
@@ -331,7 +332,7 @@ class FirebaseAuthService {
         }
         if (targetGen !== this.authGeneration) return
 
-        const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+        const workerUrl = resolveWorkerUrl()
         const res = await tauriFetch(`${workerUrl}/v1/me`, {
           headers: { 'Authorization': `Bearer ${token}` },
         })

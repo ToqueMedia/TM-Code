@@ -175,6 +175,28 @@ function ProfileSection() {
   const isFree = planKey === 'explorer'
   const isTopPlan = planInfo.isTop
 
+  // Display + bar honesty:
+  //   - 0 consumption → "0%" label and bar width 0 (no bar)
+  //   - 0 < consumedPct < 0.01 → "<1%" label and bar width 2% (visible sliver)
+  //   - 0.01..1 → rounded %; bar width exactly tracks value (floor 2% so it's
+  //     always >= the minimum visible thickness, but only when there is usage)
+  //   - > 1 (overage) → "100%+" capped, bar full-red
+  // Prevents the prior mismatch where Math.round() dropped sub-1% to "0%"
+  // while Math.max(2, …) still rendered a visible 2% sliver.
+  const pct = billingLoaded && tokenBudget > 0 ? consumedPct : null
+  const consumedPctLabel = pct === null
+    ? '—'
+    : pct <= 0
+      ? '0%'
+      : pct >= 1
+        ? `${Math.round(pct * 100)}%`  // 100 or overage — show actual
+        : pct < 0.01
+          ? '<1%'
+          : `${Math.round(pct * 100)}%`
+  const barWidthPct = pct === null || pct <= 0
+    ? 0
+    : Math.min(100, Math.max(2, pct * 100))
+
   async function handleSignOut() {
     try {
       await FirebaseAuthService.getInstance().signOut()
@@ -273,9 +295,7 @@ function ProfileSection() {
               fontSize="13px" fontWeight="700" fontFamily={tokens.fontFamily.mono}
               color={noCredits ? tokens.colors.accent.red : tokens.colors.text.primary}
             >
-              {billingLoaded && tokenBudget > 0
-                ? `${Math.round(consumedPct * 100)}%`
-                : '—'}
+              {consumedPctLabel}
             </Text>
           </Flex>
           {billingLoaded && tokenBudget > 0 && (
@@ -291,7 +311,7 @@ function ProfileSection() {
                     ? '#f0b429'
                     : `linear-gradient(90deg, ${tokens.colors.accent.primary}, ${tokens.colors.accent.purple})`
                   }
-                  width={`${Math.min(100, Math.max(2, consumedPct * 100))}%`}
+                  width={`${barWidthPct}%`}
                   transition="width 0.5s ease"
                 />
               </Box>

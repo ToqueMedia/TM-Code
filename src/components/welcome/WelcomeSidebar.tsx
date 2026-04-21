@@ -17,6 +17,7 @@ import {
   LuChevronRight,
   LuSettings,
   LuTerminal,
+  LuEraser,
 } from 'react-icons/lu'
 import { invoke } from '@tauri-apps/api/core'
 import { tokens } from '@/theme/tokens'
@@ -54,6 +55,9 @@ interface WelcomeSidebarProps {
   onOpenCmdProjectAsIde?: (path: string) => void
   onOpenProject: (path?: string) => void
   onSettings?: () => void
+  /** Clear the entire recents list (both CMD and IDE). The caller handles
+   *  the confirmation dialog; this component just surfaces the button. */
+  onClearRecent?: () => void
 }
 
 const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
@@ -67,6 +71,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   onOpenCmdProjectAsIde,
   onOpenProject,
   onSettings,
+  onClearRecent,
 }) => {
   const [appVersion, setAppVersion] = useState('')
 
@@ -212,19 +217,59 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
 
       {/* Recent projects */}
       <VStack align="stretch" flex={1} overflow="hidden" minH={0}>
-        <HStack px={2} mb={3}>
-          <Icon color={tokens.colors.text.muted} fontSize="12px">
-            <LuClock />
-          </Icon>
-          <Text
-            fontSize="11px"
-            fontWeight="700"
-            textTransform="uppercase"
-            color={tokens.colors.text.muted}
-            letterSpacing="1px"
-          >
-            {t('welcome.recent')}
-          </Text>
+        <HStack px={2} mb={3} justify="space-between">
+          <HStack gap={2}>
+            <Icon color={tokens.colors.text.muted} fontSize="12px">
+              <LuClock />
+            </Icon>
+            <Text
+              fontSize="11px"
+              fontWeight="700"
+              textTransform="uppercase"
+              color={tokens.colors.text.muted}
+              letterSpacing="1px"
+            >
+              {t('welcome.recent')}
+            </Text>
+          </HStack>
+
+          {/* Clear-all button — shown only when there is something to clear.
+              Caller owns the confirmation dialog (see projectStore.clearAllRecent). */}
+          {onClearRecent && recentProjects.length > 0 && (
+            <Flex
+              as="button"
+              alignItems="center"
+              justifyContent="center"
+              gap={1}
+              px={2}
+              h="22px"
+              borderRadius="6px"
+              bg="transparent"
+              border="1px solid transparent"
+              cursor="pointer"
+              transition="all 0.15s ease"
+              _hover={{
+                bg: 'rgba(254, 16, 99, 0.08)',
+                borderColor: 'rgba(254, 16, 99, 0.25)',
+              }}
+              onClick={(e: React.MouseEvent) => { e.stopPropagation(); onClearRecent() }}
+              title={t('welcome.clearRecentTitle')}
+              aria-label={t('welcome.clearRecentTitle')}
+            >
+              <Icon color={tokens.colors.text.muted} fontSize="11px">
+                <LuEraser />
+              </Icon>
+              <Text
+                fontSize="9px"
+                fontWeight="700"
+                textTransform="uppercase"
+                letterSpacing="0.08em"
+                color={tokens.colors.text.muted}
+              >
+                {t('welcome.clearRecent')}
+              </Text>
+            </Flex>
+          )}
         </HStack>
 
         <VStack

@@ -1,6 +1,7 @@
-import { useState, useCallback, useRef } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useChatStore } from '../stores/chatStore'
 import { useBillingStore } from '../stores/billingStore'
+import { useCmdAttachmentStore } from '../stores/cmdAttachmentStore'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard } from '../services/attachmentService'
 import { logger } from '../utils/logger'
 import type { Attachment } from '../types/chat'
@@ -39,48 +40,41 @@ const selectNoop = () => noop
 export function useAttachments(options: UseAttachmentsOptions = {}) {
   const { localState = false, textareaRef } = options
 
-  // ─── Local state (used when localState=true) ───
-  const [localAttachments, setLocalAttachments] = useState<Attachment[]>([])
+  // ─── Store subscriptions ───
+  // When localState=true, we read from useCmdAttachmentStore (shared across
+  // CmdModeView and CmdModePromptInput so drops on the outer frame end up in
+  // the same list as pastes in the input). Otherwise we go through chatStore.
+  const cmdAttachments = useCmdAttachmentStore(s => s.attachments)
+  const cmdAddAttachment = useCmdAttachmentStore(s => s.addAttachment)
+  const cmdRemoveAttachment = useCmdAttachmentStore(s => s.removeAttachment)
+  const cmdClearAttachments = useCmdAttachmentStore(s => s.clearAttachments)
+  const cmdIsDragging = useCmdAttachmentStore(s => s.isDragging)
+  const cmdSetDragging = useCmdAttachmentStore(s => s.setDragging)
 
-  // ─── Store state ───
-  // When localState=true, inert selectors return frozen constants so Zustand
-  // never triggers a re-render from chatStore changes. The hook still calls
-  // useChatStore (React rules), but the subscription becomes effectively free.
+  // Inert selectors return frozen constants when localState=true so Zustand
+  // short-circuits re-renders from chatStore.draftAttachments changes.
   const storeAttachments = useChatStore(localState ? selectEmptyAttachments : selectDraftAttachments)
   const storeAdd = useChatStore(localState ? selectNoop : selectAddDraft) as (att: Attachment) => void
   const storeRemove = useChatStore(localState ? selectNoop : selectRemoveDraft) as (id: string) => void
   const storeClear = useChatStore(localState ? selectNoop : selectClearDraft) as () => void
 
   // ─── Unified accessors ───
-  const attachments = localState ? localAttachments : storeAttachments
+  const attachments = localState ? cmdAttachments : storeAttachments
 
   const addAttachment = useCallback((att: Attachment) => {
-    if (localState) {
-      setLocalAttachments(prev => {
-        if (prev.length >= 10) return prev
-        if (att.path && prev.some(a => a.path === att.path)) return prev
-        return [...prev, att]
-      })
-    } else {
-      storeAdd(att)
-    }
-  }, [localState, storeAdd])
+    if (localState) cmdAddAttachment(att)
+    else storeAdd(att)
+  }, [localState, cmdAddAttachment, storeAdd])
 
   const removeAttachment = useCallback((id: string) => {
-    if (localState) {
-      setLocalAttachments(prev => prev.filter(a => a.id !== id))
-    } else {
-      storeRemove(id)
-    }
-  }, [localState, storeRemove])
+    if (localState) cmdRemoveAttachment(id)
+    else storeRemove(id)
+  }, [localState, cmdRemoveAttachment, storeRemove])
 
   const clearAttachments = useCallback(() => {
-    if (localState) {
-      setLocalAttachments([])
-    } else {
-      storeClear()
-    }
-  }, [localState, storeClear])
+    if (localState) cmdClearAttachments()
+    else storeClear()
+  }, [localState, cmdClearAttachments, storeClear])
 
   // ─── Billing check ───
   const billingPlan = useBillingStore(s => s.plan)
@@ -89,28 +83,67 @@ export function useAttachments(options: UseAttachmentsOptions = {}) {
   const showImageWarning = hasImages && !supportsImages
 
   // ─── Drag state ───
-  const [isDragging, setIsDragging] = useState(false)
+  // CMD mode uses the shared store (outer frame + inner input must stay in sync).
+  // Chat mode uses local React state — a single component owns the overlay.
   const dragCounterRef = useRef(0)
+  const [chatDragging, setChatDragging] = useState(false)
+  const isDragging = localState ? cmdIsDragging : chatDragging
+
+  const setDragging = useCallback((v: boolean) => {
+    if (localState) cmdSetDragging(v)
+    else setChatDragging(v)
+  }, [localState, cmdSetDragging])
 
   // ─── Paste handler ───
+  // Attaches images (native paste) and file-like clipboard items (Finder/Explorer
+  // copy-paste of a file, which arrives via clipboardData.files with a real path
+  // on platforms that expose it).
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
     const items = e.clipboardData?.items
-    if (!items) return
+    const files = e.clipboardData?.files
 
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i]
-      if (item.type.startsWith('image/')) {
-        e.preventDefault()
-        const blob = item.getAsFile()
-        if (!blob) continue
-        try {
-          const attachment = await createImageAttachmentFromClipboard(blob)
-          addAttachment(attachment)
-        } catch (err) {
-          logger.error('attachments', 'Failed to paste image:', err)
+    // 1. Native image paste (screenshot, cmd+c on an image in a browser, etc.)
+    if (items) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i]
+        if (item.type.startsWith('image/')) {
+          e.preventDefault()
+          const blob = item.getAsFile()
+          if (!blob) continue
+          try {
+            const attachment = await createImageAttachmentFromClipboard(blob)
+            addAttachment(attachment)
+          } catch (err) {
+            logger.error('attachments', 'Failed to paste image:', err)
+          }
+          return
         }
-        return
       }
+    }
+
+    // 2. File-as-file paste (Finder/Explorer copy-paste). Only hits in Tauri when
+    // the OS exposes the file via clipboardData.files. We don't preventDefault
+    // unless we actually consume something, so a user pasting text still sees text.
+    if (files && files.length > 0) {
+      let consumed = false
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i] as File & { path?: string }
+        try {
+          // Tauri exposes a `path` on File when the drop/paste originates from the OS.
+          if (file.path) {
+            const attachment = await createAttachmentFromPath(file.path)
+            addAttachment(attachment)
+            consumed = true
+          } else if (file.type.startsWith('image/')) {
+            const attachment = await createImageAttachmentFromClipboard(file)
+            addAttachment(attachment)
+            consumed = true
+          }
+        } catch (err) {
+          logger.error('attachments', 'Failed to attach pasted file:', err)
+        }
+      }
+      if (consumed) e.preventDefault()
     }
   }, [addAttachment])
 
@@ -122,36 +155,40 @@ export function useAttachments(options: UseAttachmentsOptions = {}) {
   const handleDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     dragCounterRef.current++
-    if (dragCounterRef.current === 1) setIsDragging(true)
-  }, [])
+    if (dragCounterRef.current === 1) setDragging(true)
+  }, [setDragging])
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     dragCounterRef.current--
-    if (dragCounterRef.current === 0) setIsDragging(false)
-  }, [])
+    if (dragCounterRef.current === 0) setDragging(false)
+  }, [setDragging])
 
   const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     dragCounterRef.current = 0
-    setIsDragging(false)
+    setDragging(false)
 
     const files = e.dataTransfer?.files
     if (!files || files.length === 0) return
 
     for (let i = 0; i < files.length; i++) {
-      const file = files[i]
-      if (file.type.startsWith('image/')) {
-        try {
+      const file = files[i] as File & { path?: string }
+      try {
+        // Prefer the Tauri-exposed path — keeps non-image files attachable by reference.
+        if (file.path) {
+          const attachment = await createAttachmentFromPath(file.path)
+          addAttachment(attachment)
+        } else if (file.type.startsWith('image/')) {
           const attachment = await createImageAttachmentFromClipboard(file)
           addAttachment(attachment)
-        } catch (err) {
-          logger.error('attachments', 'Failed to attach dropped image:', err)
         }
+      } catch (err) {
+        logger.error('attachments', 'Failed to attach dropped file:', err)
       }
     }
     textareaRef?.current?.focus()
-  }, [addAttachment, textareaRef])
+  }, [addAttachment, setDragging, textareaRef])
 
   // ─── File picker ───
   const handleAttachFiles = useCallback(async () => {

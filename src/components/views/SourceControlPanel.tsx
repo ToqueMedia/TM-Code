@@ -291,7 +291,8 @@ function SourceControlPanel() {
       if (!token) token = await FirebaseAuthService.getInstance().getIdToken(true)
       if (!token) throw new Error('Not authenticated')
 
-      const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+      const { resolveWorkerUrl } = await import('../../utils/devUrls')
+      const workerUrl = resolveWorkerUrl()
       const { tauriFetch } = await import('../../services/tauriFetch')
       const response = await tauriFetch(`${workerUrl}/v1/commit-message`, {
         method: 'POST',

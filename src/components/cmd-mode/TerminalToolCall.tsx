@@ -20,6 +20,16 @@ const READ_TOOLS = new Set([
   'check_background_agents',
 ])
 
+// Sub-agent spawners emit their output INLINE via the text-delta stream + nested
+// child tool calls. Their `result` field duplicates that stream content, so we
+// suppress the result box on the parent launcher to avoid showing the same
+// text twice.
+const SUBAGENT_SPAWNERS = new Set([
+  'research',
+  'verify',
+  'spawn_background_agent',
+])
+
 const RESULT_PREVIEW_CHARS = 1400
 
 function buildReadSummary(toolName: string, result: string | undefined): string | null {
@@ -73,12 +83,42 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
     [isReadTool, isRunning, toolCall.toolName, toolCall.result],
   )
 
-  const showResult = toolCall.result && !hasDiff && !isReadTool
+  const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(toolCall.toolName)
+  const showResult = toolCall.result && !hasDiff && !isReadTool && !isSubAgentSpawner
+
+  const isNested = !!toolCall.spawnedBy
 
   return (
-    <Box my={1.5} fontFamily={tokens.fontFamily.mono}>
+    <Box
+      my={1.5}
+      fontFamily={tokens.fontFamily.mono}
+      {...(isNested
+        ? {
+            // Visual marker: nested sub-agent tool calls are indented and carry
+            // a purple left-rail so the user sees at a glance what was run by
+            // a research/verify sub-agent vs the main agent.
+            ml: 4,
+            pl: 2,
+            borderLeft: `2px solid ${tokens.colors.accent.purple}`,
+            opacity: 0.95,
+          }
+        : {})}
+    >
       {/* Header: ● Verb(path)  or  ● Verb subtitle */}
       <Flex align="center" gap={1.5} wrap="wrap">
+        {isNested && (
+          <Text
+            fontSize="10px"
+            fontWeight="700"
+            color={tokens.colors.accent.purple}
+            flexShrink={0}
+            lineHeight="1"
+            opacity={0.7}
+            title="Sub-agent tool call"
+          >
+            ↳
+          </Text>
+        )}
         <Text
           fontSize="11px"
           fontWeight="700"

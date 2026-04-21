@@ -141,38 +141,49 @@ describe('SkillService', () => {
     })
   })
 
-  describe('buildSkillsPromptBlock', () => {
+  describe('buildSkillsPromptBlock (JIT index)', () => {
     it('returns empty string for no skills', () => {
       expect(service.buildSkillsPromptBlock([])).toBe('')
     })
 
-    it('wraps skills in <skills> tags', () => {
+    it('emits index lines with name + description (full content NOT inlined)', () => {
       const block = service.buildSkillsPromptBlock([
-        { id: 'b:general', name: 'general', path: '/p', content: '# General', references: [], scope: 'bundled' },
+        {
+          id: 'b:general', name: 'general', description: 'General coding hygiene rules',
+          path: '/p', content: '# General\n\nFull body that should NOT appear in the index.',
+          references: [], scope: 'bundled',
+        },
       ])
-      expect(block).toContain('<skills>')
-      expect(block).toContain('</skills>')
-      expect(block).toContain('<skill name="general" scope="bundled">')
+      expect(block).toContain('# Skills available')
+      expect(block).toContain('read_skill')
+      expect(block).toContain('- general — General coding hygiene rules')
+      // Critical: the full body is intentionally absent from the index.
+      expect(block).not.toContain('Full body that should NOT appear')
     })
 
-    it('respects token budget — drops lower priority skills', () => {
-      const longContent = 'x'.repeat(7950)
+    it('does NOT silently drop skills regardless of total content size (no truncation)', () => {
+      // Pre-JIT this test asserted truncation. Post-JIT the index is small enough
+      // that even huge content bodies do not affect emission — bodies are out-of-band.
+      const longBody = 'x'.repeat(20_000)
       const block = service.buildSkillsPromptBlock([
-        { id: 'p:rules', name: 'rules', path: '/p', content: longContent, references: [], scope: 'project' },
-        { id: 'b:general', name: 'general', path: '/p', content: '# General\nShort.', references: [], scope: 'bundled' },
+        {
+          id: 'p:rules', name: 'rules', description: 'Project-specific rules',
+          path: '/p', content: longBody, references: [], scope: 'project',
+        },
+        {
+          id: 'b:general', name: 'general', description: 'General coding rules',
+          path: '/p', content: longBody, references: [], scope: 'bundled',
+        },
       ])
-
-      // Project skill (priority 0) fits within 8000 budget
-      expect(block).toContain('rules')
-      // Bundled skill (priority 2) would exceed budget — dropped
-      expect(block).not.toContain('general')
+      expect(block).toContain('- rules [project] — Project-specific rules')
+      expect(block).toContain('- general — General coding rules')
     })
 
     it('sorts by priority: project > global > bundled', () => {
       const block = service.buildSkillsPromptBlock([
-        { id: 'b:bundled', name: 'bundled-skill', path: '/p', content: 'B', references: [], scope: 'bundled' },
-        { id: 'p:project', name: 'project-skill', path: '/p', content: 'P', references: [], scope: 'project' },
-        { id: 'g:global', name: 'global-skill', path: '/p', content: 'G', references: [], scope: 'global' },
+        { id: 'b:bundled', name: 'bundled-skill', description: 'B desc', path: '/p', content: 'B', references: [], scope: 'bundled' },
+        { id: 'p:project', name: 'project-skill', description: 'P desc', path: '/p', content: 'P', references: [], scope: 'project' },
+        { id: 'g:global', name: 'global-skill', description: 'G desc', path: '/p', content: 'G', references: [], scope: 'global' },
       ])
 
       const projectIdx = block.indexOf('project-skill')
@@ -181,6 +192,42 @@ describe('SkillService', () => {
 
       expect(projectIdx).toBeLessThan(globalIdx)
       expect(globalIdx).toBeLessThan(bundledIdx)
+    })
+  })
+
+  describe('parseSkillFrontmatter', () => {
+    it('extracts name and description from YAML frontmatter', async () => {
+      const { parseSkillFrontmatter } = await import('../skillService')
+      const raw = `---
+name: pdf-document
+description: Generate PDFs via pandoc and weasyprint.
+---
+
+# PDF Document
+
+Body here.`
+      const parsed = parseSkillFrontmatter(raw, 'fallback')
+      expect(parsed.name).toBe('pdf-document')
+      expect(parsed.description).toBe('Generate PDFs via pandoc and weasyprint.')
+      expect(parsed.body).toContain('# PDF Document')
+      expect(parsed.body).not.toContain('---')
+    })
+
+    it('falls back to first paragraph after H1 when no frontmatter', async () => {
+      const { parseSkillFrontmatter } = await import('../skillService')
+      const raw = `# General Coding\n\nBest practices for clean code across projects.\n\n## Section\n\nMore.`
+      const parsed = parseSkillFrontmatter(raw, 'general-coding')
+      expect(parsed.name).toBe('general-coding')
+      expect(parsed.description).toBe('Best practices for clean code across projects.')
+    })
+
+    it('caps overly long descriptions at the configured max', async () => {
+      const { parseSkillFrontmatter } = await import('../skillService')
+      const longDesc = 'a'.repeat(500)
+      const raw = `---\nname: x\ndescription: ${longDesc}\n---\nbody`
+      const parsed = parseSkillFrontmatter(raw, 'x')
+      expect(parsed.description.length).toBeLessThanOrEqual(220)
+      expect(parsed.description.endsWith('…')).toBe(true)
     })
   })
 
@@ -224,7 +271,7 @@ describe('SkillService', () => {
     it('throws on bundled skills', async () => {
       await expect(
         service.deleteSkill({
-          id: 'bundled:react', name: 'react', path: '/res/react',
+          id: 'bundled:react', name: 'react', description: 'React patterns', path: '/res/react',
           content: '', references: [], scope: 'bundled',
         })
       ).rejects.toThrow('Cannot delete bundled skills')
@@ -241,7 +288,7 @@ describe('SkillService', () => {
       })
 
       await service.deleteSkill({
-        id: 'project:rules', name: 'rules', path: '/project/.tms/skills/rules',
+        id: 'project:rules', name: 'rules', description: 'Project rules', path: '/project/.tms/skills/rules',
         content: '', references: [], scope: 'project',
       })
 
