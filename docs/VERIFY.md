@@ -6,33 +6,29 @@ Atualizado: 2026-04-20
 
 ---
 
-## 1. Backend proxy — routing do GLM-5.1
+## 1. ~~Backend proxy — routing do GLM-5.1~~ — RESOLVIDO 2026-04-21
 
-**Risco:** alto. Se falhar, o toggle de thinking na UI é silent no-op mesmo com o parâmetro a ser enviado pelo frontend.
+**Status:** Bug confirmado e corrigido em `toquemedia-studio-api/src/proxy.ts`.
 
-**Contexto:** `modelProfiles.ts` define `GLM_5_1.thinkingParam: 'reasoning'`. O `buildThinkingParam()` constrói `{ reasoning: { enabled: true|false } }` — formato **OpenRouter**.
+**Diagnóstico:**
+- Frontend (`modelProfiles.GLM_5_1.thinkingParam: 'reasoning'`) envia `reasoning: { enabled }` (formato OpenRouter).
+- Backend roteou GLM-5.1 para DashScope (`MODEL_TO_PROVIDER['glm-5.1'] = 'dashscope'`).
+- A conversão `reasoning ↔ enable_thinking` no proxy só rodava se `provider === 'openrouter'`.
+- Resultado: DashScope recebia o campo `reasoning` desconhecido e ignorava — toggle thinking era silent no-op, modelo usava default (provavelmente thinking ON).
 
-**O que verificar no código do backend proxy:**
+**Fix aplicado:** três branches no bloco GLM-5.1 normalization:
+- `openrouter`: mantém `reasoning: { enabled }` (dead code hoje — nenhum modelo aponta).
+- `dashscope` (prod): converte `reasoning` / `thinking` → `enable_thinking`. Default `false`.
+- `deepinfra` (dev): strip de `reasoning` / `thinking` / `enable_thinking` / `thinking_budget` + `reasoning_content` em mensagens. **Thinking não é controlável em dev** — DeepInfra é pure OpenAI-compat e GLM-5.1 usa o default do modelo.
 
-1. Para o modelId `Z-AI/GLM-5.1`, para que provider encaminha? OpenRouter? Z-AI API nativa? Outro?
-2. Se for OpenRouter → formato `{ reasoning: { enabled } }` é aceite. OK.
-3. Se for **Z-AI direto** → o formato correto é `{ thinking: { type: "enabled" | "disabled" } }` OU `{ enable_thinking: true|false }`. O nosso `reasoning` seria ignorado.
-4. Verificar também se o proxy loga o body final enviado ao provider — útil para debug.
-
-**Se o routing for Z-AI direto:**
-- Mudar `thinkingParam` no perfil para `'thinking'` ou `'enable_thinking'`
-- Re-testar com toggle ON e OFF, verificar `reasoning_content` no response stream
-
-**Teste sugerido:**
+**Verificação que ainda falta (runtime real):**
 ```
-1. Plano pago, toggle thinking ON
-2. Pedir algo trivial ("soma 1+1")
-3. Observar se há bloco de reasoning no response (visível via ReasoningBlock no chat)
-4. Toggle OFF, repetir
-5. Segundo caso NÃO deve mostrar reasoning
+1. Plano pago, toggle thinking ON em Settings
+2. Pedir algo trivial → deve mostrar bloco de reasoning no chat
+3. Toggle OFF → repetir → NÃO deve mostrar reasoning
 ```
 
-Se ambos mostram (ou não mostram) reasoning identicamente, o toggle está broken ponta-a-ponta.
+**Inconsistência cosmética (não bloqueante):** `modelProfiles.GLM_5_1.modelId` ainda é `'Z-AI/GLM-5.1'` (formato OpenRouter, stale desde a migração para DashScope). Backend descarta o model do client (`body.model`), então não afeta funcionalidade — só comentário/clareza.
 
 ---
 
