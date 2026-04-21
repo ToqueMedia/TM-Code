@@ -42,7 +42,11 @@ interface PendingPermission {
   args: Record<string, unknown>
   /** Why this prompt was forced — null means normal permission flow */
   promptReason: PromptReason
-  resolve: (approved: boolean) => void
+  /** Resolves the pending `requestPermission` promise. When `denyReason` is
+   *  provided, the tool's result surfaces the reason to the agent so it can
+   *  react to the user's rationale (e.g., "I denied because the path is outside
+   *  the project"). */
+  resolve: (result: { approved: boolean; denyReason?: string }) => void
 }
 
 interface PermissionState {
@@ -57,10 +61,14 @@ interface PermissionState {
 }
 
 interface PermissionActions {
-  requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason) => Promise<boolean>
+  requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason) => Promise<{ approved: boolean; denyReason?: string }>
   approve: () => void
   approveAll: () => void
   deny: () => void
+  /** Deny the current pending permission and feed a user-written reason back
+   *  to the agent as part of the tool's result. Useful when the default
+   *  "Permission denied" message isn't expressive enough. */
+  denyWith: (reason: string) => void
   setAutoApproveDiffs: (value: boolean) => void
   resetAutoApprove: () => void
   clearPending: () => void

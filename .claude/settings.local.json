@@ -45,7 +45,9 @@
       "WebFetch(domain:developers.gamma.app)",
       "Bash(git stash *)",
       "Bash(yarn add *)",
-      "Bash(node --experimental-vm-modules -e ' *)"
+      "Bash(node --experimental-vm-modules -e ' *)",
+      "Bash(grep -rn \"users/\\\\${\\\\|users/\\\\$\\\\|'users/' +\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src --include=\"*.ts\")",
+      "Bash(grep -rn \"documents:commit\\\\|:commit\\\\|users/\\\\\\\\\\\\${\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src --include=\"*.ts\")"
     ]
   }
 }

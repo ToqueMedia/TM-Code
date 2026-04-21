@@ -182,10 +182,18 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
           : 'rgba(255,255,255,0.05)'
         }`}
       >
-        {/* Read tool: compact summary, no content */}
+        {/* Read tool: compact summary when done, running hint while waiting.
+            Without the running hint, search_files / glob tools appear as a lone
+            spinner with no body — users can't tell if the query is slow, stuck,
+            or genuinely finding nothing. */}
         {isReadTool && !isRunning && readSummary && (
           <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt="1px">
             {readSummary}
+          </Text>
+        )}
+        {isReadTool && isRunning && !toolCall.progressText && (
+          <Text fontSize="11px" color={tokens.colors.toolCall.runningText} fontFamily={tokens.fontFamily.mono} mt="1px" opacity={0.8}>
+            working…
           </Text>
         )}
 

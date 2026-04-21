@@ -8,6 +8,7 @@ import {
   GoogleAuthProvider,
   signOut,
   onAuthStateChanged,
+  updateProfile,
   type User
 } from 'firebase/auth'
 import {
@@ -110,12 +111,14 @@ function ensureFirebase() {
 function getFirebaseAuth() { ensureFirebase(); return _auth! }
 function getFirebaseDb() { ensureFirebase(); return _db! }
 
-// For backward-compat — lazy getter
-export const db = new Proxy({} as ReturnType<typeof getFirestore>, {
-  get(_target, prop) {
-    return Reflect.get(getFirebaseDb(), prop)
-  },
-})
+// Lazy Firestore accessor. We *must* return the real Firestore instance —
+// Firebase SDK v10+'s `doc()` / `getDoc()` validate the first arg via a brand
+// check that a Proxy wrapper fails ("Expected first argument to doc() to be a
+// CollectionReference, a DocumentReference or FirebaseFirestore"). Earlier
+// this file exposed `db` as a Proxy for lazy init — the Proxy forwarded
+// property reads but the brand check still rejected it at runtime.
+// `getFirebaseDb()` is the real, initialized instance; use it directly.
+export const db = (): ReturnType<typeof getFirestore> => getFirebaseDb()
 
 // Collections (aligned with web project)
 export const COLLECTIONS = {
@@ -153,6 +156,15 @@ class FirebaseAuthService {
   private unsubscribeAuth: (() => void) | null = null
   private lastBillingFetchMs = 0
   private authGeneration = 0
+  /**
+   * When signUp is in flight, holds a promise that resolves after the Firestore
+   * profile write completes. `onAuthStateChanged` awaits this before calling
+   * `/v1/me` so the backend's GET finds the doc the frontend just wrote instead
+   * of racing ahead, seeing 404, and creating a minimal doc that — even with
+   * `updateMask` — ends up sharing the write window with the frontend. Cleared
+   * to null immediately after the await so existing-user sign-ins never wait.
+   */
+  private signupWriteGate: Promise<void> | null = null
 
   static getInstance(): FirebaseAuthService {
     if (!FirebaseAuthService.instance) {
@@ -187,14 +199,21 @@ class FirebaseAuthService {
       }
       store.setUser(authData)
 
-      // Enrich with Firestore profile (for displayName/photoURL) — non-blocking
+      // Enrich with Firestore profile (for displayName/photoURL) — non-blocking.
+      // Precedence: Firestore profile → live Firebase user → store (may have been
+      // set manually by signUp after updateProfile) → initial authData snapshot.
+      // The store-fallback matters because the backend /v1/me can seed the
+      // Firestore doc with an empty displayName before our signUp setDoc wins;
+      // in that window Firestore reads back `''` and without this fallback
+      // we'd clobber the name that signUp just pushed to the store.
       const gen = ++this.authGeneration
       this.loadProfile(user.uid).then(profile => {
         if (gen !== this.authGeneration) return
         if (!profile) return
+        const storeDisplayName = useAuthStore.getState().user?.displayName || null
         store.setUser({
           ...authData,
-          displayName: profile.displayName || profile.fullName || authData.displayName,
+          displayName: profile.displayName || profile.fullName || user.displayName || storeDisplayName || authData.displayName,
           photoURL: profile.photoURL || authData.photoURL,
         })
       }).catch(() => {})
@@ -208,7 +227,17 @@ class FirebaseAuthService {
       const shouldFetch = !billingState.isLoaded || (now - this.lastBillingFetchMs > BILLING_THROTTLE_MS)
       if (shouldFetch) {
         this.lastBillingFetchMs = now
-        this.fetchBillingInfo(gen)
+        // Wait for an in-flight signUp to finish writing the Firestore profile
+        // BEFORE calling /v1/me. Otherwise the backend's GET returns 404, the
+        // backend creates a minimal billing doc (without the profile fields),
+        // and the user sees no displayName in Firestore. The gate resolves
+        // synchronously to `undefined` for sign-ins (no signup in flight),
+        // adding zero overhead to the common path.
+        const gate = this.signupWriteGate
+        this.signupWriteGate = null
+        const kickBilling = () => this.fetchBillingInfo(gen)
+        if (gate) gate.then(kickBilling).catch(kickBilling)
+        else kickBilling()
       }
     })
   }
@@ -221,7 +250,7 @@ class FirebaseAuthService {
   }
 
   private async loadProfile(uid: string) {
-    const snap = await getDoc(doc(db, COLLECTIONS.USERS, uid))
+    const snap = await getDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid))
     return snap.exists() ? snap.data() : null
   }
 
@@ -238,16 +267,56 @@ class FirebaseAuthService {
   }
 
   async signUp(email: string, password: string, displayName?: string): Promise<User> {
-    const result = await createUserWithEmailAndPassword(getFirebaseAuth(), email, password)
-    const user = result.user
+    // Arm the gate BEFORE createUserWithEmailAndPassword fires — onAuthStateChanged
+    // will pick up the new user synchronously, and if the gate isn't set yet the
+    // /v1/me call leaves before our setDoc lands. Resolved in the try below
+    // after the Firestore write completes (success OR failure — we never want
+    // to hang onAuthStateChanged if setDoc throws).
+    let gateResolve: () => void = () => {}
+    this.signupWriteGate = new Promise<void>(resolve => { gateResolve = resolve })
 
-    // Create Firestore user profile (best-effort)
+    let result
     try {
-      await setDoc(doc(db, COLLECTIONS.USERS, user.uid), {
+      result = await createUserWithEmailAndPassword(getFirebaseAuth(), email, password)
+    } catch (err) {
+      // Auth rejected (email already in use, weak password, etc.). Release the
+      // gate so a subsequent successful signIn/signUp in this session isn't
+      // blocked by a dangling unresolved promise.
+      gateResolve()
+      this.signupWriteGate = null
+      throw err
+    }
+    const user = result.user
+    const trimmedName = displayName?.trim() || ''
+
+    // ── Step 1: Auth profile ─────────────────────────────────────
+    // Persist the display name on the Firebase Auth user object. Without this,
+    // `user.displayName` stays null — the ID-token `name` claim is empty, the
+    // email-template sender has no name, and every place reading `user.displayName`
+    // (onAuthStateChanged, UI fallbacks, ProfileSection) shows the fallback
+    // until Firestore enrichment races in (and often not even then — see below).
+    if (trimmedName) {
+      try {
+        await updateProfile(user, { displayName: trimmedName })
+      } catch (err) {
+        console.warn('[auth] updateProfile failed during signUp:', err)
+      }
+    }
+
+    // ── Step 2: Firestore profile (merge:true so backend /v1/me seed doesn't clobber) ─
+    // The backend's /v1/me endpoint auto-creates the user doc on first call. That
+    // request fires as soon as onAuthStateChanged runs (before this setDoc gets
+    // scheduled), so we race with it. Without `{ merge: true }`, whichever write
+    // lands second REPLACES the other. With merge:true both sides contribute
+    // their fields and the name always survives.
+    // Catch logs instead of swallowing — silent failures previously hid rule
+    // violations and emulator connectivity issues for weeks.
+    try {
+      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, user.uid), {
         uid: user.uid,
         email: user.email,
-        fullName: displayName || '',
-        displayName: displayName || '',
+        fullName: trimmedName,
+        displayName: trimmedName,
         photoURL: null,
         provider: 'email',
         emailVerified: user.emailVerified,
@@ -255,9 +324,26 @@ class FirebaseAuthService {
         createdAt: Timestamp.now(),
         updatedAt: Timestamp.now(),
         userPlan: 'explorer',
-      })
-    } catch {
-      // Firestore may be unavailable
+      }, { merge: true })
+    } catch (err) {
+      console.warn('[auth] Firestore profile write failed during signUp:', err)
+    } finally {
+      // Release the gate whether setDoc succeeded or failed — we never want
+      // onAuthStateChanged to hang indefinitely on a failed write.
+      gateResolve()
+    }
+
+    // ── Step 3: Sync displayName to authStore ────────────────────
+    // onAuthStateChanged fired synchronously on createUser with displayName=null.
+    // `updateProfile` does NOT re-trigger onAuthStateChanged, so the store still
+    // holds the stale null. Push the name explicitly so the UI shows the real
+    // name immediately (previously showed "User" fallback until next token refresh).
+    if (trimmedName) {
+      const authStore = useAuthStore.getState()
+      const current = authStore.user
+      if (current && !current.displayName) {
+        authStore.setUser({ ...current, displayName: trimmedName })
+      }
     }
 
     return user
@@ -275,7 +361,7 @@ class FirebaseAuthService {
     // Includes ALL fields needed for a new user. merge:true means existing fields
     // (like userPlan set by subscription) won't be overwritten.
     try {
-      await setDoc(doc(db, COLLECTIONS.USERS, user.uid), {
+      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, user.uid), {
         uid: user.uid,
         email: user.email,
         fullName: user.displayName || '',
@@ -289,7 +375,7 @@ class FirebaseAuthService {
 
       // Set defaults for new users only (fields that shouldn't exist yet).
       // merge:true won't overwrite existing userPlan/tmsQuota if present.
-      const userDoc = doc(db, COLLECTIONS.USERS, user.uid)
+      const userDoc = doc(getFirebaseDb(), COLLECTIONS.USERS, user.uid)
       const snap = await getDoc(userDoc)
       const data = snap.data()
       if (data && !data.userPlan) {
@@ -394,7 +480,7 @@ class FirebaseAuthService {
 
   /** Best-effort profile field sync (fire-and-forget) */
   private syncProfile(uid: string, fields: Record<string, unknown>) {
-    setDoc(doc(db, COLLECTIONS.USERS, uid), fields, { merge: true }).catch(() => {})
+    setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid), fields, { merge: true }).catch(() => {})
   }
 }
 
