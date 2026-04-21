@@ -980,26 +980,33 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                 diffOldContent = parsed.oldContent
                 diffNewContent = parsed.newContent
                 isNewFile = parsed.isNewFile
-                // Always start as 'pending'. The "accepted" badge must only
-                // appear after DiffService.acceptDiff actually writes to
-                // disk — otherwise an aborted run or a failed write would
-                // leave the UI claiming the file was saved when it wasn't.
-                // Flicker of Accept/Reject buttons during auto-approve is
-                // handled in InlineDiff via the autoApproveDiffs flag.
-                diffStatus = 'pending'
+                // CMD mode writes directly to disk and marks the diff as
+                // alreadyApplied — skip the approval queue entirely. Chat
+                // mode always starts pending and waits for user approval.
+                // The "accepted" badge must only appear after a real write
+                // happens on disk (chat mode: DiffService.acceptDiff; cmd
+                // mode: the tool itself) — otherwise an aborted/failed write
+                // would leave the UI claiming the file was saved when it
+                // wasn't.
+                if (parsed.alreadyApplied === true) {
+                  diffStatus = 'approved'
+                } else {
+                  diffStatus = 'pending'
 
-                // Create DiffResult for DiffService + GeneratingView
-                const id = crypto.randomUUID()
-                diffResultId = id
-                newDiff = {
-                  id,
-                  filePath: parsed.path,
-                  originalContent: parsed.oldContent || '',
-                  newContent: parsed.newContent || '',
-                  isNewFile: parsed.isNewFile || false,
-                  status: 'pending',
-                  toolCallId: toolId,
-                  toolName: toolCalls[i].toolName,
+                  // Create DiffResult for DiffService + GeneratingView.
+                  // Skipped in cmd mode — there's no approval flow to drive.
+                  const id = crypto.randomUUID()
+                  diffResultId = id
+                  newDiff = {
+                    id,
+                    filePath: parsed.path,
+                    originalContent: parsed.oldContent || '',
+                    newContent: parsed.newContent || '',
+                    isNewFile: parsed.isNewFile || false,
+                    status: 'pending',
+                    toolCallId: toolId,
+                    toolName: toolCalls[i].toolName,
+                  }
                 }
               }
             } catch {

@@ -277,9 +277,10 @@ class AgentService {
       const isThinking = useSettingsStore.getState().thinkingEnabled
 
       // Filter tools based on model capabilities.
-      // web_search is only supported natively on DashScope Qwen models
-      // (via enable_search:true injected by the backend). Other models
-      // (GLM-5.1, DeepSeek, Kimi, etc.) cannot execute this tool.
+      // web_search is exposed to the model when profile.supportsSearch is true.
+      //   - DashScope-native (DeepSeek, Qwen): provider resolves enable_search server-side.
+      //   - Non-native (GLM-5.1): frontend execute() side-cars the query to Qwen
+      //     via X-Request-Type: 'web_search' and returns the answer as tool_result.
       const filteredTools = this.tools.filter(t => {
         if (t.function.name === 'web_search') {
           return profile.supportsSearch

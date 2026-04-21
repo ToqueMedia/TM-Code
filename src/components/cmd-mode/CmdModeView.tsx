@@ -239,12 +239,14 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
 
       {pendingPermission && (
         <TerminalPermissionPrompt
+          key={pendingPermission.id}
           toolName={pendingPermission.toolName}
           args={pendingPermission.args}
           promptReason={pendingPermission.promptReason}
           onApprove={() => usePermissionStore.getState().approve()}
           onApproveAll={() => usePermissionStore.getState().approveAll()}
           onDeny={() => usePermissionStore.getState().deny()}
+          onDenyWith={(reason) => usePermissionStore.getState().denyWith(reason)}
         />
       )}
 

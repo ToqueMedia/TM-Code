@@ -20,6 +20,18 @@ const READ_TOOLS = new Set([
   'check_background_agents',
 ])
 
+// Tools that mutate the filesystem — shown with their own running hint so
+// the user sees *something* while the write is in flight, instead of a
+// lone spinner with an empty body.
+const WRITE_TOOLS = new Set([
+  'write_file',
+  'create_file',
+  'edit_file',
+  'delete_file',
+  'rename_file',
+  'create_directory',
+])
+
 // Sub-agent spawners emit their output INLINE via the text-delta stream + nested
 // child tool calls. Their `result` field duplicates that stream content, so we
 // suppress the result box on the parent launcher to avoid showing the same
@@ -58,6 +70,7 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
   const isRunning = toolCall.status === 'running'
   const hasDiff = toolCall.diffOldContent !== undefined || toolCall.diffNewContent !== undefined
   const isReadTool = READ_TOOLS.has(toolCall.toolName)
+  const isWriteTool = WRITE_TOOLS.has(toolCall.toolName)
 
   const display = getToolDisplay(toolCall.toolName)
   const verb = isRunning ? display.running : isError ? display.failed : display.done
@@ -194,6 +207,15 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
         {isReadTool && isRunning && !toolCall.progressText && (
           <Text fontSize="11px" color={tokens.colors.toolCall.runningText} fontFamily={tokens.fontFamily.mono} mt="1px" opacity={0.8}>
             working…
+          </Text>
+        )}
+
+        {/* Write tools: running hint while the disk write is in flight.
+            Otherwise write_file / edit_file / create_file render as a
+            lone spinner with an empty body until the result comes back. */}
+        {isWriteTool && isRunning && !hasDiff && !toolCall.progressText && (
+          <Text fontSize="11px" color={tokens.colors.toolCall.runningText} fontFamily={tokens.fontFamily.mono} mt="1px" opacity={0.8}>
+            writing…
           </Text>
         )}
 

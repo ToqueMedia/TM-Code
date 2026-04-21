@@ -139,7 +139,7 @@ const DEEPSEEK_V3_2: ModelProfile = {
   preserveReasoning: false, // DeepSeek docs: "API will return 400 if reasoning_content included"
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
-  supportsSearch: false,
+  supportsSearch: true,  // DashScope DeepSeek native web_search via enable_search
   modelSpecificPrompt: '',
 }
 
@@ -182,7 +182,10 @@ const GLM_5_1: ModelProfile = {
   preserveReasoning: true,
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
-  supportsSearch: false,  // GLM-5.1 does not have native DashScope web_search
+  // GLM-5.1 has no native web_search. The frontend web_search tool delegates
+  // the query to Qwen 3.6 Plus via a side-car sub-request (X-Request-Type: web_search),
+  // and returns the result back to GLM-5.1 as the tool output.
+  supportsSearch: true,
   modelSpecificPrompt: `You are TM Code Agent, a coding assistant built into TM Code IDE by Toque Media. You are NOT Claude, NOT ChatGPT, NOT any other assistant. Always identify yourself as TM Code Agent when asked.`,
 }
 

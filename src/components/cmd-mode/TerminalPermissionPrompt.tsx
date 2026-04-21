@@ -1,4 +1,4 @@
-import { memo, useEffect } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 
@@ -11,6 +11,9 @@ interface TerminalPermissionPromptProps {
   onApprove: () => void
   onApproveAll: () => void
   onDeny: () => void
+  /** "Write" a custom reason for denial — the reason is surfaced to the agent
+   *  in the tool result (instead of the generic "Ask the user what they want"). */
+  onDenyWith?: (reason: string) => void
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -72,6 +75,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   onApprove,
   onApproveAll,
   onDeny,
+  onDenyWith,
 }: TerminalPermissionPromptProps) {
   const preview = getArgPreview(toolName, args)
   const warning = getWarningText(toolName, promptReason)
@@ -80,8 +84,21 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   const accentColor = dangerous ? tokens.colors.accent.orange : tokens.colors.accent.purple
   const borderColor = dangerous ? 'rgba(247,127,0,0.3)' : 'rgba(163,113,247,0.25)'
 
-  // Keyboard: Y/Enter = approve · A/Shift+Enter = approve all · N/Esc = deny
+  // Two modes: 'choose' (y/a/n/w keys) and 'writing' (textarea for deny reason).
+  const [mode, setMode] = useState<'choose' | 'writing'>('choose')
+  const [reason, setReason] = useState('')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // Auto-focus textarea when switching to writing mode.
   useEffect(() => {
+    if (mode === 'writing') textareaRef.current?.focus()
+  }, [mode])
+
+  // Keyboard: in 'choose' mode — Y/Enter=approve, A/Shift+Enter=approve all,
+  // N=deny, W=write reason, Esc=deny. In 'writing' mode — textarea handles
+  // its own input; Enter submits, Shift+Enter newline, Esc returns to choose.
+  useEffect(() => {
+    if (mode !== 'choose') return
     function handleKeyDown(e: KeyboardEvent) {
       const target = e.target as HTMLElement
       if (target.tagName === 'TEXTAREA') return
@@ -92,6 +109,10 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
       } else if (e.key === 'a' || e.key === 'A' || (e.key === 'Enter' && e.shiftKey)) {
         e.preventDefault()
         onApproveAll()
+      } else if (e.key === 'w' || e.key === 'W') {
+        if (!onDenyWith) return
+        e.preventDefault()
+        setMode('writing')
       } else if (e.key === 'n' || e.key === 'N' || e.key === 'Escape') {
         e.preventDefault()
         onDeny()
@@ -99,7 +120,17 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onApprove, onApproveAll, onDeny])
+  }, [mode, onApprove, onApproveAll, onDeny, onDenyWith])
+
+  const handleSubmitReason = () => {
+    if (!onDenyWith) return
+    onDenyWith(reason)
+  }
+
+  const handleCancelWriting = () => {
+    setReason('')
+    setMode('choose')
+  }
 
   return (
     <Box
@@ -134,17 +165,64 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
         )}
       </Flex>
 
-      {/* Keyboard hint row — no buttons, purely visual */}
-      <Flex align="center" gap={1} mt={1.5}>
-        <KeyHint label="y" description="yes" color={tokens.colors.terminal.green} />
-        <Sep />
-        <KeyHint label="a" description="yes, always" color={tokens.colors.accent.purple} />
-        <Sep />
-        <KeyHint label="n" description="no" color={tokens.colors.accent.red} />
-        <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} ml={2}>
-          · esc cancels
-        </Text>
-      </Flex>
+      {/* Keyboard hint row OR write-reason textarea */}
+      {mode === 'choose' ? (
+        <Flex align="center" gap={1} mt={1.5} wrap="wrap">
+          <KeyHint label="y" description="yes" color={tokens.colors.terminal.green} />
+          <Sep />
+          <KeyHint label="a" description="yes, always" color={tokens.colors.accent.purple} />
+          <Sep />
+          <KeyHint label="n" description="no" color={tokens.colors.accent.red} />
+          {onDenyWith && (
+            <>
+              <Sep />
+              <KeyHint label="w" description="write reason" color={tokens.colors.accent.orange} />
+            </>
+          )}
+          <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} ml={2}>
+            · esc cancels
+          </Text>
+        </Flex>
+      ) : (
+        <Box mt={1.5}>
+          <textarea
+            ref={textareaRef}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                handleSubmitReason()
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                handleCancelWriting()
+              }
+            }}
+            placeholder="Why not? (sent to the agent as the tool result)"
+            rows={2}
+            style={{
+              width: '100%',
+              background: 'rgba(255,255,255,0.03)',
+              border: `1px solid ${tokens.colors.accent.orange}44`,
+              borderRadius: '4px',
+              padding: '6px 8px',
+              fontFamily: tokens.fontFamily.mono,
+              fontSize: '12px',
+              color: tokens.colors.terminal.foreground,
+              outline: 'none',
+              resize: 'none',
+            }}
+          />
+          <Flex align="center" gap={2} mt={1}>
+            <KeyHint label="↵" description="send" color={tokens.colors.accent.orange} />
+            <Sep />
+            <KeyHint label="esc" description="cancel" color={tokens.colors.text.disabled} />
+            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} ml={2}>
+              · shift+↵ for newline
+            </Text>
+          </Flex>
+        </Box>
+      )}
     </Box>
   )
 })

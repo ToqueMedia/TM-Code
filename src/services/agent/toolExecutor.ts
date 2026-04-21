@@ -10,6 +10,7 @@ import { useCheckpointStore } from '../../stores/checkpointStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
+import { resolveWorkerUrl } from '../../utils/devUrls'
 // TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
@@ -190,9 +191,12 @@ class ToolExecutor {
           return `Blocked: "${dangerousMatch}" is blocked in your Settings. The developer disabled this command. Ask the developer to unblock it in Settings > Sandbox if needed.`
         }
         // Not blocked but dangerous → always ask (forcePrompt bypasses Accept All)
-        const approved = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command')
-        if (!approved) {
-          return `Permission denied by user for ${dangerousMatch}. Ask the user what they want instead.`
+        const decision = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command')
+        if (!decision.approved) {
+          const reason = decision.denyReason
+            ? ` User says: ${decision.denyReason}`
+            : ' Ask the user what they want instead.'
+          return `Permission denied by user for ${dangerousMatch}.${reason}`
         }
         dangerousAlreadyApproved = true
       }
@@ -207,10 +211,13 @@ class ToolExecutor {
     ])
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
-      const approved = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false)
-      if (!approved) {
+      const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false)
+      if (!decision.approved) {
         const target = (input.path || input.command || input.name || '') as string
-        return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}. Ask the user what they want instead or suggest an alternative approach.`
+        const reason = decision.denyReason
+          ? ` User says: ${decision.denyReason}`
+          : ' Ask the user what they want instead or suggest an alternative approach.'
+        return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}.${reason}`
       }
     }
 
@@ -712,6 +719,91 @@ class ToolExecutor {
     return null
   }
 
+  /**
+   * Sub-call to the worker proxy that delegates a web_search query to a
+   * DashScope model with native enable_search (Qwen 3.6 Plus on the backend).
+   *
+   * Invoked ONLY when the current model lacks native web_search
+   * (e.g. GLM-5.1). DeepSeek V3.2 and Qwen on DashScope have native search
+   * and never reach this code path — the provider resolves the tool_call
+   * server-side and streams the answer back directly.
+   *
+   * The request uses X-Request-Type: 'web_search' — the proxy forces the
+   * model + enable_search based on that header (see proxy.ts).
+   */
+  private async runWebSearchSubCall(query: string, maxResults: number, abortSignal?: AbortSignal): Promise<string> {
+    if (abortSignal?.aborted) return 'web_search aborted by user.'
+    const token = await FirebaseAuthService.getInstance().getIdToken()
+    if (!token) return 'web_search error: authentication required.'
+
+    const body = {
+      system: `You are a web search assistant. Use the native web_search tool to answer the user's query with up-to-date information. Return a concise summary with sources (title + URL). Do not add commentary.`,
+      messages: [
+        { role: 'user', content: `Search the web for: ${query}\n\nReturn up to ${maxResults} results.` },
+      ],
+      max_tokens: 4096,
+    }
+
+    const url = `${resolveWorkerUrl()}/v1/messages`
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          'X-Request-Type': 'web_search',
+        },
+        body: JSON.stringify(body),
+        signal: abortSignal,
+      })
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return 'web_search aborted by user.'
+      return `web_search error: network failure (${err instanceof Error ? err.message : String(err)}).`
+    }
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      return `web_search error: HTTP ${response.status}. ${detail.slice(0, 200)}`
+    }
+
+    // The worker returns an Anthropic SSE stream. We only need the final text,
+    // so accumulate content_block_delta text deltas into a single string.
+    const reader = response.body?.getReader()
+    if (!reader) return 'web_search error: empty response body.'
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let answer = ''
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const data = line.slice(6).trim()
+          if (!data || data === '[DONE]') continue
+          try {
+            const event = JSON.parse(data) as { type?: string; delta?: { type?: string; text?: string } }
+            if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) {
+              answer += event.delta.text
+            }
+          } catch { /* ignore malformed SSE frames */ }
+        }
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return 'web_search aborted by user.'
+      return `web_search error: stream read failure (${err instanceof Error ? err.message : String(err)}).`
+    } finally {
+      try { reader.releaseLock() } catch { /* noop */ }
+    }
+
+    return answer.trim() || 'web_search returned no results.'
+  }
+
 
   /**
    * Patterns that indicate file-writing operations via shell.
@@ -1086,14 +1178,23 @@ class ToolExecutor {
           }
         }
 
-        // CMD mode: write directly to disk, no diff/approval needed
+        // CMD mode: write directly to disk, no approval needed — but still
+        // return diff JSON so the UI renders the before/after like in chat mode.
+        // `alreadyApplied: true` tells chatStore to skip the approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
           this.refreshFileTree()
-          return `File ${isNewFile ? 'created' : 'written'}: ${path}`
+          return JSON.stringify({
+            type: 'diff',
+            path,
+            oldContent,
+            newContent,
+            isNewFile,
+            alreadyApplied: true,
+          })
         }
 
         // Check for uninstalled package imports before generating diff
@@ -1141,14 +1242,22 @@ class ToolExecutor {
           // File doesn't exist — good, proceed
         }
 
-        // CMD mode: write directly to disk
+        // CMD mode: write directly to disk, still return diff JSON so the UI
+        // renders the new file content. `alreadyApplied` skips approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(content) })
           this.refreshFileTree()
-          return `File created: ${path}`
+          return JSON.stringify({
+            type: 'diff',
+            path,
+            oldContent: '',
+            newContent: content,
+            isNewFile: true,
+            alreadyApplied: true,
+          })
         }
 
         // Check for uninstalled package imports before generating diff
@@ -1334,14 +1443,22 @@ class ToolExecutor {
 
         const newContent = content.replace(oldStr, newStr)
 
-        // CMD mode: write directly to disk
+        // CMD mode: write directly to disk, still return diff JSON so the UI
+        // renders the before/after. `alreadyApplied` skips approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
           this.refreshFileTree()
-          return `File edited: ${path}`
+          return JSON.stringify({
+            type: 'diff',
+            path,
+            oldContent: content,
+            newContent,
+            isNewFile: false,
+            alreadyApplied: true,
+          })
         }
 
         // Check for uninstalled package imports in the NEW PART only (not the whole file).
@@ -1396,14 +1513,18 @@ class ToolExecutor {
       }
     })
 
-    // === web_search (DashScope/Qwen native tool — handled server-side) ===
-    // Qwen 3.6 on DashScope has native web_search. The model calls this tool,
-    // DashScope executes the search internally, and returns results directly.
-    // No execute handler needed — passive tools are skipped in execute().
+    // === web_search ===
+    // Two execution paths, chosen by the current model:
+    //   - DeepSeek V3.2 / Qwen on DashScope: native enable_search — the provider
+    //     executes internally and returns results in the stream. The frontend
+    //     NEVER receives a tool_call, so execute() is not invoked for these.
+    //   - GLM-5.1 (or any non-native model): execute() runs and side-cars the
+    //     query to Qwen 3.6 Plus via X-Request-Type: 'web_search'. The backend
+    //     forces the model + enable_search and streams the answer back.
     this.tools.set('web_search', {
       definition: {
         name: 'web_search',
-        description: 'Search the internet for up-to-date information. Returns search results with titles, snippets, URLs, and metadata. Use this to look up documentation, find solutions to errors, research technical topics, or get current information. This tool is handled natively by the AI provider (DashScope/Qwen) — the model calls it, the provider executes.',
+        description: 'Search the internet for up-to-date information. Returns search results with titles, snippets, URLs, and metadata. Use this to look up documentation, find solutions to errors, research technical topics, or get current information.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1413,9 +1534,14 @@ class ToolExecutor {
           required: ['query']
         },
         concurrencySafe: true,
-        passive: true,  // handled server-side by DashScope via enable_search
       },
-      execute: async () => 'web_search is a native DashScope/Qwen tool. Results are returned by the provider directly.'
+      execute: async (input: Record<string, unknown>) => {
+        const query = typeof input.query === 'string' ? input.query.trim() : ''
+        if (!query) return 'web_search error: query is required.'
+        const maxResults = typeof input.max_results === 'number' ? input.max_results : 5
+        const abortSignal = input._abortSignal as AbortSignal | undefined
+        return await this.runWebSearchSubCall(query, maxResults, abortSignal)
+      }
     })
 
     // === web_fetch ===
@@ -1973,8 +2099,8 @@ class ToolExecutor {
         const subAgentToolNames = new Set([
           'read_file', 'write_file', 'create_file', 'edit_file',
           'list_directory', 'search_files', 'glob', 'get_diagnostics',
-          'web_search',   // passive — DashScope executes (query-based)
-          'web_fetch',    // active — frontend fetches specific URLs
+          'web_search',   // native on DashScope models, side-car to Qwen on GLM-5.1
+          'web_fetch',    // frontend fetches a specific URL
         ])
         const subAgentTools = this.getToolDefinitions().filter(t =>
           subAgentToolNames.has(t.function.name)
