@@ -106,7 +106,7 @@ function App() {
 			const hasMissingMandatory = GLOBAL_REQUIREMENTS.some(req => {
 				if (!req.mandatory) return false;
 				const status = requirements?.requirements?.[req.name];
-				return !status || !status.met;
+				return !status || !status.meetsMinimum;
 			});
 
 			if (hasMissingMandatory) {

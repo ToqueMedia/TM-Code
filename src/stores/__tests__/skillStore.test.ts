@@ -12,6 +12,7 @@ function resetStore() {
 const mockSkill = (name: string, scope: Skill['scope'] = 'bundled'): Skill => ({
   id: `${scope}:${name}`,
   name,
+  description: `Mock skill: ${name}`,
   path: `/path/${name}`,
   content: `# ${name}`,
   references: [],

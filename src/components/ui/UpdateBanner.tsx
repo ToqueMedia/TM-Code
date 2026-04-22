@@ -1,17 +1,17 @@
 import { memo, useState } from 'react'
-import { Box, Button, Flex, Text, HStack, IconButton, Badge, Separator } from '@chakra-ui/react'
+import { Box, Button, Flex, Text, HStack, Badge } from '@chakra-ui/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useUpdateStore } from '../../stores/updateStore'
 import { installUpdate } from '../../services/updateService'
 import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
-import { FiDownload, FiClock, FiX, FiInfo } from 'react-icons/fi'
+import { FiDownload, FiClock } from 'react-icons/fi'
 
 const MotionBox = motion(Box)
 
 function UpdateBanner() {
   const t = useTranslation()
-  const { pendingUpdate, isBannerVisible, snoozeBanner, ignoreUpdate } = useUpdateStore()
+  const { pendingUpdate, isBannerVisible, snoozeBanner } = useUpdateStore()
   const [isUpdating, setIsUpdating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -129,7 +129,6 @@ function UpdateBanner() {
                   variant="ghost"
                   color="whiteAlpha.700"
                   _hover={{ color: "white", bg: "whiteAlpha.100" }}
-                  leftIcon={<FiClock size={13} />}
                   onClick={snoozeBanner}
                   disabled={isUpdating}
                   fontSize="12px"
@@ -138,6 +137,7 @@ function UpdateBanner() {
                   px={3}
                   borderRadius="8px"
                 >
+                  <FiClock size={13} style={{ marginRight: 6 }} />
                   {t('common.later')}
                 </Button>
                 
@@ -157,7 +157,7 @@ function UpdateBanner() {
                   px={4}
                   borderRadius="8px"
                   onClick={handleUpdate}
-                  isLoading={isUpdating}
+                  loading={isUpdating}
                   loadingText={t('settings.updateDownloading')}
                   transition="all 0.2s"
                 >

@@ -7,7 +7,6 @@
 import { check } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { useUpdateStore, type UpdateInfo } from '../stores/updateStore'
-import { t } from '../i18n'
 
 let checkedThisSession = false
 
@@ -68,7 +67,7 @@ export async function autoCheckForUpdate(): Promise<void> {
         useUpdateStore.getState().setPendingUpdate({
           version: '99.9.9',
           body: 'Esta é uma atualização de teste para validar o sistema de notificações.',
-          date: new RegExp().toString(),
+          date: new Date().toISOString(),
         })
         return
       }

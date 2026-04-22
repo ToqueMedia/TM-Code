@@ -1,8 +1,7 @@
 import React from 'react'
-import { Box, Button, Flex, Heading, Text, VStack, Link, Icon } from '@chakra-ui/react'
-import { FiAlertTriangle, FiDownload, FiRefreshCw, FiExternalLink } from 'react-icons/fi'
+import { Box, Button, Flex, Heading, Text, VStack, Link } from '@chakra-ui/react'
+import { FiAlertTriangle, FiRefreshCw, FiExternalLink } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
-import { useTranslation } from '@/i18n'
 import type { EnvironmentCheckResult } from '@/services/environmentCheck'
 import { GLOBAL_REQUIREMENTS } from '@/services/startupRequirements'
 
@@ -12,7 +11,6 @@ interface RequirementsErrorScreenProps {
 }
 
 export const RequirementsErrorScreen: React.FC<RequirementsErrorScreenProps> = ({ result, onRetry }) => {
-  const t = useTranslation()
   const [isRetrying, setIsRetrying] = React.useState(false)
 
   const handleRetry = async () => {
@@ -97,12 +95,12 @@ export const RequirementsErrorScreen: React.FC<RequirementsErrorScreenProps> = (
           bg={tokens.colors.accent.primary}
           color="white"
           _hover={{ bg: tokens.colors.accent.primaryDark }}
-          leftIcon={<FiRefreshCw size={18} className={isRetrying ? 'spin' : ''} />}
           onClick={handleRetry}
-          isLoading={isRetrying}
+          loading={isRetrying}
           borderRadius={tokens.radius.lg}
           px={8}
         >
+          <FiRefreshCw size={18} className={isRetrying ? 'spin' : ''} style={{ marginRight: 8 }} />
           Verificar novamente
         </Button>
 
