@@ -10,7 +10,6 @@ import { TerminalStatusLine } from './TerminalStatusLine'
 import { TerminalMessageRenderer } from './TerminalMessageRenderer'
 import { TerminalGreeting } from './TerminalGreeting'
 import { BillingOverageBanner } from './BillingOverageBanner'
-import { CanvaConnectBanner } from './CanvaConnectBanner'
 import { ErrorBoundary } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
@@ -193,7 +192,6 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
     >
       <TerminalTitleBar projectPath={projectPath} onBack={onBack} />
       <BillingOverageBanner />
-      <CanvaConnectBanner />
 
       {/* Output area */}
       <Box

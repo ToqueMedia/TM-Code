@@ -1,18 +1,30 @@
-import { buildConfigEntry, MCP_REGISTRY } from '../mcpRegistry'
-import { CANVA_MCP_NAME } from '../canvaMcp'
+import type { McpRegistryEntry } from '../mcpRegistry'
+import { buildConfigEntry } from '../mcpRegistry'
 
 /**
- * These tests exercise the pure config-merge logic that /canva-connect and
- * /mcp-install both perform. We re-implement the merge inline (not imported
- * from the command module — that module pulls in Zustand + Tauri and is hard
- * to unit-test in isolation) and assert the invariants we care about:
+ * These tests exercise the pure config-merge logic that /mcp-install performs.
+ * We re-implement the merge inline (not imported from the command module —
+ * that module pulls in Zustand + Tauri and is hard to unit-test in isolation)
+ * and assert the invariants we care about:
  *   - existing mcpServers are preserved
  *   - new entries are added
  *   - re-installing the same integration is idempotent (no duplicates, latest config wins)
  *   - unrelated keys at the top level are preserved
+ *
+ * Uses a hand-built fixture (not MCP_REGISTRY) so the merge invariants stay
+ * verifiable even when the registry is empty (today, until OAuth lands).
  */
-function mergeRegistryEntry(existing: unknown, entryName: string) {
-  const entry = MCP_REGISTRY.find(e => e.name === entryName)!
+
+const FIXTURE: McpRegistryEntry = {
+  name: 'test-mcp',
+  label: 'Test MCP',
+  url: 'https://example.com/mcp',
+  description: 'Fixture entry used only by config-merge tests.',
+  category: 'dev-tools',
+  auth: 'oauth-browser',
+}
+
+function mergeRegistryEntry(existing: unknown, entry: McpRegistryEntry) {
   const existingObj = (existing as { mcpServers?: Record<string, unknown> }) || {}
   return {
     ...existingObj,
@@ -23,12 +35,12 @@ function mergeRegistryEntry(existing: unknown, entryName: string) {
   }
 }
 
-describe('MCP config merge (shared by /canva-connect and /mcp-install)', () => {
+describe('MCP config merge (/mcp-install)', () => {
   it('writes a fresh config when none exists', () => {
-    const merged = mergeRegistryEntry({}, CANVA_MCP_NAME)
+    const merged = mergeRegistryEntry({}, FIXTURE)
     expect(merged.mcpServers).toBeDefined()
-    expect(merged.mcpServers[CANVA_MCP_NAME]).toEqual({
-      url: 'https://mcp.canva.com/mcp',
+    expect(merged.mcpServers[FIXTURE.name]).toEqual({
+      url: FIXTURE.url,
       transport: 'remote',
     })
   })
@@ -39,19 +51,19 @@ describe('MCP config merge (shared by /canva-connect and /mcp-install)', () => {
         'my-custom-mcp': { command: 'python', args: ['server.py'] },
       },
     }
-    const merged = mergeRegistryEntry(existing, 'figma')
+    const merged = mergeRegistryEntry(existing, FIXTURE)
     expect(merged.mcpServers['my-custom-mcp']).toEqual({
       command: 'python',
       args: ['server.py'],
     })
-    expect(merged.mcpServers['figma']).toBeDefined()
+    expect(merged.mcpServers[FIXTURE.name]).toBeDefined()
   })
 
   it('is idempotent — installing twice yields one entry with the latest config', () => {
-    const first = mergeRegistryEntry({}, CANVA_MCP_NAME)
-    const second = mergeRegistryEntry(first, CANVA_MCP_NAME)
-    expect(Object.keys(second.mcpServers)).toEqual([CANVA_MCP_NAME])
-    expect(second.mcpServers[CANVA_MCP_NAME]).toEqual(first.mcpServers[CANVA_MCP_NAME])
+    const first = mergeRegistryEntry({}, FIXTURE)
+    const second = mergeRegistryEntry(first, FIXTURE)
+    expect(Object.keys(second.mcpServers)).toEqual([FIXTURE.name])
+    expect(second.mcpServers[FIXTURE.name]).toEqual(first.mcpServers[FIXTURE.name])
   })
 
   it('preserves non-mcpServers top-level keys (settings, metadata)', () => {
@@ -60,19 +72,11 @@ describe('MCP config merge (shared by /canva-connect and /mcp-install)', () => {
       version: 1,
       mcpServers: {},
     }
-    const merged = mergeRegistryEntry(existing, 'figma') as typeof existing & {
+    const merged = mergeRegistryEntry(existing, FIXTURE) as typeof existing & {
       mcpServers: Record<string, unknown>
     }
     expect(merged.$schema).toBe('https://some-schema.json')
     expect(merged.version).toBe(1)
-    expect(merged.mcpServers['figma']).toBeDefined()
-  })
-
-  it('uses the canonical URL for each registry entry (no drift from registry)', () => {
-    for (const entry of MCP_REGISTRY) {
-      const merged = mergeRegistryEntry({}, entry.name)
-      const written = merged.mcpServers[entry.name] as { url?: string }
-      expect(written.url).toBe(entry.url)
-    }
+    expect(merged.mcpServers[FIXTURE.name]).toBeDefined()
   })
 })

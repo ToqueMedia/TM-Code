@@ -32,9 +32,9 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
 
-type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'sandbox'
+type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'sandbox' | 'admin'
 
-const NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
+const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'profile', key: 'settings.profilePlan' },
   { id: 'editor', key: 'settings.editor' },
   { id: 'sandbox', key: 'settings.sandbox' as TranslationKey },
@@ -43,6 +43,11 @@ const NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'mcp', key: 'settings.mcpServers' },
 ]
 
+const ADMIN_NAV_ENTRY: { id: SectionId; key: TranslationKey } = {
+  id: 'admin',
+  key: 'settings.admin' as TranslationKey,
+}
+
 interface SettingsViewProps {
   onBack?: () => void
 }
@@ -50,6 +55,18 @@ interface SettingsViewProps {
 function SettingsView({ onBack }: SettingsViewProps = {}) {
   const [activeSection, setActiveSection] = useState<SectionId>('profile')
   const t = useTranslation()
+  const isAdmin = useAuthStore(function (s) { return s.user?.isAdmin === true })
+  // `isAdmin` is populated by /v1/me. Before that fetch lands (first login,
+  // no persisted value) we're in an indeterminate state. Render a placeholder
+  // nav entry so a returning admin who opens Settings within the first 1–3s
+  // doesn't briefly see a non-admin layout. If /v1/me resolves to
+  // isAdmin=false we drop the placeholder automatically.
+  const isAdminUnknown = useAuthStore(function (s) {
+    return s.isAuthenticated && s.user?.isAdmin === undefined
+  })
+  const billingLoaded = useBillingStore(function (s) { return s.isLoaded })
+  const showAdminNav = isAdmin || (isAdminUnknown && !billingLoaded)
+  const NAV_KEYS = showAdminNav ? [...BASE_NAV_KEYS, ADMIN_NAV_ENTRY] : BASE_NAV_KEYS
 
   return (
     <Flex flex="1" overflow="hidden">
@@ -139,6 +156,7 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
             {activeSection === 'shortcuts' && <ShortcutsSection />}
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
+            {activeSection === 'admin' && showAdminNav && <AdminSection />}
           </Box>
         </Box>
       </Flex>
@@ -149,7 +167,7 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
 // ━━━ Profile & Plan Section ━━━
 
 const PLAN_CONFIG: Record<string, { labelKey: string; color: string; creditsLabelKey: string; isTop: boolean }> = {
-  explorer:       { labelKey: 'Free',         color: tokens.colors.text.muted,      creditsLabelKey: 'settings.dailyCredits',    isTop: false },
+  explorer:       { labelKey: 'Free',         color: tokens.colors.text.muted,      creditsLabelKey: 'settings.monthlyCredits', isTop: false },
   pro:            { labelKey: 'Pro',          color: tokens.colors.accent.purple,   creditsLabelKey: 'settings.monthlyCredits',  isTop: false },
   'business-4x':  { labelKey: 'Business 4x',  color: tokens.colors.accent.orange,   creditsLabelKey: 'settings.monthlyCredits',  isTop: false },
   'business-8x':  { labelKey: 'Business 8x',  color: tokens.colors.accent.primary,  creditsLabelKey: 'settings.monthlyCredits',  isTop: true },
@@ -1408,6 +1426,277 @@ function AddServerForm(props: { projectPath: string; onDone: () => void; onCance
 }
 
 // ━━━ Shared components ━━━
+
+function AdminSection() {
+  const t = useTranslation()
+  const [models, setModels] = useState<import('../../services/adminService').AdminModel[]>([])
+  const [freeLive, setFreeLive] = useState<string>('')
+  const [paidLive, setPaidLive] = useState<string>('')
+  const [paidDivergent, setPaidDivergent] = useState<Record<string, string> | null>(null)
+  const [freeSelection, setFreeSelection] = useState<string>('')
+  const [paidSelection, setPaidSelection] = useState<string>('')
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSavingFree, setIsSavingFree] = useState(false)
+  const [isSavingPaid, setIsSavingPaid] = useState(false)
+  const [forbidden, setForbidden] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [verify, setVerify] = useState<import('../../services/adminService').VerifyResponse | null>(null)
+  const [isVerifying, setIsVerifying] = useState(false)
+
+  const load = useCallback(async function () {
+    setIsLoading(true)
+    setError(null)
+    try {
+      const { fetchAdminModels } = await import('../../services/adminService')
+      const data = await fetchAdminModels()
+      setModels(data.models)
+      setFreeLive(data.live.free)
+      setFreeSelection(data.live.free)
+      setPaidLive(data.live.paid || '')
+      setPaidSelection(data.live.paid || '')
+      setPaidDivergent(data.live.paidDivergent)
+    } catch (err) {
+      if (err instanceof Error && err.message === 'FORBIDDEN') {
+        setForbidden(true)
+      } else {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
+  const refreshVerify = useCallback(async function () {
+    setIsVerifying(true)
+    try {
+      const { fetchAdminVerify } = await import('../../services/adminService')
+      const data = await fetchAdminVerify()
+      setVerify(data)
+    } catch (err) {
+      if (err instanceof Error && err.message === 'FORBIDDEN') setForbidden(true)
+    } finally {
+      setIsVerifying(false)
+    }
+  }, [])
+
+  useEffect(function () { load(); refreshVerify() }, [load, refreshVerify])
+
+  async function handleSave(plan: 'free' | 'paid') {
+    const modelId = plan === 'free' ? freeSelection : paidSelection
+    if (!modelId) return
+    const setSaving = plan === 'free' ? setIsSavingFree : setIsSavingPaid
+    setSaving(true)
+    setError(null)
+    try {
+      const { setLiveModel } = await import('../../services/adminService')
+      await setLiveModel(plan, modelId)
+      // The "live" badge next to the selected model updates as confirmation —
+      // no need for a transient "Saved" flash.
+      if (plan === 'free') setFreeLive(modelId)
+      else { setPaidLive(modelId); setPaidDivergent(null) }
+      // Refresh verify card so admin sees the new resolution immediately.
+      refreshVerify()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('admin.saveError'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (forbidden) {
+    return <Text fontSize="13px" color={tokens.colors.accent.red}>{t('admin.forbidden')}</Text>
+  }
+  if (isLoading) {
+    return <Text fontSize="12px" color={tokens.colors.text.muted}>{t('admin.loading')}</Text>
+  }
+
+  return (
+    <VStack align="stretch" gap={6}>
+      <Text fontSize="12px" color={tokens.colors.text.muted}>{t('admin.subtitle')}</Text>
+
+      {error && (
+        <Box p={3} borderRadius={tokens.radius.lg} bg={tokens.colors.accent.redSubtle}
+          border="1px solid" borderColor={tokens.colors.accent.red}>
+          <Text fontSize="12px" color={tokens.colors.accent.red}>{error}</Text>
+        </Box>
+      )}
+
+      <SettingsGroup title={t('admin.freePlan')} badge={t('admin.coderModels')}>
+        <ModelRadioList
+          models={models}
+          selectedId={freeSelection}
+          liveId={freeLive}
+          onChange={setFreeSelection}
+        />
+        <Flex justify="flex-end" mt={3}>
+          <Button
+            size="sm"
+            disabled={isSavingFree || freeSelection === freeLive || !freeSelection}
+            onClick={function () { handleSave('free') }}
+            bg={tokens.colors.accent.primary}
+            color="white"
+            _hover={{ bg: tokens.colors.accent.primaryDark }}
+            _disabled={{ opacity: 0.4, cursor: 'not-allowed' }}
+          >
+            {isSavingFree ? t('admin.saving') : t('admin.save')}
+          </Button>
+        </Flex>
+      </SettingsGroup>
+
+      <SettingsGroup title={t('admin.paidPlans')} badge={t('admin.coderModels')}>
+        <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>{t('admin.paidPlansDesc')}</Text>
+        {paidDivergent && (
+          <Box p={3} mb={3} borderRadius={tokens.radius.lg}
+            bg="rgba(247, 127, 0, 0.08)"
+            border="1px solid" borderColor={tokens.colors.accent.orange}>
+            <Text fontSize="11px" color={tokens.colors.accent.orange}>{t('admin.divergentTiers')}</Text>
+          </Box>
+        )}
+        <ModelRadioList
+          models={models}
+          selectedId={paidSelection}
+          liveId={paidLive}
+          onChange={setPaidSelection}
+        />
+        <Flex justify="flex-end" mt={3}>
+          <Button
+            size="sm"
+            disabled={isSavingPaid || (paidSelection === paidLive && !paidDivergent) || !paidSelection}
+            onClick={function () { handleSave('paid') }}
+            bg={tokens.colors.accent.primary}
+            color="white"
+            _hover={{ bg: tokens.colors.accent.primaryDark }}
+            _disabled={{ opacity: 0.4, cursor: 'not-allowed' }}
+          >
+            {isSavingPaid ? t('admin.saving') : t('admin.save')}
+          </Button>
+        </Flex>
+      </SettingsGroup>
+
+      <SettingsGroup title={t('admin.verifyTitle')}>
+        <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>{t('admin.verifyDesc')}</Text>
+        {verify ? (
+          <VStack align="stretch" gap={2}>
+            {verify.verified.map(function (row) {
+              const isStale = verify.cache.stalePlans.includes(row.plan)
+              const broken = !row.ok
+              return (
+                <Box
+                  key={row.plan}
+                  p={3}
+                  borderRadius={tokens.radius.lg}
+                  bg={tokens.colors.bg.card}
+                  border="1px solid"
+                  borderColor={broken ? tokens.colors.accent.red : (isStale ? tokens.colors.accent.orange : tokens.colors.bg.cardBorder)}
+                >
+                  <Flex justify="space-between" align="center" mb={1}>
+                    <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>{row.plan}</Text>
+                    <HStack gap={2}>
+                      {broken && (
+                        <Text fontSize="10px" color={tokens.colors.accent.red}>
+                          {t('admin.verifyBroken')}
+                        </Text>
+                      )}
+                      {!broken && isStale && (
+                        <Text fontSize="10px" color={tokens.colors.accent.orange}>
+                          {t('admin.verifyStale')}
+                        </Text>
+                      )}
+                    </HStack>
+                  </Flex>
+                  <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
+                    {row.storedIdeModel} → {row.resolvedUpstreamModel ?? '?'} @ {row.resolvedProvider ?? '?'}
+                  </Text>
+                  {row.providerUrl && (
+                    <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt={1}>
+                      {row.providerUrl}
+                    </Text>
+                  )}
+                </Box>
+              )
+            })}
+          </VStack>
+        ) : (
+          <Text fontSize="12px" color={tokens.colors.text.muted}>{t('admin.verifyChecking')}</Text>
+        )}
+        <Flex justify="flex-end" mt={3}>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={isVerifying}
+            onClick={refreshVerify}
+            color={tokens.colors.text.secondary}
+            _hover={{ color: tokens.colors.text.primary, bg: tokens.colors.bg.hoverSubtle }}
+            _disabled={{ opacity: 0.4, cursor: 'not-allowed' }}
+          >
+            {isVerifying ? t('admin.verifyChecking') : t('admin.verifyRefresh')}
+          </Button>
+        </Flex>
+      </SettingsGroup>
+    </VStack>
+  )
+}
+
+function ModelRadioList(props: {
+  models: import('../../services/adminService').AdminModel[]
+  selectedId: string
+  liveId: string
+  onChange: (id: string) => void
+}) {
+  return (
+    <VStack align="stretch" gap={1}>
+      {props.models.map(function (m) {
+        const isSelected = props.selectedId === m.id
+        const isLive = props.liveId === m.id
+        return (
+          <Box
+            key={m.id}
+            as="button"
+            onClick={function () { props.onChange(m.id) }}
+            textAlign="left"
+            px={3} py="10px"
+            borderRadius={tokens.radius.lg}
+            bg={isSelected ? tokens.colors.bg.activeItem : tokens.colors.bg.card}
+            border="1px solid"
+            borderColor={isSelected ? tokens.colors.accent.primary : tokens.colors.bg.cardBorder}
+            cursor="pointer"
+            transition={tokens.transition.fast}
+            _hover={{ borderColor: isSelected ? tokens.colors.accent.primary : tokens.colors.border.default }}
+          >
+            <Flex align="center" justify="space-between">
+              <HStack gap={3}>
+                <Box
+                  w="14px" h="14px" borderRadius="full"
+                  border="2px solid"
+                  borderColor={isSelected ? tokens.colors.accent.primary : tokens.colors.border.default}
+                  display="flex" alignItems="center" justifyContent="center"
+                >
+                  {isSelected && (
+                    <Box w="6px" h="6px" borderRadius="full" bg={tokens.colors.accent.primary} />
+                  )}
+                </Box>
+                <Text fontSize="13px" fontWeight="500" color={tokens.colors.text.primary}>{m.name}</Text>
+                <Text fontSize="11px" color={tokens.colors.text.muted}>({m.providerLabel})</Text>
+              </HStack>
+              {isLive && (
+                <Box
+                  px={2} py="1px"
+                  borderRadius={tokens.radius.full}
+                  bg={tokens.colors.accent.greenSubtle}
+                  color={tokens.colors.accent.green}
+                  fontSize="10px"
+                  fontWeight="500"
+                >
+                  live
+                </Box>
+              )}
+            </Flex>
+          </Box>
+        )
+      })}
+    </VStack>
+  )
+}
 
 function SettingsGroup(props: { title: string; badge?: string; children: React.ReactNode }) {
   return (

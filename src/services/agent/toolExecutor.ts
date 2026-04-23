@@ -2120,10 +2120,13 @@ class ToolExecutor {
 Available tools:
 - File operations: read_file, write_file, create_file, edit_file
 - Search: search_files (ripgrep), glob, list_directory
-- Web: web_search (search engine), web_fetch (fetch specific URLs)
+- Web research:
+  - web_search — takes a natural-language query and returns ranked results with titles, snippets, and URLs. This is how you discover what pages exist on a topic.
+  - web_fetch — takes one complete target URL you already know and returns the contents of that single page. This is how you read the body of a specific article, doc, or API reference.
+  - Typical flow: start with web_search to find relevant URLs, then web_fetch on the most promising result to read its full content.
 - Diagnostics: get_diagnostics
 
-Be thorough but concise. Use web_search for looking up documentation, error solutions, or technical research. Use web_fetch when you need to read specific URL content.
+Be thorough but concise.
 
 Project root: ${projectRoot}`
 

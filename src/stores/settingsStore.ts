@@ -86,12 +86,6 @@ interface SettingsState {
    * Toggled by user in Settings or via the chat status bar indicator.
    */
   thinkingEnabled: boolean
-  /**
-   * Per-user dismissal of CMD-mode banners that advertise optional integrations.
-   * Currently used by the Canva MCP banner — once the user dismisses it, do not
-   * show again on subsequent sessions. They can still run /canva-connect anytime.
-   */
-  cmdBannerDismissed: { canva?: boolean }
 }
 
 interface SettingsActions {
@@ -111,7 +105,6 @@ interface SettingsActions {
   resetShortcuts: () => void
   completeOnboarding: () => void
   setThinkingEnabled: (enabled: boolean) => void
-  dismissCmdBanner: (key: 'canva') => void
 }
 
 const DEFAULTS: SettingsState = {
@@ -135,7 +128,6 @@ const DEFAULTS: SettingsState = {
   // Thinking/reasoning ON by default for paid plans.
   // Free plan (DeepSeek) ignores thinking param entirely.
   thinkingEnabled: true,
-  cmdBannerDismissed: {},
 }
 
 export const useSettingsStore = create<SettingsState & SettingsActions>()(
@@ -259,17 +251,11 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
       setThinkingEnabled: (enabled: boolean) => {
         set(() => ({ thinkingEnabled: enabled }))
       },
-
-      dismissCmdBanner: (key: 'canva') => {
-        set(state => ({
-          cmdBannerDismissed: { ...state.cmdBannerDismissed, [key]: true },
-        }))
-      },
     }),
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands, thinkingEnabled: state.thinkingEnabled, cmdBannerDismissed: state.cmdBannerDismissed }
+        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands, thinkingEnabled: state.thinkingEnabled }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -294,7 +280,6 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           sandboxEnabled: p.sandboxEnabled ?? DEFAULTS.sandboxEnabled,
           flaggedCommands: Array.isArray(p.flaggedCommands) ? p.flaggedCommands : DEFAULTS.flaggedCommands,
           thinkingEnabled: p.thinkingEnabled ?? DEFAULTS.thinkingEnabled,
-          cmdBannerDismissed: { ...DEFAULTS.cmdBannerDismissed, ...(p.cmdBannerDismissed || {}) },
           // Merge shortcuts: defaults for new keys, but preserve null (cleared by conflict)
           shortcuts: Object.fromEntries(
             Object.keys(DEFAULT_SHORTCUTS).map(k => [

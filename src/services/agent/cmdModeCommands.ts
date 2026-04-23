@@ -11,7 +11,6 @@ import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import AgentService from './agentService'
 import MCPService from '../mcp/mcpService'
-import { CANVA_MCP_NAME, isCanvaConnected } from '../../utils/canvaMcp'
 import { MCP_REGISTRY, findRegistryEntry, buildConfigEntry, type McpRegistryEntry } from '../../utils/mcpRegistry'
 import { clearPromptHistory } from '../cmdPromptHistory'
 import { t } from '../../i18n/useTranslation'
@@ -254,12 +253,10 @@ async function executeResumeTarget(target: string, projectPath: string): Promise
   }
 }
 
-// ─── /mcp-install, /mcp-browse, /canva-connect — unified registry-backed install flow ───
+// ─── /mcp-install, /mcp-browse — unified registry-backed install flow ───
 //
-// All three commands funnel through `installRegistryEntry` so there is exactly one
-// read-merge-write + addSingleServer implementation. Canva keeps a dedicated alias
-// (`/canva-connect`) and richer OAuth-upfront messaging via `messageKeys` overrides
-// on its registry entry — no duplicate code path.
+// Both commands funnel through `installRegistryEntry` so there is exactly one
+// read-merge-write + addSingleServer implementation.
 
 type MessageSlot = 'installing' | 'installed' | 'registered' | 'alreadyInstalled'
 
@@ -278,16 +275,14 @@ function messageKey(entry: McpRegistryEntry, slot: MessageSlot): TranslationKey 
 
 /**
  * Read-merge-write a registry entry into ~/.toquemedia-studio/mcp.json and start it.
- * Single source of truth for MCP install — shared by /canva-connect and /mcp-install.
+ * Single source of truth for MCP install — used by /mcp-install and /mcp-browse.
  */
 async function installRegistryEntry(entry: McpRegistryEntry, projectPath: string): Promise<void> {
   const state = useChatStore.getState()
 
-  // Idempotency — Canva uses URL-based detection to guard against false positives.
-  const getUrl = (name: string) => MCPService.getInstance().getServerUrl(name)
-  const isAlreadyConnected = entry.name === CANVA_MCP_NAME
-    ? isCanvaConnected(useMcpStore.getState().servers, getUrl)
-    : useMcpStore.getState().servers.some(s => s.name === entry.name && s.status === 'running')
+  const isAlreadyConnected = useMcpStore.getState().servers.some(
+    s => s.name === entry.name && s.status === 'running',
+  )
   if (isAlreadyConnected) {
     state.addSystemMessage(fmt(t(messageKey(entry, 'alreadyInstalled')), { label: entry.label }), 'info')
     return
@@ -299,7 +294,7 @@ async function installRegistryEntry(entry: McpRegistryEntry, projectPath: string
     globalConfigPath = `${homeDir}/.toquemedia-studio/mcp.json`
   } catch (err) {
     logger.error('cmd', 'Failed to resolve home directory:', err)
-    state.addSystemMessage(t('cmd.canva.homeFailed'), 'error')
+    state.addSystemMessage(t('cmd.mcp.homeFailed'), 'error')
     return
   }
 
@@ -327,7 +322,7 @@ async function installRegistryEntry(entry: McpRegistryEntry, projectPath: string
   } catch (err) {
     logger.error('cmd', `Failed to write ${entry.name} MCP config:`, err)
     const msg = err instanceof Error ? err.message : String(err)
-    state.addSystemMessage(fmt(t('cmd.canva.writeFailed'), { msg }), 'error')
+    state.addSystemMessage(fmt(t('cmd.mcp.writeFailed'), { msg }), 'error')
     return
   }
 
@@ -362,13 +357,6 @@ async function installRegistryEntry(entry: McpRegistryEntry, projectPath: string
   }
 }
 
-/** /canva-connect — thin alias that delegates to the shared install flow. */
-async function executeCanvaConnect(_args: string, projectPath: string): Promise<void> {
-  const entry = findRegistryEntry(CANVA_MCP_NAME)
-  if (!entry) return  // unreachable — Canva is always in the registry
-  await installRegistryEntry(entry, projectPath)
-}
-
 async function executeMcpInstall(args: string, projectPath: string): Promise<void> {
   const state = useChatStore.getState()
   const name = args.trim().toLowerCase()
@@ -386,6 +374,10 @@ async function executeMcpInstall(args: string, projectPath: string): Promise<voi
 
 async function executeMcpBrowse(_args: string, _projectPath: string): Promise<void> {
   const state = useChatStore.getState()
+  if (MCP_REGISTRY.length === 0) {
+    state.addSystemMessage(t('cmd.mcp.browseEmpty'), 'info')
+    return
+  }
   const header = t('cmd.mcp.browseHeader')
   const lines = MCP_REGISTRY.map(e =>
     fmt(t('cmd.mcp.browseEntry'), {
@@ -469,12 +461,6 @@ export const CMD_MODE_COMMANDS: SlashCommand[] = [
         await executeResume('', projectPath)
       }
     },
-  },
-  {
-    name: '/canva-connect',
-    description: 'Ligar Canva MCP — designs, apresentações, export PDF/PPT',
-    enabled: true,
-    execute: executeCanvaConnect,
   },
   {
     name: '/mcp-install',

@@ -29,6 +29,7 @@ export interface BillingSSEEvent {
 export interface MeResponse {
   plan: UserPlanName
   isActive: boolean
+  isAdmin?: boolean
   billing: {
     consumedPct: number
     tokensConsumed: number

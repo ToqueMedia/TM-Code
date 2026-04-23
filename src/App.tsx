@@ -122,9 +122,14 @@ function App() {
 
 			// Read directly from the store — not from the effect closure — to avoid
 			// stale values if the store updated between renders and the effect firing.
-			const { currentProject: proj, cmdModeProjectPath: cmd, recentProjects: recent } = useProjectStore.getState();
+			const { currentProject: proj, cmdModeProjectPath: cmd, recentProjects: recent, welcomeScreen } = useProjectStore.getState();
 
-			if (!proj && !cmd && recent.length > 0) {
+			// If the user was explicitly on the Welcome screen last time the app
+			// closed, honour that on restart — do NOT auto-open the most recent
+			// project. `welcomeScreen === null` means "no Welcome preference yet"
+			// (first-ever launch or pre-0.3.0 persisted state), in which case the
+			// legacy auto-open-last-project behaviour still applies.
+			if (!proj && !cmd && !welcomeScreen && recent.length > 0) {
 				const lastProject = recent[0];
 				if (lastProject.path) {
 					setIsOpeningProject(true);

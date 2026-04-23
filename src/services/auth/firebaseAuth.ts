@@ -447,11 +447,21 @@ class FirebaseAuthService {
 
         console.info(
           `[billing] Plan: ${data.plan}, Active: ${data.isActive}, ` +
+          `Admin: ${data.isAdmin === true}, ` +
           `Consumed: ${(data.billing.consumedPct * 100).toFixed(1)}%, ` +
           `Extra: ${data.billing.extraUsageBalance}, Status: ${data.billing.status}`
         )
 
         useBillingStore.getState().updateFromMe(data)
+
+        // Propagate isAdmin into the auth store so Settings can gate the Admin
+        // panel. The backend is authoritative; we don't trust any local flag.
+        const authStore = useAuthStore.getState()
+        const currentUser = authStore.user
+        if (currentUser) {
+          authStore.setUser({ ...currentUser, isAdmin: data.isAdmin === true })
+        }
+
         return // success
       } catch (err) {
         console.warn(`[billing] Fetch failed (attempt ${attempt}/${MAX_ATTEMPTS}):`, err)

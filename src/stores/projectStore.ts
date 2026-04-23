@@ -27,6 +27,14 @@ interface ProjectStore {
   cmdModeProjectPath: string | null;
   /** Paths that have been opened at least once in CMD mode — persisted. */
   cmdModeProjectPaths: string[];
+  /**
+   * Where the user was on the Welcome screen the last time the app quit.
+   * Persisted so a restart returns them to the same sub-screen instead of
+   * auto-opening the most recent project. `null` means "no explicit Welcome
+   * state" (first launch, or the user has a project open) — the auto-open
+   * logic in App.tsx may still reopen a recent project in that case.
+   */
+  welcomeScreen: 'hero' | 'settings' | null;
   hasHydrated: boolean;
 
   // Actions
@@ -46,6 +54,7 @@ interface ProjectStore {
   setCmdModeProjectPath: (path: string | null) => void;
   /** Remove a path from the CMD mode paths list (e.g. user promotes it to an IDE project). */
   removeCmdModePath: (path: string) => void;
+  setWelcomeScreen: (screen: 'hero' | 'settings' | null) => void;
   setHasHydrated: (hydrated: boolean) => void;
 }
 
@@ -136,19 +145,27 @@ export const useProjectStore = create<ProjectStore>()(
       error: null,
       cmdModeProjectPath: null,
       cmdModeProjectPaths: [],
+      welcomeScreen: null,
       hasHydrated: false,
 
       setHasHydrated: (hydrated: boolean) => {
         set({ hasHydrated: hydrated });
       },
 
+      setWelcomeScreen: (screen) => {
+        set({ welcomeScreen: screen });
+      },
+
       setCmdModeProjectPath: (path: string | null) => {
         if (path) {
           // Record that this path was opened in CMD mode (deduplicated, max 20)
           const existing = get().cmdModeProjectPaths.filter(p => p !== path)
-          set({ cmdModeProjectPath: path, cmdModeProjectPaths: [path, ...existing].slice(0, 20) })
+          // Entering CMD mode clears the Welcome sub-screen marker — the
+          // next app start should restore CMD, not Welcome.
+          set({ cmdModeProjectPath: path, cmdModeProjectPaths: [path, ...existing].slice(0, 20), welcomeScreen: null })
         } else {
-          set({ cmdModeProjectPath: null })
+          // Leaving CMD back to Welcome — remember that's where the user is.
+          set({ cmdModeProjectPath: null, welcomeScreen: 'hero' })
         }
       },
 
@@ -159,7 +176,8 @@ export const useProjectStore = create<ProjectStore>()(
       },
 
       openProject: async (path: string, options?: { initGit?: boolean }) => {
-        set({ loading: true, error: null, cmdModeProjectPath: null });
+        // Opening a project exits any Welcome state — clear the persisted marker.
+        set({ loading: true, error: null, cmdModeProjectPath: null, welcomeScreen: null });
 
         // Clean up previous project's state before loading the new one
         const prevProject = get().currentProject;
@@ -403,6 +421,9 @@ export const useProjectStore = create<ProjectStore>()(
           await get().saveProjectState().catch(console.error);
         }
         tearDownProject();
+        // User is now back on Welcome — remember that so a restart doesn't
+        // auto-reopen the project they just closed.
+        set({ welcomeScreen: 'hero' });
       },
 
       saveProjectState: async () => {
@@ -509,6 +530,7 @@ export const useProjectStore = create<ProjectStore>()(
         windowState: state.windowState,
         cmdModeProjectPath: state.cmdModeProjectPath,
         cmdModeProjectPaths: state.cmdModeProjectPaths,
+        welcomeScreen: state.welcomeScreen,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);
