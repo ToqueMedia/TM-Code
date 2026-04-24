@@ -114,29 +114,34 @@ const MIMO_V2_FLASH: ModelProfile = {
   modelSpecificPrompt: `Never start responses with filler ("Sure!", "Of course!", "Let me help you"). Go straight to the answer or code. Output only changed code — never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
 }
 
-const DEEPSEEK_V3_2: ModelProfile = {
-  id: 'deepseek-v3.2',
-  name: 'DeepSeek V3.2',
+const DEEPSEEK_V4_FLASH: ModelProfile = {
+  id: 'deepseek-v4-flash',
+  name: 'DeepSeek V4-Flash',
   persona: { name: 'Nzinga Mbandi', tagline: 'Equilibrada e precisa — pensa antes de agir, excelente custo-benefício. Custo: 1x' },
-  modelId: 'deepseek-v3.2',
-  contextWindow: 131_072,
-  maxOutputTokens: 32_768,
+  modelId: 'deepseek-v4-flash',
+  // Upstream supports 1M tokens; we keep 256K / 128K-out for now and will
+  // raise the caps once billing and latency numbers are validated.
+  contextWindow: 262_144,
+  maxOutputTokens: 131_072,
 
   temperature: 0.0,
   reasoningTemperature: null,
   topP: 1.0,
   topK: null,
 
-  // DeepSeek V3.2 on DashScope does NOT support thinking — the backend
-  // strips enable_thinking/thinking/thinking_budget for this model
-  // (proxy.ts MODELS_NO_THINKING). Profile must reflect reality.
-  thinkingMode: 'none',
-  supportsThinking: false,
-  thinkingParam: null,
+  // V4-Flash supports three reasoning modes (Non-Think / Think-High / Think-Max).
+  // We expose a toggle — user turns thinking on/off from Settings. DashScope
+  // follows the `enable_thinking` boolean convention used by other models.
+  thinkingMode: 'toggleable',
+  supportsThinking: true,
+  thinkingParam: 'enable_thinking',
   thinkingBudget: null,
   thinkingMandatory: false,
 
-  preserveReasoning: false, // DeepSeek docs: "API will return 400 if reasoning_content included"
+  // V4 accepts reasoning_content in subsequent turns (unlike V3.2 which rejected
+  // it with 400). Preserving it gives the model access to its previous chain
+  // of thought and improves multi-turn reasoning continuity.
+  preserveReasoning: true,
   skipSystemPromptInThinking: false,
   supportsAttachments: false,
   supportsSearch: true,  // DashScope DeepSeek native web_search via enable_search
@@ -401,7 +406,7 @@ const STEP_3_5_FLASH: ModelProfile = {
 export const MODEL_PROFILES: Record<string, ModelProfile> = {
   // 1x cost
   'mimo-v2-flash': MIMO_V2_FLASH,
-  'deepseek-v3.2': DEEPSEEK_V3_2,
+  'deepseek-v4-flash': DEEPSEEK_V4_FLASH,
   'step-3.5-flash': STEP_3_5_FLASH,
   // 2x cost
   'qwen3-coder-next': QWEN3_CODER_NEXT,
@@ -415,7 +420,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'gemini-3-flash': GEMINI_3_FLASH,
 }
 
-export const DEFAULT_MODEL_ID = 'deepseek-v3.2'
+export const DEFAULT_MODEL_ID = 'deepseek-v4-flash'
 
 // Dead code — kept for potential reactivation
 export const FREE_MODEL_ID = 'mimo-v2-flash'
@@ -447,7 +452,7 @@ export function getAllModelProfiles(): ModelProfile[] {
  * - multimodal (images) → Qwen 3.6 Plus handles image analysis, then GLM-5.1 processes the result
  */
 export function getProfileForPlan(plan: UserPlanName): ModelProfile {
-  if (plan === 'explorer') return DEEPSEEK_V3_2
+  if (plan === 'explorer') return DEEPSEEK_V4_FLASH
   // All paid plans use GLM-5.1 as the primary model.
   // Qwen 3.6 Plus is reserved for multimodal (image) processing.
   return GLM_5_1

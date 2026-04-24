@@ -101,7 +101,12 @@
       "Bash(echo \"FE_EXIT=$?\")",
       "Bash(echo \"BE_EXIT=$?\")",
       "Bash(npx firebase *)",
-      "Bash(echo \"TS=$?\")"
+      "Bash(echo \"TS=$?\")",
+      "Bash(git log *)",
+      "Bash(git show-ref *)",
+      "WebFetch(domain:api-docs.deepseek.com)",
+      "WebFetch(domain:simonwillison.net)",
+      "Bash(grep -A1 '^name = \"toquemedia-studio\"$' src-tauri/Cargo.lock)"
     ]
   }
 }

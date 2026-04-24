@@ -6,7 +6,10 @@
 
 import { check } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
+import { getVersion } from '@tauri-apps/api/app'
 import { useUpdateStore, type UpdateInfo } from '../stores/updateStore'
+import { IS_VITE_DEV } from '../utils/viteEnv'
+import { compareSemver } from '../utils/semver'
 
 let checkedThisSession = false
 
@@ -23,10 +26,31 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   }
 }
 
+/**
+ * Drop any stale `pendingUpdate` left over from a previous session whose
+ * target version is already installed. Without this, the banner rehydrates
+ * from localStorage and reappears after the user completed the update —
+ * pointing at their own current version.
+ */
+export async function reconcilePendingUpdate(): Promise<void> {
+  const store = useUpdateStore.getState()
+  const pending = store.pendingUpdate
+  if (!pending) return
+  try {
+    const currentVersion = await getVersion()
+    if (compareSemver(pending.version, currentVersion) <= 0) {
+      console.info(`[updater] Clearing stale pendingUpdate — current=${currentVersion} >= pending=${pending.version}`)
+      store.setPendingUpdate(null)
+    }
+  } catch (err) {
+    console.warn('[updater] reconcilePendingUpdate failed:', err)
+  }
+}
+
 /** Download, install, and relaunch the app. */
 export async function installUpdate(): Promise<void> {
   // DEBUG: Simulate installation flow for testing
-  if (import.meta.env.DEV && window.localStorage.getItem('SIMULATE_UPDATE') === 'true') {
+  if (IS_VITE_DEV && window.localStorage.getItem('SIMULATE_UPDATE') === 'true') {
     console.info('[updater] Simulating download and install...')
     await new Promise(r => setTimeout(r, 2000)) // Simulate download time
     alert('Simulação: A aplicação iria reiniciar agora para aplicar a versão 99.9.9')
@@ -42,6 +66,11 @@ export async function installUpdate(): Promise<void> {
       console.info(`[updater] Downloading ${(progress.data.contentLength / 1024 / 1024).toFixed(1)}MB...`)
     }
   })
+
+  // Clear the persisted banner state before relaunch — otherwise the next
+  // boot rehydrates and shows the banner again pointing at the version the
+  // user just installed.
+  useUpdateStore.getState().setPendingUpdate(null)
 
   await relaunch()
 }
@@ -60,10 +89,15 @@ export async function autoCheckForUpdate(): Promise<void> {
   if (checkedThisSession) return
   checkedThisSession = true
 
+  // Reconcile before any check — a just-updated user shouldn't briefly see
+  // the stale banner from their previous session while we wait the 5s
+  // startup delay or the Tauri check round-trip.
+  await reconcilePendingUpdate()
+
   const performCheck = async () => {
     try {
       // DEBUG: Simulate a fake update for testing
-      if (import.meta.env.DEV && window.localStorage.getItem('SIMULATE_UPDATE') === 'true') {
+      if (IS_VITE_DEV && window.localStorage.getItem('SIMULATE_UPDATE') === 'true') {
         useUpdateStore.getState().setPendingUpdate({
           version: '99.9.9',
           body: 'Esta é uma atualização de teste para validar o sistema de notificações.',
@@ -73,7 +107,13 @@ export async function autoCheckForUpdate(): Promise<void> {
       }
 
       const update = await checkForUpdate()
-      if (!update) return
+      if (!update) {
+        // No update available — clear any stale pending entry.
+        if (useUpdateStore.getState().pendingUpdate) {
+          useUpdateStore.getState().setPendingUpdate(null)
+        }
+        return
+      }
       useUpdateStore.getState().setPendingUpdate(update)
     } catch (err) {
       console.warn('[updater] Check failed:', err)
