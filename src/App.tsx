@@ -37,7 +37,7 @@ import { tokens } from '@/theme/tokens';
 
 function App() {
 	const { currentProject, openProject, hasHydrated } = useProjectStore();
-	const { isAuthenticated, isLoading: authLoading } = useAuthStore();
+	const { isAuthenticated, isLoading: authLoading, signupComplete } = useAuthStore();
 	const hasCompletedOnboarding = useSettingsStore(s => s.hasCompletedOnboarding);
 	const [initializing, setInitializing] = useState(true);
 	const [requirementsResult, setRequirementsResult] = useState<EnvironmentCheckResult | null>(null);
@@ -368,6 +368,15 @@ function App() {
 	// Not authenticated → show login
 	if (!isAuthenticated) {
 		return <LoginScreen initialMode={loginInitialMode} />;
+	}
+
+	// Authenticated but signup not yet complete (mid-phone-link or backend
+	// /v1/me reported `signup_incomplete`). Stay on the login surface — the
+	// IDE shell must not render until the backend confirms signup is done.
+	// `signupComplete === null` means the first /v1/me hasn't returned yet;
+	// we wait rather than render the IDE optimistically.
+	if (signupComplete !== true) {
+		return <LoginScreen initialMode="signup" />;
 	}
 
 	return (

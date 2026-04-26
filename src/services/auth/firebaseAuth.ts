@@ -6,9 +6,13 @@ import {
   createUserWithEmailAndPassword,
   signInWithPopup,
   GoogleAuthProvider,
+  RecaptchaVerifier,
   signOut,
   onAuthStateChanged,
+  sendEmailVerification,
   updateProfile,
+  linkWithPhoneNumber,
+  type ConfirmationResult,
   type User
 } from 'firebase/auth'
 import {
@@ -23,6 +27,8 @@ import {
 import {
   initializeAppCheck,
   CustomProvider,
+  getToken as getAppCheckToken,
+  type AppCheck,
   type AppCheckToken,
 } from 'firebase/app-check'
 import { useAuthStore } from '../../stores/authStore'
@@ -47,6 +53,7 @@ const firebaseConfig = {
 let _app: ReturnType<typeof initializeApp> | null = null
 let _auth: ReturnType<typeof getAuth> | null = null
 let _db: ReturnType<typeof getFirestore> | null = null
+let _appCheck: AppCheck | null = null
 
 function ensureFirebase() {
   if (_app) return
@@ -58,6 +65,9 @@ function ensureFirebase() {
   }
   _app = initializeApp(firebaseConfig)
   _auth = getAuth(_app)
+  // Localizes the verification email + SMS templates Firebase sends. Without
+  // this, users in PT-speaking markets (Angola, PT, BR) get English defaults.
+  _auth.languageCode = 'pt'
   initializeFirestore(_app, { ignoreUndefinedProperties: true })
   _db = getFirestore(_app)
 
@@ -98,13 +108,34 @@ function ensureFirebase() {
         },
       })
 
-      initializeAppCheck(_app, {
+      _appCheck = initializeAppCheck(_app, {
         provider: appCheckProvider,
         isTokenAutoRefreshEnabled: true,
       })
-    } catch {
-      // AppCheck init failed — non-fatal
+    } catch (err) {
+      console.warn('[appCheck] init failed:', err)
     }
+  }
+}
+
+/**
+ * Returns the headers needed to satisfy backend App Check enforcement on
+ * gated endpoints. Callers should spread the result into their `headers`
+ * object — empty when App Check is disabled or the SDK hasn't initialized,
+ * matching the dev/emulator no-op contract.
+ *
+ * Uses cached tokens when valid (the SDK refreshes them automatically every
+ * ~50 min when `isTokenAutoRefreshEnabled` is on).
+ */
+export async function getAppCheckHeader(): Promise<Record<string, string>> {
+  if (!_appCheck) return {}
+  try {
+    const result = await getAppCheckToken(_appCheck, /* forceRefresh */ false)
+    if (!result?.token) return {}
+    return { 'X-Firebase-AppCheck': result.token }
+  } catch (err) {
+    console.warn('[appCheck] getToken failed:', err)
+    return {}
   }
 }
 
@@ -324,6 +355,9 @@ class FirebaseAuthService {
         createdAt: Timestamp.now(),
         updatedAt: Timestamp.now(),
         userPlan: 'explorer',
+        // Set false here so the backend's signup gates block this account
+        // until phone link succeeds. Flipped to true in confirmPhoneCode.
+        signupComplete: false,
       }, { merge: true })
     } catch (err) {
       console.warn('[auth] Firestore profile write failed during signUp:', err)
@@ -346,7 +380,82 @@ class FirebaseAuthService {
       }
     }
 
+    // ── Step 4: Email verification (fire-and-forget) ─────────────
+    // The backend /v1/me will reject unverified accounts older than 24h with
+    // 403, so this email must reach the user. We don't block signUp on it —
+    // a transient network error here would otherwise force the user to retry
+    // the entire signup. Failures here are logged and surface as the 24h-grace
+    // verification reminder banner; they're not fatal at this moment.
+    sendEmailVerification(user).catch(err => {
+      console.warn('[auth] sendEmailVerification failed:', err)
+    })
+
     return user
+  }
+
+  /**
+   * Initiate the phone-number link flow. Renders an invisible reCAPTCHA in
+   * the given container element, sends an SMS code to `phoneE164`, and
+   * returns a `ConfirmationResult` to be passed to `confirmPhoneCode`.
+   *
+   * The container element must exist in the DOM at call time. Caller is
+   * responsible for cleanup of the verifier via the returned `cleanup` fn —
+   * Firebase keeps internal references that prevent GC otherwise.
+   */
+  async startPhoneLink(
+    phoneE164: string,
+    recaptchaContainer: HTMLElement,
+  ): Promise<{ confirmation: ConfirmationResult; cleanup: () => void }> {
+    if (!this.currentUser) {
+      throw new Error('No authenticated user — call signUp first')
+    }
+
+    const verifier = new RecaptchaVerifier(getFirebaseAuth(), recaptchaContainer, {
+      size: 'invisible',
+    })
+
+    try {
+      const confirmation = await linkWithPhoneNumber(this.currentUser, phoneE164, verifier)
+      return {
+        confirmation,
+        cleanup: () => {
+          try { verifier.clear() } catch { /* noop */ }
+        },
+      }
+    } catch (err) {
+      try { verifier.clear() } catch { /* noop */ }
+      throw err
+    }
+  }
+
+  /**
+   * Complete the phone-link flow with the 6-digit code the user received via
+   * SMS. On success, the phone number is linked to the account and persisted
+   * to Firestore. Throws on invalid code so the UI can show an inline error.
+   */
+  async confirmPhoneCode(confirmation: ConfirmationResult, code: string): Promise<void> {
+    const result = await confirmation.confirm(code)
+    const user = result.user
+
+    // Persist phone fields to Firestore so the backend /v1/me sees the
+    // linked phone without having to read it from the Auth admin SDK.
+    // signupComplete=true unlocks all backend signup gates.
+    try {
+      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, user.uid), {
+        phoneNumber: user.phoneNumber,
+        phoneVerifiedAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+        signupComplete: true,
+      }, { merge: true })
+    } catch (err) {
+      console.warn('[auth] phone profile sync failed:', err)
+    }
+  }
+
+  /** Re-send email verification — used by the persistent unverified banner. */
+  async resendEmailVerification(): Promise<void> {
+    if (!this.currentUser) throw new Error('No authenticated user')
+    await sendEmailVerification(this.currentUser)
   }
 
   async signInWithGoogle(): Promise<User> {
@@ -371,6 +480,9 @@ class FirebaseAuthService {
         emailVerified: user.emailVerified,
         lastLogin: Timestamp.now(),
         updatedAt: Timestamp.now(),
+        // Google accounts skip the phone-link step so they're considered
+        // complete on first sign-in. Future: require phone for Google too.
+        signupComplete: true,
       }, { merge: true })
 
       // Set defaults for new users only (fields that shouldn't exist yet).
@@ -424,11 +536,20 @@ class FirebaseAuthService {
         })
 
         if (!res.ok) {
-          // 403 = inactive account. Won't recover via retry. Mark loaded with
-          // isActive=false so the UI can render the right state instead of
-          // staying in loading state forever.
+          // 403 = signup gate failed. Distinguishes inactive / signup-incomplete /
+          // email-not-verified so the UI can show the right action. signup-incomplete
+          // means the user authenticated but never finished phone link → keep them
+          // on the LoginScreen so they can retry; the existing Firebase user
+          // remains until they complete or explicitly cancel.
           if (res.status === 403) {
-            console.warn('[billing] /v1/me returned 403 — account inactive')
+            const reason = await res.json().catch(() => ({})) as { reason?: string }
+            console.warn(`[billing] /v1/me 403 reason=${reason.reason || 'unknown'}`)
+            if (reason.reason === 'signup_incomplete') {
+              useAuthStore.getState().setSignupComplete(false)
+              useBillingStore.setState({ isLoaded: true })
+              return
+            }
+            useAuthStore.getState().setSignupComplete(true) // not the gate that's blocking
             useBillingStore.setState({ isLoaded: true, isActive: false, noCredits: true })
             return
           }
@@ -453,6 +574,10 @@ class FirebaseAuthService {
         )
 
         useBillingStore.getState().updateFromMe(data)
+
+        // /v1/me only returns 200 after all signup gates pass — flip the
+        // local flag so the App auth gate can render the IDE.
+        useAuthStore.getState().setSignupComplete(true)
 
         // Propagate isAdmin into the auth store so Settings can gate the Admin
         // panel. The backend is authoritative; we don't trust any local flag.

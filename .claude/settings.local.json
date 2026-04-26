@@ -106,7 +106,18 @@
       "Bash(git show-ref *)",
       "WebFetch(domain:api-docs.deepseek.com)",
       "WebFetch(domain:simonwillison.net)",
-      "Bash(grep -A1 '^name = \"toquemedia-studio\"$' src-tauri/Cargo.lock)"
+      "Bash(grep -A1 '^name = \"toquemedia-studio\"$' src-tauri/Cargo.lock)",
+      "Bash(git commit *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(echo \"backend-exit=$?\")",
+      "Bash(echo \"frontend=$?\")",
+      "Bash(echo \"backend=$?\")",
+      "Bash(echo \"functions=$?\")",
+      "Bash(wrangler whoami *)",
+      "Bash(firebase use *)",
+      "Bash(npm run *)",
+      "Bash(firebase deploy *)",
+      "Bash(curl *)"
     ]
   }
 }

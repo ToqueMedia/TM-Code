@@ -3,6 +3,7 @@ use commands::ai_completion::*;
 use commands::checkpoint::*;
 use commands::container::*;
 use commands::debugger::*;
+use commands::device::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
 use commands::git::*;
@@ -834,7 +835,8 @@ pub fn run() {
             open_preview_webview,
             close_preview_webview,
             resize_preview_webview,
-            get_app_version
+            get_app_version,
+            get_device_fingerprint
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
