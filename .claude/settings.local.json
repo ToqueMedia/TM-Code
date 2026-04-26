@@ -117,7 +117,8 @@
       "Bash(firebase use *)",
       "Bash(npm run *)",
       "Bash(firebase deploy *)",
-      "Bash(curl *)"
+      "Bash(curl *)",
+      "Bash(cargo update *)"
     ]
   }
 }
