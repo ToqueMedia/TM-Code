@@ -84,19 +84,14 @@ function ensureFirebase() {
 
       const appCheckProvider = new CustomProvider({
         getToken: async (): Promise<AppCheckToken> => {
-          const auth = getAuth(_app!)
-          const user = auth.currentUser
-          if (!user) {
-            return { token: '', expireTimeMillis: Date.now() + 5_000 }
-          }
-
-          const idToken = await user.getIdToken()
+          // CRITICAL: must work BEFORE the user signs in. Firebase Auth itself
+          // requires an App Check token when enforcement is on — gating this
+          // call on `auth.currentUser` creates a chicken-and-egg lock-out
+          // (`auth/firebase-app-check-token-is-invalid`). The backend `/v1/appcheck-token`
+          // is auth-less and rate-limited per-IP for the same reason.
           const res = await tauriFetch(`${workerUrl}/v1/appcheck-token`, {
             method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${idToken}`,
-              'Content-Type': 'application/json',
-            },
+            headers: { 'Content-Type': 'application/json' },
           })
 
           if (!res.ok) {

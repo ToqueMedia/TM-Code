@@ -1,7 +1,8 @@
 /**
  * Auto-update service.
- * Checks for updates on app startup, shows a toast notification,
- * and allows the user to download + install + relaunch.
+ * Checks for updates on app startup, on window focus, and periodically while
+ * the IDE is open. Shows a banner notification when a newer version is
+ * available; clicking download + install relaunches the app.
  */
 
 import { check } from '@tauri-apps/plugin-updater'
@@ -12,6 +13,17 @@ import { IS_VITE_DEV } from '../utils/viteEnv'
 import { compareSemver } from '../utils/semver'
 
 let checkedThisSession = false
+
+/** Periodic re-check interval — short enough to catch hot releases within a
+ *  typical work session, long enough that we don't hammer the updater. */
+const PERIODIC_CHECK_INTERVAL_MS = 60 * 60 * 1000 // 1h
+
+/** Minimum gap between any two checks regardless of trigger (focus, interval,
+ *  manual). Stops focus-thrash from spamming the updater when the user is
+ *  alt-tabbing rapidly between windows. */
+const MIN_CHECK_GAP_MS = 15 * 60 * 1000 // 15min
+
+let lastCheckAtMs = 0
 
 export { type UpdateInfo }
 
@@ -84,7 +96,11 @@ export function setPendingUpdate(update: UpdateInfo | null): void {
   useUpdateStore.getState().setPendingUpdate(update)
 }
 
-/** Auto-check on startup and periodically (every 6 hours). Shows banner if update available. */
+/**
+ * Auto-check on startup, on window focus, and every 1h while the IDE is
+ * open. Shows banner if update available. All triggers funnel through one
+ * `performCheck` so the 15min throttle applies uniformly.
+ */
 export async function autoCheckForUpdate(): Promise<void> {
   if (checkedThisSession) return
   checkedThisSession = true
@@ -94,7 +110,21 @@ export async function autoCheckForUpdate(): Promise<void> {
   // startup delay or the Tauri check round-trip.
   await reconcilePendingUpdate()
 
-  const performCheck = async () => {
+  const performCheck = async (trigger: 'startup' | 'interval' | 'focus') => {
+    // Throttle. Avoids hammering the updater when focus events fire rapidly
+    // (alt-tab, window manager re-focusing). Startup is exempt — it sets the
+    // baseline timestamp, so a focus event seconds later doesn't trigger a
+    // duplicate check.
+    if (trigger !== 'startup' && Date.now() - lastCheckAtMs < MIN_CHECK_GAP_MS) {
+      return
+    }
+    // Skip if we already have a pending update — user hasn't acted on it yet,
+    // re-checking can't surface anything they don't already see in the banner.
+    if (useUpdateStore.getState().pendingUpdate) {
+      return
+    }
+    lastCheckAtMs = Date.now()
+
     try {
       // DEBUG: Simulate a fake update for testing
       if (IS_VITE_DEV && window.localStorage.getItem('SIMULATE_UPDATE') === 'true') {
@@ -114,15 +144,20 @@ export async function autoCheckForUpdate(): Promise<void> {
         }
         return
       }
+      console.info(`[updater] ${trigger}: update available v${update.version}`)
       useUpdateStore.getState().setPendingUpdate(update)
     } catch (err) {
-      console.warn('[updater] Check failed:', err)
+      console.warn(`[updater] check (${trigger}) failed:`, err)
     }
   }
 
   // Initial check after startup delay
-  setTimeout(performCheck, 5000)
+  setTimeout(() => performCheck('startup'), 5000)
 
-  // Periodic check every 6 hours
-  setInterval(performCheck, 6 * 60 * 60 * 1000)
+  // Periodic check every 1h
+  setInterval(() => performCheck('interval'), PERIODIC_CHECK_INTERVAL_MS)
+
+  // Re-check when the user returns to the app (alt-tab back, system wake).
+  // Throttled to 15min minimum gap to avoid spam.
+  window.addEventListener('focus', () => performCheck('focus'))
 }
