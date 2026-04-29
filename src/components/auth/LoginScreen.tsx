@@ -24,9 +24,6 @@ const ERROR_MESSAGES: Record<string, string> = {
   'auth/invalid-credential': 'Email ou password incorrectos.',
   'auth/email-already-in-use': 'Este email já está registado.',
   'auth/weak-password': 'Password demasiado fraca (mín. 6 caracteres).',
-  'auth/popup-closed-by-user': 'Login cancelado.',
-  'auth/popup-blocked': 'Pop-up bloqueado. Permita pop-ups e tente novamente.',
-  'auth/account-exists-with-different-credential': 'Já existe uma conta com este email usando outro método.',
   'auth/too-many-requests': 'Muitas tentativas. Aguarde alguns minutos.',
   'auth/network-request-failed': 'Erro de conexão. Verifique a internet.',
   'auth/invalid-phone-number': 'Número de telefone inválido.',
@@ -40,17 +37,6 @@ const ERROR_MESSAGES: Record<string, string> = {
 function getErrorMessage(err: unknown): string {
   const code = (err instanceof Error && 'code' in err ? (err as { code: string }).code : '') || ''
   return ERROR_MESSAGES[code] || (err instanceof Error ? err.message : '') || 'Erro de autenticação.'
-}
-
-function GoogleIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-      <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
-      <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z" fill="#34A853"/>
-      <path d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
-      <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
-    </svg>
-  )
 }
 
 interface LoginScreenProps {
@@ -67,7 +53,6 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
   const [smsCode, setSmsCode] = useState('')
   const [mode, setMode] = useState<AuthMode>(initialMode)
   const [loading, setLoading] = useState(false)
-  const [googleLoading, setGoogleLoading] = useState(false)
   const confirmationRef = useRef<ConfirmationResult | null>(null)
   const recaptchaContainerRef = useRef<HTMLDivElement | null>(null)
   const verifierCleanupRef = useRef<(() => void) | null>(null)
@@ -102,7 +87,7 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
     }
   }, [])
 
-  const anyLoading = loading || googleLoading
+  const anyLoading = loading
 
   /**
    * On phone-link rollback (limit exceeded, code timeout, etc.) we delete the
@@ -252,50 +237,6 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
     }
   }
 
-  const handleGoogleSignIn = async () => {
-    if (anyLoading) return
-
-    setGoogleLoading(true)
-    setError(null)
-
-    // Watchdog: in Tauri's WebKit WebView, signInWithPopup can hang forever
-    // when the user closes the Google popup — Firebase's popup.closed polling
-    // doesn't always detect the close across window contexts, so the promise
-    // never resolves/rejects and the `finally` block below never runs. That
-    // leaves `googleLoading=true` and blocks the whole form.
-    //
-    // When the popup closes, focus returns to the main window. If Firebase
-    // hasn't resolved ~1.5s after that focus event (well past any normal
-    // postMessage round-trip), we treat the attempt as cancelled.
-    let settled = false
-    let watchdogTimer: ReturnType<typeof setTimeout> | undefined
-    const handleMainWindowFocus = () => {
-      if (settled) return
-      watchdogTimer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        setGoogleLoading(false)
-        // Silent cancel — the user intentionally closed the popup.
-      }, 1500)
-    }
-    window.addEventListener('focus', handleMainWindowFocus)
-
-    try {
-      const authService = FirebaseAuthService.getInstance()
-      await authService.signInWithGoogle()
-      settled = true
-    } catch (err: unknown) {
-      if (!settled) {
-        settled = true
-        setError(getErrorMessage(err))
-      }
-    } finally {
-      window.removeEventListener('focus', handleMainWindowFocus)
-      if (watchdogTimer) clearTimeout(watchdogTimer)
-      setGoogleLoading(false)
-    }
-  }
-
   const toggleMode = () => {
     setMode(m => m === 'signin' ? 'signup' : 'signin')
     setSignupStep('form')
@@ -384,10 +325,6 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
       <style>{`
         .auth-input:focus {
           border-color: ${tokens.colors.accent.primary} !important;
-        }
-        .auth-btn-google:hover:not(:disabled) {
-          background: ${tokens.colors.bg.hoverSubtle} !important;
-          border-color: ${tokens.colors.text.muted} !important;
         }
         .auth-btn-submit:hover:not(:disabled) {
           filter: brightness(1.1);
@@ -570,50 +507,6 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
             </form>
           ) : (
           <>
-          {/* Google button */}
-          <button
-            type="button"
-            className="auth-btn-google"
-            onClick={handleGoogleSignIn}
-            disabled={anyLoading}
-            style={{
-              width: '100%',
-              padding: '11px 0',
-              background: 'transparent',
-              border: `1px solid ${tokens.colors.border.panel}`,
-              borderRadius: '10px',
-              color: tokens.colors.text.primary,
-              fontSize: '13px',
-              fontWeight: '500',
-              cursor: anyLoading ? 'not-allowed' : 'pointer',
-              fontFamily: 'inherit',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '10px',
-              opacity: anyLoading ? 0.5 : 1,
-              transition: `all ${tokens.transition.normal}`,
-            }}
-          >
-            {googleLoading ? (
-              <LoadingDots />
-            ) : (
-              <>
-                <GoogleIcon />
-                Continuar com Google
-              </>
-            )}
-          </button>
-
-          {/* Divider */}
-          <Flex align="center" my={5} gap={3}>
-            <Box flex="1" height="1px" bg={tokens.colors.border.panel} />
-            <Text fontSize="11px" color={tokens.colors.text.muted} textTransform="uppercase" letterSpacing="0.5px">
-              ou
-            </Text>
-            <Box flex="1" height="1px" bg={tokens.colors.border.panel} />
-          </Flex>
-
           {/* Form */}
           <form onSubmit={handleSubmit}>
             {/* Display Name (signup only) */}

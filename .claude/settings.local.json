@@ -118,7 +118,28 @@
       "Bash(npm run *)",
       "Bash(firebase deploy *)",
       "Bash(curl *)",
-      "Bash(cargo update *)"
+      "Bash(cargo update *)",
+      "Bash(firebase functions:log --only cleanupOrphanSignups -n 50)",
+      "Bash(firebase functions:log --only cleanupOrphanSignups -n 100)",
+      "Bash(firebase functions:log --only cleanupOrphanSignups -n 1000)",
+      "Bash(gcloud --project=maiplayer-ac56d logging read 'protoPayload.methodName=\"google.cloud.identitytoolkit.v1.AccountManagementService.DeleteAccount\" timestamp>=\"2026-04-26T14:00:00Z\" timestamp<=\"2026-04-26T15:00:00Z\"' --limit=100 --format=json)",
+      "Bash(gcloud --project=maiplayer-ac56d logging read 'resource.type=\"audited_resource\" timestamp>=\"2026-04-26T14:20:00Z\" timestamp<=\"2026-04-26T14:30:00Z\" protoPayload.serviceName=\"identitytoolkit.googleapis.com\"' --limit=10 --format=json)",
+      "Bash(firebase functions:log --only cleanupOrphanSignups -n 5000, vai recuperar os dados no firestore, as senhas de acesso?)",
+      "Bash(gcloud --project=maiplayer-ac56d firestore databases describe --database='\\(default\\)' --format=json)",
+      "Bash(gcloud --project=maiplayer-ac56d logging read 'timestamp>=\"2026-04-26T14:25:00Z\" timestamp<=\"2026-04-26T14:26:00Z\" protoPayload.serviceName=\"identitytoolkit.googleapis.com\"' --limit=200 --format='value\\(protoPayload.methodName,protoPayload.request.localId,protoPayload.resourceName\\)')",
+      "Bash(gcloud --project=maiplayer-ac56d logging read 'timestamp>=\"2026-04-26T14:25:00Z\" timestamp<=\"2026-04-26T14:26:00Z\" \"deleteUser\"' --limit=100 --format='value\\(timestamp,jsonPayload,textPayload\\)')",
+      "Bash(gcloud --project=maiplayer-ac56d logging read 'timestamp>=\"2026-04-26T14:25:00Z\" timestamp<=\"2026-04-26T14:26:00Z\" resource.labels.function_name=\"cleanupOrphanSignups\"' --limit=200 --format=json)",
+      "Bash(gcloud --project=maiplayer-ac56d firestore collections list)",
+      "Bash(gcloud --project=maiplayer-ac56d firestore backups list --location=us-central1)",
+      "Bash(gcloud --project=maiplayer-ac56d firestore backups list --location=eur3)",
+      "Bash(gcloud --project=maiplayer-ac56d firestore databases backup-schedules list --database='\\(default\\)')",
+      "Bash(security find-identity *)",
+      "Bash(echo \"tsc=$?\")",
+      "Bash(firebase firestore:databases:list --project maiplayer-ac56d)",
+      "Bash(gcloud --project=maiplayer-ac56d firestore documents read 'users/bhq635G4GNcmmHQZArlAkunsNZ53')",
+      "Bash(gcloud auth *)",
+      "Bash(grep -c \"env\\\\s*$\\\\s*?\\\\s*await firestoreAdminAuthHeaders\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestore.ts)",
+      "Bash(grep -n \"env$\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestore.ts)"
     ]
   }
 }

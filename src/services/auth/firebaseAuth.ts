@@ -4,8 +4,6 @@ import {
   connectAuthEmulator,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
-  signInWithPopup,
-  GoogleAuthProvider,
   RecaptchaVerifier,
   signOut,
   onAuthStateChanged,
@@ -216,12 +214,19 @@ class FirebaseAuthService {
         return
       }
 
-      // Set user immediately with Firebase Auth data
+      // Preserve `isAdmin` across token refreshes. onAuthStateChanged fires
+      // every ~50min when Firebase rotates the ID token, and rebuilding
+      // authData from scratch each time wiped the flag — making the Admin
+      // gate flicker (`/v1/me` is throttled to 5min, so the next fetch that
+      // would restore it could be far away).
+      const previousIsAdmin = store.user?.isAdmin === true
+
       const authData = {
         uid: user.uid,
         email: user.email,
         displayName: user.displayName || null,
         photoURL: user.photoURL || null,
+        isAdmin: previousIsAdmin,
       }
       store.setUser(authData)
 
@@ -236,9 +241,16 @@ class FirebaseAuthService {
       this.loadProfile(user.uid).then(profile => {
         if (gen !== this.authGeneration) return
         if (!profile) return
-        const storeDisplayName = useAuthStore.getState().user?.displayName || null
+        // Re-read the current store user so we don't clobber `isAdmin` if
+        // /v1/me has already resolved and populated it. `authData.isAdmin`
+        // is the snapshot captured at onAuthStateChanged time and may be
+        // stale by the time this Firestore read returns.
+        const currentStoreUser = useAuthStore.getState().user
+        const storeDisplayName = currentStoreUser?.displayName || null
+        const currentIsAdmin = currentStoreUser?.isAdmin ?? authData.isAdmin
         store.setUser({
           ...authData,
+          isAdmin: currentIsAdmin,
           displayName: profile.displayName || profile.fullName || user.displayName || storeDisplayName || authData.displayName,
           photoURL: profile.photoURL || authData.photoURL,
         })
@@ -451,52 +463,6 @@ class FirebaseAuthService {
   async resendEmailVerification(): Promise<void> {
     if (!this.currentUser) throw new Error('No authenticated user')
     await sendEmailVerification(this.currentUser)
-  }
-
-  async signInWithGoogle(): Promise<User> {
-    const provider = new GoogleAuthProvider()
-    provider.addScope('email')
-    provider.addScope('profile')
-
-    const result = await signInWithPopup(getFirebaseAuth(), provider)
-    const user = result.user
-
-    // Single setDoc with merge: true — creates doc if missing, merges if exists.
-    // Includes ALL fields needed for a new user. merge:true means existing fields
-    // (like userPlan set by subscription) won't be overwritten.
-    try {
-      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, user.uid), {
-        uid: user.uid,
-        email: user.email,
-        fullName: user.displayName || '',
-        displayName: user.displayName || '',
-        photoURL: user.photoURL || null,
-        provider: 'google',
-        emailVerified: user.emailVerified,
-        lastLogin: Timestamp.now(),
-        updatedAt: Timestamp.now(),
-        // Google accounts skip the phone-link step so they're considered
-        // complete on first sign-in. Future: require phone for Google too.
-        signupComplete: true,
-      }, { merge: true })
-
-      // Set defaults for new users only (fields that shouldn't exist yet).
-      // merge:true won't overwrite existing userPlan/tmsQuota if present.
-      const userDoc = doc(getFirebaseDb(), COLLECTIONS.USERS, user.uid)
-      const snap = await getDoc(userDoc)
-      const data = snap.data()
-      if (data && !data.userPlan) {
-        await setDoc(userDoc, {
-          userPlan: 'explorer',
-          onboarding: DEFAULT_ONBOARDING,
-          createdAt: Timestamp.now(),
-        }, { merge: true })
-      }
-    } catch (err) {
-      console.warn('[auth] Google profile sync failed:', err)
-    }
-
-    return user
   }
 
   async signOut(): Promise<void> {

@@ -180,6 +180,7 @@ function ProfileSection() {
   const billingLoaded = useBillingStore(s => s.isLoaded)
   const consumedPct = useBillingStore(s => s.consumedPct)
   const tokenBudget = useBillingStore(s => s.tokenBudget)
+  const tokensConsumed = useBillingStore(s => s.tokensConsumed)
   const cycleEnd = useBillingStore(s => s.cycleEnd)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const noCredits = useBillingStore(s => s.noCredits)
@@ -214,6 +215,16 @@ function ProfileSection() {
   const barWidthPct = pct === null || pct <= 0
     ? 0
     : Math.min(100, Math.max(2, pct * 100))
+
+  // "Consumo extra" — capacidade total restante (ciclo + créditos overage)
+  // como percentagem do tokenBudget. Diminui conforme consumedPct sobe e,
+  // depois dos 100%, conforme tmsRemaining é gasto. Só aparece quando há
+  // overage tokens disponíveis (compraram pacote extra).
+  const extraCapacityPct = billingLoaded && tokenBudget > 0 && tmsRemaining > 0
+    ? Math.max(0, Math.round(
+        ((Math.max(0, tokenBudget - tokensConsumed) + tmsRemaining) / tokenBudget) * 100
+      ))
+    : null
 
   async function handleSignOut() {
     try {
@@ -340,9 +351,9 @@ function ProfileSection() {
                   </Text>
                 )}
               </Flex>
-              {tmsRemaining > 0 && (
+              {extraCapacityPct !== null && (
                 <Text fontSize="11px" color={tokens.colors.accent.orange} mt={1.5}>
-                  +{tmsRemaining} {t('settings.overageCredits' as any)}
+                  +{extraCapacityPct}% {t('settings.extraConsumption' as any)}
                 </Text>
               )}
             </>
