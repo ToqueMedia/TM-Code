@@ -32,6 +32,9 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
         <Text as="span" opacity={0.5}>{projectPath}</Text>
       </Text>
       <Box mt={2} mb={1} h="1px" bg="rgba(255,255,255,0.06)" />
+      {/* Column width is the max command name (+2ch padding) — auto-scales as new
+          commands land. ch unit respects the monospace font metrics across
+          platforms; prior 72px hard-coded clipped longer command names. */}
       <Box fontSize="11px" lineHeight="1.8">
         {commands.map(([cmd, desc]) => (
           <Flex key={cmd} gap={2} align="baseline">
@@ -41,7 +44,8 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
               color={tokens.colors.accent.purple}
               fontWeight="600"
               flexShrink={0}
-              w="72px"
+              whiteSpace="nowrap"
+              minW="16ch"
             >
               {cmd}
             </Text>
@@ -56,7 +60,8 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
             fontSize="11px"
             color={tokens.colors.text.disabled}
             flexShrink={0}
-            w="72px"
+            whiteSpace="nowrap"
+            minW="16ch"
           >
             ↑ ↓
           </Text>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 
@@ -72,7 +73,13 @@ export default function ContextMenuOverlay({ items, x, y, onClose }: ContextMenu
 		return () => window.removeEventListener('keydown', onKey)
 	}, [highlightIdx, items, onClose])
 
-	return (
+	// Portal to document.body so the overlay escapes any ancestor stacking
+	// context (title bar's backdrop-filter, main layout's transforms, etc.).
+	// Without this, sibling branches of the app tree can paint on top of the
+	// menu regardless of zIndex.
+	if (typeof document === 'undefined') return null
+
+	return createPortal(
 		<Box
 			position="fixed"
 			inset={0}
@@ -148,6 +155,7 @@ export default function ContextMenuOverlay({ items, x, y, onClose }: ContextMenu
 					)
 				})}
 			</Box>
-		</Box>
+		</Box>,
+		document.body,
 	)
 }

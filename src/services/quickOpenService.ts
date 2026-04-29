@@ -147,7 +147,13 @@ export default class QuickOpenService {
 
   async buildIndex(): Promise<void> {
     if (!this.rootPath) return
-    if (this.building) return
+    // NOTE: no `if (this.building) return` guard. The token mechanism below
+    // already handles concurrent builds — the loser exits early inside the loop
+    // and the winner's `finally` writes the final state. The early-exit used
+    // to leak `building=true` forever whenever React StrictMode's double-mount
+    // (or any rapid re-initialize) called buildIndex while an older run was
+    // still cancelling: the older run's `finally` saw a token mismatch and
+    // refused to reset `building`, while the newer run never got to run at all.
 
     // Safety: refuse to index overly broad paths (home dir, FS root, etc.)
     // See memory: broad recursive FSEvents on $HOME freezes the app.

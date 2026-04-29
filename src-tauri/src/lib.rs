@@ -3,6 +3,7 @@ use commands::ai_completion::*;
 use commands::checkpoint::*;
 use commands::container::*;
 use commands::debugger::*;
+use commands::device::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
 use commands::git::*;
@@ -73,14 +74,29 @@ fn open_preview_webview(
 
     let win = app.get_webview_window("main").ok_or("No main window")?;
 
-    // WKWebView blocks HTTP URLs (ATS). Use a custom protocol "tmpreview://"
-    // that proxies requests to the dev server via Rust's reqwest.
-    // Keep "localhost" — Vite may bind to IPv6 [::1], and "localhost" resolves to both
-    let proxy_target = url.trim_end_matches('/').to_string();
+    // WKWebView on macOS blocks http:// URLs (ATS). There we use a custom
+    // protocol "tmpreview://" that proxies requests to the dev server via a
+    // raw TCP connection, and the proxy's raw_http_get needs a concrete IPv4
+    // to avoid IPv6 stalls — hence we force 127.0.0.1 inside proxy_target.
+    //
+    // On Windows (WebView2) and Linux (WebKitGTK) we load the http:// URL
+    // DIRECTLY in the child webview. The Chromium-based WebView2 uses Happy
+    // Eyeballs to try both IPv4 and IPv6 — so "localhost" works regardless
+    // of whether the dev server binds to ::1, 127.0.0.1, or both. Pinning
+    // 127.0.0.1 here broke preview when the user's Vite/Next bound IPv6-only
+    // (default when no --host flag). Use the URL as-is for direct loading.
+    let proxy_target = url
+        .trim_end_matches('/')
+        .replace("://localhost", "://127.0.0.1");
     let _proxy_target_for_ws = proxy_target.clone();
+    // Platform gate — on non-macOS we load the URL directly.
+    let use_proxy = cfg!(target_os = "macos");
+    // For direct loading, preserve the original URL (don't force IPv4).
+    let direct_url = format!("{}/", url.trim_end_matches('/'));
 
     // Clone app handle for IPC handler (receives runtime errors from preview JS)
     let app_for_ipc = app.clone();
+    let proxy_target_for_protocol = proxy_target.clone();
 
     let wv = wry::WebViewBuilder::new()
         // Inject error capture script into every page load.
@@ -191,7 +207,7 @@ fn open_preview_webview(
             }
         })
         .with_asynchronous_custom_protocol("tmpreview".into(), move |_webview_id, request, responder| {
-            let target = proxy_target.clone();
+            let target = proxy_target_for_protocol.clone();
             std::thread::spawn(move || {
                 let path = request.uri().path_and_query()
                     .map(|pq| pq.as_str())
@@ -239,7 +255,7 @@ fn open_preview_webview(
                 }
             });
         })
-        .with_url("tmpreview://localhost/")
+        .with_url(if use_proxy { "tmpreview://localhost/".to_string() } else { direct_url.clone() })
         .with_devtools(true)
         .with_bounds(wry::Rect {
             position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(x, y)),
@@ -277,7 +293,10 @@ fn open_preview_webview(
         }
     }
 
-    eprintln!("[preview] Native webview created for {}", url);
+    eprintln!(
+        "[preview] Native webview created — requested url={}, proxy target={}",
+        url, proxy_target
+    );
     Ok(())
 }
 
@@ -724,6 +743,7 @@ pub fn run() {
             validate_project_location,
             check_project_status,
             remove_from_recent_projects,
+            clear_recent_projects,
             delete_project,
             build_file_tree,
             create_file_or_directory,
@@ -745,6 +765,7 @@ pub fn run() {
             kill_process,
             kill_port,
             check_server_health,
+            probe_server,
             get_current_directory,
             get_home_directory,
             change_directory,
@@ -814,7 +835,8 @@ pub fn run() {
             open_preview_webview,
             close_preview_webview,
             resize_preview_webview,
-            get_app_version
+            get_app_version,
+            get_device_fingerprint
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

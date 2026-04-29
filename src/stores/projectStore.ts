@@ -13,6 +13,7 @@ import WindowService from '../services/windowService';
 import { sessionService } from '../services/agent/sessionService';
 import { useChatStore } from './chatStore';
 import { useProblemsStore } from './problemsStore';
+import { IS_VITE_DEV } from '../utils/viteEnv';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
 import { t } from '../i18n';
@@ -26,6 +27,14 @@ interface ProjectStore {
   cmdModeProjectPath: string | null;
   /** Paths that have been opened at least once in CMD mode — persisted. */
   cmdModeProjectPaths: string[];
+  /**
+   * Where the user was on the Welcome screen the last time the app quit.
+   * Persisted so a restart returns them to the same sub-screen instead of
+   * auto-opening the most recent project. `null` means "no explicit Welcome
+   * state" (first launch, or the user has a project open) — the auto-open
+   * logic in App.tsx may still reopen a recent project in that case.
+   */
+  welcomeScreen: 'hero' | 'settings' | null;
   hasHydrated: boolean;
 
   // Actions
@@ -34,6 +43,7 @@ interface ProjectStore {
   loadRecentProjects: () => Promise<void>;
   closeProject: () => Promise<void>;
   removeFromRecent: (projectId: string) => Promise<void>;
+  clearAllRecent: () => Promise<void>;
   deleteProject: (projectId: string, projectPath: string) => Promise<void>;
   saveProjectState: () => Promise<void>;
   loadProjectState: (projectId: string) => Promise<void>;
@@ -44,6 +54,7 @@ interface ProjectStore {
   setCmdModeProjectPath: (path: string | null) => void;
   /** Remove a path from the CMD mode paths list (e.g. user promotes it to an IDE project). */
   removeCmdModePath: (path: string) => void;
+  setWelcomeScreen: (screen: 'hero' | 'settings' | null) => void;
   setHasHydrated: (hydrated: boolean) => void;
 }
 
@@ -106,7 +117,7 @@ function tearDownProject() {
   // Stop dev server and clear preview state
   devServerManager.stop().catch(() => {});
   const layout = useLayoutStore.getState();
-  layout.clearPreviewServer();
+  layout.clearDevServer();
   if (layout.viewMode === 'preview' || layout.viewMode === 'generating') {
     layout.setViewMode('chat');
   }
@@ -134,19 +145,27 @@ export const useProjectStore = create<ProjectStore>()(
       error: null,
       cmdModeProjectPath: null,
       cmdModeProjectPaths: [],
+      welcomeScreen: null,
       hasHydrated: false,
 
       setHasHydrated: (hydrated: boolean) => {
         set({ hasHydrated: hydrated });
       },
 
+      setWelcomeScreen: (screen) => {
+        set({ welcomeScreen: screen });
+      },
+
       setCmdModeProjectPath: (path: string | null) => {
         if (path) {
           // Record that this path was opened in CMD mode (deduplicated, max 20)
           const existing = get().cmdModeProjectPaths.filter(p => p !== path)
-          set({ cmdModeProjectPath: path, cmdModeProjectPaths: [path, ...existing].slice(0, 20) })
+          // Entering CMD mode clears the Welcome sub-screen marker — the
+          // next app start should restore CMD, not Welcome.
+          set({ cmdModeProjectPath: path, cmdModeProjectPaths: [path, ...existing].slice(0, 20), welcomeScreen: null })
         } else {
-          set({ cmdModeProjectPath: null })
+          // Leaving CMD back to Welcome — remember that's where the user is.
+          set({ cmdModeProjectPath: null, welcomeScreen: 'hero' })
         }
       },
 
@@ -157,7 +176,8 @@ export const useProjectStore = create<ProjectStore>()(
       },
 
       openProject: async (path: string, options?: { initGit?: boolean }) => {
-        set({ loading: true, error: null, cmdModeProjectPath: null });
+        // Opening a project exits any Welcome state — clear the persisted marker.
+        set({ loading: true, error: null, cmdModeProjectPath: null, welcomeScreen: null });
 
         // Clean up previous project's state before loading the new one
         const prevProject = get().currentProject;
@@ -169,7 +189,7 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'Failed to stop dev server during project switch:', e);
           }
           const layout = useLayoutStore.getState();
-          layout.clearPreviewServer();
+          layout.clearDevServer();
           layout.clearDevServerLogs();
           layout.setScaffoldPhase(null);
           // Reset HTTP Client for the new project context
@@ -296,6 +316,25 @@ export const useProjectStore = create<ProjectStore>()(
         }
       },
 
+      clearAllRecent: async () => {
+        try {
+          const count = get().recentProjects.length;
+          if (count === 0) return;
+
+          const ok = await tauriConfirm(
+            `Limpar a lista de projectos recentes (${count})?\n\nOs ficheiros dos projectos não são apagados — apenas desaparecem desta lista.`,
+            { title: 'Limpar recentes', kind: 'warning' }
+          );
+          if (!ok) return;
+
+          await invoke('clear_recent_projects');
+          set({ recentProjects: [] });
+        } catch (error) {
+          logger.error('project', 'Failed to clear recent projects:', error);
+          throw error;
+        }
+      },
+
       removeFromRecent: async (projectId: string) => {
         try {
           const project = get().recentProjects.find(p => p.id === projectId);
@@ -345,7 +384,7 @@ export const useProjectStore = create<ProjectStore>()(
           } else if (devServerManager.getProjectPath() === projectPath) {
             // Stop the dev server only if it belongs to the project being deleted
             await devServerManager.stop().catch(() => {});
-            useLayoutStore.getState().clearPreviewServer();
+            useLayoutStore.getState().clearDevServer();
           }
 
           // Remove from recentProjects IMMEDIATELY so App.tsx auto-open
@@ -382,6 +421,9 @@ export const useProjectStore = create<ProjectStore>()(
           await get().saveProjectState().catch(console.error);
         }
         tearDownProject();
+        // User is now back on Welcome — remember that so a restart doesn't
+        // auto-reopen the project they just closed.
+        set({ welcomeScreen: 'hero' });
       },
 
       saveProjectState: async () => {
@@ -488,6 +530,7 @@ export const useProjectStore = create<ProjectStore>()(
         windowState: state.windowState,
         cmdModeProjectPath: state.cmdModeProjectPath,
         cmdModeProjectPaths: state.cmdModeProjectPaths,
+        welcomeScreen: state.welcomeScreen,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);
@@ -497,7 +540,7 @@ export const useProjectStore = create<ProjectStore>()(
 );
 
 // ── DEBUG: log currentProject transitions ─────────────────────────────────
-if (import.meta.env.DEV) {
+if (IS_VITE_DEV) {
   useProjectStore.subscribe((state, prev) => {
     if (state.currentProject !== prev.currentProject) {
       console.log(

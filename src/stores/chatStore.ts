@@ -60,9 +60,9 @@ interface ChatActions {
   // Reasoning toggle
   toggleReasoning: (messageId: string) => void
   // Tool call actions (pending -> start -> result)
-  addPendingToolCall: (toolId: string, toolName: string) => void
-  updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>) => void
-  updateToolCallWithResult: (toolId: string, result: string, isError: boolean) => void
+  addPendingToolCall: (toolId: string, toolName: string, spawnedBy?: string, targetMessageId?: string) => void
+  updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>, targetMessageId?: string) => void
+  updateToolCallWithResult: (toolId: string, result: string, isError: boolean, targetMessageId?: string) => void
   updateToolCallProgress: (toolId: string, progressText: string) => void
   // Inline diff actions (centralized — handle DiffService + store + agent unblock atomically)
   approveDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => Promise<void>
@@ -852,12 +852,20 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
     },
 
-    addPendingToolCall: (toolId: string, toolName: string) => {
+    addPendingToolCall: (toolId: string, toolName: string, spawnedBy?: string, targetMessageId?: string) => {
       const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      if (!activeSessionId) return
+      // When `targetMessageId` is provided, write to that specific message —
+      // used by background sub-agents that keep running after the main turn
+      // finalizes (streamingMessageId becomes null but the message still exists
+      // in the session and must keep receiving events for full user visibility).
+      const targetId = targetMessageId ?? streamingMessageId
+      if (!targetId) return
 
       const session = sessions.get(activeSessionId)
       if (!session) return
+      // Guard against writes to a message that no longer exists (e.g. session was cleared).
+      if (!session.messages.some(m => m.id === targetId)) return
 
       const toolCall: ToolCallDisplay = {
         id: toolId,
@@ -865,10 +873,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         input: {},
         status: 'running',
         timestamp: Date.now(),
+        ...(spawnedBy ? { spawnedBy } : {}),
       }
 
       const messages = session.messages.map(msg => {
-        if (msg.id !== streamingMessageId) return msg
+        if (msg.id !== targetId) return msg
         // Finalize reasoning timing if tool call arrives before text
         const reasoningDurationMs = (msg.reasoningStartedAt && !msg.reasoningDurationMs)
           ? Date.now() - msg.reasoningStartedAt
@@ -889,15 +898,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       set({ sessions: updatedSessions })
     },
 
-    updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>) => {
+    updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>, targetMessageId?: string) => {
       const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      if (!activeSessionId) return
+      const targetId = targetMessageId ?? streamingMessageId
+      if (!targetId) return
 
       const session = sessions.get(activeSessionId)
       if (!session) return
+      if (!session.messages.some(m => m.id === targetId)) return
 
       const messages = session.messages.map(msg => {
-        if (msg.id !== streamingMessageId) return msg
+        if (msg.id !== targetId) return msg
         const toolCalls = [...(msg.toolCalls || [])]
         for (let i = toolCalls.length - 1; i >= 0; i--) {
           if (toolCalls[i].id === toolId) {
@@ -922,29 +934,36 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       if (!session) return
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
-      if (!msg) return
+      if (!msg || !msg.toolCalls) return
 
-      const tc = msg.toolCalls?.find(t => t.id === toolId)
-      if (tc) {
-        // Mutate in place (same pattern as streaming text deltas for performance)
-        tc.progressText = progressText
-        session.updatedAt = Date.now()
-      }
+      const idx = msg.toolCalls.findIndex(t => t.id === toolId)
+      if (idx < 0) return
+
+      // Replace the tool call with a new reference so memoized consumers
+      // (TerminalToolCall uses default memo) detect the change. The parent
+      // message keeps the same ref — streamingVersion drives parent rerender.
+      const newToolCalls = msg.toolCalls.slice()
+      newToolCalls[idx] = { ...newToolCalls[idx], progressText }
+      msg.toolCalls = newToolCalls
+      session.updatedAt = Date.now()
 
       set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },
 
-    updateToolCallWithResult: (toolId: string, result: string, isError: boolean) => {
+    updateToolCallWithResult: (toolId: string, result: string, isError: boolean, targetMessageId?: string) => {
       const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      if (!activeSessionId) return
+      const targetId = targetMessageId ?? streamingMessageId
+      if (!targetId) return
 
       const session = sessions.get(activeSessionId)
       if (!session) return
+      if (!session.messages.some(m => m.id === targetId)) return
 
       let newDiff: DiffResult | null = null
 
       const messages = session.messages.map(msg => {
-        if (msg.id !== streamingMessageId) return msg
+        if (msg.id !== targetId) return msg
         const toolCalls = [...(msg.toolCalls || [])]
         for (let i = toolCalls.length - 1; i >= 0; i--) {
           if (toolCalls[i].id === toolId) {
@@ -961,20 +980,33 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                 diffOldContent = parsed.oldContent
                 diffNewContent = parsed.newContent
                 isNewFile = parsed.isNewFile
-                diffStatus = 'pending'
+                // CMD mode writes directly to disk and marks the diff as
+                // alreadyApplied — skip the approval queue entirely. Chat
+                // mode always starts pending and waits for user approval.
+                // The "accepted" badge must only appear after a real write
+                // happens on disk (chat mode: DiffService.acceptDiff; cmd
+                // mode: the tool itself) — otherwise an aborted/failed write
+                // would leave the UI claiming the file was saved when it
+                // wasn't.
+                if (parsed.alreadyApplied === true) {
+                  diffStatus = 'approved'
+                } else {
+                  diffStatus = 'pending'
 
-                // Create DiffResult for DiffService + GeneratingView
-                const id = crypto.randomUUID()
-                diffResultId = id
-                newDiff = {
-                  id,
-                  filePath: parsed.path,
-                  originalContent: parsed.oldContent || '',
-                  newContent: parsed.newContent || '',
-                  isNewFile: parsed.isNewFile || false,
-                  status: 'pending',
-                  toolCallId: toolId,
-                  toolName: toolCalls[i].toolName,
+                  // Create DiffResult for DiffService + GeneratingView.
+                  // Skipped in cmd mode — there's no approval flow to drive.
+                  const id = crypto.randomUUID()
+                  diffResultId = id
+                  newDiff = {
+                    id,
+                    filePath: parsed.path,
+                    originalContent: parsed.oldContent || '',
+                    newContent: parsed.newContent || '',
+                    isNewFile: parsed.isNewFile || false,
+                    status: 'pending',
+                    toolCallId: toolId,
+                    toolName: toolCalls[i].toolName,
+                  }
                 }
               }
             } catch {

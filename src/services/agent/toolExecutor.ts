@@ -10,6 +10,7 @@ import { useCheckpointStore } from '../../stores/checkpointStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
+import { resolveWorkerUrl } from '../../utils/devUrls'
 // TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
@@ -190,9 +191,12 @@ class ToolExecutor {
           return `Blocked: "${dangerousMatch}" is blocked in your Settings. The developer disabled this command. Ask the developer to unblock it in Settings > Sandbox if needed.`
         }
         // Not blocked but dangerous → always ask (forcePrompt bypasses Accept All)
-        const approved = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command')
-        if (!approved) {
-          return `Permission denied by user for ${dangerousMatch}. Ask the user what they want instead.`
+        const decision = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command')
+        if (!decision.approved) {
+          const reason = decision.denyReason
+            ? ` User says: ${decision.denyReason}`
+            : ' Ask the user what they want instead.'
+          return `Permission denied by user for ${dangerousMatch}.${reason}`
         }
         dangerousAlreadyApproved = true
       }
@@ -207,10 +211,13 @@ class ToolExecutor {
     ])
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
-      const approved = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false)
-      if (!approved) {
+      const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false)
+      if (!decision.approved) {
         const target = (input.path || input.command || input.name || '') as string
-        return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}. Ask the user what they want instead or suggest an alternative approach.`
+        const reason = decision.denyReason
+          ? ` User says: ${decision.denyReason}`
+          : ' Ask the user what they want instead or suggest an alternative approach.'
+        return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}.${reason}`
       }
     }
 
@@ -472,21 +479,38 @@ class ToolExecutor {
   }
 
   private detectServerUrl(output: string) {
+    // Fallback path: when the agent ran a raw `execute_command` that happens
+    // to start a server, pick up the URL and register it as a frontend-like
+    // dev server so the preview opens. Prefer `start_dev_server` which gives
+    // proper lifecycle management; this is best-effort.
+    //
+    // CRITICAL: skip entirely when a dev server is already active. Otherwise
+    // any stray URL in command output (e.g. `curl http://localhost:7777/api`,
+    // log lines with API references, build reports) would overwrite the
+    // live dev server URL. This had broken fullstack preview: the agent
+    // would print a backend URL mid-stream and the preview would hop to it.
+    const layoutStore = useLayoutStore.getState()
+    if (layoutStore.devServer) return
+
+    // Positive-readiness patterns ONLY — never match a bare URL in output,
+    // since that catches curl calls, log lines, and docs/comments.
     const serverPatterns = [
       /Local:\s+(https?:\/\/localhost:\d+)/,
       /ready on (https?:\/\/localhost:\d+)/,
       /Server running at (https?:\/\/localhost:\d+)/,
       /listening on (https?:\/\/localhost:\d+)/,
-      /http:\/\/localhost:(\d+)/,
     ]
 
     for (const pattern of serverPatterns) {
       const match = output.match(pattern)
       if (match) {
-        const url = match[1].startsWith('http') ? match[1] : `http://localhost:${match[1]}`
-        const layoutStore = useLayoutStore.getState()
-        layoutStore.setPreviewServer(url, 0)
-        layoutStore.setViewMode('preview')
+        const url = match[1]
+        // Read again just before mutating — another tool call may have started
+        // a real devServer between the early-return above and this point.
+        if (useLayoutStore.getState().devServer) return
+        useLayoutStore.getState().initDevServer({ pid: 0, projectKind: 'frontend' })
+        useLayoutStore.getState().setDevServerFrontendUrl(url)
+        useLayoutStore.getState().setViewMode('preview')
         break
       }
     }
@@ -695,6 +719,91 @@ class ToolExecutor {
     return null
   }
 
+  /**
+   * Sub-call to the worker proxy that delegates a web_search query to a
+   * DashScope model with native enable_search (Qwen 3.6 Plus on the backend).
+   *
+   * Invoked ONLY when the current model lacks native web_search
+   * (e.g. GLM-5.1). DeepSeek V3.2 and Qwen on DashScope have native search
+   * and never reach this code path — the provider resolves the tool_call
+   * server-side and streams the answer back directly.
+   *
+   * The request uses X-Request-Type: 'web_search' — the proxy forces the
+   * model + enable_search based on that header (see proxy.ts).
+   */
+  private async runWebSearchSubCall(query: string, maxResults: number, abortSignal?: AbortSignal): Promise<string> {
+    if (abortSignal?.aborted) return 'web_search aborted by user.'
+    const token = await FirebaseAuthService.getInstance().getIdToken()
+    if (!token) return 'web_search error: authentication required.'
+
+    const body = {
+      system: `You are a web search assistant. Use the native web_search tool to answer the user's query with up-to-date information. Return a concise summary with sources (title + URL). Do not add commentary.`,
+      messages: [
+        { role: 'user', content: `Search the web for: ${query}\n\nReturn up to ${maxResults} results.` },
+      ],
+      max_tokens: 4096,
+    }
+
+    const url = `${resolveWorkerUrl()}/v1/messages`
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          'X-Request-Type': 'web_search',
+        },
+        body: JSON.stringify(body),
+        signal: abortSignal,
+      })
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return 'web_search aborted by user.'
+      return `web_search error: network failure (${err instanceof Error ? err.message : String(err)}).`
+    }
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      return `web_search error: HTTP ${response.status}. ${detail.slice(0, 200)}`
+    }
+
+    // The worker returns an Anthropic SSE stream. We only need the final text,
+    // so accumulate content_block_delta text deltas into a single string.
+    const reader = response.body?.getReader()
+    if (!reader) return 'web_search error: empty response body.'
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let answer = ''
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const data = line.slice(6).trim()
+          if (!data || data === '[DONE]') continue
+          try {
+            const event = JSON.parse(data) as { type?: string; delta?: { type?: string; text?: string } }
+            if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) {
+              answer += event.delta.text
+            }
+          } catch { /* ignore malformed SSE frames */ }
+        }
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return 'web_search aborted by user.'
+      return `web_search error: stream read failure (${err instanceof Error ? err.message : String(err)}).`
+    } finally {
+      try { reader.releaseLock() } catch { /* noop */ }
+    }
+
+    return answer.trim() || 'web_search returned no results.'
+  }
+
 
   /**
    * Patterns that indicate file-writing operations via shell.
@@ -758,6 +867,10 @@ class ToolExecutor {
     // checkMissingImports sees the new dependencies immediately.
     if (path.endsWith('/package.json') || path === 'package.json') {
       this.invalidateDepsCache()
+    }
+    // Invalidate the cached system prompt when prompt-relevant files change.
+    if (/(^|\/)(README|TMS|PLAN|TODO)\.md$|(^|\/)package\.json$|(^|\/)\.toquemedia-template$/.test(path)) {
+      import('./contextBuilder').then(m => m.default.getInstance().invalidatePromptCache()).catch(() => { /* non-critical */ })
     }
   }
 
@@ -1065,14 +1178,23 @@ class ToolExecutor {
           }
         }
 
-        // CMD mode: write directly to disk, no diff/approval needed
+        // CMD mode: write directly to disk, no approval needed — but still
+        // return diff JSON so the UI renders the before/after like in chat mode.
+        // `alreadyApplied: true` tells chatStore to skip the approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
           this.refreshFileTree()
-          return `File ${isNewFile ? 'created' : 'written'}: ${path}`
+          return JSON.stringify({
+            type: 'diff',
+            path,
+            oldContent,
+            newContent,
+            isNewFile,
+            alreadyApplied: true,
+          })
         }
 
         // Check for uninstalled package imports before generating diff
@@ -1120,14 +1242,22 @@ class ToolExecutor {
           // File doesn't exist — good, proceed
         }
 
-        // CMD mode: write directly to disk
+        // CMD mode: write directly to disk, still return diff JSON so the UI
+        // renders the new file content. `alreadyApplied` skips approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(content) })
           this.refreshFileTree()
-          return `File created: ${path}`
+          return JSON.stringify({
+            type: 'diff',
+            path,
+            oldContent: '',
+            newContent: content,
+            isNewFile: true,
+            alreadyApplied: true,
+          })
         }
 
         // Check for uninstalled package imports before generating diff
@@ -1313,14 +1443,22 @@ class ToolExecutor {
 
         const newContent = content.replace(oldStr, newStr)
 
-        // CMD mode: write directly to disk
+        // CMD mode: write directly to disk, still return diff JSON so the UI
+        // renders the before/after. `alreadyApplied` skips approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
           this.refreshFileTree()
-          return `File edited: ${path}`
+          return JSON.stringify({
+            type: 'diff',
+            path,
+            oldContent: content,
+            newContent,
+            isNewFile: false,
+            alreadyApplied: true,
+          })
         }
 
         // Check for uninstalled package imports in the NEW PART only (not the whole file).
@@ -1375,14 +1513,18 @@ class ToolExecutor {
       }
     })
 
-    // === web_search (DashScope/Qwen native tool — handled server-side) ===
-    // Qwen 3.6 on DashScope has native web_search. The model calls this tool,
-    // DashScope executes the search internally, and returns results directly.
-    // No execute handler needed — passive tools are skipped in execute().
+    // === web_search ===
+    // Two execution paths, chosen by the current model:
+    //   - DeepSeek V3.2 / Qwen on DashScope: native enable_search — the provider
+    //     executes internally and returns results in the stream. The frontend
+    //     NEVER receives a tool_call, so execute() is not invoked for these.
+    //   - GLM-5.1 (or any non-native model): execute() runs and side-cars the
+    //     query to Qwen 3.6 Plus via X-Request-Type: 'web_search'. The backend
+    //     forces the model + enable_search and streams the answer back.
     this.tools.set('web_search', {
       definition: {
         name: 'web_search',
-        description: 'Search the internet for up-to-date information. Returns search results with titles, snippets, URLs, and metadata. Use this to look up documentation, find solutions to errors, research technical topics, or get current information. This tool is handled natively by the AI provider (DashScope/Qwen) — the model calls it, the provider executes.',
+        description: 'Search the internet for up-to-date information. Returns search results with titles, snippets, URLs, and metadata. Use this to look up documentation, find solutions to errors, research technical topics, or get current information.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1392,9 +1534,14 @@ class ToolExecutor {
           required: ['query']
         },
         concurrencySafe: true,
-        passive: true,  // handled server-side by DashScope via enable_search
       },
-      execute: async () => 'web_search is a native DashScope/Qwen tool. Results are returned by the provider directly.'
+      execute: async (input: Record<string, unknown>) => {
+        const query = typeof input.query === 'string' ? input.query.trim() : ''
+        if (!query) return 'web_search error: query is required.'
+        const maxResults = typeof input.max_results === 'number' ? input.max_results : 5
+        const abortSignal = input._abortSignal as AbortSignal | undefined
+        return await this.runWebSearchSubCall(query, maxResults, abortSignal)
+      }
     })
 
     // === web_fetch ===
@@ -1634,44 +1781,54 @@ class ToolExecutor {
     this.tools.set('start_dev_server', {
       definition: {
         name: 'start_dev_server',
-        description: 'Start a dev server as a background process. Returns immediately — the server runs in the background and the preview panel opens automatically when it is ready. Use this instead of execute_command for dev servers, watchers, or any long-running process. Only one dev server can run at a time (starting a new one stops the previous). For backend/API servers, the HTTP Client panel opens instead of the iframe preview.',
+        description: 'Start the project\'s dev server as a background process. Returns immediately — the correct preview panel opens automatically when the server is ready. ONE dev server per project.\n\nPass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).\n\nproject_kind: "frontend" (UI-only → iframe preview), "backend" (API-only → HTTP Client panel), "fullstack" (both — iframe + toggleable HTTP Client drawer). Auto-detected if omitted.\n\nPORTS — TWO MODES:\n  • TM Code projects (.toquemedia-id exists): uses reserved ports 7773 (frontend) / 7777 (backend). Omit frontend_port and backend_port.\n  • External projects: inspect the project\'s real ports first (package.json scripts, source code). If they differ from 7773/7777, pass frontend_port and backend_port as overrides so TM Code adapts to the project WITHOUT rewriting user scripts. Never force-migrate an external project\'s ports — adapt instead.',
         input_schema: {
           type: 'object',
           properties: {
-            command: { type: 'string', description: 'Dev server command (e.g., "pnpm run dev", "pnpm start", "npx vite")' },
-            server_type: { type: 'string', enum: ['frontend', 'backend'], description: 'Optional hint: "frontend" for iframe preview (React, Vue, etc.), "backend" for HTTP Client panel (Express, FastAPI, etc.). Auto-detected if omitted.' }
+            command: { type: 'string', description: 'Dev server command (e.g., "npm run dev", "pnpm start", "npx vite"). Pass the top-level command even if it spawns multiple processes.' },
+            project_kind: { type: 'string', enum: ['frontend', 'backend', 'fullstack'], description: '"frontend", "backend", or "fullstack". Auto-detected if omitted.' },
+            frontend_port: { type: 'number', description: 'Port the frontend actually binds to. Omit for TM Code projects (uses 7773). For external projects, pass their real port (e.g., 3000 for Next.js, 5173 for Vite default).' },
+            backend_port: { type: 'number', description: 'Port the backend actually binds to. Omit for TM Code projects (uses 7777). For external projects, pass their real port (e.g., 3001, 8080).' },
+            server_type: { type: 'string', enum: ['frontend', 'backend'], description: 'DEPRECATED — use project_kind instead.' }
           },
           required: ['command']
         }
       },
       execute: async (input) => {
         const command = input.command as string
-        let serverType = input.server_type as 'frontend' | 'backend' | undefined
+        let projectKind = input.project_kind as 'frontend' | 'backend' | 'fullstack' | undefined
+        const legacyServerType = input.server_type as 'frontend' | 'backend' | undefined
+        const frontendPort = typeof input.frontend_port === 'number' ? input.frontend_port : undefined
+        const backendPort = typeof input.backend_port === 'number' ? input.backend_port : undefined
         this.validateCommand(command)
         const projectRoot = this.getProjectRoot()
 
-        // If the agent didn't provide a hint, infer from project files
-        if (!serverType) {
+        // Legacy server_type maps to the new project_kind
+        if (!projectKind && legacyServerType) {
+          projectKind = legacyServerType
+        }
+
+        // Infer from project files if still not provided
+        if (!projectKind) {
           try {
             const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
             const cat = await detectProjectCategory(projectRoot)
-            serverType = categoryToServerHint(cat)
+            const hint = categoryToServerHint(cat)
+            projectKind = hint
           } catch { /* detection failure is non-fatal */ }
         }
-
-        // Stop any existing server
-        if (devServerManager.isActive()) {
-          await devServerManager.stop()
-        }
+        if (!projectKind) projectKind = 'frontend'
 
         try {
-          await devServerManager.start(projectRoot, command, serverType)
+          await devServerManager.start(projectRoot, command, { projectKind, frontendPort, backendPort })
           const url = devServerManager.getUrl()
+          const portsNote = (frontendPort || backendPort)
+            ? ` [using custom ports: frontend=${frontendPort ?? 7773}, backend=${backendPort ?? 7777}]`
+            : ''
           if (url) {
-            return `Dev server started and running at ${url}. The correct preview panel will open automatically.`
+            return `Dev server started and running at ${url} (${projectKind})${portsNote}. The correct preview panel will open automatically.`
           }
-          const port = serverType === 'backend' ? 7777 : 7773
-          return `Dev server starting with command: ${command}. The preview panel will open automatically when the server is ready (port ${port}).`
+          return `Dev server starting with command: ${command} (${projectKind})${portsNote}. The preview panel will open automatically when the server is ready.`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`
@@ -1734,6 +1891,34 @@ class ToolExecutor {
           const msg = error instanceof Error ? error.message : String(error)
           return `Diagnostics failed: ${msg}. Try running "npx tsc --noEmit" via execute_command as a fallback.`
         }
+      }
+    })
+
+    // === read_skill ===
+    this.tools.set('read_skill', {
+      definition: {
+        name: 'read_skill',
+        description: 'Load the full content of a skill (process, examples, install steps, verification) by its name. The system prompt lists each available skill with a one-line description; call this tool ONCE per skill when you decide it is relevant to the current task. Content stays in conversation history afterward — no need to re-read.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Skill name as listed in the "Skills available" section of the system prompt (e.g., "pdf-document", "frontend-design", "slidev-presentation").' }
+          },
+          required: ['name']
+        },
+        concurrencySafe: true,
+      },
+      execute: async (input) => {
+        const name = (input.name as string)?.trim()
+        if (!name) return 'Error: read_skill requires a non-empty "name" argument.'
+        const SkillSvc = (await import('./skillService')).default
+        const svc = SkillSvc.getInstance()
+        const skill = svc.getCachedSkillContent(name)
+        if (!skill) {
+          const available = svc.getCachedSkillNames()
+          return `Error: skill "${name}" is not loaded for the current context. Available skills: ${available.join(', ') || '(none — check the "Skills available" section of the system prompt)'}.`
+        }
+        return svc.formatSkillForReading(skill)
       }
     })
 
@@ -1914,8 +2099,8 @@ class ToolExecutor {
         const subAgentToolNames = new Set([
           'read_file', 'write_file', 'create_file', 'edit_file',
           'list_directory', 'search_files', 'glob', 'get_diagnostics',
-          'web_search',   // passive — DashScope executes (query-based)
-          'web_fetch',    // active — frontend fetches specific URLs
+          'web_search',   // native on DashScope models, side-car to Qwen on GLM-5.1
+          'web_fetch',    // frontend fetches a specific URL
         ])
         const subAgentTools = this.getToolDefinitions().filter(t =>
           subAgentToolNames.has(t.function.name)
@@ -1935,10 +2120,13 @@ class ToolExecutor {
 Available tools:
 - File operations: read_file, write_file, create_file, edit_file
 - Search: search_files (ripgrep), glob, list_directory
-- Web: web_search (search engine), web_fetch (fetch specific URLs)
+- Web research:
+  - web_search — takes a natural-language query and returns ranked results with titles, snippets, and URLs. This is how you discover what pages exist on a topic.
+  - web_fetch — takes one complete target URL you already know and returns the contents of that single page. This is how you read the body of a specific article, doc, or API reference.
+  - Typical flow: start with web_search to find relevant URLs, then web_fetch on the most promising result to read its full content.
 - Diagnostics: get_diagnostics
 
-Be thorough but concise. Use web_search for looking up documentation, error solutions, or technical research. Use web_fetch when you need to read specific URL content.
+Be thorough but concise.
 
 Project root: ${projectRoot}`
 
@@ -1962,16 +2150,43 @@ Project root: ${projectRoot}`
 
         updateProgress('Starting research...')
 
+        // Forward every sub-agent event to the main chatStore so the user sees
+        // the FULL activity in real-time. Visibility logic extracted to a pure
+        // helper — see src/services/agent/subAgentVisibility.ts.
+        const chatStore = useChatStore.getState()
+        const { useAgentStore } = await import('../../stores/agentStore')
+        const agentStore = useAgentStore.getState()
+        const { createSubAgentVisibility } = await import('./subAgentVisibility')
+
+        const visibility = createSubAgentVisibility({
+          parentToolCallId: toolCallId,
+          reasoningLabel: 'research sub-agent',
+          hooks: {
+            appendTextDelta: chatStore.appendTextDelta,
+            appendReasoningDelta: chatStore.appendReasoningDelta,
+            addPendingToolCall: chatStore.addPendingToolCall,
+            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
+            updateToolCallWithResult: chatStore.updateToolCallWithResult,
+            setStatus: (s) => agentStore.setStatus(s),
+          },
+        })
+
         await subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => { result += delta },
-          onReasoningDelta: () => {
+          onTextDelta: (delta) => {
+            result += delta
+            visibility.callbacks.onTextDelta(delta)
+          },
+          onReasoningDelta: (delta) => {
+            visibility.callbacks.onReasoningDelta(delta)
             updateProgress('Thinking...')
           },
-          onToolCallPending: (_toolId, toolName) => {
+          onToolCallPending: (childId, toolName) => {
             toolsCalled++
+            visibility.callbacks.onToolCallPending(childId, toolName)
             updateProgress(`Using ${toolName}...`)
           },
-          onToolCallStart: (_toolId, toolName, args) => {
+          onToolCallStart: (childId, toolName, args) => {
+            visibility.callbacks.onToolCallStart(childId, toolName, args)
             const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.query as string)
               || (args.pattern as string)
@@ -1979,7 +2194,9 @@ Project root: ${projectRoot}`
               || ''
             updateProgress(`${toolName}: ${target}`)
           },
-          onToolResult: () => {},
+          onToolResult: (childId, toolName, res, isError) => {
+            visibility.callbacks.onToolResult(childId, toolName, res, isError)
+          },
           onTurnComplete: () => {},
           onDone: (finalText) => {
             if (finalText && !result) result = finalText
@@ -1987,6 +2204,7 @@ Project root: ${projectRoot}`
           },
           onError: (error) => {
             result = `Research error: ${error.message}`
+            visibility.cleanupOrphans(`aborted: research sub-agent failed — ${error.message}`)
             updateProgress('Error')
           },
           onUsageUpdate: (inputTokens, outputTokens) => {
@@ -2070,39 +2288,75 @@ Project root: ${projectRoot}`
         let tokens = 0
         let calls = 0
 
+        // Forward events to the main chatStore AND the bg store. The key
+        // difference from research/verify: we capture the active `streamingMessageId`
+        // at spawn time and pass it as `targetMessageId` to every chat-store write.
+        // This keeps the sub-agent's tool calls flowing into the SAME assistant
+        // message even after the main turn finalizes (at which point
+        // `streamingMessageId` becomes null). Without this, bg-agent activity
+        // past the main turn end would be invisible in the chat feed.
+        const parentToolCallId = input._toolCallId as string | undefined
+        const chatStore = useChatStore.getState()
+        const targetMessageId = chatStore.streamingMessageId ?? undefined
+        const { useAgentStore } = await import('../../stores/agentStore')
+        const agentStore = useAgentStore.getState()
+        const { createSubAgentVisibility } = await import('./subAgentVisibility')
+
+        const visibility = createSubAgentVisibility({
+          parentToolCallId,
+          reasoningLabel: 'background sub-agent',
+          targetMessageId,
+          hooks: {
+            appendTextDelta: chatStore.appendTextDelta,
+            appendReasoningDelta: chatStore.appendReasoningDelta,
+            addPendingToolCall: chatStore.addPendingToolCall,
+            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
+            updateToolCallWithResult: chatStore.updateToolCallWithResult,
+            setStatus: (s) => agentStore.setStatus(s),
+          },
+        })
+
         subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => { resultText += delta },
-          onReasoningDelta: () => {
+          onTextDelta: (delta) => {
+            resultText += delta
+            visibility.callbacks.onTextDelta(delta)
+          },
+          onReasoningDelta: (delta) => {
+            visibility.callbacks.onReasoningDelta(delta)
             bgStore.updateProgress(agentId, 'Thinking...', calls, tokens)
           },
-          onToolCallPending: (_id, toolName) => {
+          onToolCallPending: (childId, toolName) => {
             calls++
+            visibility.callbacks.onToolCallPending(childId, toolName)
             bgStore.updateProgress(agentId, `Using ${toolName}...`, calls, tokens)
           },
-          onToolCallStart: (_id, toolName, args) => {
+          onToolCallStart: (childId, toolName, args) => {
+            visibility.callbacks.onToolCallStart(childId, toolName, args)
             const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.query as string)
               || (args.pattern as string)
               || ''
             bgStore.updateProgress(agentId, `${toolName}: ${target}`, calls, tokens)
           },
-          onToolResult: () => {},
+          onToolResult: (childId, toolName, res, isError) => {
+            visibility.callbacks.onToolResult(childId, toolName, res, isError)
+          },
           onTurnComplete: () => {},
           onDone: (finalText) => {
             if (finalText && !resultText) resultText = finalText
             useBackgroundAgentStore.getState().completeAgent(agentId, resultText || 'No results found.')
           },
           onError: (error) => {
+            visibility.cleanupOrphans(`aborted: background sub-agent failed — ${error.message}`)
             useBackgroundAgentStore.getState().failAgent(agentId, error.message)
           },
           onUsageUpdate: (inp, out) => {
             tokens += inp + out
           },
         } satisfies AgentCallbacks).catch((err) => {
-          useBackgroundAgentStore.getState().failAgent(
-            agentId,
-            err instanceof Error ? err.message : String(err),
-          )
+          const msg = err instanceof Error ? err.message : String(err)
+          visibility.cleanupOrphans(`aborted: background sub-agent crashed — ${msg}`)
+          useBackgroundAgentStore.getState().failAgent(agentId, msg)
         })
 
         return `Background agent "${agentId}" started for: "${question}". Use check_background_agents to see results when ready.`
@@ -2319,21 +2573,51 @@ Verify this implementation. Run tests, type checks, and any other relevant valid
         // Uses a scoped context ID so concurrent background agents aren't affected.
         const readOnlyId = this.enterReadOnlyMode()
         try {
+        // Forward every sub-agent event to the main chatStore — see
+        // src/services/agent/subAgentVisibility.ts for the shared wiring.
+        const chatStore = useChatStore.getState()
+        const { useAgentStore } = await import('../../stores/agentStore')
+        const agentStore = useAgentStore.getState()
+        const { createSubAgentVisibility } = await import('./subAgentVisibility')
+
+        const visibility = createSubAgentVisibility({
+          parentToolCallId: toolCallId,
+          reasoningLabel: 'verify sub-agent',
+          hooks: {
+            appendTextDelta: chatStore.appendTextDelta,
+            appendReasoningDelta: chatStore.appendReasoningDelta,
+            addPendingToolCall: chatStore.addPendingToolCall,
+            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
+            updateToolCallWithResult: chatStore.updateToolCallWithResult,
+            setStatus: (s) => agentStore.setStatus(s),
+          },
+        })
+
         await subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => { result += delta },
-          onReasoningDelta: () => { updateProgress('Analyzing...') },
-          onToolCallPending: (_toolId, toolName) => {
+          onTextDelta: (delta) => {
+            result += delta
+            visibility.callbacks.onTextDelta(delta)
+          },
+          onReasoningDelta: (delta) => {
+            visibility.callbacks.onReasoningDelta(delta)
+            updateProgress('Analyzing...')
+          },
+          onToolCallPending: (childId, toolName) => {
             toolsCalled++
+            visibility.callbacks.onToolCallPending(childId, toolName)
             updateProgress(`${toolName}...`)
           },
-          onToolCallStart: (_toolId, toolName, args) => {
+          onToolCallStart: (childId, toolName, args) => {
+            visibility.callbacks.onToolCallStart(childId, toolName, args)
             const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.command as string)?.slice(0, 40)
               || (args.query as string)
               || ''
             updateProgress(`${toolName}: ${target}`)
           },
-          onToolResult: () => {},
+          onToolResult: (childId, toolName, res, isError) => {
+            visibility.callbacks.onToolResult(childId, toolName, res, isError)
+          },
           onTurnComplete: () => {},
           onDone: (finalText) => {
             if (finalText && !result) result = finalText
@@ -2341,6 +2625,7 @@ Verify this implementation. Run tests, type checks, and any other relevant valid
           },
           onError: (error) => {
             result = `Verification error: ${error.message}`
+            visibility.cleanupOrphans(`aborted: verify sub-agent failed — ${error.message}`)
             updateProgress('Error')
           },
           onUsageUpdate: (inputTokens, outputTokens) => {

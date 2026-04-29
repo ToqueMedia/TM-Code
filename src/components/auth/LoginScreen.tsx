@@ -1,13 +1,19 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import type { ConfirmationResult } from 'firebase/auth'
 import { tokens } from '@/theme/tokens'
 import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import { useAuthStore } from '../../stores/authStore'
+import { isDisposableEmail } from '../../services/auth/disposableEmails'
+import { registerDevice } from '../../services/auth/deviceRegistration'
 import WindowControls from '../ui/WindowControls'
+import PhoneInput, { toE164 } from './PhoneInput'
+import { DEFAULT_COUNTRY, type Country } from '../../services/auth/countries'
 import { IS_MAC } from '@/utils/platform'
 
 type AuthMode = 'signin' | 'signup'
+type SignupStep = 'form' | 'sms'
 
 const ERROR_MESSAGES: Record<string, string> = {
   'auth/invalid-email': 'Email inválido.',
@@ -18,27 +24,19 @@ const ERROR_MESSAGES: Record<string, string> = {
   'auth/invalid-credential': 'Email ou password incorrectos.',
   'auth/email-already-in-use': 'Este email já está registado.',
   'auth/weak-password': 'Password demasiado fraca (mín. 6 caracteres).',
-  'auth/popup-closed-by-user': 'Login cancelado.',
-  'auth/popup-blocked': 'Pop-up bloqueado. Permita pop-ups e tente novamente.',
-  'auth/account-exists-with-different-credential': 'Já existe uma conta com este email usando outro método.',
   'auth/too-many-requests': 'Muitas tentativas. Aguarde alguns minutos.',
   'auth/network-request-failed': 'Erro de conexão. Verifique a internet.',
+  'auth/invalid-phone-number': 'Número de telefone inválido.',
+  'auth/missing-phone-number': 'Introduza o número de telefone.',
+  'auth/quota-exceeded': 'Limite de SMS atingido. Tente novamente mais tarde.',
+  'auth/credential-already-in-use': 'Este número já está associado a outra conta.',
+  'auth/invalid-verification-code': 'Código incorrecto. Verifique e tente novamente.',
+  'auth/code-expired': 'Código expirado. Solicite um novo código.',
 }
 
 function getErrorMessage(err: unknown): string {
   const code = (err instanceof Error && 'code' in err ? (err as { code: string }).code : '') || ''
   return ERROR_MESSAGES[code] || (err instanceof Error ? err.message : '') || 'Erro de autenticação.'
-}
-
-function GoogleIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-      <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
-      <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z" fill="#34A853"/>
-      <path d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
-      <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
-    </svg>
-  )
 }
 
 interface LoginScreenProps {
@@ -49,17 +47,64 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
+  const [country, setCountry] = useState<Country>(DEFAULT_COUNTRY)
+  const [phoneNumber, setPhoneNumber] = useState('')
+  const [signupStep, setSignupStep] = useState<SignupStep>('form')
+  const [smsCode, setSmsCode] = useState('')
   const [mode, setMode] = useState<AuthMode>(initialMode)
   const [loading, setLoading] = useState(false)
-  const [googleLoading, setGoogleLoading] = useState(false)
+  const confirmationRef = useRef<ConfirmationResult | null>(null)
+  const recaptchaContainerRef = useRef<HTMLDivElement | null>(null)
+  const verifierCleanupRef = useRef<(() => void) | null>(null)
   const error = useAuthStore(s => s.error)
   const setError = useAuthStore(s => s.setError)
 
+  const phoneDigits = phoneNumber.replace(/\D+/g, '')
+  // E.164 max = 15 digits including country code. We bound the national part
+  // to [7, 14] which covers every country in our list with margin.
+  const phoneValid = phoneDigits.length >= 7 && phoneDigits.length <= 14
   const isFormValid = mode === 'signup'
-    ? email.trim() && password.trim() && displayName.trim()
+    ? email.trim() && password.trim() && displayName.trim() && phoneValid
     : email.trim() && password.trim()
 
-  const anyLoading = loading || googleLoading
+  // Resend cooldown — Firebase rejects rapid repeats with `too-many-requests`.
+  // 30s matches the typical SMS arrival window.
+  const [resendCooldown, setResendCooldown] = useState(0)
+  useEffect(() => {
+    if (resendCooldown <= 0) return
+    const id = setInterval(() => setResendCooldown(c => Math.max(0, c - 1)), 1000)
+    return () => clearInterval(id)
+  }, [resendCooldown])
+
+  // Clear the RecaptchaVerifier if the user navigates away mid-SMS step.
+  // Firebase keeps internal references to the verifier element that prevent
+  // GC otherwise, leaking the iframe across login attempts.
+  useEffect(() => {
+    return () => {
+      try { verifierCleanupRef.current?.() } catch { /* noop */ }
+      verifierCleanupRef.current = null
+      confirmationRef.current = null
+    }
+  }, [])
+
+  const anyLoading = loading
+
+  /**
+   * On phone-link rollback (limit exceeded, code timeout, etc.) we delete the
+   * half-created Firebase user so the email can be re-used. Failures here are
+   * logged — the orphaned account will still be blocked by /v1/me.
+   */
+  async function rollbackHalfCreatedAccount() {
+    try {
+      const u = FirebaseAuthService.getInstance().getCurrentUser()
+      if (u) await u.delete()
+    } catch (err) {
+      console.warn('[auth] rollback (user.delete) failed:', err)
+    }
+    try { verifierCleanupRef.current?.() } catch { /* noop */ }
+    verifierCleanupRef.current = null
+    confirmationRef.current = null
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -70,11 +115,86 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
 
     try {
       const authService = FirebaseAuthService.getInstance()
+
       if (mode === 'signin') {
         await authService.signIn(email, password)
-      } else {
-        await authService.signUp(email, password, displayName.trim())
+        return
       }
+
+      // Signup: validate disposable email before burning a Firebase create call
+      if (isDisposableEmail(email.trim())) {
+        setError('Emails temporários não são permitidos. Use um email pessoal ou de trabalho.')
+        return
+      }
+
+      // 1) Create the Firebase Auth user (email/password).
+      await authService.signUp(email.trim(), password, displayName.trim())
+
+      // 2) Start phone-link flow — sends SMS, waits for the user to enter
+      //    the code in the next step.
+      const container = recaptchaContainerRef.current
+      if (!container) throw new Error('reCAPTCHA container unavailable')
+      const phoneE164 = toE164(country, phoneNumber)
+      const { confirmation, cleanup } = await authService.startPhoneLink(phoneE164, container)
+      confirmationRef.current = confirmation
+      verifierCleanupRef.current = cleanup
+      setResendCooldown(30)
+      setSignupStep('sms')
+    } catch (err: unknown) {
+      // If we reach here mid-signup (account created but phone link failed),
+      // roll back so the user can retry without "email-already-in-use".
+      if (mode === 'signup' && FirebaseAuthService.getInstance().getCurrentUser()) {
+        await rollbackHalfCreatedAccount()
+      }
+      setError(getErrorMessage(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleConfirmCode = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (anyLoading) return
+    const code = smsCode.trim()
+    if (code.length < 6) {
+      setError('Código deve ter 6 dígitos.')
+      return
+    }
+    if (!confirmationRef.current) {
+      setError('Sessão de verificação expirou. Reinicie a criação de conta.')
+      return
+    }
+
+    setLoading(true)
+    setError(null)
+    try {
+      const authService = FirebaseAuthService.getInstance()
+      await authService.confirmPhoneCode(confirmationRef.current, code)
+
+      // Phone linked — register the device fingerprint with the backend.
+      // Fail-closed: any non-OK rolls the account back. We never want a
+      // network glitch (or a tampered local proxy) to let a user past the
+      // device cap.
+      const reg = await registerDevice()
+      if (!reg.ok) {
+        await rollbackHalfCreatedAccount()
+        setSignupStep('form')
+        const messages: Record<typeof reg.reason, string> = {
+          limit_exceeded: 'Este dispositivo já tem o número máximo de contas permitido.',
+          disposable_email: 'Emails temporários não são permitidos. Use um email pessoal ou de trabalho.',
+          rate_limited: 'Demasiadas tentativas de criação de conta. Aguarde uma hora.',
+          appcheck_failed: 'Falha de validação de segurança. Reinicie a aplicação e tente novamente.',
+          unauthorized: 'Sessão inválida. Tente novamente.',
+          network: 'Falha de rede ao validar o dispositivo. Verifique a ligação e tente outra vez.',
+        }
+        setError(messages[reg.reason])
+        return
+      }
+
+      // Cleanup verifier — onAuthStateChanged will swap to the app shell.
+      try { verifierCleanupRef.current?.() } catch { /* noop */ }
+      verifierCleanupRef.current = null
+      confirmationRef.current = null
     } catch (err: unknown) {
       setError(getErrorMessage(err))
     } finally {
@@ -82,24 +202,45 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
     }
   }
 
-  const handleGoogleSignIn = async () => {
+  const handleCancelSms = async () => {
     if (anyLoading) return
-
-    setGoogleLoading(true)
+    await rollbackHalfCreatedAccount()
+    setSignupStep('form')
+    setSmsCode('')
     setError(null)
+  }
 
+  const handleResendSms = async () => {
+    if (anyLoading || resendCooldown > 0) return
+    const container = recaptchaContainerRef.current
+    if (!container) return
+
+    setLoading(true)
+    setError(null)
     try {
-      const authService = FirebaseAuthService.getInstance()
-      await authService.signInWithGoogle()
+      // Discard the previous verifier — RecaptchaVerifier instances are
+      // single-use; reusing one yields `auth/argument-error`.
+      try { verifierCleanupRef.current?.() } catch { /* noop */ }
+      verifierCleanupRef.current = null
+
+      const phoneE164 = toE164(country, phoneNumber)
+      const { confirmation, cleanup } = await FirebaseAuthService.getInstance()
+        .startPhoneLink(phoneE164, container)
+      confirmationRef.current = confirmation
+      verifierCleanupRef.current = cleanup
+      setSmsCode('')
+      setResendCooldown(30)
     } catch (err: unknown) {
       setError(getErrorMessage(err))
     } finally {
-      setGoogleLoading(false)
+      setLoading(false)
     }
   }
 
   const toggleMode = () => {
     setMode(m => m === 'signin' ? 'signup' : 'signin')
+    setSignupStep('form')
+    setSmsCode('')
     setError(null)
   }
 
@@ -185,10 +326,6 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
         .auth-input:focus {
           border-color: ${tokens.colors.accent.primary} !important;
         }
-        .auth-btn-google:hover:not(:disabled) {
-          background: ${tokens.colors.bg.hoverSubtle} !important;
-          border-color: ${tokens.colors.text.muted} !important;
-        }
         .auth-btn-submit:hover:not(:disabled) {
           filter: brightness(1.1);
         }
@@ -236,7 +373,9 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
             letterSpacing="-0.5px"
             lineHeight="1.2"
           >
-            {mode === 'signin' ? 'Bem-vindo de volta' : 'Crie a sua conta'}
+            {mode === 'signin'
+              ? 'Bem-vindo de volta'
+              : signupStep === 'sms' ? 'Verifique o telefone' : 'Crie a sua conta'}
           </Text>
           <Text
             fontSize="13px"
@@ -245,7 +384,9 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
           >
             {mode === 'signin'
               ? 'Entre para continuar a desenvolver'
-              : 'Comece a criar os seus projectos'
+              : signupStep === 'sms'
+                ? `Enviámos um código para +${country.dialCode} ${phoneNumber}`
+                : 'Comece a criar os seus projectos'
             }
           </Text>
         </Box>
@@ -260,50 +401,112 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
           boxShadow="0 8px 32px rgba(0, 0, 0, 0.3)"
           data-login-card
         >
-          {/* Google button */}
-          <button
-            type="button"
-            className="auth-btn-google"
-            onClick={handleGoogleSignIn}
-            disabled={anyLoading}
-            style={{
-              width: '100%',
-              padding: '11px 0',
-              background: 'transparent',
-              border: `1px solid ${tokens.colors.border.panel}`,
-              borderRadius: '10px',
-              color: tokens.colors.text.primary,
-              fontSize: '13px',
-              fontWeight: '500',
-              cursor: anyLoading ? 'not-allowed' : 'pointer',
-              fontFamily: 'inherit',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '10px',
-              opacity: anyLoading ? 0.5 : 1,
-              transition: `all ${tokens.transition.normal}`,
-            }}
-          >
-            {googleLoading ? (
-              <LoadingDots />
-            ) : (
-              <>
-                <GoogleIcon />
-                Continuar com Google
-              </>
-            )}
-          </button>
+          {/* SMS step — replaces the entire signup card body */}
+          {mode === 'signup' && signupStep === 'sms' ? (
+            <form onSubmit={handleConfirmCode}>
+              <Box mb={4}>
+                <label>
+                  <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1.5} fontWeight="500">
+                    Código de verificação
+                  </Text>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    autoFocus
+                    maxLength={6}
+                    value={smsCode}
+                    onChange={(e) => setSmsCode(e.target.value.replace(/\D+/g, '').slice(0, 6))}
+                    placeholder="000000"
+                    disabled={anyLoading}
+                    style={{
+                      ...inputStyle,
+                      fontSize: '20px',
+                      letterSpacing: '8px',
+                      textAlign: 'center',
+                      fontVariantNumeric: 'tabular-nums',
+                    }}
+                  />
+                </label>
+              </Box>
 
-          {/* Divider */}
-          <Flex align="center" my={5} gap={3}>
-            <Box flex="1" height="1px" bg={tokens.colors.border.panel} />
-            <Text fontSize="11px" color={tokens.colors.text.muted} textTransform="uppercase" letterSpacing="0.5px">
-              ou
-            </Text>
-            <Box flex="1" height="1px" bg={tokens.colors.border.panel} />
-          </Flex>
+              {error && (
+                <Box
+                  mb={4}
+                  p={3}
+                  bg={tokens.colors.accent.redSubtle}
+                  borderRadius="10px"
+                  border={`1px solid ${tokens.colors.accent.redMuted}`}
+                >
+                  <Text fontSize="12px" color={tokens.colors.accent.red} lineHeight="1.5">
+                    {error}
+                  </Text>
+                </Box>
+              )}
 
+              <button
+                type="submit"
+                className="auth-btn-submit"
+                disabled={smsCode.length < 6 || anyLoading}
+                style={{
+                  width: '100%',
+                  padding: '11px 0',
+                  background: (smsCode.length < 6 || anyLoading) ? tokens.colors.border.panel : tokens.colors.accent.primary,
+                  border: 'none',
+                  borderRadius: '10px',
+                  color: '#fff',
+                  fontSize: '13px',
+                  fontWeight: '600',
+                  cursor: (smsCode.length < 6 || anyLoading) ? 'not-allowed' : 'pointer',
+                  fontFamily: 'inherit',
+                  opacity: smsCode.length < 6 ? 0.5 : 1,
+                  transition: `all ${tokens.transition.normal}`,
+                  boxShadow: (smsCode.length === 6 && !anyLoading) ? tokens.shadow.dialogButton : 'none',
+                }}
+              >
+                {loading ? <LoadingDots /> : 'Confirmar'}
+              </button>
+
+              <Flex justify="space-between" align="center" mt={3} gap={2}>
+                <button
+                  type="button"
+                  onClick={handleCancelSms}
+                  disabled={anyLoading}
+                  style={{
+                    padding: '6px 0',
+                    background: 'transparent',
+                    border: 'none',
+                    color: tokens.colors.text.secondary,
+                    fontSize: '12px',
+                    fontFamily: 'inherit',
+                    cursor: anyLoading ? 'not-allowed' : 'pointer',
+                    outline: 'none',
+                  }}
+                >
+                  Voltar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResendSms}
+                  disabled={anyLoading || resendCooldown > 0}
+                  style={{
+                    padding: '6px 0',
+                    background: 'transparent',
+                    border: 'none',
+                    color: resendCooldown > 0 ? tokens.colors.text.muted : tokens.colors.accent.primary,
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    fontFamily: 'inherit',
+                    cursor: (anyLoading || resendCooldown > 0) ? 'not-allowed' : 'pointer',
+                    outline: 'none',
+                  }}
+                >
+                  {resendCooldown > 0 ? `Reenviar em ${resendCooldown}s` : 'Reenviar código'}
+                </button>
+              </Flex>
+            </form>
+          ) : (
+          <>
           {/* Form */}
           <form onSubmit={handleSubmit}>
             {/* Display Name (signup only) */}
@@ -348,7 +551,7 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
             </Box>
 
             {/* Password */}
-            <Box mb={4}>
+            <Box mb={mode === 'signup' ? 3 : 4}>
               <label>
                 <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1.5} fontWeight="500">
                   Password
@@ -365,6 +568,25 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
                 />
               </label>
             </Box>
+
+            {/* Phone (signup only) */}
+            {mode === 'signup' && (
+              <Box mb={4}>
+                <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1.5} fontWeight="500">
+                  Telefone
+                </Text>
+                <PhoneInput
+                  country={country}
+                  onCountryChange={setCountry}
+                  number={phoneNumber}
+                  onNumberChange={setPhoneNumber}
+                  disabled={anyLoading}
+                />
+                <Text fontSize="11px" color={tokens.colors.text.muted} mt={1.5} lineHeight="1.4">
+                  Vamos enviar um código por SMS para confirmar.
+                </Text>
+              </Box>
+            )}
 
             {/* Error */}
             {error && (
@@ -409,25 +631,41 @@ function LoginScreen({ initialMode = 'signin' }: LoginScreenProps) {
               )}
             </button>
           </form>
+          </>
+          )}
         </Box>
 
-        {/* Toggle mode */}
-        <Flex justify="center" mt={5} gap={1} data-login-card>
-          <Text fontSize="12px" color={tokens.colors.text.secondary}>
-            {mode === 'signin' ? 'Não tem conta?' : 'Já tem conta?'}
-          </Text>
-          <Text
-            fontSize="12px"
-            color={tokens.colors.accent.primary}
-            cursor="pointer"
-            fontWeight="500"
-            role="button"
-            _hover={{ textDecoration: 'underline' }}
-            onClick={toggleMode}
-          >
-            {mode === 'signin' ? 'Criar conta' : 'Entrar'}
-          </Text>
-        </Flex>
+        {/* Invisible reCAPTCHA container — required by Firebase phone auth.
+            Stays empty until startPhoneLink renders the widget into it. */}
+        <Box
+          ref={recaptchaContainerRef}
+          id="tmcode-recaptcha-container"
+          position="absolute"
+          width="0"
+          height="0"
+          overflow="hidden"
+        />
+
+        {/* Toggle mode — hidden during SMS verification to avoid losing
+            the half-completed signup */}
+        {!(mode === 'signup' && signupStep === 'sms') && (
+          <Flex justify="center" mt={5} gap={1} data-login-card>
+            <Text fontSize="12px" color={tokens.colors.text.secondary}>
+              {mode === 'signin' ? 'Não tem conta?' : 'Já tem conta?'}
+            </Text>
+            <Text
+              fontSize="12px"
+              color={tokens.colors.accent.primary}
+              cursor="pointer"
+              fontWeight="500"
+              role="button"
+              _hover={{ textDecoration: 'underline' }}
+              onClick={toggleMode}
+            >
+              {mode === 'signin' ? 'Criar conta' : 'Entrar'}
+            </Text>
+          </Flex>
+        )}
       </Flex>
     </Flex>
   )

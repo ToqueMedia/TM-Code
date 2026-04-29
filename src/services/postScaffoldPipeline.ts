@@ -55,8 +55,13 @@ async function postScaffoldPipeline(
   layoutStore.addDevServerLog(`Starting dev server (${devCmd})...`, 'info')
 
   try {
-    const serverHint = template.category === 'backend' ? 'backend' as const : 'frontend' as const
-    await devServerManager.start(projectPath, devCmd, serverHint)
+    // Preserve fullstack category from the template so dual-port kill and
+    // port-authoritative classification kick in (react-express-ts etc.).
+    const projectKind: 'frontend' | 'backend' | 'fullstack' =
+      template.category === 'backend' ? 'backend'
+      : template.category === 'fullstack' ? 'fullstack'
+      : 'frontend'
+    await devServerManager.start(projectPath, devCmd, { projectKind })
     layoutStore.setScaffoldPhase('ready', 'Dev server is running')
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)

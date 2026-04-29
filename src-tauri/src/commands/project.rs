@@ -1306,6 +1306,34 @@ pub fn remove_from_recent_projects(project_id: String) -> Result<()> {
     remove_project_from_settings(&project_id)
 }
 
+/// Clears the entire recent projects list. Atomic — writes the settings file
+/// once with an empty vec. Project metadata directories and on-disk files are
+/// NOT touched (by design — this is "forget", not "delete").
+#[tauri::command]
+pub fn clear_recent_projects() -> Result<()> {
+    let settings_path = get_settings_path();
+
+    if !settings_path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&settings_path)?;
+    let mut settings: GlobalSettings = serde_json::from_str(&content)?;
+
+    if settings.recent_projects.is_empty() {
+        return Ok(());
+    }
+
+    settings.recent_projects.clear();
+
+    let settings_content = serde_json::to_string_pretty(&settings)?;
+    let tmp_path = settings_path.with_extension("json.tmp");
+    fs::write(&tmp_path, &settings_content)?;
+    fs::rename(&tmp_path, &settings_path)?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_project(project_id: String, project_path: String) -> Result<()> {
     validate_project_id(&project_id)?;

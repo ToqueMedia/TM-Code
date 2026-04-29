@@ -19,7 +19,7 @@
  */
 
 import { t } from '../../i18n'
-import type { Attachment, ContentPart, ConversationMessage } from '../../types/chat'
+import type { Attachment, ConversationMessage } from '../../types/chat'
 import type { ContentBlock, PromptValue } from '../../types/messageQueueTypes'
 import type { OpenAIContentPart } from './agentService'
 
@@ -274,14 +274,29 @@ export function contentAsText(content: string | unknown[] | null | undefined): s
 export function downgradeHistoryToText(
   history: readonly ConversationMessage[],
 ): ConversationMessage[] {
+  const placeholder = t('prompt.imageStripped')
   return history.map(msg => {
     if (msg.content == null || typeof msg.content === 'string') {
       return msg as ConversationMessage
     }
-    const parts = msg.content as ContentPart[]
-    const placeholder = t('prompt.imageStripped')
-    const text = parts
-      .map(p => (p.type === 'text' ? p.text : placeholder))
+    // The content array mixes OpenAI multimodal parts (text / image_url) with
+    // Anthropic-shape blocks (tool_use, tool_result, thinking). Only image_url
+    // parts are the ones that got stripped due to no multimodal support — the
+    // rest are text-equivalent and must be preserved as text so the downstream
+    // model sees the real conversation instead of a row of image placeholders.
+    const text = (msg.content as any[])
+      .map((p: any) => {
+        if (typeof p === 'string') return p
+        switch (p.type) {
+          case 'text':        return p.text ?? ''
+          case 'thinking':    return p.thinking ?? ''
+          case 'tool_use':    return `[tool: ${p.name}(${JSON.stringify(p.input || {})})]`
+          case 'tool_result': return typeof p.content === 'string' ? p.content : JSON.stringify(p.content || '')
+          case 'image_url':   return placeholder
+          default:            return ''
+        }
+      })
+      .filter(Boolean)
       .join('\n')
     return { ...msg, content: text }
   })

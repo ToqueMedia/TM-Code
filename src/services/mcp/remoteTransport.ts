@@ -19,9 +19,20 @@ export interface RemoteMCPResponse {
   error?: { code: number; message: string }
 }
 
+const MAX_RETRIES = 3
+const BACKOFF_MS = [500, 1500, 4000]
+
+function isRetryableStatus(status: number): boolean {
+  // 408 Request Timeout, 429 Too Many Requests, 5xx — worth another try.
+  return status === 408 || status === 429 || status >= 500
+}
+
 /**
  * Send a JSON-RPC request to a remote MCP server via the Worker proxy.
  * The Worker validates the URL (blocks private IPs) and forwards the request.
+ *
+ * Retries on network errors and retryable HTTP statuses with exponential backoff.
+ * Auth errors (401/403), bad requests (400), and JSON-RPC errors fail fast.
  */
 export async function sendRemoteMCPRequest(request: RemoteMCPRequest): Promise<unknown> {
   const firebaseAuth = FirebaseAuthService.getInstance()
@@ -31,32 +42,54 @@ export async function sendRemoteMCPRequest(request: RemoteMCPRequest): Promise<u
     throw new Error('Not authenticated — cannot proxy MCP request')
   }
 
-  const response = await tauriFetch(`${WORKER_URL}/v1/mcp-proxy`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${idToken}`,
-    },
-    body: JSON.stringify({
-      serverUrl: request.serverUrl,
-      method: request.method,
-      params: request.params,
-    }),
-    timeoutSecs: 30,
-  })
+  let lastError: Error | null = null
 
-  if (!response.ok) {
-    const errorBody = await response.text().catch(() => '')
-    throw new Error(`MCP proxy error (${response.status}): ${errorBody}`)
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await tauriFetch(`${WORKER_URL}/v1/mcp-proxy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          serverUrl: request.serverUrl,
+          method: request.method,
+          params: request.params,
+        }),
+        timeoutSecs: 30,
+      })
+
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => '')
+        const err = new Error(`MCP proxy error (${response.status}): ${errorBody}`)
+        if (isRetryableStatus(response.status) && attempt < MAX_RETRIES) {
+          lastError = err
+          await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]))
+          continue
+        }
+        throw err
+      }
+
+      const data = (await response.json()) as RemoteMCPResponse
+
+      if (data.error) {
+        throw new Error(`Remote MCP error: ${data.error.message} (code: ${data.error.code})`)
+      }
+
+      return data.result ?? data
+    } catch (e) {
+      // Network/timeout errors from tauriFetch surface as thrown Errors — retry.
+      if (attempt < MAX_RETRIES && !(e instanceof Error && e.message.startsWith('Remote MCP error:'))) {
+        lastError = e instanceof Error ? e : new Error(String(e))
+        await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]))
+        continue
+      }
+      throw e
+    }
   }
 
-  const data = (await response.json()) as RemoteMCPResponse
-
-  if (data.error) {
-    throw new Error(`Remote MCP error: ${data.error.message} (code: ${data.error.code})`)
-  }
-
-  return data.result ?? data
+  throw lastError ?? new Error('MCP proxy: exhausted retries')
 }
 
 /**

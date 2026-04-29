@@ -20,6 +20,28 @@ const READ_TOOLS = new Set([
   'check_background_agents',
 ])
 
+// Tools that mutate the filesystem — shown with their own running hint so
+// the user sees *something* while the write is in flight, instead of a
+// lone spinner with an empty body.
+const WRITE_TOOLS = new Set([
+  'write_file',
+  'create_file',
+  'edit_file',
+  'delete_file',
+  'rename_file',
+  'create_directory',
+])
+
+// Sub-agent spawners emit their output INLINE via the text-delta stream + nested
+// child tool calls. Their `result` field duplicates that stream content, so we
+// suppress the result box on the parent launcher to avoid showing the same
+// text twice.
+const SUBAGENT_SPAWNERS = new Set([
+  'research',
+  'verify',
+  'spawn_background_agent',
+])
+
 const RESULT_PREVIEW_CHARS = 1400
 
 function buildReadSummary(toolName: string, result: string | undefined): string | null {
@@ -48,6 +70,7 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
   const isRunning = toolCall.status === 'running'
   const hasDiff = toolCall.diffOldContent !== undefined || toolCall.diffNewContent !== undefined
   const isReadTool = READ_TOOLS.has(toolCall.toolName)
+  const isWriteTool = WRITE_TOOLS.has(toolCall.toolName)
 
   const display = getToolDisplay(toolCall.toolName)
   const verb = isRunning ? display.running : isError ? display.failed : display.done
@@ -73,12 +96,42 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
     [isReadTool, isRunning, toolCall.toolName, toolCall.result],
   )
 
-  const showResult = toolCall.result && !hasDiff && !isReadTool
+  const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(toolCall.toolName)
+  const showResult = toolCall.result && !hasDiff && !isReadTool && !isSubAgentSpawner
+
+  const isNested = !!toolCall.spawnedBy
 
   return (
-    <Box my={1.5} fontFamily={tokens.fontFamily.mono}>
+    <Box
+      my={1.5}
+      fontFamily={tokens.fontFamily.mono}
+      {...(isNested
+        ? {
+            // Visual marker: nested sub-agent tool calls are indented and carry
+            // a purple left-rail so the user sees at a glance what was run by
+            // a research/verify sub-agent vs the main agent.
+            ml: 4,
+            pl: 2,
+            borderLeft: `2px solid ${tokens.colors.accent.purple}`,
+            opacity: 0.95,
+          }
+        : {})}
+    >
       {/* Header: ● Verb(path)  or  ● Verb subtitle */}
       <Flex align="center" gap={1.5} wrap="wrap">
+        {isNested && (
+          <Text
+            fontSize="10px"
+            fontWeight="700"
+            color={tokens.colors.accent.purple}
+            flexShrink={0}
+            lineHeight="1"
+            opacity={0.7}
+            title="Sub-agent tool call"
+          >
+            ↳
+          </Text>
+        )}
         <Text
           fontSize="11px"
           fontWeight="700"
@@ -142,10 +195,27 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
           : 'rgba(255,255,255,0.05)'
         }`}
       >
-        {/* Read tool: compact summary, no content */}
+        {/* Read tool: compact summary when done, running hint while waiting.
+            Without the running hint, search_files / glob tools appear as a lone
+            spinner with no body — users can't tell if the query is slow, stuck,
+            or genuinely finding nothing. */}
         {isReadTool && !isRunning && readSummary && (
           <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt="1px">
             {readSummary}
+          </Text>
+        )}
+        {isReadTool && isRunning && !toolCall.progressText && (
+          <Text fontSize="11px" color={tokens.colors.toolCall.runningText} fontFamily={tokens.fontFamily.mono} mt="1px" opacity={0.8}>
+            working…
+          </Text>
+        )}
+
+        {/* Write tools: running hint while the disk write is in flight.
+            Otherwise write_file / edit_file / create_file render as a
+            lone spinner with an empty body until the result comes back. */}
+        {isWriteTool && isRunning && !hasDiff && !toolCall.progressText && (
+          <Text fontSize="11px" color={tokens.colors.toolCall.runningText} fontFamily={tokens.fontFamily.mono} mt="1px" opacity={0.8}>
+            writing…
           </Text>
         )}
 

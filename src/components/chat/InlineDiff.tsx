@@ -1,11 +1,15 @@
-import { memo, useState, useMemo } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { Box, Flex, Text, Image, Kbd } from '@chakra-ui/react'
 import { FiCheck, FiCheckCircle, FiX } from 'react-icons/fi'
 import { diffLines } from 'diff'
 import { getFileIconUrl } from '@/utils/fileIcons'
 import { useSettingsStore, formatBinding } from '@/stores/settingsStore'
+import { usePermissionStore } from '@/stores/permissionStore'
 import { tokens } from '@/theme/tokens'
 import { detectLanguage, highlightLines, type HighlightedLine } from '@/utils/syntaxHighlight'
+
+const CONTEXT_LINES = 3
+const MAX_LINES = 40
 
 interface InlineDiffProps {
   filePath: string
@@ -18,8 +22,6 @@ interface InlineDiffProps {
   onDeny: () => void
   onRejectAll: () => void
 }
-
-const MAX_LINES = 20
 
 interface DiffLine {
   type: 'added' | 'removed' | 'normal'
@@ -42,6 +44,7 @@ function InlineDiff({
 }: InlineDiffProps) {
   const [showFull, setShowFull] = useState(false)
   const sc = useSettingsStore(s => s.shortcuts)
+  const autoApproveDiffs = usePermissionStore(s => s.autoApproveDiffs)
   const fileName = filePath.split('/').pop() || filePath
   const language = useMemo(() => detectLanguage(filePath), [filePath])
 
@@ -80,12 +83,63 @@ function InlineDiff({
     return lines
   }, [changes])
 
-  const shouldTruncate = allLines.length > MAX_LINES && !showFull
-  const displayLines = shouldTruncate ? allLines.slice(0, MAX_LINES) : allLines
   const isResolved = status === 'approved' || status === 'denied'
+  // Hide approval buttons whenever autoApproveDiffs is on (user already opted
+  // into "Accept all", or we're inside a /plan run). Prevents the flicker where
+  // buttons briefly appear before the auto-approval phase resolves.
+  const showActionButtons = !isResolved && !autoApproveDiffs
 
   const addedCount = allLines.filter(l => l.type === 'added').length
   const removedCount = allLines.filter(l => l.type === 'removed').length
+
+  // Unified-diff style hunks with CONTEXT_LINES of surrounding context
+  // around each changed block. Overlapping or adjacent ranges are merged
+  // so non-contiguous changes are separated by a compact "···" row.
+  const hunks = useMemo(() => {
+    if (allLines.length === 0) return []
+
+    const changedIdxs: number[] = []
+    allLines.forEach((line, idx) => {
+      if (line.type !== 'normal') changedIdxs.push(idx)
+    })
+    if (changedIdxs.length === 0) return []
+
+    const ranges: Array<{ start: number; end: number }> = []
+    for (const idx of changedIdxs) {
+      const start = Math.max(0, idx - CONTEXT_LINES)
+      const end = Math.min(allLines.length - 1, idx + CONTEXT_LINES)
+      const last = ranges[ranges.length - 1]
+      if (last && start <= last.end + 1) {
+        last.end = Math.max(last.end, end)
+      } else {
+        ranges.push({ start, end })
+      }
+    }
+
+    return ranges.map(({ start, end }) => allLines.slice(start, end + 1))
+  }, [allLines])
+
+  const totalDisplayLines = useMemo(
+    () => hunks.reduce((n, h) => n + h.length, 0),
+    [hunks],
+  )
+  const shouldTruncate = totalDisplayLines > MAX_LINES && !showFull
+  const displayHunks = useMemo(() => {
+    if (!shouldTruncate) return hunks
+    const out: DiffLine[][] = []
+    let remaining = MAX_LINES
+    for (const h of hunks) {
+      if (remaining <= 0) break
+      if (h.length <= remaining) {
+        out.push(h)
+        remaining -= h.length
+      } else {
+        out.push(h.slice(0, remaining))
+        remaining = 0
+      }
+    }
+    return out
+  }, [hunks, shouldTruncate])
 
   // Get highlighted tokens for a diff line
   const getLineTokens = (line: DiffLine): HighlightedLine => {
@@ -166,9 +220,9 @@ function InlineDiff({
         </Flex>
       </Flex>
 
-      {/* Diff content */}
+      {/* Diff content — only changed lines (+/-) grouped into hunks */}
       <Box
-        maxH="240px"
+        maxH="320px"
         overflowY="auto"
         overflowX="auto"
         fontSize="12px"
@@ -179,82 +233,117 @@ function InlineDiff({
           '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.1)', borderRadius: '2px' },
         }}
       >
-        {displayLines.map((line) => {
-          let bg = 'transparent'
-          let prefixChar = '\u00A0'
-
-          if (line.type === 'added') {
-            bg = 'rgba(46, 160, 67, 0.08)'
-            prefixChar = '+'
-          } else if (line.type === 'removed') {
-            bg = 'rgba(248, 81, 73, 0.08)'
-            prefixChar = '-'
-          }
-
-          const gutterTextColor = line.type === 'normal' ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.25)'
-          const lineTokens = getLineTokens(line)
-
-          return (
-            <Flex key={`${line.type}-${line.oldNum ?? 'n'}-${line.newNum ?? 'n'}`} bg={bg} align="stretch" minH="20px">
-              {/* Old line number */}
-              <Flex
-                w="38px"
-                flexShrink={0}
-                justify="flex-end"
-                align="center"
-                pr="8px"
-                bg={line.type === 'removed' ? 'rgba(248, 81, 73, 0.06)' : line.type === 'added' ? 'rgba(46, 160, 67, 0.04)' : 'transparent'}
-                userSelect="none"
-              >
-                <Text fontSize="10px" color={gutterTextColor}>
-                  {line.oldNum ?? ''}
-                </Text>
-              </Flex>
-              {/* New line number */}
-              <Flex
-                w="38px"
-                flexShrink={0}
-                justify="flex-end"
-                align="center"
-                pr="8px"
-                bg={line.type === 'removed' ? 'rgba(248, 81, 73, 0.06)' : line.type === 'added' ? 'rgba(46, 160, 67, 0.04)' : 'transparent'}
-                borderRight={`1px solid ${line.type === 'added' ? 'rgba(46, 160, 67, 0.15)' : line.type === 'removed' ? 'rgba(248, 81, 73, 0.15)' : 'rgba(255,255,255,0.06)'}`}
-                userSelect="none"
-              >
-                <Text fontSize="10px" color={gutterTextColor}>
-                  {line.newNum ?? ''}
-                </Text>
-              </Flex>
-              {/* Prefix (+/-) */}
-              <Flex
-                w="20px"
-                flexShrink={0}
-                justify="center"
-                align="center"
-                userSelect="none"
-              >
-                <Text
-                  fontSize="11px"
-                  color={line.type === 'added' ? tokens.colors.diff.addedText : line.type === 'removed' ? tokens.colors.diff.removedText : 'transparent'}
-                  fontWeight="700"
+        {displayHunks.length === 0 ? (
+          <Flex px={3} py="10px" align="center">
+            <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+              No changes.
+            </Text>
+          </Flex>
+        ) : (
+          displayHunks.map((hunk, hi) => (
+            <Box key={`hunk-${hi}`}>
+              {hi > 0 && (
+                <Flex
+                  align="center"
+                  h="16px"
+                  bg="rgba(255,255,255,0.015)"
+                  borderTop="1px dashed rgba(255,255,255,0.06)"
+                  borderBottom="1px dashed rgba(255,255,255,0.06)"
+                  userSelect="none"
                 >
-                  {prefixChar}
-                </Text>
-              </Flex>
-              {/* Code content — syntax highlighted */}
-              <Box flex="1" pr={3} whiteSpace="pre" fontSize="12px" display="flex">
-                {lineTokens.map((token, ti) => (
-                  <span key={ti} style={{ color: token.color }}>
-                    {token.text}
-                  </span>
-                ))}
-              </Box>
-            </Flex>
-          )
-        })}
+                  <Box w="96px" flexShrink={0} />
+                  <Text fontSize="10px" color="rgba(255,255,255,0.25)" fontFamily={tokens.fontFamily.mono}>
+                    ···
+                  </Text>
+                </Flex>
+              )}
+              {hunk.map((line) => {
+                let bg = 'transparent'
+                let prefixChar = '\u00A0'
+                if (line.type === 'added') {
+                  bg = 'rgba(46, 160, 67, 0.08)'
+                  prefixChar = '+'
+                } else if (line.type === 'removed') {
+                  bg = 'rgba(248, 81, 73, 0.08)'
+                  prefixChar = '-'
+                }
+                const gutterBg = line.type === 'removed'
+                  ? 'rgba(248, 81, 73, 0.06)'
+                  : line.type === 'added'
+                    ? 'rgba(46, 160, 67, 0.04)'
+                    : 'transparent'
+                const gutterBorder = line.type === 'added'
+                  ? 'rgba(46, 160, 67, 0.15)'
+                  : line.type === 'removed'
+                    ? 'rgba(248, 81, 73, 0.15)'
+                    : 'rgba(255,255,255,0.06)'
+                const gutterTextColor = line.type === 'normal'
+                  ? 'rgba(255,255,255,0.15)'
+                  : 'rgba(255,255,255,0.25)'
+                const lineTokens = getLineTokens(line)
+                return (
+                  <Flex
+                    key={`${line.type}-${line.oldNum ?? 'n'}-${line.newNum ?? 'n'}`}
+                    bg={bg}
+                    align="stretch"
+                    minH="20px"
+                  >
+                    <Flex
+                      w="38px"
+                      flexShrink={0}
+                      justify="flex-end"
+                      align="center"
+                      pr="8px"
+                      bg={gutterBg}
+                      userSelect="none"
+                    >
+                      <Text fontSize="10px" color={gutterTextColor}>
+                        {line.oldNum ?? ''}
+                      </Text>
+                    </Flex>
+                    <Flex
+                      w="38px"
+                      flexShrink={0}
+                      justify="flex-end"
+                      align="center"
+                      pr="8px"
+                      bg={gutterBg}
+                      borderRight={`1px solid ${gutterBorder}`}
+                      userSelect="none"
+                    >
+                      <Text fontSize="10px" color={gutterTextColor}>
+                        {line.newNum ?? ''}
+                      </Text>
+                    </Flex>
+                    <Flex w="20px" flexShrink={0} justify="center" align="center" userSelect="none">
+                      <Text
+                        fontSize="11px"
+                        color={line.type === 'added'
+                          ? tokens.colors.diff.addedText
+                          : line.type === 'removed'
+                            ? tokens.colors.diff.removedText
+                            : 'transparent'}
+                        fontWeight="700"
+                      >
+                        {prefixChar}
+                      </Text>
+                    </Flex>
+                    <Box flex="1" pr={3} whiteSpace="pre" fontSize="12px" display="flex">
+                      {lineTokens.map((token, ti) => (
+                        <span key={ti} style={{ color: token.color }}>
+                          {token.text}
+                        </span>
+                      ))}
+                    </Box>
+                  </Flex>
+                )
+              })}
+            </Box>
+          ))
+        )}
       </Box>
 
-      {/* Show more */}
+      {/* Show more — when truncated */}
       {shouldTruncate && (
         <Box
           px={3}
@@ -269,13 +358,13 @@ function InlineDiff({
             _hover={{ textDecoration: 'underline' }}
             onClick={() => setShowFull(true)}
           >
-            Show {allLines.length - MAX_LINES} more lines
+            Show {totalDisplayLines - MAX_LINES} more lines
           </Text>
         </Box>
       )}
 
       {/* Action buttons */}
-      {!isResolved && (
+      {showActionButtons && (
         <Flex
           gap={2}
           px={3}

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
-import { useLayoutStore } from '../../stores/layoutStore'
+import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useProblemsStore } from '../../stores/problemsStore'
@@ -83,7 +83,7 @@ export function usePromptBar() {
   const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
-  const isPreviewServerRunning = useLayoutStore(s => s.isPreviewServerRunning)
+  const isPreviewServerRunning = useLayoutStore(selectIsPreviewServerRunning)
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const isScaffolding = scaffoldPhase === 'installing' || scaffoldPhase === 'starting'
@@ -540,7 +540,7 @@ export function usePromptBar() {
           const layoutStore = useLayoutStore.getState()
 
           // If preview server is running, reload and show preview
-          if (layoutStore.isPreviewServerRunning) {
+          if (selectIsPreviewServerRunning(layoutStore)) {
             layoutStore.reloadPreview()
             layoutStore.setViewMode('preview')
             return
@@ -554,8 +554,16 @@ export function usePromptBar() {
           // Otherwise, try to start preview if we have a dev command
           if (devCommand && currentProject?.path) {
             layoutStore.addDevServerLog(`Starting dev server (${devCommand})...`, 'info')
+            // Detect project kind so fullstack monorepos get dual-port kill
+            // and port-authoritative URL classification (not just 'frontend').
+            let projectKind: 'frontend' | 'backend' | 'fullstack' | undefined
             try {
-              await devServerManager.start(currentProject.path, devCommand)
+              const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
+              const cat = await detectProjectCategory(currentProject.path)
+              projectKind = categoryToServerHint(cat)
+            } catch { /* non-fatal */ }
+            try {
+              await devServerManager.start(currentProject.path, devCommand, { projectKind })
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err)
               layoutStore.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
@@ -929,7 +937,7 @@ export function usePromptBar() {
     }
 
     // If server is already running or static preview exists, just switch view
-    if (layoutStore.isPreviewServerRunning || layoutStore.previewHtmlContent) {
+    if (selectIsPreviewServerRunning(layoutStore) || layoutStore.previewHtmlContent) {
       layoutStore.setViewMode('preview')
       return
     }
@@ -951,8 +959,18 @@ export function usePromptBar() {
 
     if (cmd && currentProject?.path) {
       layout.addDevServerLog(`Starting dev server (${cmd})...`, 'info')
+      // Detect project kind (frontend / backend / fullstack) from package.json
+      // deps. Without this, devServerManager defaults to 'frontend' and the
+      // port-authoritative classifier + dual-port kill behaviour never kick in
+      // for fullstack monorepos — resulting in EADDRINUSE on the backend side.
+      let projectKind: 'frontend' | 'backend' | 'fullstack' | undefined
       try {
-        await devServerManager.start(currentProject.path, cmd)
+        const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
+        const cat = await detectProjectCategory(currentProject.path)
+        projectKind = categoryToServerHint(cat)
+      } catch { /* non-fatal — fall through with undefined, start() defaults to frontend */ }
+      try {
+        await devServerManager.start(currentProject.path, cmd, { projectKind })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         layout.addDevServerLog(`Could not start dev server: ${msg}`, 'error')

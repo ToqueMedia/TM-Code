@@ -42,7 +42,11 @@ interface PendingPermission {
   args: Record<string, unknown>
   /** Why this prompt was forced — null means normal permission flow */
   promptReason: PromptReason
-  resolve: (approved: boolean) => void
+  /** Resolves the pending `requestPermission` promise. When `denyReason` is
+   *  provided, the tool's result surfaces the reason to the agent so it can
+   *  react to the user's rationale (e.g., "I denied because the path is outside
+   *  the project"). */
+  resolve: (result: { approved: boolean; denyReason?: string }) => void
 }
 
 interface PermissionState {
@@ -57,10 +61,14 @@ interface PermissionState {
 }
 
 interface PermissionActions {
-  requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason) => Promise<boolean>
+  requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason) => Promise<{ approved: boolean; denyReason?: string }>
   approve: () => void
   approveAll: () => void
   deny: () => void
+  /** Deny the current pending permission and feed a user-written reason back
+   *  to the agent as part of the tool's result. Useful when the default
+   *  "Permission denied" message isn't expressive enough. */
+  denyWith: (reason: string) => void
   setAutoApproveDiffs: (value: boolean) => void
   resetAutoApprove: () => void
   clearPending: () => void
@@ -87,7 +95,7 @@ function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionSt
     const scope = getToolScope(next.toolName)
     if (approvedScopes.has(scope)) {
       // Auto-approve this one and continue to the next
-      next.resolve(true)
+      next.resolve({ approved: true })
       continue
     }
     // Show this one to the user
@@ -116,13 +124,13 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       const scope = getToolScope(toolName)
 
       // User authorized all tools in this scope (core or mcp)
-      if (get().approvedScopes.has(scope)) return Promise.resolve(true)
+      if (get().approvedScopes.has(scope)) return Promise.resolve({ approved: true })
 
-      if (SAFE_TOOLS.has(toolName)) return Promise.resolve(true)
-      if (HAS_OWN_APPROVAL.has(toolName)) return Promise.resolve(true)
+      if (SAFE_TOOLS.has(toolName)) return Promise.resolve({ approved: true })
+      if (HAS_OWN_APPROVAL.has(toolName)) return Promise.resolve({ approved: true })
     }
 
-    return new Promise<boolean>((resolve) => {
+    return new Promise<{ approved: boolean; denyReason?: string }>((resolve) => {
       const entry: PendingPermission = {
         id: crypto.randomUUID(),
         toolName,
@@ -145,7 +153,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approve: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
-      pendingPermission.resolve(true)
+      pendingPermission.resolve({ approved: true })
       set({ pendingPermission: null })
       advanceQueue(set, get)
     }
@@ -154,7 +162,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approveAll: () => {
     const { pendingPermission, permissionQueue } = get()
     if (pendingPermission) {
-      pendingPermission.resolve(true)
+      pendingPermission.resolve({ approved: true })
       const scope = getToolScope(pendingPermission.toolName)
       const scopes = new Set(get().approvedScopes)
       scopes.add(scope)
@@ -172,7 +180,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         } else {
           const qScope = getToolScope(queued.toolName)
           if (scopes.has(qScope)) {
-            queued.resolve(true)
+            queued.resolve({ approved: true })
           } else {
             remaining.push(queued)
           }
@@ -187,7 +195,16 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   deny: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
-      pendingPermission.resolve(false)
+      pendingPermission.resolve({ approved: false })
+      set({ pendingPermission: null })
+      advanceQueue(set, get)
+    }
+  },
+
+  denyWith: (reason: string) => {
+    const { pendingPermission } = get()
+    if (pendingPermission) {
+      pendingPermission.resolve({ approved: false, denyReason: reason.trim() || undefined })
       set({ pendingPermission: null })
       advanceQueue(set, get)
     }
@@ -207,10 +224,10 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     // Reject current + all queued permissions
     const { pendingPermission, permissionQueue } = get()
     if (pendingPermission) {
-      pendingPermission.resolve(false)
+      pendingPermission.resolve({ approved: false })
     }
     for (const queued of permissionQueue) {
-      queued.resolve(false)
+      queued.resolve({ approved: false })
     }
     set({ pendingPermission: null, permissionQueue: [] })
   },

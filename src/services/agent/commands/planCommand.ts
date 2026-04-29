@@ -2,7 +2,17 @@ import { useChatStore } from '../../../stores/chatStore'
 import { useAgentStore } from '../../../stores/agentStore'
 import { usePermissionStore } from '../../../stores/permissionStore'
 import { runAgentWithCallbacks } from '../agentRunner'
+import { FileService } from '../../fileService'
 import AgentService from '../agentService'
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await FileService.readFile(path)
+    return true
+  } catch {
+    return false
+  }
+}
 
 export async function executePlan(args: string, projectPath: string): Promise<void> {
   const chatStore = useChatStore.getState()
@@ -21,7 +31,7 @@ export async function executePlan(args: string, projectPath: string): Promise<vo
   const prevAutoApprove = permStore.autoApproveDiffs
   permStore.setAutoApproveDiffs(true)
 
-  // Run the architect agent with reasoning model (Qwen 3.6 Plus via OpenRouter)
+  // Run the architect agent with reasoning model (Qwen 3.6 Max-Preview via DashScope)
   const agentService = AgentService.getInstance()
   agentService.setRequestType('plan')
   try {
@@ -34,10 +44,17 @@ export async function executePlan(args: string, projectPath: string): Promise<vo
     permStore.setAutoApproveDiffs(prevAutoApprove)
   }
 
-  // Only show approval card if the agent didn't error out
-  if (useAgentStore.getState().status !== 'error') {
-    chatStore.addCardMessage('plan_approval', projectPath)
+  // Only show the approval card if PLAN.md was actually written. Aborts and
+  // silent write failures don't always flip agent status to 'error', so the
+  // file itself is the authoritative signal.
+  if (useAgentStore.getState().status === 'error') return
+  if (!(await fileExists(`${projectPath}/PLAN.md`))) {
+    chatStore.addSystemMessage(
+      'Plan generation did not finish — PLAN.md was not written. Run /plan again to retry.',
+    )
+    return
   }
+  chatStore.addCardMessage('plan_approval', projectPath)
 }
 
 export async function handlePlanApprove(projectPath: string): Promise<void> {
@@ -63,10 +80,15 @@ export async function handlePlanApprove(projectPath: string): Promise<void> {
     permStore.setAutoApproveDiffs(prevAutoApprove)
   }
 
-  // Only show todo card if the agent didn't error out
-  if (useAgentStore.getState().status !== 'error') {
-    chatStore.addCardMessage('todo_list', projectPath)
+  // Same logic as /plan: only show the TODO card if TODO.md is on disk.
+  if (useAgentStore.getState().status === 'error') return
+  if (!(await fileExists(`${projectPath}/TODO.md`))) {
+    chatStore.addSystemMessage(
+      'Task list generation did not finish — TODO.md was not written. Approve the plan again to retry.',
+    )
+    return
   }
+  chatStore.addCardMessage('todo_list', projectPath)
 }
 
 export function handlePlanRequestChanges(): void {

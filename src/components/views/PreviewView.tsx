@@ -1,10 +1,9 @@
-import { memo, useRef, useEffect, useCallback, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { memo, useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2 } from 'react-icons/fi'
+import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
-import { useLayoutStore, type DevServerLogEntry } from '../../stores/layoutStore'
+import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { devServerManager } from '../../services/devServerManager'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
@@ -19,12 +18,17 @@ import { t } from '@/i18n'
 
 const STORAGE_KEY = 'preview-chat-width'
 const CONSOLE_STORAGE_KEY = 'preview-console-height'
+const HTTP_DRAWER_HEIGHT_KEY = 'preview-http-drawer-height'
+const HTTP_DRAWER_OPEN_KEY = 'preview-http-drawer-open'
 const MIN_WIDTH = 280
 const MAX_WIDTH = 640
 const DEFAULT_WIDTH = 380
 const MIN_CONSOLE_HEIGHT = 80
 const MAX_CONSOLE_HEIGHT = 400
 const DEFAULT_CONSOLE_HEIGHT = 180
+const MIN_DRAWER_HEIGHT = 200
+const MAX_DRAWER_HEIGHT = 600
+const DEFAULT_DRAWER_HEIGHT = 340
 
 const LOG_COLORS: Record<string, string> = {
   info: tokens.colors.text.secondary,
@@ -36,7 +40,9 @@ function PreviewView() {
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
-  const previewUrl = useLayoutStore(s => s.previewUrl)
+  const frontendUrl = useLayoutStore(selectFrontendUrl)
+  const backendUrl = useLayoutStore(selectBackendUrl)
+  const projectKind = useLayoutStore(selectProjectKind)
   const previewMode = useLayoutStore(s => s.previewMode)
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const previewSourcePath = useLayoutStore(s => s.previewSourcePath)
@@ -44,8 +50,18 @@ function PreviewView() {
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const devServerLogs = useLayoutStore(s => s.devServerLogs)
   const isConsoleVisible = useLayoutStore(s => s.isConsoleVisible)
+  const isHttpDrawerOpen = useLayoutStore(s => s.isHttpDrawerOpen)
   const previewServerTimedOut = useLayoutStore(s => s.previewServerTimedOut)
   const isPreviewServerLoading = useLayoutStore(s => s.isPreviewServerLoading)
+
+  // Main surface selection:
+  //   - backend project → HttpClientPanel (no iframe)
+  //   - frontend/fullstack → iframe preview
+  //   - static → iframe with HTML content
+  const showHttpClientMain = projectKind === 'backend'
+  const showIframe = projectKind === 'frontend' || projectKind === 'fullstack' || previewMode === 'static'
+  const isFullstack = projectKind === 'fullstack'
+  const previewUrl = showHttpClientMain ? backendUrl : frontendUrl
 
   const [isChatCollapsed, setIsChatCollapsed] = useState(false)
 
@@ -76,12 +92,65 @@ function PreviewView() {
   })
   const [isResizing, setIsResizing] = useState(false)
   const [isResizingConsole, setIsResizingConsole] = useState(false)
+  const [drawerHeight, setDrawerHeight] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(HTTP_DRAWER_HEIGHT_KEY)
+      if (saved) {
+        const parsed = parseInt(saved, 10)
+        if (parsed >= MIN_DRAWER_HEIGHT && parsed <= MAX_DRAWER_HEIGHT) return parsed
+      }
+    } catch { /* ignore */ }
+    return DEFAULT_DRAWER_HEIGHT
+  })
+  const [isResizingDrawer, setIsResizingDrawer] = useState(false)
+  const drawerHandleRef = useRef<HTMLDivElement>(null)
+
+  // Restore drawer-open state on mount (fullstack only).
+  useEffect(() => {
+    if (projectKind !== 'fullstack') return
+    try {
+      const saved = localStorage.getItem(HTTP_DRAWER_OPEN_KEY)
+      if (saved === '1' && !useLayoutStore.getState().isHttpDrawerOpen) {
+        useLayoutStore.getState().toggleHttpDrawer()
+      }
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectKind])
+
+  // Persist drawer-open state whenever it changes.
+  useEffect(() => {
+    try {
+      localStorage.setItem(HTTP_DRAWER_OPEN_KEY, isHttpDrawerOpen ? '1' : '0')
+    } catch { /* ignore */ }
+  }, [isHttpDrawerOpen])
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
 
-  const errorCount = devServerLogs.filter(l => l.level === 'error').length
-  const warnCount = devServerLogs.filter(l => l.level === 'warn').length
+  // Single pass over logs; memoized so subscribers that re-render the
+  // wrapping component (e.g. on unrelated layoutStore changes) don't
+  // re-scan the whole log list.
+  const { errorCount, warnCount, hasErrors } = useMemo(() => {
+    let e = 0, w = 0
+    for (const l of devServerLogs) {
+      if (l.level === 'error') e++
+      else if (l.level === 'warn') w++
+    }
+    return { errorCount: e, warnCount: w, hasErrors: e > 0 }
+  }, [devServerLogs])
+
+  // Keyboard shortcut for fullstack drawer: Cmd/Ctrl + Shift + H
+  useEffect(() => {
+    if (projectKind !== 'fullstack') return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'h') {
+        e.preventDefault()
+        useLayoutStore.getState().toggleHttpDrawer()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [projectKind])
 
   // Auto-scroll chat
   useEffect(() => {
@@ -146,17 +215,12 @@ function PreviewView() {
 
   const handleStopServer = useCallback(async () => {
     closePreviewWebview()
-    const port = previewUrl?.match(/:(\d+)/)?.[1]
     await devServerManager.stop()
-    // Also kill the port to ensure no orphan process
-    if (port) {
-      try { await invoke('kill_port', { port: parseInt(port) }) } catch {}
-    }
     const layout = useLayoutStore.getState()
-    layout.clearPreviewServer()
+    layout.clearDevServer()
     const prev = layout.previousViewMode
     layout.setViewMode(prev && prev !== 'generating' && prev !== 'preview' ? prev : 'chat')
-  }, [previewUrl])
+  }, [])
 
   // Horizontal resize (chat width)
   const handleResizeStart = useCallback((e: React.PointerEvent) => {
@@ -239,13 +303,55 @@ function PreviewView() {
     handleEl.addEventListener('pointerup', onPointerUp)
   }, [consoleHeight])
 
-  const hasPreview = previewUrl || previewHtmlContent
+  const hasPreview = !!(previewUrl || previewHtmlContent)
 
   const displayLabel = previewMode === 'static'
     ? (previewSourcePath?.split('/').pop() || 'Static Preview')
-    : previewMode === 'api'
+    : showHttpClientMain
       ? (previewUrl || 'HTTP Client')
       : (previewUrl || 'Loading...')
+
+  // Drawer resize (vertical, drag up from the top of the drawer)
+  const handleDrawerResizeStart = useCallback((e: React.PointerEvent) => {
+    e.preventDefault()
+    const handleEl = drawerHandleRef.current
+    if (!handleEl) return
+
+    const pid = e.pointerId
+    try { handleEl.setPointerCapture(pid) } catch { /* ignore */ }
+
+    const startY = e.clientY
+    const startH = drawerHeight
+    let current = drawerHeight
+    const body = document.body
+    const prevCursor = body.style.cursor
+    const prevUserSelect = body.style.userSelect
+    body.style.cursor = 'row-resize'
+    body.style.userSelect = 'none'
+    setIsResizingDrawer(true)
+
+    function onPointerMove(pe: PointerEvent) {
+      // Dragging up = increasing height
+      let next = startH + (startY - pe.clientY)
+      if (next < MIN_DRAWER_HEIGHT) next = MIN_DRAWER_HEIGHT
+      if (next > MAX_DRAWER_HEIGHT) next = MAX_DRAWER_HEIGHT
+      current = next
+      setDrawerHeight(next)
+    }
+
+    function onPointerUp() {
+      try { localStorage.setItem(HTTP_DRAWER_HEIGHT_KEY, String(current)) } catch { /* ignore */ }
+      try { handleEl?.releasePointerCapture(pid) } catch { /* ignore */ }
+      handleEl?.removeEventListener('pointermove', onPointerMove)
+      handleEl?.removeEventListener('pointerup', onPointerUp)
+      body.style.cursor = prevCursor
+      body.style.userSelect = prevUserSelect
+      setIsResizingDrawer(false)
+    }
+
+    handleEl.addEventListener('pointermove', onPointerMove)
+    handleEl.addEventListener('pointerup', onPointerUp)
+  }, [drawerHeight])
 
   return (
     <Flex flex="1" overflow="hidden">
@@ -400,7 +506,7 @@ function PreviewView() {
               flex={1}
               userSelect="all"
             >
-              {previewMode === 'api' ? 'HTTP Client' : displayLabel}
+              {showHttpClientMain ? 'HTTP Client' : displayLabel}
             </Text>
           </Flex>
 
@@ -418,6 +524,22 @@ function PreviewView() {
             >
               {isChatCollapsed ? <FiMinimize2 size={13} /> : <FiMaximize2 size={13} />}
             </IconButton>
+
+            {/* HTTP Client drawer toggle — only visible for fullstack projects */}
+            {isFullstack && (
+              <IconButton
+                aria-label={isHttpDrawerOpen ? 'Close HTTP Client' : 'Open HTTP Client'}
+                size="xs"
+                variant="ghost"
+                color={isHttpDrawerOpen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
+                _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                borderRadius="6px"
+                onClick={() => useLayoutStore.getState().toggleHttpDrawer()}
+                title="Toggle HTTP Client"
+              >
+                <FiZap size={13} />
+              </IconButton>
+            )}
 
             {/* Console */}
             <IconButton
@@ -455,7 +577,7 @@ function PreviewView() {
             )}
 
             {/* Stop server */}
-            {(previewMode === 'server' || previewMode === 'api') && previewUrl && (
+            {previewMode !== 'static' && previewUrl && (
               <IconButton
                 aria-label={t("misc.stopServer")}
                 size="xs"
@@ -472,21 +594,21 @@ function PreviewView() {
         </Flex>
 
         {/* ── Content area ──────────────────────────────────── */}
-        {previewMode === 'api' ? (
+        {showHttpClientMain ? (
+          // Backend-only project → HTTP Client occupies the full main area.
           <Flex flex="1" direction="column" overflow="hidden">
             <HttpClientPanel />
           </Flex>
         ) : (
-          <Box flex="1" bg={tokens.colors.text.inverse} position="relative">
-            {hasPreview ? (
+          <Box flex="1" bg={tokens.colors.text.inverse} position="relative" overflow="hidden">
+            {hasPreview && showIframe ? (
               <Box position="relative" w="100%" h="100%">
                 <TauriWebview
-                  url={previewMode === 'server' ? previewUrl! : undefined}
+                  url={previewMode === 'static' ? undefined : previewUrl!}
                   html={previewMode === 'static' ? previewHtmlContent! : undefined}
                   reloadKey={previewReloadKey}
                   frozen={isResizing || isResizingConsole}
                 />
-                {/* Semi-transparent overlay during resize — replaces blank screen */}
                 {(isResizing || isResizingConsole) && (
                   <Box
                     position="absolute"
@@ -535,7 +657,7 @@ function PreviewView() {
                       Retry
                     </Box>
                   </>
-                ) : devServerLogs.some(l => l.level === 'error') ? (
+                ) : hasErrors ? (
                   <>
                     <Text fontSize={tokens.fontSize.sm} color={tokens.colors.accent.red} fontWeight="500">
                       {t("view.devServerFailed")}
@@ -566,6 +688,72 @@ function PreviewView() {
             )}
           </Box>
         )}
+
+        {/* Fullstack HTTP Client drawer — resizable bottom slide-up panel */}
+        <AnimatePresence>
+          {isFullstack && isHttpDrawerOpen && (
+            <motion.div
+              key="http-drawer"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: drawerHeight + 4, opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={isResizingDrawer
+                ? { duration: 0 }
+                : { duration: 0.2, ease: [0.4, 0, 0.2, 1] }
+              }
+              style={{ flexShrink: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
+            >
+              {/* Resize handle — drag up/down */}
+              <Box
+                ref={drawerHandleRef}
+                h="4px"
+                cursor="row-resize"
+                flexShrink={0}
+                bg={isResizingDrawer ? tokens.colors.accent.primary : 'transparent'}
+                transition={isResizingDrawer ? 'none' : `background ${tokens.transition.fast}`}
+                _hover={{ bg: tokens.colors.accent.primary }}
+                onPointerDown={handleDrawerResizeStart}
+                zIndex={2}
+              />
+              <Flex
+                align="center"
+                justify="space-between"
+                px={3}
+                py="6px"
+                bg={tokens.colors.bg.panel}
+                borderTop={`1px solid ${tokens.colors.border.sidebarPanel}`}
+                borderBottom={`1px solid ${tokens.colors.border.glass}`}
+                flexShrink={0}
+              >
+                <HStack gap={2}>
+                  <FiZap size={11} color={tokens.colors.accent.primary} />
+                  <Text fontSize="11px" fontWeight={600} color={tokens.colors.text.secondary} textTransform="uppercase" letterSpacing="0.5px">
+                    HTTP Client
+                  </Text>
+                  {backendUrl && (
+                    <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily="mono">
+                      {backendUrl}
+                    </Text>
+                  )}
+                </HStack>
+                <IconButton
+                  aria-label="Close HTTP Client"
+                  size="xs"
+                  variant="ghost"
+                  color={tokens.colors.text.disabled}
+                  _hover={{ color: tokens.colors.text.secondary, bg: tokens.colors.bg.hoverSubtle }}
+                  borderRadius="4px"
+                  onClick={() => useLayoutStore.getState().toggleHttpDrawer()}
+                >
+                  <FiChevronDown size={12} />
+                </IconButton>
+              </Flex>
+              <Box flex="1" overflow="hidden" bg={tokens.colors.bg.mainLayout}>
+                <HttpClientPanel />
+              </Box>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Console panel (DevTools-style) with slide animation */}
         <AnimatePresence>

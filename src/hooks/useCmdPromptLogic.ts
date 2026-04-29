@@ -16,6 +16,14 @@ import { useAttachments } from './useAttachments'
 import QuickOpenService, { type QuickOpenItem } from '../services/quickOpenService'
 import { extractAndResolveMentions } from '../services/attachmentService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../utils/mentionParser'
+import { t } from '../i18n/useTranslation'
+import {
+  loadPromptHistory,
+  savePromptHistory,
+  mergePromptHistory,
+  onHistoryReset,
+  MAX_PROMPT_HISTORY,
+} from '../services/cmdPromptHistory'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../types/messageQueueTypes'
 
 const MENTION_MENU_LIMIT = 50
@@ -24,6 +32,12 @@ const MENTION_MENU_LIMIT = 50
  * CMD-mode prompt logic — slash commands, message queue, @mention support.
  */
 const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/payments'])
+
+// Control commands that must run immediately even while the agent is streaming.
+// They each stop the agent internally (stopAgent()) before doing their work, so
+// queueing them would defeat their purpose — /exit would wait for the very task
+// it's supposed to cancel.
+const CONTROL_COMMANDS_BYPASS_QUEUE = new Set(['/exit', '/new', '/clear'])
 
 export function useCmdPromptLogic() {
   const [input, setInput] = useState('')
@@ -49,8 +63,14 @@ export function useCmdPromptLogic() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // History is kept in-memory for instant ArrowUp/Down; IDB is only touched
+  // on mount (load) and send (write). See src/services/cmdPromptHistory.ts.
   const historyRef = useRef<string[]>([])
   const historyIndexRef = useRef(-1)
+  // Track which project the loaded history belongs to — when the user switches
+  // CMD-mode projects (same hook instance on remount is typical, but guard
+  // anyway), we reload to avoid mixing histories.
+  const historyLoadedForRef = useRef<string | null>(null)
 
   const isStreaming = useChatStore(s => s.isStreaming)
   const currentProject = useProjectStore(s => s.currentProject)
@@ -85,6 +105,39 @@ export function useCmdPromptLogic() {
   useEffect(() => {
     if (!projectPath) return
     QuickOpenService.getInstance().initialize(projectPath).catch(() => {})
+  }, [projectPath])
+
+  // Load persisted prompt history from IDB once per project — populates the
+  // in-memory ref used for ArrowUp/Down navigation. Non-blocking: the UI
+  // renders immediately and ArrowUp on an empty history is a no-op anyway.
+  //
+  // Race-safe via `mergePromptHistory`: if the user sent a prompt before the
+  // IDB read finished, those fresh in-memory entries stay at index 0 and the
+  // older persisted entries are appended behind them. The naive "replace when
+  // empty" check from the first iteration lost disk history whenever a send
+  // raced ahead of the load — this merge preserves both sides.
+  useEffect(() => {
+    if (!projectPath) return
+    if (historyLoadedForRef.current === projectPath) return
+    let cancelled = false
+    loadPromptHistory(projectPath).then(persisted => {
+      if (cancelled) return
+      historyRef.current = mergePromptHistory(historyRef.current, persisted)
+      historyLoadedForRef.current = projectPath
+    }).catch(() => { /* IDB unavailable — stay with in-memory */ })
+    return () => { cancelled = true }
+  }, [projectPath])
+
+  // Listen for externally-triggered resets (e.g. the /history-clear command)
+  // so the in-memory ref drops in lock-step with the IDB delete. Without this,
+  // ArrowUp would keep resurrecting cleared prompts until the hook remounts.
+  useEffect(() => {
+    return onHistoryReset((path) => {
+      if (path === projectPath) {
+        historyRef.current = []
+        historyIndexRef.current = -1
+      }
+    })
   }, [projectPath])
 
   // Cleanup blur timeout on unmount
@@ -298,12 +351,28 @@ export function useCmdPromptLogic() {
     const hasAttachments = draftAttachments.length > 0
     if (!prompt && !hasAttachments) return
 
+    // Billing gate for image attachments — the bar already shows a warning,
+    // but prior behaviour silently let the send go through, which either
+    // consumed tokens for nothing (explorer plan strips images) or confused
+    // the user. Block here with an actionable message instead.
+    if (showImageWarning) {
+      useChatStore.getState().addSystemMessage(
+        t('cmdMode.imageNotSupportedBlocked'),
+        'warn',
+      )
+      return
+    }
+
     setInput('')
     setShowCommandMenu(false)
     setShowMentionMenu(false)
 
-    historyRef.current = [prompt, ...historyRef.current.filter(h => h !== prompt)].slice(0, 100)
+    historyRef.current = [prompt, ...historyRef.current.filter(h => h !== prompt)].slice(0, MAX_PROMPT_HISTORY)
     historyIndexRef.current = -1
+    // Persist asynchronously — never blocks send. Never throws (service swallows IDB errors).
+    if (prompt && projectPath) {
+      void savePromptHistory(projectPath, historyRef.current)
+    }
 
     // Build value: plain string or ContentBlock[] with attachments
     let value: PromptValue
@@ -319,13 +388,22 @@ export function useCmdPromptLogic() {
       value = prompt
     }
 
-    if (isStreaming) {
+    // Control commands (/exit, /new, /clear) bypass the queue — they cancel
+    // the running agent as part of their work, so queueing would make them
+    // wait for the very thing they mean to stop.
+    const textForDispatch = typeof value === 'string'
+      ? value
+      : value.filter(b => b.type === 'text').map(b => b.text).join(' ')
+    const firstToken = textForDispatch.trim().split(/\s+/)[0] || ''
+    const isBypassCommand = CONTROL_COMMANDS_BYPASS_QUEUE.has(firstToken)
+
+    if (isStreaming && !isBypassCommand) {
       enqueue({ value, mode: 'prompt', priority: 'next', uuid: crypto.randomUUID() })
       return
     }
 
     await executePrompt(value)
-  }, [input, isStreaming, executePrompt, draftAttachments, clearAttachments])
+  }, [input, isStreaming, executePrompt, draftAttachments, clearAttachments, showImageWarning])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -381,8 +459,18 @@ export function useCmdPromptLogic() {
         }
       }
 
-      // History navigation (when menus are closed)
+      // History navigation (when menus are closed).
+      // Terminal UX: ArrowUp only navigates history when the caret is at the
+      // very start of the input (or already browsing history). If the user
+      // is mid-edit, let the textarea handle ArrowUp normally (move cursor
+      // up a line in multi-line input, or to the start on single-line).
       if (!showCommandMenu && !showMentionMenu) {
+        const ta = textareaRef.current
+        const caret = ta?.selectionStart ?? 0
+        const selLen = ta ? ta.selectionEnd - ta.selectionStart : 0
+        const atStart = caret === 0 && selLen === 0
+        const browsingHistory = historyIndexRef.current >= 0
+
         if (e.key === 'ArrowUp') {
           // Priority 1: Edit queued message if one exists and input is empty
           if (input.length === 0 && queuedCommands.length > 0) {
@@ -391,13 +479,18 @@ export function useCmdPromptLogic() {
             const val = typeof lastQueued.value === 'string'
               ? lastQueued.value
               : lastQueued.value.map(b => (b.type === 'text' ? b.text : '')).join(' ')
-            
+
             remove([lastQueued as QueuedCommand])
             setInput(val)
             return
           }
 
-          // Priority 2: Standard history navigation
+          // Priority 2: Standard history navigation — only if caret is at
+          // the start and input is empty, OR the user is already cycling
+          // through history. Otherwise let the textarea handle ArrowUp.
+          if (!browsingHistory && (input.length > 0 || !atStart)) {
+            return
+          }
           const history = historyRef.current
           if (history.length === 0) return
           e.preventDefault()
@@ -407,6 +500,9 @@ export function useCmdPromptLogic() {
           return
         }
         if (e.key === 'ArrowDown') {
+          // Only hijack ArrowDown while actively browsing history — otherwise
+          // it should move the caret normally within the textarea.
+          if (!browsingHistory) return
           e.preventDefault()
           if (historyIndexRef.current <= 0) {
             historyIndexRef.current = -1

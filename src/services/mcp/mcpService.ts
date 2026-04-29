@@ -311,6 +311,16 @@ class MCPService {
   }
 
   /**
+   * Returns the stored URL for a remote MCP server, or undefined for stdio servers
+   * (which don't have URLs). Consumers can use this to disambiguate "a server named
+   * X" from "the specific remote server at URL Y" — essential for integration-detection
+   * heuristics that must not false-positive on user-renamed servers.
+   */
+  getServerUrl(name: string): string | undefined {
+    return this.serverUrls.get(name)
+  }
+
+  /**
    * Shutdown all running servers.
    */
   async shutdown(): Promise<void> {

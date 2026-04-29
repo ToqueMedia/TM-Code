@@ -634,12 +634,13 @@ pub async fn run_streaming_command(
 /// Routing:
 ///   - Active project → host shell, cwd clamped to project directory
 ///   - No active project → host shell, unrestricted
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn start_dev_server(
     app: tauri::AppHandle,
     command: String,
     cwd: String,
     port: Option<u16>,
+    skip_port_env: Option<bool>,
     process_map: State<'_, ProcessMap>,
     active_project: State<'_, ActiveProjectState>,
 ) -> Result<u32, String> {
@@ -652,14 +653,42 @@ pub async fn start_dev_server(
 
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
+    // Fullstack wrappers (concurrently, npm-run-all, turbo, pnpm -r, etc.)
+    // inherit PORT and propagate to BOTH children — the backend grabs the
+    // frontend's reserved port, forcing the frontend to auto-increment and
+    // leaving the preview pointing at a stale port. For those wrappers we
+    // skip PORT entirely and let each sub-script pick from the dedicated
+    // TM_FRONTEND_PORT / TM_BACKEND_PORT variables instead.
+    //
+    // The TypeScript caller may pass `skipPortEnv` to override this heuristic
+    // — TS can inspect package.json and catch wrappers that are hidden behind
+    // one level of `npm run <script>` indirection. Our string check here is
+    // the fallback for when the TS-side detection couldn't run.
+    let is_fullstack_wrapper = skip_port_env.unwrap_or_else(|| {
+        let cmd_lower = command.to_lowercase();
+        cmd_lower.contains("concurrently")
+            || cmd_lower.contains("npm-run-all")
+            || cmd_lower.contains("run-p ")
+            || cmd_lower.contains("turbo run")
+            || cmd_lower.contains("turbo dev")
+            || (cmd_lower.contains("pnpm") && cmd_lower.contains(" -r"))
+            || cmd_lower.contains("nx run-many")
+    });
+
     let mut cmd = if let Some(ref ap) = project {
         // App-level isolation: sandbox the dev server command
         let clamped = clamp_to_project(&cwd, &ap.project_path);
         let mut c = build_sandboxed_host_command(&command, &PathBuf::from(&clamped));
         c.env("FORCE_COLOR", "0")
             .env("NO_COLOR", "1")
-            .env("PORT", &port_str)
-            .env("BROWSER", "none");
+            .env("BROWSER", "none")
+            .env("HOST", "0.0.0.0")
+            .env("HOSTNAME", "0.0.0.0")
+            .env("TM_FRONTEND_PORT", "7773")
+            .env("TM_BACKEND_PORT", "7777");
+        if !is_fullstack_wrapper {
+            c.env("PORT", &port_str);
+        }
         c
     } else {
         // No active project
@@ -675,10 +704,17 @@ pub async fn start_dev_server(
             .current_dir(&cwd)
             .env("FORCE_COLOR", "0")
             .env("NO_COLOR", "1")
-            .env("PORT", &port_str)
             .env("BROWSER", "none")
+            .env("HOST", "0.0.0.0")
+            .env("HOSTNAME", "0.0.0.0")
+            .env("TM_FRONTEND_PORT", "7773")
+            .env("TM_BACKEND_PORT", "7777")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        if !is_fullstack_wrapper {
+            c.env("PORT", &port_str);
+        }
 
         if let Some(path) = get_user_path() {
             c.env("PATH", path);
@@ -699,60 +735,127 @@ pub async fn start_dev_server(
 
     let pid = child.id();
 
-    // Stream stdout to frontend (resilient to non-UTF-8 lines)
+    // ─── Batched output streaming ────────────────────────────────────────
+    // Reader threads funnel lines to a single flusher thread via an mpsc
+    // channel. The flusher coalesces lines into batches (flush every 100ms
+    // OR when 50+ lines accumulate) and emits a single `dev-server-output`
+    // event per batch. This dramatically reduces IPC pressure on Windows
+    // WebView2, which otherwise saturates the JS event loop and starves
+    // setTimeout callbacks (breaking text-delta buffered flushes in the
+    // agent stream). Lines are joined with `\n`; the frontend splits back.
+    let (tx, rx) = std::sync::mpsc::channel::<(&'static str, String)>();
+
     if let Some(stdout) = child.stdout.take() {
-        let app_clone = app.clone();
+        let tx = tx.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stdout);
             for line_result in reader.lines() {
                 match line_result {
                     Ok(line) => {
-                        let _ = app_clone.emit(
-                            "dev-server-output",
-                            DevServerOutput {
-                                pid,
-                                stream: "stdout".into(),
-                                data: line,
-                            },
-                        );
+                        if tx.send(("stdout", line)).is_err() {
+                            break;
+                        }
                     }
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::InvalidData {
-                            // Non-UTF-8 line — skip but don't stop reading
                             continue;
                         }
-                        // Real IO error (pipe closed, process exited) — stop
                         break;
                     }
                 }
             }
-            // Don't emit exit here — let the wait thread handle it
         });
     }
 
-    // Stream stderr to frontend (resilient to non-UTF-8 lines)
     if let Some(stderr) = child.stderr.take() {
-        let app_clone = app.clone();
+        let tx = tx.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stderr);
             for line_result in reader.lines() {
                 match line_result {
                     Ok(line) => {
-                        let _ = app_clone.emit(
-                            "dev-server-output",
-                            DevServerOutput {
-                                pid,
-                                stream: "stderr".into(),
-                                data: line,
-                            },
-                        );
+                        if tx.send(("stderr", line)).is_err() {
+                            break;
+                        }
                     }
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::InvalidData {
                             continue;
                         }
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    // Drop the original sender so the flusher exits when both readers finish.
+    drop(tx);
+
+    // Flusher thread: debounce + batch lines → single IPC event per stream.
+    {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            use std::sync::mpsc::RecvTimeoutError;
+            const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
+            const MAX_BUF_LINES: usize = 50;
+
+            let mut stdout_buf: Vec<String> = Vec::new();
+            let mut stderr_buf: Vec<String> = Vec::new();
+            let mut last_flush = std::time::Instant::now();
+
+            let flush =
+                |app: &tauri::AppHandle,
+                 stdout_buf: &mut Vec<String>,
+                 stderr_buf: &mut Vec<String>| {
+                    if !stdout_buf.is_empty() {
+                        let _ = app.emit(
+                            "dev-server-output",
+                            DevServerOutput {
+                                pid,
+                                stream: "stdout".into(),
+                                data: stdout_buf.drain(..).collect::<Vec<_>>().join("\n"),
+                            },
+                        );
+                    }
+                    if !stderr_buf.is_empty() {
+                        let _ = app.emit(
+                            "dev-server-output",
+                            DevServerOutput {
+                                pid,
+                                stream: "stderr".into(),
+                                data: stderr_buf.drain(..).collect::<Vec<_>>().join("\n"),
+                            },
+                        );
+                    }
+                };
+
+            loop {
+                let elapsed = last_flush.elapsed();
+                let timeout = FLUSH_INTERVAL.saturating_sub(elapsed);
+
+                match rx.recv_timeout(timeout) {
+                    Ok((stream, line)) => {
+                        if stream == "stdout" {
+                            stdout_buf.push(line);
+                        } else {
+                            stderr_buf.push(line);
+                        }
+
+                        // Force flush if buffer is getting large (backpressure)
+                        if stdout_buf.len() + stderr_buf.len() >= MAX_BUF_LINES {
+                            flush(&app_clone, &mut stdout_buf, &mut stderr_buf);
+                            last_flush = std::time::Instant::now();
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        flush(&app_clone, &mut stdout_buf, &mut stderr_buf);
+                        last_flush = std::time::Instant::now();
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        // Both readers done — flush remaining and exit.
+                        flush(&app_clone, &mut stdout_buf, &mut stderr_buf);
                         break;
                     }
                 }
@@ -772,7 +875,15 @@ pub async fn start_dev_server(
         // Actually, we insert the child into the process map and wait on PID via kill -0 polling.
         map.insert(pid, child);
 
-        // Spawn a thread that polls whether the process is still alive
+        // Spawn a thread that polls whether the process is still alive.
+        // Windows tasklist is slow (~100–200ms per spawn) and creates
+        // process-spawn churn that shows up as UI stutter on WebView2.
+        // Use a longer interval there; exit detection can tolerate ~2s latency.
+        let poll_interval = if cfg!(unix) {
+            std::time::Duration::from_millis(500)
+        } else {
+            std::time::Duration::from_millis(2000)
+        };
         std::thread::spawn(move || {
             loop {
                 let alive = if cfg!(unix) {
@@ -800,7 +911,7 @@ pub async fn start_dev_server(
                     let _ = app_clone.emit("dev-server-exit", pid);
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(poll_interval);
             }
         });
     }
@@ -1030,55 +1141,205 @@ pub async fn check_server_health(url: String) -> Result<bool, String> {
     }
 }
 
+/// Result of a server probe: reachable + content-type header.
+/// Used to classify detected URLs as frontend (HTML) vs backend (JSON/other)
+/// for fullstack projects that expose multiple URLs.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServerProbeResult {
+    pub ok: bool,
+    /// Raw Content-Type header (may be null if not present).
+    pub content_type: Option<String>,
+    /// Best-effort classification derived from content-type:
+    ///   "html" | "json" | "other" | null (when ok=false).
+    pub kind: Option<String>,
+}
+
+/// Probe a URL — TCP reachability + Content-Type inspection.
+/// Follows up to 3 redirects so we classify by the FINAL destination's
+/// content-type (a backend that 302s from "/" to "/api/v1/health" should
+/// classify as JSON, not by the empty 302 body).
+#[tauri::command]
+pub async fn probe_server(url: String) -> Result<ServerProbeResult, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            let kind = content_type.as_deref().map(|ct| {
+                let lower = ct.to_lowercase();
+                if lower.starts_with("text/html") || lower.starts_with("application/xhtml") {
+                    "html".to_string()
+                } else if lower.contains("json") {
+                    "json".to_string()
+                } else {
+                    "other".to_string()
+                }
+            });
+
+            Ok(ServerProbeResult {
+                ok: true,
+                content_type,
+                kind,
+            })
+        }
+        Err(_) => Ok(ServerProbeResult {
+            ok: false,
+            content_type: None,
+            kind: None,
+        }),
+    }
+}
+
+/// Collect PIDs owning `port` on Windows, in ANY connection state
+/// (LISTENING, ESTABLISHED, TIME_WAIT owners, etc.). `findstr :<port>`
+/// alone matches `:77730` when looking for `:7773`, so we parse the
+/// columns and compare the port number exactly.
+#[cfg(windows)]
+fn windows_pids_on_port(port: u16) -> Vec<u32> {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/C", "netstat", "-aon"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    hide_console_window(&mut cmd);
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut pids: Vec<u32> = Vec::new();
+
+    for line in text.lines() {
+        // netstat columns (Windows): Proto  Local  Foreign  State  PID
+        // (UDP rows have no State column, PID in column 4).
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 4 {
+            continue;
+        }
+        let proto = cols[0];
+        if proto != "TCP" && proto != "UDP" {
+            continue;
+        }
+        let local = cols[1];
+        // Exact port match — reject `:77730` when looking for `:7773`.
+        // Local column looks like `0.0.0.0:7773` or `[::1]:7773`.
+        let local_port = local.rsplit_once(':').map(|(_, p)| p).unwrap_or("");
+        if local_port != port.to_string() {
+            continue;
+        }
+        let pid_str = cols.last().copied().unwrap_or("");
+        if let Ok(pid) = pid_str.parse::<u32>() {
+            if pid != 0 && !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
+/// Check if a port is currently held by some process. Platform-specific.
+/// This is the light-weight predicate used by kill_port to avoid spawning
+/// netstat/lsof 30 times in a polling loop when the port is already free.
+fn port_is_occupied(port: u16) -> bool {
+    #[cfg(unix)]
+    {
+        let check = format!("lsof -ti:{}", port);
+        Command::new("sh")
+            .args(["-c", &check])
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        !windows_pids_on_port(port).is_empty()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
 /// Kill any process listening on the given port.
 /// Used to free the dev server port before starting a new server.
+///
+/// Fast path: if the port is already free, return immediately (no subprocess
+/// spawn). Previously the polling loop called `netstat -aon` up to 30 times
+/// per port — on Windows each spawn is 100-500ms, so a fullstack start could
+/// block up to 30 seconds of perceived UI freeze even when nothing needed
+/// killing. Now we check once, skip if free, and back off aggressively if
+/// the port stays occupied after kill.
 #[tauri::command]
 pub async fn kill_port(port: u16) -> Result<bool, String> {
-    if cfg!(unix) {
-        let cmd = format!("lsof -ti:{} | xargs kill -9 2>/dev/null", port);
-        let _ = Command::new("sh").args(["-c", &cmd]).output();
-    } else {
-        let cmd = format!(
-            "for /f \"tokens=5\" %a in ('netstat -aon ^| findstr :{} ^| findstr LISTENING') do taskkill /F /PID %a",
-            port
-        );
-        let mut kill_cmd = Command::new("cmd");
-        kill_cmd.args(["/C", &cmd]);
-        hide_console_window(&mut kill_cmd);
-        let _ = kill_cmd.output();
+    // Fast path: nothing to kill.
+    if !port_is_occupied(port) {
+        return Ok(true);
     }
 
-    // Wait until the OS actually frees the port (up to 3s).
-    // kill -9 is async — the kernel may take a moment to release the socket.
-    for _ in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let port_free = if cfg!(unix) {
-            let check = format!("lsof -ti:{}", port);
-            Command::new("sh")
-                .args(["-c", &check])
-                .output()
-                .map(|o| o.stdout.is_empty())
-                .unwrap_or(true)
-        } else {
-            let check = format!("netstat -aon | findstr :{} | findstr LISTENING", port);
-            let mut nc = Command::new("cmd");
-            nc.args(["/C", &check]);
-            hide_console_window(&mut nc);
-            nc.output().map(|o| o.stdout.is_empty()).unwrap_or(true)
-        };
-        if port_free {
+    let kill_once = || {
+        if cfg!(unix) {
+            let cmd = format!("lsof -ti:{} | xargs kill -9 2>/dev/null", port);
+            let _ = Command::new("sh").args(["-c", &cmd]).output();
+        }
+        #[cfg(windows)]
+        {
+            for pid in windows_pids_on_port(port) {
+                // /T kills the entire tree — orphan children (tsc-watch, etc.)
+                // that inherited the socket handle are also terminated.
+                let mut tk = Command::new("taskkill");
+                tk.args(["/T", "/F", "/PID", &pid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                hide_console_window(&mut tk);
+                let _ = tk.output();
+            }
+        }
+    };
+
+    kill_once();
+
+    // Wait for the OS to release the socket. Exponential backoff — first
+    // check sooner (the kernel usually releases within ~100ms), then widen
+    // so we don't spam netstat if something really is stuck.
+    let delays_ms = [100u64, 150, 200, 300, 500, 800, 1000];
+    for &delay in &delays_ms {
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        if !port_is_occupied(port) {
             return Ok(true);
         }
     }
 
-    // Port still occupied after 3s — try one more kill (Unix only)
-    if cfg!(unix) {
-        let cmd = format!("lsof -ti:{} | xargs kill -9 2>/dev/null", port);
-        let _ = Command::new("sh").args(["-c", &cmd]).output();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    }
+    // Port still occupied after ~3s — one more aggressive kill pass.
+    kill_once();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    Ok(true)
+    // Report whether we actually freed it.
+    let free = if cfg!(unix) {
+        let check = format!("lsof -ti:{}", port);
+        Command::new("sh")
+            .args(["-c", &check])
+            .output()
+            .map(|o| o.stdout.is_empty())
+            .unwrap_or(true)
+    } else {
+        #[cfg(windows)]
+        {
+            windows_pids_on_port(port).is_empty()
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    };
+    Ok(free)
 }
 
 #[tauri::command]

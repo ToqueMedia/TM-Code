@@ -233,15 +233,15 @@ Only **two models** are actively configured as defaults:
 
 | Plan | Default Model | Provider | Context Budget |
 |------|--------------|----------|----------------|
-| **Free (Explorer)** | `deepseek-v3.2` | DashScope (Alibaba Cloud) | 131,072 tokens |
+| **Free (Explorer)** | `deepseek-v4-flash` | DashScope (Alibaba Cloud) | 262,144 tokens (1M capped) |
 | **Pro / Business (4x/8x)** | `glm-5.1` | OpenRouter (Z-AI) | 200,000 tokens |
 
 ### Plan-Specific Configuration
 
-- **Free tier**: Restricted to `deepseek-v3.2` only (efficient, no thinking mode)
+- **Free tier**: Restricted to `deepseek-v4-flash` only (efficient, no thinking mode; upstream supports 1M ctx, capped at 256K)
 - **Paid tiers**: Use `glm-5.1` with toggleable reasoning, strong tool calling, and 200K context
 - **Multimodal (images)**: Paid plans → Qwen 3.6 Plus analyzes images, text description sent to GLM-5.1
-- **`/plan` command**: Uses `deepseek-v3.2` as fallback for all plans (avoids billing leak on free tier)
+- **`/plan` command**: Uses `deepseek-v4-flash` as fallback for all plans (avoids billing leak on free tier)
 
 ### Available Providers (Configured but Not Default)
 
@@ -249,7 +249,7 @@ The backend supports multiple providers but they're not set as defaults:
 
 | Provider | Models | API Endpoint |
 |----------|--------|-------------|
-| **DashScope** (Alibaba Cloud) | `deepseek-v3.2`, `qwen3.6-plus`, `glm-5`, `kimi-k2.5`, `qwen3-coder-next`, `MiniMax-M2.5`, `step-3.5-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
+| **DashScope** (Alibaba Cloud) | `deepseek-v4-flash`, `qwen3.6-plus`, `glm-5`, `kimi-k2.5`, `qwen3-coder-next`, `MiniMax-M2.5`, `step-3.5-flash` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
 | **OpenRouter** | `glm-5.1` (Z-AI), future models | `https://openrouter.ai/api/v1/chat/completions` |
 | **MiMo** (Xiaomi) | `mimo-v2-flash` | `https://api.xiaomimemo.com/v1/chat/completions` |
 | **Gemini** (Google) | `gemini-3-flash-preview`, `gemini-3-flash` | `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` |

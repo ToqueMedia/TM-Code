@@ -79,16 +79,13 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     handleKeyDown,
     handleFocus,
     handleBlur,
-    // Attachments
+    // Attachments — drag handlers live on CmdModeView (whole-area drop zone);
+    // this component only owns paste (input-focused) and the visual overlay.
     draftAttachments,
     removeAttachment,
     clearAttachments,
     showImageWarning,
     handlePaste,
-    handleDragOver,
-    handleDragEnter,
-    handleDragLeave,
-    handleDrop,
     isDragging,
     handleAttachFiles,
   } = useCmdPromptLogic()
@@ -106,10 +103,6 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
       borderTop="1px solid rgba(255, 255, 255, 0.05)"
       position="relative"
       data-no-drag
-      onDragOver={handleDragOver}
-      onDragEnter={handleDragEnter}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
     >
       {/* Drop overlay */}
       {isDragging && (

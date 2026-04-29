@@ -1,21 +1,31 @@
 /**
  * Auto-update service.
- * Checks for updates on app startup, shows a toast notification,
- * and allows the user to download + install + relaunch.
+ * Checks for updates on app startup, on window focus, and periodically while
+ * the IDE is open. Shows a banner notification when a newer version is
+ * available; clicking download + install relaunches the app.
  */
 
 import { check } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
-import { useToastStore } from '../stores/toastStore'
-import { t } from '../i18n'
+import { getVersion } from '@tauri-apps/api/app'
+import { useUpdateStore, type UpdateInfo } from '../stores/updateStore'
+import { IS_VITE_DEV } from '../utils/viteEnv'
+import { compareSemver } from '../utils/semver'
 
 let checkedThisSession = false
 
-export interface UpdateInfo {
-  version: string
-  body: string | null
-  date: string | null
-}
+/** Periodic re-check interval — short enough to catch hot releases within a
+ *  typical work session, long enough that we don't hammer the updater. */
+const PERIODIC_CHECK_INTERVAL_MS = 60 * 60 * 1000 // 1h
+
+/** Minimum gap between any two checks regardless of trigger (focus, interval,
+ *  manual). Stops focus-thrash from spamming the updater when the user is
+ *  alt-tabbing rapidly between windows. */
+const MIN_CHECK_GAP_MS = 15 * 60 * 1000 // 15min
+
+let lastCheckAtMs = 0
+
+export { type UpdateInfo }
 
 /** Check for updates. Returns update info if available, null if up-to-date. Throws on error. */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
@@ -28,8 +38,38 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   }
 }
 
+/**
+ * Drop any stale `pendingUpdate` left over from a previous session whose
+ * target version is already installed. Without this, the banner rehydrates
+ * from localStorage and reappears after the user completed the update —
+ * pointing at their own current version.
+ */
+export async function reconcilePendingUpdate(): Promise<void> {
+  const store = useUpdateStore.getState()
+  const pending = store.pendingUpdate
+  if (!pending) return
+  try {
+    const currentVersion = await getVersion()
+    if (compareSemver(pending.version, currentVersion) <= 0) {
+      console.info(`[updater] Clearing stale pendingUpdate — current=${currentVersion} >= pending=${pending.version}`)
+      store.setPendingUpdate(null)
+    }
+  } catch (err) {
+    console.warn('[updater] reconcilePendingUpdate failed:', err)
+  }
+}
+
 /** Download, install, and relaunch the app. */
 export async function installUpdate(): Promise<void> {
+  // DEBUG: Simulate installation flow for testing
+  if (IS_VITE_DEV && window.localStorage.getItem('SIMULATE_UPDATE') === 'true') {
+    console.info('[updater] Simulating download and install...')
+    await new Promise(r => setTimeout(r, 2000)) // Simulate download time
+    alert('Simulação: A aplicação iria reiniciar agora para aplicar a versão 99.9.9')
+    useUpdateStore.getState().setPendingUpdate(null)
+    return
+  }
+
   const update = await check()
   if (!update) throw new Error('No update available')
 
@@ -39,41 +79,85 @@ export async function installUpdate(): Promise<void> {
     }
   })
 
+  // Clear the persisted banner state before relaunch — otherwise the next
+  // boot rehydrates and shows the banner again pointing at the version the
+  // user just installed.
+  useUpdateStore.getState().setPendingUpdate(null)
+
   await relaunch()
 }
 
 /** Pending update info (set after check, consumed by Settings UI) */
-let pendingUpdate: UpdateInfo | null = null
-
 export function getPendingUpdate(): UpdateInfo | null {
-  return pendingUpdate
+  return useUpdateStore.getState().pendingUpdate
 }
 
 export function setPendingUpdate(update: UpdateInfo | null): void {
-  pendingUpdate = update
+  useUpdateStore.getState().setPendingUpdate(update)
 }
 
-/** Auto-check on startup (once per session). Shows toast if update available. */
+/**
+ * Auto-check on startup, on window focus, and every 1h while the IDE is
+ * open. Shows banner if update available. All triggers funnel through one
+ * `performCheck` so the 15min throttle applies uniformly.
+ */
 export async function autoCheckForUpdate(): Promise<void> {
   if (checkedThisSession) return
   checkedThisSession = true
 
-  // Delay check to not slow down startup
-  await new Promise(r => setTimeout(r, 5000))
+  // Reconcile before any check — a just-updated user shouldn't briefly see
+  // the stale banner from their previous session while we wait the 5s
+  // startup delay or the Tauri check round-trip.
+  await reconcilePendingUpdate()
 
-  try {
-    const update = await checkForUpdate()
-    if (!update) return
+  const performCheck = async (trigger: 'startup' | 'interval' | 'focus') => {
+    // Throttle. Avoids hammering the updater when focus events fire rapidly
+    // (alt-tab, window manager re-focusing). Startup is exempt — it sets the
+    // baseline timestamp, so a focus event seconds later doesn't trigger a
+    // duplicate check.
+    if (trigger !== 'startup' && Date.now() - lastCheckAtMs < MIN_CHECK_GAP_MS) {
+      return
+    }
+    // Skip if we already have a pending update — user hasn't acted on it yet,
+    // re-checking can't surface anything they don't already see in the banner.
+    if (useUpdateStore.getState().pendingUpdate) {
+      return
+    }
+    lastCheckAtMs = Date.now()
 
-    // Store pending update so UI can show an update banner/button
-    pendingUpdate = update
+    try {
+      // DEBUG: Simulate a fake update for testing
+      if (IS_VITE_DEV && window.localStorage.getItem('SIMULATE_UPDATE') === 'true') {
+        useUpdateStore.getState().setPendingUpdate({
+          version: '99.9.9',
+          body: 'Esta é uma atualização de teste para validar o sistema de notificações.',
+          date: new Date().toISOString(),
+        })
+        return
+      }
 
-    useToastStore.getState().addToast(
-      'info',
-      `TM Code ${update.version} ${t('settings.updateAvailable')}. ${t('settings.updateGoSettings')}`,
-      15000
-    )
-  } catch (err) {
-    console.warn('[updater] Auto-check failed:', err)
+      const update = await checkForUpdate()
+      if (!update) {
+        // No update available — clear any stale pending entry.
+        if (useUpdateStore.getState().pendingUpdate) {
+          useUpdateStore.getState().setPendingUpdate(null)
+        }
+        return
+      }
+      console.info(`[updater] ${trigger}: update available v${update.version}`)
+      useUpdateStore.getState().setPendingUpdate(update)
+    } catch (err) {
+      console.warn(`[updater] check (${trigger}) failed:`, err)
+    }
   }
+
+  // Initial check after startup delay
+  setTimeout(() => performCheck('startup'), 5000)
+
+  // Periodic check every 1h
+  setInterval(() => performCheck('interval'), PERIODIC_CHECK_INTERVAL_MS)
+
+  // Re-check when the user returns to the app (alt-tab back, system wake).
+  // Throttled to 15min minimum gap to avoid spam.
+  window.addEventListener('focus', () => performCheck('focus'))
 }

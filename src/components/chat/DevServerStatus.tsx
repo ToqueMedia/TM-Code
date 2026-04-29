@@ -1,7 +1,7 @@
 import { memo, useRef, useEffect } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiMonitor, FiX } from 'react-icons/fi'
-import { useLayoutStore, type DevServerLogEntry } from '../../stores/layoutStore'
+import { useLayoutStore, selectIsPreviewServerRunning, type DevServerLogEntry } from '../../stores/layoutStore'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -13,7 +13,7 @@ const LOG_COLORS: Record<string, string> = {
 
 function DevServerStatus() {
   const isLoading = useLayoutStore(s => s.isPreviewServerLoading)
-  const isRunning = useLayoutStore(s => s.isPreviewServerRunning)
+  const isRunning = useLayoutStore(selectIsPreviewServerRunning)
   const logs = useLayoutStore(s => s.devServerLogs)
   const scrollRef = useRef<HTMLDivElement>(null)
 

@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect } from 'react'
 import { Box, Flex, useDialog } from '@chakra-ui/react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useProjectStore } from '../stores/projectStore'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
-import { WelcomeSidebar, WelcomeHero, CloneDialog } from './welcome'
+import { WelcomeSidebar, WelcomeHero, CloneDialog, StartupRequirementsBanner } from './welcome'
 import SettingsView from './views/SettingsView'
 import WindowControls from './ui/WindowControls'
 import { IS_MAC } from '@/utils/platform'
@@ -19,8 +19,8 @@ interface WelcomeScreenProps {
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   const cloneDialog = useDialog()
-  const { recentProjects, loadRecentProjects, cmdModeProjectPath, cmdModeProjectPaths, setCmdModeProjectPath, removeCmdModePath } = useProjectStore()
-  const [showSettings, setShowSettings] = useState(false)
+  const { recentProjects, loadRecentProjects, cmdModeProjectPath, cmdModeProjectPaths, setCmdModeProjectPath, removeCmdModePath, clearAllRecent, welcomeScreen, setWelcomeScreen } = useProjectStore()
+  const showSettings = welcomeScreen === 'settings'
 
   // Window controls — shared hook eliminates duplication
   const { handleClose, handleMinimize, handleFullToggle } = useWindowControls()
@@ -31,6 +31,16 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     manager.startManaging()
     return () => manager.stopManaging()
   }, [loadRecentProjects])
+
+  // Mark that the user is on the Welcome screen so the next app start
+  // returns here instead of auto-opening the most recent project. Null →
+  // 'hero' promotion is a no-op if cmdMode is active; the user is in that
+  // sub-screen instead and its own persistence covers that case.
+  useEffect(() => {
+    if (!cmdModeProjectPath && welcomeScreen === null) {
+      setWelcomeScreen('hero')
+    }
+  }, [cmdModeProjectPath, welcomeScreen, setWelcomeScreen])
 
   const handleDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
@@ -130,7 +140,8 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
           onOpenCmdProject={setCmdModeProjectPath}
           onOpenCmdProjectAsIde={(path) => { removeCmdModePath(path); onOpenProject(path) }}
           onOpenProject={onOpenProject}
-          onSettings={() => setShowSettings(true)}
+          onSettings={() => setWelcomeScreen('settings')}
+          onClearRecent={clearAllRecent}
         />
       )}
 
@@ -142,7 +153,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
           />
         </Box>
       ) : showSettings ? (
-        <SettingsView onBack={() => setShowSettings(false)} />
+        <SettingsView onBack={() => setWelcomeScreen('hero')} />
       ) : (
         <WelcomeHero
           onNewProject={handleNewProject}
@@ -153,6 +164,10 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       )}
 
       <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} />
+
+      {/* Non-blocking prereq banner — only shows when a tool is missing/outdated.
+          Positioned absolute near the top so it doesn't reflow the hero layout. */}
+      {!cmdModeProjectPath && !showSettings && <StartupRequirementsBanner />}
     </Flex>
   )
 }

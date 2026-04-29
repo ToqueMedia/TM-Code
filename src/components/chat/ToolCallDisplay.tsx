@@ -173,10 +173,17 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
     useChatStore.getState().rejectAllAndStop()
   }, [])
 
+  // Sub-agent tool calls carry a spawnedBy id — nest them visually under the
+  // research/verify/bg launcher so the user sees the full activity hierarchy.
+  const isNested = !!toolCall.spawnedBy
+  const nestedProps = isNested
+    ? { ml: 4, pl: 2, borderLeft: `2px solid ${tokens.colors.accent.purple}` } as const
+    : {}
+
   // Render inline diff for write tools
   if (isCompleted && hasDiff) {
     return (
-      <Box my={2}>
+      <Box my={2} {...nestedProps}>
         <Flex align="center" gap={2} mb={1.5} px={1}>
           <Box color={tokens.colors.accent.green} flexShrink={0}>
             <FiCheck size={12} />
@@ -222,9 +229,15 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
     )
   }
 
+  // Sub-agent spawners emit their output inline via the text stream + nested
+  // child tool calls. Their `result` duplicates that content, so suppress the
+  // result panel on the parent to avoid showing the same text twice.
+  const SUBAGENT_SPAWNERS = new Set(['research', 'verify', 'spawn_background_agent'])
+  const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(toolCall.toolName)
+
   // Standard tool call rendering
   const resultLines = resultText.split('\n')
-  const hasOutput = resultText.length > 0 && !isRunning
+  const hasOutput = resultText.length > 0 && !isRunning && !isSubAgentSpawner
   const showExpand = resultLines.length > 4 && !expanded
   const displayResult = showExpand ? resultLines.slice(0, 4).join('\n') : resultText
 
@@ -236,6 +249,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
       border={`1px solid ${isRunning ? 'rgba(240, 192, 0, 0.12)' : isFailed ? 'rgba(248, 81, 73, 0.12)' : 'rgba(255, 255, 255, 0.04)'}`}
       bg={isRunning ? 'rgba(240, 192, 0, 0.03)' : isFailed ? 'rgba(248, 81, 73, 0.03)' : 'rgba(255, 255, 255, 0.015)'}
       transition="all 0.15s"
+      {...nestedProps}
     >
       {/* Header row */}
       <Flex

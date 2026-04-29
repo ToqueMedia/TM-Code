@@ -9,6 +9,7 @@ import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
+import { resolveWorkerUrl } from '../../utils/devUrls'
 import { getQueryGuard } from './queryGuard'
 import { contentAsText } from './promptValueHelpers'
 import {
@@ -48,7 +49,9 @@ interface AnthropicMessage {
 
 // === Config ===
 
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+// Resolved via OS-aware helper — on Mac/Linux dev the env's 192.168.64.1 is
+// auto-remapped to localhost. See src/utils/devUrls.ts for rationale.
+const WORKER_URL = resolveWorkerUrl()
 const MAX_OUTPUT_TOKENS = 32768
 // Max auto-continuations when model hits token limit mid-response
 const MAX_CONTINUATIONS = 3
@@ -274,9 +277,10 @@ class AgentService {
       const isThinking = useSettingsStore.getState().thinkingEnabled
 
       // Filter tools based on model capabilities.
-      // web_search is only supported natively on DashScope Qwen models
-      // (via enable_search:true injected by the backend). Other models
-      // (GLM-5.1, DeepSeek, Kimi, etc.) cannot execute this tool.
+      // web_search is exposed to the model when profile.supportsSearch is true.
+      //   - DashScope-native (DeepSeek, Qwen): provider resolves enable_search server-side.
+      //   - Non-native (GLM-5.1): frontend execute() side-cars the query to Qwen
+      //     via X-Request-Type: 'web_search' and returns the answer as tool_result.
       const filteredTools = this.tools.filter(t => {
         if (t.function.name === 'web_search') {
           return profile.supportsSearch

@@ -2,7 +2,7 @@ import { memo, useRef, useEffect, useCallback } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { useChatStore, resolveDiffApprovalByResultId, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { useLayoutStore } from '../../stores/layoutStore'
+import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
 import MessageBubble from '../chat/MessageBubble'
 import DiffPreview from '../chat/DiffPreview'
 import DiffService from '../../services/agent/diffService'
@@ -61,7 +61,7 @@ function GeneratingView() {
       if (remaining.length === 0 && !useChatStore.getState().isStreaming) {
         const ls = useLayoutStore.getState()
         if (ls.viewMode === 'generating') {
-          if (ls.isPreviewServerRunning) ls.setViewMode('preview')
+          if (selectIsPreviewServerRunning(ls)) ls.setViewMode('preview')
           else if (acceptedPathsRef.current.length > 0) { await tryStaticPreview(acceptedPathsRef.current); acceptedPathsRef.current = [] }
           else ls.setViewMode('chat')
         }

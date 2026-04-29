@@ -1,7 +1,7 @@
 {
   "name": "toquemedia-studio",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.4.1",
   "type": "module",
   "packageManager": "yarn@1.22.22",
   "engines": {
@@ -62,6 +62,7 @@
     "@vitejs/plugin-react": "^6.0.1",
     "@welldone-software/why-did-you-render": "^10.0.1",
     "commander": "^14.0.3",
+    "fake-indexeddb": "^6.2.5",
     "identity-obj-proxy": "^3.0.0",
     "jest": "^30.3.0",
     "jest-environment-jsdom": "^30.3.0",

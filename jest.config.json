@@ -4,6 +4,7 @@
   "setupFilesAfterEnv": ["<rootDir>/src/components/__tests__/setupTests.ts"],
   "moduleNameMapper": {
     "\\.(css|less|scss|sass)$": "identity-obj-proxy",
+    "^.*utils/viteEnv$": "<rootDir>/src/utils/__mocks__/viteEnv.ts",
     "^@/(.*)$": "<rootDir>/src/$1",
     "^~/(.*)$": "<rootDir>/src/$1"
   },

@@ -23,6 +23,7 @@
     "fs:allow-rename",
     "core:window:default",
     "core:window:allow-close",
+    "core:window:allow-destroy",
     "core:window:allow-create",
     "core:window:allow-hide",
     "core:window:allow-show",

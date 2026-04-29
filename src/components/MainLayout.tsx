@@ -119,17 +119,42 @@ function MainLayout() {
   useEffect(() => {
     return () => {
       devServerManager.stop().catch(() => {})
-      useLayoutStore.getState().clearPreviewServer()
+      useLayoutStore.getState().clearDevServer()
     }
   }, [currentProject?.path])
 
-  // Cleanup dev server on window close (Tauri event — awaits async cleanup)
+  // Cleanup dev server on window close. Flow: preventDefault → run stop()
+  // (with 1.5s watchdog) → destroy(). destroy() requires the
+  // `core:window:allow-destroy` capability — without it, Tauri 2 rejects
+  // silently and the window never closes. Errors are logged, not swallowed,
+  // so future regressions surface instead of hiding. Last-resort fallback is
+  // `process.exit(0)` which goes through the `process:allow-exit` permission.
+  // Calling close() again would re-enter onCloseRequested and infinite-loop.
   useEffect(() => {
     let unlisten: (() => void) | undefined
     getCurrentWindow().onCloseRequested(async (event) => {
       event.preventDefault()
-      await devServerManager.stop().catch(() => {})
-      await getCurrentWindow().destroy()
+      try {
+        await Promise.race([
+          devServerManager.stop(),
+          new Promise<void>(resolve => setTimeout(resolve, 1500)),
+        ])
+      } catch (err) {
+        console.warn('[close] stop() failed:', err)
+      }
+      try {
+        await getCurrentWindow().destroy()
+      } catch (err) {
+        console.error('[close] destroy() failed:', err)
+        // Fallback: force-exit the whole process. No infinite loop possible
+        // since this kills the Tauri runtime itself.
+        try {
+          const { exit } = await import('@tauri-apps/plugin-process')
+          await exit(0)
+        } catch (exitErr) {
+          console.error('[close] exit() also failed:', exitErr)
+        }
+      }
     }).then(fn => { unlisten = fn })
 
     return () => unlisten?.()

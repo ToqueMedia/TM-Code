@@ -8,7 +8,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { CreditIndicator } from '../ui/CreditIndicator'
 import { McpIndicator } from '../ui/StatusIndicators'
 import { tokens } from '@/theme/tokens'
-import { IS_MAC, basename } from '@/utils/platform'
+import { IS_MAC, IS_WINDOWS, basename } from '@/utils/platform'
 
 interface TerminalTitleBarProps {
   projectPath: string
@@ -50,12 +50,14 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
   return (
     <Flex
       px={3}
-      py="6px"
+      py="11px"
+      minH="38px"
       bg="rgba(0,0,0,0.45)"
       borderBottom="1px solid rgba(255,255,255,0.05)"
       align="center"
       justify="space-between"
       pl={IS_MAC ? '80px' : 3}
+      pr={IS_WINDOWS ? '148px' : 3}
       userSelect="none"
       flexShrink={0}
       data-tauri-drag-region

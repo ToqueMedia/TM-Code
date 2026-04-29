@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { Requirement } from './templateService'
+import { IS_WINDOWS } from '@/utils/platform'
 
 export interface CheckResult {
   requirement: Requirement
@@ -12,6 +13,8 @@ export interface CheckResult {
 export interface EnvironmentCheckResult {
   allPassed: boolean
   results: CheckResult[]
+  /** Map of requirement name to its check result for O(1) lookup in UI */
+  requirements: Record<string, CheckResult>
 }
 
 interface CommandResult {
@@ -29,56 +32,55 @@ const cache = new Map<string, {
 }>()
 
 async function checkSingle(req: Requirement): Promise<CheckResult> {
-  try {
-    // Use home directory as cwd to avoid corepack interference.
-    // When cwd contains a package.json with "packageManager", corepack blocks
-    // other package managers (e.g. pnpm returns exit 1 in a yarn project).
-    const homeDir = await invoke<string>('get_home_directory').catch(() => null)
-    const output = await invoke<CommandResult>('execute_command', {
-      command: `${req.command} ${req.versionFlag}`,
-      cwd: homeDir,
-    })
+  const homeDir = await invoke<string>('get_home_directory').catch(() => null)
+  
+  // Support multiple commands for the same requirement (e.g. python3 OR python)
+  const commandsToTry = (req.name === 'Python 3' && IS_WINDOWS) 
+    ? ['python', 'python3'] 
+    : [req.command]
 
-    if (!output.success) {
-      return {
-        requirement: req,
-        found: false,
-        version: null,
-        meetsMinimum: false,
-        error: `Command failed: ${req.command}`,
+  let lastError = ''
+
+  for (const cmd of commandsToTry) {
+    try {
+      console.log(`[envCheck] Checking ${req.name} via "${cmd} ${req.versionFlag}"`)
+      
+      const output = await invoke<CommandResult>('execute_command', {
+        command: `${cmd} ${req.versionFlag}`,
+        cwd: homeDir,
+      })
+
+      console.log(`[envCheck] Result for ${req.name} (${cmd}):`, output)
+
+      if (output.success) {
+        const rawOutput = (output.stdout || output.stderr || '').trim()
+        const version = extractVersion(rawOutput)
+
+        if (version) {
+          const meetsMinimum = compareVersions(version, req.minVersion) >= 0
+          return {
+            requirement: req,
+            found: true,
+            version,
+            meetsMinimum,
+            error: meetsMinimum ? null : `Version ${version} is below minimum ${req.minVersion}`,
+          }
+        }
+        lastError = `Could not parse version from: ${rawOutput}`
+      } else {
+        lastError = `Command failed: ${cmd}`
       }
+    } catch (e) {
+      lastError = String(e)
     }
+  }
 
-    const rawOutput = (output.stdout || output.stderr || '').trim()
-    const version = extractVersion(rawOutput)
-
-    if (!version) {
-      return {
-        requirement: req,
-        found: true,
-        version: null,
-        meetsMinimum: false,
-        error: `Could not parse version from: ${rawOutput}`,
-      }
-    }
-
-    const meetsMinimum = compareVersions(version, req.minVersion) >= 0
-
-    return {
-      requirement: req,
-      found: true,
-      version,
-      meetsMinimum,
-      error: meetsMinimum ? null : `Version ${version} is below minimum ${req.minVersion}`,
-    }
-  } catch {
-    return {
-      requirement: req,
-      found: false,
-      version: null,
-      meetsMinimum: false,
-      error: `${req.name} not found. Is it installed and in your PATH?`,
-    }
+  return {
+    requirement: req,
+    found: false,
+    version: null,
+    meetsMinimum: false,
+    error: `${req.name} not found. ${lastError}`,
   }
 }
 
@@ -133,13 +135,14 @@ export async function verifyRequirements(
     const result: EnvironmentCheckResult = {
       allPassed: results.every(r => r.found && r.meetsMinimum),
       results,
+      requirements: Object.fromEntries(results.map(r => [r.requirement.name, r])),
     }
 
     cache.set(cacheKey, { result, timestamp: Date.now() })
     return result
   } catch {
     // Graceful degradation: don't block scaffold on IPC/unexpected errors
-    return { allPassed: true, results: [] }
+    return { allPassed: true, results: [], requirements: {} }
   }
 }
 

@@ -4,7 +4,6 @@ import {
   getProfileForPlan,
   getMultimodalProfile,
   hasMultimodalContent,
-  getDefaultModelForPlan,
   MODEL_PROFILES,
   DEFAULT_MODEL_ID,
 } from '../modelProfiles'
@@ -19,7 +18,7 @@ describe('modelProfiles', () => {
     it('contains all expected models', () => {
       const ids = Object.keys(MODEL_PROFILES)
       expect(ids).toContain('mimo-v2-flash')
-      expect(ids).toContain('deepseek-v3.2')
+      expect(ids).toContain('deepseek-v4-flash')
       expect(ids).toContain('step-3.5-flash')
       expect(ids).toContain('glm-5')
       expect(ids).toContain('glm-5.1')
@@ -84,11 +83,12 @@ describe('modelProfiles', () => {
   // Paid plans use GLM-5.1. Qwen 3.6 Plus is reserved for multimodal.
 
   describe('getProfileForPlan', () => {
-    it('explorer (free) returns DeepSeek V3.2', () => {
+    it('explorer (free) returns DeepSeek V4-Flash', () => {
       const profile = getProfileForPlan('explorer')
-      expect(profile.id).toBe('deepseek-v3.2')
-      expect(profile.thinkingMode).toBe('none')
-      expect(profile.supportsThinking).toBe(false)
+      expect(profile.id).toBe('deepseek-v4-flash')
+      expect(profile.thinkingMode).toBe('toggleable')
+      expect(profile.supportsThinking).toBe(true)
+      expect(profile.thinkingParam).toBe('enable_thinking')
     })
 
     it('pro returns GLM-5.1', () => {
@@ -109,8 +109,8 @@ describe('modelProfiles', () => {
       expect(getProfileForPlan('pro').contextWindow).toBe(200_000)
     })
 
-    it('DeepSeek has no thinking, GLM-5.1 has toggleable', () => {
-      expect(getProfileForPlan('explorer').thinkingMode).toBe('none')
+    it('DeepSeek V4-Flash and GLM-5.1 both have toggleable thinking', () => {
+      expect(getProfileForPlan('explorer').thinkingMode).toBe('toggleable')
       expect(getProfileForPlan('pro').thinkingMode).toBe('toggleable')
     })
   })
@@ -141,13 +141,4 @@ describe('modelProfiles', () => {
     })
   })
 
-  describe('getDefaultModelForPlan (compat)', () => {
-    it('explorer defaults to deepseek-v3.2', () => {
-      expect(getDefaultModelForPlan('explorer')).toBe('deepseek-v3.2')
-    })
-
-    it('paid plans default to glm-5.1', () => {
-      expect(getDefaultModelForPlan('pro')).toBe('glm-5.1')
-    })
-  })
 })
