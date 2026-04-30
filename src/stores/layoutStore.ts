@@ -62,6 +62,10 @@ interface LayoutState {
   previewMode: PreviewMode
   /** For fullstack projects: true when the HTTP Client drawer is expanded. */
   isHttpDrawerOpen: boolean
+  /** Cross-component publish modal flag — both MinimalTitleBar and the
+   *  PreviewView toolbar trigger the same modal so we keep a single source
+   *  of truth here. The modal itself is mounted by MinimalTitleBar. */
+  isPublishModalOpen: boolean
   previewHtmlContent: string | null
   previewSourcePath: string | null
   /** Incremented to signal the preview iframe should reload */
@@ -112,6 +116,9 @@ interface LayoutActions {
   toggleConsole: () => void
   /** Toggle the HTTP Client drawer in fullstack projects. */
   toggleHttpDrawer: () => void
+  /** Open / close the deploy publish modal. Single source of truth so both
+   *  the title bar and the preview toolbar trigger the same dialog. */
+  setPublishModalOpen: (open: boolean) => void
   goBack: () => void
   setScaffoldPhase: (phase: ScaffoldPhase, message?: string) => void
 }
@@ -132,6 +139,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   devServer: null,
   previewMode: 'server',
   isHttpDrawerOpen: false,
+  isPublishModalOpen: false,
   previewHtmlContent: null,
   previewSourcePath: null,
   previewReloadKey: 0,
@@ -267,6 +275,10 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
 
   toggleHttpDrawer: () => {
     set(state => ({ isHttpDrawerOpen: !state.isHttpDrawerOpen }))
+  },
+
+  setPublishModalOpen: (open: boolean) => {
+    set({ isPublishModalOpen: open })
   },
 
   addDevServerLog: (text: string, level: DevLogLevel = 'info') => {

@@ -45,6 +45,9 @@ export function useCmdPromptLogic() {
   // Slash command menu
   const [showCommandMenu, setShowCommandMenu] = useState(false)
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([])
+  // True when the menu is in arg-suggestion mode (after `<cmd> `). Drives
+  // the footer hint informing the user free-form text follows the args.
+  const [isArgMode, setIsArgMode] = useState(false)
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
 
   // @mention menu
@@ -297,17 +300,39 @@ export function useCmdPromptLogic() {
   const handleInputChange = useCallback((value: string) => {
     setInput(value)
 
-    // Slash command menu
-    const firstWord = value.split(' ')[0]
+    // Mode 1: command name (no space yet) → suggest commands
     if (value.startsWith('/') && !value.includes(' ')) {
+      const firstWord = value.split(' ')[0]
       const commands = filterCommands(firstWord, allCommands)
       setFilteredCommands(commands)
       setShowCommandMenu(commands.length > 0)
       setSelectedCommandIndex(0)
       setShowMentionMenu(false)
+      setIsArgMode(false)
       return
     }
+
+    // Mode 2: typed `<known-cmd> [partial]` → suggest argument values for the
+    // command. Synthesised as SlashCommand-shaped items so the existing menu
+    // and key-nav logic keep working unchanged.
+    const argResult = slashCommandRegistry.getArgSuggestions(value)
+    if (argResult) {
+      const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({
+        name: arg.value,
+        description: arg.description,
+        enabled: true,
+        execute: async () => {},
+      }))
+      setFilteredCommands(argItems)
+      setShowCommandMenu(true)
+      setSelectedCommandIndex(0)
+      setShowMentionMenu(false)
+      setIsArgMode(true)
+      return
+    }
+
     setShowCommandMenu(false)
+    setIsArgMode(false)
 
     // @mention detection — unicode-safe, shared with chat prompt & resolver.
     const cursorPos = textareaRef.current?.selectionStart ?? value.length
@@ -336,14 +361,48 @@ export function useCmdPromptLogic() {
   }, [allCommands, filterCommands])
 
   const handleCommandSelect = useCallback((command: SlashCommand) => {
-    setShowCommandMenu(false)
-    if (NO_ARG_COMMANDS.has(command.name)) {
-      setInput('')
-      executePrompt(command.name)
-    } else {
-      setInput(command.name + ' ')
+    // Arg mode: the picked item is a synthesised arg suggestion (not a real
+    // slash command). Detect by checking whether the current input already
+    // includes a space — we only enter arg-suggest mode after the command
+    // name + space.
+    setInput(prev => {
+      if (prev.includes(' ')) {
+        const lastSpaceIdx = prev.lastIndexOf(' ')
+        const prefix = prev.slice(0, lastSpaceIdx + 1)
+        const next = prefix + command.name + ' '
+        // Re-evaluate the menu so chained arg picks (e.g. /auth picks
+        // email-password then immediately offers google) auto-advance.
+        const argResult = slashCommandRegistry.getArgSuggestions(next)
+        if (argResult) {
+          const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({
+            name: arg.value,
+            description: arg.description,
+            enabled: true,
+            execute: async () => {},
+          }))
+          setFilteredCommands(argItems)
+          setShowCommandMenu(true)
+          setSelectedCommandIndex(0)
+          setIsArgMode(true)
+        } else {
+          setShowCommandMenu(false)
+          setIsArgMode(false)
+        }
+        textareaRef.current?.focus()
+        return next
+      }
+
+      // Command mode: real command pick. No-arg commands run immediately;
+      // commands that accept args get the trailing space + focus.
+      setShowCommandMenu(false)
+      setIsArgMode(false)
+      if (NO_ARG_COMMANDS.has(command.name)) {
+        executePrompt(command.name)
+        return ''
+      }
       textareaRef.current?.focus()
-    }
+      return command.name + ' '
+    })
   }, [executePrompt])
 
   const handleSend = useCallback(async () => {
@@ -574,6 +633,7 @@ export function useCmdPromptLogic() {
     showCommandMenu,
     filteredCommands,
     selectedCommandIndex,
+    isArgMode,
     showMentionMenu,
     filteredMentions,
     selectedMentionIndex,

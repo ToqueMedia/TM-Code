@@ -1,6 +1,6 @@
 import { memo, useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react'
 import { Box, Flex, Text, HStack, Portal } from '@chakra-ui/react'
-import { FiLogOut, FiSettings, FiAlertCircle } from 'react-icons/fi'
+import { FiLogOut, FiSettings, FiAlertCircle, FiLoader, FiUpload } from 'react-icons/fi'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
 import { useProjectStore } from '../stores/projectStore'
@@ -9,9 +9,11 @@ import { useAuthStore } from '../stores/authStore'
 import { usePermissionStore } from '../stores/permissionStore'
 import { useLayoutStore } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'
+import { useDeployStore } from '../stores/deployStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
+import PublishModal from './dialogs/PublishModal'
 import { useTranslation } from '@/i18n'
 import { IS_MAC } from '@/utils/platform'
 
@@ -43,9 +45,22 @@ function MinimalTitleBar() {
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
+  // Publish modal state lives in the layout store so the PreviewView toolbar
+  // can open the same modal without needing a duplicate mount.
+  const publishOpen = useLayoutStore(s => s.isPublishModalOpen)
   const avatarRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 })
+
+  // Subscribed so the button flips to "Publishing…" + spinner while a deploy
+  // is mid-flight. Without this the user can re-click and lose track of
+  // progress (the modal already guards against double-deploy, but the visual
+  // affordance matters across all view modes — chat, editor, preview).
+  const isPublishing = useDeployStore(function (s) {
+    const id = currentProject?.id
+    if (!id) return false
+    return s.records.get(id)?.phase === 'in_progress'
+  })
 
   // Position the dropdown relative to the avatar (recalculate on resize)
   const recalcMenuPos = useCallback(() => {
@@ -70,6 +85,23 @@ function MinimalTitleBar() {
     window.addEventListener('app:report-issue', handleOpen)
     return () => window.removeEventListener('app:report-issue', handleOpen)
   }, [])
+
+  // Cmd/Ctrl+Shift+D — open the publish modal when a project is loaded.
+  // Bound to MinimalTitleBar (always-mounted) so the shortcut works in every
+  // view mode, not just the (now unused) full TitleBar.
+  useEffect(function () {
+    function onKey(e: KeyboardEvent) {
+      const meta = IS_MAC ? e.metaKey : e.ctrlKey
+      if (meta && e.shiftKey && (e.key === 'd' || e.key === 'D')) {
+        if (currentProject) {
+          e.preventDefault()
+          useLayoutStore.getState().setPublishModalOpen(true)
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [currentProject])
 
   // Close menu on outside click
   useEffect(() => {
@@ -201,8 +233,57 @@ function MinimalTitleBar() {
       {/* Center spacer */}
       <Flex flex={1} />
 
-      {/* Right: Agent status + User identity */}
-      <HStack gap={3} flexShrink={0} pr={1}>
+      {/* Right: Publish + Agent status + User identity */}
+      <HStack gap={3} flexShrink={0} pr={1} data-tauri-drag-region="false">
+        {/* Publish button — visible whenever a project is open, in any view
+            mode (chat, editor, preview). Position-of-emphasis at the start
+            of the right cluster. */}
+        {currentProject && (
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            gap="6px"
+            h="24px"
+            px="10px"
+            borderRadius="6px"
+            bg={tokens.colors.accent.primarySubtle}
+            color={tokens.colors.accent.primary}
+            border={`1px solid ${tokens.colors.accent.primaryMuted}`}
+            fontSize="11px"
+            fontWeight="500"
+            cursor="pointer"
+            transition={tokens.transition.fast}
+            _hover={{
+              bg: tokens.colors.accent.primaryHover,
+              boxShadow: `0 2px 12px -2px ${tokens.colors.accent.primaryGlow}`,
+            }}
+            onClick={function () { useLayoutStore.getState().setPublishModalOpen(true) }}
+            title={isPublishing
+              ? 'Publishing… click to view progress'
+              : `Publish (${IS_MAC ? '⌘' : 'Ctrl'}⇧D)`}
+          >
+            {isPublishing ? (
+              <Box
+                css={{
+                  animation: 'tm-publish-spin 1.4s linear infinite',
+                  '@keyframes tm-publish-spin': {
+                    from: { transform: 'rotate(0deg)' },
+                    to: { transform: 'rotate(360deg)' },
+                  },
+                }}
+              >
+                <FiLoader size={11} />
+              </Box>
+            ) : (
+              <FiUpload size={11} />
+            )}
+            <Text fontSize="11px" fontWeight="500">
+              {isPublishing ? 'Publishing…' : 'Publish'}
+            </Text>
+          </Box>
+        )}
+
         {/* Agent status */}
         <HStack gap={1.5}>
           <Box
@@ -371,6 +452,11 @@ function MinimalTitleBar() {
           onClose={() => setShowIssueReporter(false)}
         />
       </Suspense>
+
+      {/* Publish modal — controlled by the Publish button above and the
+          Cmd/Ctrl+Shift+D shortcut. Mounted here so it survives view mode
+          changes (chat → preview → editor) without unmounting mid-deploy. */}
+      <PublishModal isOpen={publishOpen} onClose={function () { useLayoutStore.getState().setPublishModalOpen(false) }} />
     </Box>
   )
 }

@@ -102,6 +102,9 @@ export function usePromptBar() {
 
   // Slash command menu state
   const [showCommandMenu, setShowCommandMenu] = useState(false)
+  // True when the menu is in arg-suggestion mode (after `<cmd> `). Drives
+  // the SlashCommandMenu footer hint about free-form text after args.
+  const [isArgMode, setIsArgMode] = useState(false)
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([])
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
 
@@ -176,16 +179,38 @@ export function usePromptBar() {
       historyIndexRef.current = -1
     }
 
-    // Slash commands: /command
+    // Slash commands: /command (no space → suggest command names)
     if (value.startsWith('/') && !value.includes(' ')) {
       const commands = slashCommandRegistry.filterCommands(value.split(' ')[0])
       setFilteredCommands(commands)
       setShowCommandMenu(commands.length > 0)
       setSelectedCommandIndex(0)
       setShowMentionMenu(false)
+      setIsArgMode(false)
       return
     }
+
+    // Slash commands: /<known-cmd> [partial] → suggest argument values when
+    // the command declares argSuggestions. Picking one re-triggers the menu
+    // so chains like `/auth email-password google` are one-key-each.
+    const argResult = slashCommandRegistry.getArgSuggestions(value)
+    if (argResult) {
+      const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({
+        name: arg.value,
+        description: arg.description,
+        enabled: true,
+        execute: async () => {},
+      }))
+      setFilteredCommands(argItems)
+      setShowCommandMenu(true)
+      setSelectedCommandIndex(0)
+      setShowMentionMenu(false)
+      setIsArgMode(true)
+      return
+    }
+
     setShowCommandMenu(false)
+    setIsArgMode(false)
 
     // @mention detection — unicode-safe, shared parser. Directories included
     // so users can reference dirs like @src/components/ for listing.
@@ -216,8 +241,38 @@ export function usePromptBar() {
   }, [setInput])
 
   const handleCommandSelect = useCallback((command: SlashCommand) => {
-    setInput(command.name + ' ')
-    setShowCommandMenu(false)
+    // Arg vs command pick: if the buffer already contains a space, we're
+    // picking from the arg-suggestion menu, so replace just the trailing
+    // partial word. Otherwise we're picking a real command — replace the
+    // whole buffer with `<cmd> ` so the user can keep typing.
+    const current = useChatStore.getState().draftInput
+    let next: string
+    if (current.includes(' ')) {
+      const lastSpaceIdx = current.lastIndexOf(' ')
+      next = current.slice(0, lastSpaceIdx + 1) + command.name + ' '
+    } else {
+      next = command.name + ' '
+    }
+    setInput(next)
+
+    // Re-evaluate so chained arg picks (e.g. /auth email-password google)
+    // surface the next round of suggestions without manual retype.
+    const argResult = slashCommandRegistry.getArgSuggestions(next)
+    if (argResult) {
+      const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({
+        name: arg.value,
+        description: arg.description,
+        enabled: true,
+        execute: async () => {},
+      }))
+      setFilteredCommands(argItems)
+      setShowCommandMenu(true)
+      setSelectedCommandIndex(0)
+      setIsArgMode(true)
+    } else {
+      setShowCommandMenu(false)
+      setIsArgMode(false)
+    }
     textareaRef.current?.focus()
   }, [setInput])
 
@@ -1001,6 +1056,7 @@ export function usePromptBar() {
     showCommandMenu,
     filteredCommands,
     selectedCommandIndex,
+    isArgMode,
     handleCommandSelect,
     // @mention menu
     showMentionMenu,

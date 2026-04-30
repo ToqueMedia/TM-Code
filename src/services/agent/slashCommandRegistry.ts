@@ -1,12 +1,32 @@
 import { executeInit } from './commands/initCommand'
 import { executePlan } from './commands/planCommand'
 import { executePayments } from './commands/paymentsCommand'
+import { executeAuth, AUTH_ARG_SUGGESTIONS } from './commands/authCommand'
+
+/** A canonical argument value the user can pick after the command name. */
+export interface SlashCommandArg {
+  /** Token appended to the input when the user picks this suggestion. */
+  value: string
+  /** One-line label shown in the autocomplete menu. */
+  description: string
+}
 
 export interface SlashCommand {
   name: string
   description: string
   enabled: boolean
   execute: (args: string, projectPath: string) => Promise<void>
+  /**
+   * Optional canonical values the menu offers after the user types
+   * `<cmd> ` (space). Suggestions are filtered by the partial word the
+   * user is currently typing, and values already in the input are hidden
+   * — so multi-arg chains like `/auth email-password google` work without
+   * showing duplicates.
+   *
+   * Free-form instructions appended after the last canonical value silently
+   * dismiss the menu — there's nothing left to suggest.
+   */
+  argSuggestions?: SlashCommandArg[]
 }
 
 class SlashCommandRegistry {
@@ -43,6 +63,14 @@ class SlashCommandRegistry {
       execute: executePayments,
     })
 
+    this.register({
+      name: '/auth',
+      description: 'Scaffold GIP authentication — /auth email-password | google | both [instructions]',
+      enabled: true,
+      execute: executeAuth,
+      argSuggestions: AUTH_ARG_SUGGESTIONS,
+    })
+
   }
 
   register(command: SlashCommand): void {
@@ -72,6 +100,52 @@ class SlashCommandRegistry {
     return this.listCommands().filter(cmd =>
       cmd.name.startsWith(prefix.toLowerCase())
     )
+  }
+
+  /**
+   * Compute the argument autocomplete suggestions for the current input. Returns
+   * an empty array when the input does not look like `<known-cmd> <partial>`,
+   * the command has no `argSuggestions`, or every suggestion has already been
+   * picked / no remaining suggestion matches the partial.
+   *
+   * The "partial" is the last whitespace-separated token.
+   *
+   * Free-form-text exit: as soon as the user types a token that is NOT one of
+   * the known arg values, we treat them as having moved past the args list
+   * into free-form instructions. The menu stays hidden from that point on,
+   * even if a later partial happens to start with a known arg name (so
+   * `/auth google Crie em…` does NOT re-suggest `email-password`).
+   */
+  getArgSuggestions(input: string): { command: SlashCommand; suggestions: SlashCommandArg[]; partial: string } | null {
+    if (!input.startsWith('/') || !input.includes(' ')) return null
+    const parts = input.split(/\s+/)
+    const cmdName = parts[0]
+    const cmd = this.commands.get(cmdName)
+    if (!cmd || !cmd.argSuggestions || cmd.argSuggestions.length === 0) return null
+
+    // Tokens between the command name and the cursor — last is the in-progress
+    // word, the rest are committed.
+    const argTokens = parts.slice(1)
+    const partial = argTokens.length > 0 ? argTokens[argTokens.length - 1] : ''
+    const previousTokens = argTokens.slice(0, -1).filter(Boolean)
+
+    // Free-form exit: if any previous token isn't a known arg value, the user
+    // has moved on to instructions. The menu must not return — they would
+    // accidentally suggest replacing free-form text with a canonical arg.
+    const validValues = new Set(cmd.argSuggestions.map(a => a.value))
+    const hasFreeFormText = previousTokens.some(token => !validValues.has(token))
+    if (hasFreeFormText) return null
+
+    const committed = new Set(previousTokens)
+
+    const suggestions = cmd.argSuggestions.filter(arg => {
+      if (committed.has(arg.value)) return false
+      if (partial && !arg.value.toLowerCase().startsWith(partial.toLowerCase())) return false
+      return true
+    })
+
+    if (suggestions.length === 0) return null
+    return { command: cmd, suggestions, partial }
   }
 }
 

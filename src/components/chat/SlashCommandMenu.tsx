@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import type { SlashCommand } from '../../services/agent/slashCommandRegistry'
 
 export type SlashCommandMenuTheme = 'red' | 'purple'
@@ -14,6 +15,10 @@ interface SlashCommandMenuProps {
   direction?: 'up' | 'down'
   /** Cap the menu height and scroll internally */
   maxHeight?: number
+  /** When true, render a footer hint telling the user free-form text can
+   *  follow the picked args. Set by the prompt-bar hooks when arg mode
+   *  is active so command-mode menus stay clean. */
+  showArgsHint?: boolean
 }
 
 const THEME_COLORS: Record<SlashCommandMenuTheme, {
@@ -36,7 +41,7 @@ const THEME_COLORS: Record<SlashCommandMenuTheme, {
   },
 }
 
-function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', direction = 'up', maxHeight }: SlashCommandMenuProps) {
+function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', direction = 'up', maxHeight, showArgsHint }: SlashCommandMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const colors = THEME_COLORS[theme]
 
@@ -133,6 +138,28 @@ function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', di
           )}
         </Flex>
       ))}
+      {/* Footer hint — only in arg mode. Tells the user the suggestions are
+          optional shortcuts and they can keep typing free-form instructions
+          after picking the canonical values. */}
+      {showArgsHint && (
+        <Box
+          mx="4px"
+          mt="4px"
+          pt="6px"
+          px="14px"
+          pb="6px"
+          borderTop="1px solid rgba(255, 255, 255, 0.06)"
+        >
+          <Text
+            fontSize="10.5px"
+            color={tokens.colors.text.muted}
+            letterSpacing="0.01em"
+            lineHeight="1.4"
+          >
+            {t('prompt.slashArgsHint')}
+          </Text>
+        </Box>
+      )}
     </Box>
   )
 }

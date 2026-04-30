@@ -58,6 +58,10 @@ const RICH_ARTIFACT_SKILLS = new Set([
 const FRONTEND_PROJECT_TYPES = new Set([
   'react', 'vue', 'angular', 'svelte', 'nextjs', 'nuxt',
 ])
+// Auth-scaffolding skills. Index-only entries (~150B in prompt each); the agent
+// only fetches the body via read_skill if it decides to wire up auth. Loaded
+// for any frontend project so the agent knows the recipe is available.
+const AUTH_SKILLS = new Set(['auth-proxy-gip', 'google-signin'])
 
 // parseSkillFrontmatter + MAX_DESCRIPTION_CHARS live in ./skillFrontmatter (zero-deps)
 // so that scripts/verify-skills.ts can import the same implementation.
@@ -357,6 +361,14 @@ ${lines.join('\n')}`
     if (skillName === 'frontend-design') {
       if (mode === 'cmd') return true
       return projectType ? FRONTEND_PROJECT_TYPES.has(projectType) : false
+    }
+
+    // Auth-scaffolding skills (auth-proxy-gip, google-signin): chat-only, frontend
+    // projects only. The agent reads the index entry and only fetches the body
+    // via read_skill when the user asks for login/auth.
+    if (AUTH_SKILLS.has(skillName)) {
+      if (mode !== 'chat' || !projectType) return false
+      return FRONTEND_PROJECT_TYPES.has(projectType)
     }
 
     // Code-pattern skills (react-patterns, vue-patterns, …) are CHAT-only — they apply

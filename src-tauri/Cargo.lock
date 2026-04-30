@@ -5014,6 +5014,7 @@ name = "toquemedia-studio"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "dirs 5.0.1",
  "flate2",
  "glob",

@@ -139,7 +139,17 @@
       "Bash(gcloud --project=maiplayer-ac56d firestore documents read 'users/bhq635G4GNcmmHQZArlAkunsNZ53')",
       "Bash(gcloud auth *)",
       "Bash(grep -c \"env\\\\s*$\\\\s*?\\\\s*await firestoreAdminAuthHeaders\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestore.ts)",
-      "Bash(grep -n \"env$\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestore.ts)"
+      "Bash(grep -n \"env$\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestore.ts)",
+      "Bash(grep -E '\\\\.\\(tsx?|jsx?\\)$')",
+      "Bash(grep -E \"\\\\.\\(ts|js|txt\\)$\")",
+      "WebFetch(domain:ollama.com)",
+      "WebFetch(domain:www.buildfastwithai.com)",
+      "WebFetch(domain:docs.ollama.com)",
+      "WebFetch(domain:mimo.xiaomi.com)",
+      "Bash(grep -n \"isArgMode\\\\|setIsArgMode\\\\|setShowCommandMenu\\\\|return {\\\\|filteredCommands,\" /Users/ithustle/dev/deskotp/exodus-ide/src/hooks/useCmdPromptLogic.ts)",
+      "Bash(node -e \"console.log\\('test'\\)\")",
+      "Bash(python3 -c \"import sys, json; [print\\(json.loads\\(l\\).get\\('message',{}\\).get\\('content',''\\) if isinstance\\(json.loads\\(l\\).get\\('message',{}\\).get\\('content',''\\), str\\) else json.dumps\\(json.loads\\(l\\).get\\('message',{}\\).get\\('content',''\\)\\)[:5000]\\) for l in sys.stdin if l.strip\\(\\)]\")",
+      "Bash(python3 *)"
     ]
   }
 }

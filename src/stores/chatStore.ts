@@ -97,6 +97,16 @@ interface ChatActions {
   clearAllSessions: () => void
   // Card messages (plan approval, todo list)
   addCardMessage: (type: ChatMessageCard['type'], projectPath: string) => void
+  /** Add a credential_request card with field metadata. Returns the message id so the
+   *  card can update its own status when the user submits or cancels. */
+  addCredentialRequestCard: (
+    projectPath: string,
+    requestId: string,
+    serviceName: string,
+    fields: NonNullable<ChatMessageCard['fields']>,
+  ) => string
+  /** Mark a credential_request card as submitted and record which keys were saved (no values). */
+  markCredentialRequestSubmitted: (messageId: string, submittedKeys: string[]) => void
   updateCardStatus: (messageId: string, status: ChatMessageCard['status']) => void
 }
 
@@ -1824,6 +1834,71 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const messages = session.messages.map(msg => {
           if (msg.id !== messageId || !msg.card) return msg
           return { ...msg, card: { ...msg.card, status } }
+        })
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+
+        return { sessions: updatedSessions }
+      })
+
+      debouncedSave()
+    },
+
+    addCredentialRequestCard: (projectPath, requestId, serviceName, fields) => {
+      const messageId = generateId('msg')
+      const message: ChatMessage = {
+        id: messageId,
+        role: 'system',
+        content: '',
+        timestamp: Date.now(),
+        card: {
+          type: 'credential_request',
+          projectPath,
+          status: 'pending',
+          requestId,
+          serviceName,
+          fields,
+        },
+      }
+
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const updatedSession: ChatSession = {
+          ...session,
+          messages: [...session.messages, message],
+          updatedAt: Date.now(),
+        }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, updatedSession)
+
+        return { sessions: updatedSessions }
+      })
+
+      debouncedSave()
+      return messageId
+    },
+
+    markCredentialRequestSubmitted: (messageId, submittedKeys) => {
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const messages = session.messages.map(msg => {
+          if (msg.id !== messageId || !msg.card) return msg
+          return {
+            ...msg,
+            card: { ...msg.card, status: 'submitted' as const, submittedKeys },
+          }
         })
 
         const updatedSessions = new Map(sessions)

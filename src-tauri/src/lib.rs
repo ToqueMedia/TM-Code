@@ -796,6 +796,8 @@ pub fn run() {
             copy_directory,
             scaffold_template,
             glob_files,
+            write_env_vars,
+            collect_deploy_bundle,
             list_skills_bundled,
             read_skill_content,
             mcp_start_server,

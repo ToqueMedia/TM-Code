@@ -31,8 +31,9 @@ import { IS_WINDOWS } from '@/utils/platform'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
+import DeploysSection from './settings/DeploysSection'
 
-type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'sandbox' | 'admin'
+type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'sandbox' | 'deploys' | 'admin'
 
 const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'profile', key: 'settings.profilePlan' },
@@ -41,6 +42,7 @@ const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'shortcuts', key: 'settings.shortcuts' },
   { id: 'skills', key: 'settings.skills' },
   { id: 'mcp', key: 'settings.mcpServers' },
+  { id: 'deploys', key: 'settings.deploys' as TranslationKey },
 ]
 
 const ADMIN_NAV_ENTRY: { id: SectionId; key: TranslationKey } = {
@@ -156,6 +158,7 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
             {activeSection === 'shortcuts' && <ShortcutsSection />}
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
+            {activeSection === 'deploys' && <DeploysSection />}
             {activeSection === 'admin' && showAdminNav && <AdminSection />}
           </Box>
         </Box>

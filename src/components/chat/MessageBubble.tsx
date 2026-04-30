@@ -12,6 +12,7 @@ import AgentLogo from '../ui/AgentLogo'
 import ReasoningBlock from './ReasoningBlock'
 import PlanApprovalCard from './PlanApprovalCard'
 import TodoListCard from './TodoListCard'
+import CredentialRequestCard from './CredentialRequestCard'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -296,6 +297,9 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       }
       if (message.card.type === 'todo_list') {
         return <TodoListCard card={message.card} />
+      }
+      if (message.card.type === 'credential_request') {
+        return <CredentialRequestCard messageId={message.id} card={message.card} />
       }
     }
 

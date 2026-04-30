@@ -33,6 +33,7 @@ function PromptBar() {
     showCommandMenu,
     filteredCommands,
     selectedCommandIndex,
+    isArgMode,
     handleCommandSelect,
     showMentionMenu,
     filteredMentions,
@@ -66,6 +67,7 @@ function PromptBar() {
             commands={filteredCommands}
             selectedIndex={selectedCommandIndex}
             onSelect={handleCommandSelect}
+            showArgsHint={isArgMode}
           />
         )}
 

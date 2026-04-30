@@ -202,12 +202,14 @@ class ToolExecutor {
       }
     }
 
-    // Agent-internal tools: bypass permission entirely. These are autonomous
-    // decisions (the agent activates reasoning or updates its own task list)
-    // — never surface a permission prompt to the user.
+    // Agent-internal tools + tools that surface their own confirmation UI:
+    // bypass the generic permission dialog. update_tasks/check_background_agents
+    // are autonomous; request_credentials renders a secure form in the chat
+    // (Save/Skip is the gate, not the permission dialog).
     const PERMISSION_EXEMPT_TOOLS = new Set([
       'update_tasks',
       'check_background_agents',
+      'request_credentials',
     ])
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
@@ -2441,6 +2443,281 @@ Project root: ${projectRoot}`
     })
 
     // === verify (adversarial verification sub-agent) ===
+    // === provision_auth ===
+    // One-shot tool that provisions GIP authentication for the current project:
+    // 1. Calls the backend to get-or-create a per-project GIP tenant
+    // 2. Writes the returned credentials to .env (via write_env_vars)
+    // 3. Copies the bundled auth-proxy boilerplate (routes, middleware, schema, authClient)
+    // 4. Returns a summary the agent can read before scaffolding the frontend
+    //    code via the auth-proxy-gip skill (read_skill('auth-proxy-gip')).
+    //
+    // The agent uses this when the user requests login/signup/auth in their
+    // project. After this tool returns, the agent should:
+    //   - read_skill('auth-proxy-gip') for the frontend recipe
+    //   - read_skill('google-signin') if Google sign-in is requested
+    //   - mount the auth-proxy router in the backend entry (app.use('/api', authProxyRouter))
+    this.tools.set('provision_auth', {
+      definition: {
+        name: 'provision_auth',
+        description:
+          'Provision Google Identity Platform (GIP) authentication for the current project. Creates a per-project GIP tenant on the platform and writes the Firebase Web config to .env (VITE_FIREBASE_API_KEY, AUTH_DOMAIN, PROJECT_ID, TENANT_ID + backend GIP_TENANT_ID + GIP_FIREBASE_API_KEY + GCP_PROJECT_ID). Use ONCE per project when the user requests login/signup/auth. The agent then implements the auth-proxy and frontend in whatever stack fits the project (Express, Hono, Fastify, FastAPI, etc.) — see read_skill("auth-proxy-gip") for the protocol. After this returns, the project has EVERY credential it needs: the auth-proxy uses VITE_FIREBASE_API_KEY (a public Firebase Web key) for Identity Toolkit REST. Do NOT call request_credentials afterwards: Firebase service accounts, Firebase Admin SDK keys, GOOGLE_APPLICATION_CREDENTIALS, GIP_SERVICE_ACCOUNT_*, and any GCP infrastructure credential are platform-managed and live only on the TM Code worker — the user does not have them.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            provider: {
+              type: 'string',
+              enum: ['gip'],
+              description: 'Auth provider. Currently only "gip" is supported.',
+            },
+          },
+          required: ['provider'],
+        },
+      },
+      execute: async (input) => {
+        const provider = String(input.provider || '').toLowerCase()
+        if (provider !== 'gip') {
+          return `Unsupported auth provider: ${provider}. Only "gip" is supported.`
+        }
+
+        const project = useProjectStore.getState().currentProject
+        if (!project) {
+          return 'No project is open. Open a project before provisioning auth.'
+        }
+
+        const firebaseAuth = FirebaseAuthService.getInstance()
+        const idToken = await firebaseAuth.getIdToken()
+        if (!idToken) {
+          return 'Not authenticated to TM Code. Sign in first, then retry.'
+        }
+
+        const workerUrl = resolveWorkerUrl()
+        let provisionRes: Awaited<ReturnType<typeof tauriFetch>>
+        try {
+          provisionRes = await tauriFetch(`${workerUrl}/v1/auth/provision-gip`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              projectId: project.id,
+              projectName: project.name,
+            }),
+          })
+        } catch (err) {
+          return `Failed to reach auth provisioning endpoint: ${err instanceof Error ? err.message : String(err)}`
+        }
+
+        if (!provisionRes.ok) {
+          const body = await provisionRes.text().catch(() => '')
+          return `GIP provisioning failed (HTTP ${provisionRes.status}): ${body.slice(0, 300)}`
+        }
+
+        const data = (await provisionRes.json()) as {
+          tenantId?: string
+          apiKey?: string
+          authDomain?: string
+          projectId?: string
+          googleClientId?: string | null
+        }
+
+        if (!data.tenantId || !data.apiKey || !data.authDomain || !data.projectId) {
+          return `Provisioning returned incomplete data: ${JSON.stringify(data)}`
+        }
+
+        // Write the credentials to .env via the same single-write-path used by
+        // request_credentials. Keys mirror what the auth-proxy-gip skill expects.
+        const envVars: Array<{ key: string; value: string }> = [
+          { key: 'VITE_FIREBASE_API_KEY', value: data.apiKey },
+          { key: 'VITE_FIREBASE_AUTH_DOMAIN', value: data.authDomain },
+          { key: 'VITE_FIREBASE_PROJECT_ID', value: data.projectId },
+          { key: 'VITE_GIP_TENANT_ID', value: data.tenantId },
+          // Backend env (read by the auth-proxy boilerplate)
+          { key: 'GCP_PROJECT_ID', value: data.projectId },
+          { key: 'GIP_TENANT_ID', value: data.tenantId },
+          { key: 'GIP_FIREBASE_API_KEY', value: data.apiKey },
+        ]
+        if (data.googleClientId) {
+          envVars.push({ key: 'VITE_GOOGLE_CLIENT_ID', value: data.googleClientId })
+        }
+
+        try {
+          await invoke('write_env_vars', { projectPath: project.path, vars: envVars })
+        } catch (err) {
+          return `Wrote tenant ${data.tenantId} but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
+        }
+
+        const lines: string[] = []
+        lines.push(`GIP tenant ready: ${data.tenantId} (project ${data.projectId}).`)
+        lines.push(`.env written: ${envVars.map((v) => v.key).join(', ')}.`)
+        lines.push('')
+        lines.push('Next steps:')
+        lines.push('  1. read_skill("auth-proxy-gip") for the protocol — Identity Toolkit REST endpoints, JWT verification, recommended client/server patterns. Stack-agnostic; pick whatever backend the project already uses (or whichever the developer asked for).')
+        lines.push('  2. Implement the backend auth proxy in your chosen stack: signup, signin, google, refresh, sync. Use VITE_FIREBASE_API_KEY (or the equivalent server-side env var GIP_FIREBASE_API_KEY) to call Identity Toolkit. Verify Firebase JWTs with the Google JWKS (no Firebase Admin SDK needed).')
+        lines.push('  3. Implement the frontend: firebase init (auth.tenantId from VITE_GIP_TENANT_ID), Login/Signup/AuthGuard, an auth store with signup/login/logout/setUser. Only onAuthStateChanged is allowed from firebase/auth.')
+        lines.push('  4. If Google sign-in is requested: read_skill("google-signin") for the GIS button integration.')
+        lines.push('')
+        lines.push('CREDENTIALS COMPLETE — do NOT call request_credentials for anything Firebase/GIP/GCP-related. The auth-proxy authenticates against Identity Toolkit REST using the PUBLIC VITE_FIREBASE_API_KEY (now in .env), not a service account. There is NO Firebase Admin SDK in this stack and the user does not have GOOGLE_APPLICATION_CREDENTIALS / serviceAccountKey.json / GIP_SERVICE_ACCOUNT_* — those live only on the TM Code platform worker.')
+
+        return lines.join('\n')
+      },
+    })
+
+    // === request_credentials ===
+    // Renders a secure form in the chat for collecting API keys, tokens, and
+    // secrets. The form is the ONLY legitimate write path for the project's
+    // .env file (the agent's normal write/read tools are mechanically blocked
+    // from .env). Values never enter the chat history or the model context —
+    // the tool result only echoes the keys that were saved.
+    this.tools.set('request_credentials', {
+      definition: {
+        name: 'request_credentials',
+        description:
+          'Request API keys, tokens, or other secrets from the user via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by you). Never instruct the user to create or edit .env, and never ask them to paste secrets into the chat.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nDO NOT USE FOR: anything Firebase / Google Identity Platform / GCP-infrastructure related. The TM Code platform manages those: provision_auth handles GIP tenants and writes the necessary VITE_FIREBASE_* + GIP_* keys to .env automatically. The user does not have (and will never have) Firebase service account JSONs, serviceAccountKey.json, GOOGLE_APPLICATION_CREDENTIALS, GIP_SERVICE_ACCOUNT_CLIENT_EMAIL/PRIVATE_KEY, or any Firebase Admin SDK credential — those live only on the platform worker. Asking for them is incorrect and will confuse the user.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            service_name: {
+              type: 'string',
+              description: 'Name of the service the credentials are for (e.g. "OpenAI", "Stripe", "Firebase")',
+            },
+            fields: {
+              type: 'array',
+              description: 'Credential fields to collect. Maximum 8 per request.',
+              items: {
+                type: 'object',
+                properties: {
+                  id: {
+                    type: 'string',
+                    description: 'Env var key as it will appear in .env (UPPER_SNAKE_CASE, e.g. "OPENAI_API_KEY")',
+                  },
+                  label: {
+                    type: 'string',
+                    description: 'Human-readable label shown in the form',
+                  },
+                  type: {
+                    type: 'string',
+                    enum: ['text', 'password'],
+                    description: 'Use "password" for API keys, tokens, secrets. Use "text" for non-sensitive values like project IDs.',
+                  },
+                  required: {
+                    type: 'boolean',
+                    description: 'Whether the field must be filled before the user can submit',
+                  },
+                  helperText: {
+                    type: 'string',
+                    description: 'Optional hint shown below the field (e.g. "Find this at https://...")',
+                  },
+                },
+                required: ['id', 'label', 'type', 'required'],
+              },
+            },
+          },
+          required: ['service_name', 'fields'],
+        },
+      },
+      execute: async (input) => {
+        const serviceName = String(input.service_name || '').trim()
+        if (!serviceName) {
+          return 'Missing required parameter: service_name'
+        }
+
+        const rawFields = input.fields
+        if (!Array.isArray(rawFields) || rawFields.length === 0) {
+          return 'Missing required parameter: fields (must be a non-empty array)'
+        }
+        if (rawFields.length > 8) {
+          return 'Too many fields: maximum 8 per request. Group related credentials into separate calls.'
+        }
+
+        const fields: Array<{
+          id: string
+          label: string
+          type: 'text' | 'password'
+          required: boolean
+          helperText?: string
+        }> = []
+        const seenIds = new Set<string>()
+        for (const raw of rawFields as Array<Record<string, unknown>>) {
+          const id = String(raw?.id ?? '').trim()
+          const label = String(raw?.label ?? '').trim()
+          if (!id || !label) {
+            return 'Each field must have non-empty "id" and "label".'
+          }
+          if (!/^[A-Z_][A-Z0-9_]*$/.test(id)) {
+            return `Field id "${id}" is not a valid env var key (must match /^[A-Z_][A-Z0-9_]*$/).`
+          }
+          if (seenIds.has(id)) {
+            return `Duplicate field id "${id}".`
+          }
+          seenIds.add(id)
+          const type = raw?.type === 'text' ? 'text' : 'password'
+          fields.push({
+            id,
+            label,
+            type,
+            required: raw?.required !== false,
+            helperText: raw?.helperText ? String(raw.helperText).trim() : undefined,
+          })
+        }
+
+        const projectRoot = this.getProjectRoot()
+        if (!projectRoot) {
+          return 'No active project — cannot collect credentials. Open a project first.'
+        }
+
+        const { useCredentialRequestStore } = await import('../../stores/credentialRequestStore')
+        const chatStore = useChatStore.getState()
+
+        // request() is synchronous — returns the id and a promise we await
+        // below. We race the promise against the abort signal so the tool
+        // unblocks immediately if the loop is cancelled.
+        const { id: requestId, promise: requestPromise } = useCredentialRequestStore
+          .getState()
+          .request({ serviceName, fields })
+
+        const cardMessageId = chatStore.addCredentialRequestCard(
+          projectRoot,
+          requestId,
+          serviceName,
+          fields,
+        )
+
+        const abortSignal = input._abortSignal as AbortSignal | undefined
+
+        const result = await new Promise<{ submitted: boolean; keys?: string[] }>((resolve) => {
+          let settled = false
+          const onAbort = () => {
+            if (settled) return
+            settled = true
+            useCredentialRequestStore.getState().cancel(requestId)
+            resolve({ submitted: false })
+          }
+          if (abortSignal) {
+            if (abortSignal.aborted) {
+              onAbort()
+              return
+            }
+            abortSignal.addEventListener('abort', onAbort, { once: true })
+          }
+          requestPromise.then((r) => {
+            if (settled) return
+            settled = true
+            resolve(r)
+          })
+        })
+
+        if (result.submitted) {
+          chatStore.markCredentialRequestSubmitted(cardMessageId, result.keys ?? [])
+          const keysList = (result.keys ?? []).join(', ') || '(none)'
+          return `Credentials saved to .env for ${serviceName}: ${keysList}. Values are masked from the chat history. Continue with the implementation.`
+        }
+
+        chatStore.updateCardStatus(cardMessageId, 'cancelled')
+        return `User cancelled the credential request for ${serviceName}. Ask the user how they want to proceed without these credentials.`
+      },
+    })
+
     this.tools.set('verify', {
       definition: {
         name: 'verify',

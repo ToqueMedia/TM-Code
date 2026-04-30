@@ -88,10 +88,26 @@ export interface ToolCallDisplay {
   spawnedBy?: string
 }
 
+export interface CredentialFieldDescriptor {
+  id: string
+  label: string
+  type: 'text' | 'password'
+  required: boolean
+  helperText?: string
+}
+
 export interface ChatMessageCard {
-  type: 'plan_approval' | 'todo_list'
+  type: 'plan_approval' | 'todo_list' | 'credential_request'
   projectPath: string
-  status: 'pending' | 'approved' | 'changes_requested' | 'rejected'
+  status: 'pending' | 'approved' | 'changes_requested' | 'rejected' | 'submitted' | 'cancelled'
+  /** credential_request only: identifies the pending entry in credentialRequestStore */
+  requestId?: string
+  /** credential_request only: service name (e.g. "OpenAI", "Stripe") shown in the form header */
+  serviceName?: string
+  /** credential_request only: fields to collect */
+  fields?: CredentialFieldDescriptor[]
+  /** credential_request only: keys actually submitted (no values) — populated after submit */
+  submittedKeys?: string[]
 }
 
 export type SystemMessageLevel = 'info' | 'success' | 'error' | 'warn'
