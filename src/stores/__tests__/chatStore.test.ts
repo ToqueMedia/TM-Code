@@ -190,12 +190,16 @@ describe('chatStore', () => {
   })
 
   describe('token usage tracking', () => {
-    it('accumulates token usage', () => {
+    it('input takes max (current context size), output accumulates (new tokens emitted)', () => {
+      // Each turn re-sends the full conversation, so input=200 already
+      // contains the work that input=100 represented. Summing inputs would
+      // double-count. Output, by contrast, is fresh tokens generated each
+      // turn — those add up.
       useChatStore.getState().addTokenUsage(100, 50)
       useChatStore.getState().addTokenUsage(200, 75)
 
       const { totalTokensUsed } = useChatStore.getState()
-      expect(totalTokensUsed.input).toBe(300)
+      expect(totalTokensUsed.input).toBe(200)
       expect(totalTokensUsed.output).toBe(125)
     })
   })

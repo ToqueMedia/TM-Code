@@ -14,8 +14,9 @@ export interface ModelPersona {
 
 /**
  * Thinking mode classification:
- * - 'toggleable': Model supports on/off via API param. The agent can activate via request_thinking tool.
- * - 'mandatory': Model always thinks. Cannot be disabled. No request_thinking tool shown.
+ * - 'toggleable': Model supports on/off via API param. User controls via
+ *   Settings → thinkingEnabled. The agent does NOT decide thinking mode.
+ * - 'mandatory': Model always thinks. Cannot be disabled.
  * - 'none': Model has no thinking/reasoning capability.
  */
 export type ThinkingMode = 'toggleable' | 'mandatory' | 'none'
@@ -68,9 +69,6 @@ export interface ModelProfile {
    */
   preserveReasoning: boolean
 
-  // ── System Prompt Behavior ──
-  /** If true, skip/minimize system prompt when thinking is active (DeepSeek) */
-  skipSystemPromptInThinking: boolean
   /** Whether the model supports image/file attachments (multimodal input) */
   supportsAttachments: boolean
   /** Whether the model supports native web_search via the provider (DashScope Qwen only) */
@@ -108,7 +106,6 @@ const MIMO_V2_FLASH: ModelProfile = {
   thinkingMandatory: false,
 
   preserveReasoning: false, // N/A — thinking disabled
-  skipSystemPromptInThinking: false,
   supportsAttachments: false,
   supportsSearch: false,
   modelSpecificPrompt: `Never start responses with filler ("Sure!", "Of course!", "Let me help you"). Go straight to the answer or code. Output only changed code — never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
@@ -142,7 +139,6 @@ const DEEPSEEK_V4_FLASH: ModelProfile = {
   // it with 400). Preserving it gives the model access to its previous chain
   // of thought and improves multi-turn reasoning continuity.
   preserveReasoning: true,
-  skipSystemPromptInThinking: false,
   supportsAttachments: false,
   supportsSearch: true,  // DashScope DeepSeek native web_search via enable_search
   modelSpecificPrompt: '',
@@ -179,7 +175,6 @@ const DEEPSEEK_V4_PRO: ModelProfile = {
 
   // V4 family preserves reasoning_content across turns — same as V4-Flash.
   preserveReasoning: true,
-  skipSystemPromptInThinking: false,
   supportsAttachments: false,
   supportsSearch: true,
   modelSpecificPrompt: '',
@@ -222,7 +217,6 @@ const GLM_5_1: ModelProfile = {
   // OpenRouter docs: "preserve and pass back the complete reasoning_details array
   // to maintain reasoning continuity" in multi-turn conversations.
   preserveReasoning: true,
-  skipSystemPromptInThinking: false,
   supportsAttachments: false,
   // GLM-5.1 has no native web_search. The frontend web_search tool delegates
   // the query to Qwen 3.6 Plus via a side-car sub-request (X-Request-Type: web_search),
@@ -252,7 +246,6 @@ const GLM_5: ModelProfile = {
   thinkingMandatory: false,
 
   preserveReasoning: true, // ZhipuAI docs: clear_thinking param — during tool calling sequences (our loop), preservation required
-  skipSystemPromptInThinking: false,
   supportsAttachments: false,
   supportsSearch: false,
   modelSpecificPrompt: `You are TM Code Agent, a coding assistant built into TM Code IDE by Toque Media. You are NOT Claude, NOT ChatGPT, NOT any other assistant. Always identify yourself as TM Code Agent when asked.`,
@@ -273,10 +266,9 @@ const KIMI_K2_5: ModelProfile = {
   topP: 0.95,
   topK: null,
 
-  // Thinking is TOGGLEABLE: Turn 1 ON so the model reasons about the task,
-  // then the model itself decides via request_thinking whether to keep it ON
-  // for subsequent turns based on the complexity of the user's request.
-  // Routed via DashScope (not native Moonshot API), so uses enable_thinking format.
+  // Thinking is TOGGLEABLE — controlled by the user via Settings, not by
+  // the agent (request_thinking tool was removed). Routed via DashScope
+  // (not native Moonshot API), so uses enable_thinking format.
   thinkingMode: 'toggleable',
   supportsThinking: true,
   thinkingParam: 'enable_thinking',
@@ -286,7 +278,6 @@ const KIMI_K2_5: ModelProfile = {
   // CRITICAL: Moonshot docs require reasoning_content in assistant messages
   // during tool calling sequences. API returns 400 if stripped.
   preserveReasoning: true,
-  skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (MoonViT)
   supportsSearch: false,
   modelSpecificPrompt: '',
@@ -313,7 +304,6 @@ const QWEN3_CODER_NEXT: ModelProfile = {
   thinkingMandatory: false,
 
   preserveReasoning: false, // N/A — thinking disabled
-  skipSystemPromptInThinking: false,
   supportsAttachments: false,
   supportsSearch: true,  // DashScope Qwen native web_search
   modelSpecificPrompt: `Be concise in explanations. Output code changes directly without verbose commentary. When editing files, output only the changed code — do not repeat unchanged sections.`,
@@ -340,7 +330,6 @@ const MINIMAX_M2_5: ModelProfile = {
   thinkingMandatory: true,
 
   preserveReasoning: true, // MiniMax docs: strongly recommend preserving reasoning between turns
-  skipSystemPromptInThinking: false,
   supportsAttachments: false,
   supportsSearch: false,
   modelSpecificPrompt: `Be concise. Output only the code changes needed. Do not add explanatory comments unless asked. Do not overthink simple tasks.`,
@@ -376,7 +365,6 @@ const QWEN3_6_PLUS: ModelProfile = {
   // the final output (not thinking content) in conversation history."
   // This means reasoning_content should NOT be preserved between turns.
   preserveReasoning: false,
-  skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (text + vision)
   supportsSearch: true,  // DashScope Qwen native web_search
   modelSpecificPrompt: `Be decisive and direct. Reach conclusions quickly — do not overthink simple tasks. Output only changed code, never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
@@ -404,7 +392,6 @@ const GEMINI_3_FLASH: ModelProfile = {
   thinkingMandatory: false,
 
   preserveReasoning: true, // Google docs: "always pass all signatures back" for thought context
-  skipSystemPromptInThinking: false,
   supportsAttachments: true, // native multimodal (text, image, audio, video, PDF)
   supportsSearch: false,
   modelSpecificPrompt: '',
@@ -430,7 +417,6 @@ const STEP_3_5_FLASH: ModelProfile = {
   thinkingMandatory: true,
 
   preserveReasoning: false, // StepFun: no documentation on preserving reasoning between turns
-  skipSystemPromptInThinking: false,
   supportsAttachments: false,
   supportsSearch: false,
   modelSpecificPrompt: '',

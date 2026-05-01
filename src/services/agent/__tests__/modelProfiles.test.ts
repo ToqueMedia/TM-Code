@@ -19,6 +19,7 @@ describe('modelProfiles', () => {
       const ids = Object.keys(MODEL_PROFILES)
       expect(ids).toContain('mimo-v2-flash')
       expect(ids).toContain('deepseek-v4-flash')
+      expect(ids).toContain('deepseek-v4-pro')
       expect(ids).toContain('step-3.5-flash')
       expect(ids).toContain('glm-5')
       expect(ids).toContain('glm-5.1')
@@ -27,7 +28,7 @@ describe('modelProfiles', () => {
       expect(ids).toContain('minimax-m2.5')
       expect(ids).toContain('qwen3.6-plus')
       expect(ids).toContain('gemini-3-flash')
-      expect(ids.length).toBe(10)
+      expect(ids.length).toBe(11)
     })
 
     it('mimo-v2-flash has correct specs', () => {
@@ -73,7 +74,7 @@ describe('modelProfiles', () => {
   describe('getAllModelProfiles', () => {
     it('returns all profiles', () => {
       const all = getAllModelProfiles()
-      expect(all.length).toBe(10)
+      expect(all.length).toBe(11)
     })
   })
 

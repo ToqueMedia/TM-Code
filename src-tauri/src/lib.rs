@@ -686,7 +686,22 @@ pub fn run() {
                 .expect("Failed to set window icon")
                 .inner_size(1250.0, 850.0)
                 .min_inner_size(900.0, 600.0)
-                .decorations(false);
+                .decorations(false)
+                // Start hidden — the React entry calls window.show() after the
+                // first paint commit, so the window doesn't appear empty for
+                // the ~100-300ms it takes the SPA to mount. Standard pattern
+                // used by VS Code, Linear, Raycast, etc.
+                .visible(false)
+                // Force the *window* appearance to Dark regardless of OS
+                // preference. The TM Code UI is dark-only; without this, in
+                // macOS Light mode the traffic lights, native menu bar items,
+                // and the NSVisualEffectView material all render in their
+                // light variants and clash with the rest of the chrome. On
+                // Windows this drives DwmSetWindowAttribute(USE_IMMERSIVE_DARK_MODE)
+                // so the title bar and Mica also stay dark. If a light theme
+                // is ever added, swap this for None and listen to the
+                // `theme-changed` event on the window.
+                .theme(Some(tauri::Theme::Dark));
 
             #[cfg(target_os = "macos")]
             {

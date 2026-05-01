@@ -34,6 +34,64 @@ Backend mirrors:
 
 **Do NOT modify `.env` yourself.** It is system-managed.
 
+## Loading `.env` at runtime
+
+`provision_auth` writes credentials to `.env`. Most runtimes do NOT load `.env` automatically — you have to wire it in, or `process.env.GIP_FIREBASE_API_KEY` will be `undefined` at runtime and every Identity Toolkit call returns 400 `API_KEY_INVALID`.
+
+Pick whatever fits the runtime. Examples:
+
+- **Node 20.6+** via tsx or node directly: pass `--env-file=.env` in the dev/start script (e.g. `tsx watch --env-file=.env server/index.ts`).
+- **Older Node / general fallback**: install `dotenv` and `import 'dotenv/config'` at the top of the entry file before any `process.env.X` access.
+- **NestJS**: `ConfigModule.forRoot({ isGlobal: true })`.
+- **Bun**: loads `.env` automatically — no setup needed.
+- **Deno**: pass `--env-file=.env` to `deno run`, or use `Deno.env`.
+- **Python (FastAPI etc.)**: `python-dotenv` with `load_dotenv()` at startup, or `pydantic-settings`.
+- **Go**: `github.com/joho/godotenv` with `godotenv.Load()` at startup.
+
+Verify after wiring with a fail-fast guard near startup:
+
+```ts
+if (!process.env.GIP_FIREBASE_API_KEY) {
+  throw new Error('GIP_FIREBASE_API_KEY missing — is .env being loaded?')
+}
+```
+
+Without this guard, missing env vars surface only as cryptic 400s from Identity Toolkit ("API key not valid"), wasting debugging time.
+
+## Ports and CORS — let the framework defaults stand
+
+Pick the framework's default port (Vite=5173, Next=3000, Express/your-choice). The TM Code IDE detects the dev-server URL from log output and classifies it by HTTP content-type — there is no "reserved port" you must use. Hardcoding 7773/7777 is no longer required.
+
+Two coordination concerns when frontend and backend run on different ports:
+
+**1. Backend port**: bind to whatever the runtime gives you, defaulting to a sensible value:
+```ts
+app.listen(Number(process.env.PORT) || 3000, '0.0.0.0', ...)
+```
+
+**2. CORS**: the frontend port is unknown at write-time (the dev server may pick a different one if the default is busy). Three options, in order of preference:
+
+- **Permissive in dev** (simplest, only safe for local dev):
+  ```ts
+  app.use(cors({ origin: true, credentials: true }))
+  ```
+- **Env-driven** (recommended if your stack supports it):
+  ```ts
+  const allowed = (process.env.CORS_ORIGIN || '').split(',').filter(Boolean)
+  app.use(cors({ origin: allowed.length ? allowed : true, credentials: true }))
+  ```
+  Then the dev script or `.env` declares `CORS_ORIGIN=http://localhost:5173`.
+- **Hardcoded list** (fragile — only when you control all the ports): include every realistic dev origin. Avoid; the natural-port world makes this brittle.
+
+The auth helper (`authFetch`) on the frontend uses `/api/...` paths. Wire the Vite dev proxy to forward `/api` to the backend so the browser sees same-origin requests and CORS doesn't even apply for the proxy:
+```ts
+// vite.config.ts
+server: {
+  proxy: { '/api': { target: 'http://localhost:3000', changeOrigin: true } }
+}
+```
+With the proxy in place, CORS only matters for direct cross-origin calls (e.g. third-party APIs) — the auth flow stays same-origin.
+
 ## Hard rules
 
 1. **NEVER** install `firebase-admin`. There is no Admin SDK in this stack — the auth-proxy talks to the Identity Toolkit REST API directly with `VITE_FIREBASE_API_KEY` (a public key).

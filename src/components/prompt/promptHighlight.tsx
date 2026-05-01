@@ -1,27 +1,70 @@
 import { Fragment, type ReactNode } from 'react'
 import { tokens } from '@/theme/tokens'
 import { slashCommandRegistry } from '../../services/agent/slashCommandRegistry'
+import { extractHashtags } from '../../utils/hashtagParser'
+import { HASHTAG_OPTIONS } from '../../services/agent/hashtagRegistry'
+
+interface HighlightSegment {
+  start: number
+  end: number
+}
+
+const HIGHLIGHT_STYLE = { color: tokens.colors.accent.primary, fontWeight: 600 }
 
 /**
- * Render the prompt input value as styled spans, with the leading slash-command
- * token highlighted when it matches a registered command. Returns the raw
- * string when no highlight applies — caller can render either output the
- * same way, simplifying the overlay JSX.
+ * Render the prompt input value as styled spans, with TWO classes of token
+ * highlighted:
  *
- * Why "registered command" only: highlighting any `/word` would reward typos
- * (`/aith` looks correct in pink). Coloring only known commands gives the
- * user free validation that the name is recognized.
+ *   1. Leading slash-command (only when the token matches a registered
+ *      command). Position-locked: must start at index 0.
+ *   2. Closed-vocabulary hashtags (`#auth-*` etc.) anywhere in the input,
+ *      only when the tag exists in `HASHTAG_OPTIONS`. Whitespace-delimited.
+ *
+ * Plain string is returned when nothing matches — saves the caller a
+ * Fragment in the common case.
+ *
+ * Why "registered tokens only": highlighting any `/word` or `#word` would
+ * reward typos (`/aith`, `#aut-google` would both look correct). Coloring
+ * only known tokens gives the user free validation that the name is
+ * recognised by the IDE.
  */
 export function renderHighlightedPrompt(value: string): ReactNode {
-  if (!value.startsWith('/')) return value
-  const match = value.match(/^(\/\S+)(\s|$)/)
-  if (!match) return value
-  const token = match[1]
-  if (!slashCommandRegistry.getCommand(token)) return value
-  return (
-    <Fragment>
-      <span style={{ color: tokens.colors.accent.primary, fontWeight: 600 }}>{token}</span>
-      {value.slice(token.length)}
-    </Fragment>
-  )
+  const segments: HighlightSegment[] = []
+
+  // 1. Leading slash command
+  if (value.startsWith('/')) {
+    const slashMatch = value.match(/^(\/\S+)(\s|$)/)
+    if (slashMatch && slashCommandRegistry.getCommand(slashMatch[1])) {
+      segments.push({ start: 0, end: slashMatch[1].length })
+    }
+  }
+
+  // 2. Known hashtags (whitespace-delimited)
+  const knownTags = new Set(HASHTAG_OPTIONS.map(o => o.tag))
+  for (const tag of extractHashtags(value)) {
+    if (knownTags.has(`#${tag.token}`)) {
+      segments.push({ start: tag.start, end: tag.end })
+    }
+  }
+
+  if (segments.length === 0) return value
+
+  // Stable in-place sort; no overlap is possible because each segment is
+  // whitespace-anchored so they never share a character.
+  segments.sort((a, b) => a.start - b.start)
+
+  const out: ReactNode[] = []
+  let cursor = 0
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]
+    if (cursor < seg.start) out.push(value.slice(cursor, seg.start))
+    out.push(
+      <span key={`hl-${i}`} style={HIGHLIGHT_STYLE}>
+        {value.slice(seg.start, seg.end)}
+      </span>,
+    )
+    cursor = seg.end
+  }
+  if (cursor < value.length) out.push(value.slice(cursor))
+  return <Fragment>{out}</Fragment>
 }

@@ -1640,14 +1640,13 @@ class ToolExecutor {
     this.tools.set('start_dev_server', {
       definition: {
         name: 'start_dev_server',
-        description: 'Start the project\'s dev server as a background process. Returns immediately — the correct preview panel opens automatically when the server is ready. ONE dev server per project.\n\nPass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).\n\nproject_kind: "frontend" (UI-only → iframe preview), "backend" (API-only → HTTP Client panel), "fullstack" (both — iframe + toggleable HTTP Client drawer). Auto-detected if omitted.\n\nPORTS — TWO MODES:\n  • TM Code projects (.toquemedia-id exists): uses reserved ports 7773 (frontend) / 7777 (backend). Omit frontend_port and backend_port.\n  • External projects: inspect the project\'s real ports first (package.json scripts, source code). If they differ from 7773/7777, pass frontend_port and backend_port as overrides so TM Code adapts to the project WITHOUT rewriting user scripts. Never force-migrate an external project\'s ports — adapt instead.',
+        description: 'Start the project\'s dev server as a background process. Returns immediately — the correct preview panel opens automatically when the server is ready. ONE dev server per project.\n\nPass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).\n\nproject_kind: "frontend" (UI-only → iframe preview), "backend" (API-only → HTTP Client panel), "fullstack" (both — iframe + toggleable HTTP Client drawer). Auto-detected if omitted.\n\nPorts: the framework picks the port (Vite=5173, Next=3000, Express=whatever your scripts bind). The IDE detects the URL from log output and classifies frontend/backend by HTTP content-type — you do not need to pass any port.\n\nfrontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond with the same content-type and the IDE assigned the wrong URL to the iframe. Most projects do not need it.',
         input_schema: {
           type: 'object',
           properties: {
             command: { type: 'string', description: 'Dev server command (e.g., "npm run dev", "pnpm start", "npx vite"). Pass the top-level command even if it spawns multiple processes.' },
             project_kind: { type: 'string', enum: ['frontend', 'backend', 'fullstack'], description: '"frontend", "backend", or "fullstack". Auto-detected if omitted.' },
-            frontend_port: { type: 'number', description: 'Port the frontend actually binds to. Omit for TM Code projects (uses 7773). For external projects, pass their real port (e.g., 3000 for Next.js, 5173 for Vite default).' },
-            backend_port: { type: 'number', description: 'Port the backend actually binds to. Omit for TM Code projects (uses 7777). For external projects, pass their real port (e.g., 3001, 8080).' },
+            frontend_port_hint: { type: 'number', description: 'Optional override for fullstack content-type ambiguity. Treats the URL on this port as frontend regardless of what it serves. Use only when the automatic content-type classifier picks the wrong URL.' },
             server_type: { type: 'string', enum: ['frontend', 'backend'], description: 'DEPRECATED — use project_kind instead.' }
           },
           required: ['command']
@@ -1657,8 +1656,7 @@ class ToolExecutor {
         const command = input.command as string
         let projectKind = input.project_kind as 'frontend' | 'backend' | 'fullstack' | undefined
         const legacyServerType = input.server_type as 'frontend' | 'backend' | undefined
-        const frontendPort = typeof input.frontend_port === 'number' ? input.frontend_port : undefined
-        const backendPort = typeof input.backend_port === 'number' ? input.backend_port : undefined
+        const frontendPortHint = typeof input.frontend_port_hint === 'number' ? input.frontend_port_hint : undefined
         this.validateCommand(command)
         const projectRoot = this.getProjectRoot()
 
@@ -1679,15 +1677,13 @@ class ToolExecutor {
         if (!projectKind) projectKind = 'frontend'
 
         try {
-          await devServerManager.start(projectRoot, command, { projectKind, frontendPort, backendPort })
+          await devServerManager.start(projectRoot, command, { projectKind, frontendPortHint })
           const url = devServerManager.getUrl()
-          const portsNote = (frontendPort || backendPort)
-            ? ` [using custom ports: frontend=${frontendPort ?? 7773}, backend=${backendPort ?? 7777}]`
-            : ''
+          const hintNote = frontendPortHint ? ` [frontend port hint: ${frontendPortHint}]` : ''
           if (url) {
-            return `Dev server started and running at ${url} (${projectKind})${portsNote}. The correct preview panel will open automatically.`
+            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The correct preview panel will open automatically.`
           }
-          return `Dev server starting with command: ${command} (${projectKind})${portsNote}. The preview panel will open automatically when the server is ready.`
+          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. The preview panel will open automatically when the server is ready.`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`

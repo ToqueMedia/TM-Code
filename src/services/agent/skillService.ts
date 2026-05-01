@@ -55,12 +55,8 @@ const RICH_ARTIFACT_SKILLS = new Set([
   'pdf-document', 'docx-document', 'xlsx-spreadsheet',
   'pptx-presentation', 'slidev-presentation', 'html-document',
 ])
-const FRONTEND_PROJECT_TYPES = new Set([
-  'react', 'vue', 'angular', 'svelte', 'nextjs', 'nuxt',
-])
-// Auth-scaffolding skills. Index-only entries (~150B in prompt each); the agent
-// only fetches the body via read_skill if it decides to wire up auth. Loaded
-// for any frontend project so the agent knows the recipe is available.
+// Auth-scaffolding skills. Index-only entries (~150B in prompt each); the
+// agent fetches the body via read_skill only when it decides to wire up auth.
 const AUTH_SKILLS = new Set(['auth-proxy-gip', 'google-signin'])
 
 // parseSkillFrontmatter + MAX_DESCRIPTION_CHARS live in ./skillFrontmatter (zero-deps)
@@ -370,46 +366,64 @@ ${lines.join('\n')}`
     }
   }
 
+  /**
+   * Decide whether a bundled skill makes it into the system-prompt index.
+   *
+   * Design principle: keep this gate MINIMAL. It exists to filter out skills
+   * whose tool surface doesn't match the active mode (e.g. CMD-only PDF
+   * authoring in a chat-mode prompt) — NOT to second-guess relevance. The
+   * skill description in the index is self-explanatory; the model decides
+   * via `read_skill` whether to load the body. We add ~150B per skill in
+   * the index — trivial cost vs the real cost of silently dropping a useful
+   * skill (training-data fallback, mediocre output).
+   *
+   * Heuristics that gate by `projectType` only earn their keep when the
+   * filter is genuinely orthogonal (vue-patterns vs react codebase). Even
+   * then, fresh/empty projects fall back to "show everything" — the model
+   * is about to scaffold and needs to see the options.
+   */
   private isBundledSkillRelevant(
     skillName: string,
     projectType?: string,
     mode: PromptMode = 'chat',
   ): boolean {
     // Force-loaded skills bypass every other gate — used by hashtag flows
-    // (e.g. `#auth-google`) that pre-commit the agent to a workflow regardless
-    // of the project's auto-detected type. Without this, an empty project (no
-    // package.json → projectType undefined) silently drops auth skills even
-    // though the user explicitly asked for them via the hashtag.
+    // (e.g. `#auth-google`) that pre-commit the agent to a workflow.
     if (this.forceLoadedSkillNames.has(skillName)) return true
 
-    // general-coding is always relevant in both modes — it carries cross-cutting hygiene rules.
+    // general-coding is always relevant — cross-cutting hygiene.
     if (skillName === 'general-coding') return true
 
-    // Rich-artifact skills are CMD-only: they assume direct disk writes and broader scope
-    // (PDF, Word, Excel, PowerPoint, HTML deliverables) that don't belong in code-focused chat.
+    // Rich-artifact skills (PDF, Word, Excel, PPT, HTML) are CMD-only — they
+    // assume direct disk writes and a tool surface that chat mode doesn't
+    // expose. This is a real capabilities gate, not a relevance heuristic.
     if (RICH_ARTIFACT_SKILLS.has(skillName)) {
       return mode === 'cmd'
     }
 
-    // frontend-design loads in BOTH modes when working with a frontend project,
-    // and always in CMD (CMD users may scaffold UI ad-hoc outside a typed project).
-    if (skillName === 'frontend-design') {
-      if (mode === 'cmd') return true
-      return projectType ? FRONTEND_PROJECT_TYPES.has(projectType) : false
-    }
+    // frontend-design: self-describing (UI, component, landing, dashboard,
+    // "make it look good"). Index it always — the model reads the description
+    // and decides if it applies. Empty/fresh projects need it most.
+    if (skillName === 'frontend-design') return true
 
-    // Auth-scaffolding skills (auth-proxy-gip, google-signin): chat-only, frontend
-    // projects only. The agent reads the index entry and only fetches the body
-    // via read_skill when the user asks for login/auth.
+    // Auth-scaffolding skills (auth-proxy-gip, google-signin) — chat-only
+    // (CMD has no dev-server preview, the recipe doesn't apply there). No
+    // projectType gate: empty projects are exactly when the agent is about
+    // to scaffold auth, so the index entry must be visible. The model picks
+    // it up only when the user asks for login/auth.
     if (AUTH_SKILLS.has(skillName)) {
-      if (mode !== 'chat' || !projectType) return false
-      return FRONTEND_PROJECT_TYPES.has(projectType)
+      return mode === 'chat'
     }
 
-    // Code-pattern skills (react-patterns, vue-patterns, …) are CHAT-only — they apply
-    // to ongoing codebase work, not to one-off CMD tasks.
+    // Code-pattern skills (react-patterns, vue-patterns, …) — chat-only.
+    // Project-type filter IS load-bearing here: a vue-patterns entry in a
+    // confirmed react codebase is genuine noise. BUT for empty/unknown
+    // projects (no manifest yet → projectType undefined), show all — the
+    // agent is about to scaffold and needs to see the options before
+    // committing to a stack.
     if (CODE_PATTERN_SKILLS.has(skillName)) {
-      if (mode !== 'chat' || !projectType) return false
+      if (mode !== 'chat') return false
+      if (!projectType) return true  // empty/fresh project: model picks
       const mapping: Record<string, string[]> = {
         react: ['react-patterns'],
         vue: ['vue-patterns'],

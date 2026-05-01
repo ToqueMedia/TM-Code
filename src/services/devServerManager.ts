@@ -36,11 +36,11 @@ interface InternalSlot {
   status: InternalStatus
   /** Bumped on every start/stop; guards stale invoke/poll returns. */
   generation: number
-  /** Ports used by the classifier — defaults to TM Code's 7773/7777 but the
-   *  caller can override for external projects so we don't force-rewrite
-   *  their scripts to our reserved ports. */
-  frontendPort: number
-  backendPort: number
+  /** Optional hint for the classifier: when content-type probe is ambiguous,
+   *  treat a URL on this port as frontend. The model passes this on
+   *  `start_dev_server` only when the natural content-type detection is
+   *  unreliable for the project's setup. Most projects don't need it. */
+  frontendPortHint?: number
   /** URLs seen in the stream (deduped). We probe each one and classify. */
   detectedUrls: Set<string>
   /** URLs already assigned to frontend or backend slot — skip re-classifying. */
@@ -58,16 +58,17 @@ interface InternalSlot {
   scriptErrorHintShown: boolean
 }
 
-/** Options for starting a dev server. Per-project overrides are optional — when
- *  omitted, TM Code's reserved ports (7773 frontend / 7777 backend) are used. */
+/** Options for starting a dev server. The model picks ports naturally
+ *  (Vite=5173, Next=3000, Express=whatever) — the IDE detects URLs from
+ *  log output and classifies them by content-type. Pass `frontendPortHint`
+ *  only when the content-type probe is ambiguous and you need to force
+ *  the iframe target to a specific port. */
 export interface StartOptions {
   projectKind?: ProjectKind
-  /** Override the frontend port (iframe target). Pass this for external projects
-   *  whose Vite/Next already runs on a different port — TM Code adapts instead
-   *  of rewriting the user's scripts. */
-  frontendPort?: number
-  /** Override the backend port (HTTP Client base). Same rationale. */
-  backendPort?: number
+  /** Optional override for ambiguous fullstack content-type probes. When
+   *  set, a probed URL on this port is treated as frontend regardless of
+   *  what the server returned. Most projects do not need it. */
+  frontendPortHint?: number
 }
 
 interface DevServerOutputPayload {
@@ -81,9 +82,6 @@ interface ServerProbeResult {
   content_type: string | null
   kind: 'html' | 'json' | 'other' | null
 }
-
-const DEFAULT_FRONTEND_PORT = 7773
-const DEFAULT_BACKEND_PORT = 7777
 
 const READY_TIMEOUT = 15_000
 const READY_POLL_INTERVAL = 500
@@ -135,30 +133,26 @@ class DevServerManager {
   }
 
   /**
-   * Inject --port and --host for frontend/fullstack-monolithic commands.
+   * Inject `--host 0.0.0.0` for frontend dev servers on platforms where it
+   * matters. Critical on Windows: Node 18+ resolves "localhost" to IPv6
+   * `::1`, so Vite/Next without explicit host bind only to `[::1]` and the
+   * Tauri preview webview (IPv4) can't reach them.
    *
-   * --host 0.0.0.0 is critical on Windows: Node 18+ resolves "localhost" to
-   * IPv6 `::1`, so Vite/Next without an explicit host bind only to `[::1]`.
-   * The Tauri preview webview connects via IPv4 and fails silently.
+   * Port is NOT injected — the model's command stands as-written. The IDE
+   * detects whatever URL the server prints and classifies by content-type.
    *
-   * For fullstack WRAPPERS (concurrently, etc.), we DON'T inject, because the
-   * --port flag would be swallowed by the parent npm script, not forwarded to
-   * the actual dev server child. The user's scripts must respect PORT env
-   * directly or use explicit --port in the sub-scripts.
+   * Wrappers (concurrently, npm-run-all, turbo, pnpm -r, workspaces fanout)
+   * swallow injected flags as their own args, so we don't inject for them.
    */
-  private injectPortAndHost(command: string, projectKind: ProjectKind, isWrapper: boolean, frontendPort: number): string {
-    // Backend-only: no --port/--host injection (PORT env does the work).
+  private injectHost(command: string, projectKind: ProjectKind, isWrapper: boolean): string {
     if (projectKind === 'backend') return command
-    // ANY wrapper (concurrently, npm-run-all, turbo, pnpm -r, workspaces…)
-    // swallows our injected flags as its own args. Injecting breaks the run.
-    // User scripts must honor PORT/HOST env or declare ports explicitly.
     if (isWrapper) return command
 
     if (/^(npm|yarn|pnpm|bun)\s+(run\s+\w+|start|dev)\b/.test(command)) {
-      return `${command} -- --port ${frontendPort} --host 0.0.0.0`
+      return `${command} -- --host 0.0.0.0`
     }
     if (/^(npx\s+)?(ng\s+serve|next\s+dev|vite|nuxt\s+dev|astro\s+dev|svelte-kit\s+dev)\b/.test(command)) {
-      return `${command} --port ${frontendPort} --host 0.0.0.0`
+      return `${command} --host 0.0.0.0`
     }
     return command
   }
@@ -181,41 +175,18 @@ class DevServerManager {
     // Back-compat: allow positional ProjectKind (older call sites).
     const opts: StartOptions = typeof options === 'string' ? { projectKind: options } : options
     const projectKind: ProjectKind = opts.projectKind ?? 'frontend'
-    const frontendPort = opts.frontendPort ?? DEFAULT_FRONTEND_PORT
-    const backendPort = opts.backendPort ?? DEFAULT_BACKEND_PORT
+    const frontendPortHint = opts.frontendPortHint
 
     // One server per project. Stop any existing before launching.
+    // Stop() cleanly tears down the previous slot; no preemptive kill_port —
+    // we don't know which ports the server will choose. If a zombie blocks
+    // a port from a previous TM Code crash, the dev server itself surfaces
+    // EADDRINUSE in the log and the user can act on it.
     await this.stop()
-
-    // Clear the relevant port(s). Only kill ports we're actually going to use.
-    const portsToClear: number[] = (() => {
-      if (projectKind === 'fullstack') return [frontendPort, backendPort]
-      if (projectKind === 'backend') return [backendPort]
-      return [frontendPort]
-    })()
-
-    for (const port of portsToClear) {
-      try {
-        const freed = await invoke<boolean>('kill_port', { port })
-        if (freed) {
-          logger.info('devServer', `Port ${port} cleared`)
-        } else {
-          const msg = `Port ${port} is held by a process that refused to die. The dev server may fail to bind. Try restarting TM Code or rebooting.`
-          logger.warn('devServer', msg)
-          useLayoutStore.getState().addDevServerLog(msg, 'warn')
-        }
-      } catch { /* best-effort */ }
-    }
 
     // Resolve wrapper status NOW (may inspect package.json asynchronously).
     const isWrapper = await isFullstackWrapper(devCommand, projectPath)
-    const resolvedCommand = this.injectPortAndHost(devCommand, projectKind, isWrapper, frontendPort)
-    // Which port to pass to Rust for env injection: frontend/fullstack use
-    // frontendPort, backend uses backendPort. For wrappers, Rust skips PORT anyway.
-    const portForRust = projectKind === 'backend' ? backendPort : frontendPort
-    // Tell Rust explicitly whether to skip the PORT env. TS does the authoritative
-    // detection (can read package.json); Rust's own string check is fallback.
-    const skipPortEnv = isWrapper
+    const resolvedCommand = this.injectHost(devCommand, projectKind, isWrapper)
 
     const slot: InternalSlot = {
       pid: 0,
@@ -224,8 +195,7 @@ class DevServerManager {
       command: devCommand,
       status: 'starting',
       generation: Date.now() + Math.random(),
-      frontendPort,
-      backendPort,
+      frontendPortHint,
       detectedUrls: new Set(),
       classifiedUrls: new Set(),
       frontendUrl: null,
@@ -241,11 +211,15 @@ class DevServerManager {
     await this.ensureListeners()
 
     try {
+      // Pass `skipPortEnv: true` for ALL commands now — the model picks the
+      // port via its own command (Vite default 5173, Next 3000, etc.). The
+      // Rust side won't override with a fixed PORT env. `port` is unused
+      // when skipPortEnv is true but kept for API back-compat.
       const pid = await invoke<number>('start_dev_server', {
         command: resolvedCommand,
         cwd: projectPath,
-        port: portForRust,
-        skipPortEnv,
+        port: 0,
+        skipPortEnv: true,
       })
 
       if (this.server !== slot || slot.generation !== this.server.generation) {
@@ -427,7 +401,7 @@ class DevServerManager {
     const kindLabel = kind === 'html' ? 'frontend' : kind === 'json' ? 'backend' : 'generic'
     layoutStore.addDevServerLog(`Server ready at ${url} (${kindLabel}, ${probe.content_type ?? '?'})`, 'info')
 
-    // Delegate to the pure classifier — it decides frontend/backend/mirror.
+    // Delegate to the pure classifier — content-type drives, hint overrides.
     const actions = classifyProbedUrl(
       url,
       kind as ProbeKind,
@@ -437,8 +411,7 @@ class DevServerManager {
         backendUrl: slot.backendUrl,
         backendUrlMirrored: slot.backendUrlMirrored,
       },
-      slot.backendPort,
-      slot.frontendPort,
+      slot.frontendPortHint,
     )
     for (const action of actions) {
       if (action.type === 'assignFrontend') {
@@ -496,21 +469,29 @@ class DevServerManager {
 
     slot.generation = Date.now() + Math.random()
     const pid = slot.pid
-    const { frontendPort, backendPort, projectKind } = slot
+    // Use the actually-detected URLs to derive ports for the post-stop
+    // safety kill (handles Windows cmd.exe → concurrently → npm → node
+    // chains where tree-kill sometimes loses descendants). If no URL was
+    // ever detected, there's nothing to clean up at the port level.
+    const portsToClean: number[] = []
+    for (const url of [slot.frontendUrl, slot.backendUrl]) {
+      if (!url) continue
+      const m = url.match(/:(\d+)/)
+      if (m) {
+        const p = parseInt(m[1], 10)
+        if (p && !portsToClean.includes(p)) portsToClean.push(p)
+      }
+    }
     this.server = null
 
     // Kill the concurrently-parent tree.
     if (pid) {
       try { await invoke('kill_process', { pid }) } catch { /* may already be dead */ }
     }
-    // Backup path: force-kill anything still bound to our target ports. On
-    // Windows the cmd.exe → concurrently → npm → node chain sometimes loses
-    // descendants to tree-kill (taskkill /T). This guarantees the port is
-    // actually free — which is what the user cares about (nothing serving
-    // at :7773 after pressing Stop).
-    const portsToClean: number[] = projectKind === 'fullstack'
-      ? [frontendPort, backendPort]
-      : projectKind === 'backend' ? [backendPort] : [frontendPort]
+    // Backup path: force-kill anything still bound to the ports the server
+    // actually used. On Windows the cmd.exe → concurrently → npm → node
+    // chain sometimes loses descendants to tree-kill (taskkill /T). This
+    // guarantees nothing is left listening on those ports after Stop.
     await Promise.all(
       portsToClean.map(port =>
         invoke<boolean>('kill_port', { port }).catch(() => false)
@@ -533,9 +514,12 @@ class DevServerManager {
   async restart(): Promise<void> {
     const slot = this.server
     if (!slot) return
-    const { projectPath, command, projectKind } = slot
+    // Preserve frontendPortHint across restart — it's a deliberate user
+    // override for content-type ambiguity, dropping it on restart would
+    // re-trigger the bug the hint was set to fix.
+    const { projectPath, command, projectKind, frontendPortHint } = slot
     await this.stop()
-    await this.start(projectPath, command, projectKind)
+    await this.start(projectPath, command, { projectKind, frontendPortHint })
   }
 
   /** Best-guess URL for external openers (system browser). */
