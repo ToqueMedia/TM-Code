@@ -59,6 +59,47 @@ async function isWindowFocused(): Promise<boolean> {
   }
 }
 
+/**
+ * Translate an internal tool identifier into a user-readable verb phrase
+ * suitable for OS notifications and toast messages. The notification
+ * surface is consumer-grade — it has to make sense to someone who doesn't
+ * know what `mcp__github__create_issue` means.
+ *
+ * Falls back to a tidied version of the raw id (mcp/MCP namespace stripped,
+ * underscores → spaces) when no specific entry matches.
+ */
+export function humaniseToolName(toolName: string): string {
+  const map: Record<string, string> = {
+    write_file: 'edit a file',
+    read_file: 'read a file',
+    create_file: 'create a file',
+    delete_file_or_directory: 'delete a file or folder',
+    rename_file_or_directory: 'rename a file or folder',
+    copy_file_or_directory: 'copy a file or folder',
+    create_directories_all: 'create folders',
+    execute_command: 'run a shell command',
+    run_streaming_command: 'run a shell command',
+    start_dev_server: 'start the dev server',
+    kill_process: 'stop a process',
+    git_commit: 'commit changes',
+    git_push: 'push to git remote',
+    git_pull: 'pull from git remote',
+    search_in_files: 'search in files',
+    replace_in_files: 'replace across files',
+  }
+  if (map[toolName]) return map[toolName]
+  // mcp__github__create_issue → "create issue (github)"
+  if (toolName.startsWith('mcp__')) {
+    const parts = toolName.split('__')
+    if (parts.length >= 3) {
+      const provider = parts[1]
+      const action = parts.slice(2).join(' ').replace(/_/g, ' ')
+      return `${action} (${provider})`
+    }
+  }
+  return toolName.replace(/_/g, ' ')
+}
+
 export async function notify(opts: NotifyOptions): Promise<void> {
   if (opts.dedupKey) {
     const last = recentByKey.get(opts.dedupKey)

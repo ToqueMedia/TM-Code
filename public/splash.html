@@ -31,6 +31,13 @@
           rgba(254, 16, 99, 0.10) 0%,
           rgba(10, 10, 10, 0.92) 70%
         );
+        /* macOS windows are typically 10pt rounded. With transparent(true) on
+           the NSWindow, the inner content view bleeds to the edges — so the
+           rounded corners need to be drawn by us. Falls back to square on
+           Win/Linux where the WebView is opaque (and DWM/compositor handles
+           rounding on Win11 anyway). */
+        border-radius: 10px;
+        overflow: hidden;
         animation: fadeIn 220ms ease-out both;
       }
       .wordmark {

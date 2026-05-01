@@ -67,13 +67,14 @@ function App() {
 	// Splash dismiss — the main window is created hidden by Rust to avoid the
 	// flash of empty chrome before the SPA mounts. React's first paint
 	// commits *before* this effect runs, so by the time we call `app_ready`
-	// the DOM is fully populated. The Rust side has a 5s failsafe in case
+	// the DOM is fully populated. The Rust side has a 15s failsafe in case
 	// this effect never fires (render crash) — see lib.rs setup.
 	useEffect(() => {
 		import('@tauri-apps/api/core').then(({ invoke }) => {
 			invoke('app_ready').catch(() => { /* not running under Tauri */ })
 		})
 	}, []);
+
 
 	// Initialize Firebase Auth listener
 	useEffect(() => {
@@ -99,14 +100,100 @@ function App() {
 			const next = state.pendingPermission
 			if (!next || next.id === lastSeenId) return
 			lastSeenId = next.id
-			import('./services/notificationService').then(({ notify }) => {
+			import('./services/notificationService').then(({ notify, humaniseToolName }) => {
 				notify({
 					title: 'TM Code — permission needed',
-					body: `Approve ${next.toolName} to continue`,
+					body: `The agent wants to ${humaniseToolName(next.toolName)}`,
 					dedupKey: `permission:${next.id}`,
 				})
 			})
 		})
+	}, []);
+
+	// "Open With TM Code" — file association launches. The OS hands us a
+	// file path either via env::args (Win/Linux) or RunEvent::Opened (macOS
+	// Apple Event). Both routes funnel into the Rust pending-files buffer.
+	// On mount we drain the buffer; while running we also listen for live
+	// open events. For every path: open the common-ancestor folder ONCE as
+	// project, open all files in the editor, force the view to `editor`
+	// (not the default `chat`) so the user lands where they expect.
+	useEffect(() => {
+		let unlisten: (() => void) | undefined
+		let active = true
+
+		// Common-ancestor folder of an arbitrary set of paths. When the user
+		// selects multiple files in Finder / Explorer and uses "Open With",
+		// each may live in a different directory — we want to open one
+		// project that contains them all, not call openProject() per file
+		// (the last one would win and the previous switches would just
+		// thrash dev servers).
+		function commonAncestor(paths: string[]): string {
+			if (paths.length === 0) return ''
+			const sep = paths[0].includes('/') ? '/' : '\\'
+			if (paths.length === 1) {
+				return paths[0].substring(0, paths[0].lastIndexOf(sep)) || sep
+			}
+			const splits = paths.map(p => p.split(sep))
+			const minLen = Math.min(...splits.map(s => s.length))
+			const common: string[] = []
+			for (let i = 0; i < minLen; i++) {
+				const seg = splits[0][i]
+				if (splits.every(s => s[i] === seg)) common.push(seg)
+				else break
+			}
+			// If the last common segment looks like a partial filename we
+			// stopped at the file boundary — drop the last shared file part.
+			const joined = common.join(sep)
+			return joined || sep
+		}
+
+		async function openManyInEditor(paths: string[]) {
+			if (paths.length === 0) return
+			try {
+				const projectRoot = commonAncestor(paths)
+				const { useProjectStore } = await import('@/stores/projectStore')
+				const already = useProjectStore.getState().currentProject?.path
+				if (already !== projectRoot) {
+					await useProjectStore.getState().openProject(projectRoot)
+				}
+				const { useEditorRepository } = await import('@/stores/editorStore')
+				const repo = useEditorRepository.getState()
+				for (const p of paths) repo.openFile(p)
+				const { useLayoutStore } = await import('@/stores/layoutStore')
+				useLayoutStore.getState().setViewMode('editor')
+			} catch (err) {
+				logger.error('app', 'open-with batch failed:', err)
+			}
+		}
+
+		;(async () => {
+			try {
+				const { invoke } = await import('@tauri-apps/api/core')
+				const { listen } = await import('@tauri-apps/api/event')
+
+				// Drain cold-start buffer first — paths queued by Rust before
+				// the SPA mounted (file-association launch).
+				const pending = await invoke<string[]>('take_pending_open_files')
+				if (active && pending && pending.length > 0) {
+					// Block the regular "restore last project" useEffect from
+					// also running — file association is a stronger signal of
+					// intent than persisted state.
+					hasStartedInitRef.current = true
+					await openManyInEditor(pending)
+				}
+
+				// Live listener for "Open With" while the app is already running.
+				const u = await listen<string[]>('open-file-with-app', async (e) => {
+					if (!active) return
+					await openManyInEditor(e.payload || [])
+				})
+				unlisten = u
+			} catch {
+				// Tauri not present (jsdom tests, etc.)
+			}
+		})()
+
+		return () => { active = false; unlisten?.() }
 	}, []);
 
 	// Native file drop — drag a folder from Finder/Explorer onto the window
@@ -135,18 +222,20 @@ function App() {
 						if (!paths || paths.length === 0) return
 						const droppedPath = paths[0]
 						try {
+							// Two-step gate: cheap is_directory probe first to
+							// distinguish folder drops from file drops (which
+							// the PromptBar HTML5 path handles for images).
+							// Only when it really is a folder do we run the
+							// fuller validate_project_path — and only then
+							// surface validation errors to the user.
+							const isDir = await invoke<boolean>('is_directory', { path: droppedPath })
+							if (!isDir) return
 							const result = await invoke<{ valid: boolean; error?: string }>(
 								'validate_project_path',
 								{ path: droppedPath }
 							)
 							if (!result.valid) {
-								// Silently ignore non-folder drops (e.g. images dropped
-								// onto the prompt — those are handled by the HTML5 drop
-								// path in usePromptBar). Only surface a toast when a
-								// folder *was* dropped but the validator rejected it.
-								const name = droppedPath.split(/[/\\]/).pop() || ''
-								const looksLikeFolder = !name.includes('.') || name.startsWith('.')
-								if (looksLikeFolder && result.error) {
+								if (result.error) {
 									const { useToastStore } = await import('./stores/toastStore')
 									useToastStore.getState().addToast('error', result.error)
 								}
@@ -189,6 +278,13 @@ function App() {
 		hasStartedInitRef.current = true;
 
 		const initializeApp = async () => {
+			// Guard against the file-association drain effect having already
+			// opened a project while we were waiting for auth/hydration.
+			// Belt-and-braces with hasStartedInitRef — if drain finished
+			// before we got here, currentProject is set and we'd otherwise
+			// thrash by reopening the persisted last-project on top.
+			if (useProjectStore.getState().currentProject) return;
+
 			// MANDATORY: Check global prerequisites before anything else
 			const requirements = await checkStartupRequirements();
 			setRequirementsResult(requirements);

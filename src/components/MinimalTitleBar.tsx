@@ -14,7 +14,7 @@ import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
 import PublishModal from './dialogs/PublishModal'
 import { useTranslation } from '@/i18n'
-import { IS_MAC } from '@/utils/platform'
+import { IS_MAC, IS_LINUX } from '@/utils/platform'
 
 const IssueReporterDialog = lazy(() => import('./dialogs/IssueReporterDialog'))
 
@@ -184,11 +184,12 @@ function MinimalTitleBar() {
   return (
     <Box
       height="35px"
-      // Translucent over the native NSVisualEffectView (macOS) /
-      // Mica/Acrylic (Windows) installed by lib.rs::run().setup. Stays solid
-      // on Linux (no platform vibrancy) — the rgba alpha just darkens the
-      // window's solid backing color, which still reads correctly.
+      // Translucent over the native NSVisualEffectView (macOS) / Mica/Acrylic
+      // (Windows) installed by lib.rs::run().setup. Linux has no platform
+      // vibrancy via window-vibrancy, so we keep the previous CSS backdrop
+      // blur there — it's not equivalent to native, but better than a flat bar.
       bg={IS_MAC ? 'rgba(15, 15, 15, 0.55)' : tokens.colors.dialog.bg}
+      backdropFilter={IS_LINUX ? 'blur(10px)' : undefined}
       borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
       display="flex"
       alignItems="center"

@@ -165,7 +165,8 @@
       "WebFetch(domain:firebase.google.com)",
       "Bash(yarn install *)",
       "Bash(npm view *)",
-      "WebFetch(domain:v2.tauri.app)"
+      "WebFetch(domain:v2.tauri.app)",
+      "WebFetch(domain:docs.rs)"
     ]
   }
 }

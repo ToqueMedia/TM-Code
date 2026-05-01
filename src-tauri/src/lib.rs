@@ -471,6 +471,77 @@ fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Files queued by the OS for opening (file association: "Open with TM Code"
+/// from Finder/Explorer/Nautilus, or by drag-dropping a file onto the dock
+/// icon). The frontend drains this on mount and listens for the live
+/// `open-file-with-app` event for opens that happen after the SPA is up.
+static PENDING_OPEN_FILES: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+fn pending_open_files() -> &'static std::sync::Mutex<Vec<String>> {
+    PENDING_OPEN_FILES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[tauri::command]
+fn take_pending_open_files() -> Vec<String> {
+    pending_open_files()
+        .lock()
+        .map(|mut v| v.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// Cheap path-is-directory probe. Used by the file-drop handler to tell a
+/// folder drop (open as project) from a file drop (likely an image targeted
+/// at the prompt — handled by the HTML5 path). Doesn't validate suitability,
+/// so it's faster than `validate_project_path` and the contract is clearer.
+#[tauri::command]
+fn is_directory(path: String) -> bool {
+    std::path::Path::new(&path).is_dir()
+}
+
+/// AppHandle stash for the macOS dock menu handler. The handler is an
+/// Objective-C object whose selector methods can't take Rust closures or
+/// Tauri's State<T>, so the handle has to live in a static. Wrapped in
+/// OnceLock for thread-safe one-time init.
+#[cfg(target_os = "macos")]
+static DOCK_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+/// Custom NSObject that backs the dock menu items. Its two selectors
+/// (`openFolder:` and `openFile:`) emit a `native-menu` CustomEvent into
+/// the main webview, identical to the one the menu bar uses — so the
+/// existing `useNativeMenu` hook handles both routes with no extra wiring.
+#[cfg(target_os = "macos")]
+mod dock {
+    use objc2::define_class;
+    use objc2::runtime::{AnyObject, NSObject};
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[name = "TmDockHandler"]
+        pub struct DockHandler;
+
+        impl DockHandler {
+            #[unsafe(method(openFolder:))]
+            fn _open_folder(&self, _sender: *mut AnyObject) {
+                emit_native_menu("open-folder");
+            }
+
+            #[unsafe(method(openFile:))]
+            fn _open_file(&self, _sender: *mut AnyObject) {
+                emit_native_menu("open-file");
+            }
+        }
+    );
+
+    fn emit_native_menu(id: &str) {
+        let Some(handle) = super::DOCK_APP_HANDLE.get() else { return };
+        let Some(window) = tauri::Manager::get_webview_window(handle, "main") else { return };
+        // Safe: id values are hard-coded above, no escaping needed.
+        let _ = window.eval(format!(
+            "window.dispatchEvent(new CustomEvent('native-menu', {{ detail: {{ id: '{}' }} }}))",
+            id
+        ));
+    }
+}
+
 /// Domains allowed to open as popup windows (OAuth flows).
 fn is_oauth_domain(host: &str) -> bool {
     host.contains("google.com")
@@ -520,6 +591,29 @@ pub fn run() {
         // Port 14300 — TM Code specific. Avoids conflict with common dev ports.
         .plugin(tauri_plugin_localhost::Builder::new(14300).build())
         .setup(move |app| {
+            // ── File-association launch args ───────────────────────────
+            // On Windows/Linux, "Open with TM Code" launches the binary
+            // with file paths in argv[1..]. macOS routes these through
+            // RunEvent::Opened (handled in `run` callback below) instead.
+            // We collect all paths here and let the frontend drain via
+            // `take_pending_open_files` once React mounts.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                let paths: Vec<String> = args
+                    .into_iter()
+                    .filter(|a| {
+                        let p = std::path::Path::new(a);
+                        p.exists() && p.is_file()
+                    })
+                    .collect();
+                if !paths.is_empty() {
+                    if let Ok(mut buf) = pending_open_files().lock() {
+                        buf.extend(paths);
+                    }
+                }
+            }
+
             // Load app icon from embedded PNG
             let icon = Image::from_bytes(include_bytes!("../icons/128x128@2x.png"))
                 .expect("Failed to load app icon");
@@ -584,19 +678,9 @@ pub fn run() {
             }
 
             let _splash = splash_builder.build()?;
-
-            // Apply vibrancy on the splash too — keeps the look consistent
-            // with the main window once it appears.
-            #[cfg(target_os = "macos")]
-            {
-                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
-                let _ = apply_vibrancy(
-                    &_splash,
-                    NSVisualEffectMaterial::HudWindow,
-                    Some(NSVisualEffectState::Active),
-                    None,
-                );
-            }
+            // No vibrancy on the splash — it lives <2s and the radial-gradient
+            // background in splash.html reads well on its own. Allocating an
+            // NSVisualEffectView for that lifetime is wasted work.
 
             // ── Native macOS menu bar ──────────────────────────────────
             #[cfg(target_os = "macos")]
@@ -718,6 +802,61 @@ pub fn run() {
                         ));
                     }
                 });
+
+                // ── Dock menu (right-click on dock icon) ───────────────
+                // macOS users expect this. Two items: Open Folder… and
+                // Open File…, both reusing the same `native-menu` event
+                // channel as the menu bar. NSApp.setDockMenu: is the
+                // documented way; we go through msg_send! because objc2-app-kit
+                // doesn't expose this single setter directly.
+                {
+                    use objc2::{msg_send, sel, AllocAnyThread};
+                    use objc2::rc::Retained;
+                    use objc2::MainThreadOnly;
+                    use objc2::runtime::AnyObject;
+                    use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
+                    use objc2_foundation::NSString;
+
+                    let _ = DOCK_APP_HANDLE.set(app.handle().clone());
+
+                    if let Some(mtm) = objc2::MainThreadMarker::new() {
+                        let handler: Retained<dock::DockHandler> = unsafe {
+                            let alloc = dock::DockHandler::alloc();
+                            msg_send![alloc, init]
+                        };
+
+                        let menu = NSMenu::new(mtm);
+
+                        let make_item = |title: &str, action: objc2::runtime::Sel| -> Retained<NSMenuItem> {
+                            unsafe {
+                                let title_ns = NSString::from_str(title);
+                                let key = NSString::from_str("");
+                                let alloc = NSMenuItem::alloc(mtm);
+                                let item: Retained<NSMenuItem> = msg_send![
+                                    alloc,
+                                    initWithTitle: &*title_ns,
+                                    action: action,
+                                    keyEquivalent: &*key
+                                ];
+                                let target_ref: &AnyObject = &*(Retained::as_ptr(&handler) as *const AnyObject);
+                                item.setTarget(Some(target_ref));
+                                item
+                            }
+                        };
+
+                        menu.addItem(&make_item("Open Folder…", sel!(openFolder:)));
+                        menu.addItem(&make_item("Open File…", sel!(openFile:)));
+
+                        let ns_app = NSApplication::sharedApplication(mtm);
+                        unsafe {
+                            let _: () = msg_send![&*ns_app, setDockMenu: &*menu];
+                        }
+
+                        // The handler must outlive the menu — leak so it
+                        // sticks around for the app's lifetime.
+                        std::mem::forget(handler);
+                    }
+                }
             }
 
             // Create main window.
@@ -893,6 +1032,30 @@ pub fn run() {
                     Some(NSVisualEffectState::Active),
                     None,
                 );
+
+                // Native rounded window corners. With decorations(false) +
+                // transparent(true), AppKit doesn't round the window for us
+                // — the canonical fix is layer-backing the contentView and
+                // setting CALayer.cornerRadius. masksToBounds clips the
+                // WKWebView subview to the rounded shape. Tauri 2 doesn't
+                // expose corner_radius on the builder yet, so we go through
+                // objc2. Using msg_send! for the layer call avoids pulling
+                // in objc2-quartz-core just for two setters.
+                if let Ok(ns_window_ptr) = main_window.ns_window() {
+                    use objc2::msg_send;
+                    use objc2::runtime::AnyObject;
+                    unsafe {
+                        let ns_win = &*(ns_window_ptr as *const objc2_app_kit::NSWindow);
+                        if let Some(content_view) = ns_win.contentView() {
+                            content_view.setWantsLayer(true);
+                            let layer: *mut AnyObject = msg_send![&*content_view, layer];
+                            if !layer.is_null() {
+                                let _: () = msg_send![layer, setCornerRadius: 10.0_f64];
+                                let _: () = msg_send![layer, setMasksToBounds: true];
+                            }
+                        }
+                    }
+                }
             }
             #[cfg(target_os = "windows")]
             {
@@ -910,12 +1073,14 @@ pub fn run() {
             // The frontend's `app_ready` invoke is the primary signal to
             // close splash + show main. If React never mounts (crash,
             // infinite loop, missing chunk) we'd be stuck on the splash
-            // forever. After 5s, force the transition and log a warning;
+            // forever. After 15s — long enough for slow hardware on first
+            // cold start with empty cache, short enough that the user
+            // notices a hang — force the transition and log a warning;
             // the ErrorBoundary in the main window then surfaces whatever
             // went wrong instead of leaving the user with a frozen splash.
             let app_handle_for_failsafe = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                 if let Some(win) = app_handle_for_failsafe.get_webview_window("main") {
                     if let Ok(false) = win.is_visible() {
                         eprintln!("[splash] failsafe: 5s elapsed without app_ready — forcing show");
@@ -1060,8 +1225,36 @@ pub fn run() {
             resize_preview_webview,
             get_app_version,
             get_device_fingerprint,
-            app_ready
+            app_ready,
+            take_pending_open_files,
+            is_directory
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // RunEvent::Opened fires when the OS asks the running app to open
+            // a file (macOS Apple Events from "Open With", drag-drop on dock,
+            // re-launch via Finder while the app is already running). On Win/
+            // Linux this same case is the env::args path read in setup().
+            if let tauri::RunEvent::Opened { urls } = event {
+                let new_paths: Vec<String> = urls
+                    .iter()
+                    .filter(|u| u.scheme() == "file")
+                    .filter_map(|u| u.to_file_path().ok())
+                    .filter_map(|p| p.into_os_string().into_string().ok())
+                    .collect();
+
+                if !new_paths.is_empty() {
+                    // Buffer for cold-start drain by frontend.
+                    if let Ok(mut buf) = pending_open_files().lock() {
+                        buf.extend(new_paths.iter().cloned());
+                    }
+                    // Live event for the already-running case (frontend has
+                    // its listener attached). On cold start the listener
+                    // isn't there yet, so the buffer is the source of truth
+                    // — frontend's `take_pending_open_files` invoke drains it.
+                    let _ = app_handle.emit("open-file-with-app", new_paths);
+                }
+            }
+        });
 }
