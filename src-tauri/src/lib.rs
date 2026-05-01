@@ -774,6 +774,44 @@ pub fn run() {
                 })
                 .build()?;
 
+            // ── Native window vibrancy ───────────────────────────────────
+            // macOS:    NSVisualEffectView under the WKWebView → blur of
+            //           wallpaper/windows behind. Material `HudWindow` reads
+            //           well in dark themes and respects the active/inactive
+            //           state automatically.
+            // Windows:  Mica on Win 11 (matches title bar), falls back to
+            //           Acrylic on Win 10. apply_mica returns Err on
+            //           unsupported builds — we silently ignore.
+            // Linux:    no equivalent; skipped.
+            //
+            // Vibrancy is only visible where the DOM is transparent. The body
+            // already has `background-color: transparent` (see theme.ts), so
+            // any region whose React component has a non-opaque bg will let
+            // the vibrancy through.
+            #[cfg(target_os = "macos")]
+            {
+                let main_window = app.get_webview_window("main")
+                    .ok_or("main window missing for vibrancy")?;
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+                let _ = apply_vibrancy(
+                    &main_window,
+                    NSVisualEffectMaterial::HudWindow,
+                    Some(NSVisualEffectState::Active),
+                    None,
+                );
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let main_window = app.get_webview_window("main")
+                    .ok_or("main window missing for vibrancy")?;
+                use window_vibrancy::{apply_mica, apply_acrylic};
+                // Mica is Win 11+. apply_mica errors on Win 10; we then try
+                // Acrylic which is supported back to Win 10 1809.
+                if apply_mica(&main_window, Some(true)).is_err() {
+                    let _ = apply_acrylic(&main_window, Some((18, 18, 18, 125)));
+                }
+            }
+
             Ok(())
         })
         // Kill all child processes on app exit to prevent orphaned processes

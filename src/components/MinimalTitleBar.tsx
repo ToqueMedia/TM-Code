@@ -184,14 +184,17 @@ function MinimalTitleBar() {
   return (
     <Box
       height="35px"
-      bg={tokens.colors.dialog.bg}
+      // Translucent over the native NSVisualEffectView (macOS) /
+      // Mica/Acrylic (Windows) installed by lib.rs::run().setup. Stays solid
+      // on Linux (no platform vibrancy) — the rgba alpha just darkens the
+      // window's solid backing color, which still reads correctly.
+      bg={IS_MAC ? 'rgba(15, 15, 15, 0.55)' : tokens.colors.dialog.bg}
       borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
       display="flex"
       alignItems="center"
       px={2}
       position="relative"
       userSelect="none"
-      backdropFilter="blur(10px)"
       flexShrink={0}
       data-tauri-drag-region
       onMouseDown={handleMouseDown}

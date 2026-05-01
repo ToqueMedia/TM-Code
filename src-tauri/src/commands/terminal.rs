@@ -21,14 +21,6 @@ pub struct CommandResult {
     pub timed_out: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProcessInfo {
-    pub pid: u32,
-    pub command: String,
-    pub args: Vec<String>,
-    pub cwd: String,
-}
-
 // Estado global para manter histórico de comandos
 type CommandHistory = Mutex<Vec<String>>;
 pub type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
@@ -37,11 +29,12 @@ pub type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
 
 /// Holds a live PTY session: the master PTY, a writer for sending input,
 /// a reader thread for streaming output, and a handle to kill the child.
+/// The session id lives only as the `PtySessionMap` key — no need to store
+/// it on the value too.
 pub struct PtySession {
     pub master: Box<dyn portable_pty::MasterPty + Send>,
     pub writer: Box<dyn std::io::Write + Send>,
     pub child: Box<dyn portable_pty::Child + Send>,
-    pub session_id: String,
 }
 
 unsafe impl Send for PtySession {}
@@ -1035,7 +1028,6 @@ pub async fn start_pty_shell(
         master,
         writer,
         child,
-        session_id: session_id.clone(),
     };
 
     pty_map
@@ -1059,7 +1051,6 @@ pub async fn write_to_pty(
         .ok_or_else(|| "PTY session not found".to_string())?;
     let mut s = session.lock().map_err(|_| "Failed to lock session")?;
 
-    use std::io::Write as _;
     let writer: &mut dyn std::io::Write = &mut *s.writer;
     writer
         .write_all(data.as_bytes())
