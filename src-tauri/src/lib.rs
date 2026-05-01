@@ -456,6 +456,21 @@ fn raw_http_get(
     Ok((status, content_type, body))
 }
 
+/// Reveal the main window once the SPA has mounted, and close the splash
+/// window. Idempotent — calling it after the safety timeout already
+/// transitioned is harmless.
+#[tauri::command]
+fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
+    if let Some(splash) = app.get_webview_window("splash") {
+        let _ = splash.close();
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        win.show().map_err(|e| format!("show failed: {}", e))?;
+        win.set_focus().map_err(|e| format!("focus failed: {}", e))?;
+    }
+    Ok(())
+}
+
 /// Domains allowed to open as popup windows (OAuth flows).
 fn is_oauth_domain(host: &str) -> bool {
     host.contains("google.com")
@@ -529,6 +544,58 @@ pub fn run() {
                         }
                     }
                 }
+            }
+
+            // ── Splashscreen window ────────────────────────────────────
+            // Loads `/splash.html` (a static file served by Vite in dev /
+            // tauri-plugin-localhost in prod). It's pure HTML+CSS — no SPA
+            // bundle — so it paints in <100ms while the React tree spins up
+            // in the (hidden) main window. Closed by the `app_ready` command
+            // once React has mounted; force-closed by the 5s failsafe below
+            // if `app_ready` never fires.
+            #[cfg(dev)]
+            let splash_url = WebviewUrl::External(
+                "http://localhost:1420/splash.html".parse().unwrap()
+            );
+            #[cfg(not(dev))]
+            let splash_url = WebviewUrl::External(
+                "http://localhost:14300/splash.html".parse().unwrap()
+            );
+
+            #[allow(unused_mut)]
+            let mut splash_builder = WebviewWindowBuilder::new(app, "splash", splash_url)
+                .title("TM Code")
+                .inner_size(360.0, 200.0)
+                .resizable(false)
+                .decorations(false)
+                .center()
+                .skip_taskbar(true)
+                .always_on_top(false)
+                .visible(true);
+
+            #[cfg(target_os = "macos")]
+            {
+                splash_builder = splash_builder.transparent(true);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                use tauri::utils::config::Color;
+                splash_builder = splash_builder.background_color(Color(10, 10, 10, 255));
+            }
+
+            let _splash = splash_builder.build()?;
+
+            // Apply vibrancy on the splash too — keeps the look consistent
+            // with the main window once it appears.
+            #[cfg(target_os = "macos")]
+            {
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+                let _ = apply_vibrancy(
+                    &_splash,
+                    NSVisualEffectMaterial::HudWindow,
+                    Some(NSVisualEffectState::Active),
+                    None,
+                );
             }
 
             // ── Native macOS menu bar ──────────────────────────────────
@@ -688,10 +755,21 @@ pub fn run() {
                 .inner_size(1250.0, 850.0)
                 .min_inner_size(900.0, 600.0)
                 .decorations(false)
-                // Start hidden — the React entry calls window.show() after the
-                // first paint commit, so the window doesn't appear empty for
-                // the ~100-300ms it takes the SPA to mount. Standard pattern
-                // used by VS Code, Linear, Raycast, etc.
+                // Start hidden — the React entry, on first mount, calls the
+                // `app_ready` command which shows the window. This eliminates
+                // the visible flash of an empty (vibrancy-only on macOS, dark
+                // on Win/Linux) frame while the SPA mounts.
+                //
+                // Safety: a 5s tokio timeout below force-shows the window if
+                // the frontend never reports ready (render crashed before
+                // useEffect ran). Without it the window would stay hidden
+                // forever.
+                //
+                // The earlier attempt that used double-rAF in main.tsx didn't
+                // work: WKWebView throttles requestAnimationFrame when the
+                // hosting NSWindow is hidden (Page Visibility API reports
+                // "hidden"), so the show() callback never fired. React's
+                // useEffect runs on the microtask queue regardless of visibility.
                 .visible(false)
                 // Force the *window* appearance to Dark regardless of OS
                 // preference. The TM Code UI is dark-only; without this, in
@@ -828,6 +906,27 @@ pub fn run() {
                 }
             }
 
+            // ── Splash safety timeout ──────────────────────────────────
+            // The frontend's `app_ready` invoke is the primary signal to
+            // close splash + show main. If React never mounts (crash,
+            // infinite loop, missing chunk) we'd be stuck on the splash
+            // forever. After 5s, force the transition and log a warning;
+            // the ErrorBoundary in the main window then surfaces whatever
+            // went wrong instead of leaving the user with a frozen splash.
+            let app_handle_for_failsafe = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Some(win) = app_handle_for_failsafe.get_webview_window("main") {
+                    if let Ok(false) = win.is_visible() {
+                        eprintln!("[splash] failsafe: 5s elapsed without app_ready — forcing show");
+                        if let Some(splash) = app_handle_for_failsafe.get_webview_window("splash") {
+                            let _ = splash.close();
+                        }
+                        let _ = win.show();
+                    }
+                }
+            });
+
             Ok(())
         })
         // Kill all child processes on app exit to prevent orphaned processes
@@ -960,7 +1059,8 @@ pub fn run() {
             close_preview_webview,
             resize_preview_webview,
             get_app_version,
-            get_device_fingerprint
+            get_device_fingerprint,
+            app_ready
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

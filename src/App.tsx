@@ -64,6 +64,17 @@ function App() {
 	// Refresh billing state on window focus / network reconnect (no polling)
 	useBillingRefresh();
 
+	// Splash dismiss — the main window is created hidden by Rust to avoid the
+	// flash of empty chrome before the SPA mounts. React's first paint
+	// commits *before* this effect runs, so by the time we call `app_ready`
+	// the DOM is fully populated. The Rust side has a 5s failsafe in case
+	// this effect never fires (render crash) — see lib.rs setup.
+	useEffect(() => {
+		import('@tauri-apps/api/core').then(({ invoke }) => {
+			invoke('app_ready').catch(() => { /* not running under Tauri */ })
+		})
+	}, []);
+
 	// Initialize Firebase Auth listener
 	useEffect(() => {
 		FirebaseAuthService.getInstance().init();
@@ -97,6 +108,64 @@ function App() {
 			})
 		})
 	}, []);
+
+	// Native file drop — drag a folder from Finder/Explorer onto the window
+	// to open it as a project. Uses Tauri's window-level drag-drop event
+	// (which gives real filesystem paths), distinct from the HTML5 drop in
+	// the prompt area (which handles image attachments via DataTransfer).
+	const [isDraggingFolder, setIsDraggingFolder] = useState(false);
+	useEffect(() => {
+		let unlisten: (() => void) | undefined
+		let active = true
+
+		;(async () => {
+			try {
+				const { getCurrentWebview } = await import('@tauri-apps/api/webview')
+				const { invoke } = await import('@tauri-apps/api/core')
+				const u = await getCurrentWebview().onDragDropEvent(async (event) => {
+					if (!active) return
+					const p = event.payload
+					if (p.type === 'enter' || p.type === 'over') {
+						setIsDraggingFolder(true)
+					} else if (p.type === 'leave') {
+						setIsDraggingFolder(false)
+					} else if (p.type === 'drop') {
+						setIsDraggingFolder(false)
+						const paths = p.paths
+						if (!paths || paths.length === 0) return
+						const droppedPath = paths[0]
+						try {
+							const result = await invoke<{ valid: boolean; error?: string }>(
+								'validate_project_path',
+								{ path: droppedPath }
+							)
+							if (!result.valid) {
+								// Silently ignore non-folder drops (e.g. images dropped
+								// onto the prompt — those are handled by the HTML5 drop
+								// path in usePromptBar). Only surface a toast when a
+								// folder *was* dropped but the validator rejected it.
+								const name = droppedPath.split(/[/\\]/).pop() || ''
+								const looksLikeFolder = !name.includes('.') || name.startsWith('.')
+								if (looksLikeFolder && result.error) {
+									const { useToastStore } = await import('./stores/toastStore')
+									useToastStore.getState().addToast('error', result.error)
+								}
+								return
+							}
+							await openProject(droppedPath)
+						} catch (err) {
+							logger.error('app', 'Folder-drop open failed:', err)
+						}
+					}
+				})
+				unlisten = u
+			} catch {
+				// Tauri webview API unavailable (e.g. running tests in jsdom)
+			}
+		})()
+
+		return () => { active = false; unlisten?.() }
+	}, [openProject]);
 
 	useEffect(() => {
 		// Only auto-open during initial app load, not on subsequent state changes
@@ -497,6 +566,39 @@ function App() {
 			</Box>
 
 			<ToastContainer />
+
+			{/* Native file-drop overlay — appears while a Finder/Explorer drag
+			    is over the window. Pointer-events: none so it never blocks the
+			    underlying drop event from reaching Tauri's native handler. */}
+			{isDraggingFolder && (
+				<Box
+					position="fixed"
+					inset={0}
+					bg="rgba(254, 16, 99, 0.12)"
+					border={`2px dashed ${tokens.colors.accent.primary}`}
+					borderRadius="0"
+					pointerEvents="none"
+					zIndex={9999}
+					display="flex"
+					alignItems="center"
+					justifyContent="center"
+					backdropFilter="blur(2px)"
+				>
+					<Box
+						bg={tokens.colors.dialog.bg}
+						border={`1px solid ${tokens.colors.accent.primaryMuted}`}
+						borderRadius="12px"
+						px={6}
+						py={4}
+						boxShadow={tokens.shadow.overlay}
+						textAlign="center"
+					>
+						<Box fontSize="13px" fontWeight={500} color={tokens.colors.text.primary}>
+							Drop folder to open as project
+						</Box>
+					</Box>
+				</Box>
+			)}
 		</Box>
 	);
 }
