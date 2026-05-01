@@ -394,6 +394,12 @@ fn resize_preview_webview(
 }
 
 /// Raw HTTP GET via TcpStream — bypasses reqwest issues with localhost.
+///
+/// Connection strategy: try IPv4 first, fall back to IPv6 ([::1]). Node 18+
+/// frameworks (Vite, Next without --host) bind to localhost which resolves
+/// to ::1 only, so a v4-pinned proxy_target hits "connection refused" even
+/// though the server is up. The fallback rescues that case without making
+/// the agent re-write its dev scripts.
 fn raw_http_get(
     host_port: &str,
     path: &str,
@@ -401,9 +407,38 @@ fn raw_http_get(
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    // Use ToSocketAddrs to resolve "localhost" → [::1] or 127.0.0.1
-    let mut stream =
-        TcpStream::connect(host_port).map_err(|e| format!("Connection refused: {}", e))?;
+    let v4_err = match TcpStream::connect(host_port) {
+        Ok(s) => {
+            return raw_http_get_with_stream(s, host_port, path);
+        }
+        Err(e) => format!("{}", e),
+    };
+
+    // IPv4 (or proxy_target's chosen host) refused. Retry against [::1] —
+    // this is the common Node 18+ "localhost binds IPv6-only" case.
+    let v6_target = if let Some(rest) = host_port.strip_prefix("127.0.0.1:") {
+        format!("[::1]:{}", rest)
+    } else if let Some(rest) = host_port.strip_prefix("localhost:") {
+        format!("[::1]:{}", rest)
+    } else {
+        return Err(format!("Connection refused: {}", v4_err));
+    };
+
+    let stream = TcpStream::connect(&v6_target)
+        .map_err(|e| format!("Connection refused (tried v4 + [::1]): v4={}, v6={}", v4_err, e))?;
+    raw_http_get_with_stream(stream, host_port, path)
+}
+
+/// Inner helper that performs the actual GET on an already-connected stream.
+/// Lets `raw_http_get` retry against an alternative address (IPv4 → IPv6)
+/// without duplicating the request/parse boilerplate.
+fn raw_http_get_with_stream(
+    mut stream: std::net::TcpStream,
+    host_port: &str,
+    path: &str,
+) -> std::result::Result<(u16, String, Vec<u8>), String> {
+    use std::io::{Read, Write};
+
     stream
         .set_write_timeout(Some(std::time::Duration::from_secs(3)))
         .ok();

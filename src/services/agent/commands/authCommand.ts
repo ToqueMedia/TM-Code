@@ -56,6 +56,7 @@ function buildPrompt(
   instructions: string,
   authProxySkill: string,
   googleSigninSkill: string | null,
+  designSkill: string | null,
 ): string {
   const wantsGoogle = providers.includes('google')
   const wantsEmail = providers.includes('email-password')
@@ -66,6 +67,9 @@ function buildPrompt(
     `</auth_skill>`,
     ...(googleSigninSkill
       ? [``, `<auth_skill name="google-signin">`, googleSigninSkill, `</auth_skill>`]
+      : []),
+    ...(designSkill
+      ? [``, `<design_skill name="frontend-design">`, designSkill, `</design_skill>`]
       : []),
   ].join('\n')
 
@@ -111,6 +115,13 @@ function buildPrompt(
       : []),
     ``,
     `${wantsGoogle ? '7' : '6'}. Verify with the project's type-checker (e.g. npx tsc --noEmit, mypy, etc.) and run any tests. Fix errors. Report what was implemented in plain prose.`,
+    ...(designSkill
+      ? [
+          ``,
+          `Design direction (the developer also dropped \`#design\`):`,
+          `Apply the frontend-design recipe above to ALL UI you build in this turn — Login, Signup, Success, AuthGuard. Commit to ONE bold aesthetic direction (brutalist, editorial, retro-futuristic, organic, luxury, maximalist, industrial — or your own). Pick distinctive typography (avoid Inter/system defaults). Build a cohesive color palette with intentional accents. No timid middle ground. The result should be visually striking AND production-grade — not generic AI chrome.`,
+        ]
+      : []),
     ``,
     `Hard rules (do NOT break):`,
     `- NEVER modify .env directly — TM Code injects credentials.`,
@@ -135,15 +146,17 @@ export async function runAuthFlow(
   providers: Provider[],
   instructions: string,
   userMessageText: string,
+  withDesign: boolean = false,
 ): Promise<void> {
   const chatStore = useChatStore.getState()
   const wantsGoogle = providers.includes('google')
 
   // Load the bundled skill content in parallel so the agent gets the full
   // recipe(s) inline — no round-trip to read_skill mid-turn.
-  const [authProxySkill, googleSigninSkill] = await Promise.all([
+  const [authProxySkill, googleSigninSkill, designSkill] = await Promise.all([
     fetchBundledSkill('auth-proxy-gip'),
     wantsGoogle ? fetchBundledSkill('google-signin') : Promise.resolve(null),
+    withDesign ? fetchBundledSkill('frontend-design') : Promise.resolve(null),
   ])
 
   if (!authProxySkill) {
@@ -155,6 +168,11 @@ export async function runAuthFlow(
   if (wantsGoogle && !googleSigninSkill) {
     chatStore.addSystemMessage(
       'Could not load the google-signin skill. Proceeding with email/password only — re-add `#auth-google` once the skill is available.'
+    )
+  }
+  if (withDesign && !designSkill) {
+    chatStore.addSystemMessage(
+      'Could not load the frontend-design skill. Proceeding without it — the UI will use the model\'s default aesthetics.'
     )
   }
 
@@ -170,8 +188,58 @@ export async function runAuthFlow(
   if (wantsGoogle && googleSigninSkill) {
     skillService.forceLoadSkill('google-signin')
   }
+  if (withDesign && designSkill) {
+    skillService.forceLoadSkill('frontend-design')
+  }
 
-  const prompt = buildPrompt(providers, instructions, authProxySkill, googleSigninSkill)
+  const prompt = buildPrompt(providers, instructions, authProxySkill, googleSigninSkill, designSkill)
+
+  await runAgentWithCallbacks(prompt, {
+    addUserMessage: true,
+    userMessageText,
+    useConversationHistory: true,
+  })
+}
+
+/**
+ * Lightweight flow for `#design` alone (no auth). Force-loads the
+ * frontend-design skill and injects its body inline so the agent commits
+ * to a deliberate aesthetic before generating UI. Mirrors claude-vaz's
+ * pattern of opt-in plugin install — explicit user signal, full skill
+ * body in context, no decision needed by the model on whether to read it.
+ */
+export async function runDesignFlow(
+  instructions: string,
+  userMessageText: string,
+): Promise<void> {
+  const chatStore = useChatStore.getState()
+  const designSkill = await fetchBundledSkill('frontend-design')
+
+  if (!designSkill) {
+    chatStore.addSystemMessage(
+      'Could not load the frontend-design skill. Continuing without it — the UI will use the model\'s default aesthetics.'
+    )
+    // Still run the agent with the cleaned text — user's request shouldn't be lost.
+    await runAgentWithCallbacks(instructions || userMessageText, {
+      addUserMessage: true,
+      userMessageText,
+      useConversationHistory: true,
+    })
+    return
+  }
+
+  SkillService.getInstance().forceLoadSkill('frontend-design')
+
+  const prompt = [
+    `<design_skill name="frontend-design">`,
+    designSkill,
+    `</design_skill>`,
+    ``,
+    `The developer dropped \`#design\` in the prompt. Apply the recipe above to ALL UI you build in this turn. Commit to ONE bold aesthetic direction — refined minimalism and maximalist chaos both work, the timid middle does not. Pick distinctive typography (avoid Inter / system defaults). Build a cohesive color palette with intentional accents. The result should be visually striking AND production-grade — not generic AI chrome.`,
+    ``,
+    `Developer's request:`,
+    `> ${instructions || userMessageText}`,
+  ].join('\n')
 
   await runAgentWithCallbacks(prompt, {
     addUserMessage: true,

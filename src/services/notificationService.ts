@@ -51,6 +51,20 @@ async function ensurePermission(): Promise<boolean> {
   }
 }
 
+/**
+ * Public entry point to trigger the OS notification-permission dialog at a
+ * moment the user expects it. Onboarding is the obvious place — the user is
+ * configuring the IDE, the prompt is contextual instead of arriving later
+ * when the agent unexpectedly wants to notify them about something else.
+ *
+ * Idempotent: the result is cached, so calling this from multiple places
+ * (e.g. onboarding ReadyStep mount + first notify) only ever shows the OS
+ * dialog once.
+ */
+export async function ensureNotificationPermission(): Promise<boolean> {
+  return ensurePermission()
+}
+
 async function isWindowFocused(): Promise<boolean> {
   try {
     return await getCurrentWindow().isFocused()

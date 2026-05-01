@@ -20,6 +20,7 @@ export interface HashtagOption {
 export const HASHTAG_OPTIONS: HashtagOption[] = [
   { tag: '#auth-email-password', description: 'Email + password auth (GIP proxy + Identity Toolkit)' },
   { tag: '#auth-google',         description: 'Google sign-in via Google Identity Services (GIP proxy)' },
+  { tag: '#design',              description: 'Polished UI with bold aesthetic direction — typography, layout, motion' },
 ]
 
 /**
@@ -40,6 +41,8 @@ const AUTH_TAG_TO_PROVIDER: Record<string, Provider> = {
   'auth-google': 'google',
 }
 
+const DESIGN_TAG_TOKEN = 'design'
+
 export interface AuthHashtagDetection {
   /** Distinct providers signalled by the recognised tags. */
   providers: Provider[]
@@ -47,32 +50,56 @@ export interface AuthHashtagDetection {
   cleanedText: string
 }
 
+export interface PreprocessedHashtags {
+  /** Distinct auth providers signalled by `#auth-*` tags. */
+  authProviders: Provider[]
+  /** True when `#design` is present — caller should force-load `frontend-design`. */
+  hasDesign: boolean
+  /** Original text minus all recognised hashtags (whitespace collapsed). */
+  cleanedText: string
+}
+
 /**
- * Detect known auth hashtags in `text`. Strips them from the text so the
- * user-visible message reads naturally without the `#tag` noise. Returns
- * `{ providers: [], cleanedText: text }` when none are found.
+ * Single-pass detector for ALL recognised hashtags. Strips them from the
+ * text and returns what was found. Walking backwards keeps later indices
+ * valid as we remove earlier tags. Unknown hashtags pass through.
  *
  * Hashtags must be whitespace-delimited (same rule as the parser): a `#`
  * mid-word doesn't trigger.
  */
-export function detectAuthHashtags(text: string): AuthHashtagDetection {
+export function preprocessHashtags(text: string): PreprocessedHashtags {
   const tags = extractHashtags(text)
   if (tags.length === 0) {
-    return { providers: [], cleanedText: text }
+    return { authProviders: [], hasDesign: false, cleanedText: text }
   }
 
   const providers = new Set<Provider>()
-  // Walk backwards so removing earlier tags doesn't shift later indices.
+  let hasDesign = false
   let cleaned = text
+
   for (let i = tags.length - 1; i >= 0; i--) {
     const tag = tags[i]
-    const provider = AUTH_TAG_TO_PROVIDER[tag.token.toLowerCase()]
+    const lowerToken = tag.token.toLowerCase()
+    const provider = AUTH_TAG_TO_PROVIDER[lowerToken]
     if (provider !== undefined) {
       providers.add(provider)
       cleaned = cleaned.slice(0, tag.start) + cleaned.slice(tag.end)
+    } else if (lowerToken === DESIGN_TAG_TOKEN) {
+      hasDesign = true
+      cleaned = cleaned.slice(0, tag.start) + cleaned.slice(tag.end)
     }
+    // Unknown tags pass through untouched.
   }
 
   cleaned = cleaned.replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim()
-  return { providers: Array.from(providers), cleanedText: cleaned }
+  return { authProviders: Array.from(providers), hasDesign, cleanedText: cleaned }
+}
+
+/**
+ * Detect known auth hashtags only (legacy API kept for callers that don't
+ * care about `#design`). Use `preprocessHashtags` when you need both.
+ */
+export function detectAuthHashtags(text: string): AuthHashtagDetection {
+  const pre = preprocessHashtags(text)
+  return { providers: pre.authProviders, cleanedText: pre.cleanedText }
 }

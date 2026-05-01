@@ -508,7 +508,9 @@ Files:
 
 Dev servers:
  - The framework picks the port (Vite=5173, Next=3000, Express=whatever your scripts bind). The IDE detects URLs from log output and classifies them by HTTP content-type (HTML → iframe preview; JSON/other → HTTP Client).
- - For frontend dev servers on Windows, the IDE injects --host 0.0.0.0 (works around Node 18+ binding only to ::1). Wrappers (concurrently, npm-run-all, turbo, pnpm -r, workspaces fanout) get nothing injected — wire host explicitly in sub-scripts if you need it.
+ - **Frontend dev servers MUST bind to 0.0.0.0**, not just localhost. Node 18+ resolves "localhost" to ::1 (IPv6) only, but the IDE preview connects via 127.0.0.1 (IPv4). Without explicit host binding, the preview shows "Connection refused".
+   - For top-level commands (no wrapper): the IDE auto-injects \`--host 0.0.0.0\` for known frontend frameworks (vite, next dev, nuxt dev, astro dev, svelte-kit dev, ng serve).
+   - For wrappers (concurrently, npm-run-all, turbo, pnpm -r, workspaces fanout): the IDE CANNOT inject — wrappers swallow the flag. **Wire \`--host 0.0.0.0\` explicitly in the sub-script**: \`"dev:client": "vite --host 0.0.0.0"\` (NOT just \`"vite"\`).
  - When fullstack content-type is ambiguous (e.g. Express serving HTML fallback alongside Vite), pass frontend_port_hint to start_dev_server. Most projects do not need it.
 
 Safety:
@@ -797,7 +799,7 @@ Dev servers (start_dev_server is available in CMD mode too):
  - Call start_dev_server ONCE per project. Pass project_kind: "frontend" | "backend" | "fullstack" (auto-detected if omitted).
  - The framework picks the port. The IDE detects URLs from log output and classifies them by HTTP content-type. No port to memorise.
  - Pass frontend_port_hint only when fullstack content-type is ambiguous (e.g. Express serving HTML fallback alongside Vite).
- - On Windows, the IDE injects --host 0.0.0.0 for known frontend dev servers (Node 18+ IPv6 default binding workaround).
+ - **Frontend dev servers MUST bind to 0.0.0.0** (Node 18+ resolves localhost to IPv6-only). The IDE auto-injects \`--host 0.0.0.0\` for top-level frontend commands but CANNOT inject through wrappers — when using concurrently / npm-run-all / turbo, wire \`--host 0.0.0.0\` explicitly in the sub-script (e.g. \`"dev:client": "vite --host 0.0.0.0"\`).
 
 Safety:
  - .env, .pem, .key, credentials.json, .npmrc, and *_secret* files may contain secrets. Read or expose their contents only with explicit user authorization. You may create .env.example with placeholders.

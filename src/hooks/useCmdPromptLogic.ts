@@ -16,9 +16,9 @@ import { useAttachments } from './useAttachments'
 import QuickOpenService, { type QuickOpenItem } from '../services/quickOpenService'
 import { extractAndResolveMentions } from '../services/attachmentService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../utils/mentionParser'
-import { detectAuthHashtags } from '../services/agent/hashtagRegistry'
+import { preprocessHashtags } from '../services/agent/hashtagRegistry'
 import { useHashtagMenu } from '../components/prompt/useHashtagMenu'
-import { runAuthFlow } from '../services/agent/commands/authCommand'
+import { runAuthFlow, runDesignFlow } from '../services/agent/commands/authCommand'
 import { t } from '../i18n/useTranslation'
 import {
   loadPromptHistory,
@@ -228,26 +228,34 @@ export function useCmdPromptLogic() {
       return
     }
 
-    // ── Hashtag-driven flows (e.g. #auth-google, #auth-email-password) —
-    // load the relevant skills inline and route to a specialised flow.
-    // Free-form `#tags` not in the registry pass through untouched.
-    const auth = detectAuthHashtags(textPrompt)
-    if (auth.providers.length > 0) {
-      // Auth scaffolding inherently writes files into a project — gate on
-      // a project being open. Without this the call falls through to
-      // provision_auth which fails with a cryptic tool-level error.
+    // ── Hashtag-driven flows (e.g. #auth-google, #design) — load the
+    // relevant skills inline and route to a specialised flow. Free-form
+    // `#tags` not in the registry pass through untouched.
+    const pre = preprocessHashtags(textPrompt)
+    if (pre.authProviders.length > 0 || pre.hasDesign) {
+      // Skill flows inherently write files into a project — gate on a
+      // project being open. Without this the call falls through to
+      // provision_auth or scaffolding tools which fail with cryptic errors.
       if (!path) {
         useChatStore.getState().addSystemMessage(
-          'No project open. Open a project before using auth hashtags.',
+          'No project open. Open a project before using skill hashtags.',
           'error',
         )
         return
       }
       // Strip hashtags from the visible message — they're routing signals,
       // not content. Fallback label when the user typed only the tag.
-      const bubbleText = auth.cleanedText
-        || `Add ${auth.providers.map(p => p === 'google' ? 'Google sign-in' : 'email/password sign-in').join(' and ')}`
-      await runAuthFlow(auth.providers, auth.cleanedText, bubbleText)
+      const labels = [
+        ...pre.authProviders.map(p => p === 'google' ? 'Google sign-in' : 'email/password sign-in'),
+        ...(pre.hasDesign ? ['polished UI'] : []),
+      ]
+      const bubbleText = pre.cleanedText || `Add ${labels.join(' and ')}`
+
+      if (pre.authProviders.length > 0) {
+        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign)
+      } else {
+        await runDesignFlow(pre.cleanedText, bubbleText)
+      }
       return
     }
 

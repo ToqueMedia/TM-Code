@@ -15,9 +15,9 @@ import MCPService from '../../services/mcp/mcpService'
 import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
-import { detectAuthHashtags } from '../../services/agent/hashtagRegistry'
+import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
 import { useHashtagMenu } from './useHashtagMenu'
-import { runAuthFlow } from '../../services/agent/commands/authCommand'
+import { runAuthFlow, runDesignFlow } from '../../services/agent/commands/authCommand'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../../services/attachmentService'
 import {
   enqueue as enqueueMessage,
@@ -720,11 +720,11 @@ export function usePromptBar() {
     hashtagMenu.close()
 
     // === Hashtag-driven flows: detect skill triggers (e.g. #auth-google,
-    // #auth-email-password) and route to the specialised flow. Replaces the
-    // legacy /auth slash command. Free-form `#tags` not in the registry are
-    // ignored and pass through to the agent untouched. ===
-    const auth = detectAuthHashtags(prompt)
-    if (auth.providers.length > 0) {
+    // #design) and route to the specialised flow. Replaces the legacy /auth
+    // slash command. Free-form `#tags` not in the registry are ignored and
+    // pass through to the agent untouched. ===
+    const pre = preprocessHashtags(prompt)
+    if (pre.authProviders.length > 0 || pre.hasDesign) {
       const projectPath = currentProject?.path
       if (!projectPath) {
         useChatStore.getState().setDraftInput('')
@@ -745,9 +745,19 @@ export function usePromptBar() {
       // routing signals, not content). When the cleaned text is empty (user
       // typed only the tag), synthesise a short label so the bubble isn't
       // empty.
-      const bubbleText = auth.cleanedText
-        || `Add ${auth.providers.map(p => p === 'google' ? 'Google sign-in' : 'email/password sign-in').join(' and ')}`
-      await runAuthFlow(auth.providers, auth.cleanedText, bubbleText)
+      const labels = [
+        ...pre.authProviders.map(p => p === 'google' ? 'Google sign-in' : 'email/password sign-in'),
+        ...(pre.hasDesign ? ['polished UI'] : []),
+      ]
+      const bubbleText = pre.cleanedText || `Add ${labels.join(' and ')}`
+
+      if (pre.authProviders.length > 0) {
+        // Auth flow handles design augmentation when both are requested.
+        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign)
+      } else {
+        // Design-only flow: lightweight skill injection, no execution sequence.
+        await runDesignFlow(pre.cleanedText, bubbleText)
+      }
       return
     }
 

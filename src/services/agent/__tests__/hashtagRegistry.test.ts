@@ -2,6 +2,7 @@ import {
   HASHTAG_OPTIONS,
   filterHashtagOptions,
   detectAuthHashtags,
+  preprocessHashtags,
 } from '../hashtagRegistry'
 
 describe('HASHTAG_OPTIONS', () => {
@@ -9,6 +10,11 @@ describe('HASHTAG_OPTIONS', () => {
     const tags = HASHTAG_OPTIONS.map(o => o.tag)
     expect(tags).toContain('#auth-email-password')
     expect(tags).toContain('#auth-google')
+  })
+
+  it('contains the #design tag', () => {
+    const tags = HASHTAG_OPTIONS.map(o => o.tag)
+    expect(tags).toContain('#design')
   })
 })
 
@@ -110,5 +116,54 @@ describe('detectAuthHashtags', () => {
     const a = detectAuthHashtags('#auth-google #auth-email-password')
     const b = detectAuthHashtags('#auth-email-password #auth-google')
     expect(a.providers.sort()).toEqual(b.providers.sort())
+  })
+})
+
+describe('preprocessHashtags — combined auth + design detection', () => {
+  it('detects #design alone', () => {
+    const result = preprocessHashtags('#design build a landing page')
+    expect(result.authProviders).toEqual([])
+    expect(result.hasDesign).toBe(true)
+    expect(result.cleanedText).toBe('build a landing page')
+  })
+
+  it('detects #design + auth combined', () => {
+    const result = preprocessHashtags('#auth-google #design build login')
+    expect(result.authProviders).toEqual(['google'])
+    expect(result.hasDesign).toBe(true)
+    expect(result.cleanedText).toBe('build login')
+  })
+
+  it('returns hasDesign:false when only auth tags present', () => {
+    const result = preprocessHashtags('#auth-google login')
+    expect(result.authProviders).toEqual(['google'])
+    expect(result.hasDesign).toBe(false)
+    expect(result.cleanedText).toBe('login')
+  })
+
+  it('case-insensitive #design', () => {
+    const result = preprocessHashtags('#DESIGN make it bold')
+    expect(result.hasDesign).toBe(true)
+    expect(result.cleanedText).toBe('make it bold')
+  })
+
+  it('passes unknown tags through untouched', () => {
+    const result = preprocessHashtags('see #issue-123 then #design')
+    expect(result.hasDesign).toBe(true)
+    expect(result.cleanedText).toContain('#issue-123')
+  })
+
+  it('ignores mid-word #design (whitespace rule)', () => {
+    const result = preprocessHashtags('foo#design bar')
+    expect(result.hasDesign).toBe(false)
+    expect(result.cleanedText).toBe('foo#design bar')
+  })
+
+  it('detectAuthHashtags still works (legacy API)', () => {
+    // Ensure the legacy entry point still returns auth-only result.
+    const result = detectAuthHashtags('#auth-google #design build')
+    expect(result.providers).toEqual(['google'])
+    // The cleanedText comes from preprocess which strips ALL known tags.
+    expect(result.cleanedText).toBe('build')
   })
 })

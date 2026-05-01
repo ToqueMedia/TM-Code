@@ -365,6 +365,35 @@ function App() {
 		});
 	}, [currentProject]);
 
+	// Frontend-design tip: when the active project is a frontend type, suggest
+	// `#design` once per (session × project). Mirrors claude-vaz's pattern of
+	// nudging the user toward the frontend-design plugin without auto-loading
+	// it. The skill stays opt-in — this is just discoverability.
+	useEffect(() => {
+		if (!currentProject?.path) return;
+		const pt = currentProject.projectType;
+		const FRONTEND_TYPES = new Set(['react', 'vue', 'angular', 'svelte', 'nextjs', 'nuxt']);
+		if (!pt || !FRONTEND_TYPES.has(pt)) return;
+
+		const dedupKey = `design-tip-shown:${currentProject.path}`;
+		if (sessionStorage.getItem(dedupKey)) return;
+		sessionStorage.setItem(dedupKey, '1');
+
+		// Small delay so the tip lands after the project finishes loading and
+		// the chat UI has stabilised — avoids a toast-on-top-of-skeleton flash.
+		const timer = setTimeout(() => {
+			import('./stores/toastStore').then(({ useToastStore }) => {
+				useToastStore.getState().addToast(
+					'info',
+					t('tip.designHashtag'),
+					12000,
+				)
+			}).catch(() => { /* non-critical */ });
+		}, 1500);
+
+		return () => clearTimeout(timer);
+	}, [currentProject?.path, currentProject?.projectType]);
+
 	// Check for app updates on startup (non-blocking, 5s delay)
 	useEffect(() => {
 		if (!isAuthenticated) return;

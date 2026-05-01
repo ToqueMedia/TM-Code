@@ -84,6 +84,7 @@ const en = {
 
   // ── Preview ──────────────────────────────────────────
   'preview.gisIframeBlocked': 'Google Sign-In can\'t run in the preview iframe (browser security). Open the app in a real browser to test it.',
+  'tip.designHashtag': 'Frontend project detected. Add #design to your prompt for a polished UI with deliberate aesthetic.',
 
   // ── Tab Context Menu ───────────────────────────────
   'tab.close': 'Close',
@@ -835,6 +836,7 @@ const pt: Record<keyof typeof en, string> = {
 
   // ── Preview ──────────────────────────────────────────
   'preview.gisIframeBlocked': 'O início de sessão com Google não funciona no preview (limitação do navegador). Abre a aplicação num navegador real para testar.',
+  'tip.designHashtag': 'Projecto frontend detectado. Adiciona #design ao prompt para UI polida com estética deliberada.',
 
   // ── Tab Context Menu ───────────────────────────────
   'tab.close': 'Fechar',

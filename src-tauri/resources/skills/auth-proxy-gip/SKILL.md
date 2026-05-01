@@ -62,14 +62,22 @@ Without this guard, missing env vars surface only as cryptic 400s from Identity 
 
 Pick the framework's default port (Vite=5173, Next=3000, Express/your-choice). The TM Code IDE detects the dev-server URL from log output and classifies it by HTTP content-type — there is no "reserved port" you must use. Hardcoding 7773/7777 is no longer required.
 
-Two coordination concerns when frontend and backend run on different ports:
+Three coordination concerns when frontend and backend run on different ports:
 
-**1. Backend port**: bind to whatever the runtime gives you, defaulting to a sensible value:
+**1. Frontend host (CRITICAL)**: when using a parallel runner (concurrently, npm-run-all, turbo, pnpm -r, workspaces) the frontend script MUST include `--host 0.0.0.0`:
+```json
+"dev:client": "vite --host 0.0.0.0"   // ✅ binds to IPv4 + IPv6
+"dev:client": "vite"                   // ❌ Node 18+ binds to IPv6-only,
+                                       //    IDE preview shows "Connection refused"
+```
+This is because Node 18+ resolves `localhost` to `::1` only, but the IDE preview connects via `127.0.0.1`. Without `--host`, the dev server is up but unreachable from the iframe. The IDE auto-injects `--host` for top-level commands but cannot reach inside wrapper sub-scripts. The same applies to `next dev`, `nuxt dev`, `astro dev`, `svelte-kit dev`, and `ng serve`.
+
+**2. Backend port**: bind to whatever the runtime gives you, defaulting to a sensible value:
 ```ts
 app.listen(Number(process.env.PORT) || 3000, '0.0.0.0', ...)
 ```
 
-**2. CORS**: the frontend port is unknown at write-time (the dev server may pick a different one if the default is busy). Three options, in order of preference:
+**3. CORS**: the frontend port is unknown at write-time (the dev server may pick a different one if the default is busy). Three options, in order of preference:
 
 - **Permissive in dev** (simplest, only safe for local dev):
   ```ts

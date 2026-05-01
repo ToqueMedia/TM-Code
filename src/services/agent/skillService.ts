@@ -401,10 +401,15 @@ ${lines.join('\n')}`
       return mode === 'cmd'
     }
 
-    // frontend-design: self-describing (UI, component, landing, dashboard,
-    // "make it look good"). Index it always — the model reads the description
-    // and decides if it applies. Empty/fresh projects need it most.
-    if (skillName === 'frontend-design') return true
+    // frontend-design: opt-in via `#design` hashtag. Mirrors claude-vaz's
+    // pattern (frontend-design is a plugin the user installs, not bundled).
+    // Auto-indexing leads to read_skill misfires — the model sees it in the
+    // index but doesn't decide it's relevant for "build a tiny app", and
+    // the result is generic AI aesthetics. Force-loading via hashtag is the
+    // explicit signal the model needs to commit to a deliberate aesthetic.
+    // The IDE surfaces a tip suggesting #design when a frontend project is
+    // detected (see App.tsx).
+    if (skillName === 'frontend-design') return false
 
     // Auth-scaffolding skills (auth-proxy-gip, google-signin) — chat-only
     // (CMD has no dev-server preview, the recipe doesn't apply there). No
