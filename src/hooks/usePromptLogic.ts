@@ -47,7 +47,7 @@ export function usePromptLogic() {
 
     // Mode 2: typed `<known-cmd> [partial]` → suggest argument values. Each
     // selection appends the value with a trailing space so the menu can
-    // re-trigger for the next arg in a chain (`/auth email-password google`).
+    // re-trigger for the next arg in a chain.
     const argResult = slashCommandRegistry.getArgSuggestions(value)
     if (argResult) {
       const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({

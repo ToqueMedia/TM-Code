@@ -38,10 +38,11 @@ Backend mirrors:
 
 1. **NEVER** install `firebase-admin`. There is no Admin SDK in this stack — the auth-proxy talks to the Identity Toolkit REST API directly with `VITE_FIREBASE_API_KEY` (a public key).
 2. **NEVER** call `request_credentials` after `provision_auth` for anything Firebase / GIP / GCP-related. The user does not have (and will never have) `GOOGLE_APPLICATION_CREDENTIALS`, `serviceAccountKey.json`, or `GIP_SERVICE_ACCOUNT_*` — those live only on the TM Code platform worker.
-3. **NEVER** import `signInWithEmailAndPassword`, `createUserWithEmailAndPassword`, `signInWithPopup`, `GoogleAuthProvider`, or `signOut` from `firebase/auth` on the client. Only `onAuthStateChanged` is allowed. All auth flows go through your backend proxy.
+3. **NEVER** import `signInWithEmailAndPassword`, `createUserWithEmailAndPassword`, `signInWithPopup`, `GoogleAuthProvider`, or `signOut` from `firebase/auth` on the client. Only `onAuthStateChanged` is allowed AS AN IMPORT. Note that the listener WILL NOT FIRE in this proxy flow because no client-side method ever updates `auth.currentUser` — for session restoration use the bootstrap pattern below, not `onAuthStateChanged`. All auth flows go through your backend proxy.
 4. **NEVER** modify `.env`. It is platform-managed.
 5. **ALWAYS** call `/api/auth/sync` after a successful proxy signup or signin to upsert the user row in your DB.
 6. **ALWAYS** use the project's auth-helper (e.g. `authFetch`) for protected API calls — never raw `fetch` with manual headers spread around the codebase.
+7. **ALWAYS** call your store's `init()` (or equivalent bootstrap) from the app's entry file (`main.ts(x)` / `app.ts`) BEFORE the first render. Without it, a refresh after login lands the user on an infinite loading state — the auth store has no signal to rehydrate from. See the "Session bootstrap" section below.
 
 ## Endpoint surface to implement
 
@@ -53,7 +54,19 @@ POST /api/auth/proxy/signin    body: { email, password }              → { idTo
 POST /api/auth/proxy/google    body: { idToken: <google_id_token> }   → { idToken, refreshToken, email, localId, displayName, photoUrl, expiresIn }
 POST /api/auth/proxy/refresh   body: { refreshToken }                 → { idToken, refreshToken, expiresIn }
 POST /api/auth/sync            (auth-required)  body: profile fields  → upserted user row
+GET  /api/auth/me              (auth-required)  no body                → current user row from DB
 ```
+
+The `/me` endpoint is REQUIRED for session bootstrap on app load — see the
+"Session bootstrap" section below for why `onAuthStateChanged` alone cannot
+restore the session in this proxy-only flow.
+
+### Apply rate limiting
+
+Add per-IP rate limits on the credential-handling endpoints (`/signup`, `/signin`,
+`/google`, `/refresh`) before shipping to production. Express: `express-rate-limit`
+(15 req / 5 min). Hono / Fastify / NestJS: equivalent middleware. Without this,
+the endpoints are open targets for credential stuffing and brute-force attacks.
 
 ## Identity Toolkit REST endpoints you'll call
 
@@ -107,7 +120,7 @@ For routes that need to know who the user is (`/api/auth/sync`, any protected en
 **Production** — verify against Google's secure-token JWKS:
 
 ```
-JWKS URL:  https://www.googleapis.com/service_account/v1/metadata/jwk/securetoken@system.gserviceaccount.com
+JWKS URL:  https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com
 Issuer:    https://securetoken.google.com/<GCP_PROJECT_ID>
 Audience:  <GCP_PROJECT_ID>
 Tenant check: payload.firebase?.tenant must equal <GIP_TENANT_ID>
@@ -198,6 +211,68 @@ if (window !== window.parent) setPersistence(auth, inMemoryPersistence)
 
 Export as `auth`, not `firebaseAuth`. Only import `onAuthStateChanged` from `firebase/auth` — nothing else.
 
+> **Important — `onAuthStateChanged` will NOT fire in this proxy flow.**
+> Because no client-side method (`signInWithPopup`, `signInWithEmailAndPassword`,
+> `signInWithCustomToken`, etc.) is ever called, `auth.currentUser` stays
+> `null` forever and the listener never triggers. The import is allowed
+> because some apps still use it for tab-sync or token-expiry events, but
+> for **session restoration on app load** you MUST use the bootstrap
+> pattern below — not the listener.
+
+### Session bootstrap (REQUIRED — call from main.ts/app.ts before first render)
+
+The proxy flow stores the JWT in `sessionStorage` (or cookies). On a hard
+refresh, the store starts empty — you have to actively rehydrate from the
+stored token. Without this step the user lands on an infinite spinner after
+any reload.
+
+```typescript
+// src/store/authStore.ts (Zustand example — adapt to your state lib)
+interface AuthState {
+  user: UserRow | null
+  loading: boolean
+  init: () => Promise<void>
+  setUser: (u: UserRow | null) => void
+}
+
+export const useAuthStore = create<AuthState>((set) => ({
+  user: null,
+  loading: true,
+  setUser: (u) => set({ user: u }),
+  init: async () => {
+    const token = getAuthToken()
+    if (!token) {
+      set({ user: null, loading: false })
+      return
+    }
+    try {
+      const res = await authFetch('/api/auth/me')
+      if (res.ok) {
+        set({ user: await res.json(), loading: false })
+      } else {
+        // Token invalid/expired and refresh failed — clear and show login.
+        setAuthToken(null, null)
+        set({ user: null, loading: false })
+      }
+    } catch {
+      set({ user: null, loading: false })
+    }
+  },
+}))
+```
+
+```typescript
+// src/main.tsx — call init() BEFORE first render
+import { useAuthStore } from './store/authStore'
+
+useAuthStore.getState().init().finally(() => {
+  createRoot(document.getElementById('root')!).render(<App />)
+})
+```
+
+After login (signup/signin/google), call `useAuthStore.getState().setUser(syncedUserRow)`
+explicitly — the store has no other way to learn about the new user.
+
 ### Frontend — auth helper (`src/lib/authClient.ts`)
 
 ```typescript
@@ -254,8 +329,21 @@ Adapt the storage layer (sessionStorage vs cookies) to the project's needs — e
 
 ### Auth flow sequence (recap)
 
+**App load (every refresh):**
+0. Entry file calls `useAuthStore.getState().init()` BEFORE first render.
+   `init` reads `getAuthToken()`, calls `GET /api/auth/me`, sets `user` from
+   the response (or `null` if no token / token invalid).
+
+**Login:**
 1. User submits the signup/signin form → frontend calls `/api/auth/proxy/{signup,signin}`.
 2. Backend hits Identity Toolkit → returns `{ idToken, refreshToken, localId, email }`.
 3. Frontend stores tokens via `setAuthToken`.
 4. Frontend calls `/api/auth/sync` (auth-required) to upsert the user row.
-5. Subsequent API calls use `authFetch` — auto-refresh on 401 via `/api/auth/proxy/refresh`.
+5. Frontend calls `useAuthStore.getState().setUser(syncedUserRow)` to hydrate
+   the store immediately (no listener will tell us, see note above).
+6. Subsequent API calls use `authFetch` — auto-refresh on 401 via `/api/auth/proxy/refresh`.
+
+**Logout:**
+1. Frontend calls `setAuthToken(null, null)` and `useAuthStore.getState().setUser(null)`.
+2. No backend call needed — the JWT just expires; refresh tokens stay revocable
+   server-side if you maintain a denylist (out of scope for V1).

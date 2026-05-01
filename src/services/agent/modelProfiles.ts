@@ -148,6 +148,43 @@ const DEEPSEEK_V4_FLASH: ModelProfile = {
   modelSpecificPrompt: '',
 }
 
+const DEEPSEEK_V4_PRO: ModelProfile = {
+  id: 'deepseek-v4-pro',
+  name: 'DeepSeek V4-Pro',
+  persona: { name: 'Mãe Mwene', tagline: 'Raciocínio profundo e contexto largo — para tarefas complexas e multi-passo. Custo: 4x' },
+  modelId: 'deepseek-v4-pro',
+  // Upstream supports 1M tokens (Think Max recommends ≥384K). We cap at 256K
+  // for parity with V4-Flash; raise once latency/billing numbers are validated.
+  contextWindow: 262_144,
+  maxOutputTokens: 131_072,
+
+  // Official recommendation per HuggingFace model card (2026-04):
+  // "For local deployment, we recommend setting the sampling parameters to
+  // temperature = 1.0, top_p = 1.0." Same as DeepSeek's general guidance.
+  temperature: 1.0,
+  reasoningTemperature: 1.0,
+  topP: 1.0,
+  topPNonThinking: 1.0,
+  topK: null,
+
+  // Pro exposes the same three modes (Non-Think / Think-High / Think-Max)
+  // via the `enable_thinking` boolean on DashScope. Default OFF — Think Max
+  // is expensive (per-token cost + recommended ≥384K context); user opts in
+  // from Settings when the task warrants it.
+  thinkingMode: 'toggleable',
+  supportsThinking: true,
+  thinkingParam: 'enable_thinking',
+  thinkingBudget: null,
+  thinkingMandatory: false,
+
+  // V4 family preserves reasoning_content across turns — same as V4-Flash.
+  preserveReasoning: true,
+  skipSystemPromptInThinking: false,
+  supportsAttachments: false,
+  supportsSearch: true,
+  modelSpecificPrompt: '',
+}
+
 const GLM_5_1: ModelProfile = {
   id: 'glm-5.1',
   name: 'GLM-5.1',
@@ -416,6 +453,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'glm-5': GLM_5,
   'glm-5.1': GLM_5_1,
   'kimi-k2.5': KIMI_K2_5,
+  'deepseek-v4-pro': DEEPSEEK_V4_PRO,
   // 5x cost
   'gemini-3-flash': GEMINI_3_FLASH,
 }

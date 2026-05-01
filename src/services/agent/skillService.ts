@@ -129,6 +129,34 @@ class SkillService {
   }
 
   /**
+   * Skills the user/system has explicitly opted into for this session, even
+   * when the relevance heuristic would otherwise skip them. Populated by
+   * the prompt-bar hashtag handler (e.g. `#auth-google` triggers
+   * `forceLoadSkill('google-signin')`) so the `read_skill` tool, system-
+   * prompt skill index, and the agent's mental model stay consistent.
+   *
+   * Without this, the hashtag flow would inject skill bodies inline into the
+   * user prompt while `loadSkills` left them out of the cache → `read_skill`
+   * returned "not loaded" → agent fell back to training-data implementation
+   * and ignored the skill.
+   *
+   * Persists for the lifetime of the SkillService singleton (app session).
+   * Cleared automatically on app restart; no API to reset mid-session today.
+   */
+  private forceLoadedSkillNames: Set<string> = new Set()
+
+  /**
+   * Mark a bundled skill as required for this session. Bypasses the relevance
+   * heuristic in `isBundledSkillRelevant`. Invalidates the cache so the next
+   * `loadSkills` call picks the skill up.
+   */
+  forceLoadSkill(name: string): void {
+    if (this.forceLoadedSkillNames.has(name)) return
+    this.forceLoadedSkillNames.add(name)
+    this.invalidateCache()
+  }
+
+  /**
    * Builds the skill INDEX block for the system prompt. Each skill contributes
    * one line (name + description). Full content is fetched on demand via the
    * read_skill tool — this keeps the system prompt lean and eliminates silent
@@ -347,6 +375,13 @@ ${lines.join('\n')}`
     projectType?: string,
     mode: PromptMode = 'chat',
   ): boolean {
+    // Force-loaded skills bypass every other gate — used by hashtag flows
+    // (e.g. `#auth-google`) that pre-commit the agent to a workflow regardless
+    // of the project's auto-detected type. Without this, an empty project (no
+    // package.json → projectType undefined) silently drops auth skills even
+    // though the user explicitly asked for them via the hashtag.
+    if (this.forceLoadedSkillNames.has(skillName)) return true
+
     // general-coding is always relevant in both modes — it carries cross-cutting hygiene rules.
     if (skillName === 'general-coding') return true
 

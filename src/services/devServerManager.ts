@@ -52,6 +52,10 @@ interface InternalSlot {
    *  backendUrl came from a real JSON probe and should not be overwritten. */
   backendUrlMirrored: boolean
   eaddrinuseRetried: boolean
+  /** One-shot flag: set after the first cross-origin "Script error. (:0)" hint
+   *  is emitted to the console. Prevents the helper text from repeating on
+   *  every popup retry attempt during the same dev-server slot. */
+  scriptErrorHintShown: boolean
 }
 
 /** Options for starting a dev server. Per-project overrides are optional — when
@@ -228,6 +232,7 @@ class DevServerManager {
       backendUrl: null,
       backendUrlMirrored: false,
       eaddrinuseRetried: false,
+      scriptErrorHintShown: false,
     }
     this.server = slot
 
@@ -303,6 +308,24 @@ class DevServerManager {
           toLog.push({
             text: 'Fix: Run "rm -rf node_modules package-lock.json && npm install" in the terminal to reinstall dependencies for this platform.',
             level: 'error',
+          })
+        }
+
+        // Cross-origin "Script error" — opaque error masked by the browser
+        // when a popup window's script throws. Most common signature for
+        // OAuth popup flows (Firebase signInWithPopup, googleapis OAuth
+        // window) running inside the embedded TauriWebview, where
+        // `window.opener` is null and `postMessage` cross-origin breaks.
+        // The error itself carries no detail (`(:0)` line number is the
+        // cross-origin masking signature). Surface a one-shot hint so the
+        // user knows to test in their default browser instead. Throttled per
+        // server slot to avoid spamming the console with the same hint on
+        // every popup attempt.
+        if (/\[runtime\]\s+Script error\.\s+\(:0\)/.test(line) && !slot.scriptErrorHintShown) {
+          slot.scriptErrorHintShown = true
+          toLog.push({
+            text: 'Hint: "Script error. (:0)" with no detail usually means a popup or third-party script crashed cross-origin (common with Firebase signInWithPopup / OAuth popups inside the embedded preview). Test this flow in your default browser via "Open in browser" — the popup will work there.',
+            level: 'warn',
           })
         }
       }

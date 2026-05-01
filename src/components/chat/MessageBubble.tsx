@@ -1,6 +1,6 @@
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiUser, FiCopy, FiCheck } from 'react-icons/fi'
+import { FiUser, FiCopy, FiCheck, FiDownload, FiCode, FiFileText } from 'react-icons/fi'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -13,6 +13,13 @@ import ReasoningBlock from './ReasoningBlock'
 import PlanApprovalCard from './PlanApprovalCard'
 import TodoListCard from './TodoListCard'
 import CredentialRequestCard from './CredentialRequestCard'
+import {
+  sessionToJson,
+  sessionToMarkdown,
+  triggerDownload,
+  defaultExportFilename,
+} from '../../utils/sessionExport'
+import { useToastStore } from '../../stores/toastStore'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -261,13 +268,57 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     return parts.join('\n\n').trim()
   }, [message])
 
+  // Copy the WHOLE session (messages + tool calls + reasoning) to clipboard
+  // as Markdown. The button lives on each assistant message but the action
+  // is session-wide — mirrors the Download button next to it and matches the
+  // user's request to capture the full transcript including tool activity.
   const handleCopyMessage = useCallback(() => {
-    const text = copyableText()
-    if (!text) return
-    navigator.clipboard.writeText(text).catch(() => {})
+    const session = useChatStore.getState().getActiveSession()
+    if (!session) {
+      // Fallback: copy just this message's text if there's no active session.
+      const text = copyableText()
+      if (!text) return
+      navigator.clipboard.writeText(text).catch(() => {})
+    } else {
+      navigator.clipboard.writeText(sessionToMarkdown(session)).catch((err) => {
+        console.error('[sessionCopy] clipboard write failed:', err)
+        useToastStore.getState().addToast('error', 'Could not copy session to clipboard')
+      })
+    }
     setMessageCopied(true)
     setTimeout(() => setMessageCopied(false), 2000)
   }, [copyableText])
+
+  // === Session export — downloads the WHOLE conversation (not just this
+  // message). Placed next to the per-message Copy because that's the natural
+  // home for end-of-turn actions; the menu makes it explicit it's session-wide.
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
+  const exportButtonRef = useRef<HTMLDivElement | null>(null)
+
+  const handleExportSession = useCallback(async (format: 'json' | 'md') => {
+    const session = useChatStore.getState().getActiveSession()
+    if (!session) return
+    setExportMenuOpen(false)
+    const filename = defaultExportFilename(session, format)
+    const content = format === 'json' ? sessionToJson(session) : sessionToMarkdown(session)
+    const mimeType = format === 'json' ? 'application/json' : 'text/markdown'
+    try {
+      const savedPath = await triggerDownload(filename, content, mimeType)
+      if (savedPath) {
+        useToastStore.getState().addToast(
+          'success',
+          `Session saved to ${savedPath.split(/[/\\]/).pop()}`,
+        )
+      }
+    } catch (err) {
+      // Surface failures so the user knows the export didn't land. Cancel is
+      // a normal path (returns null without throwing) — only real fs/dialog
+      // errors hit this branch.
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[sessionExport] save failed:', err)
+      useToastStore.getState().addToast('error', `Export failed: ${msg}`)
+    }
+  }, [])
 
   const handleApply = useCallback(
     (block: { id: string; code: string }) => {
@@ -398,16 +449,27 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           </Flex>
         )}
 
-        {/* Reasoning block — only show after streaming completes */}
-        {message.reasoningContent && !isStreaming && (
+        {/* Reasoning block — visible during streaming so the developer can
+            watch the model's thinking roll out movie-credits style. The block
+            handles its own auto-collapse once playback catches up. While the
+            reasoning is still rolling (durationMs not yet set), text and tool
+            calls are intentionally hidden — the user asked for one channel at
+            a time: reasoning first, then everything else. */}
+        {message.reasoningContent && (
           <ReasoningBlock
             content={message.reasoningContent}
             isVisible={message.isReasoningVisible || false}
-            isStreaming={false}
+            isStreaming={isStreaming === true && message.reasoningDurationMs == null}
             durationMs={message.reasoningDurationMs}
             onToggle={() => toggleReasoning(message.id)}
           />
         )}
+
+        {/* Gate everything below the reasoning block until the reasoning has
+            finished. Signal: `reasoningDurationMs` flips from undefined to a
+            number when finalizeAssistantMessage runs OR the first tool_call
+            arrives (chatStore: appendReasoningDelta + addPendingToolCall). */}
+        {(!message.reasoningContent || message.reasoningDurationMs != null) && (<>
 
         {/* Interleaved content blocks (text + tool calls in order) */}
         {message.contentBlocks && message.contentBlocks.length > 0 ? (
@@ -463,9 +525,14 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           />
         ))}
 
-        {/* Copy assistant message — shown after the agent finishes the task */}
+        </>)}
+
+        {/* Copy this message + Download whole session — shown after the agent
+            finishes the task. The download button serializes the active
+            session (messages + tool calls + reasoning + attachments metadata)
+            as JSON or Markdown via the browser's save-as dialog. */}
         {!isUser && !isSystem && !isStreaming && copyableText() && (
-          <Flex mt={2} justify="flex-end">
+          <Flex mt={2} justify="flex-end" gap={1} align="center">
             <Flex
               as="button"
               align="center"
@@ -487,6 +554,128 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 {messageCopied ? t('chat.copied') : t('chat.copyMessage')}
               </Text>
             </Flex>
+
+            {/* Download session — opens a small menu with JSON / Markdown */}
+            <Box position="relative" ref={exportButtonRef}>
+              <Flex
+                as="button"
+                align="center"
+                gap={1.5}
+                px={2}
+                py="4px"
+                borderRadius="6px"
+                fontSize="11px"
+                color={tokens.colors.text.disabled}
+                cursor="pointer"
+                transition={`all ${tokens.transition.fast}`}
+                _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.secondary }}
+                onClick={() => setExportMenuOpen(v => !v)}
+                title={t('chat.downloadSession')}
+                aria-label={t('chat.downloadSession')}
+                aria-haspopup="menu"
+                aria-expanded={exportMenuOpen}
+              >
+                <FiDownload size={12} />
+                <Text fontSize="11px" fontWeight={500}>
+                  {t('chat.downloadSession')}
+                </Text>
+              </Flex>
+              {exportMenuOpen && (
+                <>
+                  {/* Click-outside catcher */}
+                  <Box
+                    position="fixed"
+                    top="0"
+                    left="0"
+                    right="0"
+                    bottom="0"
+                    zIndex={10}
+                    onClick={() => setExportMenuOpen(false)}
+                  />
+                  <Box
+                    role="menu"
+                    position="absolute"
+                    bottom="calc(100% + 6px)"
+                    right="0"
+                    zIndex={11}
+                    bg={tokens.colors.bg.overlay}
+                    border={`1px solid ${tokens.colors.border.default}`}
+                    borderRadius="8px"
+                    boxShadow="0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.02)"
+                    backdropFilter="blur(8px)"
+                    minW="220px"
+                    overflow="hidden"
+                    py="4px"
+                    css={{
+                      animation: 'menuFadeIn 0.12s ease-out',
+                      '@keyframes menuFadeIn': {
+                        from: { opacity: 0, transform: 'translateY(4px)' },
+                        to: { opacity: 1, transform: 'translateY(0)' },
+                      },
+                    }}
+                  >
+                    <Text
+                      px={3}
+                      pt="6px"
+                      pb="4px"
+                      fontSize="10px"
+                      fontWeight="600"
+                      letterSpacing="0.06em"
+                      textTransform="uppercase"
+                      color={tokens.colors.text.disabled}
+                    >
+                      {t('chat.downloadSession')}
+                    </Text>
+                    <Flex
+                      as="button"
+                      role="menuitem"
+                      align="center"
+                      gap={2.5}
+                      w="100%"
+                      px={3}
+                      py="8px"
+                      fontSize="12.5px"
+                      color={tokens.colors.text.primary}
+                      cursor="pointer"
+                      transition={`background ${tokens.transition.fast}`}
+                      _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+                      onClick={() => handleExportSession('json')}
+                      whiteSpace="nowrap"
+                    >
+                      <Box color={tokens.colors.text.muted} flexShrink={0}>
+                        <FiCode size={13} />
+                      </Box>
+                      <Text fontSize="12.5px" lineHeight="1.3">
+                        {t('chat.downloadJson')}
+                      </Text>
+                    </Flex>
+                    <Flex
+                      as="button"
+                      role="menuitem"
+                      align="center"
+                      gap={2.5}
+                      w="100%"
+                      px={3}
+                      py="8px"
+                      fontSize="12.5px"
+                      color={tokens.colors.text.primary}
+                      cursor="pointer"
+                      transition={`background ${tokens.transition.fast}`}
+                      _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+                      onClick={() => handleExportSession('md')}
+                      whiteSpace="nowrap"
+                    >
+                      <Box color={tokens.colors.text.muted} flexShrink={0}>
+                        <FiFileText size={13} />
+                      </Box>
+                      <Text fontSize="12.5px" lineHeight="1.3">
+                        {t('chat.downloadMarkdown')}
+                      </Text>
+                    </Flex>
+                  </Box>
+                </>
+              )}
+            </Box>
           </Flex>
         )}
 

@@ -121,8 +121,16 @@ pub fn validate_path_within_root(path: &Path, root: &Path) -> Result<PathBuf> {
 
 /// Validates a standalone path by canonicalizing it and checking for symlink abuse.
 /// Used for commands that don't have a project root context (read_file, write_file, etc.)
+///
+/// When the path itself or its parent doesn't exist, walks UP the path tree to
+/// find the deepest ancestor that does exist, canonicalizes that, then appends
+/// the remaining segments back. This lets `write_file` succeed for paths whose
+/// parent directories don't yet exist (the caller will create_dir_all the
+/// parent right after) — without losing path-traversal protection (the `..`
+/// check runs first and is unaffected by ancestor existence).
 fn validate_path_safe(path: &Path) -> Result<PathBuf> {
-    // Block paths with ".." components before they reach the filesystem
+    // Block paths with ".." components before they reach the filesystem.
+    // Runs unconditionally — independent of which ancestors exist on disk.
     for component in path.components() {
         if let std::path::Component::ParentDir = component {
             return Err(FileTreeError::InvalidOperation(
@@ -132,26 +140,36 @@ fn validate_path_safe(path: &Path) -> Result<PathBuf> {
     }
 
     if path.exists() {
-        canonicalize_path(path)
-            .map_err(|_| FileTreeError::PathNotFound(format!("{}", path.display())))
-    } else {
-        // For new files, canonicalize the parent
-        let parent = path.parent().ok_or_else(|| {
-            FileTreeError::InvalidOperation("Cannot resolve parent directory".to_string())
-        })?;
-        if parent.as_os_str().is_empty() {
-            return Err(FileTreeError::InvalidOperation(
-                "Cannot resolve path without parent directory".to_string(),
-            ));
-        }
-        let canonical_parent = canonicalize_path(parent).map_err(|_| {
-            FileTreeError::PathNotFound(format!("Parent not found: {}", parent.display()))
-        })?;
-        let file_name = path
-            .file_name()
-            .ok_or_else(|| FileTreeError::InvalidOperation("Invalid file name".to_string()))?;
-        Ok(canonical_parent.join(file_name))
+        return canonicalize_path(path)
+            .map_err(|_| FileTreeError::PathNotFound(format!("{}", path.display())));
     }
+
+    // Path doesn't exist yet. Walk up until we find an ancestor that does,
+    // canonicalize it, then re-attach the missing-segment tail. Handles
+    // create_file / write_file targeting deeply-nested new directories.
+    let mut existing_ancestor = path.parent().ok_or_else(|| {
+        FileTreeError::InvalidOperation("Cannot resolve parent directory".to_string())
+    })?;
+    while !existing_ancestor.exists() {
+        existing_ancestor = match existing_ancestor.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => {
+                return Err(FileTreeError::InvalidOperation(
+                    "Cannot resolve any existing ancestor directory".to_string(),
+                ));
+            }
+        };
+    }
+
+    let canonical_ancestor = canonicalize_path(existing_ancestor).map_err(|_| {
+        FileTreeError::PathNotFound(format!("Ancestor not found: {}", existing_ancestor.display()))
+    })?;
+
+    // Reattach the segments between the existing ancestor and the target path.
+    let tail = path.strip_prefix(existing_ancestor).map_err(|_| {
+        FileTreeError::InvalidOperation("Failed to compute path tail relative to ancestor".to_string())
+    })?;
+    Ok(canonical_ancestor.join(tail))
 }
 
 // Convert SystemTime to ISO string

@@ -114,11 +114,6 @@ class ContextBuilder {
     const tmCodeOwned = toquemediaIdRaw !== null
 
     const pmDetected = pkgSummary?.packageManager || await this.detectPackageManager(projectPath)
-    // Share detected PM with toolExecutor for import verification error messages
-    try {
-      const ToolExecutor = (await import('./toolExecutor')).default
-      ToolExecutor.getInstance().setCachedPackageManager(pmDetected)
-    } catch { /* non-critical */ }
     const isTemplateProject = templateManifest !== null
     const hasFrameworkDeps = pkgSummary
       ? [...pkgSummary.dependencies, ...pkgSummary.devDependencies].some(d =>
@@ -162,9 +157,7 @@ class ContextBuilder {
 
     // ── 1. COMPLETION CONTRACT (primacy — U-Curve start) ──────────
 
-    sections.push(`Complete every file the task requires. No placeholders — output goes to disk as-is. Omitted code is deleted code.
-
-Authentication is platform-managed: \`provision_auth\` provisions the GIP tenant and writes ALL needed credentials to .env. Never call \`request_credentials\` for Firebase, GIP, service-account, Firebase Admin, or any GCP infrastructure value — those live only on the TM Code platform worker, not in the user's project.`)
+    sections.push(`Complete every file the task requires. No placeholders — output goes to disk as-is. Omitted code is deleted code.`)
 
     // ── 2. ROLE ───────────────────────────────────────────────────
 
@@ -432,11 +425,10 @@ Safety:
  - request_credentials is for sensitive values (API keys, tokens, OAuth secrets, DB passwords). For non-sensitive choices (region, plan tier, project name) prefer ask_user_question. Create .env.example with placeholder names so the developer can see what is expected.
 
 Authentication (when implementing it):
- - Auth scaffolding is invoked via the /auth slash command (preferred — explicit and unambiguous: "/auth email-password", "/auth google", "/auth email-password google", plus optional free-form instructions). When the developer types this, the command pre-loads the right skills and tools.
- - When the developer requests auth in free-form chat (without /auth), use your judgement: if the intent is clear (e.g. "add login + Google sign-in"), proceed with provision_auth(provider: "gip") + read_skill("auth-proxy-gip") (and read_skill("google-signin") for the Google flow). If the intent is ambiguous (provider not specified, "auth" without context), ask the developer to clarify the providers or suggest the /auth command — do not guess.
- - CRITICAL: provision_auth is FULLY SUFFICIENT. After it returns successfully you have ALL credentials. NEVER call request_credentials for Firebase, Google Identity Platform, Firebase Admin SDK, GOOGLE_APPLICATION_CREDENTIALS, serviceAccountKey.json, GIP_SERVICE_ACCOUNT_*, or any GCP infrastructure value — those are platform-managed and live only on the TM Code worker. The auth-proxy authenticates against the Identity Toolkit REST endpoint using the PUBLIC VITE_FIREBASE_API_KEY (already in .env after provision_auth), not a service account. The user does not have (and will never have) those infra-level credentials. Your training has many "Firebase needs serviceAccountKey.json" examples — they do NOT apply here; this stack uses Identity Toolkit REST + JWKS for verification, no Admin SDK at all.
- - You implement the auth-proxy backend in WHATEVER stack the project uses (Express, Hono, Fastify, NestJS, FastAPI, Go net/http, etc.) — read_skill("auth-proxy-gip") for the protocol (Identity Toolkit REST endpoints, JWT verification via JWKS, the recommended endpoint surface). Use the Identity Toolkit REST API directly (no firebase-admin). Match the project's existing server framework, or use what the developer asked for.
- - All auth runs through /api/auth/proxy/{signup,signin,google,refresh} and /api/auth/sync. From firebase/auth use only onAuthStateChanged — every other auth flow goes through the proxy endpoints (signup/signin/google sign-in/sign-out all happen there).
+ - The developer signals intent by adding hashtag triggers to the prompt: \`#auth-email-password\` and/or \`#auth-google\`. The IDE pre-loads the right skills and routes to a specialised flow when these are present. In free-form chat (no hashtag), proceed with provision_auth(provider: "gip") + read_skill("auth-proxy-gip") (plus read_skill("google-signin") for Google) when the intent is clear; ask for clarification when providers are ambiguous.
+ - provision_auth is fully sufficient: it provisions the GIP tenant and writes the Firebase Web config to .env (VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID, VITE_GIP_TENANT_ID + backend mirrors). When provision_auth fails, surface the platform error to the developer — never compensate by collecting infrastructure credentials via request_credentials.
+ - Implement the auth-proxy backend in WHATEVER stack the project uses (Express, Hono, Fastify, NestJS, FastAPI, Go net/http, etc.). Read read_skill("auth-proxy-gip") for the protocol: Identity Toolkit REST endpoints + JWKS verification, no firebase-admin. Match the project's existing server framework, or use what the developer asked for.
+ - All auth runs through /api/auth/proxy/{signup,signin,google,refresh} and /api/auth/sync. From firebase/auth use only onAuthStateChanged — every other auth flow goes through the proxy endpoints.
 
 Commands:
  - Use ${pmDetected} for all install/run/add commands.
@@ -471,8 +463,7 @@ Git:
    - When tm_code_owned is false (external project): ADAPT to the project. Inspect the user's dev scripts and source to find the real ports the servers bind to, then pass them as frontend_port and backend_port to start_dev_server. Preserve the user's scripts, dependencies, and business logic as-is. Reformat only when the developer explicitly asks "padroniza este projeto para o TM Code".
 6. .env files are blocked. Use ${pmDetected} for all package operations.
 7. Report outcomes faithfully — claim success only when output is clean, and say so explicitly when verification was not possible.
-8. Auth credentials are platform-managed via provision_auth + .env injection. NEVER ask the user for Firebase / GIP / service-account / Firebase Admin / GOOGLE_APPLICATION_CREDENTIALS / GCP infra values via request_credentials — those exist only on the TM Code worker.
-9. ${this.sharedIdentityReminder()}`)
+8. ${this.sharedIdentityReminder()}`)
 
     const full = sections.join('\n\n')
     this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS })

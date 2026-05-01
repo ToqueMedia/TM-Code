@@ -12,7 +12,7 @@ metadata:
 
 Google Sign-In via Google Identity Services (GIS) library + backend auth-proxy. The backend endpoint `POST /api/auth/proxy/google` is PRE-INSTALLED.
 
-**Important:** Google Sign-In is blocked inside iframes (preview mode) due to browser security. It works after deploy.
+**Note:** The IDE itself warns the developer when Google Sign-In is clicked inside the in-app preview (it's blocked in iframes by browser security and requires a real browser to test). Do NOT add inline notices, banner text, comments, or hint paragraphs about this in the generated code or chat — the IDE handles it. Just implement the recipe.
 
 ## Pre-installed (READ-ONLY)
 
@@ -151,5 +151,5 @@ function LoginScreen() {
 - **ALWAYS** load GIS via `<script src="https://accounts.google.com/gsi/client">` in index.html
 - **ALWAYS** call `/api/auth/sync` after Google sign-in to upsert user with name and avatar
 - **ALWAYS** use `use_fedcm_for_prompt: true` in GIS initialize config
-- Google Sign-In does NOT work in iframe preview — only after deploy. Do not try to work around this.
+- Do NOT add notices/comments about iframe limitations — the IDE shows a friendly toast when the developer clicks the GIS button in preview. Just implement the flow.
 - Only implement Google Sign-In if the user explicitly requests it

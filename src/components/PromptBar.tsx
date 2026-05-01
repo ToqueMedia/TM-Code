@@ -8,6 +8,7 @@ import PromptActions from './prompt/PromptActions'
 import AttachmentChips from './prompt/AttachmentChips'
 import SlashCommandMenu from './chat/SlashCommandMenu'
 import MentionMenu from './prompt/MentionMenu'
+import HashtagMenu from './prompt/HashtagMenu'
 import QueuedMessagesPreview from './prompt/QueuedMessagesPreview'
 import { usePromptBar } from './prompt/usePromptBar'
 import KeyBindingDisplay from './ui/KeyBindingDisplay'
@@ -39,6 +40,7 @@ function PromptBar() {
     filteredMentions,
     selectedMentionIndex,
     handleMentionSelect,
+    hashtagMenu,
     draftAttachments,
     handleAttachFiles,
     handlePaste,
@@ -78,6 +80,15 @@ function PromptBar() {
             selectedIndex={selectedMentionIndex}
             onSelect={handleMentionSelect}
             projectPath={projectPath}
+          />
+        )}
+
+        {/* #hashtag autocomplete menu */}
+        {hashtagMenu.show && (
+          <HashtagMenu
+            items={hashtagMenu.items}
+            selectedIndex={hashtagMenu.selectedIndex}
+            onSelect={hashtagMenu.handleSelect}
           />
         )}
 

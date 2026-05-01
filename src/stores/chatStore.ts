@@ -5,6 +5,7 @@ import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
 import { useCheckpointStore } from './checkpointStore'
 import { usePermissionStore } from './permissionStore'
+import { useToastStore } from './toastStore'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
 export { clearMessageQueue }
 import { setQueueLogContext } from '../services/agent/queueOperationLog'
@@ -75,6 +76,10 @@ interface ChatActions {
   updateConversationHistory: (messages: ConversationMessage[]) => void
   incrementTurnCount: () => void
   addTokenUsage: (input: number, output: number) => void
+  /** Reset the per-request token counter. Called at the start of each new
+   *  agent request (runAgentInternal entry) so the indicator scopes to the
+   *  current request, not the session-cumulative total. */
+  resetTokenUsage: () => void
   // Diff actions
   addPendingDiff: (diff: DiffResult) => void
   removePendingDiff: (diffId: string) => void
@@ -292,6 +297,15 @@ export function resolveAllPendingDiffApprovals(approved: boolean) {
 let textBuffer = ''
 let reasoningBuffer = ''
 let flushTimer: ReturnType<typeof setTimeout> | null = null
+/**
+ * Set by `markReasoningBoundary()` whenever a thinking content_block ends.
+ * The next reasoning delta that arrives gets a `\n\n` prefix so consecutive
+ * thinking blocks (one per agent loop iteration) render as distinct
+ * paragraphs in the UI instead of running together (`"...end.Start..."`).
+ * Self-correcting: at message boundaries, msg.reasoningContent is empty, so
+ * the prefix is silently dropped — no cross-message contamination.
+ */
+let pendingReasoningSeparator = false
 
 export function appendTextDeltaBuffered(delta: string) {
   textBuffer += delta
@@ -299,8 +313,32 @@ export function appendTextDeltaBuffered(delta: string) {
 }
 
 export function appendReasoningDeltaBuffered(delta: string) {
+  if (pendingReasoningSeparator) {
+    pendingReasoningSeparator = false
+    // Only prepend the separator if there's actual prior reasoning to
+    // separate from — guards against bleeding a `\n\n` into a fresh message
+    // when the boundary was marked just before message finalization.
+    const store = useChatStore.getState()
+    const session = store.getActiveSession()
+    const msgId = store.streamingMessageId
+    const hasPrior = reasoningBuffer.length > 0
+      || (msgId !== null
+        && (session?.messages.find(m => m.id === msgId)?.reasoningContent?.length ?? 0) > 0)
+    if (hasPrior) {
+      reasoningBuffer += '\n\n'
+    }
+  }
   reasoningBuffer += delta
   scheduleFlush()
+}
+
+/**
+ * Signal that a reasoning content_block just ended. Called by agentRunner's
+ * `onReasoningComplete` callback (immediately after `flushBufferedDeltas`).
+ * Pairs with the prefix logic in `appendReasoningDeltaBuffered` above.
+ */
+export function markReasoningBoundary(): void {
+  pendingReasoningSeparator = true
 }
 
 function scheduleFlush() {
@@ -1063,16 +1101,26 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     // These handle the ENTIRE flow atomically: DiffService → store update → agent unblock
 
     approveDiff: async (messageId: string, toolCallId: string, diffResultId: string | undefined) => {
-      // 1. Write file via DiffService (non-blocking on failure)
+      // 1. Write file via DiffService. We MUST observe write failures here
+      //    instead of swallowing them — the agent acts on whatever signal we
+      //    return, and an unflagged failure leaves it convinced a file exists
+      //    when it doesn't (observed bug: write_file for a path whose parent
+      //    dir was missing reported "approved" while the file was never
+      //    created, breaking later reads + tools).
+      let writeError: string | null = null
       if (diffResultId) {
         try {
           await DiffService.getInstance().acceptDiff(diffResultId)
         } catch (err) {
-          logger.error('chat', 'DiffService.acceptDiff failed:', String(err))
+          writeError = err instanceof Error ? err.message : String(err)
+          logger.error('chat', 'DiffService.acceptDiff failed:', writeError)
         }
       }
 
-      // 2. Atomic state update: set diffStatus + remove from pendingDiffs
+      // 2. Atomic state update — diffStatus reflects the real outcome.
+      //    On failure we mark the diff as 'denied' (write didn't land) and
+      //    surface the error to the user via toast so they know why.
+      const succeeded = writeError === null
       set(state => {
         const { activeSessionId, sessions, pendingDiffs } = state
         if (!activeSessionId) return state
@@ -1083,7 +1131,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const messages = session.messages.map(msg => {
           if (msg.id !== messageId) return msg
           const toolCalls = (msg.toolCalls || []).map(tc =>
-            tc.id === toolCallId ? { ...tc, diffStatus: 'approved' as const } : tc
+            tc.id === toolCallId
+              ? {
+                  ...tc,
+                  diffStatus: (succeeded ? 'approved' : 'denied') as 'approved' | 'denied',
+                  ...(succeeded ? {} : { isError: true, result: `Write failed: ${writeError}` }),
+                }
+              : tc
           )
           return { ...msg, toolCalls }
         })
@@ -1097,8 +1151,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
       })
 
-      // 3. Unblock agent
-      resolveDiffApproval(toolCallId, true)
+      if (!succeeded) {
+        useToastStore.getState().addToast('error', `File write failed: ${writeError}`)
+      }
+
+      // 3. Unblock agent — pass the real outcome so it can react (retry,
+      //    bail, ask the user) instead of charging ahead on a phantom file.
+      resolveDiffApproval(toolCallId, succeeded)
     },
 
     rejectDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => {
@@ -1412,12 +1471,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     addTokenUsage: (input: number, output: number) => {
+      // Input is REPLACED, not summed — each turn's prompt re-sends the full
+      // conversation, so summing per-turn inputs double-counts massively
+      // (turn 50's prompt already contains turns 1-49). The latest turn's
+      // input represents the current context size, which is the meaningful
+      // metric. Output is summed because each turn emits NEW tokens.
       set(state => ({
         totalTokensUsed: {
-          input: state.totalTokensUsed.input + input,
+          input: Math.max(state.totalTokensUsed.input, input),
           output: state.totalTokensUsed.output + output,
         }
       }))
+    },
+
+    resetTokenUsage: () => {
+      set({ totalTokensUsed: { input: 0, output: 0 } })
     },
 
     // === Diff actions ===

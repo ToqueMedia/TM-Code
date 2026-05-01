@@ -119,6 +119,22 @@ export function isInOverageState(status: CostBudgetStatus, consumedPct: number):
   return status === 'allowed_overage' || consumedPct > 1
 }
 
+/**
+ * "Consumo extra" — extra balance expressed as a percentage of the current
+ * plan's cycle budget. Single source of truth shared across CreditIndicator
+ * (chat dropdown), SettingsView, and any other surface that exposes the metric.
+ *
+ * Example: tokenBudget = 2M, tmsRemaining = 500K → 25%.
+ *
+ * Returns null when there is nothing meaningful to render (no plan budget yet
+ * or no extra balance) so callers can hide the row instead of showing 0%.
+ */
+export function extraConsumptionPct(tmsRemaining: number, tokenBudget: number): number | null {
+  if (tokenBudget <= 0) return null
+  if (tmsRemaining <= 0) return null
+  return Math.round((tmsRemaining / tokenBudget) * 100)
+}
+
 export const useBillingStore = create<BillingState & BillingActions>((set) => ({
   ...INITIAL_STATE,
 

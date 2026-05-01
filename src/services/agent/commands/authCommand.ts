@@ -1,78 +1,29 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useChatStore } from '../../../stores/chatStore'
 import { runAgentWithCallbacks } from '../agentRunner'
+import SkillService from '../skillService'
 import { logger } from '../../../utils/logger'
 
 /**
- * /auth — explicit trigger for the GIP auth scaffolding flow.
+ * GIP auth scaffolding flow. Triggered by hashtag tokens dropped into the
+ * prompt:
  *
- *   /auth email-password
- *   /auth google
- *   /auth email-password google
- *   /auth email-password google use minimal forms, no avatar upload
+ *   #auth-email-password
+ *   #auth-google
  *
- * Pattern follows /payments: this command pre-loads the authoritative skill
- * content (auth-proxy-gip SKILL.md, plus google-signin SKILL.md when Google is
- * requested) and injects it into the agent's prompt as <auth_skills> context.
- * The agent gets a single, self-contained instruction with everything needed
- * to implement — no round-trip to read_skill, no uncertainty about which
- * recipe applies.
+ * The hashtag detector (see `hashtagRegistry.ts`) inspects the user's prompt
+ * at submit time, parses the providers, strips the tags, and calls
+ * `runAuthFlow` below. This pre-loads the authoritative skill content
+ * (auth-proxy-gip SKILL.md, plus google-signin SKILL.md when Google is
+ * requested) and injects it into the agent's prompt as `<auth_skill>`
+ * context blocks. The agent gets a single, self-contained instruction with
+ * everything needed to implement — no round-trip to read_skill mid-turn.
  *
- * Works in chat AND CMD modes — registered in slashCommandRegistry, which
- * both prompt-bar hooks consult.
+ * Works in BOTH chat and CMD modes — wired in `usePromptBar.ts` and
+ * `useCmdPromptLogic.ts` (handleSend / executePrompt branch).
  */
 
-type Provider = 'email-password' | 'google'
-
-/**
- * Canonical argument values surfaced by the prompt-bar autocomplete after the
- * user types `/auth ` (space). Aliases like `password`, `email`, `gmail`
- * still parse correctly via PROVIDER_ALIASES below — they are just not shown
- * in the menu to keep the picker uncluttered.
- */
-export const AUTH_ARG_SUGGESTIONS: Array<{ value: string; description: string }> = [
-  { value: 'email-password', description: 'Email + password sign-up and sign-in' },
-  { value: 'google',         description: 'Google sign-in via Google Identity Services' },
-]
-
-const PROVIDER_ALIASES: Record<string, Provider> = {
-  'email-password': 'email-password',
-  'email/password': 'email-password',
-  'email_password': 'email-password',
-  'emailpassword': 'email-password',
-  'password': 'email-password',
-  'email': 'email-password',
-  'google': 'google',
-  'gmail': 'google',
-  'oauth-google': 'google',
-}
-
-interface ParsedArgs {
-  providers: Provider[]
-  instructions: string
-}
-
-function parseArgs(raw: string): ParsedArgs {
-  const tokens = raw.trim().split(/\s+/).filter(Boolean)
-  const providers: Provider[] = []
-  const remaining: string[] = []
-
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i]
-    const provider = PROVIDER_ALIASES[token.toLowerCase()]
-    if (provider && !providers.includes(provider)) {
-      providers.push(provider)
-    } else {
-      // First non-provider token marks the start of free-form instructions —
-      // everything from here on is treated as the user's prose, even if a
-      // later word would otherwise look like a provider name.
-      remaining.push(...tokens.slice(i))
-      break
-    }
-  }
-
-  return { providers, instructions: remaining.join(' ').trim() }
-}
+export type Provider = 'email-password' | 'google'
 
 interface SkillEntry {
   name: string
@@ -128,7 +79,7 @@ function buildPrompt(
   return [
     skillsBlock,
     ``,
-    `The developer triggered \`/auth\` and wants to add ${providerLine} to this project. The skill content above is the authoritative protocol — follow it. Stack choice (Express, Hono, Fastify, NestJS, FastAPI, Go, etc.) is YOURS to make: match what the project already uses, or pick something sensible if it's a fresh project.`,
+    `The developer dropped a \`#auth-*\` hashtag in the prompt and wants to add ${providerLine} to this project. The skill content above is the authoritative protocol — follow it. Stack choice (Express, Hono, Fastify, NestJS, FastAPI, Go, etc.) is YOURS to make: match what the project already uses, or pick something sensible if it's a fresh project.`,
     ...(instructions
       ? [``, `Additional instructions from the developer:`, `> ${instructions}`]
       : []),
@@ -171,26 +122,22 @@ function buildPrompt(
   ].join('\n')
 }
 
-export async function executeAuth(args: string, _projectPath: string): Promise<void> {
+/**
+ * Run the auth scaffolding flow with the given providers and free-form
+ * instructions. Loads the relevant skills inline, augments the prompt with
+ * `<auth_skill>` blocks + a strict execution sequence, and dispatches to the
+ * agent.
+ *
+ * Used by the prompt-bar hashtag handler (`#auth-email-password`,
+ * `#auth-google`) — replaces the legacy `/auth` slash command.
+ */
+export async function runAuthFlow(
+  providers: Provider[],
+  instructions: string,
+  userMessageText: string,
+): Promise<void> {
   const chatStore = useChatStore.getState()
-  const parsed = parseArgs(args)
-
-  if (parsed.providers.length === 0) {
-    chatStore.addSystemMessage(
-      'Usage: `/auth <provider> [more providers] [instructions]`\n\n' +
-      'Providers:\n' +
-      '  • `email-password` — email + password sign-up/sign-in\n' +
-      '  • `google` — Google sign-in (GIS)\n\n' +
-      'Examples:\n' +
-      '  /auth email-password\n' +
-      '  /auth google\n' +
-      '  /auth email-password google\n' +
-      '  /auth email-password google use minimal forms, no avatar upload'
-    )
-    return
-  }
-
-  const wantsGoogle = parsed.providers.includes('google')
+  const wantsGoogle = providers.includes('google')
 
   // Load the bundled skill content in parallel so the agent gets the full
   // recipe(s) inline — no round-trip to read_skill mid-turn.
@@ -207,15 +154,28 @@ export async function executeAuth(args: string, _projectPath: string): Promise<v
   }
   if (wantsGoogle && !googleSigninSkill) {
     chatStore.addSystemMessage(
-      'Could not load the google-signin skill. Proceeding with email/password only — re-run `/auth google` once the skill is available.'
+      'Could not load the google-signin skill. Proceeding with email/password only — re-add `#auth-google` once the skill is available.'
     )
   }
 
-  const prompt = buildPrompt(parsed.providers, parsed.instructions, authProxySkill, googleSigninSkill)
+  // Force-load the auth skills into the SkillService cache BEFORE the agent
+  // runs. Without this, the agent's `read_skill("auth-proxy-gip")` calls hit
+  // the relevance heuristic (which rejects auth skills for projects with no
+  // detectable type, e.g. an empty directory) and return "not loaded" — the
+  // agent then falls back to training-data implementations and ignores the
+  // skill entirely. This keeps the system-prompt skill index, the read_skill
+  // tool, and the inline `<auth_skill>` blocks in the prompt all consistent.
+  const skillService = SkillService.getInstance()
+  skillService.forceLoadSkill('auth-proxy-gip')
+  if (wantsGoogle && googleSigninSkill) {
+    skillService.forceLoadSkill('google-signin')
+  }
+
+  const prompt = buildPrompt(providers, instructions, authProxySkill, googleSigninSkill)
 
   await runAgentWithCallbacks(prompt, {
     addUserMessage: true,
-    userMessageText: `/auth ${args}`.trim(),
+    userMessageText,
     useConversationHistory: true,
   })
 }

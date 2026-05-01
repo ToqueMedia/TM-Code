@@ -33,6 +33,7 @@ import { LoadingSpinner } from './components/ui/LoadingSpinner';
 import { RequirementsErrorScreen } from './components/ui/RequirementsErrorScreen';
 import { ToastContainer } from './components/ui/Toast';
 import UpdateBanner from './components/ui/UpdateBanner';
+import { t } from '@/i18n';
 import { tokens } from '@/theme/tokens';
 
 function App() {
@@ -200,18 +201,86 @@ function App() {
 	// Listen for runtime errors from the preview WebView (console.error, uncaught exceptions).
 	// The preview IPC handler dispatches a CustomEvent on window (via eval) because
 	// wry's IPC closure doesn't have access to Tauri's Emitter trait.
+	//
+	// Side-effect: detect Google Identity Services (GIS) failures inside the
+	// preview iframe and show a friendly IDE-level toast. The agent must NOT
+	// embed iframe-warning text in generated code — that responsibility lives
+	// here so the message stays accurate (browser API errors evolve) and
+	// localised to the developer's UI language.
+	const gisToastShownRef = useRef(false);
+	const previewReloadKey = useLayoutStore(s => s.previewReloadKey);
+
+	// Reset the GIS-toast dedup flag whenever the preview reloads. Without
+	// this, the user sees the iframe-warning toast exactly once for the entire
+	// app session — even after they bounce the dev server or switch projects.
 	useEffect(() => {
+		gisToastShownRef.current = false;
+	}, [previewReloadKey]);
+
+	useEffect(() => {
+		const GIS_ERROR_PATTERNS = [
+			/accounts\.google\.com\/gsi\/client/i,
+			/\[GSI_LOGGER\]/i,
+			/FedCM/i,
+			/Refused to display.+accounts\.google\.com/i,
+			/script error.+google/i,
+			/identity[._\s]services/i,
+			// CSP frame-ancestors / COOP errors that block the GIS popup
+			/frame-ancestors.+google/i,
+			/Cross-Origin-Opener-Policy.+google/i,
+		];
+
 		function handlePreviewConsole(e: Event) {
-			const { level, text } = (e as CustomEvent<{ level: string; text: string }>).detail;
-			if (text) {
-				useLayoutStore.getState().addDevServerLog(
-					`[runtime] ${text}`,
-					level === 'warn' ? 'warn' : 'error',
-				);
+			const detail = (e as CustomEvent<{ level: string; text: string }>).detail;
+			const { level, text } = detail || { level: '', text: '' };
+			if (!text) return;
+
+			useLayoutStore.getState().addDevServerLog(
+				`[runtime] ${text}`,
+				level === 'warn' ? 'warn' : 'error',
+			);
+
+			// GIS-in-iframe detection — only on errors. Dedup is per-preview-reload
+			// (the ref resets via the effect above) so the user gets one toast
+			// per "session of the preview".
+			if (
+				!gisToastShownRef.current &&
+				level !== 'warn' &&
+				GIS_ERROR_PATTERNS.some((re) => re.test(text))
+			) {
+				gisToastShownRef.current = true;
+				import('./stores/toastStore').then(({ useToastStore }) => {
+					useToastStore.getState().addToast(
+						'warning',
+						t('preview.gisIframeBlocked'),
+						12000,
+					);
+				}).catch(() => { /* non-critical */ });
 			}
 		}
+
+		// Proactive detection: when the preview emits a `gis-detected` signal
+		// (sent by the injected probe in PreviewView), show the toast BEFORE
+		// the developer clicks anything. Catches the silent-failure mode where
+		// FedCM blocks the button without firing console.error.
+		function handleGisDetected() {
+			if (gisToastShownRef.current) return;
+			gisToastShownRef.current = true;
+			import('./stores/toastStore').then(({ useToastStore }) => {
+				useToastStore.getState().addToast(
+					'warning',
+					t('preview.gisIframeBlocked'),
+					12000,
+				);
+			}).catch(() => { /* non-critical */ });
+		}
+
 		window.addEventListener('preview-console', handlePreviewConsole);
-		return () => window.removeEventListener('preview-console', handlePreviewConsole);
+		window.addEventListener('preview-gis-detected', handleGisDetected);
+		return () => {
+			window.removeEventListener('preview-console', handlePreviewConsole);
+			window.removeEventListener('preview-gis-detected', handleGisDetected);
+		};
 	}, []);
 
 	// Initialize MCP servers once at app startup (global — persists across project switches)

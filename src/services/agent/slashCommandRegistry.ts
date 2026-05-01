@@ -1,7 +1,6 @@
 import { executeInit } from './commands/initCommand'
 import { executePlan } from './commands/planCommand'
 import { executePayments } from './commands/paymentsCommand'
-import { executeAuth, AUTH_ARG_SUGGESTIONS } from './commands/authCommand'
 
 /** A canonical argument value the user can pick after the command name. */
 export interface SlashCommandArg {
@@ -20,8 +19,7 @@ export interface SlashCommand {
    * Optional canonical values the menu offers after the user types
    * `<cmd> ` (space). Suggestions are filtered by the partial word the
    * user is currently typing, and values already in the input are hidden
-   * — so multi-arg chains like `/auth email-password google` work without
-   * showing duplicates.
+   * — so multi-arg chains work without showing duplicates.
    *
    * Free-form instructions appended after the last canonical value silently
    * dismiss the menu — there's nothing left to suggest.
@@ -63,14 +61,9 @@ class SlashCommandRegistry {
       execute: executePayments,
     })
 
-    this.register({
-      name: '/auth',
-      description: 'Scaffold GIP authentication — /auth email-password | google | both [instructions]',
-      enabled: true,
-      execute: executeAuth,
-      argSuggestions: AUTH_ARG_SUGGESTIONS,
-    })
-
+    // Note: `/auth` was removed in favour of the `#auth-email-password` and
+    // `#auth-google` hashtag triggers — see `hashtagRegistry.ts` and the
+    // hashtag detection in `usePromptBar.ts` / `useCmdPromptLogic.ts`.
   }
 
   register(command: SlashCommand): void {
@@ -113,8 +106,7 @@ class SlashCommandRegistry {
    * Free-form-text exit: as soon as the user types a token that is NOT one of
    * the known arg values, we treat them as having moved past the args list
    * into free-form instructions. The menu stays hidden from that point on,
-   * even if a later partial happens to start with a known arg name (so
-   * `/auth google Crie em…` does NOT re-suggest `email-password`).
+   * even if a later partial happens to start with a known arg name.
    */
   getArgSuggestions(input: string): { command: SlashCommand; suggestions: SlashCommandArg[]; partial: string } | null {
     if (!input.startsWith('/') || !input.includes(' ')) return null

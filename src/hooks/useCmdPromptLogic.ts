@@ -16,6 +16,9 @@ import { useAttachments } from './useAttachments'
 import QuickOpenService, { type QuickOpenItem } from '../services/quickOpenService'
 import { extractAndResolveMentions } from '../services/attachmentService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../utils/mentionParser'
+import { detectAuthHashtags } from '../services/agent/hashtagRegistry'
+import { useHashtagMenu } from '../components/prompt/useHashtagMenu'
+import { runAuthFlow } from '../services/agent/commands/authCommand'
 import { t } from '../i18n/useTranslation'
 import {
   loadPromptHistory,
@@ -65,6 +68,16 @@ export function useCmdPromptLogic() {
   const quickOpenBuilding = QuickOpenService.getInstance().isBuilding()
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // #hashtag menu — closed-vocabulary skill triggers (e.g. #auth-google).
+  // State + handlers live in the shared hook (also used by chat-mode).
+  // Declared after textareaRef because the hook captures the ref at call time.
+  const hashtagMenu = useHashtagMenu({
+    textareaRef,
+    setInputValue: setInput,
+    getInputValue: () => textareaRef.current?.value ?? '',
+  })
+
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // History is kept in-memory for instant ArrowUp/Down; IDB is only touched
   // on mount (load) and send (write). See src/services/cmdPromptHistory.ts.
@@ -215,6 +228,29 @@ export function useCmdPromptLogic() {
       return
     }
 
+    // ── Hashtag-driven flows (e.g. #auth-google, #auth-email-password) —
+    // load the relevant skills inline and route to a specialised flow.
+    // Free-form `#tags` not in the registry pass through untouched.
+    const auth = detectAuthHashtags(textPrompt)
+    if (auth.providers.length > 0) {
+      // Auth scaffolding inherently writes files into a project — gate on
+      // a project being open. Without this the call falls through to
+      // provision_auth which fails with a cryptic tool-level error.
+      if (!path) {
+        useChatStore.getState().addSystemMessage(
+          'No project open. Open a project before using auth hashtags.',
+          'error',
+        )
+        return
+      }
+      // Strip hashtags from the visible message — they're routing signals,
+      // not content. Fallback label when the user typed only the tag.
+      const bubbleText = auth.cleanedText
+        || `Add ${auth.providers.map(p => p === 'google' ? 'Google sign-in' : 'email/password sign-in').join(' and ')}`
+      await runAuthFlow(auth.providers, auth.cleanedText, bubbleText)
+      return
+    }
+
     // ── Agent prompt ──
     const { isAuthenticated } = useAuthStore.getState()
     if (!isAuthenticated) {
@@ -334,8 +370,20 @@ export function useCmdPromptLogic() {
     setShowCommandMenu(false)
     setIsArgMode(false)
 
-    // @mention detection — unicode-safe, shared with chat prompt & resolver.
     const cursorPos = textareaRef.current?.selectionStart ?? value.length
+
+    // Closed-vocabulary hashtag (e.g. #auth-email-password, #auth-google).
+    // detect() returns true when a `#` token owns the autocomplete slot —
+    // including the no-matches case — so we never fall through to the file
+    // picker for an unknown tag.
+    if (hashtagMenu.detect(value, cursorPos)) {
+      setShowMentionMenu(false)
+      setMentionQuery('')
+      mentionStartRef.current = -1
+      return
+    }
+
+    // @mention detection — unicode-safe, shared with chat prompt & resolver.
     const mention = findMentionAtCursor(value, cursorPos)
 
     if (!mention) {
@@ -370,8 +418,7 @@ export function useCmdPromptLogic() {
         const lastSpaceIdx = prev.lastIndexOf(' ')
         const prefix = prev.slice(0, lastSpaceIdx + 1)
         const next = prefix + command.name + ' '
-        // Re-evaluate the menu so chained arg picks (e.g. /auth picks
-        // email-password then immediately offers google) auto-advance.
+        // Re-evaluate the menu so chained arg picks auto-advance.
         const argResult = slashCommandRegistry.getArgSuggestions(next)
         if (argResult) {
           const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({
@@ -425,6 +472,7 @@ export function useCmdPromptLogic() {
     setInput('')
     setShowCommandMenu(false)
     setShowMentionMenu(false)
+    hashtagMenu.close()
 
     historyRef.current = [prompt, ...historyRef.current.filter(h => h !== prompt)].slice(0, MAX_PROMPT_HISTORY)
     historyIndexRef.current = -1
@@ -466,6 +514,11 @@ export function useCmdPromptLogic() {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // #hashtag menu — shared hook returns true when the key was consumed.
+      // Mutually exclusive with the mention menu but listed first to match
+      // the priority enforced by handleInputChange.
+      if (hashtagMenu.handleKeyDown(e)) return
+
       // @mention menu navigation — takes priority when open
       if (showMentionMenu) {
         if (e.key === 'Escape') {
@@ -523,7 +576,7 @@ export function useCmdPromptLogic() {
       // very start of the input (or already browsing history). If the user
       // is mid-edit, let the textarea handle ArrowUp normally (move cursor
       // up a line in multi-line input, or to the start on single-line).
-      if (!showCommandMenu && !showMentionMenu) {
+      if (!showCommandMenu && !showMentionMenu && !hashtagMenu.show) {
         const ta = textareaRef.current
         const caret = ta?.selectionStart ?? 0
         const selLen = ta ? ta.selectionEnd - ta.selectionStart : 0
@@ -585,6 +638,8 @@ export function useCmdPromptLogic() {
       handleSend,
       showCommandMenu, filteredCommands, selectedCommandIndex, handleCommandSelect,
       showMentionMenu, filteredMentions, selectedMentionIndex, handleMentionSelect,
+      hashtagMenu,
+      input, queuedCommands,
     ]
   )
 
@@ -639,6 +694,7 @@ export function useCmdPromptLogic() {
     selectedMentionIndex,
     mentionQuery,
     quickOpenBuilding,
+    hashtagMenu,
     textareaRef,
     isStreaming,
     canSend,

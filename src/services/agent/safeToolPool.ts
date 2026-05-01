@@ -35,6 +35,7 @@
  */
 
 import type ToolExecutor from './toolExecutor'
+import { formatError } from '../../utils/errors'
 
 /** A single tool call dispatched to the pool. */
 export interface PoolToolCall {
@@ -284,7 +285,9 @@ export async function executeToolCalls(
       }
       safeFireCallback(() => onToolResult?.(toolCall, raw, false), 'onToolResult')
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error)
+      // Use formatError so plain-object throws (Tauri's typical shape) don't
+      // collapse to "[object Object]" in the model's tool-result view.
+      const errorMsg = formatError(error)
       result = {
         toolCall,
         rawResult: errorMsg,
@@ -570,7 +573,11 @@ export class StreamingSafeToolPool {
       // Fire callback (defensive — swallow errors)
       try { this.onToolResult?.(toolCall, raw, false) } catch { /* swallow */ }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error)
+      // formatError handles Tauri's serde-tagged-enum throws (e.g.
+      // FileTreeError serialised as `{"PathNotFound":"..."}`) — without it,
+      // String(error) collapses to "[object Object]" which the model sees
+      // as a useless tool result.
+      const errorMsg = formatError(error)
       result = { toolCall, rawResult: errorMsg, isError: true, parsedDiff: null }
       try { this.onToolResult?.(toolCall, errorMsg, true) } catch { /* swallow */ }
     }

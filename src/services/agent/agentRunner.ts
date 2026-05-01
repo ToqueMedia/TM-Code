@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, markReasoningBoundary, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useProblemsStore } from '../../stores/problemsStore'
@@ -112,6 +112,14 @@ async function runAgentInternal(
     )
   }
 
+  // Reset the per-request token counter at the START of each new request so
+  // the chat indicator shows tokens for the CURRENT request only (not the
+  // session-cumulative total). A "request" = one runAgentInternal invocation,
+  // which can internally span many model turns (tool loops) — those all
+  // accumulate into the same counter. Queued messages get coalesced upstream
+  // (joinPromptValues), so a batched 3-message prompt is still ONE request.
+  chatStore.resetTokenUsage()
+
   // Start assistant message
   chatStore.startAssistantMessage()
   agentStore.setStatus('thinking')
@@ -203,22 +211,40 @@ async function runAgentInternal(
   try {
     await agentService.runAgentLoop(userContent, history, {
       onTextDelta: (delta) => {
+        // After handleStop the abort controller is set; SSE chunks already
+        // in flight would otherwise flip the status back to a busy state and
+        // strand "A pensar..." in the title bar / status indicators.
+        if (agentService.isAborted()) return
         agentStore.setStatus('generating')
         appendTextDeltaBuffered(delta)
       },
       onReasoningDelta: (delta) => {
+        if (agentService.isAborted()) return
         agentStore.setStatus('thinking')
         appendReasoningDeltaBuffered(delta)
       },
+      onReasoningComplete: () => {
+        if (agentService.isAborted()) return
+        // Drain the delta buffer immediately so the reasoning text is fully
+        // visible before the next content (tool call / final text) starts.
+        flushBufferedDeltas()
+        // Mark the block boundary so the NEXT thinking block (next agent
+        // loop iteration's reasoning) gets a `\n\n` prefix — without this,
+        // consecutive blocks render as a single run-on paragraph.
+        markReasoningBoundary()
+      },
       onToolCallPending: (toolId, toolName) => {
+        if (agentService.isAborted()) return
         flushBufferedDeltas()
         agentStore.setStatus('applying')
         useChatStore.getState().addPendingToolCall(toolId, toolName)
       },
       onToolCallStart: (toolId, _toolName, args) => {
+        if (agentService.isAborted()) return
         useChatStore.getState().updateToolCallWithArgs(toolId, args)
       },
       onToolResult: (toolId, _toolName, result, isError) => {
+        if (agentService.isAborted()) return
         useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
         agentStore.setStatus('thinking')
       },

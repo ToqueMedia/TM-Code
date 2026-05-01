@@ -11,6 +11,7 @@ import FirebaseAuthService from '../auth/firebaseAuth'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
 import { resolveWorkerUrl } from '../../utils/devUrls'
+import { formatError } from '../../utils/errors'
 // TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
@@ -94,8 +95,6 @@ function createLinkedAbortController(parentSignal?: AbortSignal): AbortControlle
 class ToolExecutor {
   private static instance: ToolExecutor
   private tools: Map<string, ToolEntry> = new Map()
-  /** Tracks install commands that completed successfully in this session. */
-  private completedInstalls: Set<string> = new Set()
   /** Tracks when files were last read by the model — for read-before-write enforcement.
    *  Stores timestamp + a simple content hash to detect concurrent modifications. */
   private readFileTimestamps: Map<string, { timestamp: number; hash: number }> = new Map()
@@ -127,14 +126,12 @@ class ToolExecutor {
     this.cmdModeCwd = null
   }
 
-  /** Clears session-scoped state (e.g., install command cache). Call on new sessions. */
+  /** Clears session-scoped state. Call on new sessions. */
   resetSessionState(): void {
-    this.completedInstalls.clear()
     this.readFileTimestamps.clear()
     this.largeResults.clear()
     this.largeResultCounter = 0
     this.readOnlyContexts.clear()
-    this._installedDepsCache = undefined
   }
 
   async execute(
@@ -342,7 +339,6 @@ class ToolExecutor {
   private async executeInstallStreaming(
     command: string,
     cwd: string,
-    installKey: string,
     toolCallId?: string,
     abortSignal?: AbortSignal,
   ): Promise<string> {
@@ -443,8 +439,6 @@ class ToolExecutor {
       const fullOutput = allOutput.join('')
 
       if (exitCode === 0) {
-        this.completedInstalls.add(installKey)
-        this.invalidateDepsCache() // New packages installed — refresh cache
         if (tcId) {
           useChatStore.getState().updateToolCallProgress(tcId, '')
         }
@@ -865,119 +859,10 @@ class ToolExecutor {
       timestamp: Date.now(),
       hash: this.simpleHash(newContent),
     })
-    // If package.json was written, invalidate the deps cache so
-    // checkMissingImports sees the new dependencies immediately.
-    if (path.endsWith('/package.json') || path === 'package.json') {
-      this.invalidateDepsCache()
-    }
     // Invalidate the cached system prompt when prompt-relevant files change.
     if (/(^|\/)(README|TMS|PLAN|TODO)\.md$|(^|\/)package\.json$|(^|\/)\.toquemedia-template$/.test(path)) {
       import('./contextBuilder').then(m => m.default.getInstance().invalidatePromptCache()).catch(() => { /* non-critical */ })
     }
-  }
-
-  /**
-   * Parses import/require statements and checks if the packages are installed.
-   * Returns a list of missing packages that need to be installed.
-   * Ignores: relative imports (./), Node built-ins, and packages already in package.json.
-   */
-  private async checkMissingImports(content: string, filePath: string): Promise<string[]> {
-    // Only check JS/TS files
-    const ext = filePath.split('.').pop()?.toLowerCase() || ''
-    if (!['ts', 'tsx', 'js', 'jsx', 'mts', 'mjs', 'cts', 'cjs'].includes(ext)) return []
-
-    // Extract package names from import/require/dynamic-import statements.
-    // Uses the string specifier in quotes rather than parsing full import syntax,
-    // so multiline imports are handled (we look for `from 'pkg'` or `require('pkg')`).
-    // Match `from 'pkg'` only at the start of a line or after import/export keywords
-    // to reduce false positives from strings/comments containing "from 'something'"
-    const fromPattern = /(?:^|;|\b(?:import|export))\s+(?:type\s+)?(?:\{[^}]*\}|[^;]*?)\s+from\s+['"]([^'"]+)['"]/gm
-    const requirePattern = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g
-    const dynamicImportPattern = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g
-
-    const packages = new Set<string>()
-    for (const pattern of [fromPattern, requirePattern, dynamicImportPattern]) {
-      let match
-      while ((match = pattern.exec(content)) !== null) {
-        const specifier = match[1]
-        if (!specifier) continue
-        // Skip: relative imports, absolute paths, path aliases (#, @/, ~/)
-        if (specifier.startsWith('.') || specifier.startsWith('/')) continue
-        if (specifier.startsWith('#')) continue        // TypeScript # path alias
-        if (/^@\//.test(specifier)) continue           // @/ path alias (Vite, Next.js)
-        if (specifier.startsWith('~/')) continue        // ~/ path alias (Nuxt)
-        // Extract package name (handle scoped packages like @tanstack/react-query)
-        const pkgName = specifier.startsWith('@')
-          ? specifier.split('/').slice(0, 2).join('/')
-          : specifier.split('/')[0]
-        if (pkgName) packages.add(pkgName)
-      }
-    }
-
-    if (packages.size === 0) return []
-
-    // Node built-ins to ignore
-    const nodeBuiltins = new Set([
-      'fs', 'path', 'os', 'url', 'http', 'https', 'crypto', 'stream', 'util',
-      'events', 'buffer', 'querystring', 'zlib', 'net', 'dns', 'tls', 'child_process',
-      'cluster', 'dgram', 'readline', 'repl', 'vm', 'assert', 'console', 'timers',
-      'string_decoder', 'perf_hooks', 'worker_threads', 'inspector',
-      'node:fs', 'node:path', 'node:os', 'node:url', 'node:http', 'node:https',
-      'node:crypto', 'node:stream', 'node:util', 'node:events', 'node:buffer',
-      'node:child_process', 'node:worker_threads', 'node:test', 'node:assert',
-    ])
-
-    // Read package.json deps (cached to avoid repeated IPC calls)
-    const installedDeps = await this.getInstalledDeps()
-    if (installedDeps === null) return [] // No package.json — skip check
-
-    // Find missing packages
-    const missing: string[] = []
-    for (const pkg of packages) {
-      if (nodeBuiltins.has(pkg)) continue
-      if (installedDeps.has(pkg)) continue
-      missing.push(pkg)
-    }
-
-    return missing
-  }
-
-  /** Cached installed deps from package.json. Invalidated when install commands run. */
-  private _installedDepsCache: Set<string> | null | undefined = undefined // undefined = not loaded, null = no package.json
-
-  /** Get installed deps (cached). Returns null if no package.json. */
-  private async getInstalledDeps(): Promise<Set<string> | null> {
-    if (this._installedDepsCache !== undefined) return this._installedDepsCache
-    try {
-      const projectRoot = this.getProjectRoot()
-      const pkgRaw = await invoke<string>('read_file', { path: `${projectRoot}/package.json` })
-      const pkg = JSON.parse(pkgRaw)
-      this._installedDepsCache = new Set([
-        ...Object.keys(pkg.dependencies || {}),
-        ...Object.keys(pkg.devDependencies || {}),
-        ...Object.keys(pkg.peerDependencies || {}),
-      ])
-      return this._installedDepsCache
-    } catch {
-      this._installedDepsCache = null
-      return null
-    }
-  }
-
-  /** Invalidate deps cache (called after install commands succeed). */
-  invalidateDepsCache(): void {
-    this._installedDepsCache = undefined
-  }
-
-  /** Detect package manager for error messages. Uses cached value from contextBuilder. */
-  private detectPm(): string {
-    return this._cachedPm || 'npm'
-  }
-  private _cachedPm: string | null = null
-
-  /** Set the detected package manager (called during prompt building). */
-  setCachedPackageManager(pm: string): void {
-    this._cachedPm = pm
   }
 
   /** Fast non-cryptographic hash for concurrent modification detection. */
@@ -1060,8 +945,10 @@ class ToolExecutor {
           this.readFileTimestamps.set(filePath, { timestamp: Date.now(), hash: this.simpleHash(content) })
           return content
         } catch (error) {
-          // Enrich file-not-found errors with path suggestions (like Claude Code)
-          const msg = error instanceof Error ? error.message : String(error)
+          // formatError handles Tauri's plain-object throws — the previous
+          // `String(error)` could yield "[object Object]" which both swallowed
+          // the not-found heuristic AND surfaced uselessly to the model.
+          const msg = formatError(error)
           if (/not found|no such file|does not exist/i.test(msg)) {
             const suggestion = await this.suggestSimilarPath(filePath)
             const projectRoot = this.getProjectRoot()
@@ -1071,7 +958,9 @@ class ToolExecutor {
             }
             return enriched
           }
-          throw error
+          // Re-throw with a real Error so the safeToolPool catch sees a usable
+          // shape (and the formatError fallback there matches what we logged).
+          throw new Error(`read_file failed for ${filePath}: ${msg}`)
         }
       }
     })
@@ -1199,12 +1088,6 @@ class ToolExecutor {
           })
         }
 
-        // Check for uninstalled package imports before generating diff
-        const missingPkgs = await this.checkMissingImports(newContent, path)
-        if (missingPkgs.length > 0) {
-          return `Error: The following packages are imported but NOT installed in package.json: ${missingPkgs.join(', ')}\n\nInstall them first with execute_command (e.g., "${this.detectPm()} add ${missingPkgs.join(' ')}"), then call write_file again.`
-        }
-
         // Return diff data as JSON for inline display
         // The file is NOT written yet — user approves via InlineDiff
         return JSON.stringify({
@@ -1260,12 +1143,6 @@ class ToolExecutor {
             isNewFile: true,
             alreadyApplied: true,
           })
-        }
-
-        // Check for uninstalled package imports before generating diff
-        const missingPkgs = await this.checkMissingImports(content, path)
-        if (missingPkgs.length > 0) {
-          return `Error: The following packages are imported but NOT installed in package.json: ${missingPkgs.join(', ')}\n\nInstall them first with execute_command (e.g., "${this.detectPm()} add ${missingPkgs.join(' ')}"), then call create_file again.`
         }
 
         // Return diff data as JSON for inline display (consistent with write_file)
@@ -1463,13 +1340,6 @@ class ToolExecutor {
           })
         }
 
-        // Check for uninstalled package imports in the NEW PART only (not the whole file).
-        // Checking the whole file would flag pre-existing imports that already work.
-        const missingPkgs = await this.checkMissingImports(newStr, path)
-        if (missingPkgs.length > 0) {
-          return `Error: The following packages are imported but NOT installed in package.json: ${missingPkgs.join(', ')}\n\nInstall them first with execute_command (e.g., "${this.detectPm()} add ${missingPkgs.join(' ')}"), then call edit_file again.`
-        }
-
         // Return diff data as JSON for inline display
         return JSON.stringify({
           type: 'diff',
@@ -1643,39 +1513,26 @@ class ToolExecutor {
         const cwd = (input.cwd as string) || projectRoot
         this.validatePathWithinProject(cwd)
 
-        // Block repeated install commands that already succeeded.
-        // Matches direct ("pnpm install") and compound ("cd server && pnpm install") forms.
-        // Key includes effective cwd so monorepo sub-directory installs aren't blocked.
+        // Detect package-manager install commands so they get the streaming
+        // execution path (real-time logs in chat + PID-based cancellation).
+        // We no longer skip repeated installs — npm/yarn/pnpm/bun are all
+        // idempotent (they only mutate node_modules when something changed),
+        // and the prior skip-memo caused false positives that masked real
+        // installs. Trust the package manager.
         const normalizedCmd = cmd.replace(/\s+/g, ' ')
-        const directInstall = normalizedCmd.match(/^((?:npm|yarn|pnpm|bun)\s+(?:install|ci))\b/)
+        const directInstall = normalizedCmd.match(/^((?:npm|yarn|pnpm|bun)\s+(?:install|ci|add|remove|uninstall))\b/)
           || normalizedCmd.match(/^(pip\s+install)\b/)
         const compoundInstall = !directInstall
-          ? normalizedCmd.match(/^cd\s+(\S+)\s*&&\s*((?:npm|yarn|pnpm|bun)\s+(?:install|ci))\b/)
+          ? normalizedCmd.match(/^cd\s+(\S+)\s*&&\s*((?:npm|yarn|pnpm|bun)\s+(?:install|ci|add|remove|uninstall))\b/)
           : null
         const isInstallCmd = directInstall !== null || compoundInstall !== null
-        const installBaseCmd = directInstall?.[1] || compoundInstall?.[2] || ''
-        // For "cd subdir && pnpm install", resolve cwd to the subdirectory.
-        // Normalize ./path and trailing slashes so keys match across forms.
-        const effectiveCwd = compoundInstall
-          ? `${cwd}/${compoundInstall[1]}`.replace(/\/\.\//g, '/').replace(/\/+$/, '')
-          : cwd
-        const installKey = isInstallCmd ? `${installBaseCmd}@${effectiveCwd}` : ''
 
-        if (isInstallCmd && this.completedInstalls.has(installKey)) {
-          return `SKIPPED: "${installBaseCmd}" already completed successfully in ${effectiveCwd}. Dependencies are installed.\nExit code: 0`
-        }
-
-        // For install commands: use streaming so the user sees real-time logs in the chat.
-        // Note: the outer guard at execute() entry already returns early on
-        // pre-aborted signals — no inner re-check needed (was R2 critique
-        // about duplicate-with-divergent-message).
         const callSignal = input._abortSignal as AbortSignal | undefined
 
         if (isInstallCmd) {
           return this.executeInstallStreaming(
             cmd,
             cwd,
-            installKey,
             input._toolCallId as string | undefined,
             callSignal,
           )

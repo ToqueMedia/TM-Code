@@ -21,7 +21,7 @@ import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore, McpServerState } from '../../stores/mcpStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useAuthStore } from '../../stores/authStore'
-import { useBillingStore } from '../../stores/billingStore'
+import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
@@ -183,7 +183,6 @@ function ProfileSection() {
   const billingLoaded = useBillingStore(s => s.isLoaded)
   const consumedPct = useBillingStore(s => s.consumedPct)
   const tokenBudget = useBillingStore(s => s.tokenBudget)
-  const tokensConsumed = useBillingStore(s => s.tokensConsumed)
   const cycleEnd = useBillingStore(s => s.cycleEnd)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const noCredits = useBillingStore(s => s.noCredits)
@@ -219,15 +218,9 @@ function ProfileSection() {
     ? 0
     : Math.min(100, Math.max(2, pct * 100))
 
-  // "Consumo extra" — capacidade total restante (ciclo + créditos overage)
-  // como percentagem do tokenBudget. Diminui conforme consumedPct sobe e,
-  // depois dos 100%, conforme tmsRemaining é gasto. Só aparece quando há
-  // overage tokens disponíveis (compraram pacote extra).
-  const extraCapacityPct = billingLoaded && tokenBudget > 0 && tmsRemaining > 0
-    ? Math.max(0, Math.round(
-        ((Math.max(0, tokenBudget - tokensConsumed) + tmsRemaining) / tokenBudget) * 100
-      ))
-    : null
+  // "Consumo extra" — single source of truth in billingStore.extraConsumptionPct.
+  // tmsRemaining / tokenBudget × 100 (e.g. 500K extra on a 2M plan = 25%).
+  const extraCapacityPct = billingLoaded ? extraConsumptionPct(tmsRemaining, tokenBudget) : null
 
   async function handleSignOut() {
     try {
@@ -356,7 +349,7 @@ function ProfileSection() {
               </Flex>
               {extraCapacityPct !== null && (
                 <Text fontSize="11px" color={tokens.colors.accent.orange} mt={1.5}>
-                  +{extraCapacityPct}% {t('settings.extraConsumption' as any)}
+                  {extraCapacityPct}% {t('settings.extraConsumption' as any)}
                 </Text>
               )}
             </>

@@ -176,6 +176,58 @@ fn open_preview_webview(
                     }
                     _send('error', parts.join(' '));
                 };
+
+                // Proactive Google Identity Services (GIS) probe.
+                //
+                // GIS in iframes often fails *silently* — FedCM blocks the
+                // button, no console error fires, the developer clicks and
+                // nothing happens. To surface this BEFORE the click, we watch
+                // for the GIS script-tag being added to the DOM. If we see
+                // it AND we're inside an iframe, fire a one-shot signal so
+                // the IDE can show a friendly toast preemptively.
+                //
+                // We only fire once per page load — the IDE's React side has
+                // its own dedup that resets per preview-reload.
+                var _gisDetected = false;
+                var _isInIframe = (function() {
+                    try { return window.self !== window.top; }
+                    catch (_) { return true; } /* cross-origin parent → in iframe */
+                })();
+
+                var _checkForGis = function() {
+                    if (_gisDetected || !_isInIframe) return;
+                    var scripts = document.getElementsByTagName('script');
+                    for (var i = 0; i < scripts.length; i++) {
+                        var src = scripts[i].src || '';
+                        if (src.indexOf('accounts.google.com/gsi/client') !== -1) {
+                            _gisDetected = true;
+                            try {
+                                window.ipc.postMessage(JSON.stringify({ type: 'gis-detected' }));
+                            } catch(_) {}
+                            return;
+                        }
+                    }
+                };
+
+                // Initial pass after DOM is ready
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', _checkForGis);
+                } else {
+                    _checkForGis();
+                }
+                // Also observe future script additions (SPA routes, lazy loads)
+                if (window.MutationObserver) {
+                    var _mo = new MutationObserver(function() { _checkForGis(); });
+                    var _moStart = function() {
+                        if (document.body) _mo.observe(document.body, { childList: true, subtree: true });
+                    };
+                    if (document.body) _moStart();
+                    else document.addEventListener('DOMContentLoaded', _moStart);
+                    // Stop observing once we've fired (no need to keep watching)
+                    var _stopWhenDetected = setInterval(function() {
+                        if (_gisDetected) { _mo.disconnect(); clearInterval(_stopWhenDetected); }
+                    }, 1000);
+                }
             })();
         "#)
         // IPC handler: receives console messages from the preview JS.
@@ -184,26 +236,42 @@ fn open_preview_webview(
         // because the wry IPC closure doesn't have access to Tauri's Emitter trait.
         .with_ipc_handler(move |request| {
             let body = request.body();
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) {
-                if msg.get("type").and_then(|t| t.as_str()) == Some("console") {
-                    let level = msg.get("level").and_then(|l| l.as_str()).unwrap_or("error");
-                    let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                    if !text.is_empty() {
-                        // Escape for JS string literal (backslash, quotes, newlines)
-                        let safe_text = text
-                            .replace('\\', "\\\\")
-                            .replace('\'', "\\'")
-                            .replace('\n', "\\n")
-                            .replace('\r', "");
-                        let safe_level = level.replace('\'', "\\'");
-                        if let Some(win) = app_for_ipc.get_webview_window("main") {
-                            let _ = win.eval(format!(
-                                "window.dispatchEvent(new CustomEvent('preview-console',{{detail:{{level:'{}',text:'{}'}}}}));",
-                                safe_level, safe_text
-                            ));
-                        }
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let msg_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            match msg_type {
+                "console" => {
+                    let level = parsed.get("level").and_then(|l| l.as_str()).unwrap_or("error");
+                    let text = parsed.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if text.is_empty() { return; }
+                    // Escape for JS string literal (backslash, quotes, newlines)
+                    let safe_text = text
+                        .replace('\\', "\\\\")
+                        .replace('\'', "\\'")
+                        .replace('\n', "\\n")
+                        .replace('\r', "");
+                    let safe_level = level.replace('\'', "\\'");
+                    if let Some(win) = app_for_ipc.get_webview_window("main") {
+                        let _ = win.eval(format!(
+                            "window.dispatchEvent(new CustomEvent('preview-console',{{detail:{{level:'{}',text:'{}'}}}}));",
+                            safe_level, safe_text
+                        ));
                     }
                 }
+                "gis-detected" => {
+                    // Proactive signal from the in-preview probe: GIS script
+                    // detected inside an iframe context. The IDE's listener
+                    // will show a friendly toast pre-warning the developer.
+                    if let Some(win) = app_for_ipc.get_webview_window("main") {
+                        let _ = win.eval(
+                            "window.dispatchEvent(new CustomEvent('preview-gis-detected'));"
+                        );
+                    }
+                }
+                _ => {}
             }
         })
         .with_asynchronous_custom_protocol("tmpreview".into(), move |_webview_id, request, responder| {

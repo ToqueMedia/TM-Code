@@ -3,6 +3,7 @@ import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiPaperclip } from 'react-icons/fi'
 import { useCmdPromptLogic } from '../../hooks/useCmdPromptLogic'
 import SlashCommandMenu from '../chat/SlashCommandMenu'
+import HashtagMenu from '../prompt/HashtagMenu'
 import { TerminalMentionMenu } from './TerminalMentionMenu'
 import CmdAttachmentBar from './CmdAttachmentBar'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
@@ -85,6 +86,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     selectedMentionIndex,
     mentionQuery,
     quickOpenBuilding,
+    hashtagMenu,
     textareaRef,
     isStreaming,
     queuedCommands,
@@ -109,9 +111,9 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
   useImperativeHandle(ref, () => ({
     focus: () => textareaRef.current?.focus(),
     hasText: () => (textareaRef.current?.value.trim().length ?? 0) > 0,
-    isMenuOpen: () => showCommandMenu || showMentionMenu,
+    isMenuOpen: () => showCommandMenu || showMentionMenu || hashtagMenu.show,
     clearAttachments,
-  }), [textareaRef, showCommandMenu, showMentionMenu, clearAttachments])
+  }), [textareaRef, showCommandMenu, showMentionMenu, hashtagMenu.show, clearAttachments])
 
   // Sync textarea scroll → highlight overlay so the colored slash-command
   // span stays under the actual glyphs when content scrolls past 6 rows.
@@ -158,6 +160,18 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
           selectedIndex={selectedCommandIndex}
           onSelect={handleCommandSelect}
           showArgsHint={isArgMode}
+          theme="purple"
+          direction="up"
+          maxHeight={260}
+        />
+      )}
+
+      {/* #hashtag autocomplete */}
+      {hashtagMenu.show && (
+        <HashtagMenu
+          items={hashtagMenu.items}
+          selectedIndex={hashtagMenu.selectedIndex}
+          onSelect={hashtagMenu.handleSelect}
           theme="purple"
           direction="up"
           maxHeight={260}

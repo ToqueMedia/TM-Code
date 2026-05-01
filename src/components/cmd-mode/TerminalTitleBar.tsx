@@ -5,6 +5,8 @@ import { useBillingStore } from '../../stores/billingStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useAgentStore } from '../../stores/agentStore'
+import { getProfileForPlan } from '../../services/agent/modelProfiles'
 import { CreditIndicator } from '../ui/CreditIndicator'
 import { McpIndicator } from '../ui/StatusIndicators'
 import { tokens } from '@/theme/tokens'
@@ -28,7 +30,13 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
-  const thinkingSupported = billingPlan !== 'explorer'
+  const backendThinkingMode = useAgentStore(s => s.thinkingMode)
+  const fallbackProfile = getProfileForPlan(billingPlan)
+  const effectiveMode = backendThinkingMode
+    ?? (fallbackProfile.supportsThinking
+        ? (fallbackProfile.thinkingMode === 'mandatory' ? 'mandatory' : 'toggleable')
+        : 'none')
+  const thinkingSupported = effectiveMode === 'toggleable'
   const [copied, setCopied] = useState(false)
 
   const handleCopyContext = useCallback(async () => {

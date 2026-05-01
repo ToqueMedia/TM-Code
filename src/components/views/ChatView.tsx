@@ -8,7 +8,7 @@ import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { useBillingStore, isInOverageState, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
+import { useBillingStore, isInOverageState, extraConsumptionPct, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
 import MessageBubble from '../chat/MessageBubble'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
@@ -318,11 +318,13 @@ function ChatView() {
                     />
                     <Text fontSize="12px" color={tokens.colors.accent.orange} fontWeight="500">
                       {t('chat.billingSpillover')}{' '}
-                      {tmsRemaining > 0
-                        ? `${Math.round((consumedPct - 1) * tokenBudget / 1000).toLocaleString()}K ${t('chat.extraTokens')}`
-                        : billingStatus === 'rejected'
-                        ? t('chat.noCreditsRemaining')
-                        : t('chat.tokensUsed')}
+                      {(() => {
+                        const remainingPct = extraConsumptionPct(tmsRemaining, tokenBudget)
+                        if (remainingPct !== null && remainingPct > 0) {
+                          return `${remainingPct}% ${t('chat.extraCreditsRemaining')}`
+                        }
+                        return t('chat.noCreditsRemaining')
+                      })()}
                     </Text>
                     {billingPlan !== 'explorer' && tmsRemaining <= 0 && (
                       <Text
@@ -417,6 +419,8 @@ function CreditIndicator(props: {
   // the cycle is exhausted (consumed_pct > 1, includes spillover requests).
   const isInOverage = isInOverageState(props.status, props.consumedPct)
   const isBlocked = props.status === 'rejected'
+  // Single source of truth — same metric used in CreditIndicator + SettingsView.
+  const extraPct = extraConsumptionPct(props.tmsRemaining, props.tokenBudget)
 
   // Flash animation when consumedPct increases
   useEffect(() => {
@@ -600,8 +604,8 @@ function CreditIndicator(props: {
             </VStack>
           )}
 
-          {/* TMS overage credits */}
-          {props.tmsRemaining > 0 && (
+          {/* Extra consumption — % via single-source helper. */}
+          {extraPct !== null && (
             <>
               <Box w="100%" h="1px" bg={isInOverage ? 'rgba(247, 127, 0, 0.15)' : 'rgba(255, 255, 255, 0.06)'} />
               <Flex justify="space-between" w="100%">
@@ -610,7 +614,7 @@ function CreditIndicator(props: {
                 </Text>
                 <Text fontSize="10px" fontWeight="700" fontFamily={tokens.fontFamily.mono}
                   color={isInOverage ? tokens.colors.accent.orange : tokens.colors.text.primary}>
-                  {props.tmsRemaining}
+                  {extraPct}%
                 </Text>
               </Flex>
             </>
