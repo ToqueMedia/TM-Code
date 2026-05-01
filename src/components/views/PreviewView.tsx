@@ -763,7 +763,7 @@ function PreviewView() {
               exit={{ height: 0, opacity: 0 }}
               transition={isResizingDrawer
                 ? { duration: 0 }
-                : { duration: 0.2, ease: [0.4, 0, 0.2, 1] }
+                : { type: 'spring', stiffness: 420, damping: 36, mass: 0.9 }
               }
               style={{ flexShrink: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
             >
@@ -829,7 +829,7 @@ function PreviewView() {
               exit={{ height: 0, opacity: 0 }}
               transition={isResizingConsole
                 ? { duration: 0 }
-                : { duration: 0.2, ease: [0.4, 0, 0.2, 1] }
+                : { type: 'spring', stiffness: 420, damping: 36, mass: 0.9 }
               }
               style={{ flexShrink: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
             >

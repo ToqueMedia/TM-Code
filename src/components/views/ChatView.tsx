@@ -196,7 +196,7 @@ function ChatView() {
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+            transition={{ type: 'spring', stiffness: 380, damping: 38, mass: 1 }}
             style={{ flexShrink: 0, overflow: 'hidden' }}
           >
             <Flex
