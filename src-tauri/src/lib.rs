@@ -497,6 +497,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Serve app via HTTP localhost instead of tauri:// protocol.
         // This allows iframes to load other HTTP origins (dev server previews)

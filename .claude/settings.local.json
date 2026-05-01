@@ -162,7 +162,9 @@
       "Bash(sort -t: -k2 -n -r)",
       "Bash(awk NR==206 {print substr\\($0, 1, 500\\)} *)",
       "Bash(node *)",
-      "WebFetch(domain:firebase.google.com)"
+      "WebFetch(domain:firebase.google.com)",
+      "Bash(yarn install *)",
+      "Bash(npm view *)"
     ]
   }
 }

@@ -22,6 +22,7 @@ import { checkStartupRequirements, GLOBAL_REQUIREMENTS } from './services/startu
 import type { EnvironmentCheckResult } from './services/environmentCheck';
 import { useUpdateStore } from './stores/updateStore';
 import { useLayoutStore } from './stores/layoutStore';
+import { usePermissionStore } from './stores/permissionStore';
 import { logger } from './utils/logger';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNativeMenu } from './hooks/useNativeMenu';
@@ -75,6 +76,26 @@ function App() {
 				});
 			}
 		});
+	}, []);
+
+	// Native OS notification when the agent asks for permission while the
+	// IDE window is in the background. The notify() helper itself skips when
+	// the window is focused, so users actively watching the app see only the
+	// in-app dialog, never a duplicate banner.
+	useEffect(() => {
+		let lastSeenId: string | null = null
+		return usePermissionStore.subscribe((state) => {
+			const next = state.pendingPermission
+			if (!next || next.id === lastSeenId) return
+			lastSeenId = next.id
+			import('./services/notificationService').then(({ notify }) => {
+				notify({
+					title: 'TM Code — permission needed',
+					body: `Approve ${next.toolName} to continue`,
+					dedupKey: `permission:${next.id}`,
+				})
+			})
+		})
 	}, []);
 
 	useEffect(() => {

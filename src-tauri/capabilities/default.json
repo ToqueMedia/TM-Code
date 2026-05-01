@@ -51,6 +51,7 @@
     "process:default",
     "process:allow-restart",
     "process:allow-exit",
+    "notification:default",
     {
       "identifier": "fs:scope",
       "allow": [
