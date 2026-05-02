@@ -5,7 +5,7 @@
 
 > **Backend reality:** the production AI/billing API is the Cloudflare Worker `toquemedia-studio-api` at `~/dev/deskotp/toquemedia-studio-api`, deployed to **`api-agents.toquemedia.net`** (per `wrangler.toml:32`). It serves both TM Code IDE (Tauri) and — once CORS is updated — the rebranded `code.toquemedia.net` web. There is no separate Cloud Run service.
 
-> **Decisions registered (2026-05-02):** Q1 drop showcase · Q4 no PAT endpoint, defer api-keys tab · Q6 downloads via GitHub Releases (`ToqueMedia/TM-Code`) · Q7 rebrand to `code.toquemedia.net`. See §12.
+> **Decisions registered (2026-05-02):** Q1 drop showcase · Q4 **drop API Keys tab entirely (not deferred — out of scope, period)** · Q6 downloads via GitHub Releases (`ToqueMedia/TM-Code`) · Q7 rebrand to `code.toquemedia.net`. See §12.
 
 > **Phase 0 audit findings (2026-05-02):**
 > - Cross-coupling: `AuthContext.tsx` is clean ✓. The "delete" candidates have **no surprise importers** in surviving code once Q1 (drop showcase) is applied.
@@ -181,7 +181,7 @@ Estimated bundle reduction: monaco alone is ~3MB gzipped; total post-trim should
 /account/payment-methods PaymentMethodsTab
 /account/security       SecurityTab (password, 2FA, sessions)
 /account/admin          AdminTab (only if isAdmin from /v1/me)
-                        # /account/api-keys is deferred — no worker endpoint (Q4)
+                        # /account/api-keys dropped from plan (Q4)
 
 /upgrade, /checkout/:planId    KEEP (linked from /account/billing)
 ```
@@ -217,7 +217,7 @@ Use a single nested layout: `AccountLayout` with sidebar nav + tab outlet. React
 - `screens/account/billing/UsageMeter.tsx` — wraps existing `TokenConsumptionBar` + adds "Consumo extra" pill from `tokenBudget.extraUsageBalance` (already in `TokenBudgetState`, see `AuthContext.tsx:218-220`).
 - `screens/account/payment-methods/PaymentMethodList.tsx` — list cards/MB-Way + add/remove. Backed by Dodo + Multicaixa.
 - `screens/account/security/SessionsPanel.tsx` — Firebase Auth session revocation + active devices.
-- ~~`screens/account/api-keys/ApiKeysPanel.tsx`~~ — **deferred (Q4)**. No worker endpoint exists for personal access tokens. The IDE auths via Firebase ID token with refresh; nothing for the user to manage on the web today.
+- ~~`screens/account/api-keys/ApiKeysPanel.tsx`~~ — **DROPPED (Q4, 2026-05-02)**. The IDE already authenticates via Firebase ID token with auto-refresh; there is nothing the user needs to manage on the web. Not "deferred" — removed from plan entirely.
 - `screens/account/components/AccountSidebar.tsx` — sidebar nav with active state.
 - `components/layout/AccountLayout.tsx` — nested router layout shell.
 
@@ -434,7 +434,7 @@ Rationale: auth flow, CSP rules, redirects, and the function rewrite are all alr
 | **1. New `/account` shell** | `AccountLayout` + nested router + sidebar + Overview tab + auth gating + redirect from `/dashboard` and `/profile`. Wire existing `BalanceCard`/`SeatsManagement`/`AdminPanel` into new tabs without rewriting them | **M** |
 | **2. Billing tab polish** | New `PlanCard`, `UsageMeter` wrapper, `BillingHistory` rebuild, link to `/upgrade`, "Cancelar subscrição" action | **M** |
 | **3. Payment methods + security tabs** | Repurpose Dodo/Multicaixa flows; add Firebase session revocation UI; password change | **M** |
-| ~~4. API keys / device pairing tab~~ | **DEFERRED** — Q4 confirmed no worker endpoint exists. Add later if we choose to build PAT infrastructure server-side |
+| ~~4. API keys / device pairing tab~~ | **DROPPED** — Q4 confirmed no worker endpoint, and no business reason to build one. The IDE auths via Firebase ID token with refresh. Removed from plan, not deferred. |
 | **5. Landing rewrite** | Replace messaging, swap hero demo, add `DownloadSection`, `FaqSection`, `/features`, `/download`, `/pricing` rename | **L** |
 | **6. SEO + perf pass** | Per-route head manager, sitemap regen, OG image, robots cleanup, lazy-load sections, font audit | **M** |
 | **7. Cutover + redirects** | Add 301s to `firebase.prod.json`; tighten CSP; banner on old routes | **S** |
@@ -455,7 +455,7 @@ Total: roughly 1×L + 4×M + 4×S of focused work.
 - Stripe migration (we are sticking with Dodo + Multicaixa)
 - Firestore rules cleanup beyond best-effort comment-marking
 - Migrating away from Vite to Next.js (the prompt's premise was incorrect — staying on Vite SPA)
-- New endpoints on `toquemedia-studio-api`: API Keys / device tokens (Q4), subscription cancellation, usage-history chart (Q5)
+- New endpoints on `toquemedia-studio-api`: subscription cancellation, usage-history chart (Q5). API Keys / device tokens dropped from plan (Q4) — not in scope now or later.
 
 **Two narrow exceptions** to "worker is untouched":
 
@@ -472,7 +472,7 @@ Total: roughly 1×L + 4×M + 4×S of focused work.
 |---|---|
 | **Q1** | **DROP** the showcase gallery on landing. No "Made with TM Code" section in v1. Frees us to delete `ProjectDAO`, `ProjectRepository`, `useShowCaseStore`, `useProjects`, `screens/showCases/`, `screens/profile/components/admin/ShowcasesTab.tsx`, and `screens/landing/ShowcaseSection.tsx` (which calls `ProjectDAO.shared.getShowCaseProjects()` at line 68 — confirmed audit). |
 | **Q3** | **CONFIRMED** (audit 2026-05-02): worker `toquemedia-studio-api` does NOT read or write `blueprints`, `chatMessages`, `projects/{id}/screens`, or `projects/{id}/files`. Worker only touches `users`, `subscription_plans`, `admin_audit`, `deviceFingerprints`, `projectDeployments`, `subdomains`. The four web-only collections can be archived 30/60/90 days after the web stops writing them. |
-| **Q4** | **CONFIRMED: no PAT/device-token endpoint exists.** Worker only accepts Firebase ID tokens. No `apiKeys` collection, no `/v1/account/api-keys` route. **`/account/api-keys` tab is removed from this refactor's scope.** Add it later only after a corresponding worker PR (new collection + 3 routes + middleware fallback). The IDE already authenticates via Firebase ID token with refresh — no functional regression. |
+| **Q4** | **DROPPED FROM PLAN (2026-05-02).** No PAT/device-token endpoint exists, and no business reason to build one. The IDE authenticates via Firebase ID token with auto-refresh — there is nothing for the user to manage from the web. Not "deferred" — removed entirely. If a future product need surfaces (third-party CI integrations, multi-device PAT control), that becomes its own scoped initiative. |
 | **Q6** | **GitHub Releases at `https://github.com/ToqueMedia/TM-Code`.** Landing/`/download` calls `https://api.github.com/repos/ToqueMedia/TM-Code/releases/latest` (no auth, 60 req/h per IP — sufficient), detects OS, picks the asset by filename pattern (`.dmg` macOS, `.msi` Windows, `.AppImage` Linux). No new worker endpoint, no static manifest to maintain. `VITE_TM_CODE_DOWNLOAD_BASE_URL` is no longer needed. |
 | **Q7** | **Rebrand to `code.toquemedia.net`.** DNS handled separately by Célio in Cloudflare. Code-side changes: `firebase.prod.json` (hosting site + CSP + OAuth domains), `index.html` (`<title>`, `og:url`, `og:image`, `twitter:*`, `<link rel="canonical">`, JSON-LD `SoftwareApplication.url`), `public/sitemap.xml` (regenerate), `public/robots.txt` (new `Sitemap:`), `<link rel="alternate" hreflang>` for pt/en/fr/zh, grep for hard-coded `studio.toquemedia.net` literals, **add `code.toquemedia.net` to Firebase Auth authorized domains** (GIP/Auth console). Also: add to worker `ALLOWED_ORIGINS` (see §11). |
 | **Q10** | **CONFIRMED dead** (audit 2026-05-02): worker source has zero references to `aiService` Cloud Function. All AI traffic goes to `api-agents.toquemedia.net/v1/chat/completions`. Drop the `/ai/**` rewrite from `firebase.prod.json:48-52` and the `aiService` Cloud Function. Optional belt-and-braces: tail Functions logs for a week first to catch any rogue caller. |
