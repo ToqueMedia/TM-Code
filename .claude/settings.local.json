@@ -168,7 +168,9 @@
       "Bash(grep -rn \"chat\\\\.thinking[^OM]\\\\|chat\\\\.thinking$\" /Users/ithustle/dev/deskotp/exodus-ide/src --include=\"*.ts\" --include=\"*.tsx\")",
       "Bash(awk 'NR>=178 && NR<=402 { next } { print }' /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/__tests__/chatE2E.test.ts)",
       "Bash(awk '/\"plans\\\\.\\(free|pro|business4x|business8x\\)\\\\./' /Users/ithustle/dev/web/toquemedia-studio/packages/web/src/locales/pt.json)",
-      "Bash(shuf -n 20)"
+      "Bash(shuf -n 20)",
+      "Bash(grep -rE \"t\\\\\\(\\\\`countries\\\\.\" src/)",
+      "Bash(grep -rE \"[\\\\`'\\\\\"]tokens\\\\.[a-z]\" src/)"
     ]
   }
 }
