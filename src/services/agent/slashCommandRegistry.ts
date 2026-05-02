@@ -1,5 +1,6 @@
 import { executeInit } from './commands/initCommand'
 import { executePlan } from './commands/planCommand'
+import { executeDebug } from './commands/debugCommand'
 import { executePayments } from './commands/paymentsCommand'
 
 /** A canonical argument value the user can pick after the command name. */
@@ -52,6 +53,13 @@ class SlashCommandRegistry {
       description: 'Architect a feature — generate specs, get approval, create dev todo list',
       enabled: true,
       execute: executePlan,
+    })
+
+    this.register({
+      name: '/debug',
+      description: 'Debug an error or symptom — hypothesis-driven investigation with reasoning ON',
+      enabled: true,
+      execute: executeDebug,
     })
 
     this.register({

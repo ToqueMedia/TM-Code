@@ -125,9 +125,10 @@ const DEFAULTS: SettingsState = {
   hasCompletedOnboarding: false,
   sandboxEnabled: false,
   flaggedCommands: [],
-  // Thinking/reasoning ON by default for paid plans.
-  // Free plan (DeepSeek) ignores thinking param entirely.
-  thinkingEnabled: true,
+  // Reasoning OFF by default in Code mode (all plans). User toggles per turn.
+  // /plan and /debug commands force reasoning ON via X-Request-Type header,
+  // bypassing this setting for the duration of the command.
+  thinkingEnabled: false,
 }
 
 export const useSettingsStore = create<SettingsState & SettingsActions>()(

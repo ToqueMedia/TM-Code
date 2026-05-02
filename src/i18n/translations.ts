@@ -431,9 +431,9 @@ const en = {
   'prompt.imageStripped': '[image attached — upgrade to a paid plan for image support]',
   'prompt.modelTextOnlyWarning': 'Free plan does not support images. Upgrade to Pro for multimodal support.',
   'prompt.planLabel.explorer': 'Free',
+  'prompt.planLabel.vibe': 'Vibe',
   'prompt.planLabel.pro': 'Pro',
-  'prompt.planLabel.business-4x': 'Business 4x',
-  'prompt.planLabel.business-8x': 'Business 8x',
+  'prompt.planLabel.max': 'Max',
 
   // ── CMD Mode Attachments ──────────────────────────
   'cmdMode.attach': 'Attach',
@@ -1185,9 +1185,9 @@ const pt: Record<keyof typeof en, string> = {
   'prompt.imageStripped': '[imagem anexada — faz upgrade para um plano pago para suporte de imagens]',
   'prompt.modelTextOnlyWarning': 'O plano gratuito não suporta imagens. Faz upgrade para Pro para suporte multimodal.',
   'prompt.planLabel.explorer': 'Gratuito',
+  'prompt.planLabel.vibe': 'Vibe',
   'prompt.planLabel.pro': 'Pro',
-  'prompt.planLabel.business-4x': 'Business 4x',
-  'prompt.planLabel.business-8x': 'Business 8x',
+  'prompt.planLabel.max': 'Max',
   'cmdMode.attach': 'Anexar',
   'cmdMode.attachTooltip': 'Anexar ficheiros ou imagens',
   'cmdMode.dropToAttach': 'Largar para anexar',

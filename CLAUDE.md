@@ -109,6 +109,28 @@ Tauri manages shared state via `app.manage()`:
 - **Build**: Vite 8, Jest 30 + ts-jest for testing
 - **Package Manager**: Yarn 1.22.22 (Node >= 20.19.0)
 
+## Plans, models, and routing
+
+TM Code uses **two coder models** plus one multimodal handler. Per-plan model is admin-managed in `~/dev/web/toquemedia-studio` (Settings page writes to Firestore `subscription_plans/{planId}.ideModel`); the IDE never picks a model itself.
+
+| Plan | Token cap/cycle | Coder |
+|---|---|---|
+| `explorer` (free) | 1.5M | DeepSeek V4-Flash (DashScope) |
+| `vibe` | 5.88M | GLM-5.1 (DashScope) |
+| `pro` | 11.76M | GLM-5.1 (DashScope) |
+| `max` | 72.55M | GLM-5.1 (DashScope) |
+
+**Multimodal**: server-side preprocessing in `toquemedia-studio-api/src/multimodal.ts`. When a paid-plan request contains `image_url` blocks, the worker calls Qwen 3.6 Plus in parallel for each image, replaces the blocks with text descriptions, then forwards the now-text-only request to the user's plan model. Free tier blocks attachments at the UI level (`useAttachments.ts:81`). The frontend never swaps profiles for image messages — `getProfileForPlan(plan)` is the single profile selector.
+
+**Slash commands** (`src/services/agent/commands/`):
+- `/plan` — same coder model, `X-Request-Type: plan` header forces `enable_thinking=true` for the turn.
+- `/debug` — same coder model, `X-Request-Type: debug` header forces reasoning ON. Hypothesis-driven prompt.
+- Code mode (default chat) — reasoning OFF by default, user-toggleable on paid plans (`thinkingSupported = billingPlan !== 'explorer'`).
+
+**Frontend rule (do not break)**: `getProfileForPlan(plan)` in `src/services/agent/modelProfiles.ts` returns sampling-shape defaults only — never trust `profile.id` as the model the upstream will see. The backend (`toquemedia-studio-api/src/proxy.ts`) is the source of truth for model resolution; clamps for upstream-specific quirks live there.
+
+**Pricing analytics**: `BLENDED_TOKEN_PRICE_USD_PER_M = $1.785` (70/30 input/output mix), `PLAN_MARGIN_RATIO = 0.35`. Subscription prices are Firestore-driven; the constants in `src/types.ts` are local fallbacks only.
+
 ## Project Templates
 
 Available in `src-tauri/resources/templates/`:

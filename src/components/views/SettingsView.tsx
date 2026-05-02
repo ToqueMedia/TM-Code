@@ -170,10 +170,10 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
 // ━━━ Profile & Plan Section ━━━
 
 const PLAN_CONFIG: Record<string, { labelKey: string; color: string; creditsLabelKey: string; isTop: boolean }> = {
-  explorer:       { labelKey: 'Free',         color: tokens.colors.text.muted,      creditsLabelKey: 'settings.monthlyCredits', isTop: false },
-  pro:            { labelKey: 'Pro',          color: tokens.colors.accent.purple,   creditsLabelKey: 'settings.monthlyCredits',  isTop: false },
-  'business-4x':  { labelKey: 'Business 4x',  color: tokens.colors.accent.orange,   creditsLabelKey: 'settings.monthlyCredits',  isTop: false },
-  'business-8x':  { labelKey: 'Business 8x',  color: tokens.colors.accent.primary,  creditsLabelKey: 'settings.monthlyCredits',  isTop: true },
+  explorer: { labelKey: 'Free', color: tokens.colors.text.muted,     creditsLabelKey: 'settings.monthlyCredits', isTop: false },
+  vibe:     { labelKey: 'Vibe', color: tokens.colors.accent.green,   creditsLabelKey: 'settings.monthlyCredits', isTop: false },
+  pro:      { labelKey: 'Pro',  color: tokens.colors.accent.purple,  creditsLabelKey: 'settings.monthlyCredits', isTop: false },
+  max:      { labelKey: 'Max',  color: tokens.colors.accent.primary, creditsLabelKey: 'settings.monthlyCredits', isTop: true  },
 }
 
 function ProfileSection() {

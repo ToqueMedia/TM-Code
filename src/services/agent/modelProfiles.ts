@@ -80,36 +80,16 @@ export interface ModelProfile {
 import type { UserPlanName } from '../../stores/billingStore'
 
 // ─────────────────────────────────────────────────
-// Model Profiles — Personas named after Angolan heroes
-// (mimo-v2-flash uses a non-hero persona for Free tier)
+// Model Profiles — Official models only (2026-05-02)
+//
+// Frontend keeps a profile per default-routable model. Backend is the source
+// of truth for plan→model routing (admin-controlled in Firestore); the
+// frontend's per-plan profile only defines max_tokens and sampling for the
+// request body. Backend (proxy.ts) clamps max_tokens per upstream when needed.
+//
+// Official coder models: DeepSeek V4-Flash, GLM-5.1, Step 3.5 Flash, Kimi K2.6,
+// MiniMax M2.7. Multimodal handler: Qwen3.6-Plus.
 // ─────────────────────────────────────────────────
-
-const MIMO_V2_FLASH: ModelProfile = {
-  id: 'mimo-v2-flash',
-  name: 'MiMo V2 Flash',
-  persona: { name: 'Free', tagline: 'Rápida para tarefas simples — edições, perguntas e protótipos rápidos. Custo: 1x' },
-  modelId: 'mimo-v2-flash',
-  contextWindow: 262_144,
-  maxOutputTokens: 65_536,
-
-  temperature: 0.3,
-  reasoningTemperature: null,
-  topP: 0.95,
-  topPNonThinking: null,
-  topK: null,
-
-  // Thinking supported but DEGRADES quality at all temperatures — keep OFF
-  thinkingMode: 'none',
-  supportsThinking: false,
-  thinkingParam: null,
-  thinkingBudget: null,
-  thinkingMandatory: false,
-
-  preserveReasoning: false, // N/A — thinking disabled
-  supportsAttachments: false,
-  supportsSearch: false,
-  modelSpecificPrompt: `Never start responses with filler ("Sure!", "Of course!", "Let me help you"). Go straight to the answer or code. Output only changed code — never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
-}
 
 const DEEPSEEK_V4_FLASH: ModelProfile = {
   id: 'deepseek-v4-flash',
@@ -141,42 +121,6 @@ const DEEPSEEK_V4_FLASH: ModelProfile = {
   preserveReasoning: true,
   supportsAttachments: false,
   supportsSearch: true,  // DashScope DeepSeek native web_search via enable_search
-  modelSpecificPrompt: '',
-}
-
-const DEEPSEEK_V4_PRO: ModelProfile = {
-  id: 'deepseek-v4-pro',
-  name: 'DeepSeek V4-Pro',
-  persona: { name: 'Mãe Mwene', tagline: 'Raciocínio profundo e contexto largo — para tarefas complexas e multi-passo. Custo: 4x' },
-  modelId: 'deepseek-v4-pro',
-  // Upstream supports 1M tokens (Think Max recommends ≥384K). We cap at 256K
-  // for parity with V4-Flash; raise once latency/billing numbers are validated.
-  contextWindow: 262_144,
-  maxOutputTokens: 131_072,
-
-  // Official recommendation per HuggingFace model card (2026-04):
-  // "For local deployment, we recommend setting the sampling parameters to
-  // temperature = 1.0, top_p = 1.0." Same as DeepSeek's general guidance.
-  temperature: 1.0,
-  reasoningTemperature: 1.0,
-  topP: 1.0,
-  topPNonThinking: 1.0,
-  topK: null,
-
-  // Pro exposes the same three modes (Non-Think / Think-High / Think-Max)
-  // via the `enable_thinking` boolean on DashScope. Default OFF — Think Max
-  // is expensive (per-token cost + recommended ≥384K context); user opts in
-  // from Settings when the task warrants it.
-  thinkingMode: 'toggleable',
-  supportsThinking: true,
-  thinkingParam: 'enable_thinking',
-  thinkingBudget: null,
-  thinkingMandatory: false,
-
-  // V4 family preserves reasoning_content across turns — same as V4-Flash.
-  preserveReasoning: true,
-  supportsAttachments: false,
-  supportsSearch: true,
   modelSpecificPrompt: '',
 }
 
@@ -225,267 +169,31 @@ const GLM_5_1: ModelProfile = {
   modelSpecificPrompt: `You are TM Code Agent, a coding assistant built into TM Code IDE by Toque Media. You are NOT Claude, NOT ChatGPT, NOT any other assistant. Always identify yourself as TM Code Agent when asked.`,
 }
 
-const GLM_5: ModelProfile = {
-  id: 'glm-5',
-  name: 'GLM-5',
-  persona: { name: 'Rei Mandume', tagline: 'Persistente e metódico — forte em debugging e execução passo-a-passo. Custo: 4x' },
-  modelId: 'glm-5',
-  contextWindow: 198_000,
-  maxOutputTokens: 16_384,
-
-  // Zhipu AI defaults: temp=0.95, top_p=0.7 (notably lower than industry standard)
-  temperature: 0.95,
-  reasoningTemperature: 0.95,
-  topP: 0.7,
-  topK: null,
-
-  thinkingMode: 'toggleable',
-  supportsThinking: true,
-  thinkingParam: 'enable_thinking',
-  thinkingBudget: null,
-  thinkingMandatory: false,
-
-  preserveReasoning: true, // ZhipuAI docs: clear_thinking param — during tool calling sequences (our loop), preservation required
-  supportsAttachments: false,
-  supportsSearch: false,
-  modelSpecificPrompt: `You are TM Code Agent, a coding assistant built into TM Code IDE by Toque Media. You are NOT Claude, NOT ChatGPT, NOT any other assistant. Always identify yourself as TM Code Agent when asked.`,
-}
-
-const KIMI_K2_5: ModelProfile = {
-  id: 'kimi-k2.5',
-  name: 'Kimi K2.5',
-  persona: { name: 'Agostinho Neto', tagline: 'Qualidade máxima de código — compreende imagens e lê projectos enormes. Custo: 4x' },
-  modelId: 'kimi-k2.5',
-  contextWindow: 262_144,
-  maxOutputTokens: 65_536,
-
-  // Kimi K2.5 benchmark best practices: temperature=1.0, top_p=0.95.
-  // These are recommended by Moonshot for best reasoning quality.
-  temperature: 1.0,
-  reasoningTemperature: null,
-  topP: 0.95,
-  topK: null,
-
-  // Thinking is TOGGLEABLE — controlled by the user via Settings, not by
-  // the agent (request_thinking tool was removed). Routed via DashScope
-  // (not native Moonshot API), so uses enable_thinking format.
-  thinkingMode: 'toggleable',
-  supportsThinking: true,
-  thinkingParam: 'enable_thinking',
-  thinkingBudget: null,
-  thinkingMandatory: false,
-
-  // CRITICAL: Moonshot docs require reasoning_content in assistant messages
-  // during tool calling sequences. API returns 400 if stripped.
-  preserveReasoning: true,
-  supportsAttachments: true, // native multimodal (MoonViT)
-  supportsSearch: false,
-  modelSpecificPrompt: '',
-}
-
-const QWEN3_CODER_NEXT: ModelProfile = {
-  id: 'qwen3-coder-next',
-  name: 'Qwen3 Coder Next',
-  persona: { name: 'Ngola Kiluange', tagline: 'Especialista em código — veloz, domina 358 linguagens, vai directo ao ponto. Custo: 2x' },
-  modelId: 'qwen3-coder-next',
-  contextWindow: 262_144,
-  maxOutputTokens: 65_536,
-
-  // Qwen3 official: temp=0.7 non-thinking, top_p=0.8, top_k=20
-  temperature: 0.7,
-  reasoningTemperature: null,
-  topP: 0.8,
-  topK: 20,
-
-  thinkingMode: 'none',
-  supportsThinking: false,
-  thinkingParam: null,
-  thinkingBudget: null,
-  thinkingMandatory: false,
-
-  preserveReasoning: false, // N/A — thinking disabled
-  supportsAttachments: false,
-  supportsSearch: true,  // DashScope Qwen native web_search
-  modelSpecificPrompt: `Be concise in explanations. Output code changes directly without verbose commentary. When editing files, output only the changed code — do not repeat unchanged sections.`,
-}
-
-const MINIMAX_M2_5: ModelProfile = {
-  id: 'minimax-m2.5',
-  name: 'MiniMax M2.5',
-  persona: { name: 'Ekuikui II', tagline: 'O mais forte em engenharia complexa — resolve o que outros não conseguem. Custo: 2x' },
-  modelId: 'minimax-m2.5',
-  contextWindow: 196_608,
-  maxOutputTokens: 32_768,
-
-  // MiniMax default: temp=0.9, top_p=0.95
-  temperature: 0.9,
-  reasoningTemperature: null,
-  topP: 0.95,
-  topK: null,
-
-  thinkingMode: 'mandatory',
-  supportsThinking: true,
-  thinkingParam: 'enable_thinking',
-  thinkingBudget: 4096,
-  thinkingMandatory: true,
-
-  preserveReasoning: true, // MiniMax docs: strongly recommend preserving reasoning between turns
-  supportsAttachments: false,
-  supportsSearch: false,
-  modelSpecificPrompt: `Be concise. Output only the code changes needed. Do not add explanatory comments unless asked. Do not overthink simple tasks.`,
-}
-
-const QWEN3_6_PLUS: ModelProfile = {
-  id: 'qwen3.6-plus',
-  name: 'Qwen 3.6 Plus',
-  persona: { name: 'Hoji Ya Henda', tagline: 'O mais completo — vê imagens, lê projectos inteiros e executa com decisão. Custo: 2x' },
-  modelId: 'qwen3.6-plus',
-  // DashScope official: 1M context window (confirmed via help.aliyun.com model listing)
-  contextWindow: 1_000_000,
-  maxOutputTokens: 65_536,
-
-  // Qwen3 official (HuggingFace Qwen/Qwen3-235B-A22B):
-  //   Thinking: temp=0.6, top_p=0.95, top_k=20
-  //   Non-thinking: temp=0.7, top_p=0.8, top_k=20
-  temperature: 0.7,
-  reasoningTemperature: 0.6,
-  topP: 0.95,
-  topPNonThinking: 0.8,
-  topK: 20,
-
-  // Thinking is user-controlled via Settings toggle (not agent-controlled).
-  // Qwen3 has thinking ON by default per official docs.
-  thinkingMode: 'toggleable',
-  supportsThinking: true,
-  thinkingParam: 'enable_thinking',
-  thinkingBudget: null,
-  thinkingMandatory: false,
-
-  // Qwen3 official (HuggingFace): "In multi-turn conversations, store only
-  // the final output (not thinking content) in conversation history."
-  // This means reasoning_content should NOT be preserved between turns.
-  preserveReasoning: false,
-  supportsAttachments: true, // native multimodal (text + vision)
-  supportsSearch: true,  // DashScope Qwen native web_search
-  modelSpecificPrompt: `Be decisive and direct. Reach conclusions quickly — do not overthink simple tasks. Output only changed code, never repeat unchanged sections. Keep explanations under 2 sentences unless asked for detail.`,
-}
-
-const GEMINI_3_FLASH: ModelProfile = {
-  id: 'gemini-3-flash',
-  name: 'Gemini 3 Flash',
-  persona: { name: 'Simione Mucune', tagline: 'Contexto enorme, aceita tudo — texto, imagens, PDFs e vídeo. Custo: 5x' },
-  modelId: 'gemini-3-flash',
-  contextWindow: 1_048_576,
-  maxOutputTokens: 65_536,
-
-  // Google docs: "strongly recommend keeping temperature at default 1.0"
-  temperature: 1.0,
-  reasoningTemperature: 1.0,
-  topP: 0.95,
-  topK: null,
-  extraSamplingParams: { thinking_level: 'medium' },
-
-  thinkingMode: 'mandatory', // Gemini thinking_level is not binary toggle — always applies
-  supportsThinking: true,
-  thinkingParam: null, // Gemini uses thinking_level via extraSamplingParams, not enable_thinking
-  thinkingBudget: null,
-  thinkingMandatory: false,
-
-  preserveReasoning: true, // Google docs: "always pass all signatures back" for thought context
-  supportsAttachments: true, // native multimodal (text, image, audio, video, PDF)
-  supportsSearch: false,
-  modelSpecificPrompt: '',
-}
-
-// Qwen 3.6 Max Preview — DashScope's flagship reasoning model. Registered
-// here for completeness (admin UI, model labels, etc.); it is NOT the
-// frontend's source of truth for routing — the backend (toquemedia-studio-api/
-// src/proxy.ts) decides which upstream model serves a plan. Backend clamps
-// max_tokens to 65,536 per DashScope's documented cap regardless of what
-// the frontend's per-plan profile says.
-const QWEN3_6_MAX_PREVIEW: ModelProfile = {
-  id: 'qwen3.6-max-preview',
-  name: 'Qwen 3.6 Max Preview',
-  persona: { name: 'Hunter Alpha', tagline: 'Raciocínio profundo + 1M context. Aderência forte a instruções. Custo: 1x (explorer)' },
-  modelId: 'qwen3.6-max-preview',
-  contextWindow: 1_000_000,
-  maxOutputTokens: 65_536,
-
-  // Qwen3 official sampling (HuggingFace Qwen/Qwen3-235B-A22B):
-  //   Thinking: temp=0.6, top_p=0.95, top_k=20
-  //   Non-thinking: temp=0.7, top_p=0.8, top_k=20
-  temperature: 0.7,
-  reasoningTemperature: 0.6,
-  topP: 0.95,
-  topPNonThinking: 0.8,
-  topK: 20,
-
-  thinkingMode: 'toggleable',
-  supportsThinking: true,
-  thinkingParam: 'enable_thinking',
-  thinkingBudget: null,
-  thinkingMandatory: false,
-
-  // Qwen3 official: "store only the final output (not thinking content) in
-  // multi-turn history". Strip reasoning between turns.
-  preserveReasoning: false,
-  supportsAttachments: false, // text-only; multimodal lives in qwen3.6-plus
-  supportsSearch: true, // DashScope native web_search via enable_search
-  modelSpecificPrompt: '',
-}
-
-const STEP_3_5_FLASH: ModelProfile = {
-  id: 'step-3.5-flash',
-  name: 'Step 3.5 Flash',
-  persona: { name: 'Deolinda Rodrigues', tagline: 'Pensa sempre antes de responder — raciocínio nativo a custo mínimo. Custo: 1x' },
-  modelId: 'step-3.5-flash',
-  contextWindow: 262_144,
-  maxOutputTokens: 32_768,
-
-  temperature: 1.0,
-  reasoningTemperature: null,
-  topP: 0.95,
-  topK: null,
-
-  thinkingMode: 'mandatory', // Step 3.5 Flash has native reasoning — always active
-  supportsThinking: true,
-  thinkingParam: null, // reasoning is built-in, no toggle parameter
-  thinkingBudget: null,
-  thinkingMandatory: true,
-
-  preserveReasoning: false, // StepFun: no documentation on preserving reasoning between turns
-  supportsAttachments: false,
-  supportsSearch: false,
-  modelSpecificPrompt: '',
-}
-
 // ─────────────────────────────────────────────────
 // Registry
 // ─────────────────────────────────────────────────
 
+// Frontend profile registry — used ONLY for request-body shape (sampling +
+// thinking-param format). The actual upstream model is admin-managed in
+// Firestore subscription_plans/{planId}.ideModel; the proxy resolves at
+// request time and clamps anything tighter per upstream.
+//
+// Only V4-Flash and GLM-5.1 are kept here because those are the two shapes
+// `getProfileForPlan(plan)` returns. Other catalog entries (Kimi K2.6-direct,
+// MiniMax M2.7-direct, Step 3.5 Flash 2603) are admin escape hatches —
+// when the admin reroutes there, the proxy's per-model translators handle
+// whichever shape the frontend sends.
+//
+// Multimodal (images): handled server-side in `multimodal.ts` — Qwen 3.6 Plus
+// turns image_url blocks into text, then the result is forwarded to the plan
+// model. The frontend does NOT swap profiles for image messages.
 export const MODEL_PROFILES: Record<string, ModelProfile> = {
-  // 1x cost
-  'mimo-v2-flash': MIMO_V2_FLASH,
   'deepseek-v4-flash': DEEPSEEK_V4_FLASH,
-  'step-3.5-flash': STEP_3_5_FLASH,
-  // 2x cost
-  'qwen3-coder-next': QWEN3_CODER_NEXT,
-  'minimax-m2.5': MINIMAX_M2_5,
-  'qwen3.6-plus': QWEN3_6_PLUS,
-  'qwen3.6-max-preview': QWEN3_6_MAX_PREVIEW,
-  // 4x cost
-  'glm-5': GLM_5,
-  'glm-5.1': GLM_5_1,
-  'kimi-k2.5': KIMI_K2_5,
-  'deepseek-v4-pro': DEEPSEEK_V4_PRO,
-  // 5x cost
-  'gemini-3-flash': GEMINI_3_FLASH,
+  'glm-5.1':           GLM_5_1,
 }
 
 export const DEFAULT_MODEL_ID = 'deepseek-v4-flash'
 
-// Dead code — kept for potential reactivation
-export const FREE_MODEL_ID = 'mimo-v2-flash'
 export function getModelProfile(modelId: string): ModelProfile {
   return MODEL_PROFILES[modelId] || MODEL_PROFILES[DEFAULT_MODEL_ID]
 }
@@ -493,49 +201,23 @@ export function getAllModelProfiles(): ModelProfile[] {
   return Object.values(MODEL_PROFILES)
 }
 
-// ─────────────────────────────────────────────────
-// Plan-based profile lookup (replaces model selector)
-// The model is decided by the backend based on the user's plan.
-// The frontend uses this to configure thinking/sampling/compression.
-//
-//   explorer (free)     → DeepSeek V3.2 (no thinking, 131K context)
-//   pro / business-*x   → GLM-5.1 (toggleable thinking, 200K context)
-//   multimodal (images) → Qwen 3.6 Plus handles image analysis, then GLM-5.1
-// ─────────────────────────────────────────────────
-
 /**
- * Returns the model profile for the user's billing plan.
- * Used by the frontend to configure thinking params, sampling, and
- * compression thresholds — NOT to select a model (the backend does that).
+ * Returns the sampling profile for the user's billing plan. Used by the
+ * frontend to shape the request body (thinking params, sampling, compression
+ * thresholds) — NOT to select a model. The actual model is admin-controlled
+ * via Firestore subscription_plans/{planId}.ideModel; the proxy resolves at
+ * request time.
  *
- * Routing logic:
- * - explorer (free) → DeepSeek V3.2 (no thinking, 131K context)
- * - pro / business-*x → GLM-5.1 (thinking toggle, 200K context, strong reasoning)
- * - multimodal (images) → Qwen 3.6 Plus handles image analysis, then GLM-5.1 processes the result
+ *   explorer / vibe → V4-Flash shape (sends `enable_thinking`)
+ *   pro / max       → GLM-5.1 shape (sends `reasoning: { enabled }`)
+ *
+ * If admin reroutes a plan to a different catalog entry (e.g. kimi-k2.6-direct
+ * or step-3.5-flash-2603), the proxy's per-model translators/scrubbers
+ * normalize whichever shape we send.
  */
 export function getProfileForPlan(plan: UserPlanName): ModelProfile {
-  if (plan === 'explorer') return DEEPSEEK_V4_FLASH
-  // All paid plans use GLM-5.1 as the primary model.
-  // Qwen 3.6 Plus is reserved for multimodal (image) processing.
+  if (plan === 'explorer' || plan === 'vibe') return DEEPSEEK_V4_FLASH
   return GLM_5_1
-}
-
-/**
- * Returns the multimodal model profile for image/file processing.
- * Qwen 3.6 Plus handles image analysis, then passes the description
- * + user prompt to the primary model (GLM-5.1).
- */
-export function getMultimodalProfile(): ModelProfile {
-  return QWEN3_6_PLUS
-}
-
-/**
- * Detects if a message contains multimodal content (images, files, etc.).
- * Returns true if the message has non-text content parts.
- */
-export function hasMultimodalContent(message: string | Array<{ type: string }>): boolean {
-  if (typeof message === 'string') return false
-  return message.some(part => part.type !== 'text')
 }
 
 /**

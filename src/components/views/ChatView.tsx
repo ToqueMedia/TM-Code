@@ -9,6 +9,8 @@ import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, isInOverageState, extraConsumptionPct, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
+import { useAgentStore } from '../../stores/agentStore'
+import { getProfileForPlan } from '../../services/agent/modelProfiles'
 import MessageBubble from '../chat/MessageBubble'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
@@ -40,7 +42,19 @@ function ChatView() {
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
   const setThinkingEnabled = useSettingsStore(s => s.setThinkingEnabled)
-  const thinkingSupported = billingPlan !== 'explorer'
+  // Thinking support is a property of the model the backend will route to,
+  // not the user's plan. Both production coders (V4-Flash + GLM-5.1) have
+  // toggleable thinking, so the toggle shows on every plan including free.
+  // The handshake header X-Model-Thinking-Mode (stored in agentStore) is
+  // authoritative once the first response arrives; before then we fall back
+  // to the per-plan profile shape.
+  const backendThinkingMode = useAgentStore(s => s.thinkingMode)
+  const fallbackProfile = getProfileForPlan(billingPlan)
+  const effectiveMode = backendThinkingMode
+    ?? (fallbackProfile.supportsThinking
+        ? (fallbackProfile.thinkingMode === 'mandatory' ? 'mandatory' : 'toggleable')
+        : 'none')
+  const thinkingSupported = effectiveMode === 'toggleable'
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
   const streamingVersion = useChatStore(s => s.streamingVersion)
@@ -384,10 +398,10 @@ function ChatView() {
 // ─── Credit Indicator ────────────────────────────────────────────────────────
 
 const PLAN_DISPLAY: Record<UserPlanName, { label: string; color: string }> = {
-  explorer:       { label: 'Free',        color: tokens.colors.text.muted },
-  pro:            { label: 'Pro',         color: tokens.colors.accent.purple },
-  'business-4x':  { label: 'Business 4x', color: tokens.colors.accent.orange },
-  'business-8x':  { label: 'Business 8x', color: tokens.colors.accent.primary },
+  explorer: { label: 'Free',  color: tokens.colors.text.muted },
+  vibe:     { label: 'Vibe',  color: tokens.colors.accent.green },
+  pro:      { label: 'Pro',   color: tokens.colors.accent.purple },
+  max:      { label: 'Max',   color: tokens.colors.accent.primary },
 }
 
 function CreditIndicator(props: {

@@ -7,10 +7,10 @@ import { isInOverageState, extraConsumptionPct, type UserPlanName, type CostBudg
 import { t } from '../../i18n'
 
 export const PLAN_DISPLAY: Record<UserPlanName, { label: string; color: string }> = {
-  explorer:       { label: 'Free',        color: tokens.colors.text.muted },
-  pro:            { label: 'Pro',         color: tokens.colors.accent.purple },
-  'business-4x':  { label: 'Business 4x', color: tokens.colors.accent.orange },
-  'business-8x':  { label: 'Business 8x', color: tokens.colors.accent.primary },
+  explorer:  { label: 'Free',  color: tokens.colors.text.muted },
+  vibe:      { label: 'Vibe',  color: tokens.colors.accent.green },
+  pro:       { label: 'Pro',   color: tokens.colors.accent.purple },
+  max:       { label: 'Max',   color: tokens.colors.accent.primary },
 }
 
 interface CreditIndicatorProps {
