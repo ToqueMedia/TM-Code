@@ -43,6 +43,16 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPas
     <Box px={4} pt={3} pb={1}>
       <Box
         position="relative"
+        // CRITICAL: clipping must live on the parent (not the overlay) so the
+        // transformed overlay can't leak above/below the textarea's visible
+        // bounds when the user scrolls inside the textarea. Earlier the
+        // overlay had its own overflow:hidden, which clipped the overlay's
+        // CONTENT to its first H pixels — so a scrolled textarea would show
+        // the right glyphs but the highlight overlay was stuck on the first
+        // page (and the transformed-up portion leaked above the box). Moving
+        // the clip here makes the parent the viewport, the overlay can render
+        // the full highlighted content, and translateY scrolls correctly.
+        overflow="hidden"
         // The textarea has WebkitTextFillColor: transparent so the highlight
         // overlay below can show through the glyphs. That property cascades
         // into ::placeholder, hiding the empty-state hint — restore visible
@@ -63,16 +73,16 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPas
           },
         }}
       >
-        {/* Overlay — renders the highlighted version of the value. Sits BEHIND
-            the textarea visually (z-index 0) but above the page background.
-            The textarea on top renders its text transparent so only the
-            colored spans below show through. caret-color keeps the cursor
-            visible; selection still works because the textarea owns input. */}
+        {/* Overlay — renders the FULL highlighted value (no own clipping; the
+            parent box clips). Sits BEHIND the textarea visually (z-index 0)
+            but above the page background. The textarea on top renders its
+            text transparent so only the colored spans below show through.
+            caret-color keeps the cursor visible; selection still works
+            because the textarea owns input. */}
         <Box
           aria-hidden
           position="absolute"
           inset={0}
-          overflow="hidden"
           pointerEvents="none"
           color={tokens.colors.text.primary}
           opacity={disabled ? 0.5 : 1}

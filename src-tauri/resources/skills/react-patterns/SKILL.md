@@ -36,3 +36,22 @@ You are working in a React project. Follow these conventions:
 - Type props with interfaces, not `type` aliases (interfaces are extendable).
 - Use `React.FC` sparingly — prefer explicit return types.
 - Generic components use `<T>` syntax: `function List<T>(props: ListProps<T>)`.
+
+## Routing — `/` MUST resolve to a real page
+
+The dev server opens at `/` by default. A `<Routes>` block that only registers specific paths (`/login`, `/dashboard`) renders a **blank page** at `/` because no route matches. The IDE preview iframe shows that blank page and the developer thinks the app is broken.
+
+Always include BOTH:
+- a `/` route — either renders the entry component directly OR `<Navigate>`s to it
+- a `*` wildcard fallback — typos and back-button mistakes land on a known page, not blank
+
+```tsx
+<Routes>
+  <Route path="/" element={<Navigate to="/login" replace />} />   {/* entry */}
+  <Route path="/login" element={<Login />} />
+  {/* ...other routes... */}
+  <Route path="*" element={<Navigate to="/login" replace />} />   {/* fallback */}
+</Routes>
+```
+
+Same principle for Next.js (`app/page.tsx` IS `/`), Nuxt (`pages/index.vue`), SvelteKit (`+page.svelte` at routes root) — the root path must render something. Verify on first load: address bar shows your entry route and a form/UI renders, NOT a blank page.

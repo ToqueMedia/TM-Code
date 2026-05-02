@@ -5,7 +5,8 @@
  *
  * Memoized to isolate timer ticks from causing full-view re-renders.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { memo, useCallback, useMemo, useSyncExternalStore } from 'react'
+import { useAgentElapsed } from '../../hooks/useAgentElapsed'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiCheck, FiLoader, FiSquare } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
@@ -35,18 +36,8 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   const queueLength = queuedCommands.length
   const preflight = usePreflightStatus()
 
-  const [elapsed, setElapsed] = useState(0)
-  const startRef = useRef(0)
-
-  // Timer tick during streaming — isolated from parent re-renders
-  useEffect(() => {
-    if (isStreaming) {
-      startRef.current = Date.now()
-      setElapsed(0)
-      const id = setInterval(() => setElapsed(Date.now() - startRef.current), 1000)
-      return () => clearInterval(id)
-    }
-  }, [isStreaming])
+  // Session-mode elapsed: total wall time per request, freezes during permission waits.
+  const { elapsedMs: elapsed } = useAgentElapsed('session')
 
   const handleStop = useCallback(async () => {
     await stopAgent()
@@ -54,17 +45,22 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
 
   const cfg = useMemo(() => {
     switch (status) {
-      case 'thinking':    return { color: tokens.colors.toolCall.runningText, label: 'thinking', pulse: true }
-      case 'generating':  return { color: tokens.colors.accent.primary,       label: 'writing', pulse: true }
-      case 'applying':    return { color: tokens.colors.accent.green,         label: 'applying', pulse: true }
-      case 'compressing': return { color: tokens.colors.accent.orange,        label: 'compressing', pulse: true }
-      case 'error':       return { color: tokens.colors.accent.red,           label: error || 'error', pulse: false }
-      default:            return { color: tokens.colors.text.disabled,        label: 'ready', pulse: false }
+      case 'awaiting_response': return { color: tokens.colors.toolCall.runningText, label: 'awaiting', pulse: true }
+      case 'reasoning':         return { color: tokens.colors.accent.purple,        label: 'reasoning', pulse: true }
+      case 'generating':        return { color: tokens.colors.accent.primary,       label: 'writing', pulse: true }
+      case 'applying':          return { color: tokens.colors.accent.green,         label: 'applying', pulse: true }
+      case 'compressing':       return { color: tokens.colors.accent.orange,        label: 'compressing', pulse: true }
+      case 'error':             return { color: tokens.colors.accent.red,           label: error || 'error', pulse: false }
+      default:                  return { color: tokens.colors.text.disabled,        label: 'ready', pulse: false }
     }
   }, [status, error])
 
-  const totalTok = totalTokensUsed.input + totalTokensUsed.output
-  const isSending = status === 'thinking' || status === 'compressing'
+  // Up = context size on the wire (input is replaced with max across turns).
+  // Down = output emitted by model (sums across turns). Two distinct quantities;
+  // do not add them — see chatStore.addTokenUsage for the why.
+  const inputTok = totalTokensUsed.input
+  const outputTok = totalTokensUsed.output
+  const isSending = status === 'awaiting_response' || status === 'compressing'
 
   // Toolkit preflight — small "tk 3/3" indicator. Tooltip lists missing pieces.
   const toolkit = useMemo(() => {
@@ -209,12 +205,22 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
           {isStreaming && (
             <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} whiteSpace="nowrap">
               {formatElapsed(elapsed)}
-              {totalTok > 0 && (
+              {inputTok > 0 && (
                 <>
-                  {' · '}{formatTokens(totalTok)}{' '}
-                  <Text as="span" color={isSending ? tokens.colors.accent.orange : tokens.colors.accent.green}>
-                    {isSending ? '↑' : '↓'}
+                  {' · '}
+                  <Text as="span" color={isSending ? tokens.colors.accent.orange : tokens.colors.text.disabled}>
+                    {'↑'}
                   </Text>
+                  {' '}{formatTokens(inputTok)}
+                </>
+              )}
+              {outputTok > 0 && (
+                <>
+                  {' · '}
+                  <Text as="span" color={!isSending ? tokens.colors.accent.green : tokens.colors.text.disabled}>
+                    {'↓'}
+                  </Text>
+                  {' '}{formatTokens(outputTok)}
                 </>
               )}
             </Text>

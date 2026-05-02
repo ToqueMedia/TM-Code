@@ -340,19 +340,37 @@ function App() {
 	useEffect(() => {
 		if (!currentProject) {
 			prevProjectRef.current = null;
+			// No project active — wipe any chat state left over from the previous one.
+			useChatStore.getState().clearAllSessions();
 			return;
 		}
 
 		const projectPath = currentProject.path;
 		if (projectPath === prevProjectRef.current) return;
 
-		// Save previous project's session before switching (sync-safe: app is still running)
 		const prevPath = prevProjectRef.current;
+		prevProjectRef.current = projectPath;
+
+		// Sessions are project-scoped: a session belongs only to the project that
+		// created it. Without an explicit synchronous wipe, the chatStore's
+		// in-memory `sessions` Map and `activeSessionId` carry over from the
+		// previous project, and the UI flashes the previous project's chat
+		// until restoreLastSession resolves async. Order matters here:
+		//
+		//   1. Kick off cleanupOnExit for the previous project. It captures the
+		//      session ref synchronously (before its first `await`), then writes
+		//      to disk in the background — the wipe in step 2 cannot affect it.
+		//   2. Synchronously clear in-memory chat state. UI immediately drops
+		//      the previous project's messages.
+		//   3. Async-load the new project's session (or create one if there's
+		//      no last session for this project).
 		if (prevPath) {
-			useChatStore.getState().cleanupOnExit(prevPath);
+			useChatStore.getState().cleanupOnExit(prevPath).catch(err => {
+				logger.warn('app', 'cleanupOnExit failed for previous project:', err);
+			});
 		}
 
-		prevProjectRef.current = projectPath;
+		useChatStore.getState().clearAllSessions();
 
 		const chatStore = useChatStore.getState();
 		chatStore.restoreLastSession(projectPath).then(restored => {

@@ -122,7 +122,9 @@ async function runAgentInternal(
 
   // Start assistant message
   chatStore.startAssistantMessage()
-  agentStore.setStatus('thinking')
+  // 'awaiting_response': prompt is about to be sent; nothing has streamed yet.
+  // Flips to 'reasoning' or 'generating' once the first delta lands.
+  agentStore.setStatus('awaiting_response')
 
   // Refresh MCP tools before building prompt (handles mid-session server changes)
   const mcpService = MCPService.getInstance()
@@ -220,7 +222,7 @@ async function runAgentInternal(
       },
       onReasoningDelta: (delta) => {
         if (agentService.isAborted()) return
-        agentStore.setStatus('thinking')
+        agentStore.setStatus('reasoning')
         appendReasoningDeltaBuffered(delta)
       },
       onReasoningComplete: () => {
@@ -246,7 +248,8 @@ async function runAgentInternal(
       onToolResult: (toolId, _toolName, result, isError) => {
         if (agentService.isAborted()) return
         useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
-        agentStore.setStatus('thinking')
+        // Tool finished — we are now waiting for the model's next response.
+        agentStore.setStatus('awaiting_response')
       },
       onTurnComplete: () => {
         useChatStore.getState().incrementTurnCount()

@@ -1424,9 +1424,21 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       devServerNote = `\n\nNote: A dev server is currently running at ${devServerManager.getUrl() || 'unknown URL'}. Do not start another one.`
     }
 
-    if (fileContents.length === 0 && !devServerNote) return
+    // Re-inject any skills the agent has invoked this session. Mirrors
+    // claude-vaz's `createSkillAttachmentIfNeeded` — the original tool result
+    // (with verbatim CRITICAL: blocks) was summarized into a bullet point by
+    // compressContext; without re-injection, the model falls back to its
+    // training prior and ignores the skill rules. Module-level state in
+    // skillService survives compression and supplies the full text here.
+    const { buildPostCompactionSkillsBlock } = await import('./skillService')
+    const skillsBlock = buildPostCompactionSkillsBlock()
+
+    if (fileContents.length === 0 && !devServerNote && !skillsBlock) return
 
     const parts = []
+    if (skillsBlock) {
+      parts.push(skillsBlock)
+    }
     if (fileContents.length > 0) {
       parts.push(`[Context recovery — current content of recently accessed files]\n\n${fileContents.join('\n\n')}`)
     }

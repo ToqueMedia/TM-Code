@@ -27,8 +27,9 @@ describe('modelProfiles', () => {
       expect(ids).toContain('qwen3-coder-next')
       expect(ids).toContain('minimax-m2.5')
       expect(ids).toContain('qwen3.6-plus')
+      expect(ids).toContain('qwen3.6-max-preview')
       expect(ids).toContain('gemini-3-flash')
-      expect(ids.length).toBe(11)
+      expect(ids.length).toBe(12)
     })
 
     it('mimo-v2-flash has correct specs', () => {
@@ -74,7 +75,7 @@ describe('modelProfiles', () => {
   describe('getAllModelProfiles', () => {
     it('returns all profiles', () => {
       const all = getAllModelProfiles()
-      expect(all.length).toBe(11)
+      expect(all.length).toBe(12)
     })
   })
 

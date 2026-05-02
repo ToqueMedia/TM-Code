@@ -449,32 +449,47 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           </Flex>
         )}
 
-        {/* Reasoning block — visible during streaming so the developer can
-            watch the model's thinking roll out movie-credits style. The block
-            handles its own auto-collapse once playback catches up. While the
-            reasoning is still rolling (durationMs not yet set), text and tool
-            calls are intentionally hidden — the user asked for one channel at
-            a time: reasoning first, then everything else. */}
-        {message.reasoningContent && (
-          <ReasoningBlock
-            content={message.reasoningContent}
-            isVisible={message.isReasoningVisible || false}
-            isStreaming={isStreaming === true && message.reasoningDurationMs == null}
-            durationMs={message.reasoningDurationMs}
-            onToggle={() => toggleReasoning(message.id)}
-          />
-        )}
+        {/* Legacy reasoning fallback — older persisted messages have a flat
+            `reasoningContent` string but no reasoning entry inside contentBlocks.
+            Render those at the top exactly as before. New messages put each
+            reasoning chunk into contentBlocks (rendered inline below) so a
+            second reasoning pass after tool calls appears AT its real position
+            in the stream rather than being collapsed back into this top block. */}
+        {message.reasoningContent
+          && !message.contentBlocks?.some(b => b.type === 'reasoning')
+          && (
+            <ReasoningBlock
+              content={message.reasoningContent}
+              isVisible={message.isReasoningVisible || false}
+              isStreaming={isStreaming === true && message.reasoningDurationMs == null}
+              durationMs={message.reasoningDurationMs}
+              onToggle={() => toggleReasoning(message.id)}
+            />
+          )}
 
-        {/* Gate everything below the reasoning block until the reasoning has
-            finished. Signal: `reasoningDurationMs` flips from undefined to a
-            number when finalizeAssistantMessage runs OR the first tool_call
-            arrives (chatStore: appendReasoningDelta + addPendingToolCall). */}
-        {(!message.reasoningContent || message.reasoningDurationMs != null) && (<>
-
-        {/* Interleaved content blocks (text + tool calls in order) */}
+        {/* Interleaved content blocks — reasoning, text, tool calls in order */}
         {message.contentBlocks && message.contentBlocks.length > 0 ? (
           <>
             {message.contentBlocks.map((block, idx) => {
+              if (block.type === 'reasoning') {
+                // Streaming flag: only the LAST reasoning block in the message
+                // can still be live. A finalized block (durationMs set) renders
+                // collapsed; the active one streams as movie credits.
+                const isLastBlock = idx === (message.contentBlocks?.length ?? 0) - 1
+                const blockIsStreaming = isStreaming === true
+                  && isLastBlock
+                  && block.durationMs === undefined
+                return (
+                  <ReasoningBlock
+                    key={`reasoning-${idx}`}
+                    content={block.text}
+                    isVisible={message.isReasoningVisible || false}
+                    isStreaming={blockIsStreaming}
+                    durationMs={block.durationMs}
+                    onToggle={() => toggleReasoning(message.id)}
+                  />
+                )
+              }
               if (block.type === 'text' && block.text) {
                 return (
                   <Box key={`text-${idx}`} css={markdownStyles}>
@@ -524,8 +539,6 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             onCopy={handleCopy}
           />
         ))}
-
-        </>)}
 
         {/* Copy this message + Download whole session — shown after the agent
             finishes the task. The download button serializes the active

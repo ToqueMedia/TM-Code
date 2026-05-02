@@ -46,6 +46,72 @@ const CACHE_TTL_MS = 30_000 // 30 seconds
 // enough that no realistic project hits it — but kept as a safety rail.
 const MAX_SKILL_INDEX_CHARS = 6000
 
+// === Invoked-skills state (post-compaction recovery) ===
+//
+// Mirrors claude-vaz's `STATE.invokedSkills`: when the agent calls read_skill,
+// we cache the skill's full content in a module-level Map. After context
+// compression collapses the conversation history (and the original tool-result
+// containing the verbatim skill text), this state lets us re-inject the full
+// CRITICAL blocks into the next API call so the model doesn't fall back to its
+// training prior (e.g. "use GoogleAuthProvider" when the skill explicitly
+// forbids it).
+//
+// Lifecycle: cleared at session/project boundary (chatStore.clearAllSessions);
+// SURVIVES compression deliberately. Per-skill truncated to ~5K tokens (~20K
+// chars) so the post-compact attachment stays bounded.
+export interface InvokedSkill {
+  name: string
+  content: string
+  invokedAt: number
+}
+const invokedSkills = new Map<string, InvokedSkill>()
+const INVOKED_SKILL_MAX_CHARS = 20_000   // ~5K tokens per skill
+const INVOKED_SKILLS_TOTAL_BUDGET = 100_000 // ~25K tokens across all skills
+
+export function trackInvokedSkill(name: string, content: string): void {
+  const trimmed = content.length > INVOKED_SKILL_MAX_CHARS
+    ? content.slice(0, INVOKED_SKILL_MAX_CHARS) + '\n\n[... skill truncated for post-compaction recovery]'
+    : content
+  invokedSkills.set(name, { name, content: trimmed, invokedAt: Date.now() })
+}
+
+export function getInvokedSkills(): InvokedSkill[] {
+  // Most-recently invoked first so truncation in caller drops the oldest.
+  return Array.from(invokedSkills.values()).sort((a, b) => b.invokedAt - a.invokedAt)
+}
+
+export function clearInvokedSkills(): void {
+  invokedSkills.clear()
+}
+
+/**
+ * Build the post-compaction recovery payload — concatenated skill bodies with
+ * a clear instruction wrapper. Bound by INVOKED_SKILLS_TOTAL_BUDGET; truncates
+ * the LEAST recently invoked skills first if over budget. Returns null when no
+ * skills have been invoked this session (no recovery needed).
+ */
+export function buildPostCompactionSkillsBlock(): string | null {
+  const skills = getInvokedSkills()
+  if (skills.length === 0) return null
+
+  let total = 0
+  const sections: string[] = []
+  for (const skill of skills) {
+    const section = `## Skill: ${skill.name}\n\n${skill.content}`
+    if (total + section.length > INVOKED_SKILLS_TOTAL_BUDGET) break
+    sections.push(section)
+    total += section.length
+  }
+
+  return [
+    '<post_compaction_skills>',
+    'The conversation was compacted; verbatim skill content from earlier turns may have been summarized. The full text of the skills you previously read is restored below — TREAT IT AS AUTHORITATIVE for any decision in its domain. The CRITICAL blocks at the top of each skill apply to all code you write going forward.',
+    '',
+    sections.join('\n\n---\n\n'),
+    '</post_compaction_skills>',
+  ].join('\n')
+}
+
 // Bundled skill categories — drive mode-aware loading in isBundledSkillRelevant.
 const CODE_PATTERN_SKILLS = new Set([
   'react-patterns', 'vue-patterns', 'angular-patterns', 'svelte-patterns',

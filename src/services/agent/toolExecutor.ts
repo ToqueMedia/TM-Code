@@ -189,6 +189,7 @@ class ToolExecutor {
         }
         // Not blocked but dangerous → always ask (forcePrompt bypasses Accept All)
         const decision = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command')
+        this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
           const reason = decision.denyReason
             ? ` User says: ${decision.denyReason}`
@@ -211,6 +212,7 @@ class ToolExecutor {
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
       const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false)
+      this.recordPermission(toolCallId, decision)
       if (!decision.approved) {
         const target = (input.path || input.command || input.name || '') as string
         const reason = decision.denyReason
@@ -619,6 +621,24 @@ class ToolExecutor {
     // Block all .env files EXCEPT exactly ".env.example"
     if (!filename.startsWith('.env')) return false
     return filename !== '.env.example'
+  }
+
+  /**
+   * Persist the permission decision onto the tool call so it surfaces in the
+   * session export. Without this, forensic review can't tell whether a
+   * destructive command (e.g. `kill -9`) was approved by the user or slipped
+   * through unchecked — both look identical in the post-hoc markdown.
+   *
+   * Silent for safe tools (`source: 'safe_tool'`) — no decision was made,
+   * recording it would just clutter every read_file with a permission stamp.
+   */
+  private recordPermission(toolCallId: string | undefined, decision: { approved: boolean; prompted: boolean; source: string; promptKind?: 'sensitive_file' | 'dangerous_command' | null; denyReason?: string }): void {
+    if (!toolCallId) return
+    if (decision.source === 'safe_tool') return
+    // Dynamic import keeps toolExecutor free of a hard chatStore dep at module load.
+    import('../../stores/chatStore').then(m => {
+      m.useChatStore.getState().recordToolPermission(toolCallId, decision as NonNullable<import('../../types/chat').ToolCallDisplay['permission']>)
+    }).catch(() => { /* non-critical — don't block the tool flow */ })
   }
 
   private isSensitiveFile(filePath: string): boolean {
@@ -1766,13 +1786,17 @@ class ToolExecutor {
       execute: async (input) => {
         const name = (input.name as string)?.trim()
         if (!name) return 'Error: read_skill requires a non-empty "name" argument.'
-        const SkillSvc = (await import('./skillService')).default
-        const svc = SkillSvc.getInstance()
+        const skillModule = await import('./skillService')
+        const svc = skillModule.default.getInstance()
         const skill = svc.getCachedSkillContent(name)
         if (!skill) {
           const available = svc.getCachedSkillNames()
           return `Error: skill "${name}" is not loaded for the current context. Available skills: ${available.join(', ') || '(none — check the "Skills available" section of the system prompt)'}.`
         }
+        // Cache the skill body in module-level state so it survives context
+        // compression. After compression strips the original tool result, we
+        // re-inject this content so the verbatim CRITICAL blocks aren't lost.
+        skillModule.trackInvokedSkill(skill.name, skill.content)
         return svc.formatSkillForReading(skill)
       }
     })
@@ -1818,12 +1842,13 @@ class ToolExecutor {
     this.tools.set('read_dev_server_logs', {
       definition: {
         name: 'read_dev_server_logs',
-        description: 'Read recent output from the dev server AND browser runtime errors from the live preview. Includes: build errors, type errors, HMR failures (from dev server stdout/stderr), plus uncaught exceptions, unhandled promise rejections, and console.error from the preview browser (prefixed [runtime]). Use after file changes, after start_dev_server, or when asked about preview/console/browser errors.',
+        description: 'Read output from the dev server AND browser runtime errors from the live preview. Includes: build errors, type errors, HMR failures (from dev server stdout/stderr), plus uncaught exceptions, unhandled promise rejections, and console.error from the preview browser (prefixed [runtime]). Use after file changes, after start_dev_server, or when asked about preview/console/browser errors. The buffer is CUMULATIVE — old errors are not cleared when the dev server reloads after a fix. Each entry comes with its timestamp; the response footer includes a cursor (`next_since: <ms>`). Pass that cursor as `since_timestamp` on the next call to get only entries that arrived AFTER your last read — this is how you tell whether your fix actually resolved the previous error vs. seeing the same stale entry. Without `since_timestamp`, you get the tail of the full buffer (default 50 lines).',
         input_schema: {
           type: 'object',
           properties: {
-            lines: { type: 'number', description: 'Number of log lines to return. Default: 50. Max: 200.' },
-            level: { type: 'string', enum: ['all', 'error', 'warn'], description: 'Filter by log level. "error" shows only errors. "warn" shows errors and warnings. "all" shows everything. Default: all.' }
+            lines: { type: 'number', description: 'Number of log lines to return when reading the tail. Default: 50. Max: 200. Ignored when since_timestamp is set.' },
+            level: { type: 'string', enum: ['all', 'error', 'warn'], description: 'Filter by log level. "error" shows only errors. "warn" shows errors and warnings. "all" shows everything. Default: all.' },
+            since_timestamp: { type: 'number', description: 'Unix epoch milliseconds — return only entries with timestamp > this value. Use the next_since cursor from the previous read to get just-arrived entries (the right way to verify a fix landed). Omit on first read.' }
           },
           required: []
         },
@@ -1901,31 +1926,51 @@ class ToolExecutor {
           return 'Dev server is running but has produced no output yet.'
         }
 
+        // The buffer is cumulative — old errors persist after fixes.
+        // since_timestamp lets the agent fetch only entries that arrived
+        // after its last read, which is the only reliable way to tell
+        // whether a fix actually resolved the previous error.
+        const sinceTimestamp = (input.since_timestamp as number) || 0
         const maxLines = Math.min((input.lines as number) || 50, 200)
         const levelFilter = (input.level as string) || 'all'
 
         let filtered = logs
+        if (sinceTimestamp > 0) {
+          filtered = filtered.filter(l => l.timestamp > sinceTimestamp)
+        }
         if (levelFilter === 'error') {
-          filtered = logs.filter(l => l.level === 'error')
+          filtered = filtered.filter(l => l.level === 'error')
         } else if (levelFilter === 'warn') {
-          filtered = logs.filter(l => l.level === 'warn' || l.level === 'error')
+          filtered = filtered.filter(l => l.level === 'warn' || l.level === 'error')
         }
 
-        const recent = filtered.slice(-maxLines)
+        // Tail-slice only when no cursor was provided. With since_timestamp
+        // the agent wants the full delta, not the tail of it.
+        const recent = sinceTimestamp > 0 ? filtered : filtered.slice(-maxLines)
+
+        // Cursor for the next call — always the last entry's timestamp in
+        // the FULL (unfiltered) buffer, not the filtered slice. Otherwise
+        // a level=error read would skip past info entries and the next
+        // since_timestamp call would re-surface them as "new".
+        const nextSince = logs[logs.length - 1].timestamp
 
         if (recent.length === 0) {
-          return `No ${levelFilter === 'all' ? '' : levelFilter + '-level '}logs found. Dev server appears healthy.`
+          const sinceLabel = sinceTimestamp > 0 ? ' since last read' : ''
+          return `No ${levelFilter === 'all' ? 'new ' : levelFilter + '-level '}logs${sinceLabel}. Dev server appears healthy.\nnext_since: ${nextSince}`
         }
 
         const formatted = recent.map(l => {
           const prefix = l.level === 'error' ? 'ERROR' : l.level === 'warn' ? 'WARN' : 'INFO'
-          return `[${prefix}] ${l.text}`
+          return `[${prefix}] [${l.timestamp}] ${l.text}`
         }).join('\n')
 
         const errorCount = recent.filter(l => l.level === 'error').length
         const warnCount = recent.filter(l => l.level === 'warn').length
+        const header = sinceTimestamp > 0
+          ? `Dev server logs since ${sinceTimestamp} (${recent.length} new entries, ${errorCount} errors, ${warnCount} warnings):`
+          : `Dev server logs (${recent.length} lines, ${errorCount} errors, ${warnCount} warnings):`
 
-        return `Dev server logs (${recent.length} lines, ${errorCount} errors, ${warnCount} warnings):\n${formatted}`
+        return `${header}\n${formatted}\nnext_since: ${nextSince}`
       }
     })
 
@@ -2248,7 +2293,12 @@ Project root: ${projectRoot}`
       },
       execute: async (input) => {
         const { useAgentStore } = await import('../../stores/agentStore')
-        const tasks = (input.tasks as Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>) || []
+        // Defensive: streaming JSON parse can deliver a truthy non-array (e.g.
+        // partial object) before the call settles. Coerce to array.
+        const raw = input.tasks
+        const tasks = Array.isArray(raw)
+          ? (raw as Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>)
+          : []
         useAgentStore.getState().setTasks(tasks)
         const completed = tasks.filter(t => t.status === 'completed').length
         return `Task list updated: ${completed}/${tasks.length} completed.`
@@ -2409,6 +2459,8 @@ Project root: ${projectRoot}`
         lines.push('  2. Implement the backend auth proxy in your chosen stack: signup, signin, google, refresh, sync. Use VITE_FIREBASE_API_KEY (or the equivalent server-side env var GIP_FIREBASE_API_KEY) to call Identity Toolkit. Verify Firebase JWTs with the Google JWKS (no Firebase Admin SDK needed).')
         lines.push('  3. Implement the frontend: firebase init (auth.tenantId from VITE_GIP_TENANT_ID), Login/Signup/AuthGuard, an auth store with signup/login/logout/setUser. Only onAuthStateChanged is allowed from firebase/auth.')
         lines.push('  4. If Google sign-in is requested: read_skill("google-signin") for the GIS button integration.')
+        lines.push('')
+        lines.push('Layout note: .env is at the project root. If the frontend lives in a subdirectory (e.g. client/), set envDir in vite.config.ts (envDir: path.resolve(__dirname, "..")) — otherwise import.meta.env.VITE_* will be undefined and the GIS button / firebase init will silently fail.')
         lines.push('')
         lines.push('CREDENTIALS COMPLETE — do NOT call request_credentials for anything Firebase/GIP/GCP-related. The auth-proxy authenticates against Identity Toolkit REST using the PUBLIC VITE_FIREBASE_API_KEY (now in .env), not a service account. There is NO Firebase Admin SDK in this stack and the user does not have GOOGLE_APPLICATION_CREDENTIALS / serviceAccountKey.json / GIP_SERVICE_ACCOUNT_* — those live only on the TM Code platform worker.')
 

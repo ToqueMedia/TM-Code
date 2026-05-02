@@ -13,11 +13,23 @@ export interface Attachment {
   base64?: string
 }
 
-/** Ordered content block — tracks interleaving of text and tool calls
- *  in assistant messages. Used by the chat bubble for inline rendering. */
+/** Ordered content block — tracks interleaving of reasoning, text and tool
+ *  calls in assistant messages. Used by the chat bubble for inline rendering.
+ *  Reasoning is its own block type (not the message-level reasoningContent
+ *  field) so multiple thinking passes within one assistant message render in
+ *  the correct positions: e.g. `[reasoning, tool_call, tool_call, reasoning]`
+ *  rather than collapsing every thinking pass into a single block at the top. */
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; toolCallId: string }
+  | {
+      type: 'reasoning'
+      text: string
+      /** Set when the reasoning block ends (subsequent tool/text/reasoning arrives). */
+      durationMs?: number
+      /** Internal: epoch ms when the block was first created. Used to derive durationMs. */
+      startedAt?: number
+    }
 
 /** Ordered prompt block — tracks the interleaving of user text and
  *  attachments in a SINGLE user message (or coalesced batch). The
@@ -86,6 +98,18 @@ export interface ToolCallDisplay {
    *  When set, the UI renders this tool call with a nested indent + marker so the
    *  user sees the full sub-agent activity, not just a progress string. */
   spawnedBy?: string
+  /** Permission decision recorded when the tool ran. Lets the session export
+   *  distinguish auto-approved tools, user-approved tools, and denied tools.
+   *  Without this, forensic review mistakes user-approved destructive commands
+   *  for skill violations (the export only shows the final tool result, not
+   *  the dialog the user actually saw). */
+  permission?: {
+    approved: boolean
+    prompted: boolean
+    source: 'safe_tool' | 'has_own_approval' | 'approved_scope' | 'user'
+    promptKind?: 'sensitive_file' | 'dangerous_command' | null
+    denyReason?: string
+  }
 }
 
 export interface CredentialFieldDescriptor {

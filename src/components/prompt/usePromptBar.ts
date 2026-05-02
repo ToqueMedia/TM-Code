@@ -550,7 +550,7 @@ export function usePromptBar() {
       chatStore.addUserMessage(display.text, display.attachments, blocks)
     }
     chatStore.startAssistantMessage()
-    agentStore.setStatus('thinking')
+    agentStore.setStatus('awaiting_response')
 
     // Track whether the agent loop ended with an error.
     // Used by executeQueuedInput to stop processing remaining commands.
@@ -594,7 +594,7 @@ export function usePromptBar() {
           appendTextDeltaBuffered(delta)
         },
         onReasoningDelta: (delta) => {
-          agentStore.setStatus('thinking')
+          agentStore.setStatus('reasoning')
           appendReasoningDeltaBuffered(delta)
         },
         onToolCallPending: (toolId, toolName) => {
@@ -607,7 +607,7 @@ export function usePromptBar() {
         },
         onToolResult: (toolId, _toolName, result, isError) => {
           useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
-          agentStore.setStatus('thinking')
+          agentStore.setStatus('awaiting_response')
         },
         onTurnComplete: () => {
           useChatStore.getState().incrementTurnCount()
@@ -666,14 +666,23 @@ export function usePromptBar() {
         },
         onContextCompression: (beforeTokens, signal) => {
           if (signal === 0) {
-            // Compression starting
+            // Compression starting — visible status + system message keep
+            // the user informed that the verbatim history is being summarized.
             agentStore.setStatus('compressing')
             useChatStore.getState().addSystemMessage(
-              `Comprimindo contexto (${Math.round(beforeTokens / 1000)}K tokens)...`
+              `Comprimindo contexto (${Math.round(beforeTokens / 1000)}K tokens)...`,
+              'info',
             )
           } else if (signal === -1) {
-            // Compression complete
-            agentStore.setStatus('thinking')
+            // Compression complete. Emit a claude-vaz-style boundary marker so
+            // the user has a visible checkpoint in the conversation, plus a
+            // note that invoked skills were re-injected (the model recovers
+            // its CRITICAL rules from skillService's invokedSkills map).
+            agentStore.setStatus('awaiting_response')
+            useChatStore.getState().addSystemMessage(
+              `✻ Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens). Skills invocados re-injectados — o agente continua com regras CRITICAL intactas.`,
+              'info',
+            )
           }
         },
       })

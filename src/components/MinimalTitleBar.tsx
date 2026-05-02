@@ -112,9 +112,11 @@ function MinimalTitleBar() {
 
   const statusConfig: Record<string, { color: string; label: string }> = {
     idle: { color: tokens.colors.accent.green, label: t('titlebar.ready') },
-    thinking: { color: tokens.colors.toolCall.runningText, label: t('titlebar.thinking') },
+    awaiting_response: { color: tokens.colors.toolCall.runningText, label: t('titlebar.awaitingResponse') },
+    reasoning: { color: tokens.colors.accent.purple, label: t('titlebar.reasoning') },
     generating: { color: tokens.colors.accent.primary, label: t('titlebar.generating') },
     applying: { color: tokens.colors.accent.purple, label: t('titlebar.applying') },
+    compressing: { color: tokens.colors.accent.orange, label: t('titlebar.compressing') },
     error: { color: tokens.colors.accent.red, label: t('titlebar.error') },
   }
 

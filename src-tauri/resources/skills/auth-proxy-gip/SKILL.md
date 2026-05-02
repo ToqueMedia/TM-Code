@@ -18,6 +18,42 @@ This skill describes the **protocol** for adding GIP authentication to a project
 
 Your job is to implement the auth-proxy endpoints + the frontend client.
 
+## CRITICAL: Read these before writing any code
+
+These six rules are violated repeatedly across model generations. Each violation produces a specific user-visible bug. **MUST** comply with every one.
+
+### CRITICAL — Wire the Vite dev proxy
+
+When frontend and backend run on different ports, the frontend's `vite.config.ts` **MUST** include:
+```ts
+server: { proxy: { '/api': { target: 'http://localhost:3000', changeOrigin: true } } }
+```
+Adjust the target port to match your backend. **Without this, every `/api/*` request hits port 5173 and returns 404.** CORS headers on the backend are NOT a substitute — the proxy is what makes the request leave port 5173 at all. Same logic applies to Next.js (use `rewrites()` in `next.config.js`), Nuxt, SvelteKit. Verify by `curl http://localhost:5173/api/auth/me` — must return JSON, not 404 HTML.
+
+### CRITICAL — Never install `firebase-admin`
+
+There is no Admin SDK in this stack. The auth-proxy talks to the Identity Toolkit REST API directly with `VITE_FIREBASE_API_KEY` (a public key). **DO NOT** add `firebase-admin` to dependencies under any circumstance.
+
+### CRITICAL — Never call `request_credentials` for Firebase / GIP / GCP
+
+`provision_auth` has already written everything you need. The user does NOT have (and will NEVER have) `GOOGLE_APPLICATION_CREDENTIALS`, `serviceAccountKey.json`, or `GIP_SERVICE_ACCOUNT_*`. **DO NOT** call `request_credentials` for any of these — it pops a credential dialog the user cannot satisfy.
+
+### CRITICAL — Never import client-side Firebase auth methods
+
+These imports from `firebase/auth` are forbidden on the client: `signInWithEmailAndPassword`, `createUserWithEmailAndPassword`, `signInWithPopup`, `GoogleAuthProvider`, `signOut`. Only `onAuthStateChanged` is allowed AS AN IMPORT (note: it will not fire in this proxy flow — use the bootstrap pattern below instead). All auth flows go through your backend proxy.
+
+### CRITICAL — Always navigate after `setUser`
+
+`setUser` populates the auth store; nothing else redirects automatically. Every auth flow (signup, signin, google) **MUST** call its router's `navigate(...)` after `setUser`. Email/password flows do this in the form's `onSubmit` handler. Google sign-in does this via the hook's `onSuccess` option: `useGoogleSignIn(ref, { onSuccess: () => navigate('/success') })`. AuthGuard only redirects FROM protected routes TO login — never the inverse.
+
+### CRITICAL — Always call `setAuthToken` after token exchange
+
+After every successful proxy call (signup, signin, google), **MUST** call `setAuthToken(idToken, refreshToken)` BEFORE the next `authFetch`. Skipping this means the next `/api/auth/sync` call has no Authorization header and returns 401.
+
+### CRITICAL — Always call `/api/auth/sync` after a successful auth call
+
+For all three flows (signup, signin, google), after `setAuthToken` **MUST** `await authFetch('/api/auth/sync', { method: 'POST', body: JSON.stringify({...profileFields}) })` to upsert the user into the local DB. Then `setUser(syncedUser)`.
+
 ## What's in `.env` after `provision_auth`
 
 Frontend (Vite-style):
@@ -57,6 +93,55 @@ if (!process.env.GIP_FIREBASE_API_KEY) {
 ```
 
 Without this guard, missing env vars surface only as cryptic 400s from Identity Toolkit ("API key not valid"), wasting debugging time.
+
+### Frontend (Vite) — `VITE_*` vars: classify the layout BEFORE setting `envDir`
+
+`provision_auth` writes `.env` to the **project root**. Vite reads `.env` from the directory containing its own `vite.config.*`. The `envDir` override is a **conditional** fix — applying it to a flat layout BREAKS the project (Vite looks for `.env` in a directory that doesn't have one, and `import.meta.env.VITE_GOOGLE_CLIENT_ID` becomes `undefined`, which then fails the silent guard `if (!clientId) return`).
+
+**STEP 1 — Classify the layout by answering ONE question**: where does `vite.config.ts` live relative to `.env`?
+
+ - **Same directory as `.env`** (vite.config.ts and .env are siblings) → **FLAT layout**
+ - **One level deeper than `.env`** (vite.config.ts is in `client/` or `frontend/` while `.env` is at the root) → **MONOREPO layout**
+
+**STEP 2 — Apply the correct rule:**
+
+#### FLAT layout — DO NOT set `envDir`
+
+```ts
+// vite.config.ts at project root, .env at project root
+import { defineConfig } from 'vite'
+export default defineConfig({
+  // No envDir — Vite finds .env next to its config by default.
+  plugins: [react()],
+  // ...
+})
+```
+
+Setting `envDir: path.resolve(__dirname, '..')` here points Vite at the PARENT of the project — there's no `.env` there, all `VITE_*` become `undefined`, and the GIS button silently fails to render. Symptom is identical to having no `.env` at all.
+
+#### MONOREPO layout — DO set `envDir` to the project root
+
+```ts
+// vite.config.ts inside <root>/client/, .env at <root>/.env
+import { defineConfig } from 'vite'
+import path from 'path'
+export default defineConfig({
+  envDir: path.resolve(__dirname, '..'),   // step UP into the monorepo root
+  plugins: [react()],
+  // ...
+})
+```
+
+Alternative: place a frontend-only `client/.env` containing the `VITE_*` keys (manual sync — `envDir` is preferred).
+
+> **Canonical directory names**: when splitting into sub-packages, the directory **MUST** be one of `client`, `server`, `frontend`, `backend`, `web`, `api`. Custom names (`app`, `ui`, `service`) are invisible to the IDE's project-kind detector and the wrong preview surface opens.
+
+**STEP 3 — Verify**: open `npm run dev`'s browser console and run:
+```js
+console.log(import.meta.env.VITE_GOOGLE_CLIENT_ID)
+// "<long.apps.googleusercontent.com>" → ready
+// undefined → envDir misconfigured for the layout (over-set on flat, missing on monorepo)
+```
 
 ## Ports and CORS — let the framework defaults stand
 
@@ -107,8 +192,15 @@ With the proxy in place, CORS only matters for direct cross-origin calls (e.g. t
 3. **NEVER** import `signInWithEmailAndPassword`, `createUserWithEmailAndPassword`, `signInWithPopup`, `GoogleAuthProvider`, or `signOut` from `firebase/auth` on the client. Only `onAuthStateChanged` is allowed AS AN IMPORT. Note that the listener WILL NOT FIRE in this proxy flow because no client-side method ever updates `auth.currentUser` — for session restoration use the bootstrap pattern below, not `onAuthStateChanged`. All auth flows go through your backend proxy.
 4. **NEVER** modify `.env`. It is platform-managed.
 5. **ALWAYS** call `/api/auth/sync` after a successful proxy signup or signin to upsert the user row in your DB.
+5b. **ALWAYS** navigate to the post-auth route after `setUser` — for ALL three flows (signup, signin, google). `setUser` only updates the store; nothing redirects automatically. Email/password handlers do this in the form's `onSubmit`; the Google flow does it via `useGoogleSignIn(ref, { onSuccess: () => navigate('/success') })`.
 6. **ALWAYS** use the project's auth-helper (e.g. `authFetch`) for protected API calls — never raw `fetch` with manual headers spread around the codebase.
 7. **ALWAYS** call your store's `init()` (or equivalent bootstrap) from the app's entry file (`main.ts(x)` / `app.ts`) BEFORE the first render. Without it, a refresh after login lands the user on an infinite loading state — the auth store has no signal to rehydrate from. See the "Session bootstrap" section below.
+8. **ALWAYS** wire the Vite dev proxy when frontend and backend run on different ports. Without it, `POST /api/auth/proxy/google` from the browser hits the Vite dev server (`localhost:5173`) and returns **404** — the request never reaches the backend. The fix is one line in `vite.config.ts`:
+   ```ts
+   server: { proxy: { '/api': { target: 'http://localhost:3000', changeOrigin: true } } }
+   ```
+   Adjust the target port to match your backend. Adding CORS on the backend is NOT a substitute — the proxy must exist for `/api/...` paths to leave port 5173 at all. This applies equally to Next.js (use `rewrites()` in `next.config.js`), Nuxt, SvelteKit, etc. Verify by curling `http://localhost:5173/api/auth/me` — it must return JSON, not a 404 HTML page.
+9. **ALWAYS** call `setAuthToken(idToken, refreshToken)` after a successful Google sign-in token exchange — same as signup/signin. Skipping it means subsequent `authFetch` calls have no Authorization header and `/api/auth/sync` returns 401.
 
 ## Endpoint surface to implement
 
@@ -338,6 +430,8 @@ useAuthStore.getState().init().finally(() => {
 
 After login (signup/signin/google), call `useAuthStore.getState().setUser(syncedUserRow)`
 explicitly — the store has no other way to learn about the new user.
+
+**Then navigate to the post-auth route** (`/success`, `/dashboard`, whatever your app uses). Setting the user does NOT redirect — `AuthGuard` patterns redirect *to* `/login` when the user is missing, not *from* `/login` when the user appears. Every auth handler — email/password form `onSubmit`, Google sign-in callback, signup form — must call its router's `navigate(...)` after `setUser`. The Google flow is the easy one to forget because the navigation has to be wired through `useGoogleSignIn`'s `onSuccess` option (the hook itself doesn't know which route to go to).
 
 ### Frontend — auth helper (`src/lib/authClient.ts`)
 

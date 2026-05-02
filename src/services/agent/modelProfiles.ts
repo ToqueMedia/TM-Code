@@ -397,6 +397,43 @@ const GEMINI_3_FLASH: ModelProfile = {
   modelSpecificPrompt: '',
 }
 
+// Qwen 3.6 Max Preview — DashScope's flagship reasoning model. Registered
+// here for completeness (admin UI, model labels, etc.); it is NOT the
+// frontend's source of truth for routing — the backend (toquemedia-studio-api/
+// src/proxy.ts) decides which upstream model serves a plan. Backend clamps
+// max_tokens to 65,536 per DashScope's documented cap regardless of what
+// the frontend's per-plan profile says.
+const QWEN3_6_MAX_PREVIEW: ModelProfile = {
+  id: 'qwen3.6-max-preview',
+  name: 'Qwen 3.6 Max Preview',
+  persona: { name: 'Hunter Alpha', tagline: 'Raciocínio profundo + 1M context. Aderência forte a instruções. Custo: 1x (explorer)' },
+  modelId: 'qwen3.6-max-preview',
+  contextWindow: 1_000_000,
+  maxOutputTokens: 65_536,
+
+  // Qwen3 official sampling (HuggingFace Qwen/Qwen3-235B-A22B):
+  //   Thinking: temp=0.6, top_p=0.95, top_k=20
+  //   Non-thinking: temp=0.7, top_p=0.8, top_k=20
+  temperature: 0.7,
+  reasoningTemperature: 0.6,
+  topP: 0.95,
+  topPNonThinking: 0.8,
+  topK: 20,
+
+  thinkingMode: 'toggleable',
+  supportsThinking: true,
+  thinkingParam: 'enable_thinking',
+  thinkingBudget: null,
+  thinkingMandatory: false,
+
+  // Qwen3 official: "store only the final output (not thinking content) in
+  // multi-turn history". Strip reasoning between turns.
+  preserveReasoning: false,
+  supportsAttachments: false, // text-only; multimodal lives in qwen3.6-plus
+  supportsSearch: true, // DashScope native web_search via enable_search
+  modelSpecificPrompt: '',
+}
+
 const STEP_3_5_FLASH: ModelProfile = {
   id: 'step-3.5-flash',
   name: 'Step 3.5 Flash',
@@ -435,6 +472,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'qwen3-coder-next': QWEN3_CODER_NEXT,
   'minimax-m2.5': MINIMAX_M2_5,
   'qwen3.6-plus': QWEN3_6_PLUS,
+  'qwen3.6-max-preview': QWEN3_6_MAX_PREVIEW,
   // 4x cost
   'glm-5': GLM_5,
   'glm-5.1': GLM_5_1,

@@ -60,11 +60,42 @@ export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): s
   return JSON.stringify(payload, null, 2)
 }
 
+/**
+ * Render the permission badge for a tool call. Only emitted when a decision
+ * was actually made (silent for `safe_tool`-bypassed reads to avoid clutter).
+ * Distinguishes user-approved tools from auto-approved-by-scope so forensic
+ * review can correctly attribute "destructive command was run" — the user
+ * may have explicitly granted permission, which is meaningful context that
+ * the tool result alone hides.
+ */
+function renderPermissionBadge(p: NonNullable<ToolCallDisplay['permission']>): string {
+  const kindLabel = p.promptKind === 'dangerous_command'
+    ? ' (dangerous command)'
+    : p.promptKind === 'sensitive_file'
+      ? ' (sensitive file)'
+      : ''
+  if (!p.approved) {
+    const reason = p.denyReason ? ` — "${p.denyReason}"` : ''
+    return `🚫 Permission denied by user${kindLabel}${reason}`
+  }
+  if (p.source === 'user') {
+    return `🔓 Approved by user${kindLabel}`
+  }
+  if (p.source === 'approved_scope') {
+    return '🔓 Auto-approved (scope: Accept All)'
+  }
+  if (p.source === 'has_own_approval') {
+    return '🔓 Approved via inline diff'
+  }
+  return ''
+}
+
 function renderToolCallMd(tc: ToolCallDisplay): string {
   const status = tc.isError ? '❌ failed' : tc.status === 'completed' ? '✅ ok' : `⏳ ${tc.status}`
+  const permissionBadge = tc.permission ? renderPermissionBadge(tc.permission) : ''
   const lines: string[] = []
   lines.push(`<details>`)
-  lines.push(`<summary><strong>🔧 ${tc.toolName}</strong> — ${status}</summary>`)
+  lines.push(`<summary><strong>🔧 ${tc.toolName}</strong> — ${status}${permissionBadge ? ` · ${permissionBadge}` : ''}</summary>`)
   lines.push(``)
   lines.push(`**Input:**`)
   lines.push('```json')

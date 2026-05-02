@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
@@ -65,6 +65,12 @@ interface ChatActions {
   updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>, targetMessageId?: string) => void
   updateToolCallWithResult: (toolId: string, result: string, isError: boolean, targetMessageId?: string) => void
   updateToolCallProgress: (toolId: string, progressText: string) => void
+  /** Record the permission decision that gated this tool call. Called by
+   *  toolExecutor right after `requestPermission` resolves. Surfaces in the
+   *  session export so forensics can tell user-approved tools apart from
+   *  silent auto-approvals (the bug behind misattributing destructive
+   *  commands to model improvisation). */
+  recordToolPermission: (toolId: string, permission: NonNullable<ToolCallDisplay['permission']>, targetMessageId?: string) => void
   // Inline diff actions (centralized — handle DiffService + store + agent unblock atomically)
   approveDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => Promise<void>
   rejectDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => void
@@ -119,6 +125,25 @@ let idCounter = 0
 export function generateId(prefix: string): string {
   idCounter++
   return `${prefix}-${Date.now()}-${idCounter}`
+}
+
+// === Project-scope epoch ===
+//
+// Sessions are project-scoped: a session belongs only to the project that
+// created it. Rapid project switches (A → B → C) race the async session
+// loaders — the loader for B can resolve AFTER the user is already on C, and
+// without a guard it would write B's session into C's chat state.
+//
+// Strategy: every clearAllSessions() bumps the epoch. Async loaders capture
+// the current epoch at entry, and skip their final `set()` if the epoch has
+// moved on. Module-level (not in store state) so listeners aren't triggered
+// by epoch bumps; the guard is purely a write-time check.
+let projectEpoch = 0
+function bumpProjectEpoch(): number {
+  return ++projectEpoch
+}
+function currentProjectEpoch(): number {
+  return projectEpoch
 }
 
 // === Persisted agent start time ===
@@ -293,68 +318,115 @@ export function resolveAllPendingDiffApprovals(approved: boolean) {
   pendingDiffApprovals.clear()
 }
 
-// Token buffering for streaming performance (50ms flush)
-let textBuffer = ''
-let reasoningBuffer = ''
+// Streaming delta buffer (50ms flush window).
+//
+// We use a SINGLE ordered queue, not two separate buffers. The previous
+// implementation kept `textBuffer` and `reasoningBuffer` independent and
+// flushed text-first-then-reasoning, which silently re-ordered events
+// when both kinds arrived inside the same 50ms window. Symptom: a single
+// reasoning thought got split into two ReasoningBlocks with a stray text
+// fragment between them, because the flush emitted the text BEFORE the
+// later reasoning chunk that was actually meant to extend the current block.
+//
+// Preserving arrival order keeps reasoning/text/reasoning interleaving honest
+// — each ContentBlock boundary in the rendered message reflects a real
+// upstream boundary, not an artefact of our flush schedule.
+type DeltaEntry = { kind: 'text' | 'reasoning'; delta: string }
+let deltaQueue: DeltaEntry[] = []
 let flushTimer: ReturnType<typeof setTimeout> | null = null
-/**
- * Set by `markReasoningBoundary()` whenever a thinking content_block ends.
- * The next reasoning delta that arrives gets a `\n\n` prefix so consecutive
- * thinking blocks (one per agent loop iteration) render as distinct
- * paragraphs in the UI instead of running together (`"...end.Start..."`).
- * Self-correcting: at message boundaries, msg.reasoningContent is empty, so
- * the prefix is silently dropped — no cross-message contamination.
- */
-let pendingReasoningSeparator = false
 
 export function appendTextDeltaBuffered(delta: string) {
-  textBuffer += delta
+  // Coalesce with the immediately preceding text entry so multiple character-
+  // sized text_delta events don't churn the renderer with one append per byte.
+  const last = deltaQueue[deltaQueue.length - 1]
+  if (last && last.kind === 'text') {
+    last.delta += delta
+  } else {
+    deltaQueue.push({ kind: 'text', delta })
+  }
   scheduleFlush()
 }
 
 export function appendReasoningDeltaBuffered(delta: string) {
-  if (pendingReasoningSeparator) {
-    pendingReasoningSeparator = false
-    // Only prepend the separator if there's actual prior reasoning to
-    // separate from — guards against bleeding a `\n\n` into a fresh message
-    // when the boundary was marked just before message finalization.
-    const store = useChatStore.getState()
-    const session = store.getActiveSession()
-    const msgId = store.streamingMessageId
-    const hasPrior = reasoningBuffer.length > 0
-      || (msgId !== null
-        && (session?.messages.find(m => m.id === msgId)?.reasoningContent?.length ?? 0) > 0)
-    if (hasPrior) {
-      reasoningBuffer += '\n\n'
-    }
+  // Same coalescing rule for reasoning — but ONLY when the previous queued
+  // entry is also reasoning. Crossing kinds (reasoning → text → reasoning)
+  // creates a separate entry so the temporal boundary is preserved when the
+  // queue is replayed on the next flush.
+  const last = deltaQueue[deltaQueue.length - 1]
+  if (last && last.kind === 'reasoning') {
+    last.delta += delta
+  } else {
+    deltaQueue.push({ kind: 'reasoning', delta })
   }
-  reasoningBuffer += delta
   scheduleFlush()
 }
 
 /**
- * Signal that a reasoning content_block just ended. Called by agentRunner's
- * `onReasoningComplete` callback (immediately after `flushBufferedDeltas`).
- * Pairs with the prefix logic in `appendReasoningDeltaBuffered` above.
+ * Signal that a reasoning content_block just ended. With per-block reasoning
+ * (each chunk is its own ContentBlock), the natural boundary is a tool call
+ * or a text delta arriving — no separator string needed. We still expose this
+ * function so any future caller can finalize the last reasoning block early
+ * (e.g. `onReasoningComplete` from the parser).
  */
 export function markReasoningBoundary(): void {
-  pendingReasoningSeparator = true
+  // Flush any queued deltas first so the boundary closes the right block.
+  flushBufferedDeltas()
+  const state = useChatStore.getState()
+  const { activeSessionId, streamingMessageId, sessions } = state
+  if (!activeSessionId || !streamingMessageId) return
+  const session = sessions.get(activeSessionId)
+  if (!session) return
+  const msg = session.messages.find(m => m.id === streamingMessageId)
+  if (!msg?.contentBlocks) return
+  const last = msg.contentBlocks[msg.contentBlocks.length - 1]
+  if (last && last.type === 'reasoning' && last.durationMs === undefined && last.startedAt) {
+    last.durationMs = Date.now() - last.startedAt
+    // Bump streamingVersion so subscribers see the boundary immediately.
+    useChatStore.setState(s => ({ streamingVersion: s.streamingVersion + 1 }))
+  }
 }
 
 function scheduleFlush() {
   if (!flushTimer) {
     flushTimer = setTimeout(() => {
-      const text = textBuffer
-      const reasoning = reasoningBuffer
-      textBuffer = ''
-      reasoningBuffer = ''
+      const queued = deltaQueue
+      deltaQueue = []
       flushTimer = null
 
       const store = useChatStore.getState()
-      if (text) store.appendTextDelta(text)
-      if (reasoning) store.appendReasoningDelta(reasoning)
+      // Replay each entry in arrival order. Mixed text/reasoning sequences
+      // therefore land in contentBlocks with the same interleaving the model
+      // emitted them in.
+      for (const entry of queued) {
+        if (entry.kind === 'text') store.appendTextDelta(entry.delta)
+        else store.appendReasoningDelta(entry.delta)
+      }
     }, 50)
   }
+}
+
+/**
+ * Returns the name of the most recently completed tool in the current
+ * streaming message. Used by the status bar to surface "Processed {tool} —
+ * awaiting response..." instead of the generic "Awaiting response..." while
+ * the model decides what to do next.
+ *
+ * Walks toolCalls in reverse and picks the latest one whose status is
+ * 'completed' or 'failed' — running tools belong to the 'applying' state,
+ * not 'awaiting_response'. Returns null when nothing has completed yet.
+ */
+export function selectLastCompletedToolName(state: ChatState): string | null {
+  const { activeSessionId, streamingMessageId, sessions } = state
+  if (!activeSessionId || !streamingMessageId) return null
+  const session = sessions.get(activeSessionId)
+  if (!session) return null
+  const msg = session.messages.find(m => m.id === streamingMessageId)
+  if (!msg?.toolCalls?.length) return null
+  for (let i = msg.toolCalls.length - 1; i >= 0; i--) {
+    const tc = msg.toolCalls[i]
+    if (tc.status === 'completed' || tc.status === 'failed') return tc.toolName
+  }
+  return null
 }
 
 export function flushBufferedDeltas() {
@@ -362,14 +434,14 @@ export function flushBufferedDeltas() {
     clearTimeout(flushTimer)
     flushTimer = null
   }
-  const text = textBuffer
-  const reasoning = reasoningBuffer
-  textBuffer = ''
-  reasoningBuffer = ''
+  const queued = deltaQueue
+  deltaQueue = []
 
   const store = useChatStore.getState()
-  if (text) store.appendTextDelta(text)
-  if (reasoning) store.appendReasoningDelta(reasoning)
+  for (const entry of queued) {
+    if (entry.kind === 'text') store.appendTextDelta(entry.delta)
+    else store.appendReasoningDelta(entry.delta)
+  }
 }
 
 // Per-result truncation for very large tool outputs (e.g. read_file on huge files)
@@ -846,11 +918,17 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           msg.reasoningDurationMs = Date.now() - msg.reasoningStartedAt
         }
         msg.content = msg.content + delta
-        // Maintain interleaved contentBlocks: append to last text block or create new one
+        // Maintain interleaved contentBlocks: append to last text block or create new one.
+        // If the last block is an in-flight reasoning block, finalize it first so the
+        // ReasoningBlock UI stops streaming and the text appears below it.
         const blocks = msg.contentBlocks || (msg.contentBlocks = [])
         const last = blocks[blocks.length - 1]
-        if (last && last.type === 'text') {
-          last.text += delta
+        if (last && last.type === 'reasoning' && last.durationMs === undefined && last.startedAt) {
+          last.durationMs = Date.now() - last.startedAt
+        }
+        const refreshedLast = blocks[blocks.length - 1]
+        if (refreshedLast && refreshedLast.type === 'text') {
+          refreshedLast.text += delta
         } else {
           blocks.push({ type: 'text', text: delta })
         }
@@ -869,11 +947,33 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
       if (msg) {
-        // Track when reasoning started
+        // Track when reasoning started (legacy field — kept for the
+        // session export and the message-level streaming-label fallback).
         if (!msg.reasoningStartedAt) {
           msg.reasoningStartedAt = Date.now()
         }
+        // Keep msg.reasoningContent updated as a flat concatenation. Used by
+        // session export, conversation history rebuild, and any legacy
+        // renderer that reads the message-level field directly.
         msg.reasoningContent = (msg.reasoningContent || '') + delta
+
+        // Mirror into contentBlocks so reasoning interleaves naturally with
+        // tool calls and text. Each reasoning chunk between boundaries is its
+        // own block — when a tool or text arrives, the active reasoning block
+        // is finalized (durationMs set) so the next reasoning delta starts a
+        // fresh block.
+        const blocks = msg.contentBlocks || (msg.contentBlocks = [])
+        const last = blocks[blocks.length - 1]
+        if (last && last.type === 'reasoning' && last.durationMs === undefined) {
+          last.text += delta
+        } else {
+          blocks.push({
+            type: 'reasoning',
+            text: delta,
+            startedAt: Date.now(),
+          })
+        }
+
         session.updatedAt = Date.now()
       }
 
@@ -930,7 +1030,14 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const reasoningDurationMs = (msg.reasoningStartedAt && !msg.reasoningDurationMs)
           ? Date.now() - msg.reasoningStartedAt
           : msg.reasoningDurationMs
-        const contentBlocks = [...(msg.contentBlocks || [])]
+        // Clone blocks so we can finalize the last reasoning block (if any)
+        // before appending the tool_call. The block-level durationMs is what
+        // each ReasoningBlock UI reads to flip from streaming to collapsed.
+        const contentBlocks = (msg.contentBlocks || []).map(b => ({ ...b }))
+        const last = contentBlocks[contentBlocks.length - 1]
+        if (last && last.type === 'reasoning' && last.durationMs === undefined && last.startedAt) {
+          last.durationMs = Date.now() - last.startedAt
+        }
         contentBlocks.push({ type: 'tool_call', toolCallId: toolId })
         return {
           ...msg,
@@ -995,6 +1102,24 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       msg.toolCalls = newToolCalls
       session.updatedAt = Date.now()
 
+      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+    },
+
+    recordToolPermission: (toolId, permission, targetMessageId) => {
+      const { activeSessionId, streamingMessageId, sessions } = get()
+      if (!activeSessionId) return
+      const targetId = targetMessageId ?? streamingMessageId
+      if (!targetId) return
+      const session = sessions.get(activeSessionId)
+      if (!session) return
+      const msg = session.messages.find(m => m.id === targetId)
+      if (!msg || !msg.toolCalls) return
+      const idx = msg.toolCalls.findIndex(t => t.id === toolId)
+      if (idx < 0) return
+      const newToolCalls = msg.toolCalls.slice()
+      newToolCalls[idx] = { ...newToolCalls[idx], permission }
+      msg.toolCalls = newToolCalls
+      session.updatedAt = Date.now()
       set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },
 
@@ -1587,13 +1712,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // Rebuild contentBlocks for legacy messages that don't have them
         for (const msg of session.messages) {
           if (msg.role === 'assistant' && !msg.contentBlocks?.length && msg.toolCalls?.length) {
-            // Message has tool calls but no contentBlocks — reconstruct
-            const blocks: Array<{ type: 'text'; text: string } | { type: 'tool_call'; toolCallId: string }> = []
-            // Put all text as a single block before tool calls
+            // Message has tool calls but no contentBlocks — reconstruct.
+            // Legacy messages have a flat `msg.reasoningContent` string instead
+            // of per-block reasoning entries, so we prepend it as a single
+            // reasoning block (preserves the visible position above the tools).
+            const blocks: ContentBlock[] = []
+            if (msg.reasoningContent) {
+              blocks.push({
+                type: 'reasoning',
+                text: msg.reasoningContent,
+                durationMs: msg.reasoningDurationMs,
+              })
+            }
             if (msg.content) {
               blocks.push({ type: 'text', text: msg.content })
             }
-            // Then all tool calls
             for (const tc of msg.toolCalls) {
               blocks.push({ type: 'tool_call', toolCallId: tc.id })
             }
@@ -1628,13 +1761,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     restoreLastSession: async (projectPath: string) => {
+      // Capture the project epoch at entry. If it changes during the async
+      // load (user switched projects again before this resolved), abort the
+      // write so we don't poison the new project's chat state.
+      const epoch = currentProjectEpoch()
+      const isStale = () => currentProjectEpoch() !== epoch
+
       set({ isLoadingSession: true })
       try {
         await sessionService.init(projectPath)
+        if (isStale()) return false
         const activeId = await sessionService.getActiveSessionId(projectPath)
-        if (!activeId) return false
+        if (!activeId || isStale()) return false
 
         const session = await sessionService.loadSession(projectPath, activeId)
+        if (isStale()) return false
         if (!session) {
           // Session file missing (e.g. app crashed before save) — clear the stale
           // active-session pointer so the same PathNotFound is not repeated on restart.
@@ -1651,6 +1792,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
         // Initialize checkpoint service for this restored session
         await CheckpointService.getInstance().initSession(projectPath, session.id)
+        if (isStale()) return false
         useCheckpointStore.getState().syncFromService()
 
         set(() => {
@@ -1681,6 +1823,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     createNewSession: async (projectPath: string) => {
+      // Capture epoch — abort the final `set()` if the user has since switched
+      // away from this project. Same race-guard pattern as restoreLastSession.
+      const epoch = currentProjectEpoch()
+      const isStale = () => currentProjectEpoch() !== epoch
+
       // Save current session before creating new one
       const state = get()
       const currentSession = state.getActiveSession()
@@ -1700,10 +1847,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       // Ensure persistence is initialized (covers case where restoreLastSession returned false)
       await sessionService.init(projectPath)
+      if (isStale()) return ''
       const session = await sessionService.createSession(projectPath)
+      if (isStale()) return ''
 
       // Initialize checkpoint service for this session
       await CheckpointService.getInstance().initSession(projectPath, session.id)
+      if (isStale()) return ''
       useCheckpointStore.getState().clear()
 
       set(() => {
@@ -1835,6 +1985,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     clearAllSessions: () => {
+      // Bumping the epoch invalidates any in-flight async session loader so
+      // its `set()` is skipped — prevents the previous project's data from
+      // landing in the new project's chat state on rapid A → B → C switches.
+      bumpProjectEpoch()
       // Clear message queue — queued messages belong to the previous project
       clearMessageQueue()
       // Clear module-level timers to prevent stale writes
@@ -1843,6 +1997,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         saveTimeout = null
       }
       stopStreamingSave()
+      // Drop the invoked-skills cache (post-compaction recovery state). This
+      // map is module-level so it would otherwise leak across project switches
+      // and re-inject a previous project's skills into a new project's chat.
+      import('../services/agent/skillService').then(m => m.clearInvokedSkills()).catch(() => {})
       set({
         sessions: new Map(),
         activeSessionId: null,
