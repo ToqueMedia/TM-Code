@@ -139,7 +139,8 @@
       "Bash(gcloud --project=maiplayer-ac56d firestore documents read 'users/bhq635G4GNcmmHQZArlAkunsNZ53')",
       "Bash(gcloud auth *)",
       "Bash(grep -c \"env\\\\s*$\\\\s*?\\\\s*await firestoreAdminAuthHeaders\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestore.ts)",
-      "Bash(grep -n \"env$\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestore.ts)"
+      "Bash(grep -n \"env$\" /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestore.ts)",
+      "Bash(awk -F. '{print $1}' /tmp/dead_keys.txt)"
     ]
   }
 }
