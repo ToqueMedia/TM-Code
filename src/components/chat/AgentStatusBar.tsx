@@ -2,25 +2,36 @@ import { memo } from 'react'
 import { Flex, Text, Box } from '@chakra-ui/react'
 import { FiSquare, FiCheckSquare, FiLoader } from 'react-icons/fi'
 import { useAgentStore, type AgentTask } from '../../stores/agentStore'
-import { useChatStore, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
+import { useChatStore, resolveAllPendingDiffApprovals, selectLastCompletedToolName } from '../../stores/chatStore'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { useAgentElapsed } from '../../hooks/useAgentElapsed'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useBillingStore, isInOverageState } from '../../stores/billingStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
 import { getCommandQueueSnapshot } from '../../services/agent/messageQueue'
+import { getProfileForPlan } from '../../services/agent/modelProfiles'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
 // formatTokens removed — token/credit display removed from status bar.
 
+function formatElapsedShort(ms: number): string {
+  const secs = Math.floor(ms / 1000)
+  if (secs < 60) return `${secs}s`
+  const mins = Math.floor(secs / 60)
+  const remSecs = secs % 60
+  return `${mins}m ${remSecs}s`
+}
+
 function AgentStatusBar() {
   const status = useAgentStore(s => s.status)
   const error = useAgentStore(s => s.error)
   const modelName = useAgentStore(s => s.modelName)
   const isStreaming = useChatStore(s => s.isStreaming)
+  const lastTool = useChatStore(selectLastCompletedToolName)
   const skillCount = useSkillStore(s => s.skills.length)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const mcpServers = useMcpStore(s => s.servers)
@@ -47,7 +58,8 @@ function AgentStatusBar() {
 
   const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
     idle: { color: tokens.colors.text.disabled, label: t('chat.ready'), pulse: false },
-    thinking: { color: tokens.colors.toolCall.runningText, label: t('chat.thinking'), pulse: true },
+    awaiting_response: { color: tokens.colors.toolCall.runningText, label: t('chat.awaitingResponse'), pulse: true },
+    reasoning: { color: tokens.colors.accent.purple, label: t('chat.reasoning'), pulse: true },
     generating: { color: tokens.colors.accent.primary, label: t('chat.generating'), pulse: true },
     applying: { color: tokens.colors.accent.green, label: t('chat.applying'), pulse: true },
     compressing: { color: tokens.colors.accent.orange, label: t('chat.compressing'), pulse: true },
@@ -55,7 +67,7 @@ function AgentStatusBar() {
   }
 
   // Status priority: inactive > budget blocked > overage > no credits > agent status
-  const config = (!isActive && status === 'idle')
+  let config = (!isActive && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.accountInactive'), pulse: false }
     : (isBudgetBlocked && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.noCredits'), pulse: false }
@@ -64,13 +76,38 @@ function AgentStatusBar() {
     : (noCredits && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.noCredits'), pulse: false }
     : (statusConfig[status] || statusConfig.idle)
-  // Thinking indicator — user-controlled in Settings.
-  // Only meaningful for paid plans (Qwen3.6+ supports thinking).
-  // Free plan (DeepSeek) ignores thinking param on the backend.
+
+  // When awaiting a response after a tool just completed, swap the generic
+  // "Awaiting response..." for "Processed {tool} — awaiting response..." so
+  // the user gets a faithful read on what just happened. Only meaningful for
+  // 'awaiting_response' (post-tool) — other states have their own narrative.
+  if (status === 'awaiting_response' && lastTool) {
+    config = { ...config, label: t('chat.processedTool').replace('{tool}', lastTool) }
+  }
+
+  // Per-phase elapsed timer. Pauses automatically when a permission dialog
+  // is open (shared hook keeps all three timer surfaces aligned).
+  const { elapsedMs, isPaused } = useAgentElapsed('phase')
+  const isBusy = status !== 'idle' && status !== 'error'
+  const showElapsed = isBusy && elapsedMs >= 5000
+  // Thinking toggle — visibility driven by the BACKEND's authoritative answer
+  // (X-Model-Thinking-Mode header on the last response). The frontend's
+  // per-plan profile is only a pre-handshake fallback used before the first
+  // response arrives. This eliminates the frontend↔backend drift that
+  // happens when the admin changes a plan's ideModel in Firestore.
+  // Hidden when the backend reports 'none' (e.g. mimo-v2-flash) or 'mandatory'
+  // (always-on by design — toggle would be a no-op).
   const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
   const toggleThinking = useSettingsStore(s => s.setThinkingEnabled)
+  const backendThinkingMode = useAgentStore(s => s.thinkingMode)
   const billingPlan = useBillingStore(s => s.plan)
-  const thinkingSupported = billingPlan !== 'explorer'
+  const fallbackProfile = getProfileForPlan(billingPlan)
+  const effectiveMode = backendThinkingMode
+    ?? (fallbackProfile.supportsThinking
+        ? (fallbackProfile.thinkingMode === 'mandatory' ? 'mandatory' : 'toggleable')
+        : 'none')
+  const thinkingSupported = effectiveMode === 'toggleable'
+  const thinkingMandatory = effectiveMode === 'mandatory'
   const autoApproveDiffs = usePermissionStore(s => s.autoApproveDiffs)
 
   // Build info segments — derive counts from raw store data (avoids infinite re-render loop)
@@ -98,8 +135,10 @@ function AgentStatusBar() {
 
   return (
     <Box borderTop="1px solid rgba(255, 255, 255, 0.04)" bg="rgba(255, 255, 255, 0.02)">
-      {/* Agent task list — shows when agent has active tasks */}
-      {agentTasks.length > 0 && (
+      {/* Agent task list — shows when agent has active tasks. Defensive
+          Array.isArray guard: store should always hold an array, but a
+          rogue setTasks(undefined) elsewhere shouldn't crash the chrome. */}
+      {Array.isArray(agentTasks) && agentTasks.length > 0 && (
         <Box px={3} pt="6px" pb="4px" borderBottom="1px solid rgba(255, 255, 255, 0.04)">
           <Flex align="center" gap="6px" mb="4px">
             <FiCheckSquare size={10} color={tokens.colors.accent.purple} />
@@ -159,11 +198,23 @@ function AgentStatusBar() {
         <Text fontSize="11px" color={tokens.colors.text.muted} letterSpacing="0.01em">
           {config.label}
         </Text>
-
+        {showElapsed && (
+          <Text
+            fontSize="10px"
+            color={tokens.colors.text.disabled}
+            fontFamily={tokens.fontFamily.mono}
+            letterSpacing="0.01em"
+            ml="2px"
+            title={isPaused ? 'Timer paused — awaiting your approval' : undefined}
+          >
+            {formatElapsedShort(elapsedMs)}{isPaused ? ' ⏸' : ''}
+          </Text>
+        )}
       </Flex>
 
       <Flex align="center" gap={3}>
-        {/* Thinking mode toggle — only for paid plans (Qwen3.6+ supports it) */}
+        {/* Thinking — interactive toggle when the model supports on/off,
+            static badge when it's always-on (mandatory). */}
         {thinkingSupported && (
           <Flex
             as="button"
@@ -182,6 +233,22 @@ function AgentStatusBar() {
           >
             <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
               {thinkingEnabled ? '⚡ Thinking' : 'Thinking OFF'}
+            </Text>
+          </Flex>
+        )}
+        {thinkingMandatory && (
+          <Flex
+            align="center"
+            gap="4px"
+            px="6px"
+            py="2px"
+            borderRadius="4px"
+            bg="rgba(163, 113, 247, 0.08)"
+            color={tokens.colors.accent.purple}
+            title="Thinking is always-on for this model"
+          >
+            <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
+              ⚡ Thinking
             </Text>
           </Flex>
         )}

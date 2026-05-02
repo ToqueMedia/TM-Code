@@ -21,7 +21,7 @@ import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore, McpServerState } from '../../stores/mcpStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useAuthStore } from '../../stores/authStore'
-import { useBillingStore } from '../../stores/billingStore'
+import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
@@ -31,8 +31,9 @@ import { IS_WINDOWS } from '@/utils/platform'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
+import DeploysSection from './settings/DeploysSection'
 
-type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'sandbox' | 'admin'
+type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'sandbox' | 'deploys' | 'admin'
 
 const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'profile', key: 'settings.profilePlan' },
@@ -41,6 +42,7 @@ const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'shortcuts', key: 'settings.shortcuts' },
   { id: 'skills', key: 'settings.skills' },
   { id: 'mcp', key: 'settings.mcpServers' },
+  { id: 'deploys', key: 'settings.deploys' as TranslationKey },
 ]
 
 const ADMIN_NAV_ENTRY: { id: SectionId; key: TranslationKey } = {
@@ -156,6 +158,7 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
             {activeSection === 'shortcuts' && <ShortcutsSection />}
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
+            {activeSection === 'deploys' && <DeploysSection />}
             {activeSection === 'admin' && showAdminNav && <AdminSection />}
           </Box>
         </Box>
@@ -167,10 +170,10 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
 // ━━━ Profile & Plan Section ━━━
 
 const PLAN_CONFIG: Record<string, { labelKey: string; color: string; creditsLabelKey: string; isTop: boolean }> = {
-  explorer:       { labelKey: 'Free',         color: tokens.colors.text.muted,      creditsLabelKey: 'settings.monthlyCredits', isTop: false },
-  pro:            { labelKey: 'Pro',          color: tokens.colors.accent.purple,   creditsLabelKey: 'settings.monthlyCredits',  isTop: false },
-  'business-4x':  { labelKey: 'Business 4x',  color: tokens.colors.accent.orange,   creditsLabelKey: 'settings.monthlyCredits',  isTop: false },
-  'business-8x':  { labelKey: 'Business 8x',  color: tokens.colors.accent.primary,  creditsLabelKey: 'settings.monthlyCredits',  isTop: true },
+  explorer: { labelKey: 'Free', color: tokens.colors.text.muted,     creditsLabelKey: 'settings.monthlyCredits', isTop: false },
+  vibe:     { labelKey: 'Vibe', color: tokens.colors.accent.green,   creditsLabelKey: 'settings.monthlyCredits', isTop: false },
+  pro:      { labelKey: 'Pro',  color: tokens.colors.accent.purple,  creditsLabelKey: 'settings.monthlyCredits', isTop: false },
+  max:      { labelKey: 'Max',  color: tokens.colors.accent.primary, creditsLabelKey: 'settings.monthlyCredits', isTop: true  },
 }
 
 function ProfileSection() {
@@ -180,7 +183,6 @@ function ProfileSection() {
   const billingLoaded = useBillingStore(s => s.isLoaded)
   const consumedPct = useBillingStore(s => s.consumedPct)
   const tokenBudget = useBillingStore(s => s.tokenBudget)
-  const tokensConsumed = useBillingStore(s => s.tokensConsumed)
   const cycleEnd = useBillingStore(s => s.cycleEnd)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const noCredits = useBillingStore(s => s.noCredits)
@@ -216,15 +218,9 @@ function ProfileSection() {
     ? 0
     : Math.min(100, Math.max(2, pct * 100))
 
-  // "Consumo extra" — capacidade total restante (ciclo + créditos overage)
-  // como percentagem do tokenBudget. Diminui conforme consumedPct sobe e,
-  // depois dos 100%, conforme tmsRemaining é gasto. Só aparece quando há
-  // overage tokens disponíveis (compraram pacote extra).
-  const extraCapacityPct = billingLoaded && tokenBudget > 0 && tmsRemaining > 0
-    ? Math.max(0, Math.round(
-        ((Math.max(0, tokenBudget - tokensConsumed) + tmsRemaining) / tokenBudget) * 100
-      ))
-    : null
+  // "Consumo extra" — single source of truth in billingStore.extraConsumptionPct.
+  // tmsRemaining / tokenBudget × 100 (e.g. 500K extra on a 2M plan = 25%).
+  const extraCapacityPct = billingLoaded ? extraConsumptionPct(tmsRemaining, tokenBudget) : null
 
   async function handleSignOut() {
     try {
@@ -353,7 +349,7 @@ function ProfileSection() {
               </Flex>
               {extraCapacityPct !== null && (
                 <Text fontSize="11px" color={tokens.colors.accent.orange} mt={1.5}>
-                  +{extraCapacityPct}% {t('settings.extraConsumption' as any)}
+                  {extraCapacityPct}% {t('settings.extraConsumption' as any)}
                 </Text>
               )}
             </>

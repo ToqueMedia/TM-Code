@@ -1,13 +1,29 @@
-import { memo, useImperativeHandle, forwardRef } from 'react'
+import { memo, useCallback, useImperativeHandle, useState, forwardRef } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiPaperclip } from 'react-icons/fi'
 import { useCmdPromptLogic } from '../../hooks/useCmdPromptLogic'
 import SlashCommandMenu from '../chat/SlashCommandMenu'
+import HashtagMenu from '../prompt/HashtagMenu'
 import { TerminalMentionMenu } from './TerminalMentionMenu'
 import CmdAttachmentBar from './CmdAttachmentBar'
+import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import type { QueuedCommand } from '../../types/messageQueueTypes'
+
+// Shared style block — keep textarea + highlight overlay in lockstep so the
+// colored slash-command span sits exactly under the real glyphs.
+const CMD_TEXT_STYLE: React.CSSProperties = {
+  fontSize: '13px',
+  fontFamily: tokens.fontFamily.mono,
+  lineHeight: '24px',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  margin: 0,
+  padding: '2px 0',
+  letterSpacing: 'normal',
+  tabSize: 2,
+}
 
 export interface CmdModePromptInputRef {
   focus: () => void
@@ -64,11 +80,13 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     showCommandMenu,
     filteredCommands,
     selectedCommandIndex,
+    isArgMode,
     showMentionMenu,
     filteredMentions,
     selectedMentionIndex,
     mentionQuery,
     quickOpenBuilding,
+    hashtagMenu,
     textareaRef,
     isStreaming,
     queuedCommands,
@@ -93,9 +111,16 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
   useImperativeHandle(ref, () => ({
     focus: () => textareaRef.current?.focus(),
     hasText: () => (textareaRef.current?.value.trim().length ?? 0) > 0,
-    isMenuOpen: () => showCommandMenu || showMentionMenu,
+    isMenuOpen: () => showCommandMenu || showMentionMenu || hashtagMenu.show,
     clearAttachments,
-  }), [textareaRef, showCommandMenu, showMentionMenu, clearAttachments])
+  }), [textareaRef, showCommandMenu, showMentionMenu, hashtagMenu.show, clearAttachments])
+
+  // Sync textarea scroll → highlight overlay so the colored slash-command
+  // span stays under the actual glyphs when content scrolls past 6 rows.
+  const [scrollTop, setScrollTop] = useState(0)
+  const handleScroll = useCallback(() => {
+    if (textareaRef.current) setScrollTop(textareaRef.current.scrollTop)
+  }, [textareaRef])
 
   return (
     <Box
@@ -134,6 +159,19 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
           commands={filteredCommands}
           selectedIndex={selectedCommandIndex}
           onSelect={handleCommandSelect}
+          showArgsHint={isArgMode}
+          theme="purple"
+          direction="up"
+          maxHeight={260}
+        />
+      )}
+
+      {/* #hashtag autocomplete */}
+      {hashtagMenu.show && (
+        <HashtagMenu
+          items={hashtagMenu.items}
+          selectedIndex={hashtagMenu.selectedIndex}
+          onSelect={hashtagMenu.handleSelect}
           theme="purple"
           direction="up"
           maxHeight={260}
@@ -186,7 +224,45 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
           ❯
         </Text>
 
-        <Box flex="1" position="relative">
+        <Box
+          flex="1"
+          position="relative"
+          // The textarea uses WebkitTextFillColor: transparent so the colored
+          // overlay below can be seen — the same property cascades into
+          // ::placeholder, hiding the empty-state hint. Re-color it here.
+          css={{
+            '& > textarea::placeholder': {
+              color: tokens.colors.text.disabled,
+              WebkitTextFillColor: tokens.colors.text.disabled,
+              opacity: 1,
+            },
+            // Transparent text would also hide the selection — restore it so
+            // copy/paste in CMD mode actually shows what's selected.
+            '& > textarea::selection': {
+              color: tokens.colors.terminal.foreground,
+              WebkitTextFillColor: tokens.colors.terminal.foreground,
+              background: 'rgba(163, 113, 247, 0.35)',
+            },
+          }}
+        >
+          {/* Highlight overlay (slash-command tone). Behind the textarea;
+              textarea text is transparent so only the colored span shows. */}
+          <Box
+            aria-hidden
+            position="absolute"
+            inset={0}
+            overflow="hidden"
+            pointerEvents="none"
+            color={tokens.colors.terminal.foreground}
+            style={{
+              ...CMD_TEXT_STYLE,
+              transform: `translateY(-${scrollTop}px)`,
+            }}
+          >
+            {renderHighlightedPrompt(input)}
+            {input.endsWith('\n') ? '\u200b' : null}
+          </Box>
+
           <textarea
             ref={textareaRef}
             value={input}
@@ -195,6 +271,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             onPaste={handlePaste}
             onFocus={handleFocus}
             onBlur={handleBlur}
+            onScroll={handleScroll}
             placeholder={isStreaming ? '' : 'Type a command or message…'}
             aria-label="CMD Mode input"
             rows={1}
@@ -203,18 +280,18 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             autoCapitalize="off"
             spellCheck={false}
             style={{
+              ...CMD_TEXT_STYLE,
               width: '100%',
               background: 'transparent',
               border: 'none',
               outline: 'none',
-              color: tokens.colors.terminal.foreground,
-              fontSize: '13px',
-              fontFamily: tokens.fontFamily.mono,
+              color: 'transparent',
+              caretColor: tokens.colors.terminal.foreground,
+              WebkitTextFillColor: 'transparent',
               resize: 'none',
-              lineHeight: '24px',
-              padding: '2px 0',
               maxHeight: `${6 * 24}px`,
               overflowY: 'auto',
+              position: 'relative',
             }}
           />
         </Box>

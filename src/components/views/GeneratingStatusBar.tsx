@@ -18,22 +18,27 @@ function formatElapsed(ms: number): string {
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   idle: { color: tokens.colors.text.disabled, label: 'Ready' },
-  thinking: { color: tokens.colors.toolCall.runningText, label: 'Thinking...' },
+  awaiting_response: { color: tokens.colors.toolCall.runningText, label: 'Awaiting response...' },
+  reasoning: { color: tokens.colors.accent.purple, label: 'Reasoning...' },
   generating: { color: tokens.colors.accent.primary, label: 'Generating...' },
   applying: { color: tokens.colors.accent.green, label: 'Applying changes...' },
+  compressing: { color: tokens.colors.accent.orange, label: 'Compressing context...' },
   error: { color: tokens.colors.accent.red, label: 'Error' },
 }
 
 interface GeneratingStatusBarProps {
   status: string
   isStreaming: boolean
-  totalTokens: number
+  /** Context size on the wire (last turn's full prompt size — ratchets up). */
+  inputTokens: number
+  /** Total tokens emitted by the model across all turns of this request. */
+  outputTokens: number
   currentTurnCount: number
   /** Milliseconds when the agent loop started (null when idle) */
   agentStartTime: number | null
 }
 
-function GeneratingStatusBar({ status, isStreaming, totalTokens, currentTurnCount, agentStartTime }: GeneratingStatusBarProps) {
+function GeneratingStatusBar({ status, isStreaming, inputTokens, outputTokens, currentTurnCount, agentStartTime }: GeneratingStatusBarProps) {
   const config = statusConfig[status] || statusConfig.idle
   const [elapsed, setElapsed] = useState(0)
 
@@ -79,7 +84,10 @@ function GeneratingStatusBar({ status, isStreaming, totalTokens, currentTurnCoun
         </Text>
       </Flex>
       <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-        {formatTokens(totalTokens)} tokens · {currentTurnCount} steps{elapsed > 0 ? ` · ${formatElapsed(elapsed)}` : ''}
+        {/* Up = context size on the wire, Down = tokens emitted by the model. */}
+        {inputTokens > 0 && (<>{'\u2191 '}{formatTokens(inputTokens)}{' '}</>)}
+        {outputTokens > 0 && (<>{'\u2193 '}{formatTokens(outputTokens)}{' '}</>)}
+        · {currentTurnCount} steps{elapsed > 0 ? ` · ${formatElapsed(elapsed)}` : ''}
       </Text>
     </Flex>
   )

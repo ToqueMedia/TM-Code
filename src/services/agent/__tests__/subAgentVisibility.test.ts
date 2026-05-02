@@ -58,7 +58,7 @@ describe('createSubAgentVisibility', () => {
   })
 
   describe('status transitions', () => {
-    it('ticks status as generating / thinking / applying per event kind', () => {
+    it('ticks status as generating / reasoning / applying per event kind', () => {
       const { hooks, calls } = buildHooks()
       const v = createSubAgentVisibility({ reasoningLabel: 'x', hooks })
 
@@ -69,7 +69,7 @@ describe('createSubAgentVisibility', () => {
       const statuses = calls
         .filter(c => c[0] === 'setStatus')
         .map(c => c[1][0])
-      expect(statuses).toEqual(['generating', 'thinking', 'applying'])
+      expect(statuses).toEqual(['generating', 'reasoning', 'applying'])
     })
 
     it('skips status updates gracefully when setStatus hook is absent', () => {

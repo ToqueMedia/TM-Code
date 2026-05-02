@@ -15,6 +15,9 @@ import MCPService from '../../services/mcp/mcpService'
 import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
+import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
+import { useHashtagMenu } from './useHashtagMenu'
+import { runAuthFlow, runDesignFlow } from '../../services/agent/commands/authCommand'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../../services/attachmentService'
 import {
   enqueue as enqueueMessage,
@@ -102,6 +105,9 @@ export function usePromptBar() {
 
   // Slash command menu state
   const [showCommandMenu, setShowCommandMenu] = useState(false)
+  // True when the menu is in arg-suggestion mode (after `<cmd> `). Drives
+  // the SlashCommandMenu footer hint about free-form text after args.
+  const [isArgMode, setIsArgMode] = useState(false)
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([])
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
 
@@ -110,6 +116,14 @@ export function usePromptBar() {
   const [filteredMentions, setFilteredMentions] = useState<QuickOpenItem[]>([])
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0)
   const mentionStartRef = useRef(-1)
+
+  // #hashtag menu — closed-vocabulary skill triggers (e.g. #auth-google).
+  // State + handlers live in the shared hook (also used by cmd-mode).
+  const hashtagMenu = useHashtagMenu({
+    textareaRef,
+    setInputValue: (next) => useChatStore.getState().setDraftInput(next),
+    getInputValue: () => useChatStore.getState().draftInput,
+  })
 
   // Drag-and-drop visual state (local, NOT in Zustand store)
   const [isDragging, setIsDragging] = useState(false)
@@ -176,24 +190,62 @@ export function usePromptBar() {
       historyIndexRef.current = -1
     }
 
-    // Slash commands: /command
+    // Slash commands: /command (no space → suggest command names)
     if (value.startsWith('/') && !value.includes(' ')) {
       const commands = slashCommandRegistry.filterCommands(value.split(' ')[0])
       setFilteredCommands(commands)
       setShowCommandMenu(commands.length > 0)
       setSelectedCommandIndex(0)
       setShowMentionMenu(false)
+      setIsArgMode(false)
       return
     }
-    setShowCommandMenu(false)
 
-    // @mention detection — unicode-safe, shared parser. Directories included
-    // so users can reference dirs like @src/components/ for listing.
+    // Slash commands: /<known-cmd> [partial] → suggest argument values when
+    // the command declares argSuggestions. Picking one re-triggers the menu
+    // so multi-arg chains are one-key-each.
+    const argResult = slashCommandRegistry.getArgSuggestions(value)
+    if (argResult) {
+      const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({
+        name: arg.value,
+        description: arg.description,
+        enabled: true,
+        execute: async () => {},
+      }))
+      setFilteredCommands(argItems)
+      setShowCommandMenu(true)
+      setSelectedCommandIndex(0)
+      setShowMentionMenu(false)
+      setIsArgMode(true)
+      return
+    }
+
+    setShowCommandMenu(false)
+    setIsArgMode(false)
+
+    // #hashtag and @mention detection share the same RAF — autocomplete state
+    // is mutually exclusive. Hashtag check runs first because its vocabulary
+    // is closed (and cheap), and a `#` token shouldn't fall through to the
+    // file picker.
     requestAnimationFrame(() => {
       const textarea = textareaRef.current
       if (!textarea) return
 
-      const mention = findMentionAtCursor(textarea.value, textarea.selectionStart)
+      const cursorPos = textarea.selectionStart
+      const text = textarea.value
+
+      // Closed-vocabulary hashtag (e.g. #auth-email-password, #auth-google).
+      // detect() returns true when a `#` token owns the autocomplete slot —
+      // including the no-matches case — so we never fall through to the file
+      // picker for an unknown tag.
+      if (hashtagMenu.detect(text, cursorPos)) {
+        setShowMentionMenu(false)
+        return
+      }
+
+      // @mention — unicode-safe, shared parser. Directories included so users
+      // can reference dirs like @src/components/ for listing.
+      const mention = findMentionAtCursor(text, cursorPos)
       if (!mention) {
         setShowMentionMenu(false)
         return
@@ -216,8 +268,38 @@ export function usePromptBar() {
   }, [setInput])
 
   const handleCommandSelect = useCallback((command: SlashCommand) => {
-    setInput(command.name + ' ')
-    setShowCommandMenu(false)
+    // Arg vs command pick: if the buffer already contains a space, we're
+    // picking from the arg-suggestion menu, so replace just the trailing
+    // partial word. Otherwise we're picking a real command — replace the
+    // whole buffer with `<cmd> ` so the user can keep typing.
+    const current = useChatStore.getState().draftInput
+    let next: string
+    if (current.includes(' ')) {
+      const lastSpaceIdx = current.lastIndexOf(' ')
+      next = current.slice(0, lastSpaceIdx + 1) + command.name + ' '
+    } else {
+      next = command.name + ' '
+    }
+    setInput(next)
+
+    // Re-evaluate so chained arg picks surface the next round of suggestions
+    // without manual retype.
+    const argResult = slashCommandRegistry.getArgSuggestions(next)
+    if (argResult) {
+      const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({
+        name: arg.value,
+        description: arg.description,
+        enabled: true,
+        execute: async () => {},
+      }))
+      setFilteredCommands(argItems)
+      setShowCommandMenu(true)
+      setSelectedCommandIndex(0)
+      setIsArgMode(true)
+    } else {
+      setShowCommandMenu(false)
+      setIsArgMode(false)
+    }
     textareaRef.current?.focus()
   }, [setInput])
 
@@ -226,8 +308,9 @@ export function usePromptBar() {
     blurTimeoutRef.current = setTimeout(() => {
       setShowCommandMenu(false)
       setShowMentionMenu(false)
+      hashtagMenu.close()
     }, 150)
-  }, [])
+  }, [hashtagMenu])
 
   // @mention selection: insert @path as text in the textarea, replacing the
   // full mention token (not just up to the cursor) so mid-token edits don't
@@ -467,7 +550,7 @@ export function usePromptBar() {
       chatStore.addUserMessage(display.text, display.attachments, blocks)
     }
     chatStore.startAssistantMessage()
-    agentStore.setStatus('thinking')
+    agentStore.setStatus('awaiting_response')
 
     // Track whether the agent loop ended with an error.
     // Used by executeQueuedInput to stop processing remaining commands.
@@ -511,7 +594,7 @@ export function usePromptBar() {
           appendTextDeltaBuffered(delta)
         },
         onReasoningDelta: (delta) => {
-          agentStore.setStatus('thinking')
+          agentStore.setStatus('reasoning')
           appendReasoningDeltaBuffered(delta)
         },
         onToolCallPending: (toolId, toolName) => {
@@ -524,7 +607,7 @@ export function usePromptBar() {
         },
         onToolResult: (toolId, _toolName, result, isError) => {
           useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
-          agentStore.setStatus('thinking')
+          agentStore.setStatus('awaiting_response')
         },
         onTurnComplete: () => {
           useChatStore.getState().incrementTurnCount()
@@ -583,14 +666,23 @@ export function usePromptBar() {
         },
         onContextCompression: (beforeTokens, signal) => {
           if (signal === 0) {
-            // Compression starting
+            // Compression starting — visible status + system message keep
+            // the user informed that the verbatim history is being summarized.
             agentStore.setStatus('compressing')
             useChatStore.getState().addSystemMessage(
-              `Comprimindo contexto (${Math.round(beforeTokens / 1000)}K tokens)...`
+              `Comprimindo contexto (${Math.round(beforeTokens / 1000)}K tokens)...`,
+              'info',
             )
           } else if (signal === -1) {
-            // Compression complete
-            agentStore.setStatus('thinking')
+            // Compression complete. Emit a claude-vaz-style boundary marker so
+            // the user has a visible checkpoint in the conversation, plus a
+            // note that invoked skills were re-injected (the model recovers
+            // its CRITICAL rules from skillService's invokedSkills map).
+            agentStore.setStatus('awaiting_response')
+            useChatStore.getState().addSystemMessage(
+              `✻ Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens). Skills invocados re-injectados — o agente continua com regras CRITICAL intactas.`,
+              'info',
+            )
           }
         },
       })
@@ -632,8 +724,51 @@ export function usePromptBar() {
     historyIndexRef.current = -1
     savedDraftRef.current = ''
 
-    // Close command menu
+    // Close menus
     setShowCommandMenu(false)
+    hashtagMenu.close()
+
+    // === Hashtag-driven flows: detect skill triggers (e.g. #auth-google,
+    // #design) and route to the specialised flow. Replaces the legacy /auth
+    // slash command. Free-form `#tags` not in the registry are ignored and
+    // pass through to the agent untouched. ===
+    const pre = preprocessHashtags(prompt)
+    if (pre.authProviders.length > 0 || pre.hasDesign) {
+      const projectPath = currentProject?.path
+      if (!projectPath) {
+        useChatStore.getState().setDraftInput('')
+        clearDraftAttachments()
+        useChatStore.getState().addSystemMessage('No project open. Open a project first.')
+        return
+      }
+
+      useChatStore.getState().setDraftInput('')
+      clearDraftAttachments()
+
+      const layout = useLayoutStore.getState()
+      if (layout.viewMode !== 'chat') {
+        layout.setViewMode('chat')
+      }
+
+      // The chat bubble shows the cleaned text (hashtags stripped — they're
+      // routing signals, not content). When the cleaned text is empty (user
+      // typed only the tag), synthesise a short label so the bubble isn't
+      // empty.
+      const labels = [
+        ...pre.authProviders.map(p => p === 'google' ? 'Google sign-in' : 'email/password sign-in'),
+        ...(pre.hasDesign ? ['polished UI'] : []),
+      ]
+      const bubbleText = pre.cleanedText || `Add ${labels.join(' and ')}`
+
+      if (pre.authProviders.length > 0) {
+        // Auth flow handles design augmentation when both are requested.
+        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign)
+      } else {
+        // Design-only flow: lightweight skill injection, no execution sequence.
+        await runDesignFlow(pre.cleanedText, bubbleText)
+      }
+      return
+    }
 
     // === Slash commands: execute directly (never queued) ===
     if (slashCommandRegistry.isSlashCommand(prompt)) {
@@ -782,6 +917,11 @@ export function usePromptBar() {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // #hashtag menu — shared hook returns true when the key was consumed.
+      // Mutually exclusive with the mention menu but listed first to match
+      // the priority enforced by handleInputChange.
+      if (hashtagMenu.handleKeyDown(e)) return
+
       // @mention menu navigation — takes priority when open
       if (showMentionMenu && filteredMentions.length > 0) {
         if (e.key === 'ArrowUp') {
@@ -811,7 +951,7 @@ export function usePromptBar() {
       // ArrowUp: only navigate to previous history if cursor is at the START of text (position 0)
       // ArrowDown: only navigate to next history if cursor is at the END of text
       // Otherwise, let the arrow keys move the cursor normally within the text
-      if (!showCommandMenu && !showMentionMenu && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      if (!showCommandMenu && !showMentionMenu && !hashtagMenu.show && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
         const textarea = textareaRef.current
         if (!textarea) return
 
@@ -916,7 +1056,7 @@ export function usePromptBar() {
         handleSend()
       }
     },
-    [handleSend, showCommandMenu, filteredCommands, selectedCommandIndex, handleCommandSelect, showMentionMenu, filteredMentions, selectedMentionIndex, handleMentionSelect]
+    [handleSend, showCommandMenu, filteredCommands, selectedCommandIndex, handleCommandSelect, showMentionMenu, filteredMentions, selectedMentionIndex, handleMentionSelect, hashtagMenu]
   )
 
   const toggleEditor = useCallback(() => {
@@ -1001,12 +1141,15 @@ export function usePromptBar() {
     showCommandMenu,
     filteredCommands,
     selectedCommandIndex,
+    isArgMode,
     handleCommandSelect,
     // @mention menu
     showMentionMenu,
     filteredMentions,
     selectedMentionIndex,
     handleMentionSelect,
+    // #hashtag menu — shared hook (state + handlers)
+    hashtagMenu,
     // Attachments
     draftAttachments,
     handleAttachFiles,

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TM Code",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "identifier": "com.ithustle.toquemedia-studio",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -27,6 +27,29 @@
     "resources": [
       "resources/templates/**/*",
       "resources/skills/**/*"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["txt", "md", "markdown", "mdx", "log", "rst"],
+        "name": "Text Document",
+        "description": "Open in TM Code",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "js", "jsx", "mjs", "cjs", "ts", "tsx",
+          "html", "htm", "css", "scss", "sass", "less",
+          "json", "yaml", "yml", "toml", "xml", "svg",
+          "py", "rb", "go", "rs", "java", "kt", "swift",
+          "c", "h", "cpp", "hpp", "cc", "cs", "m", "mm",
+          "php", "sh", "bash", "zsh", "fish", "ps1",
+          "sql", "vue", "svelte", "astro", "lua", "dart",
+          "env", "ini", "conf", "config"
+        ],
+        "name": "Source Code",
+        "description": "Open in TM Code",
+        "role": "Editor"
+      }
     ],
     "createUpdaterArtifacts": true,
     "macOS": {

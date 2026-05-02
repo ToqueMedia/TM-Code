@@ -16,6 +16,16 @@ const BACKEND_FILE_MARKERS = [
   'setup.py', 'Pipfile', 'Cargo.toml', 'pom.xml', 'build.gradle',
 ]
 
+// Conventional monorepo subdirectories that may contain their own package.json.
+// Without this, a root package.json with only backend deps (express in root,
+// react/vite isolated in client/package.json) gets misclassified as 'backend'
+// and the IDE always opens HttpClientPanel instead of the iframe preview.
+//
+// Exported because the system prompt instructs the agent to use these exact
+// names when scaffolding monorepos — keeping detector and prompt in lock-step
+// (any change here propagates automatically into the agent's instructions).
+export const MONOREPO_DIRS = ['client', 'server', 'frontend', 'backend', 'web', 'api']
+
 async function fileExists(path: string): Promise<boolean> {
   try {
     await invoke<string>('read_file', { path })
@@ -59,23 +69,76 @@ async function detectFromFiles(projectPath: string): Promise<ProjectCategory | n
   return results.some(Boolean) ? 'backend' : null
 }
 
+function depsFromPackageJson(raw: string | null): { deps: string[]; devDeps: string[] } {
+  if (!raw) return { deps: [], devDeps: [] }
+  try {
+    const pkg = JSON.parse(raw)
+    return {
+      deps: Object.keys(pkg.dependencies || {}),
+      devDeps: Object.keys(pkg.devDependencies || {}),
+    }
+  } catch {
+    return { deps: [], devDeps: [] }
+  }
+}
+
+function workspaceGlobs(raw: string | null): string[] {
+  if (!raw) return []
+  try {
+    const pkg = JSON.parse(raw)
+    const ws = pkg.workspaces
+    if (Array.isArray(ws)) return ws
+    if (ws && Array.isArray(ws.packages)) return ws.packages
+  } catch { /* ignore */ }
+  return []
+}
+
+/**
+ * Aggregate dependency names across the root package.json AND any
+ * sub-package.json found in conventional monorepo directories
+ * (client/, server/, frontend/, backend/, web/, api/) plus yarn-workspace
+ * entries. Without this, a root with only backend deps gets misclassified
+ * as 'backend' even when the frontend lives in client/package.json.
+ */
+async function aggregateMonorepoDeps(projectPath: string, rootRaw: string | null): Promise<{ deps: string[]; devDeps: string[] }> {
+  const root = depsFromPackageJson(rootRaw)
+  const aggregated = { deps: [...root.deps], devDeps: [...root.devDeps] }
+
+  const dirs = new Set<string>(MONOREPO_DIRS)
+  for (const glob of workspaceGlobs(rootRaw)) {
+    // Only handle simple non-glob paths and "<dir>/*" — full glob support
+    // is overkill here. "<dir>/*" expands to convention dirs we already cover.
+    if (!glob.includes('*') && !glob.startsWith('!')) {
+      dirs.add(glob)
+    }
+  }
+
+  await Promise.all(
+    Array.from(dirs).map(async dir => {
+      const sub = await readTextFile(`${projectPath}/${dir}/package.json`)
+      if (sub) {
+        const { deps, devDeps } = depsFromPackageJson(sub)
+        aggregated.deps.push(...deps)
+        aggregated.devDeps.push(...devDeps)
+      }
+    })
+  )
+
+  return aggregated
+}
+
 /**
  * Main entry — cascading detection:
- * 1. package.json deps
+ * 1. package.json deps (aggregated across monorepo sub-packages)
  * 2. Marker files (go.mod, requirements.txt, etc.)
  * 3. Returns 'unknown'
  */
 export async function detectProjectCategory(projectPath: string): Promise<ProjectCategory> {
-  const raw = await readTextFile(`${projectPath}/package.json`)
-  if (raw) {
-    try {
-      const pkg = JSON.parse(raw)
-      const fromDeps = detectFromDeps(
-        Object.keys(pkg.dependencies || {}),
-        Object.keys(pkg.devDependencies || {}),
-      )
-      if (fromDeps) return fromDeps
-    } catch { /* malformed package.json */ }
+  const rootRaw = await readTextFile(`${projectPath}/package.json`)
+  if (rootRaw) {
+    const { deps, devDeps } = await aggregateMonorepoDeps(projectPath, rootRaw)
+    const fromDeps = detectFromDeps(deps, devDeps)
+    if (fromDeps) return fromDeps
   }
 
   const fromFiles = await detectFromFiles(projectPath)

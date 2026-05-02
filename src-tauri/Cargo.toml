@@ -1,6 +1,6 @@
 [package]
 name = "toquemedia-studio"
-version = "0.4.1"
+version = "0.5.0"
 description = "TM Code — The Agent-First IDE"
 authors = ["Toque Media"]
 edition = "2021"
@@ -26,6 +26,7 @@ tauri-plugin-opener = "2"
 # to compile assembly stubs on Windows ARM64.
 tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls"] }
 tauri-plugin-process = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1.0", features = ["v4"] }
@@ -44,6 +45,7 @@ anyhow = "1.0"
 libc = "0.2"
 machine-uid = "0.5"
 sha2 = "0.10"
+base64 = "0.22"
 # Note: hostname intentionally NOT included in the fingerprint inputs (see
 # device.rs). machine-uid alone gives the stability we want without the
 # user-mutable bypass vector.
@@ -53,6 +55,13 @@ nix = { version = "0.29", features = ["signal", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSRunningApplication", "NSView", "NSWindow", "NSResponder"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSRunningApplication", "NSView", "NSWindow", "NSResponder", "NSMenu", "NSMenuItem"] }
 objc2-foundation = { version = "0.3", features = ["NSData"] }
+# Vibrancy via NSVisualEffectView. Tauri-team-maintained; talks to private API
+# already enabled by `macos-private-api` on the tauri crate.
+window-vibrancy = "0.5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Same crate handles Mica (Win 11) / Acrylic (Win 10) on Windows.
+window-vibrancy = "0.5"
 

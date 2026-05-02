@@ -12,8 +12,9 @@ import { useChatStore } from '../stores/chatStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
+import PublishModal from './dialogs/PublishModal'
 import { useTranslation } from '@/i18n'
-import { IS_MAC } from '@/utils/platform'
+import { IS_MAC, IS_LINUX } from '@/utils/platform'
 
 const IssueReporterDialog = lazy(() => import('./dialogs/IssueReporterDialog'))
 
@@ -43,6 +44,9 @@ function MinimalTitleBar() {
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
+  // Publish modal state lives in the layout store so the PreviewView toolbar
+  // can open the same modal without needing a duplicate mount.
+  const publishOpen = useLayoutStore(s => s.isPublishModalOpen)
   const avatarRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 })
@@ -71,6 +75,23 @@ function MinimalTitleBar() {
     return () => window.removeEventListener('app:report-issue', handleOpen)
   }, [])
 
+  // Cmd/Ctrl+Shift+D — open the publish modal when a project is loaded.
+  // Bound to MinimalTitleBar (always-mounted) so the shortcut works in every
+  // view mode, not just the (now unused) full TitleBar.
+  useEffect(function () {
+    function onKey(e: KeyboardEvent) {
+      const meta = IS_MAC ? e.metaKey : e.ctrlKey
+      if (meta && e.shiftKey && (e.key === 'd' || e.key === 'D')) {
+        if (currentProject) {
+          e.preventDefault()
+          useLayoutStore.getState().setPublishModalOpen(true)
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [currentProject])
+
   // Close menu on outside click
   useEffect(() => {
     if (!showUserMenu) return
@@ -91,9 +112,11 @@ function MinimalTitleBar() {
 
   const statusConfig: Record<string, { color: string; label: string }> = {
     idle: { color: tokens.colors.accent.green, label: t('titlebar.ready') },
-    thinking: { color: tokens.colors.toolCall.runningText, label: t('titlebar.thinking') },
+    awaiting_response: { color: tokens.colors.toolCall.runningText, label: t('titlebar.awaitingResponse') },
+    reasoning: { color: tokens.colors.accent.purple, label: t('titlebar.reasoning') },
     generating: { color: tokens.colors.accent.primary, label: t('titlebar.generating') },
     applying: { color: tokens.colors.accent.purple, label: t('titlebar.applying') },
+    compressing: { color: tokens.colors.accent.orange, label: t('titlebar.compressing') },
     error: { color: tokens.colors.accent.red, label: t('titlebar.error') },
   }
 
@@ -163,14 +186,18 @@ function MinimalTitleBar() {
   return (
     <Box
       height="35px"
-      bg={tokens.colors.dialog.bg}
+      // Translucent over the native NSVisualEffectView (macOS) / Mica/Acrylic
+      // (Windows) installed by lib.rs::run().setup. Linux has no platform
+      // vibrancy via window-vibrancy, so we keep the previous CSS backdrop
+      // blur there — it's not equivalent to native, but better than a flat bar.
+      bg={IS_MAC ? 'rgba(15, 15, 15, 0.55)' : tokens.colors.dialog.bg}
+      backdropFilter={IS_LINUX ? 'blur(10px)' : undefined}
       borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
       display="flex"
       alignItems="center"
       px={2}
       position="relative"
       userSelect="none"
-      backdropFilter="blur(10px)"
       flexShrink={0}
       data-tauri-drag-region
       onMouseDown={handleMouseDown}
@@ -201,8 +228,10 @@ function MinimalTitleBar() {
       {/* Center spacer */}
       <Flex flex={1} />
 
-      {/* Right: Agent status + User identity */}
-      <HStack gap={3} flexShrink={0} pr={1}>
+      {/* Right: Agent status + User identity. The Publish button still lives
+          in the PreviewView toolbar and the Cmd/Ctrl+Shift+D shortcut keeps
+          working — both routes open the same modal via layoutStore. */}
+      <HStack gap={3} flexShrink={0} pr={1} data-tauri-drag-region="false">
         {/* Agent status */}
         <HStack gap={1.5}>
           <Box
@@ -371,6 +400,11 @@ function MinimalTitleBar() {
           onClose={() => setShowIssueReporter(false)}
         />
       </Suspense>
+
+      {/* Publish modal — controlled by the Publish button above and the
+          Cmd/Ctrl+Shift+D shortcut. Mounted here so it survives view mode
+          changes (chat → preview → editor) without unmounting mid-deploy. */}
+      <PublishModal isOpen={publishOpen} onClose={function () { useLayoutStore.getState().setPublishModalOpen(false) }} />
     </Box>
   )
 }

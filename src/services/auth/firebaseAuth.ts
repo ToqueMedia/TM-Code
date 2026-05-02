@@ -20,6 +20,7 @@ import {
   doc,
   getDoc,
   setDoc,
+  onSnapshot,
   Timestamp,
 } from 'firebase/firestore'
 import {
@@ -178,6 +179,7 @@ class FirebaseAuthService {
   private static instance: FirebaseAuthService
   private currentUser: User | null = null
   private unsubscribeAuth: (() => void) | null = null
+  private unsubscribeUserDoc: (() => void) | null = null
   private lastBillingFetchMs = 0
   private authGeneration = 0
   /**
@@ -211,6 +213,7 @@ class FirebaseAuthService {
         store.setUser(null)
         useBillingStore.getState().reset()
         this.lastBillingFetchMs = 0 // allow immediate fetch on next login
+        this.unsubscribeUserDocListener()
         return
       }
 
@@ -277,7 +280,54 @@ class FirebaseAuthService {
         if (gate) gate.then(kickBilling).catch(kickBilling)
         else kickBilling()
       }
+
+      // Real-time listener for plan/quota changes on the user document.
+      // Mirrors toquemedia-studio AuthContext:191-238 — when an admin updates
+      // tokenBudget, userPlan, or extraUsageBalance in Firestore, the listener
+      // fires and we refetch /v1/me so the cycle counters and computed pct
+      // (which depend on plan caps the client doesn't know) reflect the new
+      // server-side state. Without this, admin changes only surface on next
+      // window-focus, network reconnect, or chat turn.
+      this.subscribeToUserDoc(user.uid)
     })
+  }
+
+  /**
+   * Attach an onSnapshot listener to users/{uid}. Skips the first snapshot
+   * (initial doc state — already loaded via /v1/me from onAuthStateChanged).
+   * Subsequent snapshots trigger a /v1/me refetch with the throttle bypass:
+   * any admin write to the user doc surfaces in the UI within ~1s.
+   */
+  private subscribeToUserDoc(uid: string): void {
+    this.unsubscribeUserDocListener()
+
+    let firstSnapshot = true
+    const expectedGen = this.authGeneration
+    this.unsubscribeUserDoc = onSnapshot(
+      doc(getFirebaseDb(), COLLECTIONS.USERS, uid),
+      (snap) => {
+        if (expectedGen !== this.authGeneration) return // stale listener
+        if (firstSnapshot) {
+          firstSnapshot = false
+          return
+        }
+        if (!snap.exists()) return
+        // Update the throttle stamp so onAuthStateChanged's token-refresh
+        // path doesn't redundantly refetch within the next 5 minutes.
+        this.lastBillingFetchMs = Date.now()
+        this.fetchBillingInfo(expectedGen).catch(() => {})
+      },
+      (err) => {
+        console.warn('[billing] user-doc listener error:', err)
+      }
+    )
+  }
+
+  private unsubscribeUserDocListener(): void {
+    if (this.unsubscribeUserDoc) {
+      this.unsubscribeUserDoc()
+      this.unsubscribeUserDoc = null
+    }
   }
 
   dispose(): void {
@@ -285,6 +335,7 @@ class FirebaseAuthService {
       this.unsubscribeAuth()
       this.unsubscribeAuth = null
     }
+    this.unsubscribeUserDocListener()
   }
 
   private async loadProfile(uid: string) {

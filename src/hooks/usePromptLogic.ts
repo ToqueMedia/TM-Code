@@ -14,6 +14,10 @@ export function usePromptLogic() {
   const [showCommandMenu, setShowCommandMenu] = useState(false)
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([])
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0)
+  // True when the menu is showing argument suggestions (after `<cmd> `) vs.
+  // command-name suggestions. Drives the footer hint that tells the user
+  // they can keep typing free-form instructions after picking args.
+  const [isArgMode, setIsArgMode] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -30,21 +34,74 @@ export function usePromptLogic() {
   const handleInputChange = useCallback((value: string) => {
     setInput(value)
 
-    // Only show command menu when typing the command itself (no space yet = no args)
-    const firstWord = value.split(' ')[0]
+    // Mode 1: typing the command name itself (no space) → suggest commands
     if (value.startsWith('/') && !value.includes(' ')) {
+      const firstWord = value.split(' ')[0]
       const commands = slashCommandRegistry.filterCommands(firstWord)
       setFilteredCommands(commands)
       setShowCommandMenu(commands.length > 0)
       setSelectedCommandIndex(0)
-    } else {
-      setShowCommandMenu(false)
+      setIsArgMode(false)
+      return
     }
+
+    // Mode 2: typed `<known-cmd> [partial]` → suggest argument values. Each
+    // selection appends the value with a trailing space so the menu can
+    // re-trigger for the next arg in a chain.
+    const argResult = slashCommandRegistry.getArgSuggestions(value)
+    if (argResult) {
+      const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({
+        name: arg.value,
+        description: arg.description,
+        enabled: true,
+        execute: async () => {}, // pick handled by handleCommandSelect
+      }))
+      setFilteredCommands(argItems)
+      setShowCommandMenu(true)
+      setSelectedCommandIndex(0)
+      setIsArgMode(true)
+      return
+    }
+
+    setShowCommandMenu(false)
+    setIsArgMode(false)
   }, [])
 
   const handleCommandSelect = useCallback((command: SlashCommand) => {
-    setInput(command.name + ' ')
-    setShowCommandMenu(false)
+    setInput(prev => {
+      // Arg mode: replace the trailing partial word with the picked value
+      // (preserving the command name and any previously-committed args).
+      // Command mode: replace the whole buffer with `<cmd> ` so the user
+      // can start typing args immediately.
+      let nextValue: string
+      if (prev.includes(' ')) {
+        const lastSpaceIdx = prev.lastIndexOf(' ')
+        const prefix = prev.slice(0, lastSpaceIdx + 1)
+        nextValue = prefix + command.name + ' '
+      } else {
+        nextValue = command.name + ' '
+      }
+      // Re-evaluate menu state for the new value so chained arg picks
+      // (`email-password` then `google`) auto-open the next round of
+      // suggestions without the user having to backspace and retype.
+      const argResult = slashCommandRegistry.getArgSuggestions(nextValue)
+      if (argResult) {
+        const argItems: SlashCommand[] = argResult.suggestions.map(arg => ({
+          name: arg.value,
+          description: arg.description,
+          enabled: true,
+          execute: async () => {},
+        }))
+        setFilteredCommands(argItems)
+        setShowCommandMenu(true)
+        setSelectedCommandIndex(0)
+        setIsArgMode(true)
+      } else {
+        setShowCommandMenu(false)
+        setIsArgMode(false)
+      }
+      return nextValue
+    })
     textareaRef.current?.focus()
   }, [])
 
@@ -152,6 +209,7 @@ export function usePromptLogic() {
     showCommandMenu,
     filteredCommands,
     selectedCommandIndex,
+    isArgMode,
     textareaRef,
     isStreaming,
     canSend,

@@ -176,6 +176,58 @@ fn open_preview_webview(
                     }
                     _send('error', parts.join(' '));
                 };
+
+                // Proactive Google Identity Services (GIS) probe.
+                //
+                // GIS in iframes often fails *silently* — FedCM blocks the
+                // button, no console error fires, the developer clicks and
+                // nothing happens. To surface this BEFORE the click, we watch
+                // for the GIS script-tag being added to the DOM. If we see
+                // it AND we're inside an iframe, fire a one-shot signal so
+                // the IDE can show a friendly toast preemptively.
+                //
+                // We only fire once per page load — the IDE's React side has
+                // its own dedup that resets per preview-reload.
+                var _gisDetected = false;
+                var _isInIframe = (function() {
+                    try { return window.self !== window.top; }
+                    catch (_) { return true; } /* cross-origin parent → in iframe */
+                })();
+
+                var _checkForGis = function() {
+                    if (_gisDetected || !_isInIframe) return;
+                    var scripts = document.getElementsByTagName('script');
+                    for (var i = 0; i < scripts.length; i++) {
+                        var src = scripts[i].src || '';
+                        if (src.indexOf('accounts.google.com/gsi/client') !== -1) {
+                            _gisDetected = true;
+                            try {
+                                window.ipc.postMessage(JSON.stringify({ type: 'gis-detected' }));
+                            } catch(_) {}
+                            return;
+                        }
+                    }
+                };
+
+                // Initial pass after DOM is ready
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', _checkForGis);
+                } else {
+                    _checkForGis();
+                }
+                // Also observe future script additions (SPA routes, lazy loads)
+                if (window.MutationObserver) {
+                    var _mo = new MutationObserver(function() { _checkForGis(); });
+                    var _moStart = function() {
+                        if (document.body) _mo.observe(document.body, { childList: true, subtree: true });
+                    };
+                    if (document.body) _moStart();
+                    else document.addEventListener('DOMContentLoaded', _moStart);
+                    // Stop observing once we've fired (no need to keep watching)
+                    var _stopWhenDetected = setInterval(function() {
+                        if (_gisDetected) { _mo.disconnect(); clearInterval(_stopWhenDetected); }
+                    }, 1000);
+                }
             })();
         "#)
         // IPC handler: receives console messages from the preview JS.
@@ -184,26 +236,42 @@ fn open_preview_webview(
         // because the wry IPC closure doesn't have access to Tauri's Emitter trait.
         .with_ipc_handler(move |request| {
             let body = request.body();
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) {
-                if msg.get("type").and_then(|t| t.as_str()) == Some("console") {
-                    let level = msg.get("level").and_then(|l| l.as_str()).unwrap_or("error");
-                    let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                    if !text.is_empty() {
-                        // Escape for JS string literal (backslash, quotes, newlines)
-                        let safe_text = text
-                            .replace('\\', "\\\\")
-                            .replace('\'', "\\'")
-                            .replace('\n', "\\n")
-                            .replace('\r', "");
-                        let safe_level = level.replace('\'', "\\'");
-                        if let Some(win) = app_for_ipc.get_webview_window("main") {
-                            let _ = win.eval(format!(
-                                "window.dispatchEvent(new CustomEvent('preview-console',{{detail:{{level:'{}',text:'{}'}}}}));",
-                                safe_level, safe_text
-                            ));
-                        }
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let msg_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            match msg_type {
+                "console" => {
+                    let level = parsed.get("level").and_then(|l| l.as_str()).unwrap_or("error");
+                    let text = parsed.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if text.is_empty() { return; }
+                    // Escape for JS string literal (backslash, quotes, newlines)
+                    let safe_text = text
+                        .replace('\\', "\\\\")
+                        .replace('\'', "\\'")
+                        .replace('\n', "\\n")
+                        .replace('\r', "");
+                    let safe_level = level.replace('\'', "\\'");
+                    if let Some(win) = app_for_ipc.get_webview_window("main") {
+                        let _ = win.eval(format!(
+                            "window.dispatchEvent(new CustomEvent('preview-console',{{detail:{{level:'{}',text:'{}'}}}}));",
+                            safe_level, safe_text
+                        ));
                     }
                 }
+                "gis-detected" => {
+                    // Proactive signal from the in-preview probe: GIS script
+                    // detected inside an iframe context. The IDE's listener
+                    // will show a friendly toast pre-warning the developer.
+                    if let Some(win) = app_for_ipc.get_webview_window("main") {
+                        let _ = win.eval(
+                            "window.dispatchEvent(new CustomEvent('preview-gis-detected'));"
+                        );
+                    }
+                }
+                _ => {}
             }
         })
         .with_asynchronous_custom_protocol("tmpreview".into(), move |_webview_id, request, responder| {
@@ -326,6 +394,12 @@ fn resize_preview_webview(
 }
 
 /// Raw HTTP GET via TcpStream — bypasses reqwest issues with localhost.
+///
+/// Connection strategy: try IPv4 first, fall back to IPv6 ([::1]). Node 18+
+/// frameworks (Vite, Next without --host) bind to localhost which resolves
+/// to ::1 only, so a v4-pinned proxy_target hits "connection refused" even
+/// though the server is up. The fallback rescues that case without making
+/// the agent re-write its dev scripts.
 fn raw_http_get(
     host_port: &str,
     path: &str,
@@ -333,9 +407,38 @@ fn raw_http_get(
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    // Use ToSocketAddrs to resolve "localhost" → [::1] or 127.0.0.1
-    let mut stream =
-        TcpStream::connect(host_port).map_err(|e| format!("Connection refused: {}", e))?;
+    let v4_err = match TcpStream::connect(host_port) {
+        Ok(s) => {
+            return raw_http_get_with_stream(s, host_port, path);
+        }
+        Err(e) => format!("{}", e),
+    };
+
+    // IPv4 (or proxy_target's chosen host) refused. Retry against [::1] —
+    // this is the common Node 18+ "localhost binds IPv6-only" case.
+    let v6_target = if let Some(rest) = host_port.strip_prefix("127.0.0.1:") {
+        format!("[::1]:{}", rest)
+    } else if let Some(rest) = host_port.strip_prefix("localhost:") {
+        format!("[::1]:{}", rest)
+    } else {
+        return Err(format!("Connection refused: {}", v4_err));
+    };
+
+    let stream = TcpStream::connect(&v6_target)
+        .map_err(|e| format!("Connection refused (tried v4 + [::1]): v4={}, v6={}", v4_err, e))?;
+    raw_http_get_with_stream(stream, host_port, path)
+}
+
+/// Inner helper that performs the actual GET on an already-connected stream.
+/// Lets `raw_http_get` retry against an alternative address (IPv4 → IPv6)
+/// without duplicating the request/parse boilerplate.
+fn raw_http_get_with_stream(
+    mut stream: std::net::TcpStream,
+    host_port: &str,
+    path: &str,
+) -> std::result::Result<(u16, String, Vec<u8>), String> {
+    use std::io::{Read, Write};
+
     stream
         .set_write_timeout(Some(std::time::Duration::from_secs(3)))
         .ok();
@@ -388,6 +491,92 @@ fn raw_http_get(
     Ok((status, content_type, body))
 }
 
+/// Reveal the main window once the SPA has mounted, and close the splash
+/// window. Idempotent — calling it after the safety timeout already
+/// transitioned is harmless.
+#[tauri::command]
+fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
+    if let Some(splash) = app.get_webview_window("splash") {
+        let _ = splash.close();
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        win.show().map_err(|e| format!("show failed: {}", e))?;
+        win.set_focus().map_err(|e| format!("focus failed: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Files queued by the OS for opening (file association: "Open with TM Code"
+/// from Finder/Explorer/Nautilus, or by drag-dropping a file onto the dock
+/// icon). The frontend drains this on mount and listens for the live
+/// `open-file-with-app` event for opens that happen after the SPA is up.
+static PENDING_OPEN_FILES: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+fn pending_open_files() -> &'static std::sync::Mutex<Vec<String>> {
+    PENDING_OPEN_FILES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[tauri::command]
+fn take_pending_open_files() -> Vec<String> {
+    pending_open_files()
+        .lock()
+        .map(|mut v| v.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// Cheap path-is-directory probe. Used by the file-drop handler to tell a
+/// folder drop (open as project) from a file drop (likely an image targeted
+/// at the prompt — handled by the HTML5 path). Doesn't validate suitability,
+/// so it's faster than `validate_project_path` and the contract is clearer.
+#[tauri::command]
+fn is_directory(path: String) -> bool {
+    std::path::Path::new(&path).is_dir()
+}
+
+/// AppHandle stash for the macOS dock menu handler. The handler is an
+/// Objective-C object whose selector methods can't take Rust closures or
+/// Tauri's State<T>, so the handle has to live in a static. Wrapped in
+/// OnceLock for thread-safe one-time init.
+#[cfg(target_os = "macos")]
+static DOCK_APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+/// Custom NSObject that backs the dock menu items. Its two selectors
+/// (`openFolder:` and `openFile:`) emit a `native-menu` CustomEvent into
+/// the main webview, identical to the one the menu bar uses — so the
+/// existing `useNativeMenu` hook handles both routes with no extra wiring.
+#[cfg(target_os = "macos")]
+mod dock {
+    use objc2::define_class;
+    use objc2::runtime::{AnyObject, NSObject};
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[name = "TmDockHandler"]
+        pub struct DockHandler;
+
+        impl DockHandler {
+            #[unsafe(method(openFolder:))]
+            fn _open_folder(&self, _sender: *mut AnyObject) {
+                emit_native_menu("open-folder");
+            }
+
+            #[unsafe(method(openFile:))]
+            fn _open_file(&self, _sender: *mut AnyObject) {
+                emit_native_menu("open-file");
+            }
+        }
+    );
+
+    fn emit_native_menu(id: &str) {
+        let Some(handle) = super::DOCK_APP_HANDLE.get() else { return };
+        let Some(window) = tauri::Manager::get_webview_window(handle, "main") else { return };
+        // Safe: id values are hard-coded above, no escaping needed.
+        let _ = window.eval(format!(
+            "window.dispatchEvent(new CustomEvent('native-menu', {{ detail: {{ id: '{}' }} }}))",
+            id
+        ));
+    }
+}
+
 /// Domains allowed to open as popup windows (OAuth flows).
 fn is_oauth_domain(host: &str) -> bool {
     host.contains("google.com")
@@ -429,6 +618,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Serve app via HTTP localhost instead of tauri:// protocol.
         // This allows iframes to load other HTTP origins (dev server previews)
@@ -436,6 +626,29 @@ pub fn run() {
         // Port 14300 — TM Code specific. Avoids conflict with common dev ports.
         .plugin(tauri_plugin_localhost::Builder::new(14300).build())
         .setup(move |app| {
+            // ── File-association launch args ───────────────────────────
+            // On Windows/Linux, "Open with TM Code" launches the binary
+            // with file paths in argv[1..]. macOS routes these through
+            // RunEvent::Opened (handled in `run` callback below) instead.
+            // We collect all paths here and let the frontend drain via
+            // `take_pending_open_files` once React mounts.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                let paths: Vec<String> = args
+                    .into_iter()
+                    .filter(|a| {
+                        let p = std::path::Path::new(a);
+                        p.exists() && p.is_file()
+                    })
+                    .collect();
+                if !paths.is_empty() {
+                    if let Ok(mut buf) = pending_open_files().lock() {
+                        buf.extend(paths);
+                    }
+                }
+            }
+
             // Load app icon from embedded PNG
             let icon = Image::from_bytes(include_bytes!("../icons/128x128@2x.png"))
                 .expect("Failed to load app icon");
@@ -461,6 +674,48 @@ pub fn run() {
                     }
                 }
             }
+
+            // ── Splashscreen window ────────────────────────────────────
+            // Loads `/splash.html` (a static file served by Vite in dev /
+            // tauri-plugin-localhost in prod). It's pure HTML+CSS — no SPA
+            // bundle — so it paints in <100ms while the React tree spins up
+            // in the (hidden) main window. Closed by the `app_ready` command
+            // once React has mounted; force-closed by the 5s failsafe below
+            // if `app_ready` never fires.
+            #[cfg(dev)]
+            let splash_url = WebviewUrl::External(
+                "http://localhost:1420/splash.html".parse().unwrap()
+            );
+            #[cfg(not(dev))]
+            let splash_url = WebviewUrl::External(
+                "http://localhost:14300/splash.html".parse().unwrap()
+            );
+
+            #[allow(unused_mut)]
+            let mut splash_builder = WebviewWindowBuilder::new(app, "splash", splash_url)
+                .title("TM Code")
+                .inner_size(360.0, 200.0)
+                .resizable(false)
+                .decorations(false)
+                .center()
+                .skip_taskbar(true)
+                .always_on_top(false)
+                .visible(true);
+
+            #[cfg(target_os = "macos")]
+            {
+                splash_builder = splash_builder.transparent(true);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                use tauri::utils::config::Color;
+                splash_builder = splash_builder.background_color(Color(10, 10, 10, 255));
+            }
+
+            let _splash = splash_builder.build()?;
+            // No vibrancy on the splash — it lives <2s and the radial-gradient
+            // background in splash.html reads well on its own. Allocating an
+            // NSVisualEffectView for that lifetime is wasted work.
 
             // ── Native macOS menu bar ──────────────────────────────────
             #[cfg(target_os = "macos")]
@@ -582,6 +837,61 @@ pub fn run() {
                         ));
                     }
                 });
+
+                // ── Dock menu (right-click on dock icon) ───────────────
+                // macOS users expect this. Two items: Open Folder… and
+                // Open File…, both reusing the same `native-menu` event
+                // channel as the menu bar. NSApp.setDockMenu: is the
+                // documented way; we go through msg_send! because objc2-app-kit
+                // doesn't expose this single setter directly.
+                {
+                    use objc2::{msg_send, sel, AllocAnyThread};
+                    use objc2::rc::Retained;
+                    use objc2::MainThreadOnly;
+                    use objc2::runtime::AnyObject;
+                    use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
+                    use objc2_foundation::NSString;
+
+                    let _ = DOCK_APP_HANDLE.set(app.handle().clone());
+
+                    if let Some(mtm) = objc2::MainThreadMarker::new() {
+                        let handler: Retained<dock::DockHandler> = unsafe {
+                            let alloc = dock::DockHandler::alloc();
+                            msg_send![alloc, init]
+                        };
+
+                        let menu = NSMenu::new(mtm);
+
+                        let make_item = |title: &str, action: objc2::runtime::Sel| -> Retained<NSMenuItem> {
+                            unsafe {
+                                let title_ns = NSString::from_str(title);
+                                let key = NSString::from_str("");
+                                let alloc = NSMenuItem::alloc(mtm);
+                                let item: Retained<NSMenuItem> = msg_send![
+                                    alloc,
+                                    initWithTitle: &*title_ns,
+                                    action: action,
+                                    keyEquivalent: &*key
+                                ];
+                                let target_ref: &AnyObject = &*(Retained::as_ptr(&handler) as *const AnyObject);
+                                item.setTarget(Some(target_ref));
+                                item
+                            }
+                        };
+
+                        menu.addItem(&make_item("Open Folder…", sel!(openFolder:)));
+                        menu.addItem(&make_item("Open File…", sel!(openFile:)));
+
+                        let ns_app = NSApplication::sharedApplication(mtm);
+                        unsafe {
+                            let _: () = msg_send![&*ns_app, setDockMenu: &*menu];
+                        }
+
+                        // The handler must outlive the menu — leak so it
+                        // sticks around for the app's lifetime.
+                        std::mem::forget(handler);
+                    }
+                }
             }
 
             // Create main window.
@@ -618,7 +928,33 @@ pub fn run() {
                 .expect("Failed to set window icon")
                 .inner_size(1250.0, 850.0)
                 .min_inner_size(900.0, 600.0)
-                .decorations(false);
+                .decorations(false)
+                // Start hidden — the React entry, on first mount, calls the
+                // `app_ready` command which shows the window. This eliminates
+                // the visible flash of an empty (vibrancy-only on macOS, dark
+                // on Win/Linux) frame while the SPA mounts.
+                //
+                // Safety: a 5s tokio timeout below force-shows the window if
+                // the frontend never reports ready (render crashed before
+                // useEffect ran). Without it the window would stay hidden
+                // forever.
+                //
+                // The earlier attempt that used double-rAF in main.tsx didn't
+                // work: WKWebView throttles requestAnimationFrame when the
+                // hosting NSWindow is hidden (Page Visibility API reports
+                // "hidden"), so the show() callback never fired. React's
+                // useEffect runs on the microtask queue regardless of visibility.
+                .visible(false)
+                // Force the *window* appearance to Dark regardless of OS
+                // preference. The TM Code UI is dark-only; without this, in
+                // macOS Light mode the traffic lights, native menu bar items,
+                // and the NSVisualEffectView material all render in their
+                // light variants and clash with the rest of the chrome. On
+                // Windows this drives DwmSetWindowAttribute(USE_IMMERSIVE_DARK_MODE)
+                // so the title bar and Mica also stay dark. If a light theme
+                // is ever added, swap this for None and listen to the
+                // `theme-changed` event on the window.
+                .theme(Some(tauri::Theme::Dark));
 
             #[cfg(target_os = "macos")]
             {
@@ -705,6 +1041,91 @@ pub fn run() {
                     }
                 })
                 .build()?;
+
+            // ── Native window vibrancy ───────────────────────────────────
+            // macOS:    NSVisualEffectView under the WKWebView → blur of
+            //           wallpaper/windows behind. Material `HudWindow` reads
+            //           well in dark themes and respects the active/inactive
+            //           state automatically.
+            // Windows:  Mica on Win 11 (matches title bar), falls back to
+            //           Acrylic on Win 10. apply_mica returns Err on
+            //           unsupported builds — we silently ignore.
+            // Linux:    no equivalent; skipped.
+            //
+            // Vibrancy is only visible where the DOM is transparent. The body
+            // already has `background-color: transparent` (see theme.ts), so
+            // any region whose React component has a non-opaque bg will let
+            // the vibrancy through.
+            #[cfg(target_os = "macos")]
+            {
+                let main_window = app.get_webview_window("main")
+                    .ok_or("main window missing for vibrancy")?;
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+                let _ = apply_vibrancy(
+                    &main_window,
+                    NSVisualEffectMaterial::HudWindow,
+                    Some(NSVisualEffectState::Active),
+                    None,
+                );
+
+                // Native rounded window corners. With decorations(false) +
+                // transparent(true), AppKit doesn't round the window for us
+                // — the canonical fix is layer-backing the contentView and
+                // setting CALayer.cornerRadius. masksToBounds clips the
+                // WKWebView subview to the rounded shape. Tauri 2 doesn't
+                // expose corner_radius on the builder yet, so we go through
+                // objc2. Using msg_send! for the layer call avoids pulling
+                // in objc2-quartz-core just for two setters.
+                if let Ok(ns_window_ptr) = main_window.ns_window() {
+                    use objc2::msg_send;
+                    use objc2::runtime::AnyObject;
+                    unsafe {
+                        let ns_win = &*(ns_window_ptr as *const objc2_app_kit::NSWindow);
+                        if let Some(content_view) = ns_win.contentView() {
+                            content_view.setWantsLayer(true);
+                            let layer: *mut AnyObject = msg_send![&*content_view, layer];
+                            if !layer.is_null() {
+                                let _: () = msg_send![layer, setCornerRadius: 10.0_f64];
+                                let _: () = msg_send![layer, setMasksToBounds: true];
+                            }
+                        }
+                    }
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let main_window = app.get_webview_window("main")
+                    .ok_or("main window missing for vibrancy")?;
+                use window_vibrancy::{apply_mica, apply_acrylic};
+                // Mica is Win 11+. apply_mica errors on Win 10; we then try
+                // Acrylic which is supported back to Win 10 1809.
+                if apply_mica(&main_window, Some(true)).is_err() {
+                    let _ = apply_acrylic(&main_window, Some((18, 18, 18, 125)));
+                }
+            }
+
+            // ── Splash safety timeout ──────────────────────────────────
+            // The frontend's `app_ready` invoke is the primary signal to
+            // close splash + show main. If React never mounts (crash,
+            // infinite loop, missing chunk) we'd be stuck on the splash
+            // forever. After 15s — long enough for slow hardware on first
+            // cold start with empty cache, short enough that the user
+            // notices a hang — force the transition and log a warning;
+            // the ErrorBoundary in the main window then surfaces whatever
+            // went wrong instead of leaving the user with a frozen splash.
+            let app_handle_for_failsafe = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                if let Some(win) = app_handle_for_failsafe.get_webview_window("main") {
+                    if let Ok(false) = win.is_visible() {
+                        eprintln!("[splash] failsafe: 5s elapsed without app_ready — forcing show");
+                        if let Some(splash) = app_handle_for_failsafe.get_webview_window("splash") {
+                            let _ = splash.close();
+                        }
+                        let _ = win.show();
+                    }
+                }
+            });
 
             Ok(())
         })
@@ -796,6 +1217,8 @@ pub fn run() {
             copy_directory,
             scaffold_template,
             glob_files,
+            write_env_vars,
+            collect_deploy_bundle,
             list_skills_bundled,
             read_skill_content,
             mcp_start_server,
@@ -836,8 +1259,37 @@ pub fn run() {
             close_preview_webview,
             resize_preview_webview,
             get_app_version,
-            get_device_fingerprint
+            get_device_fingerprint,
+            app_ready,
+            take_pending_open_files,
+            is_directory
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // RunEvent::Opened fires when the OS asks the running app to open
+            // a file (macOS Apple Events from "Open With", drag-drop on dock,
+            // re-launch via Finder while the app is already running). On Win/
+            // Linux this same case is the env::args path read in setup().
+            if let tauri::RunEvent::Opened { urls } = event {
+                let new_paths: Vec<String> = urls
+                    .iter()
+                    .filter(|u| u.scheme() == "file")
+                    .filter_map(|u| u.to_file_path().ok())
+                    .filter_map(|p| p.into_os_string().into_string().ok())
+                    .collect();
+
+                if !new_paths.is_empty() {
+                    // Buffer for cold-start drain by frontend.
+                    if let Ok(mut buf) = pending_open_files().lock() {
+                        buf.extend(new_paths.iter().cloned());
+                    }
+                    // Live event for the already-running case (frontend has
+                    // its listener attached). On cold start the listener
+                    // isn't there yet, so the buffer is the source of truth
+                    // — frontend's `take_pending_open_files` invoke drains it.
+                    let _ = app_handle.emit("open-file-with-app", new_paths);
+                }
+            }
+        });
 }

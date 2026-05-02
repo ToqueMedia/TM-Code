@@ -89,28 +89,26 @@ export type ClassifyAction =
 /**
  * Pure classifier: decide what assignments to apply given a probed URL.
  *
- * TM Code's port convention is AUTHORITATIVE for fullstack projects:
- *   7773 = frontend (iframe preview)
- *   7777 = backend (HTTP Client)
- *
- * Content-Type is informational, used as a tiebreaker for monolithic
- * fullstack detection (a single URL on 7773 that serves HTML + API routes:
- * Next.js, SvelteKit, Remix).
+ * Content-type drives classification. The model picks ports naturally
+ * (Vite=5173, Next=3000, Express=whatever) — the IDE detects URLs from
+ * dev-server logs and assigns them by what they SERVE, not by which port
+ * they happen to be on.
  *
  * Rules per projectKind:
  *
- *   fullstack:
- *     - url on frontend port: → frontendUrl. If content-type is 'html',
- *       also mirror to backendUrl (covers monolithic case). The mirror is
- *       overwritten later if a real URL on the backend port arrives.
- *     - url on backend port: → backendUrl (real, not mirrored). Even if
- *       it serves HTML (Express fallback, Vite build, etc.) — port wins
- *       over content-type. NEVER classify a 7777 URL as frontend.
- *     - url on any other port: ignored. TM Code's reserved ports are the
- *       only valid surfaces for fullstack.
+ *   frontend: first detected URL → frontendUrl.
+ *   backend:  first detected URL → backendUrl.
  *
- *   frontend: first detected URL → frontendUrl (port-agnostic).
- *   backend:  first detected URL → backendUrl (port-agnostic).
+ *   fullstack:
+ *     - HTML response → frontendUrl. If no real backend yet, also mirror
+ *       to backendUrl (covers monolithic case: Next.js / SvelteKit /
+ *       Remix serving HTML + API from one URL). The mirror is overwritten
+ *       later if a real JSON URL arrives.
+ *     - JSON / other response → backendUrl (real, not mirrored).
+ *     - Optional `frontendPortHint`: if a probed URL matches the hinted
+ *       port, force-classify it as frontend regardless of content-type.
+ *       Use this when probe is inconclusive (e.g., both servers happen to
+ *       respond with text/html, or content-type isn't reliable).
  *
  * Returns a list of actions in application order. An empty list means no-op.
  */
@@ -118,17 +116,11 @@ export function classifyProbedUrl(
   url: string,
   kind: ProbeKind,
   slot: ClassifySlotState,
-  backendPort: number,
-  frontendPort: number = 7773,
+  frontendPortHint?: number,
 ): ClassifyAction[] {
-  const portMatch = url.match(/:(\d+)/)
-  const port = portMatch ? parseInt(portMatch[1], 10) : 0
-
+  // Single-kind projects: first URL wins, port-agnostic.
   if (slot.projectKind === 'frontend') {
-    if (!slot.frontendUrl) {
-      return [{ type: 'assignFrontend', url }]
-    }
-    return []
+    return slot.frontendUrl ? [] : [{ type: 'assignFrontend', url }]
   }
 
   if (slot.projectKind === 'backend') {
@@ -138,28 +130,33 @@ export function classifyProbedUrl(
     return []
   }
 
-  // projectKind === 'fullstack' — port is authoritative
-  if (port === frontendPort) {
+  // projectKind === 'fullstack' — content-type drives, hint overrides
+  const portMatch = url.match(/:(\d+)/)
+  const port = portMatch ? parseInt(portMatch[1], 10) : 0
+  const hintMatched = frontendPortHint !== undefined && port === frontendPortHint
+
+  // HTML response, OR explicit hint match → frontend (with monolithic mirror).
+  if (kind === 'html' || hintMatched) {
     const actions: ClassifyAction[] = []
     if (!slot.frontendUrl) {
       actions.push({ type: 'assignFrontend', url })
     }
-    // Monolithic hint: if HTML, mirror to backend (unless a real backend is set).
+    // Monolithic case: HTML response + no real backend yet → mirror.
     if (kind === 'html' && (!slot.backendUrl || slot.backendUrlMirrored)) {
       actions.push({ type: 'assignBackend', url, mirrored: true })
     }
     return actions
   }
 
-  if (port === backendPort) {
-    // Port wins over content-type. Even if Express serves HTML here, it's
-    // the BACKEND by convention.
+  // JSON or other (non-HTML) → backend.
+  if (kind === 'json' || kind === 'other') {
     if (!slot.backendUrl || slot.backendUrlMirrored) {
       return [{ type: 'assignBackend', url, mirrored: false }]
     }
     return []
   }
 
-  // Unknown port in fullstack — ignore.
+  // kind === null (probe inconclusive) — skip; another URL or a later
+  // probe will classify.
   return []
 }

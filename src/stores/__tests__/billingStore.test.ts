@@ -158,7 +158,7 @@ describe('billingStore', () => {
         'X-Budget-Status': 'allowed',
         'X-Cycle-End': '2026-04-30',
         'X-Extra-Tokens': '5',
-        'X-Plan': 'business-4x',
+        'X-Plan': 'max',
       })
       useBillingStore.getState().updateFromHeaders(headers)
       const state = useBillingStore.getState()
@@ -166,7 +166,7 @@ describe('billingStore', () => {
       expect(state.status).toBe('allowed')
       expect(state.cycleEnd).toBe('2026-04-30')
       expect(state.tmsRemaining).toBe(5)
-      expect(state.plan).toBe('business-4x')
+      expect(state.plan).toBe('max')
     })
 
     it('sets noCredits when X-Budget-Status=rejected', () => {
@@ -202,7 +202,7 @@ describe('billingStore', () => {
   describe('reset', () => {
     it('clears all state on logout', () => {
       useBillingStore.setState({
-        plan: 'business-8x',
+        plan: 'max',
         consumedPct: 0.9,
         tmsRemaining: 50,
         isLoaded: true,

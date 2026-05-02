@@ -22,6 +22,7 @@ import { checkStartupRequirements, GLOBAL_REQUIREMENTS } from './services/startu
 import type { EnvironmentCheckResult } from './services/environmentCheck';
 import { useUpdateStore } from './stores/updateStore';
 import { useLayoutStore } from './stores/layoutStore';
+import { usePermissionStore } from './stores/permissionStore';
 import { logger } from './utils/logger';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNativeMenu } from './hooks/useNativeMenu';
@@ -33,6 +34,7 @@ import { LoadingSpinner } from './components/ui/LoadingSpinner';
 import { RequirementsErrorScreen } from './components/ui/RequirementsErrorScreen';
 import { ToastContainer } from './components/ui/Toast';
 import UpdateBanner from './components/ui/UpdateBanner';
+import { t } from '@/i18n';
 import { tokens } from '@/theme/tokens';
 
 function App() {
@@ -62,6 +64,18 @@ function App() {
 	// Refresh billing state on window focus / network reconnect (no polling)
 	useBillingRefresh();
 
+	// Splash dismiss — the main window is created hidden by Rust to avoid the
+	// flash of empty chrome before the SPA mounts. React's first paint
+	// commits *before* this effect runs, so by the time we call `app_ready`
+	// the DOM is fully populated. The Rust side has a 15s failsafe in case
+	// this effect never fires (render crash) — see lib.rs setup.
+	useEffect(() => {
+		import('@tauri-apps/api/core').then(({ invoke }) => {
+			invoke('app_ready').catch(() => { /* not running under Tauri */ })
+		})
+	}, []);
+
+
 	// Initialize Firebase Auth listener
 	useEffect(() => {
 		FirebaseAuthService.getInstance().init();
@@ -75,6 +89,172 @@ function App() {
 			}
 		});
 	}, []);
+
+	// Native OS notification when the agent asks for permission while the
+	// IDE window is in the background. The notify() helper itself skips when
+	// the window is focused, so users actively watching the app see only the
+	// in-app dialog, never a duplicate banner.
+	useEffect(() => {
+		let lastSeenId: string | null = null
+		return usePermissionStore.subscribe((state) => {
+			const next = state.pendingPermission
+			if (!next || next.id === lastSeenId) return
+			lastSeenId = next.id
+			import('./services/notificationService').then(({ notify, humaniseToolName }) => {
+				notify({
+					title: 'TM Code — permission needed',
+					body: `The agent wants to ${humaniseToolName(next.toolName)}`,
+					dedupKey: `permission:${next.id}`,
+				})
+			})
+		})
+	}, []);
+
+	// "Open With TM Code" — file association launches. The OS hands us a
+	// file path either via env::args (Win/Linux) or RunEvent::Opened (macOS
+	// Apple Event). Both routes funnel into the Rust pending-files buffer.
+	// On mount we drain the buffer; while running we also listen for live
+	// open events. For every path: open the common-ancestor folder ONCE as
+	// project, open all files in the editor, force the view to `editor`
+	// (not the default `chat`) so the user lands where they expect.
+	useEffect(() => {
+		let unlisten: (() => void) | undefined
+		let active = true
+
+		// Common-ancestor folder of an arbitrary set of paths. When the user
+		// selects multiple files in Finder / Explorer and uses "Open With",
+		// each may live in a different directory — we want to open one
+		// project that contains them all, not call openProject() per file
+		// (the last one would win and the previous switches would just
+		// thrash dev servers).
+		function commonAncestor(paths: string[]): string {
+			if (paths.length === 0) return ''
+			const sep = paths[0].includes('/') ? '/' : '\\'
+			if (paths.length === 1) {
+				return paths[0].substring(0, paths[0].lastIndexOf(sep)) || sep
+			}
+			const splits = paths.map(p => p.split(sep))
+			const minLen = Math.min(...splits.map(s => s.length))
+			const common: string[] = []
+			for (let i = 0; i < minLen; i++) {
+				const seg = splits[0][i]
+				if (splits.every(s => s[i] === seg)) common.push(seg)
+				else break
+			}
+			// If the last common segment looks like a partial filename we
+			// stopped at the file boundary — drop the last shared file part.
+			const joined = common.join(sep)
+			return joined || sep
+		}
+
+		async function openManyInEditor(paths: string[]) {
+			if (paths.length === 0) return
+			try {
+				const projectRoot = commonAncestor(paths)
+				const { useProjectStore } = await import('@/stores/projectStore')
+				const already = useProjectStore.getState().currentProject?.path
+				if (already !== projectRoot) {
+					await useProjectStore.getState().openProject(projectRoot)
+				}
+				const { useEditorRepository } = await import('@/stores/editorStore')
+				const repo = useEditorRepository.getState()
+				for (const p of paths) repo.openFile(p)
+				const { useLayoutStore } = await import('@/stores/layoutStore')
+				useLayoutStore.getState().setViewMode('editor')
+			} catch (err) {
+				logger.error('app', 'open-with batch failed:', err)
+			}
+		}
+
+		;(async () => {
+			try {
+				const { invoke } = await import('@tauri-apps/api/core')
+				const { listen } = await import('@tauri-apps/api/event')
+
+				// Drain cold-start buffer first — paths queued by Rust before
+				// the SPA mounted (file-association launch).
+				const pending = await invoke<string[]>('take_pending_open_files')
+				if (active && pending && pending.length > 0) {
+					// Block the regular "restore last project" useEffect from
+					// also running — file association is a stronger signal of
+					// intent than persisted state.
+					hasStartedInitRef.current = true
+					await openManyInEditor(pending)
+				}
+
+				// Live listener for "Open With" while the app is already running.
+				const u = await listen<string[]>('open-file-with-app', async (e) => {
+					if (!active) return
+					await openManyInEditor(e.payload || [])
+				})
+				unlisten = u
+			} catch {
+				// Tauri not present (jsdom tests, etc.)
+			}
+		})()
+
+		return () => { active = false; unlisten?.() }
+	}, []);
+
+	// Native file drop — drag a folder from Finder/Explorer onto the window
+	// to open it as a project. Uses Tauri's window-level drag-drop event
+	// (which gives real filesystem paths), distinct from the HTML5 drop in
+	// the prompt area (which handles image attachments via DataTransfer).
+	const [isDraggingFolder, setIsDraggingFolder] = useState(false);
+	useEffect(() => {
+		let unlisten: (() => void) | undefined
+		let active = true
+
+		;(async () => {
+			try {
+				const { getCurrentWebview } = await import('@tauri-apps/api/webview')
+				const { invoke } = await import('@tauri-apps/api/core')
+				const u = await getCurrentWebview().onDragDropEvent(async (event) => {
+					if (!active) return
+					const p = event.payload
+					if (p.type === 'enter' || p.type === 'over') {
+						setIsDraggingFolder(true)
+					} else if (p.type === 'leave') {
+						setIsDraggingFolder(false)
+					} else if (p.type === 'drop') {
+						setIsDraggingFolder(false)
+						const paths = p.paths
+						if (!paths || paths.length === 0) return
+						const droppedPath = paths[0]
+						try {
+							// Two-step gate: cheap is_directory probe first to
+							// distinguish folder drops from file drops (which
+							// the PromptBar HTML5 path handles for images).
+							// Only when it really is a folder do we run the
+							// fuller validate_project_path — and only then
+							// surface validation errors to the user.
+							const isDir = await invoke<boolean>('is_directory', { path: droppedPath })
+							if (!isDir) return
+							const result = await invoke<{ valid: boolean; error?: string }>(
+								'validate_project_path',
+								{ path: droppedPath }
+							)
+							if (!result.valid) {
+								if (result.error) {
+									const { useToastStore } = await import('./stores/toastStore')
+									useToastStore.getState().addToast('error', result.error)
+								}
+								return
+							}
+							await openProject(droppedPath)
+						} catch (err) {
+							logger.error('app', 'Folder-drop open failed:', err)
+						}
+					}
+				})
+				unlisten = u
+			} catch {
+				// Tauri webview API unavailable (e.g. running tests in jsdom)
+			}
+		})()
+
+		return () => { active = false; unlisten?.() }
+	}, [openProject]);
 
 	useEffect(() => {
 		// Only auto-open during initial app load, not on subsequent state changes
@@ -98,6 +278,13 @@ function App() {
 		hasStartedInitRef.current = true;
 
 		const initializeApp = async () => {
+			// Guard against the file-association drain effect having already
+			// opened a project while we were waiting for auth/hydration.
+			// Belt-and-braces with hasStartedInitRef — if drain finished
+			// before we got here, currentProject is set and we'd otherwise
+			// thrash by reopening the persisted last-project on top.
+			if (useProjectStore.getState().currentProject) return;
+
 			// MANDATORY: Check global prerequisites before anything else
 			const requirements = await checkStartupRequirements();
 			setRequirementsResult(requirements);
@@ -153,19 +340,37 @@ function App() {
 	useEffect(() => {
 		if (!currentProject) {
 			prevProjectRef.current = null;
+			// No project active — wipe any chat state left over from the previous one.
+			useChatStore.getState().clearAllSessions();
 			return;
 		}
 
 		const projectPath = currentProject.path;
 		if (projectPath === prevProjectRef.current) return;
 
-		// Save previous project's session before switching (sync-safe: app is still running)
 		const prevPath = prevProjectRef.current;
+		prevProjectRef.current = projectPath;
+
+		// Sessions are project-scoped: a session belongs only to the project that
+		// created it. Without an explicit synchronous wipe, the chatStore's
+		// in-memory `sessions` Map and `activeSessionId` carry over from the
+		// previous project, and the UI flashes the previous project's chat
+		// until restoreLastSession resolves async. Order matters here:
+		//
+		//   1. Kick off cleanupOnExit for the previous project. It captures the
+		//      session ref synchronously (before its first `await`), then writes
+		//      to disk in the background — the wipe in step 2 cannot affect it.
+		//   2. Synchronously clear in-memory chat state. UI immediately drops
+		//      the previous project's messages.
+		//   3. Async-load the new project's session (or create one if there's
+		//      no last session for this project).
 		if (prevPath) {
-			useChatStore.getState().cleanupOnExit(prevPath);
+			useChatStore.getState().cleanupOnExit(prevPath).catch(err => {
+				logger.warn('app', 'cleanupOnExit failed for previous project:', err);
+			});
 		}
 
-		prevProjectRef.current = projectPath;
+		useChatStore.getState().clearAllSessions();
 
 		const chatStore = useChatStore.getState();
 		chatStore.restoreLastSession(projectPath).then(restored => {
@@ -177,6 +382,35 @@ function App() {
 			chatStore.createNewSession(projectPath);
 		});
 	}, [currentProject]);
+
+	// Frontend-design tip: when the active project is a frontend type, suggest
+	// `#design` once per (session × project). Mirrors claude-vaz's pattern of
+	// nudging the user toward the frontend-design plugin without auto-loading
+	// it. The skill stays opt-in — this is just discoverability.
+	useEffect(() => {
+		if (!currentProject?.path) return;
+		const pt = currentProject.projectType;
+		const FRONTEND_TYPES = new Set(['react', 'vue', 'angular', 'svelte', 'nextjs', 'nuxt']);
+		if (!pt || !FRONTEND_TYPES.has(pt)) return;
+
+		const dedupKey = `design-tip-shown:${currentProject.path}`;
+		if (sessionStorage.getItem(dedupKey)) return;
+		sessionStorage.setItem(dedupKey, '1');
+
+		// Small delay so the tip lands after the project finishes loading and
+		// the chat UI has stabilised — avoids a toast-on-top-of-skeleton flash.
+		const timer = setTimeout(() => {
+			import('./stores/toastStore').then(({ useToastStore }) => {
+				useToastStore.getState().addToast(
+					'info',
+					t('tip.designHashtag'),
+					12000,
+				)
+			}).catch(() => { /* non-critical */ });
+		}, 1500);
+
+		return () => clearTimeout(timer);
+	}, [currentProject?.path, currentProject?.projectType]);
 
 	// Check for app updates on startup (non-blocking, 5s delay)
 	useEffect(() => {
@@ -200,18 +434,86 @@ function App() {
 	// Listen for runtime errors from the preview WebView (console.error, uncaught exceptions).
 	// The preview IPC handler dispatches a CustomEvent on window (via eval) because
 	// wry's IPC closure doesn't have access to Tauri's Emitter trait.
+	//
+	// Side-effect: detect Google Identity Services (GIS) failures inside the
+	// preview iframe and show a friendly IDE-level toast. The agent must NOT
+	// embed iframe-warning text in generated code — that responsibility lives
+	// here so the message stays accurate (browser API errors evolve) and
+	// localised to the developer's UI language.
+	const gisToastShownRef = useRef(false);
+	const previewReloadKey = useLayoutStore(s => s.previewReloadKey);
+
+	// Reset the GIS-toast dedup flag whenever the preview reloads. Without
+	// this, the user sees the iframe-warning toast exactly once for the entire
+	// app session — even after they bounce the dev server or switch projects.
 	useEffect(() => {
+		gisToastShownRef.current = false;
+	}, [previewReloadKey]);
+
+	useEffect(() => {
+		const GIS_ERROR_PATTERNS = [
+			/accounts\.google\.com\/gsi\/client/i,
+			/\[GSI_LOGGER\]/i,
+			/FedCM/i,
+			/Refused to display.+accounts\.google\.com/i,
+			/script error.+google/i,
+			/identity[._\s]services/i,
+			// CSP frame-ancestors / COOP errors that block the GIS popup
+			/frame-ancestors.+google/i,
+			/Cross-Origin-Opener-Policy.+google/i,
+		];
+
 		function handlePreviewConsole(e: Event) {
-			const { level, text } = (e as CustomEvent<{ level: string; text: string }>).detail;
-			if (text) {
-				useLayoutStore.getState().addDevServerLog(
-					`[runtime] ${text}`,
-					level === 'warn' ? 'warn' : 'error',
-				);
+			const detail = (e as CustomEvent<{ level: string; text: string }>).detail;
+			const { level, text } = detail || { level: '', text: '' };
+			if (!text) return;
+
+			useLayoutStore.getState().addDevServerLog(
+				`[runtime] ${text}`,
+				level === 'warn' ? 'warn' : 'error',
+			);
+
+			// GIS-in-iframe detection — only on errors. Dedup is per-preview-reload
+			// (the ref resets via the effect above) so the user gets one toast
+			// per "session of the preview".
+			if (
+				!gisToastShownRef.current &&
+				level !== 'warn' &&
+				GIS_ERROR_PATTERNS.some((re) => re.test(text))
+			) {
+				gisToastShownRef.current = true;
+				import('./stores/toastStore').then(({ useToastStore }) => {
+					useToastStore.getState().addToast(
+						'warning',
+						t('preview.gisIframeBlocked'),
+						12000,
+					);
+				}).catch(() => { /* non-critical */ });
 			}
 		}
+
+		// Proactive detection: when the preview emits a `gis-detected` signal
+		// (sent by the injected probe in PreviewView), show the toast BEFORE
+		// the developer clicks anything. Catches the silent-failure mode where
+		// FedCM blocks the button without firing console.error.
+		function handleGisDetected() {
+			if (gisToastShownRef.current) return;
+			gisToastShownRef.current = true;
+			import('./stores/toastStore').then(({ useToastStore }) => {
+				useToastStore.getState().addToast(
+					'warning',
+					t('preview.gisIframeBlocked'),
+					12000,
+				);
+			}).catch(() => { /* non-critical */ });
+		}
+
 		window.addEventListener('preview-console', handlePreviewConsole);
-		return () => window.removeEventListener('preview-console', handlePreviewConsole);
+		window.addEventListener('preview-gis-detected', handleGisDetected);
+		return () => {
+			window.removeEventListener('preview-console', handlePreviewConsole);
+			window.removeEventListener('preview-gis-detected', handleGisDetected);
+		};
 	}, []);
 
 	// Initialize MCP servers once at app startup (global — persists across project switches)
@@ -407,6 +709,39 @@ function App() {
 			</Box>
 
 			<ToastContainer />
+
+			{/* Native file-drop overlay — appears while a Finder/Explorer drag
+			    is over the window. Pointer-events: none so it never blocks the
+			    underlying drop event from reaching Tauri's native handler. */}
+			{isDraggingFolder && (
+				<Box
+					position="fixed"
+					inset={0}
+					bg="rgba(254, 16, 99, 0.12)"
+					border={`2px dashed ${tokens.colors.accent.primary}`}
+					borderRadius="0"
+					pointerEvents="none"
+					zIndex={9999}
+					display="flex"
+					alignItems="center"
+					justifyContent="center"
+					backdropFilter="blur(2px)"
+				>
+					<Box
+						bg={tokens.colors.dialog.bg}
+						border={`1px solid ${tokens.colors.accent.primaryMuted}`}
+						borderRadius="12px"
+						px={6}
+						py={4}
+						boxShadow={tokens.shadow.overlay}
+						textAlign="center"
+					>
+						<Box fontSize="13px" fontWeight={500} color={tokens.colors.text.primary}>
+							Drop folder to open as project
+						</Box>
+					</Box>
+				</Box>
+			)}
 		</Box>
 	);
 }

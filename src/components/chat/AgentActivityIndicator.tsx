@@ -1,7 +1,8 @@
-import { memo, useState, useEffect, useRef } from 'react'
+import { memo, useEffect, useRef } from 'react'
 import { Flex, Text, Box } from '@chakra-ui/react'
 import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useAgentElapsed } from '../../hooks/useAgentElapsed'
 import { tokens } from '@/theme/tokens'
 
 function formatElapsed(ms: number): string {
@@ -24,7 +25,8 @@ function formatTokens(count: number): string {
 }
 
 const STATUS_LABELS: Record<string, string> = {
-  thinking: 'Thinking',
+  awaiting_response: 'Awaiting response',
+  reasoning: 'Reasoning',
   generating: 'Writing',
   applying: 'Applying changes',
   compressing: 'Compressing context',
@@ -34,30 +36,28 @@ function AgentActivityIndicator() {
   const status = useAgentStore(s => s.status)
   const isStreaming = useChatStore(s => s.isStreaming)
   const totalTokensUsed = useChatStore(s => s.totalTokensUsed)
-  const [elapsed, setElapsed] = useState(0)
-  const startRef = useRef(0)
+  // Session-mode elapsed: total wall time per request, freezes during permission waits.
+  const { elapsedMs: elapsed } = useAgentElapsed('session')
+  const sessionStartRef = useRef(0)
   const prevStreamingRef = useRef(false)
+  const prevOutputTokensRef = useRef(0)
 
-  // Start/reset timer when streaming begins
+  // Track session start so the "Trabalhou por Xm Ys" closing message reports
+  // the real wall-clock duration (not the paused-subtracted display value).
   useEffect(() => {
-    if (isStreaming) {
-      startRef.current = Date.now()
-      setElapsed(0)
-      const interval = setInterval(() => {
-        setElapsed(Date.now() - startRef.current)
-      }, 1000)
-      return () => clearInterval(interval)
+    if (isStreaming && sessionStartRef.current === 0) {
+      sessionStartRef.current = Date.now()
     }
   }, [isStreaming])
 
   // When streaming ends, add "Worked for Xm Ys" system message
   useEffect(() => {
-    if (prevStreamingRef.current && !isStreaming && startRef.current > 0) {
-      const finalElapsed = Date.now() - startRef.current
+    if (prevStreamingRef.current && !isStreaming && sessionStartRef.current > 0) {
+      const finalElapsed = Date.now() - sessionStartRef.current
       if (finalElapsed > 2000) {
         useChatStore.getState().addSystemMessage(`Trabalhou por ${formatElapsed(finalElapsed)}`)
       }
-      startRef.current = 0
+      sessionStartRef.current = 0
     }
     prevStreamingRef.current = isStreaming
   }, [isStreaming])
@@ -65,10 +65,27 @@ function AgentActivityIndicator() {
   if (!isStreaming) return null
 
   const label = STATUS_LABELS[status] || 'Working'
+  // chatStore.addTokenUsage:
+  //   - input  is REPLACED with max(prev, newInput) — represents the CURRENT
+  //              context size on the wire (turn N's input already contains
+  //              turns 1..N-1, so summing would double-count massively).
+  //   - output is SUMMED across turns — each turn emits NEW tokens.
+  //
+  // Adding the two together (the previous behaviour) was incoherent: it
+  // mixed "size of conversation in flight" with "tokens emitted so far".
+  // Show them as two distinct directional counters instead.
   const inputTokens = totalTokensUsed.input
   const outputTokens = totalTokensUsed.output
-  // ↑ when sending (thinking/compressing = waiting for model), ↓ when receiving (generating/applying)
-  const isSending = status === 'thinking' || status === 'compressing'
+
+  // Highlight which direction is "live" right now, so the user can intuit
+  // which counter is moving without having to watch the digits change.
+  // 'awaiting_response' / 'compressing' = uploading/preparing, ↑ leads.
+  // 'reasoning' / 'generating' / 'applying' = receiving from the model, ↓ leads.
+  const isSending = status === 'awaiting_response' || status === 'compressing'
+
+  // Detect output growth so the down-arrow pulses subtly during active receipt.
+  const outputJustGrew = outputTokens > prevOutputTokensRef.current
+  prevOutputTokensRef.current = outputTokens
 
   return (
     <Flex
@@ -122,7 +139,11 @@ function AgentActivityIndicator() {
         />
       </Text>
 
-      {/* Elapsed time + total tokens + directional arrow (single element to avoid duplicate renders) */}
+      {/* Elapsed time + per-direction token counters. Up-arrow shows context
+          size on the wire (input, the last turn's prompt — ratchets up across
+          turns). Down-arrow shows tokens emitted by the model (output, sums
+          across turns). Mixing the two would be a unit error — they answer
+          different questions. The "live" direction is highlighted by colour. */}
       <Text
         fontSize="11.5px"
         color={tokens.colors.text.disabled}
@@ -130,23 +151,42 @@ function AgentActivityIndicator() {
         whiteSpace="nowrap"
       >
         ({formatElapsed(elapsed)}
-        {(inputTokens > 0 || outputTokens > 0) && (
+        {inputTokens > 0 && (
           <>
             {' \u00B7 '}
-            {formatTokens(inputTokens + outputTokens)}
-            {')'}
-            {' '}
             <Box
               as="span"
               fontSize="11px"
               css={{
                 display: 'inline',
-                color: isSending ? tokens.colors.accent.orange : tokens.colors.accent.greenBright,
+                color: isSending ? tokens.colors.accent.orange : tokens.colors.text.disabled,
               }}
-            >{isSending ? '\u2191' : '\u2193'}</Box>
+            >{'\u2191'}</Box>
+            {' '}
+            {formatTokens(inputTokens)}
           </>
         )}
-        {(inputTokens === 0 && outputTokens === 0) && ')'}
+        {outputTokens > 0 && (
+          <>
+            {' \u00B7 '}
+            <Box
+              as="span"
+              fontSize="11px"
+              css={{
+                display: 'inline',
+                color: !isSending ? tokens.colors.accent.greenBright : tokens.colors.text.disabled,
+                animation: outputJustGrew && !isSending ? 'tokenPulse 0.6s ease-out' : undefined,
+                '@keyframes tokenPulse': {
+                  '0%': { opacity: 0.4 },
+                  '100%': { opacity: 1 },
+                },
+              }}
+            >{'\u2193'}</Box>
+            {' '}
+            {formatTokens(outputTokens)}
+          </>
+        )}
+        {')'}
       </Text>
     </Flex>
   )
