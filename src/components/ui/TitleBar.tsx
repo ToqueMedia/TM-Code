@@ -10,6 +10,11 @@ import { handleClose, handleMinimize, handleFullToggle, handleMouseDown } from '
 import { useQuickOpen } from './titlebar/useQuickOpen'
 import { IS_MAC } from '../../utils/platform'
 
+// NOTE: this is the legacy full title bar. MainLayout actually renders
+// MinimalTitleBar — that's where the Publish button + Cmd+Shift+D shortcut
+// live. Keep this file in sync with MinimalTitleBar's affordances if the
+// product ever re-introduces the wide title bar.
+
 function TitleBar() {
 	const { currentProject, recentProjects, loadRecentProjects, openProject } = useProjectStore()
 

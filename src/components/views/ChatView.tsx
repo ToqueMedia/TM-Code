@@ -8,7 +8,9 @@ import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { useBillingStore, isInOverageState, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
+import { useBillingStore, isInOverageState, extraConsumptionPct, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
+import { useAgentStore } from '../../stores/agentStore'
+import { getProfileForPlan } from '../../services/agent/modelProfiles'
 import MessageBubble from '../chat/MessageBubble'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
@@ -40,7 +42,19 @@ function ChatView() {
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
   const setThinkingEnabled = useSettingsStore(s => s.setThinkingEnabled)
-  const thinkingSupported = billingPlan !== 'explorer'
+  // Thinking support is a property of the model the backend will route to,
+  // not the user's plan. Both production coders (V4-Flash + GLM-5.1) have
+  // toggleable thinking, so the toggle shows on every plan including free.
+  // The handshake header X-Model-Thinking-Mode (stored in agentStore) is
+  // authoritative once the first response arrives; before then we fall back
+  // to the per-plan profile shape.
+  const backendThinkingMode = useAgentStore(s => s.thinkingMode)
+  const fallbackProfile = getProfileForPlan(billingPlan)
+  const effectiveMode = backendThinkingMode
+    ?? (fallbackProfile.supportsThinking
+        ? (fallbackProfile.thinkingMode === 'mandatory' ? 'mandatory' : 'toggleable')
+        : 'none')
+  const thinkingSupported = effectiveMode === 'toggleable'
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
   const streamingVersion = useChatStore(s => s.streamingVersion)
@@ -196,7 +210,7 @@ function ChatView() {
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+            transition={{ type: 'spring', stiffness: 380, damping: 38, mass: 1 }}
             style={{ flexShrink: 0, overflow: 'hidden' }}
           >
             <Flex
@@ -318,11 +332,13 @@ function ChatView() {
                     />
                     <Text fontSize="12px" color={tokens.colors.accent.orange} fontWeight="500">
                       {t('chat.billingSpillover')}{' '}
-                      {tmsRemaining > 0
-                        ? `${Math.round((consumedPct - 1) * tokenBudget / 1000).toLocaleString()}K ${t('chat.extraTokens')}`
-                        : billingStatus === 'rejected'
-                        ? t('chat.noCreditsRemaining')
-                        : t('chat.tokensUsed')}
+                      {(() => {
+                        const remainingPct = extraConsumptionPct(tmsRemaining, tokenBudget)
+                        if (remainingPct !== null && remainingPct > 0) {
+                          return `${remainingPct}% ${t('chat.extraCreditsRemaining')}`
+                        }
+                        return t('chat.noCreditsRemaining')
+                      })()}
                     </Text>
                     {billingPlan !== 'explorer' && tmsRemaining <= 0 && (
                       <Text
@@ -382,10 +398,10 @@ function ChatView() {
 // ─── Credit Indicator ────────────────────────────────────────────────────────
 
 const PLAN_DISPLAY: Record<UserPlanName, { label: string; color: string }> = {
-  explorer:       { label: 'Free',        color: tokens.colors.text.muted },
-  pro:            { label: 'Pro',         color: tokens.colors.accent.purple },
-  'business-4x':  { label: 'Business 4x', color: tokens.colors.accent.orange },
-  'business-8x':  { label: 'Business 8x', color: tokens.colors.accent.primary },
+  explorer: { label: 'Free',  color: tokens.colors.text.muted },
+  vibe:     { label: 'Vibe',  color: tokens.colors.accent.green },
+  pro:      { label: 'Pro',   color: tokens.colors.accent.purple },
+  max:      { label: 'Max',   color: tokens.colors.accent.primary },
 }
 
 function CreditIndicator(props: {
@@ -417,6 +433,8 @@ function CreditIndicator(props: {
   // the cycle is exhausted (consumed_pct > 1, includes spillover requests).
   const isInOverage = isInOverageState(props.status, props.consumedPct)
   const isBlocked = props.status === 'rejected'
+  // Single source of truth — same metric used in CreditIndicator + SettingsView.
+  const extraPct = extraConsumptionPct(props.tmsRemaining, props.tokenBudget)
 
   // Flash animation when consumedPct increases
   useEffect(() => {
@@ -600,8 +618,8 @@ function CreditIndicator(props: {
             </VStack>
           )}
 
-          {/* TMS overage credits */}
-          {props.tmsRemaining > 0 && (
+          {/* Extra consumption — % via single-source helper. */}
+          {extraPct !== null && (
             <>
               <Box w="100%" h="1px" bg={isInOverage ? 'rgba(247, 127, 0, 0.15)' : 'rgba(255, 255, 255, 0.06)'} />
               <Flex justify="space-between" w="100%">
@@ -610,7 +628,7 @@ function CreditIndicator(props: {
                 </Text>
                 <Text fontSize="10px" fontWeight="700" fontFamily={tokens.fontFamily.mono}
                   color={isInOverage ? tokens.colors.accent.orange : tokens.colors.text.primary}>
-                  {props.tmsRemaining}
+                  {extraPct}%
                 </Text>
               </Flex>
             </>

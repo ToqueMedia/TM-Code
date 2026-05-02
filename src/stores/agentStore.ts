@@ -19,6 +19,13 @@ interface AgentState {
   /** Provider name reported by the backend via X-Model-Provider header. */
   modelProvider: string | null
   /**
+   * Reasoning capability of the active model, reported by the backend via
+   * X-Model-Thinking-Mode header. Authoritative source for the toggle's
+   * visibility — the frontend's per-plan profile is only a fallback for
+   * pre-handshake state (before the first response arrives).
+   */
+  thinkingMode: 'none' | 'toggleable' | 'mandatory' | null
+  /**
    * Phase A telemetry: cumulative count of times the safe tool pool blocked
    * a tool from starting because of an in-flight non-concurrency-safe sibling.
    * Each increment represents a "would-have-been-a-race" today's Promise.all
@@ -32,7 +39,7 @@ interface AgentActions {
   setStatus: (status: AgentStatus) => void
   setError: (error: string | null) => void
   // Model metadata from backend response headers
-  setModelInfo: (name: string | null, provider: string | null) => void
+  setModelInfo: (name: string | null, provider: string | null, thinkingMode?: 'none' | 'toggleable' | 'mandatory' | null) => void
   // Task management
   setTasks: (tasks: AgentTask[]) => void
   updateTaskStatus: (taskId: string, status: AgentTaskStatus) => void
@@ -49,6 +56,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   tasks: [],
   modelName: null,
   modelProvider: null,
+  thinkingMode: null,
   poolConcurrencyConflictsAvoided: 0,
 
   setStatus: (status: AgentStatus) => {
@@ -59,8 +67,15 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
     set({ error })
   },
 
-  setModelInfo: (name, provider) => {
-    set({ modelName: name, modelProvider: provider })
+  setModelInfo: (name, provider, thinkingMode) => {
+    set({
+      modelName: name,
+      modelProvider: provider,
+      // Only overwrite thinkingMode when the caller actually passed one — keeps
+      // a stale value alive across handshake-less updates rather than wiping
+      // the toggle every refresh.
+      ...(thinkingMode !== undefined ? { thinkingMode } : {}),
+    })
   },
 
   setTasks: (tasks: AgentTask[]) => {
@@ -95,6 +110,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       tasks: [],
       modelName: null,
       modelProvider: null,
+      thinkingMode: null,
       poolConcurrencyConflictsAvoided: 0,
     })
   },

@@ -9,15 +9,12 @@ import {
   type ClassifySlotState,
 } from '../devServerDetection'
 
-const FRONTEND_PORT = 7773
-const BACKEND_PORT = 7777
-
 function emptySlot(projectKind: 'frontend' | 'backend' | 'fullstack'): ClassifySlotState {
   return { projectKind, frontendUrl: null, backendUrl: null, backendUrlMirrored: false }
 }
 
-function classify(url: string, kind: 'html' | 'json' | 'other' | null, slot: ClassifySlotState) {
-  return classifyProbedUrl(url, kind, slot, BACKEND_PORT, FRONTEND_PORT)
+function classify(url: string, kind: 'html' | 'json' | 'other' | null, slot: ClassifySlotState, frontendPortHint?: number) {
+  return classifyProbedUrl(url, kind, slot, frontendPortHint)
 }
 
 describe('URL_REGEX_GLOBAL', () => {
@@ -100,102 +97,127 @@ describe('PORT_FAILURE_REGEX', () => {
   })
 })
 
-describe('classifyProbedUrl — port-authoritative fullstack + port-agnostic single kinds', () => {
-  describe('frontend-only project — port-agnostic', () => {
-    it('first detected URL → frontend regardless of port', () => {
+describe('classifyProbedUrl — content-type-driven, port-agnostic by default', () => {
+  describe('frontend-only project — first URL wins regardless of port', () => {
+    it('Vite default 5173 → frontend', () => {
       const actions = classify('http://127.0.0.1:5173/', 'html', emptySlot('frontend'))
       expect(actions).toEqual([{ type: 'assignFrontend', url: 'http://127.0.0.1:5173/' }])
+    })
+
+    it('Next.js 3000 → frontend', () => {
+      const actions = classify('http://127.0.0.1:3000/', 'html', emptySlot('frontend'))
+      expect(actions).toEqual([{ type: 'assignFrontend', url: 'http://127.0.0.1:3000/' }])
     })
 
     it('subsequent URLs ignored once frontendUrl is set', () => {
       const slot: ClassifySlotState = {
         projectKind: 'frontend',
-        frontendUrl: 'http://127.0.0.1:7773/',
+        frontendUrl: 'http://127.0.0.1:5173/',
         backendUrl: null,
         backendUrlMirrored: false,
       }
-      expect(classify('http://127.0.0.1:5173/', 'html', slot)).toEqual([])
+      expect(classify('http://127.0.0.1:5174/', 'html', slot)).toEqual([])
     })
   })
 
-  describe('backend-only project — port-agnostic', () => {
-    it('first URL → backend regardless of port or content-type', () => {
+  describe('backend-only project — first URL wins regardless of port or content-type', () => {
+    it('Express on 8080 with JSON → backend', () => {
       const actions = classify('http://127.0.0.1:8080/', 'json', emptySlot('backend'))
       expect(actions).toEqual([{ type: 'assignBackend', url: 'http://127.0.0.1:8080/', mirrored: false }])
     })
 
-    it('backend accepts HTML content-type (Express serving static) for backend-only', () => {
-      const actions = classify('http://127.0.0.1:7777/', 'html', emptySlot('backend'))
-      expect(actions).toEqual([{ type: 'assignBackend', url: 'http://127.0.0.1:7777/', mirrored: false }])
+    it('Express serving static HTML → backend (single-kind ignores content-type)', () => {
+      const actions = classify('http://127.0.0.1:3000/', 'html', emptySlot('backend'))
+      expect(actions).toEqual([{ type: 'assignBackend', url: 'http://127.0.0.1:3000/', mirrored: false }])
     })
   })
 
-  describe('fullstack — PORT IS AUTHORITATIVE (7773 = frontend, 7777 = backend)', () => {
-    it('7773 HTML → frontend + mirror backend (monolithic case)', () => {
-      const actions = classify('http://127.0.0.1:7773/', 'html', emptySlot('fullstack'))
+  describe('fullstack — content-type drives classification', () => {
+    it('Vite (HTML) at any port → frontend + mirror backend (monolithic case)', () => {
+      const actions = classify('http://127.0.0.1:5173/', 'html', emptySlot('fullstack'))
       expect(actions).toEqual([
-        { type: 'assignFrontend', url: 'http://127.0.0.1:7773/' },
-        { type: 'assignBackend', url: 'http://127.0.0.1:7773/', mirrored: true },
+        { type: 'assignFrontend', url: 'http://127.0.0.1:5173/' },
+        { type: 'assignBackend', url: 'http://127.0.0.1:5173/', mirrored: true },
       ])
     })
 
-    it('7773 non-HTML → frontend only, NO mirror (unusual but safe)', () => {
-      const actions = classify('http://127.0.0.1:7773/', 'json', emptySlot('fullstack'))
-      expect(actions).toEqual([{ type: 'assignFrontend', url: 'http://127.0.0.1:7773/' }])
+    it('Express (JSON) at any port → backend', () => {
+      const actions = classify('http://127.0.0.1:3000/', 'json', emptySlot('fullstack'))
+      expect(actions).toEqual([{ type: 'assignBackend', url: 'http://127.0.0.1:3000/', mirrored: false }])
     })
 
-    it('REGRESSION: 7777 HTML stays backend — never classifies as frontend', () => {
-      // The APPIA scenario: Express at 7777 serves Vite build as fallback,
-      // content-type is text/html. Must NOT become frontendUrl.
+    it('Express returning HTML (static fallback) → frontend (content-type wins)', () => {
+      // Express serves Vite build with text/html content-type. Without a port
+      // convention, we trust the content-type. If the user's setup needs the
+      // opposite, they pass a frontend_port_hint.
       const actions = classify('http://127.0.0.1:7777/', 'html', emptySlot('fullstack'))
-      expect(actions).toEqual([{ type: 'assignBackend', url: 'http://127.0.0.1:7777/', mirrored: false }])
+      expect(actions).toEqual([
+        { type: 'assignFrontend', url: 'http://127.0.0.1:7777/' },
+        { type: 'assignBackend', url: 'http://127.0.0.1:7777/', mirrored: true },
+      ])
     })
 
-    it('7777 JSON → backend (normal API case)', () => {
-      const actions = classify('http://127.0.0.1:7777/', 'json', emptySlot('fullstack'))
-      expect(actions).toEqual([{ type: 'assignBackend', url: 'http://127.0.0.1:7777/', mirrored: false }])
+    it('"other" content-type → backend (e.g., text/plain, octet-stream)', () => {
+      const actions = classify('http://127.0.0.1:8080/', 'other', emptySlot('fullstack'))
+      expect(actions).toEqual([{ type: 'assignBackend', url: 'http://127.0.0.1:8080/', mirrored: false }])
     })
 
-    it('unknown port in fullstack is ignored', () => {
-      // Stray URL on 5173 (Vite default) in a fullstack project where we expect 7773.
-      const actions = classify('http://127.0.0.1:5173/', 'html', emptySlot('fullstack'))
+    it('null content-type (probe inconclusive) → no action', () => {
+      const actions = classify('http://127.0.0.1:5173/', null, emptySlot('fullstack'))
       expect(actions).toEqual([])
     })
 
-    it('distributed: 7773 first then 7777 — mirror is overwritten by real backend', () => {
+    it('distributed: HTML first then JSON — mirror overwritten by real backend', () => {
       let slot = emptySlot('fullstack')
-      const viteActions = classify('http://127.0.0.1:7773/', 'html', slot)
+      const viteActions = classify('http://127.0.0.1:5173/', 'html', slot)
       expect(viteActions).toEqual([
-        { type: 'assignFrontend', url: 'http://127.0.0.1:7773/' },
-        { type: 'assignBackend', url: 'http://127.0.0.1:7773/', mirrored: true },
+        { type: 'assignFrontend', url: 'http://127.0.0.1:5173/' },
+        { type: 'assignBackend', url: 'http://127.0.0.1:5173/', mirrored: true },
       ])
 
-      // Apply
       slot = {
         projectKind: 'fullstack',
-        frontendUrl: 'http://127.0.0.1:7773/',
-        backendUrl: 'http://127.0.0.1:7773/',
+        frontendUrl: 'http://127.0.0.1:5173/',
+        backendUrl: 'http://127.0.0.1:5173/',
         backendUrlMirrored: true,
       }
 
-      const expressActions = classify('http://127.0.0.1:7777/', 'json', slot)
+      const expressActions = classify('http://127.0.0.1:3000/', 'json', slot)
       expect(expressActions).toEqual([
-        { type: 'assignBackend', url: 'http://127.0.0.1:7777/', mirrored: false },
+        { type: 'assignBackend', url: 'http://127.0.0.1:3000/', mirrored: false },
       ])
     })
 
-    it('distributed: 7777 first then 7773 — real backend is preserved, frontend is set, no mirror', () => {
-      // Backend boots first. Its URL is REAL.
-      let slot: ClassifySlotState = {
+    it('distributed: JSON first then HTML — real backend preserved, frontend assigned, no mirror', () => {
+      const slot: ClassifySlotState = {
         projectKind: 'fullstack',
         frontendUrl: null,
-        backendUrl: 'http://127.0.0.1:7777/',
+        backendUrl: 'http://127.0.0.1:3000/',
         backendUrlMirrored: false,
       }
-      const viteActions = classify('http://127.0.0.1:7773/', 'html', slot)
+      const viteActions = classify('http://127.0.0.1:5173/', 'html', slot)
       // Frontend assigned. Mirror NOT triggered because backend is real (non-mirrored).
       expect(viteActions).toEqual([
+        { type: 'assignFrontend', url: 'http://127.0.0.1:5173/' },
+      ])
+    })
+
+    it('frontendPortHint forces classification when content-type ambiguous', () => {
+      // Both servers might respond with HTML in some configurations. The hint
+      // says: "treat the URL on this port as frontend".
+      const slot = emptySlot('fullstack')
+      const actions = classify('http://127.0.0.1:7773/', 'other', slot, 7773)
+      expect(actions).toEqual([
         { type: 'assignFrontend', url: 'http://127.0.0.1:7773/' },
+      ])
+    })
+
+    it('frontendPortHint with HTML still mirrors (monolithic case)', () => {
+      const slot = emptySlot('fullstack')
+      const actions = classify('http://127.0.0.1:7773/', 'html', slot, 7773)
+      expect(actions).toEqual([
+        { type: 'assignFrontend', url: 'http://127.0.0.1:7773/' },
+        { type: 'assignBackend', url: 'http://127.0.0.1:7773/', mirrored: true },
       ])
     })
   })

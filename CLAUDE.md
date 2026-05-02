@@ -93,15 +93,14 @@ Tauri manages shared state via `app.manage()`:
 ### Dev Server Architecture
 - **Single-slot model**: one dev server per project. `layoutStore.devServer` holds `{ pid, projectKind, frontendUrl, backendUrl, status }`. Managed by `devServerManager`.
 - **Project kinds**: `frontend` (UI only → iframe preview), `backend` (API only → HTTP Client panel fills main area), `fullstack` (both — iframe with HTTP Client in a resizable bottom drawer, toggle Cmd/Ctrl+Shift+H).
-- **Reserved ports**: `7773` (frontend/iframe), `7777` (backend/HTTP Client). TM Code tree-kills any process holding these before launching. Also exposes `TM_FRONTEND_PORT` / `TM_BACKEND_PORT` env vars for scripts that want to read them explicitly.
-- **Fullstack wrapper handling**: if the top-level command is a wrapper (`concurrently`, `npm-run-all`, `turbo`, `pnpm -r`, workspaces fanout, or an `npm run <script>` whose script resolves to one via package.json inspection), TM Code skips injecting `PORT` to avoid env inheritance into both children. User scripts must honor `process.env.PORT` (or `TM_BACKEND_PORT`). Otherwise `--port 7773 --host 0.0.0.0` is injected.
-- **Platform-aware host**: macOS uses `localhost` (WKWebView ATS exemption), Windows+Linux use `127.0.0.1` (disambiguates Node 18+ IPv6 resolution). `--host 0.0.0.0` is injected so servers bind to both stacks.
-- **URL classification (fullstack)**: port is AUTHORITATIVE — `:7773` → `frontendUrl`, `:7777` → `backendUrl`, any other port is ignored. For monolithic fullstack (Next.js on 7773 serving HTML + API routes), the 7773 URL is also mirrored into `backendUrl` as a best-guess HTTP Client base. Mirrors are transient: a subsequent real URL on 7777 overwrites them. For `frontend` / `backend` project kinds, the first detected URL wins regardless of port.
-- **Canonical fullstack scaffold** (agent enforces on generated + legacy projects):
-  - Root `"dev"` uses `concurrently -k -n server,client -c blue,magenta "npm run dev:server" "npm run dev:client"` — NEVER `npm run dev --workspaces` (runs sequentially, blocks on the first child).
-  - Client: `"dev": "vite --port 7773 --host 0.0.0.0"` (explicit — wrappers swallow TM Code's CLI injection).
-  - Server: binds with `app.listen(Number(process.env.PORT) || 7777, '0.0.0.0', ...)` and sets CORS for `http://localhost:7773` in dev.
-  - `concurrently` ^9.x in root devDependencies.
+- **Natural ports** (May 2026 refactor): the framework picks the port (Vite=5173, Next=3000, Express=whatever the script binds). The IDE detects URLs from log output and classifies them by HTTP **content-type** (HTML → `frontendUrl`; JSON/other → `backendUrl`). No reserved ports, no preemptive `kill_port` calls. The previous port-authoritative classifier (`:7773` → frontend, `:7777` → backend) was retired because it ignored URL fallbacks (Vite 5173 → 5174 on conflict) and forced prescription downstream.
+- **Host injection (Windows IPv6 workaround)**: for known frontend dev servers (`vite`, `next dev`, `nuxt dev`, `astro dev`, `svelte-kit dev`, `ng serve`, plus `npm/yarn/pnpm/bun run …`), the IDE injects `--host 0.0.0.0` so servers bind on both IPv4 and IPv6. Wrappers (`concurrently`, `npm-run-all`, `turbo`, `pnpm -r`, workspaces fanout) get nothing injected — host must be wired in sub-scripts.
+- **URL classification rules**:
+  - `frontend` / `backend` single kinds: first detected URL wins, port-agnostic.
+  - `fullstack`: content-type drives — HTML → `frontendUrl` (and mirrored to `backendUrl` if monolithic, i.e. no real backend yet); JSON/other → `backendUrl`. Mirrors are transient — a subsequent real JSON URL overwrites them.
+- **`frontend_port_hint` (rare override)**: `start_dev_server` accepts an optional `frontend_port_hint`. Use only when fullstack content-type is ambiguous (e.g. Express serving HTML fallback alongside Vite). When set, a probed URL on the hinted port is forced to frontend regardless of content-type.
+- **Stop semantics**: `stop()` kills the process tree first; if any of the *actually-detected* URLs is left bound, `kill_port` is called on those specific ports as a Windows-side safety net (cmd.exe → npm → node descendants sometimes survive `taskkill /T`).
+- **Generated projects**: scaffolds use the framework's defaults (no port prescription). Backend uses `app.listen(Number(process.env.PORT) || 3000, '0.0.0.0', ...)`. CORS is permissive in dev (`origin: true`) or env-driven (`process.env.CORS_ORIGIN`). For Vite, `server.proxy` forwards `/api` to the backend so the browser sees same-origin requests and CORS doesn't apply for the auth flow. See `auth-proxy-gip` skill for the full recipe.
 
 ## Tech Stack
 
@@ -109,6 +108,28 @@ Tauri manages shared state via `app.manage()`:
 - **Backend**: Rust (edition 2021), Tauri 2 (macOS private API), tokio, serde, reqwest 0.12
 - **Build**: Vite 8, Jest 30 + ts-jest for testing
 - **Package Manager**: Yarn 1.22.22 (Node >= 20.19.0)
+
+## Plans, models, and routing
+
+TM Code uses **two coder models** plus one multimodal handler. Per-plan model is admin-managed in `~/dev/web/toquemedia-studio` (Settings page writes to Firestore `subscription_plans/{planId}.ideModel`); the IDE never picks a model itself.
+
+| Plan | Token cap/cycle | Coder |
+|---|---|---|
+| `explorer` (free) | 1.5M | DeepSeek V4-Flash (DashScope) |
+| `vibe` | 5.88M | GLM-5.1 (DashScope) |
+| `pro` | 11.76M | GLM-5.1 (DashScope) |
+| `max` | 72.55M | GLM-5.1 (DashScope) |
+
+**Multimodal**: server-side preprocessing in `toquemedia-studio-api/src/multimodal.ts`. When a paid-plan request contains `image_url` blocks, the worker calls Qwen 3.6 Plus in parallel for each image, replaces the blocks with text descriptions, then forwards the now-text-only request to the user's plan model. Free tier blocks attachments at the UI level (`useAttachments.ts:81`). The frontend never swaps profiles for image messages — `getProfileForPlan(plan)` is the single profile selector.
+
+**Slash commands** (`src/services/agent/commands/`):
+- `/plan` — same coder model, `X-Request-Type: plan` header forces `enable_thinking=true` for the turn.
+- `/debug` — same coder model, `X-Request-Type: debug` header forces reasoning ON. Hypothesis-driven prompt.
+- Code mode (default chat) — reasoning OFF by default, user-toggleable on paid plans (`thinkingSupported = billingPlan !== 'explorer'`).
+
+**Frontend rule (do not break)**: `getProfileForPlan(plan)` in `src/services/agent/modelProfiles.ts` returns sampling-shape defaults only — never trust `profile.id` as the model the upstream will see. The backend (`toquemedia-studio-api/src/proxy.ts`) is the source of truth for model resolution; clamps for upstream-specific quirks live there.
+
+**Pricing analytics**: `BLENDED_TOKEN_PRICE_USD_PER_M = $1.785` (70/30 input/output mix), `PLAN_MARGIN_RATIO = 0.35`. Subscription prices are Firestore-driven; the constants in `src/types.ts` are local fallbacks only.
 
 ## Project Templates
 

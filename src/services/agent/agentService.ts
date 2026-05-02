@@ -95,6 +95,14 @@ export interface AgentCallbacks {
   // Streaming reasoning (token by token, collapsible in UI)
   onReasoningDelta: (text: string) => void
 
+  // Reasoning block formally closed by the upstream (content_block_stop for
+  // a thinking block). Use this to flush any buffered reasoning deltas
+  // immediately so the visible block is complete before the next phase
+  // (tool calls / final answer) begins. Without this, the delta buffer's
+  // 50ms timer races against the next content_block_start and can leave
+  // the last reasoning fragment unflushed.
+  onReasoningComplete?: () => void
+
   // Tool call detected but still accumulating args
   onToolCallPending: (toolId: string, toolName: string) => void
 
@@ -1416,9 +1424,21 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       devServerNote = `\n\nNote: A dev server is currently running at ${devServerManager.getUrl() || 'unknown URL'}. Do not start another one.`
     }
 
-    if (fileContents.length === 0 && !devServerNote) return
+    // Re-inject any skills the agent has invoked this session. Mirrors
+    // claude-vaz's `createSkillAttachmentIfNeeded` — the original tool result
+    // (with verbatim CRITICAL: blocks) was summarized into a bullet point by
+    // compressContext; without re-injection, the model falls back to its
+    // training prior and ignores the skill rules. Module-level state in
+    // skillService survives compression and supplies the full text here.
+    const { buildPostCompactionSkillsBlock } = await import('./skillService')
+    const skillsBlock = buildPostCompactionSkillsBlock()
+
+    if (fileContents.length === 0 && !devServerNote && !skillsBlock) return
 
     const parts = []
+    if (skillsBlock) {
+      parts.push(skillsBlock)
+    }
     if (fileContents.length > 0) {
       parts.push(`[Context recovery — current content of recently accessed files]\n\n${fileContents.join('\n\n')}`)
     }
@@ -1448,6 +1468,16 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
   /** Returns the current abort controller (for sub-agent abort propagation). */
   getAbortController(): AbortController | null {
     return this.abortController
+  }
+
+  /**
+   * True when the current run was cancelled (handleStop fired) and no fresh
+   * runAgentLoop has started yet. Stream callbacks should consult this before
+   * mutating UI state — late deltas keep arriving for ~1s after abort and
+   * would otherwise re-flip the status from "idle" back to "thinking".
+   */
+  isAborted(): boolean {
+    return this.abortController?.signal.aborted === true
   }
 
   cancelLoop(): void {
@@ -1649,8 +1679,13 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
     const modelName = response.headers.get('X-Model-Name')
     const modelProvider = response.headers.get('X-Model-Provider')
-    if (modelName || modelProvider) {
-      useAgentStore.getState().setModelInfo(modelName, modelProvider)
+    const thinkingHeader = response.headers.get('X-Model-Thinking-Mode')
+    const thinkingMode: 'none' | 'toggleable' | 'mandatory' | null =
+      thinkingHeader === 'none' || thinkingHeader === 'toggleable' || thinkingHeader === 'mandatory'
+        ? thinkingHeader
+        : null
+    if (modelName || modelProvider || thinkingHeader) {
+      useAgentStore.getState().setModelInfo(modelName, modelProvider, thinkingMode)
     }
 
     // Read billing info from response headers
@@ -1741,6 +1776,12 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
             // For tool_use blocks, parse args, fire UI callbacks, and dispatch
             // to the streaming pool IMMEDIATELY — during the stream.
             const completed = blocks.get(event.index)
+            if (completed?.type === 'thinking') {
+              // Drain the reasoning delta buffer the moment the upstream
+              // closes the thinking block — closes the race where the next
+              // content_block_start fires before the 50ms buffer timer.
+              callbacks.onReasoningComplete?.()
+            }
             if (completed?.type === 'tool_use') {
               let args: Record<string, unknown> = {}
               try {
@@ -1764,16 +1805,27 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
           case 'message_delta': {
             finishReason = event.stopReason
+            logger.info('agent', `[stop_reason] received="${event.stopReason}" toolCallsSoFar=${toolCalls.length}`)
             break
           }
 
           case 'usage': {
-            // Accumulate — message_start has input_tokens, message_delta has output_tokens
-            // Use ?? (nullish coalescing) to handle the case where promptTokens or
-            // completionTokens are legitimately 0 (|| would treat 0 as falsy and fall through)
+            // Combine across multiple usage events per turn. Anthropic-style
+            // streams emit usage TWICE: message_start with prompt_tokens (and
+            // completion=0) then message_delta with completion_tokens (and
+            // prompt=0). The previous `??` chain only short-circuits on
+            // null/undefined — `0` is a real number that always wins, so the
+            // second event was OVERWRITING promptTokens=X with promptTokens=0.
+            // Result: input tokens silently dropped, chat counter only ever
+            // saw completion totals (~21K instead of the real ~500K+).
+            //
+            // Math.max handles every emit pattern correctly:
+            //   - Two-event Anthropic-style (X,0) then (0,Y) → keeps X and Y
+            //   - Single-event provider (X,Y) → keeps X and Y
+            //   - Incremental cumulative completion (10 → 50 → 100) → keeps 100
             usage = {
-              promptTokens: event.promptTokens ?? usage?.promptTokens ?? 0,
-              completionTokens: event.completionTokens ?? usage?.completionTokens ?? 0,
+              promptTokens: Math.max(usage?.promptTokens ?? 0, event.promptTokens ?? 0),
+              completionTokens: Math.max(usage?.completionTokens ?? 0, event.completionTokens ?? 0),
             }
             break
           }

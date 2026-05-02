@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { motion } from 'framer-motion'
 import { tokens } from '@/theme/tokens'
@@ -59,6 +60,18 @@ function CheckmarkAnimation() {
 
 function ReadyStep({ onDone, onBack }: ReadyStepProps) {
   const t = useTranslation()
+
+  // Ask the OS for notification permission at the commitment moment. The
+  // user is at the end of onboarding, about to sign in/up — a system prompt
+  // here reads as part of the setup. Asking later (when the agent first
+  // wants to notify about a permission request) feels like an unrelated
+  // pop-up. ensureNotificationPermission() is idempotent; revisiting this
+  // step via Back/Next won't re-prompt.
+  useEffect(() => {
+    import('@/services/notificationService').then(({ ensureNotificationPermission }) => {
+      ensureNotificationPermission().catch(() => { /* unsupported platform */ })
+    })
+  }, [])
 
   return (
     <Flex direction="column" align="center" textAlign="center">

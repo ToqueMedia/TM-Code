@@ -294,3 +294,20 @@ input:focus {
   40% { opacity: 1; transform: scale(1); }
 }
 
+/* ═══ Respect OS-level reduced motion preference ═══
+   Users with vestibular disorders (or who simply prefer less motion) toggle
+   this in System Settings → Accessibility. Collapsing every transition and
+   animation to ~0ms is the standard remediation — Framer Motion already
+   reads `prefers-reduced-motion` for its motion components, this rule
+   covers CSS keyframes, Chakra transitions, and anything else. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+

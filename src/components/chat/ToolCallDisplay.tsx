@@ -111,9 +111,13 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       return desc.length > 50 ? desc.slice(0, 47) + '...' : desc
     }
     case 'update_tasks': {
-      const tasks = input.tasks as Array<{ status: string }> | undefined
-      if (tasks) {
-        const done = tasks.filter(t => t.status === 'completed').length
+      // input.tasks comes from streaming JSON — during partial parse it can be
+      // a truthy non-array (e.g. an empty object or a string mid-deserialization).
+      // The previous `if (tasks)` guard was permissive enough to fall through
+      // and call .filter on a non-array, crashing the React tree.
+      const tasks = input.tasks
+      if (Array.isArray(tasks)) {
+        const done = tasks.filter((t: { status?: string }) => t?.status === 'completed').length
         return `${done}/${tasks.length} completed`
       }
       return ''

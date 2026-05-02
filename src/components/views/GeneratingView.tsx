@@ -117,8 +117,6 @@ function GeneratingView() {
     checkAllDiffsResolved()
   }, [checkAllDiffsResolved])
 
-  const totalTokens = totalTokensUsed.input + totalTokensUsed.output
-
   return (
     <Flex flex="1" overflow="hidden">
       {/* Left: Chat panel */}
@@ -130,7 +128,8 @@ function GeneratingView() {
           ))}
         </Box>
         <GeneratingStatusBar status={status} isStreaming={isStreaming}
-          totalTokens={totalTokens} currentTurnCount={currentTurnCount} agentStartTime={agentStartTime} />
+          inputTokens={totalTokensUsed.input} outputTokens={totalTokensUsed.output}
+          currentTurnCount={currentTurnCount} agentStartTime={agentStartTime} />
       </Flex>
 
       {/* Right: Diff panel */}

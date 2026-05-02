@@ -11,6 +11,7 @@ import FirebaseAuthService from '../auth/firebaseAuth'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
 import { resolveWorkerUrl } from '../../utils/devUrls'
+import { formatError } from '../../utils/errors'
 // TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
@@ -94,8 +95,6 @@ function createLinkedAbortController(parentSignal?: AbortSignal): AbortControlle
 class ToolExecutor {
   private static instance: ToolExecutor
   private tools: Map<string, ToolEntry> = new Map()
-  /** Tracks install commands that completed successfully in this session. */
-  private completedInstalls: Set<string> = new Set()
   /** Tracks when files were last read by the model — for read-before-write enforcement.
    *  Stores timestamp + a simple content hash to detect concurrent modifications. */
   private readFileTimestamps: Map<string, { timestamp: number; hash: number }> = new Map()
@@ -127,14 +126,12 @@ class ToolExecutor {
     this.cmdModeCwd = null
   }
 
-  /** Clears session-scoped state (e.g., install command cache). Call on new sessions. */
+  /** Clears session-scoped state. Call on new sessions. */
   resetSessionState(): void {
-    this.completedInstalls.clear()
     this.readFileTimestamps.clear()
     this.largeResults.clear()
     this.largeResultCounter = 0
     this.readOnlyContexts.clear()
-    this._installedDepsCache = undefined
   }
 
   async execute(
@@ -192,6 +189,7 @@ class ToolExecutor {
         }
         // Not blocked but dangerous → always ask (forcePrompt bypasses Accept All)
         const decision = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command')
+        this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
           const reason = decision.denyReason
             ? ` User says: ${decision.denyReason}`
@@ -202,16 +200,19 @@ class ToolExecutor {
       }
     }
 
-    // Agent-internal tools: bypass permission entirely. These are autonomous
-    // decisions (the agent activates reasoning or updates its own task list)
-    // — never surface a permission prompt to the user.
+    // Agent-internal tools + tools that surface their own confirmation UI:
+    // bypass the generic permission dialog. update_tasks/check_background_agents
+    // are autonomous; request_credentials renders a secure form in the chat
+    // (Save/Skip is the gate, not the permission dialog).
     const PERMISSION_EXEMPT_TOOLS = new Set([
       'update_tasks',
       'check_background_agents',
+      'request_credentials',
     ])
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
       const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false)
+      this.recordPermission(toolCallId, decision)
       if (!decision.approved) {
         const target = (input.path || input.command || input.name || '') as string
         const reason = decision.denyReason
@@ -340,7 +341,6 @@ class ToolExecutor {
   private async executeInstallStreaming(
     command: string,
     cwd: string,
-    installKey: string,
     toolCallId?: string,
     abortSignal?: AbortSignal,
   ): Promise<string> {
@@ -441,8 +441,6 @@ class ToolExecutor {
       const fullOutput = allOutput.join('')
 
       if (exitCode === 0) {
-        this.completedInstalls.add(installKey)
-        this.invalidateDepsCache() // New packages installed — refresh cache
         if (tcId) {
           useChatStore.getState().updateToolCallProgress(tcId, '')
         }
@@ -623,6 +621,24 @@ class ToolExecutor {
     // Block all .env files EXCEPT exactly ".env.example"
     if (!filename.startsWith('.env')) return false
     return filename !== '.env.example'
+  }
+
+  /**
+   * Persist the permission decision onto the tool call so it surfaces in the
+   * session export. Without this, forensic review can't tell whether a
+   * destructive command (e.g. `kill -9`) was approved by the user or slipped
+   * through unchecked — both look identical in the post-hoc markdown.
+   *
+   * Silent for safe tools (`source: 'safe_tool'`) — no decision was made,
+   * recording it would just clutter every read_file with a permission stamp.
+   */
+  private recordPermission(toolCallId: string | undefined, decision: { approved: boolean; prompted: boolean; source: string; promptKind?: 'sensitive_file' | 'dangerous_command' | null; denyReason?: string }): void {
+    if (!toolCallId) return
+    if (decision.source === 'safe_tool') return
+    // Dynamic import keeps toolExecutor free of a hard chatStore dep at module load.
+    import('../../stores/chatStore').then(m => {
+      m.useChatStore.getState().recordToolPermission(toolCallId, decision as NonNullable<import('../../types/chat').ToolCallDisplay['permission']>)
+    }).catch(() => { /* non-critical — don't block the tool flow */ })
   }
 
   private isSensitiveFile(filePath: string): boolean {
@@ -863,119 +879,10 @@ class ToolExecutor {
       timestamp: Date.now(),
       hash: this.simpleHash(newContent),
     })
-    // If package.json was written, invalidate the deps cache so
-    // checkMissingImports sees the new dependencies immediately.
-    if (path.endsWith('/package.json') || path === 'package.json') {
-      this.invalidateDepsCache()
-    }
     // Invalidate the cached system prompt when prompt-relevant files change.
     if (/(^|\/)(README|TMS|PLAN|TODO)\.md$|(^|\/)package\.json$|(^|\/)\.toquemedia-template$/.test(path)) {
       import('./contextBuilder').then(m => m.default.getInstance().invalidatePromptCache()).catch(() => { /* non-critical */ })
     }
-  }
-
-  /**
-   * Parses import/require statements and checks if the packages are installed.
-   * Returns a list of missing packages that need to be installed.
-   * Ignores: relative imports (./), Node built-ins, and packages already in package.json.
-   */
-  private async checkMissingImports(content: string, filePath: string): Promise<string[]> {
-    // Only check JS/TS files
-    const ext = filePath.split('.').pop()?.toLowerCase() || ''
-    if (!['ts', 'tsx', 'js', 'jsx', 'mts', 'mjs', 'cts', 'cjs'].includes(ext)) return []
-
-    // Extract package names from import/require/dynamic-import statements.
-    // Uses the string specifier in quotes rather than parsing full import syntax,
-    // so multiline imports are handled (we look for `from 'pkg'` or `require('pkg')`).
-    // Match `from 'pkg'` only at the start of a line or after import/export keywords
-    // to reduce false positives from strings/comments containing "from 'something'"
-    const fromPattern = /(?:^|;|\b(?:import|export))\s+(?:type\s+)?(?:\{[^}]*\}|[^;]*?)\s+from\s+['"]([^'"]+)['"]/gm
-    const requirePattern = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g
-    const dynamicImportPattern = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g
-
-    const packages = new Set<string>()
-    for (const pattern of [fromPattern, requirePattern, dynamicImportPattern]) {
-      let match
-      while ((match = pattern.exec(content)) !== null) {
-        const specifier = match[1]
-        if (!specifier) continue
-        // Skip: relative imports, absolute paths, path aliases (#, @/, ~/)
-        if (specifier.startsWith('.') || specifier.startsWith('/')) continue
-        if (specifier.startsWith('#')) continue        // TypeScript # path alias
-        if (/^@\//.test(specifier)) continue           // @/ path alias (Vite, Next.js)
-        if (specifier.startsWith('~/')) continue        // ~/ path alias (Nuxt)
-        // Extract package name (handle scoped packages like @tanstack/react-query)
-        const pkgName = specifier.startsWith('@')
-          ? specifier.split('/').slice(0, 2).join('/')
-          : specifier.split('/')[0]
-        if (pkgName) packages.add(pkgName)
-      }
-    }
-
-    if (packages.size === 0) return []
-
-    // Node built-ins to ignore
-    const nodeBuiltins = new Set([
-      'fs', 'path', 'os', 'url', 'http', 'https', 'crypto', 'stream', 'util',
-      'events', 'buffer', 'querystring', 'zlib', 'net', 'dns', 'tls', 'child_process',
-      'cluster', 'dgram', 'readline', 'repl', 'vm', 'assert', 'console', 'timers',
-      'string_decoder', 'perf_hooks', 'worker_threads', 'inspector',
-      'node:fs', 'node:path', 'node:os', 'node:url', 'node:http', 'node:https',
-      'node:crypto', 'node:stream', 'node:util', 'node:events', 'node:buffer',
-      'node:child_process', 'node:worker_threads', 'node:test', 'node:assert',
-    ])
-
-    // Read package.json deps (cached to avoid repeated IPC calls)
-    const installedDeps = await this.getInstalledDeps()
-    if (installedDeps === null) return [] // No package.json — skip check
-
-    // Find missing packages
-    const missing: string[] = []
-    for (const pkg of packages) {
-      if (nodeBuiltins.has(pkg)) continue
-      if (installedDeps.has(pkg)) continue
-      missing.push(pkg)
-    }
-
-    return missing
-  }
-
-  /** Cached installed deps from package.json. Invalidated when install commands run. */
-  private _installedDepsCache: Set<string> | null | undefined = undefined // undefined = not loaded, null = no package.json
-
-  /** Get installed deps (cached). Returns null if no package.json. */
-  private async getInstalledDeps(): Promise<Set<string> | null> {
-    if (this._installedDepsCache !== undefined) return this._installedDepsCache
-    try {
-      const projectRoot = this.getProjectRoot()
-      const pkgRaw = await invoke<string>('read_file', { path: `${projectRoot}/package.json` })
-      const pkg = JSON.parse(pkgRaw)
-      this._installedDepsCache = new Set([
-        ...Object.keys(pkg.dependencies || {}),
-        ...Object.keys(pkg.devDependencies || {}),
-        ...Object.keys(pkg.peerDependencies || {}),
-      ])
-      return this._installedDepsCache
-    } catch {
-      this._installedDepsCache = null
-      return null
-    }
-  }
-
-  /** Invalidate deps cache (called after install commands succeed). */
-  invalidateDepsCache(): void {
-    this._installedDepsCache = undefined
-  }
-
-  /** Detect package manager for error messages. Uses cached value from contextBuilder. */
-  private detectPm(): string {
-    return this._cachedPm || 'npm'
-  }
-  private _cachedPm: string | null = null
-
-  /** Set the detected package manager (called during prompt building). */
-  setCachedPackageManager(pm: string): void {
-    this._cachedPm = pm
   }
 
   /** Fast non-cryptographic hash for concurrent modification detection. */
@@ -1058,8 +965,10 @@ class ToolExecutor {
           this.readFileTimestamps.set(filePath, { timestamp: Date.now(), hash: this.simpleHash(content) })
           return content
         } catch (error) {
-          // Enrich file-not-found errors with path suggestions (like Claude Code)
-          const msg = error instanceof Error ? error.message : String(error)
+          // formatError handles Tauri's plain-object throws — the previous
+          // `String(error)` could yield "[object Object]" which both swallowed
+          // the not-found heuristic AND surfaced uselessly to the model.
+          const msg = formatError(error)
           if (/not found|no such file|does not exist/i.test(msg)) {
             const suggestion = await this.suggestSimilarPath(filePath)
             const projectRoot = this.getProjectRoot()
@@ -1069,7 +978,9 @@ class ToolExecutor {
             }
             return enriched
           }
-          throw error
+          // Re-throw with a real Error so the safeToolPool catch sees a usable
+          // shape (and the formatError fallback there matches what we logged).
+          throw new Error(`read_file failed for ${filePath}: ${msg}`)
         }
       }
     })
@@ -1197,12 +1108,6 @@ class ToolExecutor {
           })
         }
 
-        // Check for uninstalled package imports before generating diff
-        const missingPkgs = await this.checkMissingImports(newContent, path)
-        if (missingPkgs.length > 0) {
-          return `Error: The following packages are imported but NOT installed in package.json: ${missingPkgs.join(', ')}\n\nInstall them first with execute_command (e.g., "${this.detectPm()} add ${missingPkgs.join(' ')}"), then call write_file again.`
-        }
-
         // Return diff data as JSON for inline display
         // The file is NOT written yet — user approves via InlineDiff
         return JSON.stringify({
@@ -1258,12 +1163,6 @@ class ToolExecutor {
             isNewFile: true,
             alreadyApplied: true,
           })
-        }
-
-        // Check for uninstalled package imports before generating diff
-        const missingPkgs = await this.checkMissingImports(content, path)
-        if (missingPkgs.length > 0) {
-          return `Error: The following packages are imported but NOT installed in package.json: ${missingPkgs.join(', ')}\n\nInstall them first with execute_command (e.g., "${this.detectPm()} add ${missingPkgs.join(' ')}"), then call create_file again.`
         }
 
         // Return diff data as JSON for inline display (consistent with write_file)
@@ -1461,13 +1360,6 @@ class ToolExecutor {
           })
         }
 
-        // Check for uninstalled package imports in the NEW PART only (not the whole file).
-        // Checking the whole file would flag pre-existing imports that already work.
-        const missingPkgs = await this.checkMissingImports(newStr, path)
-        if (missingPkgs.length > 0) {
-          return `Error: The following packages are imported but NOT installed in package.json: ${missingPkgs.join(', ')}\n\nInstall them first with execute_command (e.g., "${this.detectPm()} add ${missingPkgs.join(' ')}"), then call edit_file again.`
-        }
-
         // Return diff data as JSON for inline display
         return JSON.stringify({
           type: 'diff',
@@ -1641,39 +1533,26 @@ class ToolExecutor {
         const cwd = (input.cwd as string) || projectRoot
         this.validatePathWithinProject(cwd)
 
-        // Block repeated install commands that already succeeded.
-        // Matches direct ("pnpm install") and compound ("cd server && pnpm install") forms.
-        // Key includes effective cwd so monorepo sub-directory installs aren't blocked.
+        // Detect package-manager install commands so they get the streaming
+        // execution path (real-time logs in chat + PID-based cancellation).
+        // We no longer skip repeated installs — npm/yarn/pnpm/bun are all
+        // idempotent (they only mutate node_modules when something changed),
+        // and the prior skip-memo caused false positives that masked real
+        // installs. Trust the package manager.
         const normalizedCmd = cmd.replace(/\s+/g, ' ')
-        const directInstall = normalizedCmd.match(/^((?:npm|yarn|pnpm|bun)\s+(?:install|ci))\b/)
+        const directInstall = normalizedCmd.match(/^((?:npm|yarn|pnpm|bun)\s+(?:install|ci|add|remove|uninstall))\b/)
           || normalizedCmd.match(/^(pip\s+install)\b/)
         const compoundInstall = !directInstall
-          ? normalizedCmd.match(/^cd\s+(\S+)\s*&&\s*((?:npm|yarn|pnpm|bun)\s+(?:install|ci))\b/)
+          ? normalizedCmd.match(/^cd\s+(\S+)\s*&&\s*((?:npm|yarn|pnpm|bun)\s+(?:install|ci|add|remove|uninstall))\b/)
           : null
         const isInstallCmd = directInstall !== null || compoundInstall !== null
-        const installBaseCmd = directInstall?.[1] || compoundInstall?.[2] || ''
-        // For "cd subdir && pnpm install", resolve cwd to the subdirectory.
-        // Normalize ./path and trailing slashes so keys match across forms.
-        const effectiveCwd = compoundInstall
-          ? `${cwd}/${compoundInstall[1]}`.replace(/\/\.\//g, '/').replace(/\/+$/, '')
-          : cwd
-        const installKey = isInstallCmd ? `${installBaseCmd}@${effectiveCwd}` : ''
 
-        if (isInstallCmd && this.completedInstalls.has(installKey)) {
-          return `SKIPPED: "${installBaseCmd}" already completed successfully in ${effectiveCwd}. Dependencies are installed.\nExit code: 0`
-        }
-
-        // For install commands: use streaming so the user sees real-time logs in the chat.
-        // Note: the outer guard at execute() entry already returns early on
-        // pre-aborted signals — no inner re-check needed (was R2 critique
-        // about duplicate-with-divergent-message).
         const callSignal = input._abortSignal as AbortSignal | undefined
 
         if (isInstallCmd) {
           return this.executeInstallStreaming(
             cmd,
             cwd,
-            installKey,
             input._toolCallId as string | undefined,
             callSignal,
           )
@@ -1781,14 +1660,13 @@ class ToolExecutor {
     this.tools.set('start_dev_server', {
       definition: {
         name: 'start_dev_server',
-        description: 'Start the project\'s dev server as a background process. Returns immediately — the correct preview panel opens automatically when the server is ready. ONE dev server per project.\n\nPass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).\n\nproject_kind: "frontend" (UI-only → iframe preview), "backend" (API-only → HTTP Client panel), "fullstack" (both — iframe + toggleable HTTP Client drawer). Auto-detected if omitted.\n\nPORTS — TWO MODES:\n  • TM Code projects (.toquemedia-id exists): uses reserved ports 7773 (frontend) / 7777 (backend). Omit frontend_port and backend_port.\n  • External projects: inspect the project\'s real ports first (package.json scripts, source code). If they differ from 7773/7777, pass frontend_port and backend_port as overrides so TM Code adapts to the project WITHOUT rewriting user scripts. Never force-migrate an external project\'s ports — adapt instead.',
+        description: 'Start the project\'s dev server as a background process. Returns immediately — the correct preview panel opens automatically when the server is ready. ONE dev server per project.\n\nPass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).\n\nproject_kind: "frontend" (UI-only → iframe preview), "backend" (API-only → HTTP Client panel), "fullstack" (both — iframe + toggleable HTTP Client drawer). Auto-detected if omitted.\n\nPorts: the framework picks the port (Vite=5173, Next=3000, Express=whatever your scripts bind). The IDE detects the URL from log output and classifies frontend/backend by HTTP content-type — you do not need to pass any port.\n\nfrontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond with the same content-type and the IDE assigned the wrong URL to the iframe. Most projects do not need it.',
         input_schema: {
           type: 'object',
           properties: {
             command: { type: 'string', description: 'Dev server command (e.g., "npm run dev", "pnpm start", "npx vite"). Pass the top-level command even if it spawns multiple processes.' },
             project_kind: { type: 'string', enum: ['frontend', 'backend', 'fullstack'], description: '"frontend", "backend", or "fullstack". Auto-detected if omitted.' },
-            frontend_port: { type: 'number', description: 'Port the frontend actually binds to. Omit for TM Code projects (uses 7773). For external projects, pass their real port (e.g., 3000 for Next.js, 5173 for Vite default).' },
-            backend_port: { type: 'number', description: 'Port the backend actually binds to. Omit for TM Code projects (uses 7777). For external projects, pass their real port (e.g., 3001, 8080).' },
+            frontend_port_hint: { type: 'number', description: 'Optional override for fullstack content-type ambiguity. Treats the URL on this port as frontend regardless of what it serves. Use only when the automatic content-type classifier picks the wrong URL.' },
             server_type: { type: 'string', enum: ['frontend', 'backend'], description: 'DEPRECATED — use project_kind instead.' }
           },
           required: ['command']
@@ -1798,8 +1676,7 @@ class ToolExecutor {
         const command = input.command as string
         let projectKind = input.project_kind as 'frontend' | 'backend' | 'fullstack' | undefined
         const legacyServerType = input.server_type as 'frontend' | 'backend' | undefined
-        const frontendPort = typeof input.frontend_port === 'number' ? input.frontend_port : undefined
-        const backendPort = typeof input.backend_port === 'number' ? input.backend_port : undefined
+        const frontendPortHint = typeof input.frontend_port_hint === 'number' ? input.frontend_port_hint : undefined
         this.validateCommand(command)
         const projectRoot = this.getProjectRoot()
 
@@ -1820,15 +1697,13 @@ class ToolExecutor {
         if (!projectKind) projectKind = 'frontend'
 
         try {
-          await devServerManager.start(projectRoot, command, { projectKind, frontendPort, backendPort })
+          await devServerManager.start(projectRoot, command, { projectKind, frontendPortHint })
           const url = devServerManager.getUrl()
-          const portsNote = (frontendPort || backendPort)
-            ? ` [using custom ports: frontend=${frontendPort ?? 7773}, backend=${backendPort ?? 7777}]`
-            : ''
+          const hintNote = frontendPortHint ? ` [frontend port hint: ${frontendPortHint}]` : ''
           if (url) {
-            return `Dev server started and running at ${url} (${projectKind})${portsNote}. The correct preview panel will open automatically.`
+            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The correct preview panel will open automatically.`
           }
-          return `Dev server starting with command: ${command} (${projectKind})${portsNote}. The preview panel will open automatically when the server is ready.`
+          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. The preview panel will open automatically when the server is ready.`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`
@@ -1911,13 +1786,17 @@ class ToolExecutor {
       execute: async (input) => {
         const name = (input.name as string)?.trim()
         if (!name) return 'Error: read_skill requires a non-empty "name" argument.'
-        const SkillSvc = (await import('./skillService')).default
-        const svc = SkillSvc.getInstance()
+        const skillModule = await import('./skillService')
+        const svc = skillModule.default.getInstance()
         const skill = svc.getCachedSkillContent(name)
         if (!skill) {
           const available = svc.getCachedSkillNames()
           return `Error: skill "${name}" is not loaded for the current context. Available skills: ${available.join(', ') || '(none — check the "Skills available" section of the system prompt)'}.`
         }
+        // Cache the skill body in module-level state so it survives context
+        // compression. After compression strips the original tool result, we
+        // re-inject this content so the verbatim CRITICAL blocks aren't lost.
+        skillModule.trackInvokedSkill(skill.name, skill.content)
         return svc.formatSkillForReading(skill)
       }
     })
@@ -1963,12 +1842,13 @@ class ToolExecutor {
     this.tools.set('read_dev_server_logs', {
       definition: {
         name: 'read_dev_server_logs',
-        description: 'Read recent output from the dev server AND browser runtime errors from the live preview. Includes: build errors, type errors, HMR failures (from dev server stdout/stderr), plus uncaught exceptions, unhandled promise rejections, and console.error from the preview browser (prefixed [runtime]). Use after file changes, after start_dev_server, or when asked about preview/console/browser errors.',
+        description: 'Read output from the dev server AND browser runtime errors from the live preview. Includes: build errors, type errors, HMR failures (from dev server stdout/stderr), plus uncaught exceptions, unhandled promise rejections, and console.error from the preview browser (prefixed [runtime]). Use after file changes, after start_dev_server, or when asked about preview/console/browser errors. The buffer is CUMULATIVE — old errors are not cleared when the dev server reloads after a fix. Each entry comes with its timestamp; the response footer includes a cursor (`next_since: <ms>`). Pass that cursor as `since_timestamp` on the next call to get only entries that arrived AFTER your last read — this is how you tell whether your fix actually resolved the previous error vs. seeing the same stale entry. Without `since_timestamp`, you get the tail of the full buffer (default 50 lines).',
         input_schema: {
           type: 'object',
           properties: {
-            lines: { type: 'number', description: 'Number of log lines to return. Default: 50. Max: 200.' },
-            level: { type: 'string', enum: ['all', 'error', 'warn'], description: 'Filter by log level. "error" shows only errors. "warn" shows errors and warnings. "all" shows everything. Default: all.' }
+            lines: { type: 'number', description: 'Number of log lines to return when reading the tail. Default: 50. Max: 200. Ignored when since_timestamp is set.' },
+            level: { type: 'string', enum: ['all', 'error', 'warn'], description: 'Filter by log level. "error" shows only errors. "warn" shows errors and warnings. "all" shows everything. Default: all.' },
+            since_timestamp: { type: 'number', description: 'Unix epoch milliseconds — return only entries with timestamp > this value. Use the next_since cursor from the previous read to get just-arrived entries (the right way to verify a fix landed). Omit on first read.' }
           },
           required: []
         },
@@ -2046,31 +1926,51 @@ class ToolExecutor {
           return 'Dev server is running but has produced no output yet.'
         }
 
+        // The buffer is cumulative — old errors persist after fixes.
+        // since_timestamp lets the agent fetch only entries that arrived
+        // after its last read, which is the only reliable way to tell
+        // whether a fix actually resolved the previous error.
+        const sinceTimestamp = (input.since_timestamp as number) || 0
         const maxLines = Math.min((input.lines as number) || 50, 200)
         const levelFilter = (input.level as string) || 'all'
 
         let filtered = logs
+        if (sinceTimestamp > 0) {
+          filtered = filtered.filter(l => l.timestamp > sinceTimestamp)
+        }
         if (levelFilter === 'error') {
-          filtered = logs.filter(l => l.level === 'error')
+          filtered = filtered.filter(l => l.level === 'error')
         } else if (levelFilter === 'warn') {
-          filtered = logs.filter(l => l.level === 'warn' || l.level === 'error')
+          filtered = filtered.filter(l => l.level === 'warn' || l.level === 'error')
         }
 
-        const recent = filtered.slice(-maxLines)
+        // Tail-slice only when no cursor was provided. With since_timestamp
+        // the agent wants the full delta, not the tail of it.
+        const recent = sinceTimestamp > 0 ? filtered : filtered.slice(-maxLines)
+
+        // Cursor for the next call — always the last entry's timestamp in
+        // the FULL (unfiltered) buffer, not the filtered slice. Otherwise
+        // a level=error read would skip past info entries and the next
+        // since_timestamp call would re-surface them as "new".
+        const nextSince = logs[logs.length - 1].timestamp
 
         if (recent.length === 0) {
-          return `No ${levelFilter === 'all' ? '' : levelFilter + '-level '}logs found. Dev server appears healthy.`
+          const sinceLabel = sinceTimestamp > 0 ? ' since last read' : ''
+          return `No ${levelFilter === 'all' ? 'new ' : levelFilter + '-level '}logs${sinceLabel}. Dev server appears healthy.\nnext_since: ${nextSince}`
         }
 
         const formatted = recent.map(l => {
           const prefix = l.level === 'error' ? 'ERROR' : l.level === 'warn' ? 'WARN' : 'INFO'
-          return `[${prefix}] ${l.text}`
+          return `[${prefix}] [${l.timestamp}] ${l.text}`
         }).join('\n')
 
         const errorCount = recent.filter(l => l.level === 'error').length
         const warnCount = recent.filter(l => l.level === 'warn').length
+        const header = sinceTimestamp > 0
+          ? `Dev server logs since ${sinceTimestamp} (${recent.length} new entries, ${errorCount} errors, ${warnCount} warnings):`
+          : `Dev server logs (${recent.length} lines, ${errorCount} errors, ${warnCount} warnings):`
 
-        return `Dev server logs (${recent.length} lines, ${errorCount} errors, ${warnCount} warnings):\n${formatted}`
+        return `${header}\n${formatted}\nnext_since: ${nextSince}`
       }
     })
 
@@ -2393,7 +2293,12 @@ Project root: ${projectRoot}`
       },
       execute: async (input) => {
         const { useAgentStore } = await import('../../stores/agentStore')
-        const tasks = (input.tasks as Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>) || []
+        // Defensive: streaming JSON parse can deliver a truthy non-array (e.g.
+        // partial object) before the call settles. Coerce to array.
+        const raw = input.tasks
+        const tasks = Array.isArray(raw)
+          ? (raw as Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>)
+          : []
         useAgentStore.getState().setTasks(tasks)
         const completed = tasks.filter(t => t.status === 'completed').length
         return `Task list updated: ${completed}/${tasks.length} completed.`
@@ -2441,6 +2346,283 @@ Project root: ${projectRoot}`
     })
 
     // === verify (adversarial verification sub-agent) ===
+    // === provision_auth ===
+    // One-shot tool that provisions GIP authentication for the current project:
+    // 1. Calls the backend to get-or-create a per-project GIP tenant
+    // 2. Writes the returned credentials to .env (via write_env_vars)
+    // 3. Copies the bundled auth-proxy boilerplate (routes, middleware, schema, authClient)
+    // 4. Returns a summary the agent can read before scaffolding the frontend
+    //    code via the auth-proxy-gip skill (read_skill('auth-proxy-gip')).
+    //
+    // The agent uses this when the user requests login/signup/auth in their
+    // project. After this tool returns, the agent should:
+    //   - read_skill('auth-proxy-gip') for the frontend recipe
+    //   - read_skill('google-signin') if Google sign-in is requested
+    //   - mount the auth-proxy router in the backend entry (app.use('/api', authProxyRouter))
+    this.tools.set('provision_auth', {
+      definition: {
+        name: 'provision_auth',
+        description:
+          'Provision Google Identity Platform (GIP) authentication for the current project. Creates a per-project GIP tenant on the platform and writes the Firebase Web config to .env (VITE_FIREBASE_API_KEY, AUTH_DOMAIN, PROJECT_ID, TENANT_ID + backend GIP_TENANT_ID + GIP_FIREBASE_API_KEY + GCP_PROJECT_ID). Use ONCE per project when the user requests login/signup/auth. The agent then implements the auth-proxy and frontend in whatever stack fits the project (Express, Hono, Fastify, FastAPI, etc.) — see read_skill("auth-proxy-gip") for the protocol. After this returns, the project has EVERY credential it needs: the auth-proxy uses VITE_FIREBASE_API_KEY (a public Firebase Web key) for Identity Toolkit REST. Do NOT call request_credentials afterwards: Firebase service accounts, Firebase Admin SDK keys, GOOGLE_APPLICATION_CREDENTIALS, GIP_SERVICE_ACCOUNT_*, and any GCP infrastructure credential are platform-managed and live only on the TM Code worker — the user does not have them.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            provider: {
+              type: 'string',
+              enum: ['gip'],
+              description: 'Auth provider. Currently only "gip" is supported.',
+            },
+          },
+          required: ['provider'],
+        },
+      },
+      execute: async (input) => {
+        const provider = String(input.provider || '').toLowerCase()
+        if (provider !== 'gip') {
+          return `Unsupported auth provider: ${provider}. Only "gip" is supported.`
+        }
+
+        const project = useProjectStore.getState().currentProject
+        if (!project) {
+          return 'No project is open. Open a project before provisioning auth.'
+        }
+
+        const firebaseAuth = FirebaseAuthService.getInstance()
+        const idToken = await firebaseAuth.getIdToken()
+        if (!idToken) {
+          return 'Not authenticated to TM Code. Sign in first, then retry.'
+        }
+
+        const workerUrl = resolveWorkerUrl()
+        let provisionRes: Awaited<ReturnType<typeof tauriFetch>>
+        try {
+          provisionRes = await tauriFetch(`${workerUrl}/v1/auth/provision-gip`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              projectId: project.id,
+              projectName: project.name,
+            }),
+          })
+        } catch (err) {
+          return `Failed to reach auth provisioning endpoint: ${err instanceof Error ? err.message : String(err)}`
+        }
+
+        if (!provisionRes.ok) {
+          const body = await provisionRes.text().catch(() => '')
+          return `GIP provisioning failed (HTTP ${provisionRes.status}): ${body.slice(0, 300)}`
+        }
+
+        const data = (await provisionRes.json()) as {
+          tenantId?: string
+          apiKey?: string
+          authDomain?: string
+          projectId?: string
+          googleClientId?: string | null
+        }
+
+        if (!data.tenantId || !data.apiKey || !data.authDomain || !data.projectId) {
+          return `Provisioning returned incomplete data: ${JSON.stringify(data)}`
+        }
+
+        // Write the credentials to .env via the same single-write-path used by
+        // request_credentials. Keys mirror what the auth-proxy-gip skill expects.
+        const envVars: Array<{ key: string; value: string }> = [
+          { key: 'VITE_FIREBASE_API_KEY', value: data.apiKey },
+          { key: 'VITE_FIREBASE_AUTH_DOMAIN', value: data.authDomain },
+          { key: 'VITE_FIREBASE_PROJECT_ID', value: data.projectId },
+          { key: 'VITE_GIP_TENANT_ID', value: data.tenantId },
+          // Backend env (read by the auth-proxy boilerplate)
+          { key: 'GCP_PROJECT_ID', value: data.projectId },
+          { key: 'GIP_TENANT_ID', value: data.tenantId },
+          { key: 'GIP_FIREBASE_API_KEY', value: data.apiKey },
+        ]
+        if (data.googleClientId) {
+          envVars.push({ key: 'VITE_GOOGLE_CLIENT_ID', value: data.googleClientId })
+        }
+
+        try {
+          await invoke('write_env_vars', { projectPath: project.path, vars: envVars })
+        } catch (err) {
+          return `Wrote tenant ${data.tenantId} but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
+        }
+
+        const lines: string[] = []
+        lines.push(`GIP tenant ready: ${data.tenantId} (project ${data.projectId}).`)
+        lines.push(`.env written: ${envVars.map((v) => v.key).join(', ')}.`)
+        lines.push('')
+        lines.push('Next steps:')
+        lines.push('  1. read_skill("auth-proxy-gip") for the protocol — Identity Toolkit REST endpoints, JWT verification, recommended client/server patterns. Stack-agnostic; pick whatever backend the project already uses (or whichever the developer asked for).')
+        lines.push('  2. Implement the backend auth proxy in your chosen stack: signup, signin, google, refresh, sync. Use VITE_FIREBASE_API_KEY (or the equivalent server-side env var GIP_FIREBASE_API_KEY) to call Identity Toolkit. Verify Firebase JWTs with the Google JWKS (no Firebase Admin SDK needed).')
+        lines.push('  3. Implement the frontend: firebase init (auth.tenantId from VITE_GIP_TENANT_ID), Login/Signup/AuthGuard, an auth store with signup/login/logout/setUser. Only onAuthStateChanged is allowed from firebase/auth.')
+        lines.push('  4. If Google sign-in is requested: read_skill("google-signin") for the GIS button integration.')
+        lines.push('')
+        lines.push('Layout note: .env is at the project root. If the frontend lives in a subdirectory (e.g. client/), set envDir in vite.config.ts (envDir: path.resolve(__dirname, "..")) — otherwise import.meta.env.VITE_* will be undefined and the GIS button / firebase init will silently fail.')
+        lines.push('')
+        lines.push('CREDENTIALS COMPLETE — do NOT call request_credentials for anything Firebase/GIP/GCP-related. The auth-proxy authenticates against Identity Toolkit REST using the PUBLIC VITE_FIREBASE_API_KEY (now in .env), not a service account. There is NO Firebase Admin SDK in this stack and the user does not have GOOGLE_APPLICATION_CREDENTIALS / serviceAccountKey.json / GIP_SERVICE_ACCOUNT_* — those live only on the TM Code platform worker.')
+
+        return lines.join('\n')
+      },
+    })
+
+    // === request_credentials ===
+    // Renders a secure form in the chat for collecting API keys, tokens, and
+    // secrets. The form is the ONLY legitimate write path for the project's
+    // .env file (the agent's normal write/read tools are mechanically blocked
+    // from .env). Values never enter the chat history or the model context —
+    // the tool result only echoes the keys that were saved.
+    this.tools.set('request_credentials', {
+      definition: {
+        name: 'request_credentials',
+        description:
+          'Request API keys, tokens, or other secrets from the user via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by you). Never instruct the user to create or edit .env, and never ask them to paste secrets into the chat.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nDO NOT USE FOR: anything Firebase / Google Identity Platform / GCP-infrastructure related. The TM Code platform manages those: provision_auth handles GIP tenants and writes the necessary VITE_FIREBASE_* + GIP_* keys to .env automatically. The user does not have (and will never have) Firebase service account JSONs, serviceAccountKey.json, GOOGLE_APPLICATION_CREDENTIALS, GIP_SERVICE_ACCOUNT_CLIENT_EMAIL/PRIVATE_KEY, or any Firebase Admin SDK credential — those live only on the platform worker. Asking for them is incorrect and will confuse the user.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            service_name: {
+              type: 'string',
+              description: 'Name of the service the credentials are for (e.g. "OpenAI", "Stripe", "Firebase")',
+            },
+            fields: {
+              type: 'array',
+              description: 'Credential fields to collect. Maximum 8 per request.',
+              items: {
+                type: 'object',
+                properties: {
+                  id: {
+                    type: 'string',
+                    description: 'Env var key as it will appear in .env (UPPER_SNAKE_CASE, e.g. "OPENAI_API_KEY")',
+                  },
+                  label: {
+                    type: 'string',
+                    description: 'Human-readable label shown in the form',
+                  },
+                  type: {
+                    type: 'string',
+                    enum: ['text', 'password'],
+                    description: 'Use "password" for API keys, tokens, secrets. Use "text" for non-sensitive values like project IDs.',
+                  },
+                  required: {
+                    type: 'boolean',
+                    description: 'Whether the field must be filled before the user can submit',
+                  },
+                  helperText: {
+                    type: 'string',
+                    description: 'Optional hint shown below the field (e.g. "Find this at https://...")',
+                  },
+                },
+                required: ['id', 'label', 'type', 'required'],
+              },
+            },
+          },
+          required: ['service_name', 'fields'],
+        },
+      },
+      execute: async (input) => {
+        const serviceName = String(input.service_name || '').trim()
+        if (!serviceName) {
+          return 'Missing required parameter: service_name'
+        }
+
+        const rawFields = input.fields
+        if (!Array.isArray(rawFields) || rawFields.length === 0) {
+          return 'Missing required parameter: fields (must be a non-empty array)'
+        }
+        if (rawFields.length > 8) {
+          return 'Too many fields: maximum 8 per request. Group related credentials into separate calls.'
+        }
+
+        const fields: Array<{
+          id: string
+          label: string
+          type: 'text' | 'password'
+          required: boolean
+          helperText?: string
+        }> = []
+        const seenIds = new Set<string>()
+        for (const raw of rawFields as Array<Record<string, unknown>>) {
+          const id = String(raw?.id ?? '').trim()
+          const label = String(raw?.label ?? '').trim()
+          if (!id || !label) {
+            return 'Each field must have non-empty "id" and "label".'
+          }
+          if (!/^[A-Z_][A-Z0-9_]*$/.test(id)) {
+            return `Field id "${id}" is not a valid env var key (must match /^[A-Z_][A-Z0-9_]*$/).`
+          }
+          if (seenIds.has(id)) {
+            return `Duplicate field id "${id}".`
+          }
+          seenIds.add(id)
+          const type = raw?.type === 'text' ? 'text' : 'password'
+          fields.push({
+            id,
+            label,
+            type,
+            required: raw?.required !== false,
+            helperText: raw?.helperText ? String(raw.helperText).trim() : undefined,
+          })
+        }
+
+        const projectRoot = this.getProjectRoot()
+        if (!projectRoot) {
+          return 'No active project — cannot collect credentials. Open a project first.'
+        }
+
+        const { useCredentialRequestStore } = await import('../../stores/credentialRequestStore')
+        const chatStore = useChatStore.getState()
+
+        // request() is synchronous — returns the id and a promise we await
+        // below. We race the promise against the abort signal so the tool
+        // unblocks immediately if the loop is cancelled.
+        const { id: requestId, promise: requestPromise } = useCredentialRequestStore
+          .getState()
+          .request({ serviceName, fields })
+
+        const cardMessageId = chatStore.addCredentialRequestCard(
+          projectRoot,
+          requestId,
+          serviceName,
+          fields,
+        )
+
+        const abortSignal = input._abortSignal as AbortSignal | undefined
+
+        const result = await new Promise<{ submitted: boolean; keys?: string[] }>((resolve) => {
+          let settled = false
+          const onAbort = () => {
+            if (settled) return
+            settled = true
+            useCredentialRequestStore.getState().cancel(requestId)
+            resolve({ submitted: false })
+          }
+          if (abortSignal) {
+            if (abortSignal.aborted) {
+              onAbort()
+              return
+            }
+            abortSignal.addEventListener('abort', onAbort, { once: true })
+          }
+          requestPromise.then((r) => {
+            if (settled) return
+            settled = true
+            resolve(r)
+          })
+        })
+
+        if (result.submitted) {
+          chatStore.markCredentialRequestSubmitted(cardMessageId, result.keys ?? [])
+          const keysList = (result.keys ?? []).join(', ') || '(none)'
+          return `Credentials saved to .env for ${serviceName}: ${keysList}. Values are masked from the chat history. Continue with the implementation.`
+        }
+
+        chatStore.updateCardStatus(cardMessageId, 'cancelled')
+        return `User cancelled the credential request for ${serviceName}. Ask the user how they want to proceed without these credentials.`
+      },
+    })
+
     this.tools.set('verify', {
       definition: {
         name: 'verify',

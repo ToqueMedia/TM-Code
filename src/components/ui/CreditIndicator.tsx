@@ -3,14 +3,14 @@ import { Box, Flex, Text, HStack, VStack } from '@chakra-ui/react'
 import { FiChevronDown } from 'react-icons/fi'
 import { tokens } from '../../theme/tokens'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { isInOverageState, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
+import { isInOverageState, extraConsumptionPct, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
 import { t } from '../../i18n'
 
 export const PLAN_DISPLAY: Record<UserPlanName, { label: string; color: string }> = {
-  explorer:       { label: 'Free',        color: tokens.colors.text.muted },
-  pro:            { label: 'Pro',         color: tokens.colors.accent.purple },
-  'business-4x':  { label: 'Business 4x', color: tokens.colors.accent.orange },
-  'business-8x':  { label: 'Business 8x', color: tokens.colors.accent.primary },
+  explorer:  { label: 'Free',  color: tokens.colors.text.muted },
+  vibe:      { label: 'Vibe',  color: tokens.colors.accent.green },
+  pro:       { label: 'Pro',   color: tokens.colors.accent.purple },
+  max:       { label: 'Max',   color: tokens.colors.accent.primary },
 }
 
 interface CreditIndicatorProps {
@@ -44,6 +44,8 @@ export function CreditIndicator(props: CreditIndicatorProps) {
   // the cycle is exhausted (consumed_pct > 1, includes spillover requests).
   const isInOverage = isInOverageState(props.status, props.consumedPct)
   const isBlocked = props.status === 'rejected'
+  // Single source of truth — same metric used in SettingsView and elsewhere.
+  const extraPct = extraConsumptionPct(props.tmsRemaining, props.tokenBudget)
 
   // Flash animation when consumedPct increases
   useEffect(() => {
@@ -227,8 +229,9 @@ export function CreditIndicator(props: CreditIndicatorProps) {
             </VStack>
           )}
 
-          {/* TMS overage credits */}
-          {props.tmsRemaining > 0 && (
+          {/* Extra consumption — single source of truth: extraConsumptionPct
+              in billingStore. Hidden when null (no plan budget or no extra). */}
+          {extraPct !== null && (
             <>
               <Box w="100%" h="1px" bg={isInOverage ? 'rgba(247, 127, 0, 0.15)' : 'rgba(255, 255, 255, 0.06)'} />
               <Flex justify="space-between" w="100%">
@@ -237,7 +240,7 @@ export function CreditIndicator(props: CreditIndicatorProps) {
                 </Text>
                 <Text fontSize="10px" fontWeight="700" fontFamily={tokens.fontFamily.mono}
                   color={isInOverage ? tokens.colors.accent.orange : tokens.colors.text.primary}>
-                  {props.tmsRemaining}
+                  {extraPct}%
                 </Text>
               </Flex>
             </>

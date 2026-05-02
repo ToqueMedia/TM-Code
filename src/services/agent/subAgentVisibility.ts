@@ -11,7 +11,7 @@
  *     user can tell sub-agent thoughts apart from main-agent thoughts.
  *   - Any tool call that was still `running` when the sub-agent errors is
  *     marked failed on cleanup (no more orphans spinning forever in the UI).
- *   - Agent status ticks between 'generating' / 'thinking' / 'applying' as
+ *   - Agent status ticks between 'generating' / 'reasoning' / 'applying' as
  *     the sub-agent works, so the status bar reflects real activity instead
  *     of staying stuck on 'applying' for the whole run.
  *
@@ -20,7 +20,7 @@
  * Vite's `import.meta.env` into the Jest CJS transform and break suite load).
  */
 
-export type SubAgentStatus = 'generating' | 'thinking' | 'applying'
+export type SubAgentStatus = 'generating' | 'reasoning' | 'applying'
 
 export interface VisibilityHooks {
   appendTextDelta: (delta: string) => void
@@ -93,7 +93,7 @@ export function createSubAgentVisibility(opts: SubAgentVisibilityOptions): SubAg
           reasoningHeaderEmitted = true
         }
         hooks.appendReasoningDelta(delta)
-        setStatus('thinking')
+        setStatus('reasoning')
       },
       onToolCallPending: (toolId, toolName) => {
         if (parentToolCallId) {
