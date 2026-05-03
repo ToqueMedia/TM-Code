@@ -404,7 +404,6 @@ fn raw_http_get(
     host_port: &str,
     path: &str,
 ) -> std::result::Result<(u16, String, Vec<u8>), String> {
-    use std::io::{Read, Write};
     use std::net::TcpStream;
 
     let v4_err = match TcpStream::connect(host_port) {
@@ -1266,12 +1265,14 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
+        .run(|_app_handle, _event| {
             // RunEvent::Opened fires when the OS asks the running app to open
             // a file (macOS Apple Events from "Open With", drag-drop on dock,
-            // re-launch via Finder while the app is already running). On Win/
-            // Linux this same case is the env::args path read in setup().
-            if let tauri::RunEvent::Opened { urls } = event {
+            // re-launch via Finder while the app is already running). The
+            // variant only exists on macOS — on Win/Linux this same case is
+            // covered by the env::args path read in setup().
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = _event {
                 let new_paths: Vec<String> = urls
                     .iter()
                     .filter(|u| u.scheme() == "file")
@@ -1288,7 +1289,7 @@ pub fn run() {
                     // its listener attached). On cold start the listener
                     // isn't there yet, so the buffer is the source of truth
                     // — frontend's `take_pending_open_files` invoke drains it.
-                    let _ = app_handle.emit("open-file-with-app", new_paths);
+                    let _ = _app_handle.emit("open-file-with-app", new_paths);
                 }
             }
         });
