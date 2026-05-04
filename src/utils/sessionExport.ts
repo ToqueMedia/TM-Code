@@ -127,7 +127,18 @@ function renderMessageMd(msg: ChatMessage): string {
   lines.push(`### ${roleLabel} — ${stamp}`)
   lines.push(``)
 
-  if (msg.reasoningContent) {
+  // When the message uses the modern block-based representation, walk it
+  // in order so reasoning passes interleave with text and tool calls in
+  // the same positions the user saw on screen. Multiple thinking passes
+  // (one before each tool call group, for example) all render in place.
+  // Falls back to the legacy flat fields for older messages.
+  const hasBlocks = !!msg.contentBlocks && msg.contentBlocks.length > 0
+  const hasInlineReasoning = hasBlocks && msg.contentBlocks!.some(b => b.type === 'reasoning')
+
+  // Legacy reasoning fallback — only when blocks don't already carry it,
+  // otherwise we'd duplicate the same content (block + flat field both
+  // populated by some legacy stream paths).
+  if (msg.reasoningContent && !hasInlineReasoning) {
     const dur = msg.reasoningDurationMs != null ? ` (${Math.round(msg.reasoningDurationMs / 1000)}s)` : ''
     lines.push(`<details>`)
     lines.push(`<summary>💭 Reasoning${dur}</summary>`)
@@ -139,10 +150,20 @@ function renderMessageMd(msg: ChatMessage): string {
     lines.push(``)
   }
 
-  if (msg.contentBlocks && msg.contentBlocks.length > 0) {
-    for (const block of msg.contentBlocks) {
+  if (hasBlocks) {
+    for (const block of msg.contentBlocks!) {
       if (block.type === 'text' && block.text) {
         lines.push(block.text)
+        lines.push(``)
+      } else if (block.type === 'reasoning' && block.text) {
+        const dur = block.durationMs != null ? ` (${Math.round(block.durationMs / 1000)}s)` : ''
+        lines.push(`<details>`)
+        lines.push(`<summary>💭 Reasoning${dur}</summary>`)
+        lines.push(``)
+        lines.push('```')
+        lines.push(block.text)
+        lines.push('```')
+        lines.push(`</details>`)
         lines.push(``)
       } else if (block.type === 'tool_call') {
         const tc = msg.toolCalls?.find(t => t.id === block.toolCallId)

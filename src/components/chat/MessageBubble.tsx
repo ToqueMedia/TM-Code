@@ -2,6 +2,7 @@ import { memo, useCallback, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiUser, FiCopy, FiCheck, FiDownload, FiCode, FiFileText } from 'react-icons/fi'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { useSyncExternalStore } from 'react'
@@ -268,42 +269,66 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const [messageCopied, setMessageCopied] = useState(false)
 
   // Build plain-text representation of this assistant message for copying.
-  // Combines contentBlocks (text + tool call summaries) and fallback content.
+  // Walks contentBlocks IN ORDER so reasoning passes interleave with text in
+  // the correct positions (matching what the user sees in the chat).
+  // Falls back to the legacy `reasoningContent` flat field + `content` for
+  // older messages that pre-date the block-based representation.
   const copyableText = useCallback(() => {
     const parts: string[] = []
-    if (message.reasoningContent) {
-      parts.push(`[Reasoning]\n${message.reasoningContent}`)
-    }
     if (message.contentBlocks && message.contentBlocks.length > 0) {
       for (const block of message.contentBlocks) {
-        if (block.type === 'text' && block.text) parts.push(block.text)
+        if (block.type === 'text' && block.text) {
+          parts.push(block.text)
+        } else if (block.type === 'reasoning' && block.text) {
+          // Tag the reasoning so the consumer can tell thoughts apart from
+          // user-facing text. Plain "[Reasoning]" header is consistent with
+          // the legacy fallback below.
+          parts.push(`[Reasoning]\n${block.text}`)
+        }
       }
-    } else if (message.content) {
-      parts.push(message.content)
+    } else {
+      // Legacy fallback for messages that never went through the block
+      // pipeline: reasoning lives on its own field, content is one string.
+      if (message.reasoningContent) {
+        parts.push(`[Reasoning]\n${message.reasoningContent}`)
+      }
+      if (message.content) {
+        parts.push(message.content)
+      }
     }
     return parts.join('\n\n').trim()
   }, [message])
 
-  // Copy the WHOLE session (messages + tool calls + reasoning) to clipboard
-  // as Markdown. The button lives on each assistant message but the action
-  // is session-wide — mirrors the Download button next to it and matches the
-  // user's request to capture the full transcript including tool activity.
-  const handleCopyMessage = useCallback(() => {
-    const session = useChatStore.getState().getActiveSession()
-    if (!session) {
-      // Fallback: copy just this message's text if there's no active session.
-      const text = copyableText()
-      if (!text) return
-      navigator.clipboard.writeText(text).catch(() => {})
-    } else {
-      navigator.clipboard.writeText(sessionToMarkdown(session)).catch((err) => {
-        console.error('[sessionCopy] clipboard write failed:', err)
-        useToastStore.getState().addToast('error', 'Could not copy session to clipboard')
-      })
-    }
+  // Copy menu — opens a popover with two scopes so the user picks what
+  // they actually want: just this reply (quote it) vs the full transcript
+  // (archive it). The Download button next door covers the file-on-disk
+  // case for the full session.
+  const [copyMenuOpen, setCopyMenuOpen] = useState(false)
+  const copyButtonRef = useRef<HTMLDivElement | null>(null)
+
+  const handleCopyConversation = useCallback(() => {
+    setCopyMenuOpen(false)
+    const text = copyableText()
+    if (!text) return
+    navigator.clipboard.writeText(text).catch((err) => {
+      console.error('[messageCopy] clipboard write failed:', err)
+      useToastStore.getState().addToast('error', 'Could not copy message to clipboard')
+    })
     setMessageCopied(true)
     setTimeout(() => setMessageCopied(false), 2000)
   }, [copyableText])
+
+  const handleCopySession = useCallback(() => {
+    setCopyMenuOpen(false)
+    const session = useChatStore.getState().getActiveSession()
+    if (!session) return
+    navigator.clipboard.writeText(sessionToMarkdown(session)).catch((err) => {
+      console.error('[sessionCopy] clipboard write failed:', err)
+      useToastStore.getState().addToast('error', 'Could not copy session to clipboard')
+    })
+    setMessageCopied(true)
+    setTimeout(() => setMessageCopied(false), 2000)
+  }, [])
 
   // === Session export — downloads the WHOLE conversation (not just this
   // message). Placed next to the per-message Copy because that's the natural
@@ -495,7 +520,48 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
               isVisible={message.isReasoningVisible || false}
               isStreaming={isStreaming === true && message.reasoningDurationMs == null}
               durationMs={message.reasoningDurationMs}
-              onToggle={() => toggleReasoning(message.id)}
+              onToggle={() => {
+                // Two layers of protection because useStickToBottom does a
+                // SMOOTH scroll on resize (`resize: 'smooth'`) which spans
+                // many frames, and a single RAF restore loses the race:
+                //
+                //   1. Decrement scrollTop by 1 BEFORE the toggle. This
+                //      synchronously fires a 'scroll' event that the
+                //      package treats as the user moving away — its
+                //      escapedFromLock flag flips to true and the next
+                //      auto-follow is suppressed.
+                //   2. Run a restore loop over ~10 frames (≈166ms @ 60fps)
+                //      so any tail-end smooth-scroll animation that did
+                //      slip through gets corrected back to the original
+                //      position.
+                const scrollEl = document.querySelector(
+                  '[role="log"]'
+                ) as HTMLElement | null
+                if (!scrollEl) {
+                  toggleReasoning(message.id)
+                  return
+                }
+                const before = scrollEl.scrollTop
+                // Layer 1: signal "user scrolled away" so useStickToBottom
+                // doesn't try to auto-follow the resize.
+                scrollEl.scrollTop = Math.max(0, before - 1)
+                if (typeof window !== 'undefined') {
+                  window.dispatchEvent(new CustomEvent('chat-toggle-interaction'))
+                }
+                toggleReasoning(message.id)
+                // Layer 2: restore position across multiple frames, in case
+                // the package's smooth-scroll animation still fires.
+                let frames = 0
+                const restore = () => {
+                  if (Math.abs(scrollEl.scrollTop - before) > 4) {
+                    scrollEl.scrollTop = before
+                  }
+                  if (frames++ < 10) {
+                    requestAnimationFrame(restore)
+                  }
+                }
+                requestAnimationFrame(restore)
+              }}
             />
           )}
 
@@ -518,14 +584,55 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                     isVisible={message.isReasoningVisible || false}
                     isStreaming={blockIsStreaming}
                     durationMs={block.durationMs}
-                    onToggle={() => toggleReasoning(message.id)}
+                    onToggle={() => {
+                // Two layers of protection because useStickToBottom does a
+                // SMOOTH scroll on resize (`resize: 'smooth'`) which spans
+                // many frames, and a single RAF restore loses the race:
+                //
+                //   1. Decrement scrollTop by 1 BEFORE the toggle. This
+                //      synchronously fires a 'scroll' event that the
+                //      package treats as the user moving away — its
+                //      escapedFromLock flag flips to true and the next
+                //      auto-follow is suppressed.
+                //   2. Run a restore loop over ~10 frames (≈166ms @ 60fps)
+                //      so any tail-end smooth-scroll animation that did
+                //      slip through gets corrected back to the original
+                //      position.
+                const scrollEl = document.querySelector(
+                  '[role="log"]'
+                ) as HTMLElement | null
+                if (!scrollEl) {
+                  toggleReasoning(message.id)
+                  return
+                }
+                const before = scrollEl.scrollTop
+                // Layer 1: signal "user scrolled away" so useStickToBottom
+                // doesn't try to auto-follow the resize.
+                scrollEl.scrollTop = Math.max(0, before - 1)
+                if (typeof window !== 'undefined') {
+                  window.dispatchEvent(new CustomEvent('chat-toggle-interaction'))
+                }
+                toggleReasoning(message.id)
+                // Layer 2: restore position across multiple frames, in case
+                // the package's smooth-scroll animation still fires.
+                let frames = 0
+                const restore = () => {
+                  if (Math.abs(scrollEl.scrollTop - before) > 4) {
+                    scrollEl.scrollTop = before
+                  }
+                  if (frames++ < 10) {
+                    requestAnimationFrame(restore)
+                  }
+                }
+                requestAnimationFrame(restore)
+              }}
                   />
                 )
               }
               if (block.type === 'text' && block.text) {
                 return (
                   <Box key={`text-${idx}`} css={markdownStyles}>
-                    <ReactMarkdown components={markdownComponents}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                       {block.text}
                     </ReactMarkdown>
                   </Box>
@@ -545,7 +652,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             {/* Fallback for legacy messages without contentBlocks */}
             {message.content && (
               <Box css={markdownStyles}>
-                <ReactMarkdown components={markdownComponents}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                   {message.content}
                 </ReactMarkdown>
               </Box>
@@ -578,27 +685,116 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             as JSON or Markdown via the browser's save-as dialog. */}
         {!isUser && !isSystem && !isStreaming && copyableText() && (
           <Flex mt={2} justify="flex-end" gap={1} align="center">
-            <Flex
-              as="button"
-              align="center"
-              gap={1.5}
-              px={2}
-              py="4px"
-              borderRadius="6px"
-              fontSize="11px"
-              color={messageCopied ? tokens.colors.accent.green : tokens.colors.text.disabled}
-              cursor="pointer"
-              transition={`all ${tokens.transition.fast}`}
-              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: messageCopied ? tokens.colors.accent.green : tokens.colors.text.secondary }}
-              onClick={handleCopyMessage}
-              title={messageCopied ? t('chat.copied') : t('chat.copyMessage')}
-              aria-label={messageCopied ? t('chat.copied') : t('chat.copyMessage')}
-            >
-              {messageCopied ? <FiCheck size={12} /> : <FiCopy size={12} />}
-              <Text fontSize="11px" fontWeight={500}>
-                {messageCopied ? t('chat.copied') : t('chat.copyMessage')}
-              </Text>
-            </Flex>
+            {/* Copy — opens a small menu so the user picks scope:
+                "Copiar conversa" → just this assistant reply
+                "Copiar sessão"   → full transcript as Markdown */}
+            <Box position="relative" ref={copyButtonRef}>
+              <Flex
+                as="button"
+                align="center"
+                gap={1.5}
+                px={2}
+                py="4px"
+                borderRadius="6px"
+                fontSize="11px"
+                color={messageCopied ? tokens.colors.accent.green : tokens.colors.text.disabled}
+                cursor="pointer"
+                transition={`all ${tokens.transition.fast}`}
+                _hover={{ bg: tokens.colors.bg.hoverSubtle, color: messageCopied ? tokens.colors.accent.green : tokens.colors.text.secondary }}
+                onClick={() => setCopyMenuOpen(v => !v)}
+                title={messageCopied ? t('chat.copied') : t('chat.copyMessage')}
+                aria-label={messageCopied ? t('chat.copied') : t('chat.copyMessage')}
+                aria-haspopup="menu"
+                aria-expanded={copyMenuOpen}
+              >
+                {messageCopied ? <FiCheck size={12} /> : <FiCopy size={12} />}
+                <Text fontSize="11px" fontWeight={500}>
+                  {messageCopied ? t('chat.copied') : t('chat.copyMessage')}
+                </Text>
+              </Flex>
+              {copyMenuOpen && (
+                <>
+                  <Box
+                    position="fixed"
+                    top="0"
+                    left="0"
+                    right="0"
+                    bottom="0"
+                    zIndex={10}
+                    onClick={() => setCopyMenuOpen(false)}
+                  />
+                  <Box
+                    role="menu"
+                    position="absolute"
+                    bottom="calc(100% + 6px)"
+                    right="0"
+                    zIndex={11}
+                    bg={tokens.colors.bg.overlay}
+                    border={`1px solid ${tokens.colors.border.default}`}
+                    borderRadius="8px"
+                    boxShadow="0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.02)"
+                    backdropFilter="blur(8px)"
+                    minW="220px"
+                    overflow="hidden"
+                    py="4px"
+                    css={{
+                      animation: 'menuFadeIn 0.12s ease-out',
+                      '@keyframes menuFadeIn': {
+                        from: { opacity: 0, transform: 'translateY(4px)' },
+                        to: { opacity: 1, transform: 'translateY(0)' },
+                      },
+                    }}
+                  >
+                    <Flex
+                      as="button"
+                      role="menuitem"
+                      align="center"
+                      gap={2.5}
+                      w="100%"
+                      px={3}
+                      py="8px"
+                      fontSize="12.5px"
+                      color={tokens.colors.text.primary}
+                      cursor="pointer"
+                      transition={`background ${tokens.transition.fast}`}
+                      _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+                      onClick={handleCopyConversation}
+                      whiteSpace="nowrap"
+                    >
+                      <Box color={tokens.colors.text.muted} flexShrink={0}>
+                        <FiCopy size={13} />
+                      </Box>
+                      <Text fontSize="12.5px" lineHeight="1.3">
+                        {t('chat.copyConversation')}
+                      </Text>
+                    </Flex>
+                    <Flex
+                      as="button"
+                      role="menuitem"
+                      align="center"
+                      gap={2.5}
+                      w="100%"
+                      px={3}
+                      py="8px"
+                      fontSize="12.5px"
+                      color={tokens.colors.text.primary}
+                      cursor="pointer"
+                      transition={`background ${tokens.transition.fast}`}
+                      _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+                      onClick={handleCopySession}
+                      whiteSpace="nowrap"
+                    >
+                      <Box color={tokens.colors.text.muted} flexShrink={0}>
+                        <FiFileText size={13} />
+                      </Box>
+                      <Text fontSize="12.5px" lineHeight="1.3">
+                        {t('chat.copySession')}
+                      </Text>
+                    </Flex>
+                  </Box>
+                </>
+              )}
+            </Box>
 
             {/* Download session — opens a small menu with JSON / Markdown */}
             <Box position="relative" ref={exportButtonRef}>

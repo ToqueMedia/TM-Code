@@ -1497,6 +1497,15 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     // without racing the cancelled loop's late finally.
     if (!this.lightweightOptions) {
       getQueryGuard().forceEnd()
+      // Notify any non-singleton sub-agents that this stop applies to them
+      // too (e.g. /review's reviewer sub-agent). Sub-agents have their own
+      // AbortController so cancelLoop() above only aborts the main loop;
+      // they listen for this event to mirror the cancellation. Only fired
+      // from the main agent — sub-agent.cancelLoop() (rare) doesn't
+      // re-broadcast and avoid feedback loops.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agent-stop-requested'))
+      }
     }
   }
 
@@ -1568,14 +1577,15 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     // Auto-cleared after the first call for short-lived types (plan, debug)
     // so subsequent turns (tool results, follow-ups) use the normal model.
     //
-    // 'e2e' is STICKY across all turns — adversarial testing makes dozens of
-    // turns (snapshot → reason → click → snapshot → …) and every one of them
-    // needs reasoning. Without sticky, only the first turn gets enable_thinking
-    // and the rest collapse to smoke. The /te2e command's `finally` block
-    // clears it explicitly via setRequestType(null).
+    // 'e2e' and 'review' are STICKY across all turns:
+    //   - /te2e cycles snapshot → reason → click → snapshot dozens of times;
+    //     every turn must keep reasoning ON or it collapses to smoke.
+    //   - /review reads many files and judges each finding against source —
+    //     same multi-turn reasoning need.
+    // Both commands' `finally` blocks clear it explicitly via setRequestType(null).
     if (this.requestType) {
       headers['X-Request-Type'] = this.requestType
-      if (this.requestType !== 'e2e') {
+      if (this.requestType !== 'e2e' && this.requestType !== 'review') {
         this.requestType = null
       }
     }

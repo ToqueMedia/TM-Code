@@ -283,17 +283,15 @@ class ToolExecutor {
     // Register new MCP tools
     for (const tool of mcpTools) {
       const fullName = `mcp__${tool.serverName}__${tool.name}`
-      // Browser tools always require per-action confirmation regardless of
-      // the user's "Approve all" state — Antigravity-style. Concurrency is
-      // forced serial too, since the model needs to await each prompt.
+      // Browser tools share a single trust gate: the user already opted into
+      // the /te2e command, which is itself a slash command they explicitly
+      // typed. Per-action permission prompts (Antigravity-style) were tried
+      // and removed — they fragmented sessions into hundreds of Y/N clicks
+      // for no observable safety gain (the browser is sandboxed in its own
+      // profile dir, isolated from the user's real Chrome). beginSession is
+      // still called to hide the preview pane so the two webviews don't
+      // compete for attention.
       const isBrowserTool = tool.serverName === 'browser'
-      // Read-only browser tools that don't change page state and are called
-      // many times per turn (snapshot is the polled "what's on screen now?"
-      // primitive). Forcing a permission prompt for every snapshot turns
-      // a 50-action /te2e session into 200+ Yes/No clicks — the user gives
-      // up. Mutating actions (click, type, navigate) keep their per-call
-      // prompt; only pure observation is auto-approved.
-      const isReadOnlyBrowserTool = isBrowserTool && tool.name === 'browser_snapshot'
 
       this.tools.set(fullName, {
         definition: {
@@ -302,11 +300,9 @@ class ToolExecutor {
           input_schema: tool.inputSchema as ToolDefinition['input_schema'],
           // MCP spec annotations.readOnlyHint → safe to run in parallel with
           // other read-only tools. Defensive default: serial when unset, so
-          // mutating MCP tools never accidentally race. Browser tools that
-          // mutate are always serial because they need a permission prompt;
-          // read-only browser tools (snapshot) can stay serial too — they
-          // come in tight observe-then-act pairs where parallelism wouldn't
-          // help anyway.
+          // mutating MCP tools never accidentally race. Browser tools stay
+          // serial because the model usually drives them in tight observe-
+          // then-act pairs where parallelism wouldn't help anyway.
           concurrencySafe: !isBrowserTool && tool.readOnlyHint === true,
         },
         execute: async (input: Record<string, unknown>) => {
@@ -315,18 +311,6 @@ class ToolExecutor {
             // of this turn so the two webviews don't compete for attention.
             const { browserSession } = await import('../browserSessionManager')
             await browserSession.beginSession()
-
-            if (!isReadOnlyBrowserTool) {
-              const decision = await usePermissionStore.getState().requestPermission(
-                fullName,
-                input,
-                'browser_action',
-              )
-              if (!decision.approved) {
-                const reason = decision.denyReason ? ` Reason: ${decision.denyReason}` : ''
-                return `Browser action denied by user.${reason} Stop and ask the user before retrying.`
-              }
-            }
           }
           return await callToolFn(tool.serverName, tool.name, input)
         },

@@ -3,6 +3,7 @@ import { executePlan } from './commands/planCommand'
 import { executeDebug } from './commands/debugCommand'
 import { executePayments } from './commands/paymentsCommand'
 import { executeE2E } from './commands/e2eCommand'
+import { executeReview } from './commands/reviewCommand'
 
 /** A canonical argument value the user can pick after the command name. */
 export interface SlashCommandArg {
@@ -83,6 +84,13 @@ class SlashCommandRegistry {
       enabled: true,
       execute: executeE2E,
       requiresPaidPlan: true,
+    })
+
+    this.register({
+      name: '/review',
+      description: 'Critical code review by a fresh sub-agent — bugs, anti-patterns, fragile workarounds, ranked by severity. Read-only.',
+      enabled: true,
+      execute: executeReview,
     })
 
     // Note: `/auth` was removed in favour of the `#auth-email-password` and

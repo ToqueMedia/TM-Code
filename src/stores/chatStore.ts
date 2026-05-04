@@ -44,6 +44,18 @@ interface ChatActions {
    */
   removeMessageById: (messageId: string) => void
   /**
+   * Move an existing message to the end of the active session's message
+   * list, preserving its content and id. Used by the queue dispatcher to
+   * re-position a bubble that was added at enqueue time but stranded
+   * behind later auto-appended messages (e.g. AgentActivityIndicator's
+   * "Trabalhou por X" system message), so the dispatch lines up cleanly:
+   *
+   *   [previous turn] → [user_q] → [new assistant streaming]
+   *
+   * No-op if the id is not found or already last.
+   */
+  moveMessageToEnd: (messageId: string) => void
+  /**
    * Insert a user message BEFORE the streaming assistant message.
    * Used by mid-turn drain to keep visual order correct:
    *   user_msg → queued_user_msg → assistant_response
@@ -785,6 +797,29 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         updatedSessions.set(activeSessionId, {
           ...session,
           messages: filtered,
+          updatedAt: Date.now(),
+        })
+        return { sessions: updatedSessions }
+      })
+      debouncedSave()
+    },
+
+    moveMessageToEnd: (messageId: string) => {
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+        const idx = session.messages.findIndex(m => m.id === messageId)
+        // Already last, or not found → nothing to do.
+        if (idx < 0 || idx === session.messages.length - 1) return state
+        const reordered = [...session.messages]
+        const [msg] = reordered.splice(idx, 1)
+        reordered.push(msg)
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, {
+          ...session,
+          messages: reordered,
           updatedAt: Date.now(),
         })
         return { sessions: updatedSessions }

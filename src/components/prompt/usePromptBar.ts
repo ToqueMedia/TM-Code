@@ -4,6 +4,7 @@ import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, fl
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
+import { useBillingStore } from '../../stores/billingStore'
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useProblemsStore } from '../../stores/problemsStore'
@@ -269,6 +270,27 @@ export function usePromptBar() {
   }, [setInput])
 
   const handleCommandSelect = useCallback((command: SlashCommand) => {
+    // Paid-plan gate at selection time. The menu's mouse onClick already
+    // refuses to fire handleClick for paywalled rows, but keyboard Enter
+    // routes through handleCommandSelect directly — without this check,
+    // a free user could press Enter on a "Pro" row and the command would
+    // land in the textarea. We refuse to insert it AND surface a message
+    // so the action is not silently swallowed.
+    if (command.requiresPaidPlan) {
+      const billingState = useBillingStore.getState()
+      if (billingState.plan === 'explorer') {
+        useChatStore.getState().addSystemMessage(
+          `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`
+        )
+        useLayoutStore.getState().setViewMode('settings')
+        // Also dismiss the menu so the user isn't left with the same row
+        // highlighted, inviting another Enter press.
+        setShowCommandMenu(false)
+        setIsArgMode(false)
+        return
+      }
+    }
+
     // Arg vs command pick: if the buffer already contains a space, we're
     // picking from the arg-suggestion menu, so replace just the trailing
     // partial word. Otherwise we're picking a real command — replace the
@@ -792,17 +814,14 @@ export function usePromptBar() {
       // gate — the command's own paywall message catches it eventually,
       // but blocking here keeps the contract consistent and avoids
       // half-spawned side effects (e.g. browserSession.start).
-      if (command.requiresPaidPlan) {
-        const { useBillingStore } = await import('../../stores/billingStore')
-        if (useBillingStore.getState().plan === 'explorer') {
-          useChatStore.getState().setDraftInput('')
-          clearDraftAttachments()
-          useChatStore.getState().addSystemMessage(
-            `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`
-          )
-          useLayoutStore.getState().setViewMode('settings')
-          return
-        }
+      if (command.requiresPaidPlan && useBillingStore.getState().plan === 'explorer') {
+        useChatStore.getState().setDraftInput('')
+        clearDraftAttachments()
+        useChatStore.getState().addSystemMessage(
+          `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`
+        )
+        useLayoutStore.getState().setViewMode('settings')
+        return
       }
 
       const projectPath = currentProject?.path
@@ -934,10 +953,20 @@ export function usePromptBar() {
       if (abortController.signal.aborted) return
 
       // The chat bubble was already created at enqueue time (see
-      // handleSubmit), so we DO NOT call addUserMessage here — doing so
-      // would duplicate the bubble. We still pass `skipUserMessage=true`
-      // to runAgentForPrompt so its internal addUserMessage path stays
-      // off too.
+      // handleSubmit). Between then and now, AgentActivityIndicator may
+      // have appended a "Trabalhou por X" system message after the
+      // previous turn finalized — pushing the queued user bubble into
+      // the middle of the transcript. Move it back to the end so the
+      // upcoming assistant message renders directly underneath it
+      // (preserving the natural user → assistant flow).
+      const headChatId = head.chatMessageId
+      if (headChatId) {
+        useChatStore.getState().moveMessageToEnd(headChatId)
+      }
+
+      // We DO NOT call addUserMessage here — bubble exists since enqueue.
+      // skipUserMessage=true keeps runAgentForPrompt's internal addUserMessage
+      // path off too.
       await runAgentForPrompt(mergedValue, true)
       // Result intentionally ignored: if the agent errored, the next batch
       // (if any) will be picked up by the effect when it re-fires. The
