@@ -2,6 +2,7 @@ import { executeInit } from './commands/initCommand'
 import { executePlan } from './commands/planCommand'
 import { executeDebug } from './commands/debugCommand'
 import { executePayments } from './commands/paymentsCommand'
+import { executeE2E } from './commands/e2eCommand'
 
 /** A canonical argument value the user can pick after the command name. */
 export interface SlashCommandArg {
@@ -26,6 +27,13 @@ export interface SlashCommand {
    * dismiss the menu — there's nothing left to suggest.
    */
   argSuggestions?: SlashCommandArg[]
+  /**
+   * When true, the command is unavailable on the free (Explorer) plan.
+   * The slash menu marks it with a "Pro" badge and disables the row;
+   * the execute function still surfaces the upgrade message if reached
+   * by another path (e.g. typing the full command and pressing enter).
+   */
+  requiresPaidPlan?: boolean
 }
 
 class SlashCommandRegistry {
@@ -67,6 +75,14 @@ class SlashCommandRegistry {
       description: 'Integrate MoMenu Payments — fetches API skills and implements (MCX, E-kwanza, Referencia)',
       enabled: true,
       execute: executePayments,
+    })
+
+    this.register({
+      name: '/te2e',
+      description: 'Validate the live preview by driving a real browser — exploratory, per-action permission, no spec files',
+      enabled: true,
+      execute: executeE2E,
+      requiresPaidPlan: true,
     })
 
     // Note: `/auth` was removed in favour of the `#auth-email-password` and

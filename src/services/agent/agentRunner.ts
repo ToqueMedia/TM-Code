@@ -9,6 +9,7 @@ import type { OpenAIContentPart } from './agentService'
 import ContextBuilder from './contextBuilder'
 import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
+import { browserSession } from '../browserSessionManager'
 import { resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText } from './promptValueHelpers'
 import type { Attachment, PromptBlock } from '../../types/chat'
@@ -131,8 +132,11 @@ async function runAgentInternal(
   const mcpTools = mcpService.getAllTools()
   const toolExecutor = ToolExecutor.getInstance()
   if (mcpTools.length > 0) {
-    toolExecutor.registerMCPTools(mcpTools, (serverName, toolName, args) =>
-      mcpService.callTool(serverName, toolName, args)
+    toolExecutor.registerMCPTools(
+      mcpTools,
+      browserSession.wrapCallTool((serverName, toolName, args) =>
+        mcpService.callTool(serverName, toolName, args),
+      ),
     )
     AgentService.getInstance().refreshTools()
   }
@@ -282,5 +286,8 @@ async function runAgentInternal(
     if (cmdOnlyMode && cmdCwd) {
       toolExecutor.disableCmdMode()
     }
+    // Restore the preview pane if a browser-driven session hid it. Safe
+    // when no session was active (no-op).
+    browserSession.endSession()
   }
 }

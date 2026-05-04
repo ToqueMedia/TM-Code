@@ -15,6 +15,7 @@ import FirebaseAuthService from './services/auth/firebaseAuth';
 import SkillService from './services/agent/skillService';
 import QuickOpenService from './services/quickOpenService';
 import MCPService from './services/mcp/mcpService';
+import { browserSession } from './services/browserSessionManager';
 import ToolExecutor from './services/agent/toolExecutor';
 import AgentService from './services/agent/agentService';
 import { autoCheckForUpdate } from './services/updateService';
@@ -531,8 +532,11 @@ function App() {
 					const mcpTools = mcpService.getAllTools();
 					if (mcpTools.length > 0) {
 						const toolExecutor = ToolExecutor.getInstance();
-						toolExecutor.registerMCPTools(mcpTools, (serverName, toolName, args) =>
-							mcpService.callTool(serverName, toolName, args)
+						toolExecutor.registerMCPTools(
+							mcpTools,
+							browserSession.wrapCallTool((serverName, toolName, args) =>
+								mcpService.callTool(serverName, toolName, args),
+							),
 						);
 						AgentService.getInstance().refreshTools();
 					}
@@ -580,8 +584,11 @@ function App() {
 					const mcpTools = mcpService.getAllTools();
 					if (mcpTools.length > 0) {
 						const toolExecutor = ToolExecutor.getInstance();
-						toolExecutor.registerMCPTools(mcpTools, (serverName, toolName, args) =>
-							mcpService.callTool(serverName, toolName, args)
+						toolExecutor.registerMCPTools(
+							mcpTools,
+							browserSession.wrapCallTool((serverName, toolName, args) =>
+								mcpService.callTool(serverName, toolName, args),
+							),
 						);
 						AgentService.getInstance().refreshTools();
 					}

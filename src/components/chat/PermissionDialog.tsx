@@ -4,7 +4,7 @@ import { FiAlertTriangle, FiShield } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
-type PromptReason = 'sensitive_file' | 'dangerous_command' | null
+type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
 
 interface PermissionDialogProps {
   toolName: string
@@ -17,7 +17,47 @@ interface PermissionDialogProps {
   onDeny: () => void
 }
 
-function getToolLabel(toolName: string, promptReason?: PromptReason): string {
+function getBrowserActionLabel(toolName: string, args: Record<string, unknown>): string {
+  // mcp__browser__browser_navigate → browser_navigate
+  const action = toolName.replace(/^mcp__browser__/, '')
+  switch (action) {
+    case 'browser_navigate':
+      return `Navigate to ${args.url || '(unknown)'}`
+    case 'browser_click': {
+      const desc = args.element || args.selector || args.ref
+      return desc ? `Click ${desc}` : 'Click on the page'
+    }
+    case 'browser_type': {
+      const text = typeof args.text === 'string' ? args.text : ''
+      const target = args.element || args.selector || args.ref
+      const masked = /password|pass|pwd/i.test(String(args.element || args.selector || ''))
+        ? '••••••'
+        : text.length > 40 ? text.slice(0, 40) + '…' : text
+      return target ? `Type "${masked}" into ${target}` : `Type "${masked}"`
+    }
+    case 'browser_press_key':
+      return `Press ${args.key}`
+    case 'browser_snapshot':
+      return 'Take an accessibility snapshot of the page'
+    case 'browser_take_screenshot':
+      return 'Take a screenshot'
+    case 'browser_close':
+      return 'Close the browser'
+    case 'browser_wait_for':
+      return args.text ? `Wait for "${args.text}"` : 'Wait for an element'
+    case 'browser_evaluate':
+      return 'Run JavaScript in the page'
+    case 'browser_resize':
+      return `Resize the viewport (${args.width}×${args.height})`
+    default:
+      return action.replace(/^browser_/, '').replace(/_/g, ' ')
+  }
+}
+
+function getToolLabel(toolName: string, promptReason?: PromptReason, args?: Record<string, unknown>): string {
+  if (promptReason === 'browser_action') {
+    return getBrowserActionLabel(toolName, args || {})
+  }
   if (promptReason === 'sensitive_file') return t('perm.readSensitive')
   if (promptReason === 'dangerous_command') return t('perm.dangerousCommand')
   switch (toolName) {
@@ -82,6 +122,10 @@ const buttonBase: React.CSSProperties = {
 }
 
 function PermissionDialog({ toolName, args, promptReason, sensitive, onApprove, onApproveAll, onDeny }: PermissionDialogProps) {
+  // Browser actions force a per-call prompt — hiding "Yes, for all" prevents
+  // confusion since clicking it would only approve this one action anyway.
+  const hideApproveAll = promptReason === 'browser_action'
+
   // Keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -91,7 +135,7 @@ function PermissionDialog({ toolName, args, promptReason, sensitive, onApprove, 
       if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'y' || e.key === 'Y') {
         e.preventDefault()
         onApprove()
-      } else if ((e.key === 'Enter' && e.shiftKey) || e.key === 'a' || e.key === 'A') {
+      } else if (!hideApproveAll && ((e.key === 'Enter' && e.shiftKey) || e.key === 'a' || e.key === 'A')) {
         e.preventDefault()
         onApproveAll()
       } else if (e.key === 'Escape' || e.key === 'n' || e.key === 'N') {
@@ -101,7 +145,7 @@ function PermissionDialog({ toolName, args, promptReason, sensitive, onApprove, 
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onApprove, onApproveAll, onDeny])
+  }, [onApprove, onApproveAll, onDeny, hideApproveAll])
 
   const path = getPreviewPath(toolName, args)
   const content = getPreviewContent(toolName, args)
@@ -141,7 +185,7 @@ function PermissionDialog({ toolName, args, promptReason, sensitive, onApprove, 
           />
         )}
         <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
-          {t("perm.agentWantsTo")} {getToolLabel(toolName, promptReason || (sensitive ? 'sensitive_file' : null))}
+          {t("perm.agentWantsTo")} {getToolLabel(toolName, promptReason || (sensitive ? 'sensitive_file' : null), args)}
         </Text>
       </Flex>
 
@@ -225,17 +269,19 @@ function PermissionDialog({ toolName, args, promptReason, sensitive, onApprove, 
         >
           Yes (Y)
         </button>
-        <button
-          onClick={onApproveAll}
-          style={{
-            ...buttonBase,
-            background: 'transparent',
-            border: `1px solid ${tokens.colors.accent.greenMuted}`,
-            color: tokens.colors.accent.green,
-          }}
-        >
-          Yes, for all (A)
-        </button>
+        {!hideApproveAll && (
+          <button
+            onClick={onApproveAll}
+            style={{
+              ...buttonBase,
+              background: 'transparent',
+              border: `1px solid ${tokens.colors.accent.greenMuted}`,
+              color: tokens.colors.accent.green,
+            }}
+          >
+            Yes, for all (A)
+          </button>
+        )}
         <button
           onClick={onDeny}
           style={{
@@ -248,7 +294,7 @@ function PermissionDialog({ toolName, args, promptReason, sensitive, onApprove, 
           No (N)
         </button>
         <Text fontSize="11px" color={tokens.colors.text.disabled} ml="auto">
-          Enter / Shift+Enter / Esc
+          {hideApproveAll ? 'Enter / Esc' : 'Enter / Shift+Enter / Esc'}
         </Text>
       </Flex>
     </Box>

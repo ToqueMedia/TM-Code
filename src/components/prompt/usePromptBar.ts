@@ -12,6 +12,7 @@ import AgentService from '../../services/agent/agentService'
 import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
 import MCPService from '../../services/mcp/mcpService'
+import { browserSession } from '../../services/browserSessionManager'
 import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
@@ -562,8 +563,11 @@ export function usePromptBar() {
       const mcpTools = mcpService.getAllTools()
       if (mcpTools.length > 0) {
         const toolExecutor = ToolExecutor.getInstance()
-        toolExecutor.registerMCPTools(mcpTools, (serverName, toolName, args) =>
-          mcpService.callTool(serverName, toolName, args)
+        toolExecutor.registerMCPTools(
+          mcpTools,
+          browserSession.wrapCallTool((serverName, toolName, args) =>
+            mcpService.callTool(serverName, toolName, args),
+          ),
         )
         AgentService.getInstance().refreshTools()
       }
@@ -782,6 +786,25 @@ export function usePromptBar() {
         return
       }
 
+      // Paid-plan gate enforced at SUBMIT time, not just visually in the
+      // SlashCommandMenu. The menu disables the row, but a user typing
+      // `/te2e ...` and pressing Enter would otherwise bypass the visual
+      // gate — the command's own paywall message catches it eventually,
+      // but blocking here keeps the contract consistent and avoids
+      // half-spawned side effects (e.g. browserSession.start).
+      if (command.requiresPaidPlan) {
+        const { useBillingStore } = await import('../../stores/billingStore')
+        if (useBillingStore.getState().plan === 'explorer') {
+          useChatStore.getState().setDraftInput('')
+          clearDraftAttachments()
+          useChatStore.getState().addSystemMessage(
+            `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`
+          )
+          useLayoutStore.getState().setViewMode('settings')
+          return
+        }
+      }
+
       const projectPath = currentProject?.path
       if (!projectPath) {
         useChatStore.getState().setDraftInput('')
@@ -823,11 +846,26 @@ export function usePromptBar() {
       value = blocks
     }
 
+    // Render the user's message in the chat IMMEDIATELY at enqueue time.
+    // Previously, the bubble was only created on dispatch — that left a
+    // gap where the message was visible only in the queue strip and
+    // disappeared when dispatched (the bubble was hidden under the
+    // assistant's streaming render). The id is carried on the queue
+    // entry so the cancel-X can drop the bubble too.
+    const display = extractDisplayFromValue(value)
+    const blocks = typeof value === 'string' ? undefined : value
+    const chatMessageId = useChatStore.getState().addUserMessage(
+      display.text,
+      display.attachments,
+      blocks,
+    )
+
     enqueueMessage({
       value,
       mode: 'prompt',
       priority: 'next',
       uuid: generateId('queued'),
+      chatMessageId,
     })
 
     // Clear input immediately — message is in the queue
@@ -895,15 +933,11 @@ export function usePromptBar() {
 
       if (abortController.signal.aborted) return
 
-      // Extract a clean text + attachments view for the chat bubble.
-      // The bubble UI renders text and attachments separately as today,
-      // but we ALSO persist the original block array as `promptBlocks`
-      // so rebuildConversationHistory can reconstruct the correct
-      // ordering for follow-up turns.
-      const display = extractDisplayFromValue(mergedValue)
-      const blocks = typeof mergedValue === 'string' ? undefined : mergedValue
-      useChatStore.getState().addUserMessage(display.text, display.attachments, blocks)
-
+      // The chat bubble was already created at enqueue time (see
+      // handleSubmit), so we DO NOT call addUserMessage here — doing so
+      // would duplicate the bubble. We still pass `skipUserMessage=true`
+      // to runAgentForPrompt so its internal addUserMessage path stays
+      // off too.
       await runAgentForPrompt(mergedValue, true)
       // Result intentionally ignored: if the agent errored, the next batch
       // (if any) will be picked up by the effect when it re-fires. The

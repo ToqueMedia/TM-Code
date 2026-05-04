@@ -10,6 +10,7 @@ import SlashCommandMenu from './chat/SlashCommandMenu'
 import MentionMenu from './prompt/MentionMenu'
 import HashtagMenu from './prompt/HashtagMenu'
 import QueuedMessagesPreview from './prompt/QueuedMessagesPreview'
+import AgentTasksPanel from './chat/AgentTasksPanel'
 import { usePromptBar } from './prompt/usePromptBar'
 import KeyBindingDisplay from './ui/KeyBindingDisplay'
 
@@ -91,6 +92,12 @@ function PromptBar() {
             onSelect={hashtagMenu.handleSelect}
           />
         )}
+
+        {/* Agent task list — same data CMD mode shows above its status bar.
+            Sits above the queue strip so it's the highest persistent context
+            block: the user sees what the agent is doing now, then what's
+            waiting next, then the input. */}
+        <AgentTasksPanel />
 
         {/* Queued messages preview (above input) */}
         <QueuedMessagesPreview />

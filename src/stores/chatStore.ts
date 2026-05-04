@@ -39,6 +39,11 @@ interface ChatActions {
   setActiveSession: (sessionId: string) => void
   addUserMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
   /**
+   * Remove a message from the active session by id. Used to drop the
+   * chat bubble associated with a cancelled queued command.
+   */
+  removeMessageById: (messageId: string) => void
+  /**
    * Insert a user message BEFORE the streaming assistant message.
    * Used by mid-turn drain to keep visual order correct:
    *   user_msg → queued_user_msg → assistant_response
@@ -766,6 +771,25 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       debouncedSave()
       return messageId
+    },
+
+    removeMessageById: (messageId: string) => {
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+        const filtered = session.messages.filter(m => m.id !== messageId)
+        if (filtered.length === session.messages.length) return state
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, {
+          ...session,
+          messages: filtered,
+          updatedAt: Date.now(),
+        })
+        return { sessions: updatedSessions }
+      })
+      debouncedSave()
     },
 
     insertUserMessageBeforeAssistant: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => {

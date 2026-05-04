@@ -13,6 +13,7 @@ import FirebaseAuthService from '../services/auth/firebaseAuth'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
 import PublishModal from './dialogs/PublishModal'
+import { BrowserMissingDialog } from './dialogs/BrowserMissingDialog'
 import { useTranslation } from '@/i18n'
 import { IS_MAC, IS_LINUX } from '@/utils/platform'
 
@@ -405,6 +406,10 @@ function MinimalTitleBar() {
           Cmd/Ctrl+Shift+D shortcut. Mounted here so it survives view mode
           changes (chat → preview → editor) without unmounting mid-deploy. */}
       <PublishModal isOpen={publishOpen} onClose={function () { useLayoutStore.getState().setPublishModalOpen(false) }} />
+
+      {/* E2E: dialog mounted globally so any tool execution path can prompt
+          the user, even from views where the preview is not yet visible. */}
+      <BrowserMissingDialog />
     </Box>
   )
 }

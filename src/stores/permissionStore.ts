@@ -34,7 +34,7 @@ function getToolScope(toolName: string): 'core' | 'mcp' {
 }
 
 /** Why this permission requires a forced prompt (bypasses "Accept All") */
-type PromptReason = 'sensitive_file' | 'dangerous_command' | null
+export type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
 
 /**
  * Outcome of a permission request — enriched so callers can record the path

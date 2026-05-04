@@ -4,8 +4,13 @@ import { FiUser, FiCopy, FiCheck, FiDownload, FiCode, FiFileText } from 'react-i
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { useSyncExternalStore } from 'react'
 import { ChatMessage } from '../../types/chat'
 import { useChatStore } from '../../stores/chatStore'
+import {
+  getCommandQueueSnapshot,
+  subscribeToCommandQueue,
+} from '../../services/agent/messageQueue'
 import CodeBlockAction from './CodeBlockAction'
 import ToolCallDisplayComponent from './ToolCallDisplay'
 import AgentLogo from '../ui/AgentLogo'
@@ -246,6 +251,17 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components
 
 function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const isUser = message.role === 'user'
+
+  // Pending = the bubble exists in the chat but the agent hasn't picked
+  // it up yet (queued behind a busy turn). Without this indicator the
+  // user sees their bubble immediately after submit and can't tell
+  // whether the agent already received it. Only meaningful for user
+  // bubbles — assistant bubbles never queue.
+  const queuedCommands = useSyncExternalStore(
+    subscribeToCommandQueue,
+    getCommandQueueSnapshot,
+  )
+  const isPendingInQueue = isUser && queuedCommands.some(c => c.chatMessageId === message.id)
   const isSystem = message.role === 'system'
   const updateCodeBlockStatus = useChatStore(s => s.updateCodeBlockStatus)
   const toggleReasoning = useChatStore(s => s.toggleReasoning)
@@ -385,6 +401,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       className="group"
       minW={0}
       overflow="hidden"
+      opacity={isPendingInQueue ? 0.6 : 1}
     >
       {/* Role header */}
       <Flex align="center" gap={2.5} mb={isUser ? 1.5 : 2.5}>
@@ -411,6 +428,21 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
         >
           {isUser ? 'You' : 'TM Code'}
         </Text>
+        {isPendingInQueue && (
+          <Text
+            fontSize="10px"
+            color={tokens.colors.accent.primary}
+            bg="rgba(254, 16, 99, 0.08)"
+            border={`1px solid rgba(254, 16, 99, 0.2)`}
+            px="6px"
+            py="1px"
+            borderRadius="4px"
+            fontWeight="500"
+            letterSpacing="0.02em"
+          >
+            queued
+          </Text>
+        )}
         {isStreaming && !isUser && (
           <Box
             w="5px"

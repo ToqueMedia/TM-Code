@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import { useBillingStore } from '../../stores/billingStore'
 import type { SlashCommand } from '../../services/agent/slashCommandRegistry'
 
 export type SlashCommandMenuTheme = 'red' | 'purple'
@@ -44,6 +45,10 @@ const THEME_COLORS: Record<SlashCommandMenuTheme, {
 function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', direction = 'up', maxHeight, showArgsHint }: SlashCommandMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const colors = THEME_COLORS[theme]
+  // Plan gate for paid commands — read here (not in the parent) so the
+  // menu reacts immediately when the plan changes mid-session (upgrade /
+  // downgrade) without prop wiring at every callsite.
+  const isFreePlan = useBillingStore(s => s.plan === 'explorer')
 
   // Scroll selected item into view
   useEffect(() => {
@@ -86,58 +91,79 @@ function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', di
         '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.1)', borderRadius: '2px' },
       } : undefined}
     >
-      {commands.map((cmd, index) => (
-        <Flex
-          key={cmd.name}
-          data-command-item
-          px="14px"
-          py="10px"
-          mx="4px"
-          borderRadius="8px"
-          cursor={cmd.enabled ? 'pointer' : 'default'}
-          align="center"
-          gap={3}
-          bg={index === selectedIndex ? colors.selectionBg : 'transparent'}
-          transition="background 0.1s"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => cmd.enabled && handleClick(cmd)}
-          _hover={cmd.enabled ? { bg: index === selectedIndex ? colors.selectionBg : colors.hoverBg } : undefined}
-          opacity={cmd.enabled ? 1 : 0.45}
-        >
-          <Text
-            fontFamily={tokens.fontFamily.mono}
-            fontSize="13px"
-            color={colors.commandNameColor}
-            fontWeight="600"
-            letterSpacing="-0.01em"
-            flexShrink={0}
+      {commands.map((cmd, index) => {
+        const isPaywalled = !!cmd.requiresPaidPlan && isFreePlan
+        const isInteractable = cmd.enabled && !isPaywalled
+        return (
+          <Flex
+            key={cmd.name}
+            data-command-item
+            px="14px"
+            py="10px"
+            mx="4px"
+            borderRadius="8px"
+            cursor={isInteractable ? 'pointer' : 'default'}
+            align="center"
+            gap={3}
+            bg={index === selectedIndex ? colors.selectionBg : 'transparent'}
+            transition="background 0.1s"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => isInteractable && handleClick(cmd)}
+            _hover={isInteractable ? { bg: index === selectedIndex ? colors.selectionBg : colors.hoverBg } : undefined}
+            opacity={isInteractable ? 1 : 0.45}
           >
-            {cmd.name}
-          </Text>
-          <Text
-            fontSize="12.5px"
-            color={tokens.colors.text.secondary}
-            letterSpacing="-0.005em"
-            flex={1}
-          >
-            {cmd.description}
-          </Text>
-          {!cmd.enabled && (
             <Text
-              fontSize="10px"
-              color={tokens.colors.text.disabled}
-              bg="rgba(255, 255, 255, 0.06)"
-              px="6px"
-              py="2px"
-              borderRadius="4px"
+              fontFamily={tokens.fontFamily.mono}
+              fontSize="13px"
+              color={colors.commandNameColor}
+              fontWeight="600"
+              letterSpacing="-0.01em"
               flexShrink={0}
-              letterSpacing="0.02em"
             >
-              coming soon
+              {cmd.name}
             </Text>
-          )}
-        </Flex>
-      ))}
+            <Text
+              fontSize="12.5px"
+              color={tokens.colors.text.secondary}
+              letterSpacing="-0.005em"
+              flex={1}
+            >
+              {cmd.description}
+            </Text>
+            {!cmd.enabled && (
+              <Text
+                fontSize="10px"
+                color={tokens.colors.text.disabled}
+                bg="rgba(255, 255, 255, 0.06)"
+                px="6px"
+                py="2px"
+                borderRadius="4px"
+                flexShrink={0}
+                letterSpacing="0.02em"
+              >
+                coming soon
+              </Text>
+            )}
+            {cmd.enabled && isPaywalled && (
+              <Text
+                fontSize="10px"
+                color={tokens.colors.accent.primary}
+                bg="rgba(254, 16, 99, 0.1)"
+                border={`1px solid rgba(254, 16, 99, 0.25)`}
+                px="6px"
+                py="2px"
+                borderRadius="4px"
+                flexShrink={0}
+                letterSpacing="0.04em"
+                fontWeight="600"
+                textTransform="uppercase"
+              >
+                Pro
+              </Text>
+            )}
+          </Flex>
+        )
+      })}
       {/* Footer hint — only in arg mode. Tells the user the suggestions are
           optional shortcuts and they can keep typing free-form instructions
           after picking the canonical values. */}

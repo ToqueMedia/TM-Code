@@ -1565,11 +1565,19 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     }
 
     // Request type override (e.g. 'plan' for /plan command → reasoning model).
-    // Sent only on the first call — auto-cleared so subsequent turns
-    // (tool results, follow-ups) use the normal plan model.
+    // Auto-cleared after the first call for short-lived types (plan, debug)
+    // so subsequent turns (tool results, follow-ups) use the normal model.
+    //
+    // 'e2e' is STICKY across all turns — adversarial testing makes dozens of
+    // turns (snapshot → reason → click → snapshot → …) and every one of them
+    // needs reasoning. Without sticky, only the first turn gets enable_thinking
+    // and the rest collapse to smoke. The /te2e command's `finally` block
+    // clears it explicitly via setRequestType(null).
     if (this.requestType) {
       headers['X-Request-Type'] = this.requestType
-      this.requestType = null
+      if (this.requestType !== 'e2e') {
+        this.requestType = null
+      }
     }
 
     // Cache request body to reuse on 401 retry (avoids re-encoding which could differ)
