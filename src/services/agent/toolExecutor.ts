@@ -283,6 +283,15 @@ class ToolExecutor {
     // Register new MCP tools
     for (const tool of mcpTools) {
       const fullName = `mcp__${tool.serverName}__${tool.name}`
+      // Browser tools share a single trust gate: the user already opted into
+      // the /te2e command, which is itself a slash command they explicitly
+      // typed. Per-action permission prompts (Antigravity-style) were tried
+      // and removed — they fragmented sessions into hundreds of Y/N clicks
+      // for no observable safety gain (the browser is sandboxed in its own
+      // profile dir, isolated from the user's real Chrome). beginSession is
+      // still called to hide the preview pane so the two webviews don't
+      // compete for attention.
+      const isBrowserTool = tool.serverName === 'browser'
 
       this.tools.set(fullName, {
         definition: {
@@ -291,10 +300,18 @@ class ToolExecutor {
           input_schema: tool.inputSchema as ToolDefinition['input_schema'],
           // MCP spec annotations.readOnlyHint → safe to run in parallel with
           // other read-only tools. Defensive default: serial when unset, so
-          // mutating MCP tools never accidentally race.
-          concurrencySafe: tool.readOnlyHint === true,
+          // mutating MCP tools never accidentally race. Browser tools stay
+          // serial because the model usually drives them in tight observe-
+          // then-act pairs where parallelism wouldn't help anyway.
+          concurrencySafe: !isBrowserTool && tool.readOnlyHint === true,
         },
         execute: async (input: Record<string, unknown>) => {
+          if (isBrowserTool) {
+            // Hide the user's preview before the very first browser action
+            // of this turn so the two webviews don't compete for attention.
+            const { browserSession } = await import('../browserSessionManager')
+            await browserSession.beginSession()
+          }
           return await callToolFn(tool.serverName, tool.name, input)
         },
       })
@@ -632,7 +649,7 @@ class ToolExecutor {
    * Silent for safe tools (`source: 'safe_tool'`) — no decision was made,
    * recording it would just clutter every read_file with a permission stamp.
    */
-  private recordPermission(toolCallId: string | undefined, decision: { approved: boolean; prompted: boolean; source: string; promptKind?: 'sensitive_file' | 'dangerous_command' | null; denyReason?: string }): void {
+  private recordPermission(toolCallId: string | undefined, decision: { approved: boolean; prompted: boolean; source: string; promptKind?: 'sensitive_file' | 'dangerous_command' | 'browser_action' | null; denyReason?: string }): void {
     if (!toolCallId) return
     if (decision.source === 'safe_tool') return
     // Dynamic import keeps toolExecutor free of a hard chatStore dep at module load.

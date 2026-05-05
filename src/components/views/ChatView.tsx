@@ -79,6 +79,27 @@ function ChatView() {
     if (isAtBottom) wasAtBottomRef.current = true
   }, [isAtBottom])
 
+  // When the user expands/collapses an inline element (reasoning block,
+  // tool call, diff), the message height changes and the stick-to-bottom
+  // ResizeObserver fires `scrollToBottom`. If the user clicked an element
+  // ABOVE the current viewport, that yanks them away from what they were
+  // reading. We listen for an explicit interaction event from those
+  // expand/collapse handlers and freeze stick-to-bottom for a tick so the
+  // upcoming resize doesn't auto-scroll.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onInteraction = () => {
+      // Only freeze if the user is genuinely not at bottom — if they ARE
+      // at bottom, scrolling to keep up is desired (e.g. expanding a tool
+      // call mid-stream while watching the latest output).
+      if (!isAtBottom) {
+        wasAtBottomRef.current = false
+      }
+    }
+    window.addEventListener('chat-toggle-interaction', onInteraction)
+    return () => window.removeEventListener('chat-toggle-interaction', onInteraction)
+  }, [isAtBottom])
+
   // Force scroll during streaming — compensates for ResizeObserver race
   // conditions caused by the 50ms buffer flush + in-place mutations.
   useEffect(() => {

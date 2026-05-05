@@ -13,6 +13,7 @@ import {
   remove as removeFromQueue,
   subscribeToCommandQueue,
 } from '@/services/agent/messageQueue'
+import { useChatStore } from '@/stores/chatStore'
 import type { PromptValue } from '@/types/messageQueueTypes'
 
 /**
@@ -97,7 +98,17 @@ function QueuedMessagesPreview() {
             color={tokens.colors.text.disabled}
             _hover={{ color: tokens.colors.accent.red, bg: tokens.colors.accent.redSubtle }}
             transition={tokens.transition.fast}
-            onClick={() => removeFromQueue([cmd])}
+            onClick={() => {
+              // Drop the chat bubble that mirrors this queued command —
+              // otherwise the bubble lingers as a "ghost" message the
+              // agent never actually saw. Safe no-op if the id is absent
+              // (legacy enqueues without chatMessageId, or if the bubble
+              // was already removed elsewhere).
+              if (cmd.chatMessageId) {
+                useChatStore.getState().removeMessageById(cmd.chatMessageId)
+              }
+              removeFromQueue([cmd])
+            }}
           >
             <FiX size={12} />
           </Box>

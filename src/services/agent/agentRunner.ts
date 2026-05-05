@@ -9,6 +9,7 @@ import type { OpenAIContentPart } from './agentService'
 import ContextBuilder from './contextBuilder'
 import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
+import { browserSession } from '../browserSessionManager'
 import { resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText } from './promptValueHelpers'
 import type { Attachment, PromptBlock } from '../../types/chat'
@@ -30,6 +31,14 @@ interface RunAgentOptions {
    * Must be set explicitly by the caller — never derived implicitly from project state.
    */
   cmdOnlyMode?: boolean
+  /**
+   * When true, skip the internal `chatStore.startAssistantMessage()` call.
+   * Used by callers that already created an assistant placeholder bubble
+   * with interim text (e.g. /te2e showing "Starting browser session…"
+   * before the slow MCP boot). Without this, runAgentInternal would create
+   * a SECOND empty assistant bubble and confuse the streaming target.
+   */
+  skipStartAssistantMessage?: boolean
 }
 
 /**
@@ -73,6 +82,7 @@ async function runAgentInternal(
     userMessageBlocks,
     useConversationHistory = false,
     cmdOnlyMode = false,
+    skipStartAssistantMessage = false,
   } = options
 
   const chatStore = useChatStore.getState()
@@ -120,8 +130,13 @@ async function runAgentInternal(
   // (joinPromptValues), so a batched 3-message prompt is still ONE request.
   chatStore.resetTokenUsage()
 
-  // Start assistant message
-  chatStore.startAssistantMessage()
+  // Start assistant message — unless the caller pre-created one (e.g. /te2e
+  // shows a "Starting browser session…" placeholder during the slow MCP
+  // boot, then streams into that same bubble). Creating a second one would
+  // leave the placeholder orphaned with the streaming target diverging.
+  if (!skipStartAssistantMessage) {
+    chatStore.startAssistantMessage()
+  }
   // 'awaiting_response': prompt is about to be sent; nothing has streamed yet.
   // Flips to 'reasoning' or 'generating' once the first delta lands.
   agentStore.setStatus('awaiting_response')
@@ -131,8 +146,11 @@ async function runAgentInternal(
   const mcpTools = mcpService.getAllTools()
   const toolExecutor = ToolExecutor.getInstance()
   if (mcpTools.length > 0) {
-    toolExecutor.registerMCPTools(mcpTools, (serverName, toolName, args) =>
-      mcpService.callTool(serverName, toolName, args)
+    toolExecutor.registerMCPTools(
+      mcpTools,
+      browserSession.wrapCallTool((serverName, toolName, args) =>
+        mcpService.callTool(serverName, toolName, args),
+      ),
     )
     AgentService.getInstance().refreshTools()
   }
@@ -282,5 +300,8 @@ async function runAgentInternal(
     if (cmdOnlyMode && cmdCwd) {
       toolExecutor.disableCmdMode()
     }
+    // Restore the preview pane if a browser-driven session hid it. Safe
+    // when no session was active (no-op).
+    browserSession.endSession()
   }
 }

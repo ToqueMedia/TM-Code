@@ -7,6 +7,15 @@
 
 > **Decisions registered (2026-05-02):** Q1 drop showcase · Q4 **drop API Keys tab entirely (not deferred — out of scope, period)** · Q6 downloads via GitHub Releases (`ToqueMedia/TM-Code`) · Q7 rebrand to `code.toquemedia.net`. See §12.
 
+> **Outstanding TODOs (2026-05-04):**
+> - **OG image**: `public/og-tm-code.svg` is a brand-gradient placeholder. Designer needs to deliver `og-tm-code.png` 1200×630 — Twitter/Facebook render PNG/JPG more reliably than SVG.
+> - **Plan rename migration (Fix K)**: Worker `UserPlanName` is now `'explorer' | 'vibe' | 'pro' | 'max'` (see `~/dev/deskotp/toquemedia-studio-api/src/types.ts:74`). Web side (`packages/web`) still uses old `'pro' | 'business-4x' | 'business-8x'` in many places. Migration is the last open task.
+> - **Firebase Auth authorized domains**: add `code.toquemedia.net` in the Firebase/GIP console (manual, no code).
+> - **`yarn install`**: regenerate lockfile after Phase 8 dependency drop (22 deps removed).
+> - **e2e tests** (`packages/web/e2e/`): not validated since route map changed extensively.
+> - **Worker CORS allowlist**: `studio.toquemedia.net` left for transition — remove once DNS swap completes.
+> - **`aiService` Cloud Function**: still in `packages/functions` source. Drop after a week of zero invocations.
+
 > **Phase 0 audit findings (2026-05-02):**
 > - Cross-coupling: `AuthContext.tsx` is clean ✓. The "delete" candidates have **no surprise importers** in surviving code once Q1 (drop showcase) is applied.
 > - **Chain deletes confirmed**: `components/layout/Header.tsx` (only consumer is `DevStudioLauncher.tsx` — dies with devStudio) and `utils/sanitizeCode.ts` (only consumers: `aiService.ts`, `exportService.ts`, `useExportCode.ts` — all in deletion zone).

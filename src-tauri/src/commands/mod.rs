@@ -3,6 +3,7 @@ pub mod checkpoint;
 pub mod container;
 pub mod debugger;
 pub mod device;
+pub mod e2e;
 pub mod file_tree;
 pub mod filesystem;
 pub mod git;

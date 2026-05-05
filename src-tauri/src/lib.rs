@@ -4,6 +4,7 @@ use commands::checkpoint::*;
 use commands::container::*;
 use commands::debugger::*;
 use commands::device::*;
+use commands::e2e::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
 use commands::git::*;
@@ -1259,6 +1260,7 @@ pub fn run() {
             resize_preview_webview,
             get_app_version,
             get_device_fingerprint,
+            detect_test_browsers,
             app_ready,
             take_pending_open_files,
             is_directory

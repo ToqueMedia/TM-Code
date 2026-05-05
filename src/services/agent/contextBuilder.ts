@@ -812,6 +812,12 @@ When you hit an obstacle, diagnose the root cause before acting — keep safety 
    - To search the content of files, use \`search_files\` instead of \`grep\` or \`rg\`
    - Reserve using \`execute_command\` exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using \`execute_command\` if it is absolutely necessary.
  - Break down and manage your work with the \`update_tasks\` tool. It is helpful for planning your work and helping the user track your progress. Mark each task as completed as soon as you are done with the task. Do not batch up multiple tasks before marking them as completed.
+ - When the user asks for multiple things with different scopes in a single message (e.g. "fix the bug AND refactor X AND add tests"), DO NOT interleave them. Concrete protocol:
+   1. List the distinct scopes you identified back to the user — explicitly, in your reply.
+   2. Recommend an order (usually: fixes first, refactors second, additions last) and explain why in one line.
+   3. Create the task list via \`update_tasks\` with one task per scope, all \`pending\` initially.
+   4. Mark only the first as \`in_progress\` and work it to completion before touching the next. Update task statuses as each finishes.
+   This avoids the failure mode where partially-applied changes from scope A break verification of scope B and the user has to untangle a half-finished mix.
  - \`read_skill\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
  - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.`
   }
@@ -830,7 +836,8 @@ When you hit an obstacle, diagnose the root cause before acting — keep safety 
   private getCmdSessionGuidanceSection(): string {
     return `# Session guidance
  - When the user denies a tool call, ask why before adjusting your approach.
- - When the user needs to run a command themselves (e.g., interactive login like \`gcloud auth login\`), suggest they type \`! <command>\` in the prompt.`
+ - When the user needs to run a command themselves (e.g., interactive login like \`gcloud auth login\`), suggest they type \`! <command>\` in the prompt.
+ - When the user asks for multiple things with different scopes in a single message (e.g. "fix the bug AND refactor X AND add tests"), DO NOT interleave them. List the distinct scopes back to the user, recommend an order (fixes first, refactors second, additions last), create a task list via \`update_tasks\` with one task per scope, and work them sequentially — finish one before starting the next.`
   }
 
   private getCmdSecuritySection(): string {

@@ -19,6 +19,11 @@ const SAFE_TOOLS = new Set([
   'read_large_result',
   'check_background_agents',
   'update_tasks',
+  // read_skill loads bundled/global/project markdown — pure read, no
+  // side effects. Without this, /review and any agent that consults
+  // skills mid-session triggers a permission prompt per skill (the agent
+  // typically reads several), which is hostile UX.
+  'read_skill',
 ])
 
 // Tools that already have their own user approval flow (InlineDiff)
@@ -34,7 +39,7 @@ function getToolScope(toolName: string): 'core' | 'mcp' {
 }
 
 /** Why this permission requires a forced prompt (bypasses "Accept All") */
-type PromptReason = 'sensitive_file' | 'dangerous_command' | null
+export type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
 
 /**
  * Outcome of a permission request — enriched so callers can record the path

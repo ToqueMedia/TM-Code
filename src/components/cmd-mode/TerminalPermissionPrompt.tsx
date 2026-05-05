@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 
-type PromptReason = 'sensitive_file' | 'dangerous_command' | null
+type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
 
 interface TerminalPermissionPromptProps {
   toolName: string

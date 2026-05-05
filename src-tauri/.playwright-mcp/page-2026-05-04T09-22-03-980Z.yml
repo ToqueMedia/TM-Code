@@ -1,0 +1,10 @@
+- generic [ref=e4]:
+  - heading "DeepV4 Flash" [level=1] [ref=e5]
+  - paragraph [ref=e6]: Sign in to get started
+  - generic [ref=e9]:
+    - button "Continuar com a Google. Abre num novo separador" [active] [ref=e11] [cursor=pointer]:
+      - generic [ref=e13]:
+        - img [ref=e15]
+        - generic [ref=e22]: Continuar com a Google
+    - iframe
+  - paragraph [ref=e8]: Powered by Google Identity Platform

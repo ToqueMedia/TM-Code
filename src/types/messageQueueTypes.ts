@@ -119,6 +119,14 @@ export type QueuedCommand = {
    * local slash commands.
    */
   skipSlashCommands?: boolean
+
+  /**
+   * Id of the chat bubble that mirrors this queued command. The bubble is
+   * created at enqueue time so the user sees their message in the chat
+   * immediately (instead of only after dispatch). When the user cancels
+   * the queue item, the bubble is removed by id.
+   */
+  chatMessageId?: string
 }
 
 // === Operation log (persistence) ===
