@@ -173,7 +173,11 @@
       "Bash(git checkout *)",
       "Bash(npx knip *)",
       "Bash(echo \"WEB EXIT=$?\")",
-      "Bash(echo \"FN EXIT=$?\")"
+      "Bash(echo \"FN EXIT=$?\")",
+      "Bash(yarn install *)",
+      "Bash(yarn workspace *)",
+      "Bash(wrangler --version)",
+      "Bash(wrangler deploy *)"
     ]
   }
 }
