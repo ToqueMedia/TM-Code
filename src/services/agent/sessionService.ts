@@ -1,7 +1,32 @@
 import { invoke } from '@tauri-apps/api/core'
-import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDisplay } from '../../types/chat'
+import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDisplay, ByokSessionSnapshot } from '../../types/chat'
 import { logger } from '../../utils/logger'
 import { hashProjectPath, encryptSession, decryptSession } from '../../utils/crypto'
+import { useByokStore } from '../../stores/byokStore'
+
+/** Snapshot the current BYOK selection so the session uses the same provider
+ *  and model for its entire lifetime, even if the user later switches the
+ *  active selection in Settings. Returns null when BYOK is not active or
+ *  not configured.
+ *
+ *  Capabilities are captured whenever the model isn't a registry hit — both
+ *  for `custom` providers (no registry) and for "other model" mode on a
+ *  curated provider (model id not in our hardcoded catalog). The IDE then
+ *  forwards them as X-BYOK-Capabilities and the backend trusts them over
+ *  the registry. */
+export function captureByokSnapshot(): ByokSessionSnapshot | null {
+  const active = useByokStore.getState().resolveActive()
+  if (!active) return null
+  const inRegistry = active.provider.models.some(m => m.id === active.model.id)
+  const isCustom = active.provider.custom === true
+  return {
+    providerId: active.provider.id,
+    modelId: active.model.id,
+    baseURL: active.baseURL,
+    custom: isCustom,
+    capabilities: !inRegistry ? active.model.capabilities : undefined,
+  }
+}
 
 const MAX_SESSIONS_PER_PROJECT = 50
 const MAX_TOOL_RESULT_LENGTH = 2000
@@ -91,6 +116,7 @@ class SessionService {
       status: 'idle',
       createdAt: now,
       updatedAt: now,
+      byokSnapshot: captureByokSnapshot(),
     }
 
     await this.saveSession(session)
@@ -123,6 +149,7 @@ class SessionService {
         status: persisted.status === 'running' ? 'idle' : persisted.status,
         createdAt: persisted.createdAt,
         updatedAt: persisted.updatedAt,
+        byokSnapshot: persisted.byokSnapshot ?? null,
       }
     } catch (error) {
       logger.error('session', `Failed to load session ${sessionId}:`, error)
@@ -141,6 +168,7 @@ class SessionService {
         createdAt: session.createdAt,
         updatedAt: Date.now(),
         messages: session.messages.map(msg => this.sanitizeMessageForSave(msg)),
+        byokSnapshot: session.byokSnapshot ?? null,
       }
 
       if (tokenUsage) {

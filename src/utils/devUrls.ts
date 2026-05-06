@@ -63,13 +63,22 @@ export function resolveUrl(input: ResolveUrlInput): string {
 
 // ─── Convenience wrappers: call the pure resolver with real runtime values ──
 
+// Log the resolved Worker URL once on first call in dev so DevTools shows
+// where requests are going (helps debug "is the IDE hitting prod or local?").
+let _workerUrlLogged = false
+
 export function resolveWorkerUrl(): string {
-  return resolveUrl({
+  const url = resolveUrl({
     envValue: VITE_WORKER_URL,
     fallback: DEFAULT_WORKER_URL,
     isViteDev: IS_VITE_DEV,
     isWindows: IS_WINDOWS,
   })
+  if (IS_VITE_DEV && !_workerUrlLogged) {
+    _workerUrlLogged = true
+    console.info(`[devUrls] Worker URL: ${url} (env=${VITE_WORKER_URL ?? '<unset>'}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
+  }
+  return url
 }
 
 export function resolveOllamaUrl(): string {

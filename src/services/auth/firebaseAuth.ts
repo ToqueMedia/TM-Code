@@ -32,6 +32,8 @@ import {
 } from 'firebase/app-check'
 import { useAuthStore } from '../../stores/authStore'
 import { useBillingStore } from '../../stores/billingStore'
+import { useFeaturesStore } from '../../stores/featuresStore'
+import { useByokStore } from '../../stores/byokStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
 import { tauriFetch } from '../tauriFetch'
 import { resolveWorkerUrl } from '../../utils/devUrls'
@@ -586,6 +588,17 @@ class FirebaseAuthService {
         )
 
         useBillingStore.getState().updateFromMe(data)
+        useFeaturesStore.getState().updateFromMe(data.features)
+
+        // BYOK catalog: load ONCE per session when the feature flag is on.
+        // /v1/me fires on every window-restore (useBillingRefresh) — billing
+        // info changes externally so that refresh is necessary, but the BYOK
+        // provider catalog is essentially static for the session and re-fetching
+        // would needlessly call byok_has_key on each provider, briefly flipping
+        // `hasKey` while in flight. catalogLoaded gates the second-call no-op.
+        if (data.features?.byokEnabled === true && !useByokStore.getState().catalogLoaded) {
+          useByokStore.getState().loadProviders().catch(() => {})
+        }
 
         // /v1/me only returns 200 after all signup gates pass — flip the
         // local flag so the App auth gate can render the IDE.

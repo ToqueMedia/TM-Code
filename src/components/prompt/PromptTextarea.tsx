@@ -71,6 +71,20 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPas
             WebkitTextFillColor: tokens.colors.text.primary,
             background: 'rgba(254, 16, 99, 0.35)',
           },
+          // Hide the textarea's native scrollbar so its content width stays
+          // equal to the overlay's. Without this, once content exceeds 6 rows
+          // a ~15px gutter appears on the textarea (overflow-y: auto) and
+          // shrinks its layout width — but the overlay (position:absolute;
+          // inset:0) keeps full width. Same text then wraps at different
+          // columns in textarea vs overlay → caret and visible glyphs drift
+          // apart → the user sees a "ghost gap" before the cursor and feels
+          // like backspace deletes "from a distance" (the caret was at the
+          // textarea's column N, but the overlay rendered the run ending at
+          // column M). Scrolling still works via wheel / touchpad / arrows.
+          '& > textarea::-webkit-scrollbar': {
+            width: 0,
+            height: 0,
+          },
         }}
       >
         {/* Overlay — renders the FULL highlighted value (no own clipping; the

@@ -22,6 +22,7 @@ import { useMcpStore, McpServerState } from '../../stores/mcpStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
+import { useFeaturesStore } from '../../stores/featuresStore'
 import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
@@ -32,8 +33,9 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
 import DeploysSection from './settings/DeploysSection'
+import ApiKeysSection from './settings/ApiKeysSection'
 
-type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'sandbox' | 'deploys' | 'admin'
+type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'apiKeys' | 'sandbox' | 'deploys' | 'admin'
 
 const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'profile', key: 'settings.profilePlan' },
@@ -44,6 +46,11 @@ const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'mcp', key: 'settings.mcpServers' },
   { id: 'deploys', key: 'settings.deploys' as TranslationKey },
 ]
+
+const API_KEYS_NAV_ENTRY: { id: SectionId; key: TranslationKey } = {
+  id: 'apiKeys',
+  key: 'settings.apiKeys' as TranslationKey,
+}
 
 const ADMIN_NAV_ENTRY: { id: SectionId; key: TranslationKey } = {
   id: 'admin',
@@ -67,8 +74,20 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
     return s.isAuthenticated && s.user?.isAdmin === undefined
   })
   const billingLoaded = useBillingStore(function (s) { return s.isLoaded })
+  const byokEnabled = useFeaturesStore(function (s) { return s.byokEnabled })
   const showAdminNav = isAdmin || (isAdminUnknown && !billingLoaded)
-  const NAV_KEYS = showAdminNav ? [...BASE_NAV_KEYS, ADMIN_NAV_ENTRY] : BASE_NAV_KEYS
+  // Insert API Keys between MCP and Deploys when the global feature flag is on.
+  // Order: profile, editor, sandbox, shortcuts, skills, mcp, [apiKeys], deploys, [admin]
+  const NAV_KEYS = (() => {
+    const base = byokEnabled
+      ? [
+          ...BASE_NAV_KEYS.filter(n => n.id !== 'deploys'),
+          API_KEYS_NAV_ENTRY,
+          ...BASE_NAV_KEYS.filter(n => n.id === 'deploys'),
+        ]
+      : BASE_NAV_KEYS
+    return showAdminNav ? [...base, ADMIN_NAV_ENTRY] : base
+  })()
 
   return (
     <Flex flex="1" overflow="hidden">
@@ -158,6 +177,7 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
             {activeSection === 'shortcuts' && <ShortcutsSection />}
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
+            {activeSection === 'apiKeys' && byokEnabled && <ApiKeysSection />}
             {activeSection === 'deploys' && <DeploysSection />}
             {activeSection === 'admin' && showAdminNav && <AdminSection />}
           </Box>

@@ -31,6 +31,12 @@ export interface BillingSSEEvent {
   extra_usage_balance: number // overage credits after this request
   plan: UserPlanName
   used_overage: boolean       // request charged to overage balance (vs cycle)
+  /** When true, the request was forwarded with a client-supplied API key.
+   *  TMS budget fields (consumed_pct, token_budget, cycle_end, extra_usage_balance,
+   *  used_overage, tokens_consumed) are zero/empty and MUST be ignored. Only
+   *  `tokens_used` is meaningful — the IDE multiplies it by provider pricing
+   *  to display $$ cost per request. */
+  byok?: boolean
 }
 
 /** Shape of the /v1/me response body */
@@ -45,6 +51,10 @@ export interface MeResponse {
     cycleEnd: string
     extraUsageBalance: number
     status: CostBudgetStatus
+  }
+  /** Global feature toggles. Missing → all flags default OFF. */
+  features?: {
+    byokEnabled?: boolean
   }
 }
 
@@ -153,6 +163,14 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
    * directly — no derivation from consumedPct × tokenBudget.
    */
   updateFromSSE: (data) => {
+    // BYOK requests don't consume TMS budget — only the per-request token
+    // count (tokens_used) is meaningful, for $$ cost display. Leave the
+    // existing TMS state untouched so a user toggling between BYOK and TMS
+    // mid-conversation doesn't see their budget bar reset to zero.
+    if (data.byok) {
+      set({ lastTokensUsed: data.tokens_used })
+      return
+    }
     set({
       consumedPct: data.consumed_pct,
       tokensConsumed: data.tokens_consumed,

@@ -1,5 +1,6 @@
 mod commands;
 use commands::ai_completion::*;
+use commands::byok::*;
 use commands::checkpoint::*;
 use commands::container::*;
 use commands::debugger::*;
@@ -424,8 +425,12 @@ fn raw_http_get(
         return Err(format!("Connection refused: {}", v4_err));
     };
 
-    let stream = TcpStream::connect(&v6_target)
-        .map_err(|e| format!("Connection refused (tried v4 + [::1]): v4={}, v6={}", v4_err, e))?;
+    let stream = TcpStream::connect(&v6_target).map_err(|e| {
+        format!(
+            "Connection refused (tried v4 + [::1]): v4={}, v6={}",
+            v4_err, e
+        )
+    })?;
     raw_http_get_with_stream(stream, host_port, path)
 }
 
@@ -501,7 +506,8 @@ fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
     }
     if let Some(win) = app.get_webview_window("main") {
         win.show().map_err(|e| format!("show failed: {}", e))?;
-        win.set_focus().map_err(|e| format!("focus failed: {}", e))?;
+        win.set_focus()
+            .map_err(|e| format!("focus failed: {}", e))?;
     }
     Ok(())
 }
@@ -510,7 +516,8 @@ fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
 /// from Finder/Explorer/Nautilus, or by drag-dropping a file onto the dock
 /// icon). The frontend drains this on mount and listens for the live
 /// `open-file-with-app` event for opens that happen after the SPA is up.
-static PENDING_OPEN_FILES: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+static PENDING_OPEN_FILES: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
+    std::sync::OnceLock::new();
 fn pending_open_files() -> &'static std::sync::Mutex<Vec<String>> {
     PENDING_OPEN_FILES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
@@ -567,8 +574,12 @@ mod dock {
     );
 
     fn emit_native_menu(id: &str) {
-        let Some(handle) = super::DOCK_APP_HANDLE.get() else { return };
-        let Some(window) = tauri::Manager::get_webview_window(handle, "main") else { return };
+        let Some(handle) = super::DOCK_APP_HANDLE.get() else {
+            return;
+        };
+        let Some(window) = tauri::Manager::get_webview_window(handle, "main") else {
+            return;
+        };
         // Safe: id values are hard-coded above, no escaping needed.
         let _ = window.eval(format!(
             "window.dispatchEvent(new CustomEvent('native-menu', {{ detail: {{ id: '{}' }} }}))",
@@ -1255,6 +1266,10 @@ pub fn run() {
             sandbox_set_enabled,
             sandbox_status,
             sandbox_check_deps,
+            byok_set_key,
+            byok_get_key,
+            byok_delete_key,
+            byok_has_key,
             open_preview_webview,
             close_preview_webview,
             resize_preview_webview,

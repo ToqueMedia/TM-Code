@@ -1,8 +1,9 @@
 import { memo, useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiLoader, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiUpload, FiZap } from 'react-icons/fi'
-import { useChatStore } from '../../stores/chatStore'
+import { FiLoader, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiUpload, FiZap, FiSend } from 'react-icons/fi'
+import { useChatStore, generateId } from '../../stores/chatStore'
+import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useDeployStore } from '../../stores/deployStore'
@@ -941,6 +942,24 @@ function PreviewView() {
   )
 }
 
+function sendLogToAgent(entry: DevServerLogEntry): void {
+  // Wrap the raw log line in a fenced code block so the agent can tell the
+  // captured output apart from the framing question, and prefix the level
+  // so error/warn context isn't lost. Queue priority 'next' matches the
+  // prompt bar — dispatches immediately when the agent is idle, otherwise
+  // queues behind the in-flight turn.
+  const time = new Date(entry.timestamp).toLocaleTimeString('en-GB', { hour12: false })
+  const levelLabel = entry.level === 'error' ? 'ERROR' : entry.level === 'warn' ? 'WARN' : 'INFO'
+  const prompt = `Help me with this dev server console line:\n\n\`\`\`\n[${levelLabel}] ${time}  ${entry.text}\n\`\`\``
+  enqueueMessage({
+    value: prompt,
+    mode: 'prompt',
+    priority: 'next',
+    uuid: generateId('queued'),
+  })
+  useLayoutStore.getState().setViewMode('chat')
+}
+
 const ConsoleLogLine = memo(function ConsoleLogLine({ entry }: { entry: DevServerLogEntry }) {
   const color = LOG_COLORS[entry.level] || tokens.colors.text.secondary
   const bgColor = entry.level === 'error'
@@ -951,6 +970,7 @@ const ConsoleLogLine = memo(function ConsoleLogLine({ entry }: { entry: DevServe
 
   return (
     <Flex
+      className="group"
       align="flex-start"
       gap={2}
       py="2px"
@@ -970,6 +990,7 @@ const ConsoleLogLine = memo(function ConsoleLogLine({ entry }: { entry: DevServe
         {new Date(entry.timestamp).toLocaleTimeString('en-GB', { hour12: false })}
       </Text>
       <Text
+        flex={1}
         fontSize="11px"
         color={color}
         fontFamily="mono"
@@ -979,6 +1000,24 @@ const ConsoleLogLine = memo(function ConsoleLogLine({ entry }: { entry: DevServe
       >
         {entry.text}
       </Text>
+      <IconButton
+        aria-label={t('misc.sendToAgent')}
+        title={t('misc.sendToAgent')}
+        size="2xs"
+        variant="ghost"
+        flexShrink={0}
+        opacity={0}
+        color={tokens.colors.text.muted}
+        transition={tokens.transition.fast}
+        _groupHover={{ opacity: 1 }}
+        _hover={{
+          color: tokens.colors.accent.primary,
+          bg: 'rgba(254, 16, 99, 0.1)',
+        }}
+        onClick={() => sendLogToAgent(entry)}
+      >
+        <FiSend size={10} />
+      </IconButton>
     </Flex>
   )
 })

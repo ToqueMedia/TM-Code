@@ -162,12 +162,17 @@ fn validate_path_safe(path: &Path) -> Result<PathBuf> {
     }
 
     let canonical_ancestor = canonicalize_path(existing_ancestor).map_err(|_| {
-        FileTreeError::PathNotFound(format!("Ancestor not found: {}", existing_ancestor.display()))
+        FileTreeError::PathNotFound(format!(
+            "Ancestor not found: {}",
+            existing_ancestor.display()
+        ))
     })?;
 
     // Reattach the segments between the existing ancestor and the target path.
     let tail = path.strip_prefix(existing_ancestor).map_err(|_| {
-        FileTreeError::InvalidOperation("Failed to compute path tail relative to ancestor".to_string())
+        FileTreeError::InvalidOperation(
+            "Failed to compute path tail relative to ancestor".to_string(),
+        )
     })?;
     Ok(canonical_ancestor.join(tail))
 }

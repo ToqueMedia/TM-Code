@@ -963,6 +963,63 @@ Atalho: `Cmd/Ctrl+,`
 
 Settings → Profile → "Upgrade plan". Abre o site web onde escolhes o plano e pagas.
 
+### Bring Your Own Key (BYOK)
+
+A partir da versão 0.6.0 podes usar a tua própria chave de API para falar diretamente com Anthropic, OpenAI, Google Gemini, DeepSeek, xAI Grok, OpenRouter, ou qualquer endpoint OpenAI-compatible.
+
+**Quando o BYOK está ligado**, os pedidos saem com a tua chave e são pagos por ti diretamente ao fornecedor. O TM Code **não consome os tokens do teu plano** — o teu plano fica idle. As funcionalidades do plano (sandbox, MCP, checkpoints, skills, deploy) continuam disponíveis conforme o plano que tens.
+
+**Quando desligas o BYOK**, voltas ao routing normal do TM Code com o modelo do teu plano.
+
+#### Configurar
+
+1. **Settings → API Keys**
+2. Liga o switch "Use BYOK" no topo
+3. Escolhe um fornecedor da lista (Anthropic, OpenAI, OpenRouter, Gemini, DeepSeek, Grok, ou Custom)
+4. Cola a tua chave de API (sai pelo prompt → Save key)
+5. *(Opcional)* Cola um base URL alternativo se a tua organização usa um gateway interno (LiteLLM, Portkey, Cloudflare AI Gateway)
+6. Escolhe o modelo no dropdown
+7. Clica **Test** — o TM Code envia uma mini-completion (5 tokens) para confirmar que a chave funciona
+8. Clica **Set active** para usar este fornecedor/modelo
+
+A pill no header do chat passa a mostrar `provider/modelo` em vez do indicador de créditos.
+
+#### Onde ficam guardadas as chaves
+
+As chaves vivem **apenas** no keychain do sistema operativo (macOS Security framework, Windows Credential Manager, Linux libsecret). **Nunca são guardadas** em ficheiros, localStorage, ou no servidor — apenas transitam por TLS no header de cada pedido.
+
+Notas:
+- **Multi-dispositivo**: configurações e chaves não sincronizam entre máquinas. Se usares o TM Code em laptop + desktop, configuras BYOK em cada uma separadamente.
+- **Linux**: requer `libsecret` (gnome-keyring ou kwallet em execução)
+- **macOS dev builds**: cada acesso pode pedir password do keychain (apps assinadas em produção não têm este atrito)
+
+#### Custo por pedido
+
+Cada modelo no catálogo tem preço por milhão de tokens (input/output) — o IDE calcula o custo aproximado de cada conversa. **Atenção**:
+- O preço mostrado é o tier base. Modelos com pricing escalonado (Gemini 2.5 Pro, Grok 4.3) cobram o dobro acima de 200K tokens de prompt.
+- O OpenRouter não tem pricing fixo — depende do modelo final escolhido. O IDE mostra "—".
+
+#### Sessões existentes não mudam
+
+Se ligas o BYOK a meio de uma conversa, a sessão atual **continua** com o fornecedor que tinha quando foi criada. Só sessões **novas** usam a nova seleção. Isto evita confusão (e cobranças) quando trocas de fornecedor a meio.
+
+#### Imagens
+
+- Modelos com vision nativo (Claude, GPT-5.5, Gemini, Grok 4.3): a imagem vai diretamente na shape do fornecedor
+- Modelos sem vision (DeepSeek, alguns Grok): em planos pagos, a imagem é processada pelo Qwen 3.6 Plus do TM Code primeiro, e o modelo recebe uma descrição em texto
+- Plano Explorer + modelo sem vision: o paperclip fica escondido (limitação do plano)
+
+#### Slash commands com BYOK
+
+`/plan`, `/debug`, `/e2e`, `/review` continuam a funcionar com BYOK — o thinking budget é forçado para "high" automaticamente nestes casos (12K tokens em Anthropic, `reasoning_effort: high` em OpenAI/Gemini/Grok).
+
+#### Plano "BYOK-only" ($5/mês)
+
+Disponível desde a v0.6.0 (após o ops criar o documento Firestore). Inclui:
+- ✅ Sandbox, MCP, checkpoints, skills, HTTP Client, preview
+- ❌ Deploy (requer plano Vibe ou superior — BYOK fica ligado normalmente quando faz upgrade)
+- ❌ Tokens incluídos (paga sempre 100% via API do fornecedor que escolher)
+
 ---
 
 ## 22. Publicar (deploy)

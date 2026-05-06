@@ -74,8 +74,6 @@ export function usePromptBar() {
   const setInput = useChatStore(s => s.setDraftInput)
   const [devCommand, setDevCommand] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  /** Abort controller for the queue processing loop — allows handleStop to cancel it. */
-  const queueAbortRef = useRef<AbortController | null>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const historyIndexRef = useRef(-1)
   const savedDraftRef = useRef('')
@@ -502,26 +500,35 @@ export function usePromptBar() {
     content: PromptValue,
     skipUserMessage = false,
   ) => {
-    let chatStore = useChatStore.getState()
+    const chatStore = useChatStore.getState()
     const agentStore = useAgentStore.getState()
-
-    let sessionId = chatStore.activeSessionId
-    if (!sessionId) {
-      const projectPath = currentProject?.path || ''
-      sessionId = await chatStore.createNewSession(projectPath)
-    }
-
-    // Re-read state after potential async createNewSession to get fresh conversationHistory
-    chatStore = useChatStore.getState()
-
-    // If preview is open, switch to chat so the user sees the agent working
-    const layoutStore = useLayoutStore.getState()
-    if (layoutStore.viewMode === 'preview') {
-      layoutStore.setViewMode('chat')
-    }
-
     const projectPath = currentProject?.path || ''
     const projectType = currentProject?.projectType || 'unknown'
+
+    // Ensure a session exists SYNCHRONOUSLY so addUserMessage below has a
+    // home for the bubble. We use sync createSession (not async
+    // createNewSession) for the same reason agentRunner.ts:113 does in
+    // cmd-mode: any await between dequeue and addUserMessage leaves the
+    // chat blank for the duration — the queued strip already emptied,
+    // and the bubble hasn't been added yet, so the user sees the message
+    // disappear. App.tsx already initialised persistence for this project
+    // via restoreLastSession before the user could interact, so the sync
+    // path is safe.
+    if (!chatStore.activeSessionId) {
+      chatStore.createSession(projectPath)
+    }
+
+    // Render the user's bubble + assistant placeholder BEFORE the async
+    // augmentation step (mention resolution + attachment disk reads can
+    // take 50–500ms). Display extraction is sync, so we can paint the
+    // bubble first and build the model payload after.
+    const display = extractDisplayFromValue(content)
+    if (!skipUserMessage) {
+      const blocks = typeof content === 'string' ? undefined : content
+      chatStore.addUserMessage(display.text, display.attachments, blocks)
+    }
+    chatStore.startAssistantMessage()
+    agentStore.setStatus('awaiting_response')
 
     // Split on model capability. Vision-capable models (Qwen 3.6 Plus
     // for image analysis, GLM-5.1 as primary) receive an OpenAI-compatible
@@ -531,7 +538,6 @@ export function usePromptBar() {
     // The split happens at this boundary (not in the queue layer) so
     // the queue stays provider-agnostic — it carries blocks, the
     // boundary decides how to ship them.
-    const display = extractDisplayFromValue(content)
     // Model is decided by the backend. Multimodal support depends on the
     // plan: paid plans use GLM-5.1 (primary) + Qwen 3.6 Plus (image analysis),
     // free uses DeepSeek V3.2 (text-only).
@@ -561,19 +567,6 @@ export function usePromptBar() {
       // Text-only path — interleaved `<attached_image>` placeholders.
       userContent = await buildAugmentedPrompt(content, projectPath, promptResolvers)
     }
-
-    // Display the original prompt (without file contents) in the chat bubble.
-    // The augmented version (with file contents) is only sent to the model.
-    // Skip if caller already added the message (e.g. queued commands).
-    if (!skipUserMessage) {
-      // Pass the original block representation through so follow-up
-      // turns reconstruct content parts in the correct order, not the
-      // lossy text-then-images fallback.
-      const blocks = typeof content === 'string' ? undefined : content
-      chatStore.addUserMessage(display.text, display.attachments, blocks)
-    }
-    chatStore.startAssistantMessage()
-    agentStore.setStatus('awaiting_response')
 
     // Track whether the agent loop ended with an error.
     // Used by executeQueuedInput to stop processing remaining commands.
@@ -865,26 +858,17 @@ export function usePromptBar() {
       value = blocks
     }
 
-    // Render the user's message in the chat IMMEDIATELY at enqueue time.
-    // Previously, the bubble was only created on dispatch — that left a
-    // gap where the message was visible only in the queue strip and
-    // disappeared when dispatched (the bubble was hidden under the
-    // assistant's streaming render). The id is carried on the queue
-    // entry so the cancel-X can drop the bubble too.
-    const display = extractDisplayFromValue(value)
-    const blocks = typeof value === 'string' ? undefined : value
-    const chatMessageId = useChatStore.getState().addUserMessage(
-      display.text,
-      display.attachments,
-      blocks,
-    )
-
+    // The queued message lives only in the queue (rendered by
+    // QueuedMessagesPreview above the input). The chat bubble is created
+    // freshly when executeQueuedInput dispatches via runAgentForPrompt —
+    // matches Claude Code's separation of "queued preview" and "transcript
+    // entry", which removes any chance of a position race against the
+    // AgentActivityIndicator's elapsed-time message.
     enqueueMessage({
       value,
       mode: 'prompt',
       priority: 'next',
       uuid: generateId('queued'),
-      chatMessageId,
     })
 
     // Clear input immediately — message is in the queue
@@ -898,9 +882,6 @@ export function usePromptBar() {
     // Clear the message queue BEFORE cancelling — prevents useQueueProcessor
     // from firing when queryGuard transitions to idle.
     clearMessageQueue()
-    // Abort the queue processing loop (if running) so it doesn't
-    // continue to the next command after the current one is cancelled.
-    queueAbortRef.current?.abort()
     // Clear any pending permission first — resolves the dangling Promise
     usePermissionStore.getState().clearPending()
     // Resolve any pending diff approval waits (rejects them)
@@ -929,9 +910,14 @@ export function usePromptBar() {
   const executeQueuedInput = useCallback(async (commands: QueuedCommand[]) => {
     if (commands.length === 0) return
 
-    // Create an abort controller so handleStop can cancel the loop
-    const abortController = new AbortController()
-    queueAbortRef.current = abortController
+    // Reserve the QueryGuard SYNCHRONOUSLY before any await. This closes the
+    // window where the queue snapshot changes (post-dequeue or new enqueue)
+    // could re-fire useQueueProcessor's effect with isQueryActive=false and
+    // dispatch a second concurrent runAgentForPrompt while createNewSession
+    // is still pending inside the first one. tryStart() inside runAgentLoop
+    // transitions dispatching→running; if reserve fails, another dispatch
+    // already owns the guard and we yield to it.
+    if (!queryGuard.reserve()) return
 
     try {
       // Switch to chat so the user sees the agent working
@@ -950,31 +936,24 @@ export function usePromptBar() {
           ? joinPromptValues(commands.map(c => c.value))
           : head.value
 
-      if (abortController.signal.aborted) return
-
-      // The chat bubble was already created at enqueue time (see
-      // handleSubmit). Between then and now, AgentActivityIndicator may
-      // have appended a "Trabalhou por X" system message after the
-      // previous turn finalized — pushing the queued user bubble into
-      // the middle of the transcript. Move it back to the end so the
-      // upcoming assistant message renders directly underneath it
-      // (preserving the natural user → assistant flow).
-      const headChatId = head.chatMessageId
-      if (headChatId) {
-        useChatStore.getState().moveMessageToEnd(headChatId)
-      }
-
-      // We DO NOT call addUserMessage here — bubble exists since enqueue.
-      // skipUserMessage=true keeps runAgentForPrompt's internal addUserMessage
-      // path off too.
-      await runAgentForPrompt(mergedValue, true)
-      // Result intentionally ignored: if the agent errored, the next batch
-      // (if any) will be picked up by the effect when it re-fires. The
-      // user-visible error is already in the chat transcript.
+      // The bubble is created on dispatch (inside runAgentForPrompt) —
+      // never at enqueue time. QueuedMessagesPreview already shows the
+      // pending message under the input, so the user has continuous
+      // visibility, and the transcript entry only exists when the agent
+      // actually receives the message. Cancellation is owned by
+      // AgentService.cancelLoop() (called from handleStop), which
+      // propagates the abort down to the in-flight fetch.
+      await runAgentForPrompt(mergedValue, false)
     } finally {
-      queueAbortRef.current = null
+      // Safety net: if runAgentForPrompt returned without ever entering
+      // runAgentLoop's tryStart() (e.g. createNewSession threw, or the
+      // concurrent-guard branch refused entry), the QueryGuard would be
+      // pinned in 'dispatching'. cancelReservation() is a no-op when the
+      // guard is idle (post-end) or running (still active), so this is
+      // always safe to call.
+      queryGuard.cancelReservation()
     }
-  }, [runAgentForPrompt])
+  }, [runAgentForPrompt, queryGuard])
 
   useQueueProcessor({ executeQueuedInput })
 

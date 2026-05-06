@@ -258,18 +258,28 @@ fn is_text_extension(path: &str) -> bool {
     let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
     matches!(
         ext.as_str(),
-        "html" | "htm" | "js" | "mjs" | "cjs" | "css" | "json" | "svg" | "txt"
-            | "xml" | "map" | "webmanifest" | "ts" | "tsx" | "jsx" | "md"
+        "html"
+            | "htm"
+            | "js"
+            | "mjs"
+            | "cjs"
+            | "css"
+            | "json"
+            | "svg"
+            | "txt"
+            | "xml"
+            | "map"
+            | "webmanifest"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "md"
     )
 }
 
 /// Walk a directory and produce a flat list of files keyed by their path
 /// RELATIVE to `base`. Skips dotfiles and `node_modules` defensively.
-fn walk_collect(
-    dir: &Path,
-    base: &Path,
-    out: &mut Vec<DeployBundleFile>,
-) -> std::io::Result<()> {
+fn walk_collect(dir: &Path, base: &Path, out: &mut Vec<DeployBundleFile>) -> std::io::Result<()> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
     for entry in std::fs::read_dir(dir)? {
@@ -432,18 +442,17 @@ pub async fn collect_deploy_bundle(project_path: String) -> Result<DeployBundle,
     //   2. Raw schema.ts content                          ← fallback for the brittle regex extractor in deployOrchestrator
     let migration_sql = if has_database {
         let migrations_dir = backend_dir.join("migrations");
-        let sql_files: Option<Vec<PathBuf>> = if migrations_dir.exists() && migrations_dir.is_dir() {
-            std::fs::read_dir(&migrations_dir)
-                .ok()
-                .map(|rd| {
-                    let mut files: Vec<PathBuf> = rd
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.path())
-                        .filter(|p| p.extension().is_some_and(|ext| ext == "sql"))
-                        .collect();
-                    files.sort();
-                    files
-                })
+        let sql_files: Option<Vec<PathBuf>> = if migrations_dir.exists() && migrations_dir.is_dir()
+        {
+            std::fs::read_dir(&migrations_dir).ok().map(|rd| {
+                let mut files: Vec<PathBuf> = rd
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|ext| ext == "sql"))
+                    .collect();
+                files.sort();
+                files
+            })
         } else {
             None
         };
@@ -530,8 +539,8 @@ pub async fn write_env_vars(project_path: String, vars: Vec<EnvVar>) -> Result<(
         return Err(format!("Project path does not exist: {}", project_path));
     }
 
-    let canonical_project = canonicalize_path(project)
-        .map_err(|e| format!("Invalid project path: {}", e))?;
+    let canonical_project =
+        canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
 
     let env_path = canonical_project.join(".env");
 
@@ -593,8 +602,7 @@ pub async fn write_env_vars(project_path: String, vars: Vec<EnvVar>) -> Result<(
         }
     }
 
-    std::fs::write(&env_path, &merged)
-        .map_err(|e| format!("Failed to write .env: {}", e))?;
+    std::fs::write(&env_path, &merged).map_err(|e| format!("Failed to write .env: {}", e))?;
 
     // Restrict permissions on Unix (owner read/write only).
     #[cfg(unix)]

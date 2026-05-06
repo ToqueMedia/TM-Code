@@ -10,6 +10,7 @@ import { useProjectStore } from './stores/projectStore';
 import { useAuthStore } from './stores/authStore';
 import { useSettingsStore } from './stores/settingsStore';
 import { useChatStore } from './stores/chatStore';
+import { useAgentStore } from './stores/agentStore';
 import { useSkillStore } from './stores/skillStore';
 import FirebaseAuthService from './services/auth/firebaseAuth';
 import SkillService from './services/agent/skillService';
@@ -372,6 +373,12 @@ function App() {
 		}
 
 		useChatStore.getState().clearAllSessions();
+		// Reset agent state so per-project things like the agent task list,
+		// last-response model name/provider, and BYOK confirmation pill don't
+		// leak from the previous project. Without this the AgentTasksPanel
+		// would still show tasks from the previously open project until the
+		// user fired their first message in the new one.
+		useAgentStore.getState().reset();
 
 		const chatStore = useChatStore.getState();
 		chatStore.restoreLastSession(projectPath).then(restored => {
@@ -464,10 +471,30 @@ function App() {
 			/Cross-Origin-Opener-Policy.+google/i,
 		];
 
+		function isPreviewProtocolNoise(text: string): boolean {
+			// Vite's @vite/client (HMR) is loaded inside the iframe through our
+			// custom Tauri protocol (tmpreview://, registered in src-tauri/src/lib.rs).
+			// The HMR client tries to open a WebSocket — the custom protocol
+			// only proxies HTTP, so the WebSocket upgrade fails and emits an
+			// unhandled rejection. The stack uniquely contains setupWebSocket
+			// @tmpreview://. The error is purely a side-effect of the IDE's
+			// preview pipeline; the user's app would HMR fine when served
+			// directly via http://, so surfacing it has no diagnostic value.
+			if (text.includes('setupWebSocket@tmpreview://')) return true;
+			// Browser cross-origin sanitization: any script error originating
+			// from a different origin is rewritten to literal "Script error."
+			// with line/col 0, no stack. The iframe runs at tmpreview:// and
+			// the parent at tauri://, so EVERY runtime error in the preview
+			// gets sanitized this way. Useless to surface.
+			if (text.startsWith('Script error.') && text.includes('(:0)')) return true;
+			return false;
+		}
+
 		function handlePreviewConsole(e: Event) {
 			const detail = (e as CustomEvent<{ level: string; text: string }>).detail;
 			const { level, text } = detail || { level: '', text: '' };
 			if (!text) return;
+			if (isPreviewProtocolNoise(text)) return;
 
 			useLayoutStore.getState().addDevServerLog(
 				`[runtime] ${text}`,

@@ -1,4 +1,5 @@
 pub mod ai_completion;
+pub mod byok;
 pub mod checkpoint;
 pub mod container;
 pub mod debugger;

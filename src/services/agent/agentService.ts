@@ -7,6 +7,7 @@ import { parseSSEStream, createThinkingDetector } from './streamParser'
 import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
+import { useByokStore } from '../../stores/byokStore'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
 import { resolveWorkerUrl } from '../../utils/devUrls'
@@ -1590,6 +1591,96 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       }
     }
 
+    // BYOK: inject the user's per-request key + provider/model selection.
+    // Session snapshot wins over the global active selection — switching
+    // the active provider mid-conversation does NOT affect already-running
+    // sessions (the snapshot is frozen at session creation).
+    //
+    // The key is fetched from the OS keychain just-in-time (never persisted
+    // in JS state) and only crosses the JS boundary into the fetch headers.
+    type ByokInjection = {
+      providerId: string
+      modelId: string
+      baseURL: string
+      custom: boolean
+      capabilities?: { images: boolean; audio: boolean; video: boolean; tools: boolean }
+    }
+    let byokInject: ByokInjection | null = null
+    if (activeSession?.byokSnapshot) {
+      const snap = activeSession.byokSnapshot
+      byokInject = {
+        providerId: snap.providerId,
+        modelId: snap.modelId,
+        baseURL: snap.baseURL,
+        custom: snap.custom,
+        capabilities: snap.capabilities,
+      }
+    } else {
+      const active = useByokStore.getState().resolveActive()
+      if (active) {
+        // Send capabilities whenever the resolved model isn't a registry hit:
+        // (a) custom provider — registry is empty by definition; (b) "other
+        // model" mode — user typed a model id not in our hardcoded catalog.
+        // For curated providers with a known model the registry is the
+        // source of truth and the header is omitted.
+        const inRegistry = active.provider.models.some(m => m.id === active.model.id)
+        const sendCapabilities = !inRegistry
+        byokInject = {
+          providerId: active.provider.id,
+          modelId: active.model.id,
+          baseURL: active.baseURL,
+          custom: active.provider.custom === true,
+          capabilities: sendCapabilities ? active.model.capabilities : undefined,
+        }
+      }
+    }
+    if (byokInject) {
+      let apiKey: string | null = null
+      try {
+        apiKey = await invoke<string | null>('byok_get_key', { provider: byokInject.providerId })
+      } catch (err) {
+        console.warn('[byok] failed to read key from keychain:', err)
+      }
+      if (apiKey) {
+        headers['X-BYOK-Provider'] = byokInject.providerId
+        headers['X-BYOK-Key'] = apiKey
+        headers['X-BYOK-Model'] = byokInject.modelId
+        if (byokInject.baseURL) {
+          headers['X-BYOK-Base-URL'] = byokInject.baseURL
+        }
+        // Send capabilities whenever they're set (custom provider OR user-
+        // declared "other model"). Backend's getModelCapabilities trusts
+        // declared values over the registry.
+        if (byokInject.capabilities) {
+          headers['X-BYOK-Capabilities'] = JSON.stringify(byokInject.capabilities)
+        }
+        useByokStore.getState().markUsed(byokInject.providerId)
+      } else {
+        // BYOK is configured to be on (snapshot or active selection) but the
+        // key isn't actually available in the keychain or fallback file.
+        // Refusing here is the right behaviour — silently falling back to TMS
+        // would consume the user's plan tokens despite them having opted into
+        // BYOK. Common cause: a previous dev-build session "saved" a key that
+        // the macOS keychain accepted but didn't persist; the new Rust binary
+        // with file fallback fixes it once the user re-saves.
+        //
+        // Sync hasKey to false so the Settings UI reflects the truth.
+        const store = useByokStore.getState()
+        const config = { ...store.perProviderConfig }
+        if (config[byokInject.providerId]) {
+          config[byokInject.providerId] = { ...config[byokInject.providerId], hasKey: false }
+          useByokStore.setState({ perProviderConfig: config })
+        }
+        throw new ServiceError(
+          `BYOK está activo para ${byokInject.providerId} mas a chave não está disponível. `
+            + `Vai a Settings → API Keys e volta a guardar a chave (em dev builds, as chaves `
+            + `por vezes não persistem; o file fallback resolve isto após restart do dev server).`,
+          'BYOK_KEY_MISSING',
+          false,
+        )
+      }
+    }
+
     // Cache request body to reuse on 401 retry (avoids re-encoding which could differ)
     const requestBody = JSON.stringify(await this.buildRequestBody(messages))
 
@@ -1705,6 +1796,12 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     if (modelName || modelProvider || thinkingHeader) {
       useAgentStore.getState().setModelInfo(modelName, modelProvider, thinkingMode)
     }
+
+    // Authoritative BYOK marker: the server confirms whether the request
+    // was actually routed via a client-supplied key. The IDE's UI pill
+    // reads this — NOT the byokStore.enabled toggle (which only says what
+    // the user configured, not what the server accepted).
+    useAgentStore.getState().setByokActive(response.headers.get('X-BYOK-Active') === 'true')
 
     // Read billing info from response headers
     useBillingStore.getState().updateFromHeaders(response.headers)

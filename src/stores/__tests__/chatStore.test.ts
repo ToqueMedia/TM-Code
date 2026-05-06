@@ -16,6 +16,7 @@ jest.mock('../../services/agent/sessionService', () => ({
     createSession: jest.fn(),
     cleanupEmptySessions: jest.fn().mockResolvedValue(undefined),
   },
+  captureByokSnapshot: jest.fn(() => null),
 }))
 
 jest.mock('../../services/agent/diffService', () => ({

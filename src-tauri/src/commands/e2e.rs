@@ -94,7 +94,8 @@ fn candidates() -> Vec<Candidate> {
             )],
         });
     } else if cfg!(target_os = "windows") {
-        let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| String::from("C:\\Program Files"));
+        let pf =
+            std::env::var("ProgramFiles").unwrap_or_else(|_| String::from("C:\\Program Files"));
         let pf86 = std::env::var("ProgramFiles(x86)")
             .unwrap_or_else(|_| String::from("C:\\Program Files (x86)"));
         let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -103,7 +104,11 @@ fn candidates() -> Vec<Candidate> {
         // Without this guard, an empty LOCALAPPDATA produces relative paths like
         // `\Google\Chrome\Application\chrome.exe` which silently never match.
         let with_local = |path: &str| -> Option<PathBuf> {
-            if local.is_empty() { None } else { Some(PathBuf::from(format!("{local}\\{path}"))) }
+            if local.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(format!("{local}\\{path}")))
+            }
         };
 
         let mut chrome_paths = vec![
@@ -124,8 +129,12 @@ fn candidates() -> Vec<Candidate> {
             name: "Google Chrome Beta",
             channel: Some("chrome-beta"),
             paths: vec![
-                PathBuf::from(format!("{pf}\\Google\\Chrome Beta\\Application\\chrome.exe")),
-                PathBuf::from(format!("{pf86}\\Google\\Chrome Beta\\Application\\chrome.exe")),
+                PathBuf::from(format!(
+                    "{pf}\\Google\\Chrome Beta\\Application\\chrome.exe"
+                )),
+                PathBuf::from(format!(
+                    "{pf86}\\Google\\Chrome Beta\\Application\\chrome.exe"
+                )),
             ],
         });
         let mut edge_paths = vec![
@@ -169,53 +178,106 @@ fn candidates() -> Vec<Candidate> {
         // which usually isn't; vendor packages drop into /opt/<vendor>).
         let home = std::env::var("HOME").unwrap_or_default();
         let extras: &[(&str, &[&str])] = &[
-            ("chrome", &[
-                "/opt/google/chrome/google-chrome",
-                "/opt/google/chrome/chrome",
-                "/snap/bin/google-chrome",
-                "/var/lib/flatpak/exports/bin/com.google.Chrome",
-            ]),
-            ("chrome-beta", &["/opt/google/chrome-beta/google-chrome-beta"]),
-            ("msedge", &[
-                "/opt/microsoft/msedge/microsoft-edge",
-                "/opt/microsoft/msedge/msedge",
-                "/snap/bin/microsoft-edge",
-            ]),
-            ("brave", &[
-                "/opt/brave.com/brave/brave-browser",
-                "/opt/brave.com/brave/brave",
-                "/snap/bin/brave",
-            ]),
-            ("chromium", &[
-                "/snap/bin/chromium",
-                "/var/lib/flatpak/exports/bin/org.chromium.Chromium",
-            ]),
+            (
+                "chrome",
+                &[
+                    "/opt/google/chrome/google-chrome",
+                    "/opt/google/chrome/chrome",
+                    "/snap/bin/google-chrome",
+                    "/var/lib/flatpak/exports/bin/com.google.Chrome",
+                ],
+            ),
+            (
+                "chrome-beta",
+                &["/opt/google/chrome-beta/google-chrome-beta"],
+            ),
+            (
+                "msedge",
+                &[
+                    "/opt/microsoft/msedge/microsoft-edge",
+                    "/opt/microsoft/msedge/msedge",
+                    "/snap/bin/microsoft-edge",
+                ],
+            ),
+            (
+                "brave",
+                &[
+                    "/opt/brave.com/brave/brave-browser",
+                    "/opt/brave.com/brave/brave",
+                    "/snap/bin/brave",
+                ],
+            ),
+            (
+                "chromium",
+                &[
+                    "/snap/bin/chromium",
+                    "/var/lib/flatpak/exports/bin/org.chromium.Chromium",
+                ],
+            ),
         ];
 
         let mut user_flatpaks: Vec<(&str, PathBuf)> = Vec::new();
         if !home.is_empty() {
-            user_flatpaks.push(("chrome", PathBuf::from(format!(
-                "{home}/.local/share/flatpak/exports/bin/com.google.Chrome"
-            ))));
-            user_flatpaks.push(("chromium", PathBuf::from(format!(
-                "{home}/.local/share/flatpak/exports/bin/org.chromium.Chromium"
-            ))));
+            user_flatpaks.push((
+                "chrome",
+                PathBuf::from(format!(
+                    "{home}/.local/share/flatpak/exports/bin/com.google.Chrome"
+                )),
+            ));
+            user_flatpaks.push((
+                "chromium",
+                PathBuf::from(format!(
+                    "{home}/.local/share/flatpak/exports/bin/org.chromium.Chromium"
+                )),
+            ));
         }
 
         for (id, name, channel, bins) in [
-            ("chrome", "Google Chrome", Some("chrome"), &["google-chrome", "google-chrome-stable"][..]),
-            ("chrome-beta", "Google Chrome Beta", Some("chrome-beta"), &["google-chrome-beta"][..]),
-            ("msedge", "Microsoft Edge", Some("msedge"), &["microsoft-edge", "microsoft-edge-stable"][..]),
-            ("msedge-beta", "Microsoft Edge Beta", Some("msedge-beta"), &["microsoft-edge-beta"][..]),
-            ("brave", "Brave Browser", None, &["brave-browser", "brave"][..]),
-            ("chromium", "Chromium", None, &["chromium", "chromium-browser"][..]),
+            (
+                "chrome",
+                "Google Chrome",
+                Some("chrome"),
+                &["google-chrome", "google-chrome-stable"][..],
+            ),
+            (
+                "chrome-beta",
+                "Google Chrome Beta",
+                Some("chrome-beta"),
+                &["google-chrome-beta"][..],
+            ),
+            (
+                "msedge",
+                "Microsoft Edge",
+                Some("msedge"),
+                &["microsoft-edge", "microsoft-edge-stable"][..],
+            ),
+            (
+                "msedge-beta",
+                "Microsoft Edge Beta",
+                Some("msedge-beta"),
+                &["microsoft-edge-beta"][..],
+            ),
+            (
+                "brave",
+                "Brave Browser",
+                None,
+                &["brave-browser", "brave"][..],
+            ),
+            (
+                "chromium",
+                "Chromium",
+                None,
+                &["chromium", "chromium-browser"][..],
+            ),
         ] {
             let mut paths: Vec<PathBuf> = bins.iter().filter_map(|b| which_in_path(b)).collect();
             for (eid, candidates) in extras {
                 if *eid == id {
                     for c in *candidates {
                         let p = PathBuf::from(c);
-                        if p.exists() { paths.push(p); }
+                        if p.exists() {
+                            paths.push(p);
+                        }
                     }
                 }
             }
@@ -225,7 +287,12 @@ fn candidates() -> Vec<Candidate> {
                 }
             }
             if !paths.is_empty() {
-                out.push(Candidate { id, name, channel, paths });
+                out.push(Candidate {
+                    id,
+                    name,
+                    channel,
+                    paths,
+                });
             }
         }
     }

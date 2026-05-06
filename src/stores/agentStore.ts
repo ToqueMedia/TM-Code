@@ -26,6 +26,14 @@ interface AgentState {
    */
   thinkingMode: 'none' | 'toggleable' | 'mandatory' | null
   /**
+   * Whether the most recent response was actually served via BYOK (the
+   * server-side X-BYOK-Active header). This is the authoritative source for
+   * the chat-header pill — the byokStore.enabled toggle says what the user
+   * configured, but only this header confirms what the server did. Drifts
+   * back to false when a non-BYOK request follows a BYOK one.
+   */
+  byokActive: boolean
+  /**
    * Phase A telemetry: cumulative count of times the safe tool pool blocked
    * a tool from starting because of an in-flight non-concurrency-safe sibling.
    * Each increment represents a "would-have-been-a-race" today's Promise.all
@@ -40,6 +48,7 @@ interface AgentActions {
   setError: (error: string | null) => void
   // Model metadata from backend response headers
   setModelInfo: (name: string | null, provider: string | null, thinkingMode?: 'none' | 'toggleable' | 'mandatory' | null) => void
+  setByokActive: (active: boolean) => void
   // Task management
   setTasks: (tasks: AgentTask[]) => void
   updateTaskStatus: (taskId: string, status: AgentTaskStatus) => void
@@ -57,6 +66,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   modelName: null,
   modelProvider: null,
   thinkingMode: null,
+  byokActive: false,
   poolConcurrencyConflictsAvoided: 0,
 
   setStatus: (status: AgentStatus) => {
@@ -76,6 +86,10 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       // the toggle every refresh.
       ...(thinkingMode !== undefined ? { thinkingMode } : {}),
     })
+  },
+
+  setByokActive: (active: boolean) => {
+    set({ byokActive: active })
   },
 
   setTasks: (tasks: AgentTask[]) => {
@@ -111,6 +125,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       modelName: null,
       modelProvider: null,
       thinkingMode: null,
+      byokActive: false,
       poolConcurrencyConflictsAvoided: 0,
     })
   },

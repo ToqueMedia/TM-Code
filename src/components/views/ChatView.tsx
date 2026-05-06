@@ -10,10 +10,12 @@ import { useMcpStore } from '../../stores/mcpStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, isInOverageState, extraConsumptionPct, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
+import { useByokStore } from '../../stores/byokStore'
 import { getProfileForPlan } from '../../services/agent/modelProfiles'
 import MessageBubble from '../chat/MessageBubble'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
+import ModelIndicator from '../chat/ModelIndicator'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
 import { tokens } from '@/theme/tokens'
@@ -49,6 +51,15 @@ function ChatView() {
   // authoritative once the first response arrives; before then we fall back
   // to the per-plan profile shape.
   const backendThinkingMode = useAgentStore(s => s.thinkingMode)
+  // Server-confirmed (after first response) OR locally configured: either way
+  // the chat is going to BYOK, so swap the credit indicator for the model
+  // indicator. The "configured but not yet confirmed" state is rendered with
+  // a slightly muted pill — a preview that the next request will route via
+  // the user's key. See ModelIndicator for the visual distinction.
+  const byokActive = useAgentStore(s => s.byokActive)
+  const byokEnabled = useByokStore(s => s.enabled)
+  const byokActiveProvider = useByokStore(s => s.activeProvider)
+  const byokActiveModel = useByokStore(s => s.activeModel)
   const fallbackProfile = getProfileForPlan(billingPlan)
   const effectiveMode = backendThinkingMode
     ?? (fallbackProfile.supportsThinking
@@ -62,6 +73,14 @@ function ChatView() {
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
   const projectPath = currentProject?.path || ''
+
+  // BYOK indicator gating: show ModelIndicator if either (a) the active session
+  // was created with a BYOK snapshot, or (b) BYOK is currently configured
+  // globally and would route the next request. Mirrors the agentService logic.
+  const sessionByokSnapshot = session?.byokSnapshot ?? null
+  const byokConfigured = sessionByokSnapshot !== null
+    || (byokEnabled && byokActiveProvider !== null && byokActiveModel !== null)
+  const showModelIndicator = byokActive || byokConfigured
 
 // use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
   // streaming content, expanding diffs, and dynamic height changes.
@@ -198,17 +217,21 @@ function ChatView() {
               </Text>
             </Flex>
           )}
-          <CreditIndicator
-            plan={billingPlan}
-            noCredits={noCredits}
-            isStreaming={isStreaming}
-            consumedPct={consumedPct}
-            tokensConsumed={tokensConsumed}
-            tokenBudget={tokenBudget}
-            cycleEnd={cycleEnd}
-            status={billingStatus}
-            tmsRemaining={tmsRemaining}
-          />
+          {showModelIndicator ? (
+            <ModelIndicator />
+          ) : (
+            <CreditIndicator
+              plan={billingPlan}
+              noCredits={noCredits}
+              isStreaming={isStreaming}
+              consumedPct={consumedPct}
+              tokensConsumed={tokensConsumed}
+              tokenBudget={tokenBudget}
+              cycleEnd={cycleEnd}
+              status={billingStatus}
+              tmsRemaining={tmsRemaining}
+            />
+          )}
           {sandboxEnabled && (
             <IsolationPill
               icon={FiShield}

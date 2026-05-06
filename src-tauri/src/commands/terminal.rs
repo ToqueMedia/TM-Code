@@ -798,31 +798,30 @@ pub async fn start_dev_server(
             let mut stderr_buf: Vec<String> = Vec::new();
             let mut last_flush = std::time::Instant::now();
 
-            let flush =
-                |app: &tauri::AppHandle,
-                 stdout_buf: &mut Vec<String>,
-                 stderr_buf: &mut Vec<String>| {
-                    if !stdout_buf.is_empty() {
-                        let _ = app.emit(
-                            "dev-server-output",
-                            DevServerOutput {
-                                pid,
-                                stream: "stdout".into(),
-                                data: stdout_buf.drain(..).collect::<Vec<_>>().join("\n"),
-                            },
-                        );
-                    }
-                    if !stderr_buf.is_empty() {
-                        let _ = app.emit(
-                            "dev-server-output",
-                            DevServerOutput {
-                                pid,
-                                stream: "stderr".into(),
-                                data: stderr_buf.drain(..).collect::<Vec<_>>().join("\n"),
-                            },
-                        );
-                    }
-                };
+            let flush = |app: &tauri::AppHandle,
+                         stdout_buf: &mut Vec<String>,
+                         stderr_buf: &mut Vec<String>| {
+                if !stdout_buf.is_empty() {
+                    let _ = app.emit(
+                        "dev-server-output",
+                        DevServerOutput {
+                            pid,
+                            stream: "stdout".into(),
+                            data: stdout_buf.drain(..).collect::<Vec<_>>().join("\n"),
+                        },
+                    );
+                }
+                if !stderr_buf.is_empty() {
+                    let _ = app.emit(
+                        "dev-server-output",
+                        DevServerOutput {
+                            pid,
+                            stream: "stderr".into(),
+                            data: stderr_buf.drain(..).collect::<Vec<_>>().join("\n"),
+                        },
+                    );
+                }
+            };
 
             loop {
                 let elapsed = last_flush.elapsed();

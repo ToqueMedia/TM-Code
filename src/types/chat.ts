@@ -187,6 +187,31 @@ export interface ChatSession {
   status: 'idle' | 'running' | 'paused' | 'completed' | 'error'
   createdAt: number
   updatedAt: number
+  /** BYOK snapshot taken at session creation. Frozen for the lifetime of
+   *  the session — switching the global active provider in Settings does
+   *  NOT migrate active sessions. Null when the session was created
+   *  without BYOK (TMS-routed). */
+  byokSnapshot?: ByokSessionSnapshot | null
+}
+
+/** Per-session frozen reference to the BYOK selection at creation time.
+ *  Stored on disk alongside the session so reloads use the same provider/
+ *  model that the conversation started with. */
+export interface ByokSessionSnapshot {
+  providerId: string
+  modelId: string
+  /** Resolved baseURL (override or provider default) at snapshot time. */
+  baseURL: string
+  /** Whether the provider is `custom`. Drives the X-BYOK-Capabilities
+   *  header inclusion on each request. */
+  custom: boolean
+  /** For custom providers: declared capabilities frozen at snapshot. */
+  capabilities?: {
+    images: boolean
+    audio: boolean
+    video: boolean
+    tools: boolean
+  }
 }
 
 export interface SessionContext {
@@ -223,4 +248,5 @@ export interface PersistedSession {
   messages: ChatMessage[]
   context?: SessionContext
   tokenUsage?: SessionTokenUsage
+  byokSnapshot?: ByokSessionSnapshot | null
 }

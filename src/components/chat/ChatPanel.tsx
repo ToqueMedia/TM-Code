@@ -6,7 +6,7 @@ import { useChatStore } from '../../stores/chatStore'
 import MessageBubble from './MessageBubble'
 import ChatSkeleton from './ChatSkeleton'
 import AgentStatusBar from './AgentStatusBar'
-import PromptInput from './PromptInput'
+import PromptBar from '../PromptBar'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -98,8 +98,10 @@ function ChatPanel() {
       {/* Agent Status Bar */}
       <AgentStatusBar />
 
-      {/* Prompt Input */}
-      <PromptInput />
+      {/* Prompt bar — full-featured (queue, attachments, slash/mention/hashtag,
+          history, BYOK indicator). Same component used by MainLayout and
+          PreviewView so behaviour stays consistent across surfaces. */}
+      <PromptBar />
     </Flex>
   )
 }
