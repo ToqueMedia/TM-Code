@@ -270,8 +270,44 @@ function TerminalMessageRendererInner({
           }}
         />
       )}
+
+      {/* Per-turn footer — duration + tokens, captured at finalize time. */}
+      {!isStreaming && (message.turnDurationMs !== undefined || message.turnInputTokens || message.turnOutputTokens) && (
+        <Flex align="center" gap={2} mt={1.5} opacity={0.6}>
+          {message.turnDurationMs !== undefined && (
+            <Text fontSize="11px" color={tokens.colors.accent.green} fontFamily={tokens.fontFamily.mono}>
+              ✓ {formatTurnDuration(message.turnDurationMs)}
+            </Text>
+          )}
+          {message.turnInputTokens ? (
+            <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+              ↑ {formatTurnTokens(message.turnInputTokens)}
+            </Text>
+          ) : null}
+          {message.turnOutputTokens ? (
+            <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+              ↓ {formatTurnTokens(message.turnOutputTokens)}
+            </Text>
+          ) : null}
+        </Flex>
+      )}
     </Box>
   )
+}
+
+function formatTurnDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`
+  const m = Math.floor(s / 60)
+  const rs = Math.round(s - m * 60)
+  return `${m}m ${rs}s`
+}
+
+function formatTurnTokens(n: number): string {
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
+  return `${(n / 1_000_000).toFixed(1)}M`
 }
 
 // Custom comparator: always re-render the streaming message.

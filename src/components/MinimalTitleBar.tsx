@@ -12,7 +12,6 @@ import { useChatStore } from '../stores/chatStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
-import PublishModal from './dialogs/PublishModal'
 import { BrowserMissingDialog } from './dialogs/BrowserMissingDialog'
 import { useTranslation } from '@/i18n'
 import { IS_MAC, IS_LINUX } from '@/utils/platform'
@@ -45,9 +44,6 @@ function MinimalTitleBar() {
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
-  // Publish modal state lives in the layout store so the PreviewView toolbar
-  // can open the same modal without needing a duplicate mount.
-  const publishOpen = useLayoutStore(s => s.isPublishModalOpen)
   const avatarRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 })
@@ -75,23 +71,6 @@ function MinimalTitleBar() {
     window.addEventListener('app:report-issue', handleOpen)
     return () => window.removeEventListener('app:report-issue', handleOpen)
   }, [])
-
-  // Cmd/Ctrl+Shift+D — open the publish modal when a project is loaded.
-  // Bound to MinimalTitleBar (always-mounted) so the shortcut works in every
-  // view mode, not just the (now unused) full TitleBar.
-  useEffect(function () {
-    function onKey(e: KeyboardEvent) {
-      const meta = IS_MAC ? e.metaKey : e.ctrlKey
-      if (meta && e.shiftKey && (e.key === 'd' || e.key === 'D')) {
-        if (currentProject) {
-          e.preventDefault()
-          useLayoutStore.getState().setPublishModalOpen(true)
-        }
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [currentProject])
 
   // Close menu on outside click
   useEffect(() => {
@@ -401,11 +380,6 @@ function MinimalTitleBar() {
           onClose={() => setShowIssueReporter(false)}
         />
       </Suspense>
-
-      {/* Publish modal — controlled by the Publish button above and the
-          Cmd/Ctrl+Shift+D shortcut. Mounted here so it survives view mode
-          changes (chat → preview → editor) without unmounting mid-deploy. */}
-      <PublishModal isOpen={publishOpen} onClose={function () { useLayoutStore.getState().setPublishModalOpen(false) }} />
 
       {/* E2E: dialog mounted globally so any tool execution path can prompt
           the user, even from views where the preview is not yet visible. */}

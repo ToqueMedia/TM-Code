@@ -169,6 +169,12 @@ export interface ChatMessage {
    * in-memory image blocks carry base64 for follow-up turn fidelity.
    */
   promptBlocks?: PromptBlock[]
+  /** Per-turn footer stats — captured at finalize time on assistant
+   *  messages so the UI can show "how long did this turn take, and how
+   *  many tokens did it consume" below the message. */
+  turnDurationMs?: number
+  turnInputTokens?: number
+  turnOutputTokens?: number
 }
 
 export interface CodeBlock {
@@ -212,6 +218,21 @@ export interface ByokSessionSnapshot {
     video: boolean
     tools: boolean
   }
+  /** Whether the BYOK model supports a thinking/reasoning toggle. When
+   *  true, the request body's thinking parameter is built using
+   *  `thinkingShape`, NOT the plan profile shape. Optional for backwards
+   *  compatibility with older persisted sessions — when absent, the
+   *  agent service falls back to looking up the live byokStore. */
+  supportsThinking?: boolean
+  /** Shape of the thinking parameter the upstream provider expects.
+   *  - `anthropic`: `thinking: { type: 'enabled' | 'disabled', budget_tokens? }`
+   *  - `openai_reasoning_effort`: `reasoning_effort: 'minimal' | 'medium'`
+   *  - `qwen_enable_thinking`: `enable_thinking: boolean`
+   *  - `gemini_thinking_budget`: `thinking_budget: number` (0 = off)
+   *  Plan-profile shapes (`enable_thinking` / `reasoning.enabled`) are
+   *  silently ignored by Anthropic/OpenAI/Gemini upstreams, which is why
+   *  the toggle was a no-op for BYOK before this field existed. */
+  thinkingShape?: 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget'
 }
 
 export interface SessionContext {

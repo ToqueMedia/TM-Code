@@ -1,12 +1,10 @@
 import { memo, useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiLoader, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiUpload, FiZap, FiSend } from 'react-icons/fi'
+import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap, FiSend } from 'react-icons/fi'
 import { useChatStore, generateId } from '../../stores/chatStore'
 import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
-import { useProjectStore } from '../../stores/projectStore'
-import { useDeployStore } from '../../stores/deployStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { devServerManager } from '../../services/devServerManager'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
@@ -18,7 +16,6 @@ import TauriWebview, { closePreviewWebview } from '../ui/TauriWebview'
 import AgentLogo from '../ui/AgentLogo'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
-import { IS_MAC } from '@/utils/platform'
 
 const STORAGE_KEY = 'preview-chat-width'
 const CONSOLE_STORAGE_KEY = 'preview-console-height'
@@ -57,15 +54,6 @@ function PreviewView() {
   const isHttpDrawerOpen = useLayoutStore(s => s.isHttpDrawerOpen)
   const previewServerTimedOut = useLayoutStore(s => s.previewServerTimedOut)
   const isPreviewServerLoading = useLayoutStore(s => s.isPreviewServerLoading)
-  const currentProject = useProjectStore(s => s.currentProject)
-  // Subscribed so the in-toolbar Publish button mirrors the title-bar one
-  // (spinner + "Publishing…" while a deploy is mid-flight). Both buttons
-  // open the same modal via layoutStore.isPublishModalOpen.
-  const isPublishing = useDeployStore(function (s) {
-    const id = currentProject?.id
-    if (!id) return false
-    return s.records.get(id)?.phase === 'in_progress'
-  })
 
   // Main surface selection:
   //   - backend project → HttpClientPanel (no iframe)
@@ -587,58 +575,6 @@ function PreviewView() {
               >
                 <FiExternalLink size={13} />
               </IconButton>
-            )}
-
-            {/* Publish — primary action in the preview toolbar. The same
-                modal also opens from the title bar; layoutStore.isPublishModalOpen
-                is the single source of truth so the two entry points cannot
-                fight each other. Pill style (not IconButton) so it reads as
-                a primary action vs. the surrounding glyph buttons. */}
-            {currentProject && (
-              <Box
-                as="button"
-                ml="6px"
-                display="flex"
-                alignItems="center"
-                gap="6px"
-                h="24px"
-                px="10px"
-                borderRadius="6px"
-                bg={tokens.colors.accent.primarySubtle}
-                color={tokens.colors.accent.primary}
-                border={`1px solid ${tokens.colors.accent.primaryMuted}`}
-                fontSize="11px"
-                fontWeight="500"
-                cursor="pointer"
-                transition={tokens.transition.fast}
-                _hover={{
-                  bg: tokens.colors.accent.primaryHover,
-                  boxShadow: `0 2px 12px -2px ${tokens.colors.accent.primaryGlow}`,
-                }}
-                onClick={() => useLayoutStore.getState().setPublishModalOpen(true)}
-                title={isPublishing
-                  ? 'Publishing… click to view progress'
-                  : `Publish (${IS_MAC ? '⌘' : 'Ctrl'}⇧D)`}
-              >
-                {isPublishing ? (
-                  <Box
-                    css={{
-                      animation: 'tm-publish-spin 1.4s linear infinite',
-                      '@keyframes tm-publish-spin': {
-                        from: { transform: 'rotate(0deg)' },
-                        to: { transform: 'rotate(360deg)' },
-                      },
-                    }}
-                  >
-                    <FiLoader size={11} />
-                  </Box>
-                ) : (
-                  <FiUpload size={11} />
-                )}
-                <Text fontSize="11px" fontWeight="500">
-                  {isPublishing ? 'Publishing…' : 'Publish'}
-                </Text>
-              </Box>
             )}
 
             {/* Stop server */}

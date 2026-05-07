@@ -57,6 +57,14 @@ function ChatView() {
   // a slightly muted pill — a preview that the next request will route via
   // the user's key. See ModelIndicator for the visual distinction.
   const byokActive = useAgentStore(s => s.byokActive)
+  // Last terminal error from the agent loop. The ServiceError thrown for 402
+  // (NO_CREDITS), 429 (BUDGET_EXHAUSTED / RATE_LIMIT), 5xx, AUTH_EXPIRED, etc.
+  // lands here via onError. Status pins to 'error' until the next turn flips
+  // it back to 'awaiting_response', so we tie banner visibility to status —
+  // the error string lingers in the store but only renders while we're in
+  // the error state.
+  const agentStatus = useAgentStore(s => s.status)
+  const agentError = useAgentStore(s => s.error)
   const byokEnabled = useByokStore(s => s.enabled)
   const byokActiveProvider = useByokStore(s => s.activeProvider)
   const byokActiveModel = useByokStore(s => s.activeModel)
@@ -310,6 +318,101 @@ function ChatView() {
         )}
       </AnimatePresence>
 
+      {/* Agent error banner — surfaces 402/429/5xx/AUTH_EXPIRED messages
+          from the agent loop. CMD mode shows this in TerminalStatusLine's
+          error label; chat had nothing equivalent, so a "Sem créditos
+          disponíveis" or "Sessão expirada" message would land in
+          agentStore.error and never render. Visibility is tied to status
+          ('error') so the banner clears automatically when the next turn
+          starts (setStatus → 'awaiting_response'). */}
+      {agentStatus === 'error' && agentError && (
+        <Flex
+          align="center"
+          gap={2}
+          px={4}
+          py="6px"
+          flexShrink={0}
+          bg="rgba(248, 81, 73, 0.08)"
+          borderBottom="1px solid rgba(248, 81, 73, 0.25)"
+        >
+          <Box flexShrink={0} color={tokens.colors.accent.red}>
+            <FiAlertCircle size={14} />
+          </Box>
+          <Text fontSize="12px" color={tokens.colors.accent.red} fontWeight={500} flex={1} lineClamp={2}>
+            {agentError}
+          </Text>
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            w="20px"
+            h="20px"
+            borderRadius="4px"
+            color={tokens.colors.accent.red}
+            opacity={0.7}
+            cursor="pointer"
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ opacity: 1, bg: 'rgba(248, 81, 73, 0.12)' }}
+            onClick={() => {
+              useAgentStore.getState().setError(null)
+              useAgentStore.getState().setStatus('idle')
+            }}
+            aria-label="Dismiss error"
+          >
+            <Text fontSize="14px" lineHeight="1">×</Text>
+          </Box>
+        </Flex>
+      )}
+
+      {/* Billing overage banner — always visible (loading / empty state / with
+          messages) when the cycle budget is exhausted. The previous version
+          lived inside the messages-only branch, so an over-budget user that
+          opened a fresh session saw nothing. CMD mode already had a
+          top-level banner; this brings chat to parity. The text adapts to
+          BYOK so the user understands their own key is now serving the
+          requests instead of the platform's plan tokens. */}
+      {consumedPct > 1 && (
+        <Flex
+          align="center"
+          justify="center"
+          gap={2}
+          px={4}
+          py="6px"
+          flexShrink={0}
+          bg="rgba(247, 127, 0, 0.08)"
+          borderBottom="1px solid rgba(247, 127, 0, 0.2)"
+        >
+          <Box w="8px" h="8px" borderRadius="full" bg={tokens.colors.accent.orange} flexShrink={0} />
+          <Text fontSize="12px" color={tokens.colors.accent.orange} fontWeight="500">
+            {showModelIndicator ? t('chat.byokOverBudget') : t('chat.billingSpillover')}{' '}
+            {(() => {
+              if (showModelIndicator) return null
+              const remainingPct = extraConsumptionPct(tmsRemaining, tokenBudget)
+              if (remainingPct !== null && remainingPct > 0) {
+                return `${remainingPct}% ${t('chat.extraCreditsRemaining')}`
+              }
+              return t('chat.noCreditsRemaining')
+            })()}
+          </Text>
+          {!showModelIndicator && billingPlan !== 'explorer' && tmsRemaining <= 0 && (
+            <Text
+              as="a"
+              fontSize="12px"
+              color={tokens.colors.accent.purple}
+              fontWeight="600"
+              cursor="pointer"
+              _hover={{ textDecoration: 'underline' }}
+              onClick={() => {
+                try { window.open('https://toquemedia.studio/upgrade', '_blank') } catch {}
+              }}
+            >
+              {t('chat.buyCredits')} →
+            </Text>
+          )}
+        </Flex>
+      )}
+
         <Box position="relative" flex="1" overflow="hidden">
         <Box
           ref={scrollRef}
@@ -353,54 +456,6 @@ function ChatView() {
                   />
                 ))}
                 <AgentActivityIndicator />
-
-                {/* Billing spillover banner — shown when user has exceeded their cycle budget */}
-                {consumedPct > 1 && (
-                  <Flex
-                    align="center"
-                    justify="center"
-                    gap={2}
-                    mt={3}
-                    px={4}
-                    py={2.5}
-                    borderRadius="10px"
-                    bg="rgba(247, 127, 0, 0.08)"
-                    border="1px solid rgba(247, 127, 0, 0.2)"
-                  >
-                    <Box
-                      w="8px"
-                      h="8px"
-                      borderRadius="full"
-                      bg={tokens.colors.accent.orange}
-                      flexShrink={0}
-                    />
-                    <Text fontSize="12px" color={tokens.colors.accent.orange} fontWeight="500">
-                      {t('chat.billingSpillover')}{' '}
-                      {(() => {
-                        const remainingPct = extraConsumptionPct(tmsRemaining, tokenBudget)
-                        if (remainingPct !== null && remainingPct > 0) {
-                          return `${remainingPct}% ${t('chat.extraCreditsRemaining')}`
-                        }
-                        return t('chat.noCreditsRemaining')
-                      })()}
-                    </Text>
-                    {billingPlan !== 'explorer' && tmsRemaining <= 0 && (
-                      <Text
-                        as="a"
-                        fontSize="12px"
-                        color={tokens.colors.accent.purple}
-                        fontWeight="600"
-                        cursor="pointer"
-                        _hover={{ textDecoration: 'underline' }}
-                        onClick={() => {
-                          try { window.open('https://toquemedia.studio/upgrade', '_blank') } catch {}
-                        }}
-                      >
-                        {t('chat.buyCredits')} →
-                      </Text>
-                    )}
-                  </Flex>
-                )}
               </Box>
             )}
           </Box>

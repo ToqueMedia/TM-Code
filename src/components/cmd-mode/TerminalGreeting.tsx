@@ -24,10 +24,10 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
 
   return (
     <Box mb={2} fontFamily={tokens.fontFamily.mono}>
-      <Text fontSize="12px" color={tokens.colors.terminal.green} fontWeight="600">
+      <Text fontSize="13px" color={tokens.colors.terminal.green} fontWeight="600">
         ◆ TM Code · terminal mode
       </Text>
-      <Text fontSize="11px" color={tokens.colors.text.disabled} mt="2px">
+      <Text fontSize="13px" color={tokens.colors.text.disabled} mt="2px">
         {projectName}&nbsp;&nbsp;
         <Text as="span" opacity={0.5}>{projectPath}</Text>
       </Text>
@@ -35,12 +35,12 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
       {/* Column width is the max command name (+2ch padding) — auto-scales as new
           commands land. ch unit respects the monospace font metrics across
           platforms; prior 72px hard-coded clipped longer command names. */}
-      <Box fontSize="11px" lineHeight="1.8">
+      <Box fontSize="13px" lineHeight="1.8">
         {commands.map(([cmd, desc]) => (
           <Flex key={cmd} gap={2} align="baseline">
             <Text
               fontFamily={tokens.fontFamily.mono}
-              fontSize="11px"
+              fontSize="13px"
               color={tokens.colors.accent.purple}
               fontWeight="600"
               flexShrink={0}
@@ -49,7 +49,7 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
             >
               {cmd}
             </Text>
-            <Text fontFamily={tokens.fontFamily.mono} fontSize="11px" color={tokens.colors.text.muted}>
+            <Text fontFamily={tokens.fontFamily.mono} fontSize="13px" color={tokens.colors.text.muted}>
               {desc}
             </Text>
           </Flex>
@@ -57,7 +57,7 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
         <Flex gap={2} align="baseline" mt="2px">
           <Text
             fontFamily={tokens.fontFamily.mono}
-            fontSize="11px"
+            fontSize="13px"
             color={tokens.colors.text.disabled}
             flexShrink={0}
             whiteSpace="nowrap"
@@ -65,7 +65,7 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
           >
             ↑ ↓
           </Text>
-          <Text fontFamily={tokens.fontFamily.mono} fontSize="11px" color={tokens.colors.text.disabled}>
+          <Text fontFamily={tokens.fontFamily.mono} fontSize="13px" color={tokens.colors.text.disabled}>
             navigate history  ·  <Text as="span" color={tokens.colors.accent.purple}>@</Text> mention a file  ·  <Text as="span" color={tokens.colors.accent.purple}>!</Text> run shell
           </Text>
         </Flex>

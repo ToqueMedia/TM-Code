@@ -25,6 +25,11 @@ export function captureByokSnapshot(): ByokSessionSnapshot | null {
     baseURL: active.baseURL,
     custom: isCustom,
     capabilities: !inRegistry ? active.model.capabilities : undefined,
+    // Thinking shape is part of the model spec — freeze it on the snapshot
+    // so the request body sends the right param shape per BYOK provider
+    // (anthropic / openai / qwen / gemini), not the plan-profile shape.
+    supportsThinking: active.model.supportsThinking,
+    thinkingShape: active.model.thinkingShape,
   }
 }
 

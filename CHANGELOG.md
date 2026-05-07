@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
-## [0.6.0] — 2026-05-05
+## [0.6.0] — 2026-05-07
 
 **BYOK lands.** Bring your own API keys for the providers you already pay for and route requests through them directly — your tokens, your bill, the same chat-first IDE.
 
@@ -55,6 +55,31 @@ A new "BYOK-only" plan tier ($5/month — sandbox + MCP + checkpoints + skills +
 - New `/v1/byok/validate` endpoint runs key validation per-user with a 3/min rate limit.
 - BYOK requests skip cost-budget checks and Firestore token commits — billing event still emitted with `byok: true` so the IDE knows TMS budget fields aren't authoritative.
 - Provider-specific request normalization is bypassed on the BYOK path; thinking-shape is normalized once per the model's declared shape (Anthropic / OpenAI reasoning_effort / Qwen enable_thinking / Gemini thinking_budget).
+
+#### BYOK — second-wave polish
+
+- **BYOK indicator now visible in CMD mode.** The same model pill that swaps in for the credit indicator in chat now surfaces in the CMD title bar too — so a BYOK user always knows which key is serving requests, regardless of which surface they're on.
+- **Per-turn footer in CMD mode** — every assistant reply ends with a compact `✓ 2.3s · ↑12k · ↓4k` line showing duration and tokens consumed for that turn. Captured at finalize time from the per-request token counter.
+- **`/plan`, `/debug` and `/review` force reasoning ON under BYOK.** The `X-Request-Type` header forces reasoning server-side for plan-managed requests, but BYOK requests are passthrough — without forcing the body shape too, those commands collapsed to generic chat. The frontend now sets the thinking flag on the body when the request type demands it, regardless of carrier.
+- **Billing overage banner adapts to BYOK** in both modes. "Plan budget exhausted — using your BYOK key" replaces the misleading "agent may be throttled" — your own key isn't constrained by the platform's monthly budget.
+
+### Changed
+
+- **CMD agent no longer starts dev servers.** `npm run dev` and `start_dev_server` are off the table in CMD mode — long-running background processes are awkward to terminate cleanly from a terminal session and frequently leave orphaned ports. Verification now happens via `tsc --noEmit`, `eslint`, `npm run build` or unit tests — one-shot commands that exit on their own. When the user wants to see the app running, the agent asks them to start the dev command themselves.
+- **CMD mode font sizes harmonised** — welcome screen, task list and message body all render at 13px now (previously a 9–14px range, with the task list visibly smaller than chat content).
+- **UI baseline guidance added to the agent's system prompt.** Six positive rules cover empty states (must guide with a named CTA, not just an icon), control groups (render whole, even when zero), heading hierarchy (matches density), decoration (anchored to a labeled element), primary actions (signposted) and design tokens (preferred over ad-hoc hex codes). Sits in the recency block of the prompt with a 1-liner echo in the final Reminder, mirroring the existing identity-reminder pattern. Catches the "auto-generated UI that breaks on empty data" failure mode without depending on the `frontend-design` skill being invoked.
+- **Deploy v1 hidden from the UI** while the universal v2 pipeline is in development. Entry points removed (keyboard shortcut, toolbar button, settings nav); underlying code, the Rust `collect_deploy_bundle` command, and backend endpoints preserved for incremental migration. v1 only worked for Vite-shape templates; v2 will provide universal deploy. Architecture and phased plan documented in `docs/PLAN-DEPLOY-V2.md`.
+
+### Fixed
+
+- **BYOK thinking toggle now actually has effect.** The frontend was unconditionally sending the plan-profile parameter shape (`enable_thinking` on Qwen, `reasoning.enabled` on OpenRouter) — Anthropic, OpenAI and Gemini upstreams ignored both silently, so toggling thinking off had no effect for those providers. The session snapshot now freezes the BYOK model's `thinkingShape`, and the request body uses the upstream's native shape: `thinking.type` for Anthropic, `reasoning_effort` for OpenAI, `thinking_budget` for Gemini, `enable_thinking` for Qwen.
+- **Queued messages appear in the CMD transcript instantly when dispatched.** The CMD agent path was resolving `@mentions` and reading the home directory before adding the user bubble, leaving a 100ms–1s gap where the queued pill had cleared but the message hadn't surfaced yet. The bubble is now rendered synchronously before any await.
+- **Billing overage banner is visible in all chat-mode states** — loading, empty, with messages. Previously it lived inside the messages-only branch, so a user who opened a fresh session over budget saw nothing. Now sits at the top of the chat view alongside the scaffold banner.
+- **Agent errors are surfaced in chat mode.** 402 (no credits), 429 (rate limit / budget exhausted), 5xx and AUTH_EXPIRED responses were stored in `agentStore.error` but never rendered — only CMD mode showed them in the status line. A new red banner surfaces the message at the top of the chat view, auto-clearing when the next turn starts.
+
+### Removed
+
+- Unused clipboard icon from the CMD header.
 
 ### Known limitations
 

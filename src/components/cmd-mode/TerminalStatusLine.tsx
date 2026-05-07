@@ -104,7 +104,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
           bg="rgba(0,0,0,0.1)"
         >
           <Text
-            fontSize="9px"
+            fontSize="13px"
             fontWeight="700"
             color={tokens.colors.text.disabled}
             fontFamily={tokens.fontFamily.mono}
@@ -115,13 +115,13 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
             {agentTasks.filter((t: AgentTask) => t.status === 'completed').length}/{agentTasks.length} tasks
           </Text>
           {agentTasks.map((task: AgentTask) => (
-            <Flex key={task.id} align="center" gap={1.5} py="1px">
+            <Flex key={task.id} align="center" gap={2} py="2px">
               {task.status === 'completed' ? (
-                <FiCheck size={9} color={tokens.colors.accent.green} style={{ flexShrink: 0 }} />
+                <FiCheck size={13} color={tokens.colors.accent.green} style={{ flexShrink: 0 }} />
               ) : task.status === 'in_progress' ? (
                 <Box
                   as={FiLoader}
-                  boxSize="9px"
+                  boxSize="13px"
                   color={tokens.colors.accent.purple}
                   flexShrink={0}
                   css={{
@@ -130,16 +130,16 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
                   }}
                 />
               ) : (
-                <Box w="9px" h="9px" flexShrink={0} display="flex" alignItems="center" justifyContent="center">
-                  <Box w="3px" h="3px" borderRadius="full" bg={tokens.colors.text.disabled} />
+                <Box w="13px" h="13px" flexShrink={0} display="flex" alignItems="center" justifyContent="center">
+                  <Box w="4px" h="4px" borderRadius="full" bg={tokens.colors.text.disabled} />
                 </Box>
               )}
               <Text
-                fontSize="11px"
+                fontSize="13px"
                 color={task.status === 'completed' ? tokens.colors.text.disabled : tokens.colors.text.secondary}
                 textDecoration={task.status === 'completed' ? 'line-through' : 'none'}
                 fontFamily={tokens.fontFamily.mono}
-                lineHeight="1.35"
+                lineHeight="1.4"
               >
                 {task.description}
               </Text>

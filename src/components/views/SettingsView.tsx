@@ -32,10 +32,9 @@ import { IS_WINDOWS } from '@/utils/platform'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
-import DeploysSection from './settings/DeploysSection'
 import ApiKeysSection from './settings/ApiKeysSection'
 
-type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'apiKeys' | 'sandbox' | 'deploys' | 'admin'
+type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'apiKeys' | 'sandbox' | 'admin'
 
 const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'profile', key: 'settings.profilePlan' },
@@ -44,7 +43,6 @@ const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'shortcuts', key: 'settings.shortcuts' },
   { id: 'skills', key: 'settings.skills' },
   { id: 'mcp', key: 'settings.mcpServers' },
-  { id: 'deploys', key: 'settings.deploys' as TranslationKey },
 ]
 
 const API_KEYS_NAV_ENTRY: { id: SectionId; key: TranslationKey } = {
@@ -76,15 +74,11 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
   const billingLoaded = useBillingStore(function (s) { return s.isLoaded })
   const byokEnabled = useFeaturesStore(function (s) { return s.byokEnabled })
   const showAdminNav = isAdmin || (isAdminUnknown && !billingLoaded)
-  // Insert API Keys between MCP and Deploys when the global feature flag is on.
-  // Order: profile, editor, sandbox, shortcuts, skills, mcp, [apiKeys], deploys, [admin]
+  // Append API Keys after MCP when the global feature flag is on.
+  // Order: profile, editor, sandbox, shortcuts, skills, mcp, [apiKeys], [admin]
   const NAV_KEYS = (() => {
     const base = byokEnabled
-      ? [
-          ...BASE_NAV_KEYS.filter(n => n.id !== 'deploys'),
-          API_KEYS_NAV_ENTRY,
-          ...BASE_NAV_KEYS.filter(n => n.id === 'deploys'),
-        ]
+      ? [...BASE_NAV_KEYS, API_KEYS_NAV_ENTRY]
       : BASE_NAV_KEYS
     return showAdminNav ? [...base, ADMIN_NAV_ENTRY] : base
   })()
@@ -178,7 +172,6 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
             {activeSection === 'apiKeys' && byokEnabled && <ApiKeysSection />}
-            {activeSection === 'deploys' && <DeploysSection />}
             {activeSection === 'admin' && showAdminNav && <AdminSection />}
           </Box>
         </Box>

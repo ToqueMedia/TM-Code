@@ -1465,6 +1465,20 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const session = sessions.get(activeSessionId)
         if (!session) return state
 
+        // Capture per-turn stats for the assistant footer (CMD mode shows
+        // a "✓ 2.3s · ↑12k ↓4k" summary line below each completed reply).
+        // tokens here is the per-REQUEST counter — addTokenUsage accumulates
+        // across tool loops within the same turn — so it represents the
+        // cost of producing this single assistant message, not the session
+        // total. `input` is max-across-turns (context size on the wire),
+        // `output` is sum (deltas emitted). They are different units; the
+        // footer shows them separately for that reason.
+        const turnDurationMs = state.agentStartTime !== null
+          ? Date.now() - state.agentStartTime
+          : undefined
+        const turnInputTokens = state.totalTokensUsed.input
+        const turnOutputTokens = state.totalTokensUsed.output
+
         const messages = session.messages.map(msg => {
           if (msg.id !== streamingMessageId) return msg
           // Finalize reasoning duration if still open
@@ -1477,6 +1491,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             // Auto-collapse reasoning when streaming ends
             isReasoningVisible: false,
             ...(reasoningDurationMs !== undefined && { reasoningDurationMs }),
+            ...(turnDurationMs !== undefined && { turnDurationMs }),
+            ...(turnInputTokens > 0 && { turnInputTokens }),
+            ...(turnOutputTokens > 0 && { turnOutputTokens }),
           }
         })
 

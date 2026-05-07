@@ -1,18 +1,19 @@
 /**
  * Preview webview — platform-specific.
  *
- * macOS: uses a native wry child webview. WKWebView's ATS blocks http:// in
- * iframes, so we need the native path plus the tmpreview:// proxy to show
- * dev server content. Managed entirely on the Rust side; React sends open/
+ * macOS: uses a native wry child webview that loads http://localhost
+ * directly. NSAllowsLocalNetworking=YES in src-tauri/Info.plist tells ATS
+ * to permit loopback hosts, so WKWebView behaves like a normal browser —
+ * full WebSocket, Service Worker, Web Crypto, OAuth, and arbitrary HTTP
+ * methods all work. Managed entirely on the Rust side; React sends open/
  * resize/close IPC commands.
  *
  * Windows / Linux: uses a plain <iframe>. WebView2 and WebKitGTK load
- * http://localhost:PORT in iframes natively — no ATS restriction. The native
- * child webview path on Windows created a cascade of problems:
+ * http://localhost:PORT in iframes natively. The native child webview
+ * path on Windows created a cascade of problems:
  *   - HWND child sits above DOM → CSS z-index can't layer menus/dialogs above it
  *   - IPC positioning calls blocked the command thread
  *   - Creation/destruction was slow and sometimes left zombie native windows
- *   - The tmpreview:// proxy mangled chunked/compressed responses
  * An iframe has none of these issues: it's a DOM element, uses the parent
  * webview's DNS resolver (Chromium Happy Eyeballs handles localhost), and
  * respects z-index like any other element.

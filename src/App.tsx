@@ -472,20 +472,10 @@ function App() {
 		];
 
 		function isPreviewProtocolNoise(text: string): boolean {
-			// Vite's @vite/client (HMR) is loaded inside the iframe through our
-			// custom Tauri protocol (tmpreview://, registered in src-tauri/src/lib.rs).
-			// The HMR client tries to open a WebSocket — the custom protocol
-			// only proxies HTTP, so the WebSocket upgrade fails and emits an
-			// unhandled rejection. The stack uniquely contains setupWebSocket
-			// @tmpreview://. The error is purely a side-effect of the IDE's
-			// preview pipeline; the user's app would HMR fine when served
-			// directly via http://, so surfacing it has no diagnostic value.
+			// Historical noise from the now-removed tmpreview:// proxy. Kept
+			// for one or two releases so transcripts captured against older
+			// builds still scrub clean. Safe to delete after v0.8.x.
 			if (text.includes('setupWebSocket@tmpreview://')) return true;
-			// Browser cross-origin sanitization: any script error originating
-			// from a different origin is rewritten to literal "Script error."
-			// with line/col 0, no stack. The iframe runs at tmpreview:// and
-			// the parent at tauri://, so EVERY runtime error in the preview
-			// gets sanitized this way. Useless to surface.
 			if (text.startsWith('Script error.') && text.includes('(:0)')) return true;
 			return false;
 		}

@@ -133,10 +133,46 @@ TM Code uses **two coder models** plus one multimodal handler. Per-plan model is
 
 ## Project Templates
 
-Available in `src-tauri/resources/templates/`:
-- **Frontend**: `react-ts-vite`, `nextjs-ts`, `nuxt-ts`, `vue-ts-vite`, `svelte-ts-vite`, `astro`, `angular-ts`
-- **Fullstack**: `react-express-ts`
-- **Backend**: `express-ts`, `fastify-ts`, `nestjs-ts`
+Templates live in **two synchronized places** — both must agree:
+
+1. **Metadata list (canonical)** — `src/services/templateService.ts` (`TEMPLATES` array, ~line 50). Each entry has `id`, `category` (frontend/backend/fullstack), `framework`, `installCommand`, `devCommand`, `tags`, optional `workspaces`. This is what the UI reads (`getAll`, `getByCategory`, `matchPrompt`).
+2. **File trees (scaffolded content)** — `src-tauri/resources/templates/<id>/`. Bundled into the Tauri app and copied by the `scaffold_template` Rust command. After scaffold, `.toquemedia-template` (a `TemplateManifest`) is written to the project root so the agent can detect which template was used.
+
+If you add a template, you must add **both** the entry in `templateService.ts` and a directory under `src-tauri/resources/templates/<id>/`. IDs in the metadata that have no matching directory will fail at scaffold time.
+
+| Category | IDs |
+|---|---|
+| Frontend | `react-ts-vite`, `nextjs-ts`, `nuxt-ts`, `vue-ts-vite`, `svelte-ts-vite`, `astro`, `angular-ts` |
+| Fullstack | `react-express-ts` |
+| Backend | `express-ts`, `fastify-ts`, `nestjs-ts` |
+
+## Deploy Pipeline
+
+Deploy is **single-target Cloudflare** (R2 for assets + Workers for backend + D1 for DB). It is **not a generic deploy** that works for every template.
+
+**Frontend entry points**:
+- `Cmd/Ctrl+Shift+D` from `MinimalTitleBar.tsx` (always-mounted) opens the `PublishModal` via `layoutStore.setPublishModalOpen(true)`.
+- `PreviewView.tsx` has a "Publish" button that opens the same modal.
+- `views/settings/DeploysSection.tsx` shows the deployment summary + custom domain panel for the current project.
+
+**Flow** (`src/services/deployService.ts`):
+1. `collect_deploy_bundle` (Rust, `src-tauri/src/commands/filesystem.rs:348`) reads the project files into a `DeployBundle`.
+2. Service walks 4 backend phase endpoints under `${workerUrl}/v1/projects/deploy/`: `init` → `upload` (chunked, parallel, 8 MB / 50 files / concurrency 3) → `worker` (only if `worker_file` exists) → `finalize`. The 4-way split exists to dodge Cloudflare's per-request CPU budget.
+3. On failure after `init`, best-effort `cleanup` POST removes orphaned R2 files.
+4. Public URL pattern: `<slug>.toquemedia.net`. Custom domains via `addCustomDomain`/`getCustomDomainStatus`/`removeCustomDomain` (Cloudflare hostname API).
+
+**Bundle shape (`collect_deploy_bundle` expects)**:
+- **Assets**: `<project>/dist/` (Vite-style flat output). Errors with build-script suggestion if missing.
+- **Worker**: first match wins from `backend/dist/worker.js` → `dist/worker.js` → `worker.js` (Hono Worker bundle).
+- **Database**: `backend/src/db/schema.ts` (Drizzle) signals `has_database=true`. Migration SQL preference: `backend/migrations/*.sql` (drizzle-kit output) → raw `schema.ts` fallback.
+- **API routes**: presence of `backend/` dir signals `has_api_routes=true`. If `backend/` exists but no `worker.js` was found, the bundle errors with a "run npm run build in backend/" hint.
+
+**Template ↔ deploy compatibility**:
+- ✅ Out-of-the-box: `react-ts-vite`, `vue-ts-vite`, `svelte-ts-vite`, `astro` (all build to flat `dist/`). Backend can be added by the agent via `provision_auth` (writes the Hono+Drizzle boilerplate into `backend/`).
+- ⚠️ Partial: `react-express-ts` — Express scaffold isn't a Worker bundle; deploy would require swapping to Hono first.
+- ❌ Not deployable today: `nextjs-ts` (`.next/` output, needs `@cloudflare/next-on-pages`), `nuxt-ts` (`.output/`), `angular-ts` (nested `dist/<app>/`), `express-ts` / `fastify-ts` / `nestjs-ts` (Node servers, not Workers).
+
+There is no framework-detection guard yet — deploys for non-compatible templates fail at `collect_deploy_bundle` with a "dist/ not found" error rather than a precise "Next.js not supported" message.
 
 ## Design System
 

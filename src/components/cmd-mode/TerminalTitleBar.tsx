@@ -1,14 +1,15 @@
-import { memo, useCallback, useState } from 'react'
-import { Box, Flex, HStack, Text, IconButton } from '@chakra-ui/react'
-import { FiCheck, FiClipboard } from 'react-icons/fi'
+import { memo } from 'react'
+import { Box, Flex, HStack, Text } from '@chakra-ui/react'
 import { useBillingStore } from '../../stores/billingStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
+import { useByokStore } from '../../stores/byokStore'
 import { getProfileForPlan } from '../../services/agent/modelProfiles'
 import { CreditIndicator } from '../ui/CreditIndicator'
 import { McpIndicator } from '../ui/StatusIndicators'
+import ModelIndicator from '../chat/ModelIndicator'
 import { tokens } from '@/theme/tokens'
 import { IS_MAC, IS_WINDOWS, basename } from '@/utils/platform'
 
@@ -31,26 +32,25 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
   const backendThinkingMode = useAgentStore(s => s.thinkingMode)
+  // BYOK indicator gating — mirrors ChatView so the pill swaps in for credits
+  // whenever the next request would route through the user's key. CMD mode
+  // uses the same AgentService singleton, so BYOK applies here too.
+  const byokActive = useAgentStore(s => s.byokActive)
+  const byokEnabled = useByokStore(s => s.enabled)
+  const byokActiveProvider = useByokStore(s => s.activeProvider)
+  const byokActiveModel = useByokStore(s => s.activeModel)
+  const activeSessionId = useChatStore(s => s.activeSessionId)
+  const sessions = useChatStore(s => s.sessions)
+  const sessionByokSnapshot = (activeSessionId ? sessions.get(activeSessionId)?.byokSnapshot : null) ?? null
+  const byokConfigured = sessionByokSnapshot !== null
+    || (byokEnabled && byokActiveProvider !== null && byokActiveModel !== null)
+  const showModelIndicator = byokActive || byokConfigured
   const fallbackProfile = getProfileForPlan(billingPlan)
   const effectiveMode = backendThinkingMode
     ?? (fallbackProfile.supportsThinking
         ? (fallbackProfile.thinkingMode === 'mandatory' ? 'mandatory' : 'toggleable')
         : 'none')
   const thinkingSupported = effectiveMode === 'toggleable'
-  const [copied, setCopied] = useState(false)
-
-  const handleCopyContext = useCallback(async () => {
-    if (!projectPath) return
-    try {
-      const { invoke } = await import('@tauri-apps/api/core')
-      const context = await invoke<string>('get_project_context', { path: projectPath })
-      await navigator.clipboard.writeText(context)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch {
-      // silent
-    }
-  }, [projectPath])
 
   // Show basename prominently, full path dimmed (cross-platform: handles \ and /)
   const projectName = basename(projectPath) || projectPath
@@ -110,20 +110,6 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
 
       {/* Right: controls */}
       <HStack gap={1.5} flexShrink={0}>
-        {/* Copy context */}
-        <IconButton
-          aria-label="Copy project context"
-          size="xs"
-          variant="ghost"
-          color={copied ? tokens.colors.accent.green : tokens.colors.text.disabled}
-          onClick={handleCopyContext}
-          minW="22px"
-          h="22px"
-          _hover={{ bg: 'rgba(255,255,255,0.05)', color: tokens.colors.text.secondary }}
-        >
-          {copied ? <FiCheck size={11} /> : <FiClipboard size={11} />}
-        </IconButton>
-
         {/* Thinking toggle */}
         {thinkingSupported && (
           <Box
@@ -154,17 +140,21 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           </Box>
         )}
 
-        <CreditIndicator
-          plan={billingPlan}
-          noCredits={noCredits}
-          isStreaming={isStreaming}
-          consumedPct={consumedPct}
-          tokensConsumed={tokensConsumed}
-          tokenBudget={tokenBudget}
-          cycleEnd={cycleEnd}
-          status={billingStatus}
-          tmsRemaining={tmsRemaining}
-        />
+        {showModelIndicator ? (
+          <ModelIndicator />
+        ) : (
+          <CreditIndicator
+            plan={billingPlan}
+            noCredits={noCredits}
+            isStreaming={isStreaming}
+            consumedPct={consumedPct}
+            tokensConsumed={tokensConsumed}
+            tokenBudget={tokenBudget}
+            cycleEnd={cycleEnd}
+            status={billingStatus}
+            tmsRemaining={tmsRemaining}
+          />
+        )}
 
         <McpIndicator servers={mcpServers} isInitializing={mcpIsInitializing} />
 

@@ -62,6 +62,43 @@ const MAX_CONTINUATIONS = 3
 const COMPRESSION_THRESHOLD_PCT = 0.835 // 83.5% of context window
 const DEFAULT_CONTEXT_WINDOW = 131_072  // Conservative fallback (128K)
 
+// === BYOK thinking-param translation ===
+//
+// Each BYOK upstream expects its own thinking-toggle shape. Sending the wrong
+// shape is silently ignored by the upstream — that was the root cause of the
+// "thinking toggle has no effect under BYOK" bug.
+//
+//   anthropic                — thinking: { type: 'enabled' | 'disabled', budget_tokens? }
+//   openai_reasoning_effort  — reasoning_effort: 'minimal' | 'medium'
+//   qwen_enable_thinking     — enable_thinking: boolean
+//   gemini_thinking_budget   — thinking_budget: number (0 = off)
+//
+// Some BYOK models are "thinking-by-default" (e.g. o1/o3) and cannot be turned
+// fully off; we send the lowest effort instead so we at least minimise it.
+type ByokThinkingShape = 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget'
+
+const BYOK_THINKING_BUDGET_TOKENS = 8_192
+const BYOK_GEMINI_THINKING_BUDGET = 24_000
+
+function buildByokThinkingParam(
+  hint: { supportsThinking: boolean; thinkingShape?: ByokThinkingShape },
+  enabled: boolean,
+): Record<string, unknown> | null {
+  if (!hint.supportsThinking || !hint.thinkingShape) return null
+  switch (hint.thinkingShape) {
+    case 'anthropic':
+      return enabled
+        ? { thinking: { type: 'enabled', budget_tokens: BYOK_THINKING_BUDGET_TOKENS } }
+        : { thinking: { type: 'disabled' } }
+    case 'openai_reasoning_effort':
+      return { reasoning_effort: enabled ? 'medium' : 'minimal' }
+    case 'qwen_enable_thinking':
+      return { enable_thinking: enabled }
+    case 'gemini_thinking_budget':
+      return { thinking_budget: enabled ? BYOK_GEMINI_THINKING_BUDGET : 0 }
+  }
+}
+
 // Context window is reported by the backend via X-Model-Context-Window header.
 // This map is ONLY used as a static fallback if the header is missing (e.g., backend not updated).
 // The backend's MODEL_CONTEXT_WINDOWS in proxy.ts is the source of truth.
@@ -272,7 +309,11 @@ class AgentService {
    * Tools use { name, description, input_schema } (not OpenAI's function wrapper).
    * The backend converts this to OpenAI format for DashScope internally.
    */
-  private async buildRequestBody(messages: AnthropicMessage[]): Promise<Record<string, unknown>> {
+  private async buildRequestBody(
+    messages: AnthropicMessage[],
+    byokThinkingHint: { supportsThinking: boolean; thinkingShape?: ByokThinkingShape } | null = null,
+    forceThinking: boolean = false,
+  ): Promise<Record<string, unknown>> {
     try {
       const { getProfileForPlan, buildSamplingParams, buildThinkingParam } = await import('./modelProfiles')
       const { useBillingStore } = await import('../../stores/billingStore')
@@ -280,10 +321,13 @@ class AgentService {
       const plan = useBillingStore.getState().plan
       const profile = getProfileForPlan(plan)
 
-      // Thinking is controlled by the user in Settings — not by the agent.
-      // Qwen3 has thinking ON by default (official docs). The user can
-      // toggle it off for faster, more direct responses.
-      const isThinking = useSettingsStore.getState().thinkingEnabled
+      // Thinking is controlled by the user in Settings — not by the agent —
+      // EXCEPT for /plan, /debug, /review and /te2e, which force it ON for
+      // the turn (those commands rely on hypothesis-driven reasoning and
+      // collapse to generic chat without it). The forced-on path matters
+      // most for BYOK, where the backend can't override the body the way
+      // it does for plan-managed models.
+      const isThinking = forceThinking || useSettingsStore.getState().thinkingEnabled
 
       // Filter tools based on model capabilities.
       // web_search is exposed to the model when profile.supportsSearch is true.
@@ -326,9 +370,21 @@ class AgentService {
       const sampling = buildSamplingParams(profile, isThinking)
       Object.assign(body, sampling)
 
-      const thinking = buildThinkingParam(profile, isThinking)
-      if (thinking) {
-        Object.assign(body, thinking)
+      // BYOK overrides the plan-profile thinking shape. Anthropic/OpenAI/
+      // Gemini upstreams silently ignore qwen-style `enable_thinking` and
+      // openrouter-style `reasoning.enabled`, so the toggle had no effect
+      // for those providers before this branch existed (root cause of the
+      // "thinking still shows when toggle is OFF" bug). When BYOK is
+      // active, build the param in the BYOK model's native shape and
+      // skip the plan profile's shape entirely.
+      if (byokThinkingHint) {
+        const byokParam = buildByokThinkingParam(byokThinkingHint, isThinking)
+        if (byokParam) Object.assign(body, byokParam)
+      } else {
+        const thinking = buildThinkingParam(profile, isThinking)
+        if (thinking) {
+          Object.assign(body, thinking)
+        }
       }
 
       return body
@@ -1584,6 +1640,19 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     //   - /review reads many files and judges each finding against source —
     //     same multi-turn reasoning need.
     // Both commands' `finally` blocks clear it explicitly via setRequestType(null).
+    // Capture before the per-request clearing below — buildRequestBody needs
+    // it to force the thinking parameter ON even when the user has the toggle
+    // OFF. For non-BYOK the backend ALSO forces reasoning server-side via
+    // the header, but for BYOK the backend is a passthrough; so the body's
+    // thinking param is the only lever, and these commands collapse to
+    // generic chat without it (defeats the purpose of /plan, /debug,
+    // /review and /te2e).
+    const forceThinking =
+      this.requestType === 'plan'
+      || this.requestType === 'debug'
+      || this.requestType === 'review'
+      || this.requestType === 'e2e'
+
     if (this.requestType) {
       headers['X-Request-Type'] = this.requestType
       if (this.requestType !== 'e2e' && this.requestType !== 'review') {
@@ -1681,8 +1750,30 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       }
     }
 
-    // Cache request body to reuse on 401 retry (avoids re-encoding which could differ)
-    const requestBody = JSON.stringify(await this.buildRequestBody(messages))
+    // Cache request body to reuse on 401 retry (avoids re-encoding which could differ).
+    // When BYOK is active, hand the snapshot down so buildRequestBody can build
+    // the thinking parameter in the BYOK provider's shape (anthropic / openai /
+    // qwen / gemini) instead of the plan-profile shape that the upstream would
+    // silently ignore — that's how the toggle was previously a no-op for BYOK.
+    let byokThinkingHint: { supportsThinking: boolean; thinkingShape?: ByokThinkingShape } | null = null
+    if (byokInject) {
+      let supportsThinking = activeSession?.byokSnapshot?.supportsThinking
+      let thinkingShape = activeSession?.byokSnapshot?.thinkingShape
+      // Snapshot may pre-date the supportsThinking/thinkingShape fields
+      // (older persisted sessions). Fall back to the live byokStore lookup.
+      if (supportsThinking === undefined) {
+        const active = useByokStore.getState().resolveActive()
+        if (active && active.provider.id === byokInject.providerId && active.model.id === byokInject.modelId) {
+          supportsThinking = active.model.supportsThinking
+          thinkingShape = active.model.thinkingShape
+        }
+      }
+      byokThinkingHint = {
+        supportsThinking: supportsThinking ?? false,
+        thinkingShape,
+      }
+    }
+    const requestBody = JSON.stringify(await this.buildRequestBody(messages, byokThinkingHint, forceThinking))
 
     let response: Response
     try {

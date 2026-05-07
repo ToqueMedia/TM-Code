@@ -807,7 +807,7 @@ pub async fn start_dev_server(
                         DevServerOutput {
                             pid,
                             stream: "stdout".into(),
-                            data: stdout_buf.drain(..).collect::<Vec<_>>().join("\n"),
+                            data: std::mem::take(stdout_buf).join("\n"),
                         },
                     );
                 }
@@ -817,7 +817,7 @@ pub async fn start_dev_server(
                         DevServerOutput {
                             pid,
                             stream: "stderr".into(),
-                            data: stderr_buf.drain(..).collect::<Vec<_>>().join("\n"),
+                            data: std::mem::take(stderr_buf).join("\n"),
                         },
                     );
                 }

@@ -266,20 +266,31 @@ export function useCmdPromptLogic() {
       return
     }
 
+    // Render the user bubble FIRST — synchronously, before any await — so the
+    // dequeued message appears in the transcript without a perceptible gap.
+    // Previously, mention resolution + runAgentWithCallbacks's `await prev` +
+    // `await invoke('get_home_directory')` chain delayed addUserMessage by
+    // 100ms–1s, leaving the user staring at an empty list right after the
+    // queued pill disappeared.
+    const attachments = typeof promptValue === 'string'
+      ? undefined
+      : promptValue.filter(b => b.type === 'attachment').map(b => b.attachment)
+    const promptBlocks = typeof promptValue === 'string' ? undefined : promptValue
+    const chatStore = useChatStore.getState()
+    if (!chatStore.activeSessionId) {
+      chatStore.createSession(path)
+    }
+    chatStore.addUserMessage(textPrompt, attachments, promptBlocks)
+
     // Resolve @mentions before sending — appends <mentioned_files> context to the prompt
     const mentionContext = path ? await extractAndResolveMentions(textPrompt, path) : ''
     const fullPrompt = mentionContext ? `${textPrompt}\n\n${mentionContext}` : textPrompt
 
-    // Extract attachments from blocks for the user message display
-    const attachments = typeof promptValue === 'string'
-      ? undefined
-      : promptValue.filter(b => b.type === 'attachment').map(b => b.attachment)
-
     await runAgentWithCallbacks(fullPrompt, {
-      addUserMessage: true,
+      addUserMessage: false,
       userMessageText: textPrompt,
       userMessageAttachments: attachments,
-      userMessageBlocks: typeof promptValue === 'string' ? undefined : promptValue,
+      userMessageBlocks: promptBlocks,
       useConversationHistory: true,
       cmdOnlyMode: true,
     })

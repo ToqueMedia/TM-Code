@@ -199,7 +199,10 @@
       "Bash(grep -n \"runAgentForPrompt\\\\|skipUserMessage\\\\|return$\\\\|return ;\" /Users/ithustle/dev/deskotp/exodus-ide/src/components/prompt/usePromptBar.ts)",
       "Bash(echo \"TSC_EXIT=$?\")",
       "Bash(echo \"TSC=$?\")",
-      "Bash(npx vite *)"
+      "Bash(gh pr *)",
+      "Bash(git branch *)",
+      "WebFetch(domain:tauri.app)",
+      "WebFetch(domain:v2.tauri.app)"
     ]
   }
 }

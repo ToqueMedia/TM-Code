@@ -76,29 +76,25 @@ fn open_preview_webview(
 
     let win = app.get_webview_window("main").ok_or("No main window")?;
 
-    // WKWebView on macOS blocks http:// URLs (ATS). There we use a custom
-    // protocol "tmpreview://" that proxies requests to the dev server via a
-    // raw TCP connection, and the proxy's raw_http_get needs a concrete IPv4
-    // to avoid IPv6 stalls — hence we force 127.0.0.1 inside proxy_target.
+    // Load the dev-server URL directly in the WKWebView/WebView2/WebKitGTK
+    // child webview. macOS's ATS would normally block http:// in WKWebView,
+    // but src-tauri/Info.plist sets NSAllowsLocalNetworking=YES which exempts
+    // loopback hosts (localhost, 127.0.0.1, ::1, *.local). With that, the
+    // three platforms behave the same and WebKit handles WebSocket upgrade,
+    // request methods/bodies/headers, Set-Cookie, Service Workers, Web
+    // Crypto, and OAuth redirects without any proxy in the middle.
     //
-    // On Windows (WebView2) and Linux (WebKitGTK) we load the http:// URL
-    // DIRECTLY in the child webview. The Chromium-based WebView2 uses Happy
-    // Eyeballs to try both IPv4 and IPv6 — so "localhost" works regardless
-    // of whether the dev server binds to ::1, 127.0.0.1, or both. Pinning
-    // 127.0.0.1 here broke preview when the user's Vite/Next bound IPv6-only
-    // (default when no --host flag). Use the URL as-is for direct loading.
-    let proxy_target = url
-        .trim_end_matches('/')
-        .replace("://localhost", "://127.0.0.1");
-    let _proxy_target_for_ws = proxy_target.clone();
-    // Platform gate — on non-macOS we load the URL directly.
-    let use_proxy = cfg!(target_os = "macos");
-    // For direct loading, preserve the original URL (don't force IPv4).
-    let direct_url = format!("{}/", url.trim_end_matches('/'));
+    // Trailing-slash normalization only applies to http(s) — appending '/'
+    // to a data: URI would land inside the base64 payload and corrupt it
+    // (the static-preview path passes data:text/html;base64,... here).
+    let direct_url = if url.starts_with("http://") || url.starts_with("https://") {
+        format!("{}/", url.trim_end_matches('/'))
+    } else {
+        url.clone()
+    };
 
     // Clone app handle for IPC handler (receives runtime errors from preview JS)
     let app_for_ipc = app.clone();
-    let proxy_target_for_protocol = proxy_target.clone();
 
     let wv = wry::WebViewBuilder::new()
         // Inject error capture script into every page load.
@@ -276,56 +272,7 @@ fn open_preview_webview(
                 _ => {}
             }
         })
-        .with_asynchronous_custom_protocol("tmpreview".into(), move |_webview_id, request, responder| {
-            let target = proxy_target_for_protocol.clone();
-            std::thread::spawn(move || {
-                let path = request.uri().path_and_query()
-                    .map(|pq| pq.as_str())
-                    .unwrap_or("/");
-                let full_url = format!("{}{}", target, path);
-                let addr = target.replace("http://", "");
-
-                // Retry with backoff — dev server may still be starting
-                let mut result = Err("not attempted".to_string());
-                for attempt in 0..5 {
-                    result = raw_http_get(&addr, path);
-                    if result.is_ok() { break; }
-                    if attempt < 4 {
-                        let delay = std::time::Duration::from_millis(500 * (attempt as u64 + 1));
-                        eprintln!("[preview] Proxy retry {} for {} (waiting {:?})", attempt + 1, full_url, delay);
-                        std::thread::sleep(delay);
-                    }
-                }
-
-                match result {
-                    Ok((status, content_type, body)) => {
-                        responder.respond(
-                            wry::http::Response::builder()
-                                .status(status)
-                                .header("Content-Type", content_type)
-                                .header("Access-Control-Allow-Origin", "*")
-                                .body(body)
-                                .unwrap()
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("[preview] Proxy error: {} -> {}", full_url, e);
-                        responder.respond(
-                            wry::http::Response::builder()
-                                .status(502)
-                                .header("Content-Type", "text/html")
-                                .body(format!(
-                                    "<html><body style='background:#1a1a2e;color:#fff;font-family:system-ui;padding:40px;text-align:center'>\
-                                    <h3>Dev server unreachable</h3><p style='color:#f85149'>{}</p><p>{}</p></body></html>",
-                                    e, full_url
-                                ).into_bytes())
-                                .unwrap()
-                        );
-                    }
-                }
-            });
-        })
-        .with_url(if use_proxy { "tmpreview://localhost/".to_string() } else { direct_url.clone() })
+        .with_url(direct_url.clone())
         .with_devtools(true)
         .with_bounds(wry::Rect {
             position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(x, y)),
@@ -363,10 +310,7 @@ fn open_preview_webview(
         }
     }
 
-    eprintln!(
-        "[preview] Native webview created — requested url={}, proxy target={}",
-        url, proxy_target
-    );
+    eprintln!("[preview] Native webview created — url={}", direct_url);
     Ok(())
 }
 
@@ -393,107 +337,6 @@ fn resize_preview_webview(
         .map_err(|e| format!("{}", e))?;
     }
     Ok(())
-}
-
-/// Raw HTTP GET via TcpStream — bypasses reqwest issues with localhost.
-///
-/// Connection strategy: try IPv4 first, fall back to IPv6 ([::1]). Node 18+
-/// frameworks (Vite, Next without --host) bind to localhost which resolves
-/// to ::1 only, so a v4-pinned proxy_target hits "connection refused" even
-/// though the server is up. The fallback rescues that case without making
-/// the agent re-write its dev scripts.
-fn raw_http_get(
-    host_port: &str,
-    path: &str,
-) -> std::result::Result<(u16, String, Vec<u8>), String> {
-    use std::net::TcpStream;
-
-    let v4_err = match TcpStream::connect(host_port) {
-        Ok(s) => {
-            return raw_http_get_with_stream(s, host_port, path);
-        }
-        Err(e) => format!("{}", e),
-    };
-
-    // IPv4 (or proxy_target's chosen host) refused. Retry against [::1] —
-    // this is the common Node 18+ "localhost binds IPv6-only" case.
-    let v6_target = if let Some(rest) = host_port.strip_prefix("127.0.0.1:") {
-        format!("[::1]:{}", rest)
-    } else if let Some(rest) = host_port.strip_prefix("localhost:") {
-        format!("[::1]:{}", rest)
-    } else {
-        return Err(format!("Connection refused: {}", v4_err));
-    };
-
-    let stream = TcpStream::connect(&v6_target).map_err(|e| {
-        format!(
-            "Connection refused (tried v4 + [::1]): v4={}, v6={}",
-            v4_err, e
-        )
-    })?;
-    raw_http_get_with_stream(stream, host_port, path)
-}
-
-/// Inner helper that performs the actual GET on an already-connected stream.
-/// Lets `raw_http_get` retry against an alternative address (IPv4 → IPv6)
-/// without duplicating the request/parse boilerplate.
-fn raw_http_get_with_stream(
-    mut stream: std::net::TcpStream,
-    host_port: &str,
-    path: &str,
-) -> std::result::Result<(u16, String, Vec<u8>), String> {
-    use std::io::{Read, Write};
-
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(3)))
-        .ok();
-
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok();
-
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-        path, host_port
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| format!("Write failed: {}", e))?;
-
-    let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("Read failed: {}", e))?;
-
-    let response = String::from_utf8_lossy(&buf);
-
-    // Parse status line
-    let status_line = response.lines().next().unwrap_or("HTTP/1.1 502");
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(502);
-
-    // Parse Content-Type header
-    let content_type = response
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("content-type:"))
-        .map(|l| {
-            l.split_once(':')
-                .map(|(_, v)| v.trim().to_string())
-                .unwrap_or_default()
-        })
-        .unwrap_or_else(|| "text/html; charset=utf-8".to_string());
-
-    // Split headers from body (double CRLF)
-    let body = if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-        buf[pos + 4..].to_vec()
-    } else {
-        buf
-    };
-
-    Ok((status, content_type, body))
 }
 
 /// Reveal the main window once the SPA has mounted, and close the splash

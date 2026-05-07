@@ -1,5 +1,18 @@
 # Preview Integrado Nativo — Plano Futuro
 
+> **OBSOLETO (2026-05-06).** Substituído por
+> [`PLAN-PREVIEW-BROWSER-PARITY.md`](./PLAN-PREVIEW-BROWSER-PARITY.md),
+> que resolve o mesmo problema com `NSAllowsLocalNetworking=YES` no
+> `Info.plist` em vez de um WKWebView Swift nativo.
+>
+> A abordagem original aqui assumia que o WKWebView nunca aceitaria
+> `http://localhost` sem código Swift custom. A spike (commit `547ee43`)
+> validou que a flag de Info.plist desbloqueia o WKWebView do wry
+> directamente — eliminando a necessidade de FFI Swift e do plano-B
+> deste documento.
+>
+> Mantido como referência histórica caso a flag falhe num macOS futuro.
+
 ## Problema
 Tauri WKWebView não permite carregar HTTP localhost em:
 - iframes (cross-origin policy)
