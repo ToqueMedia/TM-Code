@@ -19,13 +19,14 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
   const { projectPath, status } = card
 
   const handleApprove = useCallback(async () => {
+    // Once the user clicks Approve, the card commits to the terminal
+    // 'approved' state — the buttons are gone for good. A failure in TODO
+    // generation surfaces as a separate error system message in the
+    // transcript; reverting the card to 'pending' (the prior behaviour)
+    // made it look like nothing had happened and let the user double-click
+    // an already-decided plan, which the user flagged as broken UX.
     useChatStore.getState().updateCardStatus(messageId, 'approved')
     await handlePlanApprove(projectPath)
-    // Revert if the agent errored during TODO generation
-    const { useAgentStore } = await import('../../stores/agentStore')
-    if (useAgentStore.getState().status === 'error') {
-      useChatStore.getState().updateCardStatus(messageId, 'pending')
-    }
   }, [messageId, projectPath])
 
   const handleChanges = useCallback(() => {

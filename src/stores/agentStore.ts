@@ -26,6 +26,16 @@ interface AgentState {
    */
   thinkingMode: 'none' | 'toggleable' | 'mandatory' | null
   /**
+   * Context window size (tokens) reported by the backend via the
+   * `X-Model-Context-Window` header. The agent's compression threshold uses
+   * this exact value, so surfacing it here keeps the
+   * ContextWindowIndicator's percentage in lockstep with reality — instead
+   * of reading the plan profile's static value (200K for the GLM-5.1 shape,
+   * which is wrong for any BYOK model with a different window). Null until
+   * the first response arrives.
+   */
+  modelContextWindow: number | null
+  /**
    * Whether the most recent response was actually served via BYOK (the
    * server-side X-BYOK-Active header). This is the authoritative source for
    * the chat-header pill — the byokStore.enabled toggle says what the user
@@ -47,7 +57,7 @@ interface AgentActions {
   setStatus: (status: AgentStatus) => void
   setError: (error: string | null) => void
   // Model metadata from backend response headers
-  setModelInfo: (name: string | null, provider: string | null, thinkingMode?: 'none' | 'toggleable' | 'mandatory' | null) => void
+  setModelInfo: (name: string | null, provider: string | null, thinkingMode?: 'none' | 'toggleable' | 'mandatory' | null, contextWindow?: number | null) => void
   setByokActive: (active: boolean) => void
   // Task management
   setTasks: (tasks: AgentTask[]) => void
@@ -66,6 +76,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   modelName: null,
   modelProvider: null,
   thinkingMode: null,
+  modelContextWindow: null,
   byokActive: false,
   poolConcurrencyConflictsAvoided: 0,
 
@@ -77,7 +88,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
     set({ error })
   },
 
-  setModelInfo: (name, provider, thinkingMode) => {
+  setModelInfo: (name, provider, thinkingMode, contextWindow) => {
     set({
       modelName: name,
       modelProvider: provider,
@@ -85,6 +96,12 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       // a stale value alive across handshake-less updates rather than wiping
       // the toggle every refresh.
       ...(thinkingMode !== undefined ? { thinkingMode } : {}),
+      // Same opt-in pattern for context window — only updates when the
+      // caller provided a value (null is treated as "clear", undefined as
+      // "leave alone"). Lets one header (X-Model-Context-Window) drive
+      // both the agent's threshold AND the indicator pill from a single
+      // source of truth.
+      ...(contextWindow !== undefined ? { modelContextWindow: contextWindow } : {}),
     })
   },
 
@@ -125,6 +142,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       modelName: null,
       modelProvider: null,
       thinkingMode: null,
+      modelContextWindow: null,
       byokActive: false,
       poolConcurrencyConflictsAvoided: 0,
     })

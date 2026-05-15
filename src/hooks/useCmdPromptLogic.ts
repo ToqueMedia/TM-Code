@@ -224,7 +224,27 @@ export function useCmdPromptLogic() {
         useChatStore.getState().addSystemMessage(`Command ${command.name} is not yet available.`, 'warn')
         return
       }
-      await command.execute(extractArgs(textPrompt), path)
+      // Smart router for /payments — same parity as chat-mode usePromptBar.
+      // The hashtag/slash flows are first-time scaffolding; subsequent fixes
+      // go through verbal requests so the agent's appliedScaffolding system-
+      // prompt section routes to fix-mode rather than re-running fetches.
+      if (command.name === '/payments' && path) {
+        const { guardScaffoldReapply } = await import('../components/prompt/scaffoldReapplyGuard')
+        const { blocked } = await guardScaffoldReapply(
+          path,
+          ['payments.momenu'],
+          () => buildCmdPaymentsReapplyMessage(),
+          () => { /* cmd-mode has no draftInput state to clear */ },
+        )
+        if (blocked) return
+      }
+      // 'terminal' = free-form surface. /plan branches on this to drop
+      // the platform-deploy invariants (firebase-admin / Dockerfile /
+      // APP_ID fallback) — the developer here is running outside the
+      // Publish flow and may target any backend / database / hosting.
+      // The architect keeps its structural rigor (full PLAN.md template,
+      // trade-offs, completion rule) but is free to recommend any stack.
+      await command.execute(extractArgs(textPrompt), path, 'terminal')
       return
     }
 
@@ -243,18 +263,41 @@ export function useCmdPromptLogic() {
         )
         return
       }
-      // Strip hashtags from the visible message — they're routing signals,
-      // not content. Fallback label when the user typed only the tag.
-      const labels = [
-        ...pre.authProviders.map(p => p === 'google' ? 'Google sign-in' : 'email/password sign-in'),
-        ...(pre.hasDesign ? ['polished UI'] : []),
-      ]
-      const bubbleText = pre.cleanedText || `Add ${labels.join(' and ')}`
 
+      // Smart router: if any requested auth provider is already applied,
+      // block the re-scaffold flow with explanatory system message. Same
+      // parity as chat-mode usePromptBar.
       if (pre.authProviders.length > 0) {
-        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign)
+        const { guardScaffoldReapply } = await import('../components/prompt/scaffoldReapplyGuard')
+        const requestedKeys: import('../services/scaffoldingDetector').ScaffoldKey[] =
+          pre.authProviders.map(p => `auth.${p}` as const)
+        const { blocked } = await guardScaffoldReapply(
+          path,
+          requestedKeys,
+          (applied) => buildCmdAuthReapplyMessage(applied),
+          () => { /* cmd-mode has no draftInput state to clear */ },
+        )
+        if (blocked) return
+      }
+
+      // Preserve hashtags in the visible message and the persisted history.
+      // The hashtag is still useful AFTER it routes — it documents the user's
+      // intent for anyone reading the session later (debug exports, sharing
+      // a repro, scrolling back), and it's what they actually typed. The
+      // skill content is force-loaded via runAuthFlow regardless of what
+      // appears in the bubble, so stripping the tag here used to delete
+      // signal for no behavioural gain.
+      const bubbleText = textPrompt
+
+      // cmdOnlyMode=true so runAgentWithCallbacks calls toolExecutor.enableCmdMode(cwd).
+      // Without this, hashtag flows in CMD mode fail every tool call with
+      // "No project is open" — the executor falls back to useProjectStore.currentProject,
+      // which CmdModeView never populates (it invokes Rust open_project directly
+      // instead of going through useProjectStore.openProject).
+      if (pre.authProviders.length > 0) {
+        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign, true)
       } else {
-        await runDesignFlow(pre.cleanedText, bubbleText)
+        await runDesignFlow(pre.cleanedText, bubbleText, true)
       }
       return
     }
@@ -482,7 +525,7 @@ export function useCmdPromptLogic() {
     // the user. Block here with an actionable message instead.
     if (showImageWarning) {
       useChatStore.getState().addSystemMessage(
-        t('cmdMode.imageNotSupportedBlocked'),
+        t('terminalMode.imageNotSupportedBlocked'),
         'warn',
       )
       return
@@ -741,4 +784,30 @@ export function useCmdPromptLogic() {
     isDragging,
     handleAttachFiles,
   }
+}
+
+// ── Scaffold-reapply system messages (cmd-mode parity with chat-mode) ──
+// Same wording as chat-mode usePromptBar so the UX is consistent. Pure
+// builders; resolved through i18n at call time.
+
+function buildCmdAuthReapplyMessage(
+  applied: import('../services/scaffoldingDetector').ScaffoldKey[],
+): string {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { scaffoldKeyLabel } = require('../services/scaffoldingDetector') as typeof import('../services/scaffoldingDetector')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { t } = require('../i18n') as typeof import('../i18n')
+  const labels = applied.map(scaffoldKeyLabel).join(' + ')
+  const fixHint = applied.includes('auth.google')
+    ? t('scaffold.message.authFixHintGoogle')
+    : t('scaffold.message.authFixHintEmail')
+  return t('scaffold.message.authReapply')
+    .replace('{labels}', labels)
+    .replace('{fixHint}', fixHint)
+}
+
+function buildCmdPaymentsReapplyMessage(): string {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { t } = require('../i18n') as typeof import('../i18n')
+  return t('scaffold.message.paymentsReapply')
 }

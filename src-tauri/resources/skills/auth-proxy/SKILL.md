@@ -1,6 +1,6 @@
 ---
-name: auth-proxy-gip
-description: Implement user authentication (signup, signin, Google OAuth, session) for the user's app. The TM Code platform provisions a per-project GIP tenant and writes the credentials to .env via provision_auth. You implement the proxy + frontend in whatever backend stack the project uses (Express, Hono, Fastify, NestJS, FastAPI, Go, etc.). Do NOT install firebase-admin. Do NOT use Firebase JS SDK auth methods on the client — only onAuthStateChanged is allowed.
+name: auth-proxy
+description: Implement user authentication (signup, signin, Google sign-in, session) for the user's app. The TM Code platform provisions a per-project auth tenant and writes the credentials to .env via provision_auth. You implement the proxy + frontend in whatever backend stack the project uses (Express, Hono, Fastify, NestJS, FastAPI, Go, etc.). The auth-proxy itself is a thin REST forwarder — keep it free of admin-SDK installs. On the client, only onAuthStateChanged is imported from the auth library.
 license: MIT
 metadata:
   author: tm-code
@@ -8,13 +8,13 @@ metadata:
   language: en
 ---
 
-# Auth Proxy (GIP) — Stack-Agnostic Recipe
+# Auth Proxy — Stack-Agnostic Recipe
 
-This skill describes the **protocol** for adding GIP authentication to a project. Pick whatever backend stack already exists (or the one the developer asked for) — Express, Hono, Fastify, NestJS, FastAPI, Go, etc. The pattern is identical; only the syntax changes.
+This skill describes the **protocol** for adding authentication to a project via the TM Code Authentication API. Pick whatever backend stack already exists (or the one the developer asked for) — Express, Hono, Fastify, NestJS, FastAPI, Go, etc. The pattern is identical; only the syntax changes.
 
 `provision_auth` has already:
-- Created a per-project GIP tenant on the platform.
-- Written the platform-managed credentials into `.env`.
+- Reserved the per-project auth tenant on the platform.
+- Written the platform-managed credentials into `.env` (both neutral TM_* names and legacy mirrors).
 
 Your job is to implement the auth-proxy endpoints + the frontend client.
 
@@ -30,13 +30,13 @@ server: { proxy: { '/api': { target: 'http://localhost:3000', changeOrigin: true
 ```
 Adjust the target port to match your backend. **Without this, every `/api/*` request hits port 5173 and returns 404.** CORS headers on the backend are NOT a substitute — the proxy is what makes the request leave port 5173 at all. Same logic applies to Next.js (use `rewrites()` in `next.config.js`), Nuxt, SvelteKit. Verify by `curl http://localhost:5173/api/auth/me` — must return JSON, not 404 HTML.
 
-### CRITICAL — Never install `firebase-admin`
+### CRITICAL — The auth-proxy is a thin REST forwarder
 
-There is no Admin SDK in this stack. The auth-proxy talks to the Identity Toolkit REST API directly with `VITE_FIREBASE_API_KEY` (a public key). **DO NOT** add `firebase-admin` to dependencies under any circumstance.
+The auth-proxy itself does not install `firebase-admin`. It forwards signup/signin requests to the platform's auth API using the public client key in .env (`VITE_TM_AUTH_KEY` for the frontend, `TM_AUTH_KEY` for the server). The data layer (where user records live) is a separate concern and uses `firebase-admin` per the Publishing section of your system prompt — that's not a contradiction, the two surfaces have different needs.
 
-### CRITICAL — Never call `request_credentials` for Firebase / GIP / GCP
+### CRITICAL — Skip `request_credentials` for platform-managed credentials
 
-`provision_auth` has already written everything you need. The user does NOT have (and will NEVER have) `GOOGLE_APPLICATION_CREDENTIALS`, `serviceAccountKey.json`, or `GIP_SERVICE_ACCOUNT_*`. **DO NOT** call `request_credentials` for any of these — it pops a credential dialog the user cannot satisfy.
+`provision_auth` has already written everything the project needs. Admin SDK keys, service-account files, and infrastructure tokens live only on the platform side; surfacing the credentials form for them shows the developer a dialog they cannot satisfy.
 
 ### CRITICAL — Never import client-side Firebase auth methods
 
@@ -54,25 +54,100 @@ After every successful proxy call (signup, signin, google), **MUST** call `setAu
 
 For all three flows (signup, signin, google), after `setAuthToken` **MUST** `await authFetch('/api/auth/sync', { method: 'POST', body: JSON.stringify({...profileFields}) })` to upsert the user into the local DB. Then `setUser(syncedUser)`.
 
+### CRITICAL — Prisma + SQLite: use ABSOLUTE `DATABASE_URL` at runtime
+
+Prisma's runtime client (`@prisma/client` v6+) resolves relative SQLite URLs **relative to the generated client in `node_modules/.prisma/client/`**, NOT relative to `process.cwd()` or to `schema.prisma`. The Prisma CLI (`db push`, `migrate`) resolves relative to the schema. **These disagree.** Symptom: `db push` creates the DB at `<root>/prisma/dev.db`, but the server crashes on the first query with `Error code 14: Unable to open the database file` because it's looking at `<root>/node_modules/.prisma/client/prisma/dev.db` — which doesn't exist.
+
+Officially open in Prisma since 2020: [prisma/prisma#2040](https://github.com/prisma/prisma/issues/2040), [#9649](https://github.com/prisma/prisma/issues/9649), [#27085](https://github.com/prisma/prisma/issues/27085), [studio#1273](https://github.com/prisma/studio/issues/1273), [discussion #28842](https://github.com/prisma/prisma/discussions/28842). The fix is unchanged across Prisma 5/6/7: **force an absolute path before instantiating PrismaClient.**
+
+**DO NOT** rely on `DATABASE_URL=file:./prisma/dev.db` in scripts or `.env` — it appears to work (CLI migrates) but fails at runtime. **DO** override `process.env.DATABASE_URL` to an absolute `file://` URL in your Prisma singleton module BEFORE `new PrismaClient()`:
+
+```ts
+// server/lib/prisma.ts (or wherever the singleton lives)
+import { PrismaClient } from '@prisma/client'
+import { existsSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+function ensureAbsoluteSqliteUrl(): void {
+  const raw = process.env.DATABASE_URL
+  if (!raw || !raw.startsWith('file:')) return
+  const body = raw.slice('file:'.length).replace(/^\/+/, '/')
+  if (body.startsWith('/')) return // already absolute
+  const relative = raw.slice('file:'.length).replace(/^\.?\/+/, '')
+  const here = dirname(fileURLToPath(import.meta.url))
+  let cur = here
+  while (cur !== dirname(cur)) {
+    if (existsSync(resolve(cur, 'prisma/schema.prisma'))) {
+      process.env.DATABASE_URL = `file:${resolve(cur, relative)}`
+      return
+    }
+    cur = dirname(cur)
+  }
+}
+ensureAbsoluteSqliteUrl()
+
+export const prisma = new PrismaClient()
+```
+
+Verify by curling `/api/auth/sync` with a valid JWT — must return 200 with the upserted user row, not 500 with `PrismaClientInitializationError` / `Error code 14`. Also map P2021 (table missing) and P1003 (file missing) in your `/sync` and `/me` catch blocks to a 503 with a recovery hint, so the next failure is diagnosable in one glance instead of a stack trace dump.
+
+### CRITICAL — Persist the session on app load
+
+Login is one half of auth; **session persistence is the other half** and the model forgets it more than half the time. Without it, a hard refresh after login lands the user on an infinite spinner — the auth store starts empty, and nothing rehydrates it. Implement the bootstrap pattern below alongside the login handlers, in the same scaffold pass — not as a follow-up.
+
+Mechanical contract (all three steps required):
+
+1. **Persist the token** at the moment of issue. After every successful `/api/auth/proxy/{signup,signin,google}` response, call `setAuthToken(idToken, refreshToken)` *before* returning. The storage layer is `sessionStorage` by default (cookies for SSR projects). See "Frontend — auth helper" for the canonical implementation.
+2. **Rehydrate on every load**. The auth store **MUST** expose an `init()` that reads `getAuthToken()`, calls `GET /api/auth/me`, and sets `user` from the response (or `null` when the token is missing/expired and refresh fails). See "Session bootstrap" for the canonical Zustand example.
+3. **Call `init()` BEFORE first render** from the entry file (`main.ts(x)` / `app.ts`) — wrap `createRoot(...).render(<App/>)` in `useAuthStore.getState().init().finally(...)`. Typical resolve time is ≤300ms (one `GET /api/auth/me` round-trip on warm connection). Calling `init()` from a component `useEffect` is too late: the first paint already happened with `user: null` ~50ms in, and AuthGuard has already redirected to `/login` before `/me` returns.
+
+Why this matters more than it looks: in this proxy flow `onAuthStateChanged` never fires (no client-side method ever updates `auth.currentUser`), so the listener-based pattern Firebase tutorials teach is silently a no-op here. The bootstrap `init()` + `/api/auth/me` call IS the persistence mechanism — there is no fallback.
+
+Verify after wiring:
+
+```bash
+# 1. Sign in via the UI. Confirm sessionStorage has _auth_token in DevTools.
+# 2. Hard-refresh the page (Cmd+R).
+# 3. Expected: lands on the post-auth route in ≤1s (cold start ≤2s).
+#    Network tab shows GET /api/auth/me → 200 with the user row.
+# 4. Failure modes:
+#    - Lands on /login → init() not called before render OR token not persisted.
+#    - Infinite spinner → init() called but never resolves loading=false.
+#    - 401 from /me → JWKS URL wrong (see "JWT verification middleware").
+```
+
+### CRITICAL — Port 5173 must hold for auth-enabled projects (IDE handles it)
+
+The platform's auth tenant has redirect URIs locked to `http://localhost:5173`. If Vite falls back to 5174 (because 5173 is occupied), Google sign-in returns 400 `redirect_uri_mismatch` and the auth flow breaks silently — the auth API call surfaces as "API key not valid" or a generic 400 with no port hint.
+
+**The IDE's `start_dev_server` already handles this.** `devServerManager` detects `EADDRINUSE` on dev-server start, calls the `kill_port` Tauri command to free the port, and retries once. You do NOT need to run any shell command to clear port 5173.
+
+**DO NOT** run `lsof -ti:5173 | xargs kill -9` yourself. That command kills WHATEVER process owns the port — including the IDE's OWN dev server when the developer is running `npm run tauri dev`, which crashes the IDE mid-conversation.
+
+After `start_dev_server`, verify the dev-server logs show `:5173` (not `:5174`). If the auto-recovery didn't get it, ASK the developer what else is holding the port — don't escalate to manual kills.
+
 ## What's in `.env` after `provision_auth`
 
-Frontend (Vite-style):
-- `VITE_FIREBASE_API_KEY` — public Firebase Web API key (used by both the client SDK and the server-side Identity Toolkit calls).
-- `VITE_FIREBASE_AUTH_DOMAIN` — `<project>.firebaseapp.com`
-- `VITE_FIREBASE_PROJECT_ID` — GCP project id where the tenant lives
-- `VITE_GIP_TENANT_ID` — the per-project tenant id
-- `VITE_GOOGLE_CLIENT_ID` — present only when Google sign-in is configured
+Frontend (Vite-style, preferred names):
+- `VITE_TM_AUTH_KEY` — public client key (used by both the client SDK and the server-side auth-API calls).
+- `VITE_TM_AUTH_DOMAIN` — auth redirect domain
+- `VITE_TM_PROJECT_ID` — project namespace identifier (public side)
+- `VITE_TM_TENANT_ID` — the per-project tenant id
+- `VITE_TM_GOOGLE_CLIENT_ID` — present only when Google sign-in is configured
 
 Backend mirrors:
-- `GIP_FIREBASE_API_KEY` — same value as VITE_FIREBASE_API_KEY (server reads this name)
-- `GIP_TENANT_ID` — same value as VITE_GIP_TENANT_ID
-- `GCP_PROJECT_ID` — same value as VITE_FIREBASE_PROJECT_ID
+- `TM_AUTH_KEY` — same value as VITE_TM_AUTH_KEY (server reads this name)
+- `TM_TENANT_ID` — same value as VITE_TM_TENANT_ID
+- `TM_PROJECT_ID` — same value as VITE_TM_PROJECT_ID
 
-**Do NOT modify `.env` yourself.** It is system-managed.
+Legacy names also in .env for backward compat with already-scaffolded projects: `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_GIP_TENANT_ID`, `VITE_GOOGLE_CLIENT_ID`, `GIP_FIREBASE_API_KEY`, `GIP_TENANT_ID`, `GCP_PROJECT_ID`. New code reads the `TM_*` names; existing projects keep working with the old names.
+
+**Do not modify `.env` directly.** It is platform-managed.
 
 ## Loading `.env` at runtime
 
-`provision_auth` writes credentials to `.env`. Most runtimes do NOT load `.env` automatically — you have to wire it in, or `process.env.GIP_FIREBASE_API_KEY` will be `undefined` at runtime and every Identity Toolkit call returns 400 `API_KEY_INVALID`.
+`provision_auth` writes credentials to `.env`. Most runtimes do not load `.env` automatically — wire it in, or `process.env.TM_AUTH_KEY` is `undefined` at runtime and every auth-API call returns 400 `API_KEY_INVALID`.
 
 Pick whatever fits the runtime. Examples:
 
@@ -87,12 +162,12 @@ Pick whatever fits the runtime. Examples:
 Verify after wiring with a fail-fast guard near startup:
 
 ```ts
-if (!process.env.GIP_FIREBASE_API_KEY) {
-  throw new Error('GIP_FIREBASE_API_KEY missing — is .env being loaded?')
+if (!process.env.TM_AUTH_KEY) {
+  throw new Error('TM_AUTH_KEY missing — is .env being loaded?')
 }
 ```
 
-Without this guard, missing env vars surface only as cryptic 400s from Identity Toolkit ("API key not valid"), wasting debugging time.
+Without this guard, missing env vars surface only as cryptic 400s from the auth API ("API key not valid"), wasting debugging time.
 
 ### Frontend (Vite) — `VITE_*` vars: classify the layout BEFORE setting `envDir`
 
@@ -187,8 +262,8 @@ With the proxy in place, CORS only matters for direct cross-origin calls (e.g. t
 
 ## Hard rules
 
-1. **NEVER** install `firebase-admin`. There is no Admin SDK in this stack — the auth-proxy talks to the Identity Toolkit REST API directly with `VITE_FIREBASE_API_KEY` (a public key).
-2. **NEVER** call `request_credentials` after `provision_auth` for anything Firebase / GIP / GCP-related. The user does not have (and will never have) `GOOGLE_APPLICATION_CREDENTIALS`, `serviceAccountKey.json`, or `GIP_SERVICE_ACCOUNT_*` — those live only on the TM Code platform worker.
+1. The auth-proxy itself does not install `firebase-admin`. It talks to the platform's auth API directly via REST with the public client key (`VITE_TM_AUTH_KEY` / `TM_AUTH_KEY`). The data layer (where user records persist) is a separate concern and uses `firebase-admin` per the Publishing section of your system prompt — not a contradiction; two surfaces with different needs.
+2. After `provision_auth`, skip `request_credentials` for any platform-managed credential. Admin SDK keys, service-account files, and infrastructure tokens live only on the platform side; surfacing the credentials form for them shows a dialog the developer cannot satisfy.
 3. **NEVER** import `signInWithEmailAndPassword`, `createUserWithEmailAndPassword`, `signInWithPopup`, `GoogleAuthProvider`, or `signOut` from `firebase/auth` on the client. Only `onAuthStateChanged` is allowed AS AN IMPORT. Note that the listener WILL NOT FIRE in this proxy flow because no client-side method ever updates `auth.currentUser` — for session restoration use the bootstrap pattern below, not `onAuthStateChanged`. All auth flows go through your backend proxy.
 4. **NEVER** modify `.env`. It is platform-managed.
 5. **ALWAYS** call `/api/auth/sync` after a successful proxy signup or signin to upsert the user row in your DB.
@@ -226,10 +301,35 @@ Add per-IP rate limits on the credential-handling endpoints (`/signup`, `/signin
 (15 req / 5 min). Hono / Fastify / NestJS: equivalent middleware. Without this,
 the endpoints are open targets for credential stuffing and brute-force attacks.
 
-## Identity Toolkit REST endpoints you'll call
+## the auth API REST endpoints you'll call
 
 Base URL: `https://identitytoolkit.googleapis.com/v1`
 Secure-token base: `https://securetoken.googleapis.com/v1`
+
+### CRITICAL — USE `/v1`, NEVER `/v2`
+
+`accounts:signInWithIdp`, `accounts:signInWithPassword`, `accounts:signUp` are **all `/v1`**. The `/v2` namespace exists on this host but covers DIFFERENT APIs (passkeys, MFA enrollment, etc.) — it does NOT include any of the endpoints you'll call here.
+
+**Why this rule has a CRITICAL block of its own**: when a generated proxy hardcodes `/v2/accounts:signInWithIdp`, Google returns 400 or 404 with an HTML error page (not a JSON the auth API error). A standard `catch (err) { res.status(401).json(...) }` then maps it to 401, and the developer chases authentication issues for hours while the actual cause is a wrong path segment. This is a recurring failure mode (BugHunterKimi May 2026 session, others) because the model's training data has BOTH `/v1` and `/v2` Google APIs and silently picks `/v2` under generation pressure.
+
+**Defense**: when you write the constant, write it inline rather than abstracting:
+```ts
+// ✅ explicit, hard to drift
+const ITK_BASE = 'https://identitytoolkit.googleapis.com/v1'
+
+// ❌ tempting but treacherous — model writes /v2 here ~30% of the time
+const ITK_BASE = `https://identitytoolkit.googleapis.com/${API_VERSION}`
+```
+
+**Verification**: after writing the proxy, curl the endpoint with a bogus token:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"idToken":"bogus"}' \
+  http://localhost:3001/api/auth/proxy/google
+```
+- Expected: **401** with JSON body `{ "error": ... }`
+- If you get **502** with HTML body: the upstream URL is wrong (`/v2` is the most-common typo — see the "USE `/v1`" CRITICAL above for the failure rate). Fix the constant.
 
 ```
 POST {ITK}/accounts:signUp?key={API_KEY}
@@ -255,7 +355,7 @@ The **`tenantId` field is required** on signup/signin/google calls. Read it from
 
 ## Error mapping (recommended status codes)
 
-Identity Toolkit returns errors as `{ error: { message: <CODE> } }`. Map them to HTTP statuses your client can act on:
+the auth API returns errors as `{ error: { message: <CODE> } }`. Map them to HTTP statuses your client can act on:
 
 ```
 EMAIL_EXISTS                        → 409 "Email already registered"
@@ -273,22 +373,58 @@ Collapse the two "wrong email" / "wrong password" codes into one generic message
 
 ## JWT verification middleware
 
-For routes that need to know who the user is (`/api/auth/sync`, any protected endpoint), verify the `Authorization: Bearer <token>` token.
+For routes that need to know who the user is (`/api/auth/sync`, `/api/auth/me`, any protected endpoint), verify the `Authorization: Bearer <token>` token.
 
-**Production** — verify against Google's secure-token JWKS:
+**CRITICAL — JWKS URL is non-negotiable.** The platform auth API's ID tokens (the ones returned by `signInWithIdp`, `signInWithPassword`, `signUp`) are signed by `securetoken@system.gserviceaccount.com` — not by Google's general OAuth/OIDC JWKS.
 
 ```
 JWKS URL:  https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com
 Issuer:    https://securetoken.google.com/<GCP_PROJECT_ID>
 Audience:  <GCP_PROJECT_ID>
+Algorithm: RS256
 Tenant check: payload.firebase?.tenant must equal <GIP_TENANT_ID>
 ```
 
-Use `jose` (Node, Bun, Deno, edge runtimes), `jsonwebtoken` + `jwks-rsa`, `python-jose`, `golang-jwt`, or any peer.
+### Anti-patterns — these URLs DO NOT work and will cause every protected endpoint to return 401:
 
-**Development** (e.g. when emulators are involved) — `decodeJwt` without signature verification is acceptable for the tenant-id check.
+```
+❌ https://www.googleapis.com/robot/v1/metadata/googleapis.com/robot   (service-account discovery, not JWKS)
+❌ https://www.googleapis.com/oauth2/v3/certs                          (GIS/OIDC tokens only — wrong audience)
+❌ https://www.googleapis.com/oauth2/v1/certs                          (legacy, PEM not JWKS)
+❌ https://www.gstatic.com/firebasejs/...                              (client SDK, not server cert source)
+```
 
-After verification, attach the decoded payload to the request (`req.user = { uid, email, name, picture }` or your framework's equivalent).
+If `/me` or `/sync` returns 401 *with a fresh token that signInWithIdp just issued*, the JWKS URL is the first suspect.
+
+### Reference snippet — `jose` (Node / Bun / Deno / edge)
+
+```typescript
+import { createRemoteJWKSet, jwtVerify } from 'jose'
+
+const JWKS = createRemoteJWKSet(new URL(
+  'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com'
+))
+
+export async function verifyFirebaseToken(token: string) {
+  const projectId = process.env.GCP_PROJECT_ID!
+  const { payload } = await jwtVerify(token, JWKS, {
+    algorithms: ['RS256'],
+    issuer: `https://securetoken.google.com/${projectId}`,
+    audience: projectId,
+  })
+  const expectedTenant = process.env.GIP_TENANT_ID
+  if (expectedTenant && payload.firebase && (payload.firebase as { tenant?: string }).tenant !== expectedTenant) {
+    throw new Error('Tenant mismatch')
+  }
+  return payload
+}
+```
+
+For other languages: `jsonwebtoken` + `jwks-rsa` (Node legacy), `python-jose`, `golang-jwt` — same URL, same issuer, same audience, same algorithm.
+
+**Development** (emulators) — `decodeJwt` without signature verification is acceptable for the tenant-id check, but never ship that to production.
+
+After verification, attach the decoded payload to the request (`req.userId = payload.sub`, etc.).
 
 ## Reference implementation snippets
 
@@ -348,7 +484,7 @@ return db.users.findUnique({ where: { uid: decoded.sub } })
 
 The `users` schema needs at minimum `uid (PK)`, `email (unique)`, `name`, `avatarUrl`, `role`, `createdAt`, `updatedAt`. Custom columns (e.g. `phone`, `gender`) MUST be nullable or have defaults — sync runs from JWT data on first sign-in, before the app collects those fields.
 
-### Frontend — `src/lib/firebase.ts` (Vite + Firebase Web SDK)
+### Frontend — `src/lib/firebase.ts` (minimal init for the auth library)
 
 ```typescript
 import { initializeApp } from 'firebase/app'
@@ -496,7 +632,7 @@ Adapt the storage layer (sessionStorage vs cookies) to the project's needs — e
 
 **Login:**
 1. User submits the signup/signin form → frontend calls `/api/auth/proxy/{signup,signin}`.
-2. Backend hits Identity Toolkit → returns `{ idToken, refreshToken, localId, email }`.
+2. Backend hits the auth API → returns `{ idToken, refreshToken, localId, email }`.
 3. Frontend stores tokens via `setAuthToken`.
 4. Frontend calls `/api/auth/sync` (auth-required) to upsert the user row.
 5. Frontend calls `useAuthStore.getState().setUser(syncedUserRow)` to hydrate
@@ -507,3 +643,13 @@ Adapt the storage layer (sessionStorage vs cookies) to the project's needs — e
 1. Frontend calls `setAuthToken(null, null)` and `useAuthStore.getState().setUser(null)`.
 2. No backend call needed — the JWT just expires; refresh tokens stay revocable
    server-side if you maintain a denylist (out of scope for V1).
+
+---
+
+## FINAL REMINDER — the two rules that cost the most when broken
+
+The full rule list is above. These two are repeated here at the end because **a single violation of either burns the entire feature**, and the failures look like generic auth issues that send the developer chasing the wrong cause for hours. Re-read these before submitting any auth-related change:
+
+1. **`/v1`, never `/v2`** on `identitytoolkit.googleapis.com/accounts:*`. The `/v2` namespace covers passkeys / MFA only. A `/v2` typo returns HTML errors that generic `catch` blocks map to 401 — the developer sees "auth not working" with zero hint that the URL is wrong. The harness rejects writes containing `/v2/accounts:*` to fail-fast at edit time, but you're expected to write `/v1` first try, not lean on the harness. **Symptom of failure**: every protected endpoint 401s with a fresh token that just signed in successfully.
+
+2. **Persist the session AND call `init()` BEFORE first render.** Login alone doesn't keep the user logged in across refresh — it's two halves of one feature. Call `setAuthToken` after every proxy response, and wrap `createRoot(...).render(<App/>)` in `useAuthStore.getState().init().finally(...)`. Calling `init()` from a `useEffect` is too late: the first paint already redirected to `/login` ~50ms before `/me` returns. **Symptom of failure**: user signs in, sees the dashboard for a second, refreshes, lands on the login screen as if they never authenticated.

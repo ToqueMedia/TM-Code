@@ -8,16 +8,19 @@
 import { memo, useCallback, useMemo, useSyncExternalStore } from 'react'
 import { useAgentElapsed } from '../../hooks/useAgentElapsed'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiCheck, FiLoader, FiSquare } from 'react-icons/fi'
+import { FiArrowDown, FiArrowUp, FiCheck, FiLoader, FiSquare } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useAgentStore, type AgentTask } from '../../stores/agentStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useSkillStore } from '../../stores/skillStore'
+import { useBillingStore } from '../../stores/billingStore'
+import { useLayoutStore } from '../../stores/layoutStore'
 import { stopAgent } from '../../services/agent/cmdModeCommands'
 import { getCommandQueueSnapshot, subscribeToCommandQueue } from '../../services/agent/messageQueue'
 import { usePreflightStatus } from '../../hooks/usePreflightStatus'
 import { countAvailable } from '../../services/preflightService'
+import { getProfileForPlan } from '../../services/agent/modelProfiles'
 import { tokens } from '@/theme/tokens'
 import { formatElapsed, formatTokens } from './terminalHelpers'
 
@@ -35,6 +38,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   const queuedCommands = useSyncExternalStore(subscribeToCommandQueue, getCommandQueueSnapshot)
   const queueLength = queuedCommands.length
   const preflight = usePreflightStatus()
+  const devServer = useLayoutStore(s => s.devServer)
 
   // Session-mode elapsed: total wall time per request, freezes during permission waits.
   const { elapsedMs: elapsed } = useAgentElapsed('session')
@@ -56,11 +60,32 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   }, [status, error])
 
   // Up = context size on the wire (input is replaced with max across turns).
-  // Down = output emitted by model (sums across turns). Two distinct quantities;
-  // do not add them — see chatStore.addTokenUsage for the why.
+  // Down = output emitted by model (sums across turns). Historically shown as
+  // two separate counters with directional arrows. UX request 2026-05-12:
+  // present as a single combined number so the user sees "total traffic" at a
+  // glance — the directional split is still derivable from the colour cue
+  // (orange = sending, green = generating, grey = idle).
   const inputTok = totalTokensUsed.input
   const outputTok = totalTokensUsed.output
+  const combinedTok = inputTok + outputTok
   const isSending = status === 'awaiting_response' || status === 'compressing'
+  const isReceiving = status === 'generating' || status === 'reasoning' || status === 'applying'
+
+  // Context-window percentage for the active model. Same telemetry as the
+  // ContextWindowIndicator in ChatView, rendered terminal-style (text only,
+  // no progress bar) to fit CMD mode's monospace aesthetic.
+  const billingPlan = useBillingStore((s) => s.plan)
+  const activeProfile = useMemo(() => getProfileForPlan(billingPlan), [billingPlan])
+  const ctxPct = activeProfile.contextWindow > 0 && inputTok > 0
+    ? Math.min(100, (inputTok / activeProfile.contextWindow) * 100)
+    : 0
+  const ctxColor =
+    ctxPct < 70 ? tokens.colors.text.disabled
+    : ctxPct < 90 ? tokens.colors.accent.orange
+    : tokens.colors.accent.red
+  const ctxTooltip = ctxPct > 0
+    ? `Context: ${inputTok.toLocaleString()} / ${activeProfile.contextWindow.toLocaleString()} tokens (${ctxPct.toFixed(1)}%) — ${activeProfile.name}`
+    : undefined
 
   // Toolkit preflight — small "tk 3/3" indicator. Tooltip lists missing pieces.
   const toolkit = useMemo(() => {
@@ -89,8 +114,13 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
       const running = mcpServers.filter(s => s.status === 'running').length
       if (running > 0) out.push(`${running} mcp (${totalMcpTools})`)
     }
+    if (devServer && devServer.status !== 'stopped') {
+      const url = devServer.frontendUrl || devServer.backendUrl
+      const port = url?.match(/:(\d+)/)?.[1]
+      out.push(port ? `dev :${port}` : devServer.status === 'starting' ? 'dev…' : 'dev')
+    }
     return out
-  }, [autoApproveDiffs, queueLength, skillCount, mcpIsInitializing, mcpServers, totalMcpTools])
+  }, [autoApproveDiffs, queueLength, skillCount, mcpIsInitializing, mcpServers, totalMcpTools, devServer])
 
   return (
     <>
@@ -203,24 +233,44 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
         {/* Right: elapsed + tokens + stop */}
         <Flex align="center" gap={2} flexShrink={0}>
           {isStreaming && (
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} whiteSpace="nowrap">
+            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} whiteSpace="nowrap" title={ctxTooltip}>
               {formatElapsed(elapsed)}
-              {inputTok > 0 && (
+              {ctxPct > 0 && (
                 <>
                   {' · '}
-                  <Text as="span" color={isSending ? tokens.colors.accent.orange : tokens.colors.text.disabled}>
-                    {'↑'}
+                  <Text as="span" color={ctxColor}>
+                    {`ctx ${Math.round(ctxPct)}%`}
                   </Text>
-                  {' '}{formatTokens(inputTok)}
                 </>
               )}
-              {outputTok > 0 && (
+              {combinedTok > 0 && (
                 <>
                   {' · '}
-                  <Text as="span" color={!isSending ? tokens.colors.accent.green : tokens.colors.text.disabled}>
-                    {'↓'}
-                  </Text>
-                  {' '}{formatTokens(outputTok)}
+                  {isSending && (
+                    <Box
+                      as="span"
+                      display="inline-flex"
+                      alignItems="center"
+                      color={tokens.colors.accent.orange}
+                      mr="3px"
+                      verticalAlign="-2px"
+                    >
+                      <FiArrowUp size={10} strokeWidth={2.5} />
+                    </Box>
+                  )}
+                  {isReceiving && (
+                    <Box
+                      as="span"
+                      display="inline-flex"
+                      alignItems="center"
+                      color={tokens.colors.accent.green}
+                      mr="3px"
+                      verticalAlign="-2px"
+                    >
+                      <FiArrowDown size={10} strokeWidth={2.5} />
+                    </Box>
+                  )}
+                  {formatTokens(combinedTok)}
                 </>
               )}
             </Text>

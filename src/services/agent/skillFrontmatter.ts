@@ -15,6 +15,27 @@ export interface ParsedSkill {
   description: string
   /** Markdown body with the YAML frontmatter stripped, if any. */
   body: string
+  /** Whether this SKILL's body is safe to cache across turns. Defaults to
+   *  true — every SKILL today is filesystem-static. Set to false ONLY when
+   *  the body interpolates per-session state (project path, env, etc.).
+   *  When false, `noCacheReason` MUST explain what makes it volatile —
+   *  cache-busting is an architectural decision, not a default. Mirrors
+   *  the `DANGEROUS_uncachedSystemPromptSection` pattern. */
+  cacheable: boolean
+  /** Required when `cacheable === false`. Free-text justification surfaced
+   *  by the verifier so reviewers can challenge the call. */
+  noCacheReason?: string
+}
+
+/** Surfaced by the verifier (and SkillService at load time) when a SKILL
+ *  declares `cacheable: false` without a `noCacheReason`. Treated as a
+ *  validation error — the field exists to force a deliberate trade-off,
+ *  not as a silent invalidation toggle. */
+export class SkillFrontmatterError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SkillFrontmatterError'
+  }
 }
 
 /**
@@ -29,19 +50,31 @@ export function parseSkillFrontmatter(raw: string, fallbackName: string): Parsed
     const [, fmBlock, body] = fmMatch
     const nameLine = fmBlock.match(/^name:\s*(.+)$/m)
     const descLine = fmBlock.match(/^description:\s*([\s\S]+?)(?=\n\w+:|\n*$)/m)
+    const cacheableLine = fmBlock.match(/^cacheable:\s*(true|false)\s*$/m)
+    const noCacheReasonLine = fmBlock.match(/^noCacheReason:\s*(.+)$/m)
     const name = nameLine ? nameLine[1].trim() : fallbackName
     let description = descLine ? descLine[1].trim().replace(/\s+/g, ' ') : deriveDescription(body, fallbackName)
     if (description.length > MAX_DESCRIPTION_CHARS) {
       description = description.slice(0, MAX_DESCRIPTION_CHARS - 1).trimEnd() + '…'
     }
-    return { name, description, body: body.trimStart() }
+    // Default cacheable=true. The field is opt-IN to invalidation so a
+    // missing field can never accidentally bypass the prompt cache.
+    const cacheable = cacheableLine ? cacheableLine[1] === 'true' : true
+    const noCacheReason = noCacheReasonLine ? noCacheReasonLine[1].trim() : undefined
+    if (!cacheable && !noCacheReason) {
+      throw new SkillFrontmatterError(
+        `${name}: cacheable=false requires noCacheReason — explain what makes the body session-volatile (project path, env, etc.). ` +
+        `Cache-busting is an architectural decision, not a default. If the SKILL is in fact static, drop the cacheable field.`,
+      )
+    }
+    return { name, description, body: body.trimStart(), cacheable, noCacheReason }
   }
   // No frontmatter — derive from content
   let description = deriveDescription(raw, fallbackName)
   if (description.length > MAX_DESCRIPTION_CHARS) {
     description = description.slice(0, MAX_DESCRIPTION_CHARS - 1).trimEnd() + '…'
   }
-  return { name: fallbackName, description, body: raw }
+  return { name: fallbackName, description, body: raw, cacheable: true }
 }
 
 /** First non-empty paragraph after the H1 — single line, collapsed whitespace. */

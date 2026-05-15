@@ -63,8 +63,68 @@ pub async fn scaffold_template(
     }
 
     let mut visited = HashSet::new();
-    copy_dir_safe(&template_path, dest_path, &mut visited)
+    copy_template_dir(&template_path, dest_path, &mut visited)
         .map_err(|e| format!("Failed to scaffold template: {}", e))
+}
+
+/// Like `copy_dir_safe` but renames bundler-friendly underscore-prefixed
+/// names back to dotfiles on the destination side: `_gitignore` →
+/// `.gitignore`, `_env.example` → `.env.example`. The reason: Tauri's
+/// resource bundler (and many CI pipelines) silently exclude dotfiles via
+/// glob defaults, so we ship dotfiles as `_xxx` in the source tree and
+/// restore the dot at scaffold time. Only the prefix is rewritten — the
+/// rest of the filename is unchanged. Subdirectories inherit nothing.
+fn copy_template_dir(
+    src: &Path,
+    dst: &Path,
+    visited: &mut HashSet<PathBuf>,
+) -> std::io::Result<()> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)?;
+    }
+
+    if let Ok(canonical) = canonicalize_path(src) {
+        if !visited.insert(canonical) {
+            return Ok(());
+        }
+    }
+
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let raw_name = entry.file_name();
+        let name_str = raw_name.to_string_lossy();
+
+        // Restore dotfile prefix only at the leaf level. We don't rename
+        // directories — none of our templates ship dot-directories.
+        let resolved_name = if let Some(rest) = name_str.strip_prefix('_') {
+            // Whitelist the rewrite to known dotfile names so a stray
+            // _foo file doesn't get clobbered into .foo unintentionally.
+            match rest {
+                "gitignore" | "env.example" | "env" | "dockerignore" | "npmignore"
+                | "prettierrc" | "prettierrc.json" | "eslintrc" | "eslintrc.json" => {
+                    format!(".{}", rest)
+                }
+                _ => name_str.to_string(),
+            }
+        } else {
+            name_str.to_string()
+        };
+
+        let dest_entry = dst.join(&resolved_name);
+
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            copy_template_dir(&entry.path(), &dest_entry, visited)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &dest_entry)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Generic copy_directory exposed to the frontend.
@@ -244,7 +304,6 @@ pub struct DeployBundleFile {
 #[derive(Debug, Serialize)]
 pub struct DeployBundle {
     pub files: Vec<DeployBundleFile>,
-    pub worker_file: Option<DeployBundleFile>,
     pub has_database: bool,
     pub has_api_routes: bool,
     pub migration_sql: Option<String>,
@@ -339,19 +398,28 @@ fn walk_collect(dir: &Path, base: &Path, out: &mut Vec<DeployBundleFile>) -> std
 /// (`npm run build` etc.) — this command does NOT trigger a build.
 ///
 /// Conventions:
-///   - Frontend assets: read from `<project>/dist/` (Vite default)
-///   - Worker bundle:   `<project>/dist/worker.js` or `<project>/worker.js`
+///   - Frontend assets: read from `<project>/<output_dir>/`. Defaults to
+///     `dist` when the caller doesn't supply one (Vite default). v2 strategies
+///     resolve the right directory from the DeployPlan and pass it explicitly
+///     (e.g. Angular's `dist/<app>/browser`).
 ///   - Migration source: `<project>/backend/src/db/schema.ts` (Drizzle)
 ///   - hasApiRoutes:    `<project>/backend/` directory exists
 ///   - hasDatabase:     `<project>/backend/src/db/schema.ts` exists
-#[tauri::command]
-pub async fn collect_deploy_bundle(project_path: String) -> Result<DeployBundle, String> {
+///
+/// The v1 Hono Worker bundle path was removed in Phase 0 of PLAN-DEPLOY-V2.
+/// v2 strategies collect backend artifacts plan-aware in their own modules.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn collect_deploy_bundle(
+    project_path: String,
+    output_dir: Option<String>,
+) -> Result<DeployBundle, String> {
     let project = Path::new(&project_path);
     if !project.exists() || !project.is_dir() {
         return Err(format!("Project path does not exist: {}", project_path));
     }
 
-    let dist_dir = project.join("dist");
+    let resolved_output = output_dir.unwrap_or_else(|| "dist".to_string());
+    let dist_dir = project.join(&resolved_output);
     if !dist_dir.exists() || !dist_dir.is_dir() {
         // Inspect package.json to surface the project's actual build command
         // — the canonical "npm run build" is right ~95% of the time but Vite
@@ -374,65 +442,18 @@ pub async fn collect_deploy_bundle(project_path: String) -> Result<DeployBundle,
             None
         };
         let hint = match suggestion {
-            Some(cmd) => format!(" Run `{}` first to generate dist/.", cmd),
-            None => String::from(" No build script in package.json — configure one (e.g. \"build\": \"vite build\") before publishing."),
+            Some(cmd) => format!(" Run `{}` first, then try Publish again.", cmd),
+            None => String::from(" Add a `build` script to package.json (e.g. \"build\": \"vite build\"), then try Publish again."),
         };
-        return Err(format!("dist/ not found at {}.{}", project_path, hint));
+        return Err(format!("Your project hasn't been built yet.{}", hint));
     }
 
     let mut files = Vec::new();
     walk_collect(&dist_dir, &dist_dir, &mut files)
         .map_err(|e| format!("Failed to read dist: {}", e))?;
 
-    // Worker bundle — search in canonical locations, in priority order:
-    //   1. backend/dist/worker.js  → the Hono+esbuild boilerplate output
-    //   2. dist/worker.js          → frontend build emitted alongside assets
-    //   3. worker.js               → bare project-root bundle (legacy)
-    // First match wins. If a project ships multiple bundles (e.g. ran both a
-    // frontend build and a backend build) the backend one is canonical.
-    let mut worker_file: Option<DeployBundleFile> = None;
-    let candidates = [
-        project.join("backend").join("dist").join("worker.js"),
-        project.join("dist").join("worker.js"),
-        project.join("worker.js"),
-    ];
-    for candidate in candidates.iter() {
-        if candidate.exists() && candidate.is_file() {
-            match std::fs::read_to_string(candidate) {
-                Ok(content) => {
-                    worker_file = Some(DeployBundleFile {
-                        path: "worker.js".to_string(),
-                        content,
-                        encoding: "utf8".to_string(),
-                    });
-                    break;
-                }
-                Err(e) => {
-                    return Err(format!("Failed to read worker bundle: {}", e));
-                }
-            }
-        }
-    }
-
-    // Strip the worker bundle out of the static files list so it doesn't get
-    // double-uploaded as an R2 asset.
-    files.retain(|f| f.path != "worker.js");
-
     let backend_dir = project.join("backend");
     let has_backend = backend_dir.exists() && backend_dir.is_dir();
-
-    // Surface a precise error if a backend exists but wasn't built. This is
-    // the most common failure mode after `provision_auth` installs the Hono
-    // boilerplate but the user only ran the frontend build.
-    if has_backend && worker_file.is_none() {
-        let backend_pkg = backend_dir.join("package.json");
-        if backend_pkg.exists() {
-            return Err(format!(
-                "backend/ found but no worker bundle. Run `cd {} && npm install && npm run build` to produce backend/dist/worker.js, then publish again.",
-                backend_dir.display()
-            ));
-        }
-    }
 
     let schema_path = backend_dir.join("src").join("db").join("schema.ts");
     let has_database = schema_path.exists() && schema_path.is_file();
@@ -478,7 +499,6 @@ pub async fn collect_deploy_bundle(project_path: String) -> Result<DeployBundle,
 
     Ok(DeployBundle {
         files,
-        worker_file,
         has_database,
         has_api_routes: has_backend,
         migration_sql,
@@ -646,4 +666,162 @@ pub async fn read_skill_content(skill_path: String) -> Result<SkillContent, Stri
         content,
         references,
     })
+}
+
+// ── Backend tarball for Cloud Build (Phase 3 fullstack deploy) ──
+
+/// Walk the project root and produce a gzipped tar of the backend-side
+/// files Cloud Build needs (Dockerfile, server source, package.json,
+/// lockfile, tsconfig, drizzle.config.ts, schema/migrations).
+///
+/// Excludes node_modules, .git, the frontend bundle (dist/), local
+/// SQLite databases, and any .env files (secrets reach the container
+/// via Cloud Run env vars from the deployService.readBackendEnvVars
+/// helper).
+///
+/// Returns the base64-encoded tarball. The deployService POSTs it to
+/// /v1/projects/deploy/container/build which uploads to GCS and
+/// triggers Cloud Build.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn collect_backend_tarball(project_path: String) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Cursor;
+
+    let project = Path::new(&project_path);
+    if !project.exists() || !project.is_dir() {
+        return Err(format!("Project path does not exist: {}", project_path));
+    }
+
+    // Dockerfile is the load-bearing entry — the platform's build pipeline
+    // runs `docker build .` against it. If missing, ask the chat agent to
+    // generate one for the project's backend stack.
+    //
+    // No `cloudbuild.yaml` requirement: the platform builds with an inline
+    // spec server-side, so a file in the project would be unused dead code
+    // (and would leak the build architecture). The previous check rejected
+    // valid projects unnecessarily.
+    if !project.join("Dockerfile").exists() {
+        return Err(
+            "Dockerfile missing at project root. Ask the chat agent to generate one — it knows the platform's publish-backend recipe.".to_string(),
+        );
+    }
+
+    let buffer: Vec<u8> = Vec::new();
+    let cursor = Cursor::new(buffer);
+    let encoder = GzEncoder::new(cursor, Compression::default());
+    let mut tar = tar::Builder::new(encoder);
+
+    walk_for_tar(project, project, &mut tar)
+        .map_err(|e| format!("Failed to build backend tarball: {}", e))?;
+
+    let encoder = tar
+        .into_inner()
+        .map_err(|e| format!("tar finish failed: {}", e))?;
+    let cursor = encoder
+        .finish()
+        .map_err(|e| format!("gzip finish failed: {}", e))?;
+    let bytes = cursor.into_inner();
+
+    Ok(B64.encode(&bytes))
+}
+
+/// True when `entry_name` should be excluded from the backend tarball.
+/// Matches against the file/dir name (not full path) — applies at any
+/// directory depth.
+fn tarball_skip(entry_name: &str) -> bool {
+    matches!(
+        entry_name,
+        "node_modules"
+            | ".git"
+            | "dist"           // Frontend build output — Cloudflare side handles this
+            | ".next"
+            | ".nuxt"
+            | ".svelte-kit"
+            | ".vercel"
+            | ".astro"
+            | ".turbo"
+            | ".cache"
+            | "coverage"
+            | ".DS_Store"
+    )
+}
+
+/// Skip files/dirs that match these patterns (case-insensitive).
+/// Catches per-file rather than per-directory excludes (local sqlite,
+/// .env files, etc.).
+fn tarball_skip_pattern(entry_name: &str) -> bool {
+    let lower = entry_name.to_ascii_lowercase();
+    lower.starts_with(".env")
+        || lower.ends_with(".db")
+        || lower.ends_with(".db-journal")
+        || lower.ends_with(".sqlite")
+        || lower.ends_with(".sqlite3")
+        || lower.ends_with(".log")
+}
+
+/// Frontend-shape entries to exclude **only at the project root**. The
+/// backend Dockerfile's COPY filter would already keep them out of the
+/// image, but they still cost upload bandwidth on the way to GCS. We don't
+/// apply this list at deeper paths because legitimate backend code may live
+/// under e.g. `server/src/` — only the project-root `src/` is the
+/// frontend's.
+fn tarball_skip_at_root(entry_name: &str) -> bool {
+    matches!(
+        entry_name,
+        "src"
+            | "public"
+            | "index.html"
+            | "vite.config.ts"
+            | "vite.config.js"
+            | "vite.config.mjs"
+            | "tailwind.config.ts"
+            | "tailwind.config.js"
+            | "postcss.config.ts"
+            | "postcss.config.js"
+    )
+}
+
+/// Recursive walk that appends each kept file to the tar builder.
+fn walk_for_tar(
+    dir: &Path,
+    base: &Path,
+    tar: &mut tar::Builder<flate2::write::GzEncoder<std::io::Cursor<Vec<u8>>>>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name_os = entry.file_name();
+        let name = name_os.to_string_lossy();
+
+        if tarball_skip(&name) {
+            continue;
+        }
+        if tarball_skip_pattern(&name) {
+            continue;
+        }
+        // Only apply the frontend-root exclusions when we're walking the
+        // project root itself.
+        if dir == base && tarball_skip_at_root(&name) {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            walk_for_tar(&path, base, tar)?;
+            continue;
+        }
+
+        // Path inside the tarball is relative to the project root.
+        let rel = path
+            .strip_prefix(base)
+            .map_err(|_| std::io::Error::other("strip_prefix failed"))?;
+        let mut file = std::fs::File::open(&path)?;
+        tar.append_file(rel, &mut file)?;
+    }
+    Ok(())
 }

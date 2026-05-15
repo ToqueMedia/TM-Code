@@ -28,8 +28,10 @@ import {
   IS_VITE_DEV,
   VITE_OLLAMA_URL,
   VITE_WORKER_URL,
+  VITE_DEPLOY_URL,
   DEFAULT_OLLAMA_URL,
   DEFAULT_WORKER_URL,
+  PRODUCTION_DEPLOY_URL,
 } from '@/utils/viteEnv'
 
 export interface ResolveUrlInput {
@@ -88,6 +90,32 @@ export function resolveOllamaUrl(): string {
     isViteDev: IS_VITE_DEV,
     isWindows: IS_WINDOWS,
   })
+}
+
+/**
+ * Deploy URL — follows the same dev/prod split as `resolveWorkerUrl`:
+ *
+ *   - VITE_DEPLOY_URL set: use it verbatim (explicit override — staging
+ *     workers, custom proxies, etc.).
+ *   - IDE running under Vite dev: use the same dev worker as everything
+ *     else (`resolveWorkerUrl()` — typically `localhost:8787` from
+ *     `wrangler dev`). The dev worker's `authenticateRequest` bypasses
+ *     strict token verification in `isDev(env)` mode, which is why we
+ *     get clean 401s when dev tokens hit the production worker — the
+ *     audience mismatch + App Check enforcement combo causes silent
+ *     refresh failures, and the prod worker won't accept stale tokens.
+ *   - Production build: use the production deploy URL.
+ *
+ * Side-effect caveat: a dev worker forwards container/build + Cloud Run
+ * calls to real GCP using the same service-account secrets as production.
+ * R2 + KV writes go to local wrangler state. If you want a fully
+ * sandboxed dev deploy, point `VITE_DEPLOY_URL` at a dedicated staging
+ * Worker — or just skip Publish in dev.
+ */
+export function resolveDeployUrl(): string {
+  if (VITE_DEPLOY_URL) return VITE_DEPLOY_URL
+  if (IS_VITE_DEV) return resolveWorkerUrl()
+  return PRODUCTION_DEPLOY_URL
 }
 
 /** Exposed for the settingsStore self-heal check — URLs that we may have

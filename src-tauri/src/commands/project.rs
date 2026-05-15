@@ -828,14 +828,38 @@ pub fn get_recent_projects() -> Result<Vec<RecentProject>> {
     }
 
     let settings_content = fs::read_to_string(&settings_path)?;
-    let settings: GlobalSettings = serde_json::from_str(&settings_content)?;
+    let mut settings: GlobalSettings = serde_json::from_str(&settings_content)?;
 
-    // Filter out projects that no longer exist and normalize paths for frontend
+    // Filter out projects that no longer exist and normalize paths for frontend.
+    // Also dedupe by path: legacy settings.json files from before the path-dedup
+    // fix may carry multiple entries for the same on-disk project (one per stale
+    // id). Keep the first occurrence (insertion order = newest first) and drop
+    // the rest. Persist back so we don't pay the cost on every read.
     let mut valid_projects = Vec::new();
-    for mut project in settings.recent_projects {
-        if Path::new(&project.path).exists() {
-            project.path = normalize_str_for_frontend(&project.path);
-            valid_projects.push(project);
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut needs_persist = false;
+    for mut project in std::mem::take(&mut settings.recent_projects) {
+        if !Path::new(&project.path).exists() {
+            needs_persist = true;
+            continue;
+        }
+        if seen_paths.contains(&project.path) {
+            needs_persist = true;
+            continue;
+        }
+        seen_paths.insert(project.path.clone());
+        project.path = normalize_str_for_frontend(&project.path);
+        valid_projects.push(project);
+    }
+
+    if needs_persist {
+        settings.recent_projects = valid_projects.clone();
+        if let Some(parent) = settings_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&settings) {
+            // Best-effort: a write failure here doesn't break the UI's read.
+            let _ = fs::write(&settings_path, json);
         }
     }
 
@@ -1101,8 +1125,14 @@ fn update_recent_projects(project_info: &ProjectInfo) -> Result<()> {
         default_settings
     };
 
-    // Remove existing entry if it exists
-    settings.recent_projects.retain(|p| p.id != project_info.id);
+    // Remove any existing entry for this project. Dedup by id AND by path:
+    // .toquemedia-id can be regenerated (clone, deleted dotfile, .gitignored,
+    // template-copy) so the same on-disk project may end up with a fresh id.
+    // Without path-dedup the file accumulates orphans until truncation drops
+    // legitimate recents.
+    settings
+        .recent_projects
+        .retain(|p| p.id != project_info.id && p.path != project_info.path);
 
     // Create new recent project entry
     let recent_project = RecentProject {

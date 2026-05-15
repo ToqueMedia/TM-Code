@@ -162,7 +162,17 @@ function processAnthropicEvent(
   switch (data.type) {
     case 'message_start': {
       const msg = data.message
-      const inputTokens = msg?.usage?.input_tokens ?? 0
+      // Context window holds NEW input + cached reads + cache writes. The
+      // Anthropic usage block splits them across three fields because
+      // billing differs (cache reads cost less). Pressure-wise they all
+      // occupy slots, so sum them for the pill / compression heuristic.
+      // Upstreams that don't support caching just drop the cache fields
+      // → defaults to 0, behaviour unchanged.
+      const u = msg?.usage ?? {}
+      const inputTokens =
+        (u.input_tokens ?? 0)
+        + (u.cache_read_input_tokens ?? 0)
+        + (u.cache_creation_input_tokens ?? 0)
       callbacks.onEvent({
         type: 'message_start',
         messageId: msg?.id ?? '',
@@ -234,7 +244,27 @@ function processAnthropicEvent(
 
     case 'message_delta': {
       const stopReason = data.delta?.stop_reason ?? 'end_turn'
-      const outputTokens = data.usage?.output_tokens ?? 0
+      const u = data.usage ?? {}
+      // Output_tokens already includes thinking/reasoning tokens on the
+      // Anthropic native API (the spec counts thinking as output). For
+      // OpenAI-shape adapters, `completion_tokens_details.reasoning_tokens`
+      // may be reported separately — fold it in defensively so the pill's
+      // pressure reflects what actually occupies the window.
+      const outputTokens =
+        (u.output_tokens ?? 0)
+        + (u.reasoning_tokens ?? 0)
+      // Anthropic native streams only carry output_tokens here, but the
+      // worker's OpenAI→Anthropic adapter (used for BYOK on openai_compat
+      // upstreams) re-emits input_tokens on message_delta because OpenAI-
+      // shape providers report usage AFTER finish_reason — too late for
+      // message_start's usage block. Reading it here lets the IDE pick
+      // up the real prompt-token count on BYOK routes so compression
+      // triggers and the context-window indicator updates. Cache splits
+      // are summed for the same window-pressure reason as in message_start.
+      const inputTokens =
+        (u.input_tokens ?? 0)
+        + (u.cache_read_input_tokens ?? 0)
+        + (u.cache_creation_input_tokens ?? 0)
       callbacks.onEvent({
         type: 'message_delta',
         stopReason,
@@ -242,7 +272,7 @@ function processAnthropicEvent(
       })
       callbacks.onEvent({
         type: 'usage',
-        promptTokens: 0,
+        promptTokens: inputTokens,
         completionTokens: outputTokens,
       })
       break
@@ -260,6 +290,288 @@ function processAnthropicEvent(
       })
       break
     }
+  }
+}
+
+// ── OpenAI-compatible SSE parser (for local BYOK: Ollama, LM Studio) ─────
+//
+// Both Ollama (since 0.1.30) and LM Studio expose `/v1/chat/completions` in
+// OpenAI shape, so we have a single parser regardless of provider. The
+// upstream SSE format differs from Anthropic in three ways:
+//
+//   1. Bare `data:` lines, no `event:` prefix.
+//   2. Final stream marker: `data: [DONE]` (literal string), not a
+//      `message_stop` event.
+//   3. Content lives at `choices[0].delta.{content, role, tool_calls,
+//      reasoning_content, finish_reason}`. No "block index" — text and
+//      tool calls share a single virtual stream and we have to derive the
+//      block boundaries ourselves.
+//
+// We translate to the same StreamEvent shape parseSSEStream emits so the
+// downstream consumer (processStreamedTurn) doesn't need a parallel branch.
+// Block boundaries: index 0 = text, index 1 = first tool, index 2 = second…
+//
+// Tools come in as deltas: the FIRST delta with a tool_call carries the id
+// and name, subsequent deltas carry argument fragments. We open the block
+// on the first delta and emit content_block_stop when the next tool starts
+// or when finish_reason fires.
+//
+// Reasoning: OpenAI-shape upstreams that support thinking (DeepSeek-R1,
+// some Qwen3 variants) emit `delta.reasoning_content` separately from
+// `delta.content`. Translated to reasoning_delta — same downstream path
+// as Anthropic's thinking_delta.
+
+interface OpenAIDelta {
+  role?: string
+  content?: string | null
+  reasoning_content?: string | null
+  tool_calls?: Array<{
+    index?: number
+    id?: string
+    type?: 'function'
+    function?: {
+      name?: string
+      arguments?: string
+    }
+  }>
+}
+
+interface OpenAIChoice {
+  index?: number
+  delta?: OpenAIDelta
+  finish_reason?: string | null
+}
+
+interface OpenAIChunk {
+  id?: string
+  object?: string
+  created?: number
+  model?: string
+  choices?: OpenAIChoice[]
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    total_tokens?: number
+  }
+}
+
+export async function parseOpenAISSEStream(
+  response: Response,
+  callbacks: StreamParserCallbacks,
+  signal?: AbortSignal,
+): Promise<void> {
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  // Block-tracking state. blockOpen[0] is the text block; tool blocks are
+  // numbered from 1 by the order they appear in tool_calls deltas. We map
+  // the upstream's "tool_calls[i].index" (Ollama/LM Studio both emit it)
+  // to our internal block index so multiple parallel tool calls are
+  // separable downstream.
+  let textOpen = false
+  let textEmitted = false
+  // Map upstream tool index → our block index. Used so subsequent argument
+  // deltas land on the right block.
+  const toolBlockByUpstreamIdx = new Map<number, number>()
+  let nextBlockIndex = 1
+  let messageStarted = false
+  let promptTokens = 0
+  let messageStopEmitted = false
+
+  const closeOpenTextBlock = () => {
+    if (textOpen) {
+      callbacks.onEvent({ type: 'content_block_stop', index: 0 })
+      textOpen = false
+    }
+  }
+
+  const closeAllToolBlocks = () => {
+    for (const blockIdx of toolBlockByUpstreamIdx.values()) {
+      callbacks.onEvent({ type: 'content_block_stop', index: blockIdx })
+    }
+    toolBlockByUpstreamIdx.clear()
+  }
+
+  const ensureMessageStart = () => {
+    if (messageStarted) return
+    messageStarted = true
+    callbacks.onEvent({
+      type: 'message_start',
+      messageId: '',
+      inputTokens: 0,
+    })
+  }
+
+  const processChunk = (chunk: OpenAIChunk) => {
+    // Some Ollama builds send a final-only object with usage and no choices
+    // — treat as usage-only update.
+    if (chunk.usage) {
+      // OpenAI shape: prompt_tokens is the new-input count; cached portion
+      // is reported separately under `prompt_tokens_details.cached_tokens`
+      // (when the provider supports caching). For window pressure we need
+      // the SUM — cached tokens still occupy slots. Same logic for
+      // reasoning tokens on the completion side.
+      const usage = chunk.usage as {
+        prompt_tokens?: number
+        completion_tokens?: number
+        prompt_tokens_details?: { cached_tokens?: number }
+        completion_tokens_details?: { reasoning_tokens?: number }
+      }
+      const cachedInput = usage.prompt_tokens_details?.cached_tokens ?? 0
+      const reasoningOut = usage.completion_tokens_details?.reasoning_tokens ?? 0
+      const prompt = (usage.prompt_tokens ?? 0) + cachedInput
+      const completion = (usage.completion_tokens ?? 0) + reasoningOut
+      if (prompt > 0) promptTokens = prompt
+      callbacks.onEvent({
+        type: 'usage',
+        promptTokens: promptTokens || prompt,
+        completionTokens: completion,
+      })
+    }
+
+    const choice = chunk.choices?.[0]
+    if (!choice) return
+    const delta = choice.delta ?? {}
+
+    ensureMessageStart()
+
+    // Reasoning content (DeepSeek-R1 / some Qwen3): emit before opening the
+    // text block. processStreamedTurn handles reasoning deltas independently.
+    if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+      callbacks.onEvent({
+        type: 'reasoning_delta',
+        content: delta.reasoning_content,
+      })
+    }
+
+    // Tool calls — close text first so the block ordering is sane downstream.
+    if (delta.tool_calls && delta.tool_calls.length > 0) {
+      closeOpenTextBlock()
+      for (const tc of delta.tool_calls) {
+        const upstreamIdx = tc.index ?? 0
+        let blockIdx = toolBlockByUpstreamIdx.get(upstreamIdx)
+        if (blockIdx === undefined) {
+          blockIdx = nextBlockIndex++
+          toolBlockByUpstreamIdx.set(upstreamIdx, blockIdx)
+          callbacks.onEvent({
+            type: 'content_block_start',
+            index: blockIdx,
+            blockType: 'tool_use',
+            toolId: tc.id ?? `call_${blockIdx}`,
+            toolName: tc.function?.name ?? '',
+          })
+        }
+        const fragment = tc.function?.arguments ?? ''
+        if (fragment.length > 0) {
+          callbacks.onEvent({
+            type: 'tool_input_delta',
+            index: blockIdx,
+            partialJson: fragment,
+          })
+        }
+      }
+    }
+
+    // Plain text content.
+    if (typeof delta.content === 'string' && delta.content.length > 0) {
+      if (!textOpen) {
+        callbacks.onEvent({
+          type: 'content_block_start',
+          index: 0,
+          blockType: 'text',
+        })
+        textOpen = true
+      }
+      textEmitted = true
+      callbacks.onEvent({ type: 'text_delta', content: delta.content })
+    }
+
+    if (choice.finish_reason) {
+      closeOpenTextBlock()
+      closeAllToolBlocks()
+      // Map finish_reason to Anthropic-shape stop_reason for downstream
+      // compatibility. tool_calls → tool_use; stop/length → end_turn/max_tokens.
+      const stopReason =
+        choice.finish_reason === 'tool_calls' ? 'tool_use'
+        : choice.finish_reason === 'length' ? 'max_tokens'
+        : 'end_turn'
+      callbacks.onEvent({
+        type: 'message_delta',
+        stopReason,
+        outputTokens: chunk.usage?.completion_tokens ?? 0,
+      })
+      if (!messageStopEmitted) {
+        messageStopEmitted = true
+        callbacks.onEvent({ type: 'done' })
+      }
+    }
+  }
+
+  try {
+    while (true) {
+      if (signal?.aborted) return
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const lastNewline = buffer.lastIndexOf('\n')
+      if (lastNewline === -1) continue
+      const complete = buffer.slice(0, lastNewline)
+      buffer = buffer.slice(lastNewline + 1)
+
+      const lines = complete.split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed === '' || !trimmed.startsWith('data:')) continue
+        const rawData = trimmed.slice(5).trimStart()
+        if (rawData === '[DONE]') {
+          // Stream marker — finalize anything still open and emit done. Some
+          // upstreams send finish_reason AND [DONE]; we guard with
+          // messageStopEmitted to avoid double-emit.
+          closeOpenTextBlock()
+          closeAllToolBlocks()
+          if (!messageStopEmitted) {
+            messageStopEmitted = true
+            callbacks.onEvent({ type: 'done' })
+          }
+          continue
+        }
+        try {
+          const json = JSON.parse(rawData) as OpenAIChunk
+          processChunk(json)
+        } catch {
+          // Malformed JSON — skip. Local servers are usually tidy but the
+          // bytes-stream Rust bridge can split a multi-byte char on a chunk
+          // boundary; the next iteration's accumulated buffer recovers.
+          continue
+        }
+      }
+    }
+
+    // Flush remaining
+    if (buffer.trim().startsWith('data:')) {
+      const rawData = buffer.trim().slice(5).trimStart()
+      if (rawData !== '[DONE]') {
+        try {
+          processChunk(JSON.parse(rawData))
+        } catch { /* ignore */ }
+      }
+    }
+
+    // If the upstream closed without a finish_reason or [DONE], close
+    // anything open and emit done so the agent doesn't hang waiting.
+    closeOpenTextBlock()
+    closeAllToolBlocks()
+    if (!messageStopEmitted) {
+      messageStopEmitted = true
+      callbacks.onEvent({ type: 'done' })
+    }
+    // Suppress unused-var lint — textEmitted is intentional bookkeeping
+    // for future extensions (e.g. detecting empty-response cases).
+    void textEmitted
+  } finally {
+    reader.releaseLock()
   }
 }
 

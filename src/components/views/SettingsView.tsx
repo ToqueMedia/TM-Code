@@ -22,7 +22,6 @@ import { useMcpStore, McpServerState } from '../../stores/mcpStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
-import { useFeaturesStore } from '../../stores/featuresStore'
 import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
@@ -33,12 +32,14 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
 import ApiKeysSection from './settings/ApiKeysSection'
+import DeploysSection from './settings/DeploysSection'
 
-type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'apiKeys' | 'sandbox' | 'admin'
+type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'apiKeys' | 'sandbox' | 'admin' | 'deploys'
 
 const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'profile', key: 'settings.profilePlan' },
   { id: 'editor', key: 'settings.editor' },
+  { id: 'deploys', key: 'settings.deploys' as TranslationKey },
   { id: 'sandbox', key: 'settings.sandbox' as TranslationKey },
   { id: 'shortcuts', key: 'settings.shortcuts' },
   { id: 'skills', key: 'settings.skills' },
@@ -72,14 +73,16 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
     return s.isAuthenticated && s.user?.isAdmin === undefined
   })
   const billingLoaded = useBillingStore(function (s) { return s.isLoaded })
-  const byokEnabled = useFeaturesStore(function (s) { return s.byokEnabled })
   const showAdminNav = isAdmin || (isAdminUnknown && !billingLoaded)
-  // Append API Keys after MCP when the global feature flag is on.
-  // Order: profile, editor, sandbox, shortcuts, skills, mcp, [apiKeys], [admin]
+  // BYOK is ALWAYS available — no global feature flag, no per-plan check.
+  // Backend mirrors this: the chat path accepts BYOK headers for any
+  // authenticated user regardless of plan. The previous gating via
+  // `featuresStore.byokEnabled` (kill switch) and the per-plan
+  // `subscription_plans/{plan}.byokAllowed` check were both removed when
+  // the staged rollout ended.
+  // Order: profile, editor, sandbox, shortcuts, skills, mcp, apiKeys, [admin]
   const NAV_KEYS = (() => {
-    const base = byokEnabled
-      ? [...BASE_NAV_KEYS, API_KEYS_NAV_ENTRY]
-      : BASE_NAV_KEYS
+    const base = [...BASE_NAV_KEYS, API_KEYS_NAV_ENTRY]
     return showAdminNav ? [...base, ADMIN_NAV_ENTRY] : base
   })()
 
@@ -171,7 +174,8 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
             {activeSection === 'shortcuts' && <ShortcutsSection />}
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
-            {activeSection === 'apiKeys' && byokEnabled && <ApiKeysSection />}
+            {activeSection === 'apiKeys' && <ApiKeysSection />}
+            {activeSection === 'deploys' && <DeploysSection />}
             {activeSection === 'admin' && showAdminNav && <AdminSection />}
           </Box>
         </Box>

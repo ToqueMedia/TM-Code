@@ -55,7 +55,13 @@ function AgentActivityIndicator() {
     if (prevStreamingRef.current && !isStreaming && sessionStartRef.current > 0) {
       const finalElapsed = Date.now() - sessionStartRef.current
       if (finalElapsed > 2000) {
-        useChatStore.getState().addSystemMessage(`Trabalhou por ${formatElapsed(finalElapsed)}`)
+        // Ephemeral footer — momentary "worked for X" timer. Not interesting
+        // enough to persist; auto-removes from the transcript after ~8s.
+        useChatStore.getState().addSystemMessage(
+          `Trabalhou por ${formatElapsed(finalElapsed)}`,
+          undefined,
+          { ephemeral: true },
+        )
       }
       sessionStartRef.current = 0
     }
@@ -77,11 +83,15 @@ function AgentActivityIndicator() {
   const inputTokens = totalTokensUsed.input
   const outputTokens = totalTokensUsed.output
 
-  // Highlight which direction is "live" right now, so the user can intuit
-  // which counter is moving without having to watch the digits change.
-  // 'awaiting_response' / 'compressing' = uploading/preparing, ↑ leads.
-  // 'reasoning' / 'generating' / 'applying' = receiving from the model, ↓ leads.
+  // Arrows are STATE INDICATORS — they only appear next to the counter
+  // that is actively accumulating right now.
+  //   'awaiting_response' / 'compressing' → ↑ visible (input is being prepared/sent)
+  //   'reasoning' / 'generating' / 'applying' → ↓ visible (output is streaming back)
+  //   any other state → neither arrow rendered (counter numbers still show)
+  // The previous design rendered both arrows permanently as colored labels;
+  // user feedback was that they read as static text rather than live state.
   const isSending = status === 'awaiting_response' || status === 'compressing'
+  const isReceiving = status === 'reasoning' || status === 'generating' || status === 'applying'
 
   // Detect output growth so the down-arrow pulses subtly during active receipt.
   const outputJustGrew = outputTokens > prevOutputTokensRef.current
@@ -154,35 +164,40 @@ function AgentActivityIndicator() {
         {inputTokens > 0 && (
           <>
             {' \u00B7 '}
-            <Box
-              as="span"
-              fontSize="11px"
-              css={{
-                display: 'inline',
-                color: isSending ? tokens.colors.accent.orange : tokens.colors.text.disabled,
-              }}
-            >{'\u2191'}</Box>
-            {' '}
+            {isSending && (
+              <>
+                <Box
+                  as="span"
+                  fontSize="11px"
+                  css={{ display: 'inline', color: tokens.colors.accent.orange }}
+                >{'\u2191'}</Box>
+                {' '}
+              </>
+            )}
             {formatTokens(inputTokens)}
           </>
         )}
         {outputTokens > 0 && (
           <>
             {' \u00B7 '}
-            <Box
-              as="span"
-              fontSize="11px"
-              css={{
-                display: 'inline',
-                color: !isSending ? tokens.colors.accent.greenBright : tokens.colors.text.disabled,
-                animation: outputJustGrew && !isSending ? 'tokenPulse 0.6s ease-out' : undefined,
-                '@keyframes tokenPulse': {
-                  '0%': { opacity: 0.4 },
-                  '100%': { opacity: 1 },
-                },
-              }}
-            >{'\u2193'}</Box>
-            {' '}
+            {isReceiving && (
+              <>
+                <Box
+                  as="span"
+                  fontSize="11px"
+                  css={{
+                    display: 'inline',
+                    color: tokens.colors.accent.greenBright,
+                    animation: outputJustGrew ? 'tokenPulse 0.6s ease-out' : undefined,
+                    '@keyframes tokenPulse': {
+                      '0%': { opacity: 0.4 },
+                      '100%': { opacity: 1 },
+                    },
+                  }}
+                >{'\u2193'}</Box>
+                {' '}
+              </>
+            )}
             {formatTokens(outputTokens)}
           </>
         )}

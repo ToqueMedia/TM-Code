@@ -6,6 +6,7 @@ import { useEditorRepository } from '../../stores/editorStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { handleStartExecution } from '../../services/agent/commands/planCommand'
 import { useChatStore } from '../../stores/chatStore'
+import { computeSlidingWindow } from '../../utils/taskWindow'
 import { tokens } from '@/theme/tokens'
 import type { ChatMessageCard } from '../../types/chat'
 
@@ -55,6 +56,43 @@ function TodoListCard({ card }: TodoListCardProps) {
   const completedCount = tasks.filter(t => !t.isPhaseHeader && t.completed).length
   const totalCount = tasks.filter(t => !t.isPhaseHeader).length
 
+  // Auto-collapse to a one-line badge when the plan is fully executed and the
+  // agent has finished streaming. Rationale: the assistant's accompanying
+  // summary message already describes what was done — keeping the full task
+  // list expanded duplicates that information and pushes the summary off-screen.
+  // We don't return null entirely so scrolling back through history still
+  // shows that a plan ran (and clicking opens TODO.md for the full record).
+  const allComplete = !loading && totalCount > 0 && completedCount === totalCount
+  const collapsed = allComplete && !isStreaming
+
+  if (collapsed) {
+    return (
+      <Flex
+        as="button"
+        align="center"
+        gap="6px"
+        px={3}
+        py="6px"
+        my={2}
+        borderRadius="8px"
+        bg="rgba(46, 160, 67, 0.08)"
+        border="1px solid rgba(46, 160, 67, 0.18)"
+        cursor="pointer"
+        transition="all 0.15s"
+        _hover={{ bg: 'rgba(46, 160, 67, 0.12)' }}
+        onClick={handleViewTodo}
+      >
+        <FiCheckSquare size={12} color={tokens.colors.accent.greenBright} />
+        <Text fontSize="12px" color={tokens.colors.accent.greenBright} fontWeight="500">
+          Plan complete — {totalCount} {totalCount === 1 ? 'task' : 'tasks'}
+        </Text>
+        <Text fontSize="11px" color={tokens.colors.text.muted}>
+          · View TODO.md
+        </Text>
+      </Flex>
+    )
+  }
+
   return (
     <Box
       bg="rgba(255, 255, 255, 0.03)"
@@ -87,59 +125,90 @@ function TodoListCard({ card }: TodoListCardProps) {
         </Text>
       </Flex>
 
-      {/* Task list */}
+      {/* Task list — short 3-task window. Compact by design; the user opens
+          TODO.md (button below) when they want the full list. The window
+          slides so the in-progress task is always visible: at the top of
+          the list at first ([0,1,2]), then shifts forward as the agent
+          checks off completed tasks so the active row stays the bottom of
+          the window ([N-2, N-1, N]). Phase headers are dropped from the
+          window — they're structural and bloat 3 slots — but the task
+          IDs (e.g. "Task 1.1") already encode the phase. */}
       {loading ? (
         <Text fontSize="12px" color={tokens.colors.text.muted} py={2}>Loading tasks...</Text>
-      ) : (
-        <Box
-          maxH="300px"
-          overflowY="auto"
-          mb={3}
-          css={{
-            '&::-webkit-scrollbar': { width: '4px' },
-            '&::-webkit-scrollbar-thumb': {
-              background: tokens.colors.scrollbar.thumb,
-              borderRadius: '4px',
-            },
-          }}
-        >
-          {tasks.map((task, index) => {
-            if (task.isPhaseHeader) {
-              return (
-                <Text
-                  key={index}
-                  fontSize="12px"
-                  fontWeight="600"
-                  color={tokens.colors.accent.purple}
-                  mt={index > 0 ? 3 : 0}
-                  mb="6px"
-                  letterSpacing="-0.005em"
-                >
-                  {task.text}
-                </Text>
-              )
-            }
+      ) : (() => {
+        const realTasks = tasks.filter(t => !t.isPhaseHeader)
+        if (realTasks.length === 0) {
+          return <Text fontSize="12px" color={tokens.colors.text.muted} py={2}>No tasks parsed from TODO.md.</Text>
+        }
 
-            return (
-              <Flex key={index} gap="6px" py="3px" pl={2} align="flex-start">
-                {task.completed ? (
-                  <FiCheckSquare size={13} color={tokens.colors.accent.greenBright} style={{ marginTop: '2px', flexShrink: 0 }} />
-                ) : (
-                  <FiSquare size={13} color={tokens.colors.text.disabled} style={{ marginTop: '2px', flexShrink: 0 }} />
-                )}
-                <Text
-                  fontSize="12.5px"
-                  color={task.completed ? tokens.colors.text.muted : tokens.colors.text.primary}
-                  lineHeight="1.5"
-                  textDecoration={task.completed ? 'line-through' : 'none'}
+        // In-progress = first non-completed task. Heuristic, but matches the
+        // pattern the implementation agent uses (it works through tasks in
+        // order and marks each completed before moving to the next).
+        // `-1` falls through to the "all complete → show tail" branch in
+        // computeSlidingWindow (anchor at last index).
+        const inProgressIdx = realTasks.findIndex(t => !t.completed)
+        const { start: startIdx, end: endIdx, hiddenAbove, hiddenBelow } =
+          computeSlidingWindow(realTasks.length, inProgressIdx)
+        const window = realTasks.slice(startIdx, endIdx + 1)
+
+        return (
+          <Box mb={3}>
+            {hiddenAbove > 0 && (
+              <Text fontSize="11px" color={tokens.colors.text.disabled} px={2} mb="2px">
+                · {hiddenAbove} earlier {hiddenAbove === 1 ? 'task' : 'tasks'}
+              </Text>
+            )}
+            {window.map((task, i) => {
+              const absoluteIdx = startIdx + i
+              const isInProgress = absoluteIdx === inProgressIdx
+              const color = task.completed
+                ? tokens.colors.text.muted
+                : isInProgress
+                  ? tokens.colors.accent.blueBright
+                  : tokens.colors.text.primary
+              const iconColor = task.completed
+                ? tokens.colors.accent.greenBright
+                : isInProgress
+                  ? tokens.colors.accent.blueBright
+                  : tokens.colors.text.disabled
+              return (
+                <Flex
+                  key={absoluteIdx}
+                  gap="6px"
+                  py="3px"
+                  pl={2}
+                  align="flex-start"
+                  // Subtle left accent so the in-progress row reads as
+                  // "where the agent is right now" at a glance.
+                  borderLeft={isInProgress ? `2px solid ${tokens.colors.accent.blueBright}` : '2px solid transparent'}
                 >
-                  {task.text}
-                </Text>
-              </Flex>
-            )
-          })}
-        </Box>
-      )}
+                  {task.completed ? (
+                    <FiCheckSquare size={13} color={iconColor} style={{ marginTop: '2px', flexShrink: 0 }} />
+                  ) : isInProgress ? (
+                    <FiPlay size={11} color={iconColor} style={{ marginTop: '3px', flexShrink: 0 }} />
+                  ) : (
+                    <FiSquare size={13} color={iconColor} style={{ marginTop: '2px', flexShrink: 0 }} />
+                  )}
+                  <Text
+                    fontSize="12.5px"
+                    color={color}
+                    lineHeight="1.5"
+                    fontWeight={isInProgress ? '500' : '400'}
+                    textDecoration={task.completed ? 'line-through' : 'none'}
+                  >
+                    {task.text}
+                  </Text>
+                </Flex>
+              )
+            })}
+            {hiddenBelow > 0 && (
+              <Text fontSize="11px" color={tokens.colors.text.disabled} px={2} mt="2px">
+                · {hiddenBelow} more {hiddenBelow === 1 ? 'task' : 'tasks'}
+              </Text>
+            )}
+          </Box>
+        )
+      })()}
 
       {/* Action buttons */}
       <Flex gap={2} flexWrap="wrap">

@@ -10,10 +10,11 @@ import { useMcpStore } from '../../stores/mcpStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, isInOverageState, extraConsumptionPct, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { useByokStore } from '../../stores/byokStore'
-import { getProfileForPlan } from '../../services/agent/modelProfiles'
+import { useByokState } from '../../hooks/useByokState'
+import { useThinkingToggle } from '../../hooks/useThinkingToggle'
 import MessageBubble from '../chat/MessageBubble'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
+import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
 import ModelIndicator from '../chat/ModelIndicator'
 import SessionDropdown from './SessionDropdown'
@@ -42,21 +43,17 @@ function ChatView() {
   const cycleEnd = useBillingStore(s => s.cycleEnd)
   const billingStatus = useBillingStore(s => s.status)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
-  const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
-  const setThinkingEnabled = useSettingsStore(s => s.setThinkingEnabled)
-  // Thinking support is a property of the model the backend will route to,
-  // not the user's plan. Both production coders (V4-Flash + GLM-5.1) have
-  // toggleable thinking, so the toggle shows on every plan including free.
-  // The handshake header X-Model-Thinking-Mode (stored in agentStore) is
-  // authoritative once the first response arrives; before then we fall back
-  // to the per-plan profile shape.
-  const backendThinkingMode = useAgentStore(s => s.thinkingMode)
-  // Server-confirmed (after first response) OR locally configured: either way
-  // the chat is going to BYOK, so swap the credit indicator for the model
-  // indicator. The "configured but not yet confirmed" state is rendered with
-  // a slightly muted pill — a preview that the next request will route via
-  // the user's key. See ModelIndicator for the visual distinction.
-  const byokActive = useAgentStore(s => s.byokActive)
+  // Thinking + BYOK state — both via shared hooks (eliminates the 5-site
+  // duplication that previously drifted: see hooks/useByokState.ts +
+  // hooks/useThinkingToggle.ts). The hooks subscribe to the same stores
+  // we used to read here inline; behaviour is identical, the wiring is
+  // not the source-of-truth anymore.
+  const {
+    toggleable: thinkingSupported,
+    enabled: thinkingEnabled,
+    setEnabled: setThinkingEnabled,
+  } = useThinkingToggle()
+  const { byokInPlay: showModelIndicator } = useByokState()
   // Last terminal error from the agent loop. The ServiceError thrown for 402
   // (NO_CREDITS), 429 (BUDGET_EXHAUSTED / RATE_LIMIT), 5xx, AUTH_EXPIRED, etc.
   // lands here via onError. Status pins to 'error' until the next turn flips
@@ -65,30 +62,29 @@ function ChatView() {
   // the error state.
   const agentStatus = useAgentStore(s => s.status)
   const agentError = useAgentStore(s => s.error)
-  const byokEnabled = useByokStore(s => s.enabled)
-  const byokActiveProvider = useByokStore(s => s.activeProvider)
-  const byokActiveModel = useByokStore(s => s.activeModel)
-  const fallbackProfile = getProfileForPlan(billingPlan)
-  const effectiveMode = backendThinkingMode
-    ?? (fallbackProfile.supportsThinking
-        ? (fallbackProfile.thinkingMode === 'mandatory' ? 'mandatory' : 'toggleable')
-        : 'none')
-  const thinkingSupported = effectiveMode === 'toggleable'
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
   const streamingVersion = useChatStore(s => s.streamingVersion)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
-  const messages = session?.messages || []
+  const rawMessages = session?.messages || []
+  // claude-vaz parity: when the agent compresses the conversation, hide
+  // every message above the most recent compact_boundary marker. The pre-
+  // compression history stays in storage (so session export and re-open
+  // still see it) but the transcript shows only the boundary marker plus
+  // anything that came after. Tracks the LAST boundary (not the first) so
+  // repeated compressions over a long-lived session keep collapsing.
+  const messages = (() => {
+    let lastBoundary = -1
+    for (let i = rawMessages.length - 1; i >= 0; i--) {
+      if (rawMessages[i].role === 'system' && rawMessages[i].kind === 'compact_boundary') {
+        lastBoundary = i
+        break
+      }
+    }
+    return lastBoundary === -1 ? rawMessages : rawMessages.slice(lastBoundary)
+  })()
   const projectPath = currentProject?.path || ''
-
-  // BYOK indicator gating: show ModelIndicator if either (a) the active session
-  // was created with a BYOK snapshot, or (b) BYOK is currently configured
-  // globally and would route the next request. Mirrors the agentService logic.
-  const sessionByokSnapshot = session?.byokSnapshot ?? null
-  const byokConfigured = sessionByokSnapshot !== null
-    || (byokEnabled && byokActiveProvider !== null && byokActiveModel !== null)
-  const showModelIndicator = byokActive || byokConfigured
 
 // use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
   // streaming content, expanding diffs, and dynamic height changes.
@@ -198,6 +194,7 @@ function ChatView() {
 
         {/* Credits + Isolation + MCP indicators */}
         <HStack gap={1.5}>
+          <ContextWindowIndicator />
           {/* Thinking toggle — only for paid plans */}
           {thinkingSupported && (
             <Flex
@@ -447,6 +444,7 @@ function ChatView() {
                 mx="auto"
                 w="100%"
                 py={4}
+                data-selectable="true"
               >
                 {messages.map(msg => (
                   <MessageBubble

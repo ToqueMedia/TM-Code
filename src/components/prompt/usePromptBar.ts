@@ -19,6 +19,9 @@ import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenSe
 import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
 import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
 import { useHashtagMenu } from './useHashtagMenu'
+import { guardScaffoldReapply } from './scaffoldReapplyGuard'
+import { scaffoldKeyLabel, type ScaffoldKey } from '../../services/scaffoldingDetector'
+import { t } from '@/i18n'
 import { runAuthFlow, runDesignFlow } from '../../services/agent/commands/authCommand'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../../services/attachmentService'
 import {
@@ -38,6 +41,23 @@ import {
 import { getQueryGuard } from '../../services/agent/queryGuard'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
+
+/**
+ * ServiceError codes that mean "transient upstream / network problem the user
+ * can recover from by re-sending Continue". When `agentService.runAgentLoop`
+ * fires onError with one of these, we add a recovery-hint system message to
+ * the transcript so the user knows what to do — and so the hint persists
+ * across reloads (chat-store messages are sanitized + saved).
+ *
+ * Pure code-based detection — no string matching. New error sources should
+ * extend this set rather than reach for a regex on the human message.
+ */
+const RECOVERABLE_UPSTREAM_CODES = new Set<string>([
+  'SERVER_ERROR',     // 5xx from worker / cloud BYOK
+  'NETWORK_ERROR',    // fetch retry exhausted
+  'BYOK_LOCAL_ERROR', // local provider (Ollama / LM Studio) unreachable
+  'STREAM_ERROR',     // SSE error event mid-turn
+])
 
 /**
  * Detect the dev command for a project by checking manifest and package.json.
@@ -160,15 +180,45 @@ export function usePromptBar() {
     // package.json with a "dev" script during scaffolding.
   }, [currentProject?.path, isAgentBusy])
 
-  // Auto-resize textarea (runs on every input change AND on mount so the
-  // preview PromptBar gets the correct height when it mounts with existing text)
+  // ── Already-applied scaffolding hints ─────────────────────────────
+  // Powers the "já aplicado" badge in HashtagMenu / SlashCommandMenu and
+  // the smart-router branch in handleSend below. Re-runs on project change
+  // and on agent-idle transitions (an agent turn may have just provisioned
+  // auth or scaffolded /payments). The detector caches per-projectPath so
+  // multiple subscribers don't re-scan the filesystem.
+  const [appliedHints, setAppliedHints] = useState<Map<string, string>>(new Map())
+  useEffect(() => {
+    if (!currentProject?.path) {
+      setAppliedHints(new Map())
+      return
+    }
+    let cancelled = false
+    Promise.all([
+      import('../../services/scaffoldingDetector'),
+    ]).then(async ([{ detectScaffolding, scaffoldFixHint, scaffoldUITrigger }]) => {
+      const state = await detectScaffolding(currentProject.path)
+      if (cancelled) return
+      const next = new Map<string, string>()
+      for (const key of state.applied) {
+        next.set(scaffoldUITrigger(key), scaffoldFixHint(key))
+      }
+      setAppliedHints(next)
+    }).catch(() => { /* non-critical — UI just shows no hints */ })
+    return () => { cancelled = true }
+  }, [currentProject?.path, isAgentBusy])
+
+  // Auto-resize textarea on input change (and on mount, since `input` is in
+  // the initial render). Previously this had no deps array and ran on every
+  // render — including renders triggered by unrelated store updates — which
+  // measured scrollHeight repeatedly for no reason and contributed to the
+  // editing jitter the textarea overlay design is sensitive to.
   useEffect(() => {
     const textarea = textareaRef.current
     if (!textarea) return
     textarea.style.height = 'auto'
     const maxHeight = 6 * 24
     textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`
-  })
+  }, [input, textareaRef])
 
   // Preserve focus across view switches (e.g. chat → preview).
   // When the PromptBar remounts with draft text, the user was typing — refocus.
@@ -527,7 +577,9 @@ export function usePromptBar() {
       const blocks = typeof content === 'string' ? undefined : content
       chatStore.addUserMessage(display.text, display.attachments, blocks)
     }
-    chatStore.startAssistantMessage()
+    chatStore.startAssistantMessage(
+      AgentService.getInstance().isThinkingRequestedForNextTurn(),
+    )
     agentStore.setStatus('awaiting_response')
 
     // Split on model capability. Vision-capable models (Qwen 3.6 Plus
@@ -595,7 +647,12 @@ export function usePromptBar() {
         serverName: t.serverName,
       }))
       const coreToolCount = ToolExecutor.getInstance().getCoreToolCount()
-      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount)
+      // Pass the raw user text so contextBuilder can detect skill-trigger
+      // hashtags (#auth-google, #design, etc.) and inline the corresponding
+      // CRITICAL skill rules at turn 1 — before scaffoldingDetector has any
+      // filesystem markers to find.
+      const userMessageText = display.text
+      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText)
 
       const rawHistory = useChatStore.getState().conversationHistory
       // The history is canonical (carries content parts when previous
@@ -665,7 +722,11 @@ export function usePromptBar() {
               projectKind = categoryToServerHint(cat)
             } catch { /* non-fatal */ }
             try {
-              await devServerManager.start(currentProject.path, devCommand, { projectKind })
+              const { resolveFrontendPortHint } = await import('../../services/templateService')
+              const frontendPortHint = projectKind
+                ? await resolveFrontendPortHint(currentProject.path, projectKind)
+                : undefined
+              await devServerManager.start(currentProject.path, devCommand, { projectKind, frontendPortHint })
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err)
               layoutStore.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
@@ -679,29 +740,41 @@ export function usePromptBar() {
           agentStore.setError(error.message)
           useChatStore.getState().finalizeAssistantMessage()
           hadError = true
+
+          // Surface a "what happened + how to recover" system message for the
+          // error classes that the user can recover from by re-running the
+          // same prompt or sending "Continue". All onError callers in
+          // agentService.ts now throw ServiceError with a known `code` —
+          // no regex / string-matching here. If a new code needs the same
+          // UX, add it to RECOVERABLE_UPSTREAM_CODES at the top of this file
+          // and the surface message picks it up.
+          const errorCode = (error as { code?: string }).code ?? 'UNKNOWN_ERROR'
+          if (RECOVERABLE_UPSTREAM_CODES.has(errorCode)) {
+            useChatStore.getState().addSystemMessage(
+              t('chat.recoverableUpstreamError'),
+              'error',
+            )
+          }
         },
         onUsageUpdate: (inputTokens, outputTokens) => {
           useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
         },
         onContextCompression: (beforeTokens, signal) => {
           if (signal === 0) {
-            // Compression starting — visible status + system message keep
-            // the user informed that the verbatim history is being summarized.
+            // Compression starting — AgentActivityIndicator already renders
+            // the 'compressing' status with its own animated row, so we no
+            // longer push a persistent system message that would linger in
+            // the transcript after compression finished.
             agentStore.setStatus('compressing')
-            useChatStore.getState().addSystemMessage(
-              `Comprimindo contexto (${Math.round(beforeTokens / 1000)}K tokens)...`,
-              'info',
-            )
           } else if (signal === -1) {
-            // Compression complete. Emit a claude-vaz-style boundary marker so
-            // the user has a visible checkpoint in the conversation, plus a
-            // note that invoked skills were re-injected (the model recovers
-            // its CRITICAL rules from skillService's invokedSkills map).
+            // Compression complete. The boundary action drops a single
+            // claude-vaz-style marker AND folds the pre-compression history
+            // out of the visible transcript (ChatView slices on the latest
+            // boundary). It also zeroes `totalTokensUsed.input` so the
+            // ContextWindowIndicator releases the pre-compression peak that
+            // `addTokenUsage`'s Math.max had been holding.
             agentStore.setStatus('awaiting_response')
-            useChatStore.getState().addSystemMessage(
-              `✻ Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens). Skills invocados re-injectados — o agente continua com regras CRITICAL intactas.`,
-              'info',
-            )
+            useChatStore.getState().addCompactBoundaryMessage(beforeTokens)
           }
         },
       })
@@ -747,49 +820,14 @@ export function usePromptBar() {
     setShowCommandMenu(false)
     hashtagMenu.close()
 
-    // === Hashtag-driven flows: detect skill triggers (e.g. #auth-google,
-    // #design) and route to the specialised flow. Replaces the legacy /auth
-    // slash command. Free-form `#tags` not in the registry are ignored and
-    // pass through to the agent untouched. ===
-    const pre = preprocessHashtags(prompt)
-    if (pre.authProviders.length > 0 || pre.hasDesign) {
-      const projectPath = currentProject?.path
-      if (!projectPath) {
-        useChatStore.getState().setDraftInput('')
-        clearDraftAttachments()
-        useChatStore.getState().addSystemMessage('No project open. Open a project first.')
-        return
-      }
-
-      useChatStore.getState().setDraftInput('')
-      clearDraftAttachments()
-
-      const layout = useLayoutStore.getState()
-      if (layout.viewMode !== 'chat') {
-        layout.setViewMode('chat')
-      }
-
-      // The chat bubble shows the cleaned text (hashtags stripped — they're
-      // routing signals, not content). When the cleaned text is empty (user
-      // typed only the tag), synthesise a short label so the bubble isn't
-      // empty.
-      const labels = [
-        ...pre.authProviders.map(p => p === 'google' ? 'Google sign-in' : 'email/password sign-in'),
-        ...(pre.hasDesign ? ['polished UI'] : []),
-      ]
-      const bubbleText = pre.cleanedText || `Add ${labels.join(' and ')}`
-
-      if (pre.authProviders.length > 0) {
-        // Auth flow handles design augmentation when both are requested.
-        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign)
-      } else {
-        // Design-only flow: lightweight skill injection, no execution sequence.
-        await runDesignFlow(pre.cleanedText, bubbleText)
-      }
-      return
-    }
-
     // === Slash commands: execute directly (never queued) ===
+    // Slash commands take precedence over hashtag flows. A prompt that
+    // STARTS with `/plan ...` is, by construction, asking the architect
+    // command to run — even if the user mentions `#auth-google` inside the
+    // idea ("a platform with #auth-google sign-in"). Without this order,
+    // preprocessHashtags would consume the tag, route to runAuthFlow, and
+    // the /plan command never executes. The hashtag is part of the
+    // architectural description; the architect can address auth in PLAN.md.
     if (slashCommandRegistry.isSlashCommand(prompt)) {
       const command = slashCommandRegistry.getCommand(prompt)
       if (!command) return
@@ -825,6 +863,22 @@ export function usePromptBar() {
         return
       }
 
+      // Smart router for /payments: if MoMenu Payments markers are already
+      // in the project, block the re-scaffold with explanatory message.
+      // Same rationale as the auth-hashtag router below — the slash command
+      // is for first-time integration; subsequent fixes go through verbal
+      // requests so the agent (which sees the appliedScaffolding system-
+      // prompt section) routes to fix-mode rather than re-running fetches.
+      if (command.name === '/payments') {
+        const { blocked } = await guardScaffoldReapply(
+          projectPath,
+          ['payments.momenu'],
+          () => buildPaymentsReapplyMessage(),
+          () => { useChatStore.getState().setDraftInput(''); clearDraftAttachments() },
+        )
+        if (blocked) return
+      }
+
       useChatStore.getState().setDraftInput('')
       clearDraftAttachments()
 
@@ -835,7 +889,75 @@ export function usePromptBar() {
       }
 
       const args = slashCommandRegistry.getArgs(prompt)
-      await command.execute(args, projectPath)
+      // 'chat' = platform-bound surface. /plan branches on this to inject
+      // the data-layer / Dockerfile / APP_ID-fallback invariants into the
+      // architect's system prompt so the PLAN.md it produces is shaped
+      // for the TM Code Publish pipeline (no Prisma/SQLite, firebase-admin
+      // baseline, Dockerfile + backend in the same scaffold turn).
+      await command.execute(args, projectPath, 'chat')
+      return
+    }
+
+    // === Hashtag-driven flows: detect skill triggers (e.g. #auth-google,
+    // #design) and route to the specialised flow. Replaces the legacy /auth
+    // slash command. Free-form `#tags` not in the registry are ignored and
+    // pass through to the agent untouched.
+    //
+    // Runs AFTER the slash-command check so a prompt like
+    // `/plan ... with #auth-google ...` doesn't have the hashtag stripped
+    // out from under /plan — slash commands own the dispatch in that case.
+    const pre = preprocessHashtags(prompt)
+    if (pre.authProviders.length > 0 || pre.hasDesign) {
+      const projectPath = currentProject?.path
+      if (!projectPath) {
+        useChatStore.getState().setDraftInput('')
+        clearDraftAttachments()
+        useChatStore.getState().addSystemMessage('No project open. Open a project first.')
+        return
+      }
+
+      useChatStore.getState().setDraftInput('')
+      clearDraftAttachments()
+
+      const layout = useLayoutStore.getState()
+      if (layout.viewMode !== 'chat') {
+        layout.setViewMode('chat')
+      }
+
+      // Smart router: if any requested auth provider is already applied,
+      // block the re-scaffold flow with an explanatory system message. The
+      // hashtag is for FIRST-TIME provisioning; for fixing the existing
+      // implementation the user should phrase verbally ("Corrige o login
+      // com Google"). The agent then sees the `# Already-applied
+      // scaffolding` system-prompt section and routes to fix-mode.
+      if (pre.authProviders.length > 0) {
+        const requestedKeys: import('../../services/scaffoldingDetector').ScaffoldKey[] =
+          pre.authProviders.map(p => `auth.${p}` as const)
+        const { blocked } = await guardScaffoldReapply(
+          projectPath,
+          requestedKeys,
+          (applied) => buildAuthReapplyMessage(applied),
+          () => { useChatStore.getState().setDraftInput(''); clearDraftAttachments() },
+        )
+        if (blocked) return
+      }
+
+      // Preserve hashtags in the visible message and the persisted history.
+      // The hashtag is still useful AFTER it routes — it documents the user's
+      // intent for anyone reading the session later (debug exports, sharing
+      // a repro, scrolling back), and it's what they actually typed. The
+      // skill content is force-loaded via runAuthFlow regardless of what
+      // appears in the bubble, so stripping the tag here used to delete
+      // signal for no behavioural gain.
+      const bubbleText = prompt
+
+      if (pre.authProviders.length > 0) {
+        // Auth flow handles design augmentation when both are requested.
+        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign)
+      } else {
+        // Design-only flow: lightweight skill injection, no execution sequence.
+        await runDesignFlow(pre.cleanedText, bubbleText)
+      }
       return
     }
 
@@ -1152,7 +1274,11 @@ export function usePromptBar() {
         projectKind = categoryToServerHint(cat)
       } catch { /* non-fatal — fall through with undefined, start() defaults to frontend */ }
       try {
-        await devServerManager.start(currentProject.path, cmd, { projectKind })
+        const { resolveFrontendPortHint } = await import('../../services/templateService')
+        const frontendPortHint = projectKind
+          ? await resolveFrontendPortHint(currentProject.path, projectKind)
+          : undefined
+        await devServerManager.start(currentProject.path, cmd, { projectKind, frontendPortHint })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         layout.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
@@ -1192,6 +1318,10 @@ export function usePromptBar() {
     handleMentionSelect,
     // #hashtag menu — shared hook (state + handlers)
     hashtagMenu,
+    // Already-applied scaffolding hints — drives the "já aplicado" badge in
+    // both the hashtag and slash menus. Map keyed by tag (`#auth-google`)
+    // or command name (`/payments`); value is the recommended fix phrasing.
+    appliedHints,
     // Attachments
     draftAttachments,
     handleAttachFiles,
@@ -1203,4 +1333,24 @@ export function usePromptBar() {
     handleRemoveAttachment,
     isDragging,
   }
+}
+
+// ── Scaffold-reapply system messages ──────────────────────────────────
+//
+// Pure builders. Kept module-scope (not inside the hook) so they don't
+// re-allocate per render. Wording is i18n-resolved at call time so the
+// developer's IDE language drives the output.
+
+function buildAuthReapplyMessage(applied: ScaffoldKey[]): string {
+  const labels = applied.map(scaffoldKeyLabel).join(' + ')
+  const fixHint = applied.includes('auth.google')
+    ? t('scaffold.message.authFixHintGoogle')
+    : t('scaffold.message.authFixHintEmail')
+  return t('scaffold.message.authReapply')
+    .replace('{labels}', labels)
+    .replace('{fixHint}', fixHint)
+}
+
+function buildPaymentsReapplyMessage(): string {
+  return t('scaffold.message.paymentsReapply')
 }

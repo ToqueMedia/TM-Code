@@ -30,7 +30,11 @@ export default function ModelIndicator() {
 
   // Local configured state — what BYOK WOULD route through if a request
   // were sent now. Honour the active session's snapshot first, then fall
-  // back to the global byokStore selection (matches agentService logic).
+  // back to the global byokStore selection. Other call-sites (AgentStatusBar,
+  // TerminalTitleBar, ChatView, agentService) consume the equivalent gate
+  // via the `useByokState()` hook — this one keeps the inline computation
+  // because it also needs the provider/model IDs to render the pill, not
+  // just the boolean.
   const activeSession = useChatStore(s => s.activeSessionId ? s.sessions.get(s.activeSessionId) ?? null : null)
   const sessionSnapshot = activeSession?.byokSnapshot ?? null
   const enabled = useByokStore(s => s.enabled)

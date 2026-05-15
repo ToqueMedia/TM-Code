@@ -4,6 +4,7 @@ import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService, captureByokSnapshot } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
 import { useCheckpointStore } from './checkpointStore'
+import { useAgentStore } from './agentStore'
 import { usePermissionStore } from './permissionStore'
 import { useToastStore } from './toastStore'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
@@ -23,7 +24,42 @@ interface ChatState {
   error: string | null
   conversationHistory: ConversationMessage[]
   currentTurnCount: number
+  /**
+   * Token counters for the current user message (reset on addUserMessage,
+   * persisted as accumulators across the agent's tool-loop turns within the
+   * same message).
+   *
+   *   `input`  — SUMMED across turns. Each turn's prompt re-sends the full
+   *              conversation history, so this number represents the TOTAL
+   *              wire cost of the user-message-driven agent loop. Useful for
+   *              the activity-indicator "↑ Nk" display and rough cost vibe.
+   *
+   *   `output` — SUMMED across turns. Each turn emits net-new tokens; the
+   *              cumulative count is the total generation cost.
+   *
+   * NOT the right field for the context-window-pressure pill — that uses
+   * `currentPromptTokens` below (last turn's input, NOT the cumulative).
+   * The two semantics were conflated in earlier versions; conflation meant
+   * the activity counter stayed stuck at the per-turn max instead of growing
+   * with each tool-loop turn.
+   */
   totalTokensUsed: { input: number; output: number }
+  /**
+   * Last turn's prompt size, replaced (not summed) on every addTokenUsage.
+   * Represents the amount of context actually sent over the wire on the most
+   * recent API call — the natural denominator for the context-window pill's
+   * "X% full" calculation. Reset to 0 on new user message and on compaction
+   * boundary so the pill reflects the fresh post-compression state.
+   */
+  currentPromptTokens: number
+  /**
+   * Last turn's response (output) tokens — replaced per call, mirror of
+   * `currentPromptTokens`. The context window holds BOTH input AND output;
+   * the pill computes pressure as `(input + output) / window` so long
+   * reasoning/answer generations are reflected. Reset alongside
+   * `currentPromptTokens`.
+   */
+  currentResponseTokens: number
   /** Timestamp (ms) when the current agent loop started. Used for elapsed time display. */
   agentStartTime: number | null
   pendingDiffs: DiffResult[]
@@ -45,7 +81,35 @@ interface ChatActions {
    *   (not: user_msg → assistant_response → queued_user_msg)
    */
   insertUserMessageBeforeAssistant: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
-  addSystemMessage: (content: string, level?: SystemMessageLevel) => void
+  /**
+   * Atomically split the streaming assistant message for a dispatched queue
+   * message: finalises the current assistant bubble, appends the user message
+   * AT THE END (where the user is reading), and starts a fresh streaming
+   * assistant — subsequent text deltas/tool calls go into the new bubble.
+   *
+   * Why this exists separately from insertUserMessageBeforeAssistant: when a
+   * queued message dispatches mid-stream, the previous strategy was to insert
+   * the user bubble ABOVE the streaming assistant. Visually correct in array
+   * order, but the user's viewport is locked to the bottom by stick-to-bottom
+   * scrolling — the new bubble materialises hundreds of lines up and the user
+   * never sees it. They report "the message disappeared". By splitting and
+   * appending, the queued exchange (user → new assistant) lands at the
+   * scroll position the user is actually watching.
+   *
+   * Returns the new streaming assistant message id so the caller can verify
+   * the split landed.
+   */
+  splitForQueuedMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
+  addSystemMessage: (content: string, level?: SystemMessageLevel, options?: { ephemeral?: boolean; timeoutMs?: number }) => void
+  /**
+   * Records a context-compression boundary. The marker renders as a
+   * claude-vaz-style horizontal rule; ChatView hides every message above the
+   * latest boundary so the visible transcript fits in the model's
+   * post-compression view. Also resets `totalTokensUsed.input` so the
+   * ContextWindowIndicator no longer pins to the pre-compression peak that
+   * `addTokenUsage` had cached via `Math.max`.
+   */
+  addCompactBoundaryMessage: (beforeTokens: number) => void
   /**
    * Re-capture the current BYOK selection (provider/model/baseURL/caps)
    * from byokStore and store it as the active session's byokSnapshot.
@@ -54,7 +118,17 @@ interface ChatActions {
    * No-op if no active session, or if the snapshot is unchanged.
    */
   syncByokSnapshot: () => void
-  startAssistantMessage: () => string
+  /**
+   * Create an empty assistant message in the active session and return its
+   * id. `thinkingRequested` should reflect whether the upcoming turn was
+   * invoked with reasoning on (forced by /plan, /debug, /review, /te2e, or
+   * the user toggle on a non-BYOK path). MessageBubble gates reasoning
+   * block rendering on this flag — when the model emits reasoning anyway
+   * (some BYOK reasoning models always do), the UI suppresses it.
+   * Undefined preserves legacy behaviour (always render reasoning if
+   * present), so older sessions don't change.
+   */
+  startAssistantMessage: (thinkingRequested?: boolean) => string
   finalizeAssistantMessage: () => void
   addCodeBlockToMessage: (messageId: string, block: CodeBlock) => void
   updateCodeBlockStatus: (messageId: string, blockId: string, status: 'applied' | 'rejected') => void
@@ -66,8 +140,15 @@ interface ChatActions {
   // Streaming actions
   appendTextDelta: (delta: string) => void
   appendReasoningDelta: (delta: string) => void
-  // Reasoning toggle
+  // Reasoning toggle (message-level — legacy / fallback for messages
+  // without per-block visibility metadata)
   toggleReasoning: (messageId: string) => void
+  // Reasoning toggle for ONE specific reasoning block within a message.
+  // The bug this fixes: prior to per-block state, `toggleReasoning` flipped
+  // a single message-level flag and every reasoning block in that message
+  // shared it — expanding one expanded all. blockIdx is the position of the
+  // reasoning block inside `message.contentBlocks`.
+  toggleReasoningBlock: (messageId: string, blockIdx: number) => void
   // Tool call actions (pending -> start -> result)
   addPendingToolCall: (toolId: string, toolName: string, spawnedBy?: string, targetMessageId?: string) => void
   updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>, targetMessageId?: string) => void
@@ -127,6 +208,11 @@ interface ChatActions {
   /** Mark a credential_request card as submitted and record which keys were saved (no values). */
   markCredentialRequestSubmitted: (messageId: string, submittedKeys: string[]) => void
   updateCardStatus: (messageId: string, status: ChatMessageCard['status']) => void
+  /** Remove a message from the active session by id. Used by credential cards
+   *  to delete themselves from the transcript after the user accepts or cancels —
+   *  the card is a transient UI element, not a permanent log entry, and stacking
+   *  several at the end of the chat displaces the actual conversation flow. */
+  removeMessage: (messageId: string) => void
 }
 
 let idCounter = 0
@@ -658,6 +744,23 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     output: get().totalTokensUsed.output,
     turns: get().currentTurnCount,
   }))
+  // Snapshot of the most recent on-wire turn — persisted so the context
+  // window indicator survives a session reload (without it, every reopen
+  // flashes the bar to 0% until the next turn handshake repopulates the
+  // live state).
+  sessionService.setTurnSnapshotGetter(() => {
+    const c = get()
+    const a = useAgentStore.getState()
+    if (c.currentPromptTokens === 0 && c.currentResponseTokens === 0 && a.modelContextWindow == null) {
+      return null
+    }
+    return {
+      promptTokens: c.currentPromptTokens,
+      responseTokens: c.currentResponseTokens,
+      contextWindow: a.modelContextWindow,
+      modelName: a.modelName,
+    }
+  })
 
   return {
     sessions: new Map(),
@@ -670,6 +773,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     conversationHistory: [],
     currentTurnCount: 0,
     totalTokensUsed: { input: 0, output: 0 },
+    currentPromptTokens: 0,
+          currentResponseTokens: 0,
     agentStartTime: restoreAgentStartTime(),
     pendingDiffs: [],
     draftInput: '',
@@ -712,6 +817,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           conversationHistory: [],
           currentTurnCount: 0,
           totalTokensUsed: { input: 0, output: 0 },
+          currentPromptTokens: 0,
+          currentResponseTokens: 0,
         }
       })
 
@@ -770,7 +877,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const updatedSessions = new Map(sessions)
         updatedSessions.set(activeSessionId, updatedSession)
 
-        return { sessions: updatedSessions }
+        // Reset both counters inside the same `set` so the indicators flip
+        // to "hidden" on the very same render that draws the new user
+        // bubble (no momentary stale flash carried over from the previous
+        // turn). One source of truth for "a new user message starts a
+        // fresh token budget for the UI" — covers chat-mode AND slash
+        // command paths.
+        return {
+          sessions: updatedSessions,
+          totalTokensUsed: { input: 0, output: 0 },
+          currentPromptTokens: 0,
+          currentResponseTokens: 0,
+        }
       })
 
       debouncedSave()
@@ -822,14 +940,92 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       return messageId
     },
 
-    addSystemMessage: (content: string, level?: SystemMessageLevel) => {
+    splitForQueuedMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => {
+      // Drain pending text/reasoning deltas to the OLD message before we
+      // change streamingMessageId — otherwise late buffered chunks would
+      // bleed into the new bubble.
+      flushBufferedDeltas()
+
+      const userMessageId = generateId('msg')
+      const userMessage: ChatMessage = {
+        id: userMessageId,
+        role: 'user',
+        content,
+        timestamp: Date.now(),
+        attachments: attachments?.length ? attachments : undefined,
+        promptBlocks: promptBlocks?.length ? promptBlocks : undefined,
+      }
+
+      const newAssistantId = generateId('msg')
+      const newAssistant: ChatMessage = {
+        id: newAssistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: Date.now(),
+        codeBlocks: [],
+        toolCalls: [],
+        contentBlocks: [],
+        isStreaming: true,
+      }
+
+      set(state => {
+        const { activeSessionId, streamingMessageId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        // Finalise the current streaming assistant in place — same shape
+        // as finalizeAssistantMessage but without resetting streaming state
+        // (we are about to start streaming again into newAssistant).
+        const messages = session.messages.map(msg => {
+          if (msg.id !== streamingMessageId) return msg
+          const reasoningDurationMs = msg.reasoningStartedAt && !msg.reasoningDurationMs
+            ? Date.now() - msg.reasoningStartedAt
+            : msg.reasoningDurationMs
+          return {
+            ...msg,
+            isStreaming: false,
+            isReasoningVisible: false,
+            ...(reasoningDurationMs !== undefined && { reasoningDurationMs }),
+          }
+        })
+
+        // Append user message + new streaming assistant at the end.
+        messages.push(userMessage, newAssistant)
+
+        const updatedSession: ChatSession = {
+          ...session,
+          messages,
+          status: 'running',
+          updatedAt: Date.now(),
+        }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, updatedSession)
+
+        return {
+          sessions: updatedSessions,
+          // isStreaming stays true — the agent loop is still active and will
+          // emit deltas into newAssistantId starting next turn.
+          streamingMessageId: newAssistantId,
+        }
+      })
+
+      debouncedSave()
+      return newAssistantId
+    },
+
+    addSystemMessage: (content: string, level?: SystemMessageLevel, options?: { ephemeral?: boolean; timeoutMs?: number }) => {
       const messageId = generateId('msg')
+      const ephemeral = options?.ephemeral === true
       const message: ChatMessage = {
         id: messageId,
         role: 'system',
         content,
         timestamp: Date.now(),
         ...(level && { level }),
+        ...(ephemeral && { ephemeral: true }),
       }
 
       set(state => {
@@ -849,6 +1045,72 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         updatedSessions.set(activeSessionId, updatedSession)
 
         return { sessions: updatedSessions }
+      })
+
+      // Ephemeral messages auto-remove after a short delay. Default 8s gives
+      // the user time to read the line before it scrolls + fades. Callers can
+      // override via `timeoutMs` for messages that need longer dwell.
+      // Note: removeMessage is a no-op if the user already navigated to a
+      // different session — safe to fire-and-forget.
+      if (ephemeral) {
+        const ms = options?.timeoutMs ?? 8000
+        setTimeout(() => {
+          // Use getState() so the timer fires against whatever the store is
+          // at that moment, not a stale closure over the addSystemMessage time.
+          useChatStore.getState().removeMessage(messageId)
+        }, ms)
+      }
+    },
+
+    addCompactBoundaryMessage: (beforeTokens: number) => {
+      const messageId = generateId('msg')
+      const message: ChatMessage = {
+        id: messageId,
+        role: 'system',
+        kind: 'compact_boundary',
+        compactBeforeTokens: beforeTokens,
+        level: 'info',
+        // content is the fallback label for code paths that still rely on
+        // `message.content` (export-to-markdown, session-to-text); the
+        // bubble itself reads `kind` to render the dedicated UI.
+        content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens). Skills invocados re-injectados — o agente continua com regras CRITICAL intactas.`,
+        timestamp: Date.now(),
+      }
+
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) {
+          // No active session: still zero out the counter so the indicator
+          // doesn't stay pinned at the pre-compression peak in stray UI.
+          return { totalTokensUsed: { input: 0, output: state.totalTokensUsed.output }, currentPromptTokens: 0, currentResponseTokens: 0 }
+        }
+
+        const session = sessions.get(activeSessionId)
+        if (!session) {
+          return { totalTokensUsed: { input: 0, output: state.totalTokensUsed.output }, currentPromptTokens: 0, currentResponseTokens: 0 }
+        }
+
+        const updatedSession: ChatSession = {
+          ...session,
+          messages: [...session.messages, message],
+          updatedAt: Date.now(),
+        }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, updatedSession)
+
+        return {
+          sessions: updatedSessions,
+          // Reset only the input counter: `addTokenUsage` uses Math.max for
+          // input (max-across-turns), which after compression keeps the
+          // pre-compression peak. Zeroing it lets the next turn's reported
+          // promptTokens replace the value cleanly and the indicator hides
+          // until that next turn lands (per ContextWindowIndicator's
+          // `inputTokens <= 0` early-return).
+          totalTokensUsed: { input: 0, output: state.totalTokensUsed.output },
+          currentPromptTokens: 0,
+          currentResponseTokens: 0,
+        }
       })
     },
 
@@ -884,7 +1146,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       debouncedSave()
     },
 
-    startAssistantMessage: () => {
+    startAssistantMessage: (thinkingRequested) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
@@ -895,6 +1157,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         toolCalls: [],
         contentBlocks: [],
         isStreaming: true,
+        ...(thinkingRequested !== undefined && { thinkingRequested }),
       }
 
       set(state => {
@@ -1032,6 +1295,40 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const messages = session.messages.map(msg => {
           if (msg.id !== messageId) return msg
           return { ...msg, isReasoningVisible: !msg.isReasoningVisible }
+        })
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages })
+
+        return { sessions: updatedSessions }
+      })
+    },
+
+    toggleReasoningBlock: (messageId: string, blockIdx: number) => {
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const messages = session.messages.map(msg => {
+          if (msg.id !== messageId) return msg
+          const blocks = msg.contentBlocks
+          if (!blocks || blockIdx < 0 || blockIdx >= blocks.length) return msg
+          const target = blocks[blockIdx]
+          if (target.type !== 'reasoning') return msg
+          // First toggle on a block without explicit state inherits the
+          // current message-level flag, then flips. That way the first
+          // click on any block matches what the user was seeing (collapsed
+          // by default, or expanded if isReasoningVisible was true).
+          const currentVisible = target.isVisible ?? !!msg.isReasoningVisible
+          const newBlocks = blocks.map((b, i) =>
+            i === blockIdx && b.type === 'reasoning'
+              ? { ...b, isVisible: !currentVisible }
+              : b
+          )
+          return { ...msg, contentBlocks: newBlocks }
         })
 
         const updatedSessions = new Map(sessions)
@@ -1639,6 +1936,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           conversationHistory: [],
           currentTurnCount: 0,
           totalTokensUsed: { input: 0, output: 0 },
+          currentPromptTokens: 0,
+          currentResponseTokens: 0,
         }
       })
       // Mark dirty so the cleared state is persisted
@@ -1654,21 +1953,53 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     addTokenUsage: (input: number, output: number) => {
-      // Input is REPLACED, not summed — each turn's prompt re-sends the full
-      // conversation, so summing per-turn inputs double-counts massively
-      // (turn 50's prompt already contains turns 1-49). The latest turn's
-      // input represents the current context size, which is the meaningful
-      // metric. Output is summed because each turn emits NEW tokens.
+      // Two concerns, two destinations (formerly conflated into one field):
+      //
+      //   totalTokensUsed: cumulative WIRE COST across the turns of the
+      //     current user message. Both input and output SUMMED — yes input
+      //     too: each turn's prompt re-sends the prior turns, so the wire
+      //     literally carried that many tokens. This is what the activity
+      //     indicator shows ("↑ Nk · Mk") and matches the user's intuition
+      //     that "total tokens used" should grow as the agent works.
+      //
+      //   currentPromptTokens: REPLACED on every call — represents the size
+      //     of the most recent prompt sent. This is the natural denominator
+      //     for the context-window pressure pill (X% of 200K). NOT
+      //     interesting for "total cost" — that's the cumulative above.
+      //
+      // The conflation in the earlier "input = max-across-turns" version
+      // gave WRONG numbers to both consumers: the activity indicator got a
+      // value that didn't grow turn-by-turn ("não soma" was the user's
+      // complaint), and the window-pressure pill was technically right but
+      // for the wrong reason (max happened to coincide with last because
+      // prompts only grow). Splitting the fields makes each consumer use
+      // the value that matches its meaning.
+      // Anti-overwrite guard. Anthropic streaming sends usage info twice
+      // per turn: `message_start` carries the real input_tokens; the final
+      // `message_delta` carries the output_tokens AND — depending on
+      // upstream — either echoes input_tokens or sends 0 for it. Letting
+      // the 0 win produces the visible "pill bounces up/down" symptom:
+      // pill at 35% during the turn → drops to ~response/window at delta →
+      // climbs back next turn. Claude Code documents this exact behaviour
+      // (services/api/claude.ts:2918-2922 in claude-vaz) and applies the
+      // same > 0 guard. Output is always a fresh per-turn value, so it
+      // overwrites unconditionally.
       set(state => ({
         totalTokensUsed: {
-          input: Math.max(state.totalTokensUsed.input, input),
+          input: state.totalTokensUsed.input + input,
           output: state.totalTokensUsed.output + output,
-        }
+        },
+        currentPromptTokens: input > 0 ? input : state.currentPromptTokens,
+        currentResponseTokens: output,
       }))
     },
 
     resetTokenUsage: () => {
-      set({ totalTokensUsed: { input: 0, output: 0 } })
+      set({
+        totalTokensUsed: { input: 0, output: 0 },
+        currentPromptTokens: 0,
+        currentResponseTokens: 0,
+      })
     },
 
     // === Diff actions ===
@@ -1798,6 +2129,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         await CheckpointService.getInstance().initSession(projectPath, sessionId)
         useCheckpointStore.getState().syncFromService()
 
+        // Read persisted token snapshot before the set() so we can restore
+        // the indicator state in one shot rather than firing a second update
+        // (the bar would otherwise tween from 0% on every session open).
+        const snapshot = (session as ChatSession & { lastTurnSnapshot?: import('../types/chat').SessionTurnSnapshot }).lastTurnSnapshot ?? null
+
         set(() => {
           // Only keep the loaded session in memory to avoid unbounded growth
           const sessions = new Map<string, ChatSession>()
@@ -1808,9 +2144,23 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             conversationHistory,
             currentTurnCount: 0,
             totalTokensUsed: { input: 0, output: 0 },
+            currentPromptTokens: snapshot?.promptTokens ?? 0,
+            currentResponseTokens: snapshot?.responseTokens ?? 0,
             pendingDiffs: [],
           }
         })
+
+        // Restore model identity + context window so the pill renders the
+        // real % immediately. Use `undefined` for absent fields so
+        // setModelInfo's "leave alone" semantics kick in for thinkingMode.
+        if (snapshot && (snapshot.contextWindow != null || snapshot.modelName != null)) {
+          useAgentStore.getState().setModelInfo(
+            snapshot.modelName ?? null,
+            null,
+            undefined,
+            snapshot.contextWindow,
+          )
+        }
 
         await sessionService.setActiveSessionId(projectPath, sessionId)
       } finally {
@@ -1862,6 +2212,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             conversationHistory,
             currentTurnCount: 0,
             totalTokensUsed: { input: 0, output: 0 },
+            currentPromptTokens: 0,
+          currentResponseTokens: 0,
             pendingDiffs: [],
           }
         })
@@ -1924,6 +2276,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           conversationHistory: [],
           currentTurnCount: 0,
           totalTokensUsed: { input: 0, output: 0 },
+          currentPromptTokens: 0,
+          currentResponseTokens: 0,
           pendingDiffs: [],
         }
       })
@@ -1998,6 +2352,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             conversationHistory: [],
             currentTurnCount: 0,
             totalTokensUsed: { input: 0, output: 0 },
+            currentPromptTokens: 0,
+          currentResponseTokens: 0,
             pendingDiffs: [],
           }
         })
@@ -2059,17 +2415,30 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // map is module-level so it would otherwise leak across project switches
       // and re-inject a previous project's skills into a new project's chat.
       import('../services/agent/skillService').then(m => m.clearInvokedSkills()).catch(() => {})
+      // Reset to the canonical initial state. Previous version omitted
+      // isLoadingSession (could leave the loading skeleton stuck after a
+      // project delete that fired mid-load), error (stale "BYOK key missing"
+      // / 402 / 5xx banner from the deleted project lingering on the empty
+      // welcome screen), streamingVersion (cosmetic counter), and — most
+      // user-visible — draftAttachments (image chips the user had pinned to
+      // the prompt input would carry over to the next project they opened).
       set({
         sessions: new Map(),
         activeSessionId: null,
         conversationHistory: [],
         isStreaming: false,
+        isLoadingSession: false,
         streamingMessageId: null,
+        streamingVersion: 0,
+        error: null,
         agentStartTime: null,
         currentTurnCount: 0,
         totalTokensUsed: { input: 0, output: 0 },
+        currentPromptTokens: 0,
+          currentResponseTokens: 0,
         pendingDiffs: [],
         draftInput: '',
+        draftAttachments: [],
       })
     },
 
@@ -2184,6 +2553,26 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             card: { ...msg.card, status: 'submitted' as const, submittedKeys },
           }
         })
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+
+        return { sessions: updatedSessions }
+      })
+
+      debouncedSave()
+    },
+
+    removeMessage: (messageId) => {
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const messages = session.messages.filter(msg => msg.id !== messageId)
+        if (messages.length === session.messages.length) return state
 
         const updatedSessions = new Map(sessions)
         updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })

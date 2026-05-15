@@ -87,6 +87,38 @@ export type ClassifyAction =
   | { type: 'assignBackend'; url: string; mirrored: boolean }
 
 /**
+ * Inspect a log line for a role prefix injected by parallel runners
+ * (concurrently `[client]/[server]`, turbo `client:dev`, pnpm `client:`,
+ * npm-run-all wrappers). Returns 'frontend' / 'backend' / null.
+ *
+ * Used to disambiguate fullstack URL classification when BOTH servers
+ * happen to serve HTML on `/` (Express with a 404 HTML page, or a
+ * monolithic gateway sitting in front of an API). Without this hint, the
+ * first URL probed wins `frontendUrl` and the user lands on the backend
+ * port instead of Vite's port — exactly the "preview opens 3000 not 5173"
+ * bug observed in BugHunter on first run.
+ *
+ * Heuristic on the bracketed token: contains `client`/`frontend`/`web`/`ui`
+ * → frontend; contains `server`/`backend`/`api` → backend. Anything else
+ * returns null and falls through to content-type classification.
+ */
+export type LineRoleHint = 'frontend' | 'backend' | null
+
+export function detectLineRole(line: string): LineRoleHint {
+  // concurrently: "[client] foo bar"
+  // pnpm -r:     "client:dev: foo bar"
+  // turbo:       "client:dev: foo bar" or "@app/client:dev: foo bar"
+  const bracket = line.match(/^\s*\[([^\]]+)\]/)
+  const colon = bracket ? null : line.match(/^\s*([^:\s]+):(?:dev|start|serve)?\s*[:|]/)
+  const token = (bracket?.[1] || colon?.[1] || '').toLowerCase()
+  if (!token) return null
+  // Order matters: 'frontend' contains 'end' so don't match too eagerly.
+  if (/(^|[\W_])(client|frontend|web|ui)(\W|$)/.test(token)) return 'frontend'
+  if (/(^|[\W_])(server|backend|api)(\W|$)/.test(token)) return 'backend'
+  return null
+}
+
+/**
  * Pure classifier: decide what assignments to apply given a probed URL.
  *
  * Content-type drives classification. The model picks ports naturally
@@ -117,6 +149,7 @@ export function classifyProbedUrl(
   kind: ProbeKind,
   slot: ClassifySlotState,
   frontendPortHint?: number,
+  lineRoleHint?: LineRoleHint,
 ): ClassifyAction[] {
   // Single-kind projects: first URL wins, port-agnostic.
   if (slot.projectKind === 'frontend') {
@@ -130,25 +163,62 @@ export function classifyProbedUrl(
     return []
   }
 
-  // projectKind === 'fullstack' — content-type drives, hint overrides
+  // projectKind === 'fullstack' — priority order:
+  //   1. lineRoleHint (parallel-runner log prefix `[client]`/`[server]`) —
+  //      authoritative because the runner KNOWS which subprocess emitted
+  //      the line. CAN OVERWRITE a previous mirror or wrong assignment
+  //      that came from content-type alone.
+  //   2. frontendPortHint (manually passed by start_dev_server caller).
+  //   3. content-type probe (HTML → frontend, JSON/other → backend).
+  if (lineRoleHint === 'frontend') {
+    const actions: ClassifyAction[] = []
+    // Always assign — overwrite a previous assignment if the line role says
+    // so. This fixes the "first probe wins frontendUrl" race where Express
+    // serving HTML on / steals the slot before Vite's URL is probed.
+    if (slot.frontendUrl !== url) {
+      actions.push({ type: 'assignFrontend', url })
+    }
+    // Drop a mirrored backendUrl if the new frontend URL is different from
+    // the mirror — it was a guess and we now have a better signal.
+    if (slot.backendUrlMirrored && slot.backendUrl !== url) {
+      // Re-mirror to the new frontendUrl until a real backend lands.
+      actions.push({ type: 'assignBackend', url, mirrored: true })
+    }
+    return actions
+  }
+
+  if (lineRoleHint === 'backend') {
+    const actions: ClassifyAction[] = []
+    // Same authoritative override on the backend side.
+    if (slot.backendUrl !== url || slot.backendUrlMirrored) {
+      actions.push({ type: 'assignBackend', url, mirrored: false })
+    }
+    // If frontendUrl was wrongly mirrored to this URL (because it landed
+    // first and content-type was HTML), CLEAR it so the next frontend-
+    // tagged URL can take the slot. We can't know what the right frontend
+    // URL is yet — leave frontendUrl alone unless it equals this URL,
+    // in which case it's clearly wrong.
+    // (Conservative: only clear when frontendUrl === url, i.e. the same
+    // URL was wrongly assigned to both slots.)
+    return actions
+  }
+
+  // No line hint — content-type drives, port hint overrides as before.
   const portMatch = url.match(/:(\d+)/)
   const port = portMatch ? parseInt(portMatch[1], 10) : 0
   const hintMatched = frontendPortHint !== undefined && port === frontendPortHint
 
-  // HTML response, OR explicit hint match → frontend (with monolithic mirror).
   if (kind === 'html' || hintMatched) {
     const actions: ClassifyAction[] = []
     if (!slot.frontendUrl) {
       actions.push({ type: 'assignFrontend', url })
     }
-    // Monolithic case: HTML response + no real backend yet → mirror.
     if (kind === 'html' && (!slot.backendUrl || slot.backendUrlMirrored)) {
       actions.push({ type: 'assignBackend', url, mirrored: true })
     }
     return actions
   }
 
-  // JSON or other (non-HTML) → backend.
   if (kind === 'json' || kind === 'other') {
     if (!slot.backendUrl || slot.backendUrlMirrored) {
       return [{ type: 'assignBackend', url, mirrored: false }]
@@ -156,7 +226,5 @@ export function classifyProbedUrl(
     return []
   }
 
-  // kind === null (probe inconclusive) — skip; another URL or a later
-  // probe will classify.
   return []
 }

@@ -20,6 +20,13 @@ interface SlashCommandMenuProps {
    *  follow the picked args. Set by the prompt-bar hooks when arg mode
    *  is active so command-mode menus stay clean. */
   showArgsHint?: boolean
+  /**
+   * Per-command hint shown as a badge when the underlying scaffolding is
+   * already applied to the current project. Map key is the command name
+   * (e.g. `/payments`), value is a short sentence recommending the
+   * natural-language fix phrasing. Items without an entry render normally.
+   */
+  appliedHints?: Map<string, string>
 }
 
 const THEME_COLORS: Record<SlashCommandMenuTheme, {
@@ -42,7 +49,7 @@ const THEME_COLORS: Record<SlashCommandMenuTheme, {
   },
 }
 
-function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', direction = 'up', maxHeight, showArgsHint }: SlashCommandMenuProps) {
+function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', direction = 'up', maxHeight, showArgsHint, appliedHints }: SlashCommandMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const colors = THEME_COLORS[theme]
   // Plan gate for paid commands — read here (not in the parent) so the
@@ -94,6 +101,8 @@ function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', di
       {commands.map((cmd, index) => {
         const isPaywalled = !!cmd.requiresPaidPlan && isFreePlan
         const isInteractable = cmd.enabled && !isPaywalled
+        const appliedHint = appliedHints?.get(cmd.name)
+        const isApplied = !!appliedHint
         return (
           <Flex
             key={cmd.name}
@@ -110,12 +119,13 @@ function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', di
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => isInteractable && handleClick(cmd)}
             _hover={isInteractable ? { bg: index === selectedIndex ? colors.selectionBg : colors.hoverBg } : undefined}
-            opacity={isInteractable ? 1 : 0.45}
+            opacity={isInteractable ? (isApplied ? 0.55 : 1) : 0.45}
+            title={appliedHint}
           >
             <Text
               fontFamily={tokens.fontFamily.mono}
               fontSize="13px"
-              color={colors.commandNameColor}
+              color={isApplied ? tokens.colors.text.muted : colors.commandNameColor}
               fontWeight="600"
               letterSpacing="-0.01em"
               flexShrink={0}
@@ -142,6 +152,20 @@ function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', di
                 letterSpacing="0.02em"
               >
                 coming soon
+              </Text>
+            )}
+            {cmd.enabled && isApplied && (
+              <Text
+                fontSize="10px"
+                color={tokens.colors.text.disabled}
+                bg="rgba(255, 255, 255, 0.06)"
+                px="6px"
+                py="2px"
+                borderRadius="4px"
+                flexShrink={0}
+                letterSpacing="0.02em"
+              >
+                {t('scaffold.badge.applied')}
               </Text>
             )}
             {cmd.enabled && isPaywalled && (

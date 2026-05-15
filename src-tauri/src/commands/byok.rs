@@ -22,11 +22,16 @@
 //! the duration of one fetch.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use futures_util::StreamExt;
 use keyring::Entry;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter};
 
 const KEYRING_SERVICE: &str = "tm-code-byok";
 
@@ -203,6 +208,143 @@ pub fn byok_delete_key(provider: String) -> Result<(), String> {
         (Some(k), None) => Err(k),
         (None, Some(f)) => Err(f),
     }
+}
+
+// ── Local provider streaming (Ollama, LM Studio) ──
+//
+// The cloud BYOK path goes through the worker proxy, which injects the user's
+// key and converts SSE shapes. Local providers can't go through the worker
+// (proxy.ts:1111 refuses local URLs) AND running directly from the WebView
+// hits CORS — `localhost:14300` (WebView origin) → `localhost:11434` (Ollama)
+// is cross-origin and Ollama 403s by default unless OLLAMA_ORIGINS is set.
+//
+// This command opens the streaming HTTP request from Rust (no CORS) and
+// emits chunks as Tauri events scoped to a caller-supplied request_id. The
+// JS bridge listens for `byok-stream-{request_id}` events with shape:
+//
+//   { "type": "chunk", "data": "..." }   — raw bytes (UTF-8) from upstream
+//   { "type": "done" }                    — stream completed normally
+//   { "type": "error", "error": "..." }   — request or stream failed
+//   { "type": "http_error", "status": N, "body": "..." }
+//                                          — HTTP non-2xx; body included
+//
+// The data text is whatever the upstream sent — typically OpenAI-shape SSE
+// (`data: {…}\n\n`). The JS side reassembles and parses.
+//
+// Restricted to localhost to avoid being repurposed as a generic HTTP egress.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalChatStreamInput {
+    pub request_id: String,
+    pub url: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    pub body: String,
+}
+
+#[tauri::command]
+pub async fn byok_local_chat_stream(
+    app: AppHandle,
+    input: LocalChatStreamInput,
+) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(&input.url).map_err(|e| format!("invalid url: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "missing host".to_string())?;
+    if !matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1") {
+        return Err(format!(
+            "byok_local_chat_stream is restricted to localhost; got '{host}'"
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| format!("client init failed: {e}"))?;
+
+    let event_name = format!("byok-stream-{}", input.request_id);
+    let mut req = client
+        .post(parsed)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .body(input.body);
+    for (k, v) in input.headers.iter() {
+        req = req.header(k, v);
+    }
+
+    tokio::spawn(async move {
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = app.emit(
+                    &event_name,
+                    serde_json::json!({
+                        "type": "error",
+                        "error": format!("request failed: {e}"),
+                    }),
+                );
+                return;
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let _ = app.emit(
+                &event_name,
+                serde_json::json!({
+                    "type": "http_error",
+                    "status": status.as_u16(),
+                    "body": body,
+                }),
+            );
+            return;
+        }
+
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    // Lossy is fine — SSE upstreams send UTF-8 and a stray byte
+                    // shouldn't tear the connection down. Per-chunk decode means
+                    // a multi-byte codepoint split across chunks gets U+FFFD'd
+                    // on its first half; in practice OpenAI/Ollama servers don't
+                    // split mid-codepoint, but we accept the worst case rather
+                    // than buffer here (the JS-side parser is a string parser
+                    // and would also need partial-utf8 handling otherwise).
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    let _ = app.emit(
+                        &event_name,
+                        serde_json::json!({
+                            "type": "chunk",
+                            "data": text,
+                        }),
+                    );
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        &event_name,
+                        serde_json::json!({
+                            "type": "error",
+                            "error": format!("stream error: {e}"),
+                        }),
+                    );
+                    return;
+                }
+            }
+        }
+
+        let _ = app.emit(
+            &event_name,
+            serde_json::json!({
+                "type": "done",
+            }),
+        );
+    });
+
+    Ok(())
 }
 
 #[tauri::command]

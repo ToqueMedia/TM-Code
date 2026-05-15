@@ -1,6 +1,6 @@
 ---
 name: pdf-document
-description: Generate PDF files (reports, invoices, briefs, articles) via pandoc, WeasyPrint, Puppeteer or ReportLab. Call when the user asks for PDF output.
+description: Generate PDF files (reports, invoices, briefs, articles) via pandoc, WeasyPrint, Puppeteer or ReportLab. Call when the user asks for PDF output. Multilingual triggers — invoke whenever the request mentions: "PDF" / ".pdf" / "gera em PDF" / "exporta para PDF" / "relatório em PDF" / "fatura PDF" (PT) / "génère un PDF" / "exporter en PDF" (FR) / "genera un PDF" / "exporta a PDF" / "informe PDF" (ES) / "PDF文件" / "导出 PDF" (ZH).
 ---
 
 # PDF Document Generation

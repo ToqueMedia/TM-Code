@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { useLayoutStore, type ProjectKind } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'
+import { useAgentStore } from '../stores/agentStore'
 import { logger } from '../utils/logger'
 import {
   URL_REGEX_GLOBAL,
@@ -9,8 +10,11 @@ import {
   PORT_FAILURE_REGEX,
   resolveIsWrapper,
   classifyProbedUrl,
+  detectLineRole,
+  type LineRoleHint,
   type ProbeKind,
 } from './devServerDetection'
+import { coalesceLogLines } from './devServerLogCoalesce'
 
 /**
  * Preferred host in preview URLs.
@@ -56,6 +60,10 @@ interface InternalSlot {
    *  is emitted to the console. Prevents the helper text from repeating on
    *  every popup retry attempt during the same dev-server slot. */
   scriptErrorHintShown: boolean
+  /** One-shot flag for the GIS-popup-blocked hint (mirrors scriptErrorHintShown).
+   *  GIS retries the popup on every button click — without throttling, the
+   *  user gets a wall of identical hints in the log panel. */
+  gsiPopupHintShown: boolean
 }
 
 /** Options for starting a dev server. The model picks ports naturally
@@ -79,12 +87,26 @@ interface DevServerOutputPayload {
 
 interface ServerProbeResult {
   ok: boolean
+  status: number
+  /** True iff status is 2xx AND content-type is HTML. False for error pages,
+   *  JSON responses, and unreachable servers. The classifier uses this as the
+   *  ground-truth signal for "real frontend page" — content-type alone is
+   *  ambiguous because Express's default 404 page is text/html too. */
+  usable_as_frontend: boolean
   content_type: string | null
   kind: 'html' | 'json' | 'other' | null
 }
 
 const READY_TIMEOUT = 15_000
 const READY_POLL_INTERVAL = 500
+/**
+ * Once the server is reachable but the first response is HTML-error (4xx/5xx
+ * text/html), keep polling for this long to see if it stabilises to 2xx HTML.
+ * Vite cold-starts can briefly serve a 503 overlay; we don't want to mis-
+ * classify that as a backend URL. Three seconds is more than enough for the
+ * typical Vite/Next boot transition and well under the hard READY_TIMEOUT.
+ */
+const PROBE_STABILIZATION_MS = 3_000
 
 /**
  * Read the project's package.json once and produce a synchronous script
@@ -203,6 +225,7 @@ class DevServerManager {
       backendUrlMirrored: false,
       eaddrinuseRetried: false,
       scriptErrorHintShown: false,
+      gsiPopupHintShown: false,
     }
     this.server = slot
 
@@ -263,45 +286,50 @@ class DevServerManager {
     if (slot.pid !== 0 && slot.pid !== payload.pid) return
 
     const lines = payload.data.split('\n')
-    const toLog: Array<{ text: string; level: 'info' | 'warn' | 'error' }> = []
     const layoutStore = useLayoutStore.getState()
 
+    // ── Pass 1: per-line side-effects ──
+    // URL detection, EADDRINUSE auto-recovery, Script-error hint. These run
+    // per RAW line because the regex shapes were designed for that, and a
+    // URL/EADDRINUSE/Script-error signal can live inside what later becomes
+    // a multi-line block (e.g. a stack trace ending in "EADDRINUSE :::3001").
+    // Synthetic hints are pushed to `synthetics` and appended after the
+    // coalesced entries so they don't pollute block boundaries.
+    const synthetics: Array<{ text: string; level: 'info' | 'warn' | 'error' }> = []
+
     for (const line of lines) {
-      if (line.trim()) {
-        const isWarn = /\bwarn(ing)?\b/i.test(line) || /\bnpm warn\b/i.test(line)
-        const isError = !isWarn && (
-          /\berror\b/i.test(line)
-          || /\bERR[!_]/i.test(line)
-          || /\bfailed\b/i.test(line)
-          || /\bEADDRINUSE\b/.test(line)
-        )
-        const level: 'info' | 'warn' | 'error' = isError ? 'error' : isWarn ? 'warn' : 'info'
-        toLog.push({ text: line, level })
+      if (!line.trim()) continue
 
-        if (/Cannot find module.*rollup|Error:.*optional dependencies/i.test(line)) {
-          toLog.push({
-            text: 'Fix: Run "rm -rf node_modules package-lock.json && npm install" in the terminal to reinstall dependencies for this platform.',
-            level: 'error',
-          })
-        }
+      if (/Cannot find module.*rollup|Error:.*optional dependencies/i.test(line)) {
+        synthetics.push({
+          text: 'Fix: Run "rm -rf node_modules package-lock.json && npm install" in the terminal to reinstall dependencies for this platform.',
+          level: 'error',
+        })
+      }
 
-        // Cross-origin "Script error" — opaque error masked by the browser
-        // when a popup window's script throws. Most common signature for
-        // OAuth popup flows (Firebase signInWithPopup, googleapis OAuth
-        // window) running inside the embedded TauriWebview, where
-        // `window.opener` is null and `postMessage` cross-origin breaks.
-        // The error itself carries no detail (`(:0)` line number is the
-        // cross-origin masking signature). Surface a one-shot hint so the
-        // user knows to test in their default browser instead. Throttled per
-        // server slot to avoid spamming the console with the same hint on
-        // every popup attempt.
-        if (/\[runtime\]\s+Script error\.\s+\(:0\)/.test(line) && !slot.scriptErrorHintShown) {
-          slot.scriptErrorHintShown = true
-          toLog.push({
-            text: 'Hint: "Script error. (:0)" with no detail usually means a popup or third-party script crashed cross-origin (common with Firebase signInWithPopup / OAuth popups inside the embedded preview). Test this flow in your default browser via "Open in browser" — the popup will work there.',
-            level: 'warn',
-          })
-        }
+      // Cross-origin "Script error" — opaque error masked by the browser
+      // when a popup window's script throws. Most common signature for
+      // OAuth popup flows running inside the embedded TauriWebview.
+      // One-shot per slot to avoid spamming on every popup retry.
+      if (/\[runtime\]\s+Script error\.\s+\(:0\)/.test(line) && !slot.scriptErrorHintShown) {
+        slot.scriptErrorHintShown = true
+        synthetics.push({
+          text: 'Hint: "Script error. (:0)" with no detail usually means a popup or third-party script crashed cross-origin (common with auth/OAuth popups inside the embedded preview). Test this flow in your default browser via "Open in browser" — the popup will work there.',
+          level: 'warn',
+        })
+      }
+
+      // Google Identity Services popup blocked. The GIS button approach
+      // is supposed to render the credential picker inline (FedCM), but
+      // when FedCM is not available it falls back to a popup, which the
+      // Tauri WebView2/WKWebView blocks. Same fix as the Script-error
+      // hint: test in a real browser. Throttled per slot to avoid spam.
+      if (/\[GSI_LOGGER\]:\s*Failed to open popup window/i.test(line) && !slot.gsiPopupHintShown) {
+        slot.gsiPopupHintShown = true
+        synthetics.push({
+          text: 'Hint: "[GSI_LOGGER]: Failed to open popup window" means the Google Identity Services library tried to open a popup but the IDE preview webview blocked it. The GIS button falls back to popup when FedCM is unavailable (which it usually is inside the embedded preview). Test Google sign-in via "Open in browser" — popups work in your default browser. This is not a bug in your code; the auth flow is fine for production deploys.',
+          level: 'warn',
+        })
       }
 
       // EADDRINUSE auto-recovery — once per slot.
@@ -313,8 +341,11 @@ class DevServerManager {
         if (blockedPort > 0) {
           slot.eaddrinuseRetried = true
           const { projectPath, command, projectKind } = slot
-          toLog.push({ text: `Port ${blockedPort} in use — killing and restarting...`, level: 'warn' })
-          if (toLog.length > 0) layoutStore.addDevServerLogs(toLog)
+          // Flush whatever we have collected so far before the restart so
+          // the user sees the EADDRINUSE line and the recovery message.
+          const coalescedSoFar = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
+          coalescedSoFar.push({ text: `Port ${blockedPort} in use — killing and restarting...`, level: 'warn' })
+          if (coalescedSoFar.length > 0) layoutStore.addDevServerLogs(coalescedSoFar)
           this.stop().then(async () => {
             try { await invoke('kill_port', { port: blockedPort }) } catch {}
             await new Promise(r => setTimeout(r, 500))
@@ -326,11 +357,14 @@ class DevServerManager {
 
       // URL detection — skip entirely for failure lines (EADDRINUSE, retrying).
       if (!PORT_FAILURE_REGEX.test(line)) {
+        const lineRole = detectLineRole(line)
         const matches = line.match(URL_REGEX_GLOBAL)
         if (matches) {
           for (const raw of matches) {
             const url = this.normalizeUrl(raw)
-            if (!slot.detectedUrls.has(url)) {
+            if (lineRole !== null) {
+              this.probeAndClassify(url, slot, lineRole)
+            } else if (!slot.detectedUrls.has(url)) {
               slot.detectedUrls.add(url)
               this.probeAndClassify(url, slot)
             }
@@ -339,7 +373,9 @@ class DevServerManager {
           const portMatch = line.match(PORT_REGEX)
           if (portMatch) {
             const url = this.normalizeUrl(`http://localhost:${portMatch[1]}`)
-            if (!slot.detectedUrls.has(url)) {
+            if (lineRole !== null) {
+              this.probeAndClassify(url, slot, lineRole)
+            } else if (!slot.detectedUrls.has(url)) {
               slot.detectedUrls.add(url)
               this.probeAndClassify(url, slot)
             }
@@ -348,6 +384,14 @@ class DevServerManager {
       }
     }
 
+    // ── Pass 2: coalesce raw lines into multi-line blocks ──
+    // Without coalescing, a single `console.log({...})` from the user's app
+    // becomes N separate DevServerLogEntry rows in the UI, and the per-row
+    // "send to agent" button only ships one fragment. coalesceLogLines
+    // groups indented / bracket-balanced continuations into ONE entry so
+    // the whole object travels together.
+    const coalesced = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
+    const toLog = [...coalesced, ...synthetics]
     if (toLog.length > 0) layoutStore.addDevServerLogs(toLog)
   }
 
@@ -360,7 +404,7 @@ class DevServerManager {
    * classifies as 'html' and goes to frontendUrl; backendUrl also gets the
    * same URL so the HTTP Client drawer has a baseUrl.
    */
-  private async probeAndClassify(url: string, slot: InternalSlot): Promise<void> {
+  private async probeAndClassify(url: string, slot: InternalSlot, lineRoleHint?: LineRoleHint): Promise<void> {
     const gen = slot.generation
     const start = Date.now()
     let probe: ServerProbeResult | null = null
@@ -368,12 +412,34 @@ class DevServerManager {
     const MAX_IPC_ERRORS = 5
     const layoutStore = useLayoutStore.getState()
 
+    // Two-phase probe.
+    // Phase 1 — reachability: poll until probe.ok (any HTTP response received).
+    // Phase 2 — stabilisation: if the first usable response is HTML-error
+    //           (4xx/5xx text/html — Vite's overlay during HMR boot, or
+    //           Express returning its default 404 page), keep polling for a
+    //           short window to see if it settles to 2xx HTML. The dev server
+    //           we care about (Vite/Next) typically goes 503→200 within a
+    //           second of boot. The wrong answer here is the regression the
+    //           previous design had: classify on the first probe and never
+    //           look again, which assigned Express's 404 HTML to frontendUrl.
+    let stabilizingSince: number | null = null
     while (Date.now() - start < READY_TIMEOUT) {
       if (this.server !== slot || slot.generation !== gen) return
       try {
-        probe = await invoke<ServerProbeResult>('probe_server', { url })
-        if (probe.ok) break
-        ipcErrors = 0  // reset on any successful IPC call
+        const next = await invoke<ServerProbeResult>('probe_server', { url })
+        ipcErrors = 0
+        if (next.ok) {
+          probe = next
+          if (next.usable_as_frontend || next.kind !== 'other') {
+            // Either a real frontend page or a definitive backend response —
+            // both are stable signals, classify on this result.
+            break
+          }
+          // Got an HTML error response. Give the server a settle window before
+          // accepting "kind=other" as final — it may transition to 2xx HTML.
+          if (stabilizingSince === null) stabilizingSince = Date.now()
+          if (Date.now() - stabilizingSince > PROBE_STABILIZATION_MS) break
+        }
       } catch {
         ipcErrors++
         if (ipcErrors >= MAX_IPC_ERRORS) {
@@ -394,14 +460,26 @@ class DevServerManager {
     }
 
     if (this.server !== slot || slot.generation !== gen) return
-    if (slot.classifiedUrls.has(url)) return
+    // Re-classification policy:
+    //   - With a line-role hint: always allowed (hint carries strong signal).
+    //   - Without a hint: allowed only when the previous classification was
+    //     based on a non-usable HTML response (an error page that won the
+    //     slot in error). The probe stabilisation phase above should usually
+    //     prevent this, but the guard is here as defense-in-depth: if a
+    //     URL was classified during a brief HMR error window and the server
+    //     later recovers, we want to re-evaluate.
+    const previouslyClassified = slot.classifiedUrls.has(url)
+    if (previouslyClassified && !lineRoleHint && slot.frontendUrl !== null) {
+      return
+    }
     slot.classifiedUrls.add(url)
 
     const kind = probe.kind || 'other'
     const kindLabel = kind === 'html' ? 'frontend' : kind === 'json' ? 'backend' : 'generic'
-    layoutStore.addDevServerLog(`Server ready at ${url} (${kindLabel}, ${probe.content_type ?? '?'})`, 'info')
+    const roleSuffix = lineRoleHint ? `, role=${lineRoleHint}` : ''
+    layoutStore.addDevServerLog(`Server ready at ${url} (${kindLabel}, ${probe.content_type ?? '?'}${roleSuffix})`, 'info')
 
-    // Delegate to the pure classifier — content-type drives, hint overrides.
+    // Delegate to the pure classifier — line role > port hint > content-type.
     const actions = classifyProbedUrl(
       url,
       kind as ProbeKind,
@@ -412,6 +490,7 @@ class DevServerManager {
         backendUrlMirrored: slot.backendUrlMirrored,
       },
       slot.frontendPortHint,
+      lineRoleHint ?? null,
     )
     for (const action of actions) {
       if (action.type === 'assignFrontend') {
@@ -427,15 +506,30 @@ class DevServerManager {
     slot.status = 'running'
 
     // Auto-switch to preview view once the first URL lands.
-    const shouldSwitch = !useChatStore.getState().isStreaming
-    if (shouldSwitch) {
+    //
+    // Gate on agent status NOT being 'error' — when a turn ends with an
+    // upstream 5xx / network drop, the chat indicator drops isStreaming back
+    // to false but the work the user asked for never landed. The auto-switch
+    // used to fire anyway and open the preview, misleading the user into
+    // thinking the agent had finished successfully. With this gate, the
+    // preview stays out of the way and the error banner / system message
+    // remain the dominant signal.
+    const isStreaming = useChatStore.getState().isStreaming
+    const agentErrored = useAgentStore.getState().status === 'error'
+    if (!isStreaming && !agentErrored) {
       layoutStore.setViewMode('preview')
     } else if (!this.unsubPreviewDefer) {
       const unsub = useChatStore.subscribe((state, prev) => {
         if (prev.isStreaming && !state.isStreaming) {
           unsub()
           this.unsubPreviewDefer = null
-          useLayoutStore.getState().setViewMode('preview')
+          // Re-check the agent status at the moment streaming actually
+          // ends — a 5xx mid-stream can flip isStreaming→false while
+          // agentStore.status='error', and we don't want the deferred
+          // subscriber to leak the user to preview after that race.
+          if (useAgentStore.getState().status !== 'error') {
+            useLayoutStore.getState().setViewMode('preview')
+          }
         }
       })
       this.unsubPreviewDefer = unsub

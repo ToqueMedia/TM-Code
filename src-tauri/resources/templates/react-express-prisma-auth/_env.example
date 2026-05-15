@@ -1,0 +1,17 @@
+# This file documents the env keys this template expects. The real .env is
+# created by `provision_auth` (TM Code platform) — DO NOT edit it manually.
+#
+# Frontend (Vite — exposed to client bundle, public-safe):
+VITE_FIREBASE_API_KEY=
+VITE_FIREBASE_AUTH_DOMAIN=
+VITE_FIREBASE_PROJECT_ID=
+VITE_GIP_TENANT_ID=
+VITE_GOOGLE_CLIENT_ID=
+
+# Backend (server-side only):
+GIP_FIREBASE_API_KEY=
+GIP_TENANT_ID=
+GCP_PROJECT_ID=
+
+# Database (auto-resolved by scripts/db-setup.mjs to absolute path if unset):
+# DATABASE_URL=file:./prisma/dev.db

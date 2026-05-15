@@ -77,8 +77,19 @@ function ensureFirebase() {
   if (import.meta.env.VITE_APPCHECK_ENABLED === 'true') {
     try {
       if (import.meta.env.DEV) {
-        // @ts-expect-error — Firebase debug token interface
-        self.FIREBASE_APPCHECK_DEBUG_TOKEN = true
+        // Debug-token wiring only when the developer has actually registered
+        // a debug token in Firebase Console → App Check → Apps → Manage debug
+        // tokens. Setting the flag to `true` blindly makes the SDK request a
+        // fresh debug token via Firebase's `exchangeDebugToken` endpoint,
+        // which 403s when no token is registered for this machine — that
+        // 403 was bleeding into Identity Toolkit refresh flows and breaking
+        // deploys. Setting the flag to a real token string skips that
+        // exchange and just uses the registered value.
+        const debugToken = import.meta.env.VITE_APPCHECK_DEBUG_TOKEN
+        if (debugToken && typeof debugToken === 'string') {
+          // @ts-expect-error — Firebase debug token interface
+          self.FIREBASE_APPCHECK_DEBUG_TOKEN = debugToken
+        }
       }
 
       const workerUrl = resolveWorkerUrl()
@@ -590,13 +601,14 @@ class FirebaseAuthService {
         useBillingStore.getState().updateFromMe(data)
         useFeaturesStore.getState().updateFromMe(data.features)
 
-        // BYOK catalog: load ONCE per session when the feature flag is on.
-        // /v1/me fires on every window-restore (useBillingRefresh) — billing
-        // info changes externally so that refresh is necessary, but the BYOK
-        // provider catalog is essentially static for the session and re-fetching
-        // would needlessly call byok_has_key on each provider, briefly flipping
-        // `hasKey` while in flight. catalogLoaded gates the second-call no-op.
-        if (data.features?.byokEnabled === true && !useByokStore.getState().catalogLoaded) {
+        // BYOK catalog: load ONCE per session. BYOK is always available
+        // (no feature flag, no per-plan check) so we kick off the catalog
+        // load on every auth — `catalogLoaded` gates the duplicate work.
+        // /v1/me fires on every window-restore (useBillingRefresh); the
+        // provider catalog is essentially static for the session, so re-
+        // fetching would needlessly call byok_has_key on each provider
+        // and briefly flip `hasKey` while in flight.
+        if (!useByokStore.getState().catalogLoaded) {
           useByokStore.getState().loadProviders().catch(() => {})
         }
 

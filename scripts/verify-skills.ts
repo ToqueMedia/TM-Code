@@ -23,7 +23,8 @@ import { fileURLToPath } from 'node:url'
 // Import the PRODUCTION parser directly — no more copy-paste drift between the
 // CI verifier and the runtime. `skillFrontmatter.ts` is dependency-free so tsx
 // can resolve it without pulling Tauri/React types.
-import { parseSkillFrontmatter, MAX_DESCRIPTION_CHARS } from '../src/services/agent/skillFrontmatter'
+import { parseSkillFrontmatter, MAX_DESCRIPTION_CHARS, SkillFrontmatterError } from '../src/services/agent/skillFrontmatter'
+import { TOOL_NAMES, isKnownToolName } from '../src/services/agent/toolNames'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -75,6 +76,66 @@ function lintShellBlock(body: string): string[] {
   return problems
 }
 
+// ─── Tool-name reference check ────────────────────────────────────
+//
+// Catches the case where a SKILL.md mentions `provision_auth_old` (or
+// any other stale name) in backticks or as a function-call form. The
+// model would happily try to call it and the harness would reject —
+// detecting the drift here keeps the prompt + tool registry in sync.
+
+/** Words inside backticks OR immediately followed by `(` that look like
+ *  tool identifiers (snake_case, ≥4 chars). Captures real tool refs while
+ *  ignoring english prose like `auth` or `idToken`. */
+const TOOL_REF_PATTERN = /(?:`([a-z][a-z0-9_]*)`|\b([a-z][a-z0-9_]+)\s*\()/g
+
+/** Snake-case tokens that look like tool names but are platform/library
+ *  identifiers we deliberately reference in SKILLs without registering. */
+const TOOL_REF_ALLOWLIST = new Set([
+  // Firebase / Identity Toolkit endpoints + payload fields
+  'sign_in', 'sign_up', 'sign_out', 'id_token', 'refresh_token',
+  'returnSecureToken', 'tenantId', 'localId', 'displayName',
+  // Common shell / build tool names
+  'npm_install', 'yarn_install', 'pnpm_install', 'npm_run', 'yarn_run',
+  'tsx_watch', 'firebase_admin',
+  // Stdlib-ish
+  'set_user', 'set_auth_token', 'get_auth_token', 'auth_fetch', 'init_app',
+  // Test-runner / framework names
+  'use_effect', 'create_root',
+])
+
+function findStaleToolRefs(body: string): string[] {
+  const seen = new Set<string>()
+  const stale: string[] = []
+  for (const match of body.matchAll(TOOL_REF_PATTERN)) {
+    const candidate = (match[1] ?? match[2] ?? '').trim()
+    if (!candidate || candidate.length < 4) continue
+    // Heuristic: must contain at least one underscore (eliminates `await`,
+    // `console`, `fetch`, etc.) AND not be in the allowlist.
+    if (!candidate.includes('_')) continue
+    if (TOOL_REF_ALLOWLIST.has(candidate)) continue
+    if (seen.has(candidate)) continue
+    seen.add(candidate)
+    // Only flag candidates that *resemble* a tool we register but with
+    // a typo. We say "resembles" when the candidate shares a 4+ char
+    // prefix with a known tool — catches `provision_authh`, `read_skil`,
+    // `start_dev_servers`, etc., without false-positiving every snake_case
+    // word in the SKILL.
+    if (isKnownToolName(candidate)) continue
+    // Only flag candidates that start with a TM-Code-owned prefix —
+    // names nobody else in the JS/Python ecosystem uses. Generic verbs
+    // (`create_`, `read_`) collide with library APIs (xlsx `create_sheet`,
+    // python `read_csv`, etc.) so we exclude them from the drift check.
+    const TM_OWNED_PREFIXES = [
+      'provision_', 'request_credentials', 'spawn_background_',
+      'check_background_', 'update_tasks', 'start_dev_server',
+      'read_dev_server_logs', 'read_skill', 'read_large_result',
+    ]
+    const looksLikeTool = TM_OWNED_PREFIXES.some((p) => candidate.startsWith(p))
+    if (looksLikeTool) stale.push(candidate)
+  }
+  return stale
+}
+
 // ─── Runner ────────────────────────────────────────────────────────
 
 const SKILLS_ROOT = join(__dirname, '..', 'src-tauri', 'resources', 'skills')
@@ -97,7 +158,16 @@ for (const dir of listSkillDirs()) {
     continue
   }
 
-  const parsed = parseSkillFrontmatter(raw, dir)
+  let parsed: ReturnType<typeof parseSkillFrontmatter>
+  try {
+    parsed = parseSkillFrontmatter(raw, dir)
+  } catch (err) {
+    if (err instanceof SkillFrontmatterError) {
+      failures.push({ skill: dir, issue: err.message })
+      continue
+    }
+    throw err
+  }
 
   // The parsed name must match the directory name — otherwise the model reads
   // skill X and finds a body that identifies itself as Y. Subtle hallucination risk.
@@ -126,6 +196,16 @@ for (const dir of listSkillDirs()) {
     for (const p of problems) {
       failures.push({ skill: dir, issue: `shell block at line ${block.line}: ${p}` })
     }
+  }
+
+  // Drift check: tool-name references that look like a real tool but don't
+  // match any registered name. Catches typos and stale renames.
+  const stale = findStaleToolRefs(parsed.body)
+  for (const ref of stale) {
+    failures.push({
+      skill: dir,
+      issue: `references unknown tool name "${ref}" — either fix the typo or add to TOOL_NAMES in src/services/agent/toolNames.ts`,
+    })
   }
 
   console.log(`✓ ${dir} — "${parsed.description.slice(0, 80)}${parsed.description.length > 80 ? '…' : ''}"`)

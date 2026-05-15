@@ -1,52 +1,36 @@
 # Angular Patterns
 
-You are working in an Angular project. Follow these conventions:
+You are working in an Angular 17+ project. Standalone components, signals, `inject()`, typed reactive forms, `HttpClient`, async pipe — these are the modern defaults. The rules below cover non-obvious decisions and footguns.
 
-## Component Architecture
-- Use standalone components (`standalone: true`). Avoid NgModules for new code.
-- One component per file. Follow Angular naming: `user-profile.component.ts`.
-- Use signals for reactive state (`signal()`, `computed()`, `effect()`).
-- Keep templates inline for small components, external for complex ones.
+## Decision points (non-obvious)
 
-## Signals & Change Detection
-- Prefer signals over RxJS for component state.
-- Use `computed()` for derived state from signals.
-- Use `effect()` for side effects that react to signal changes.
-- Set `changeDetection: ChangeDetectionStrategy.OnPush` on all components.
+- **Signals vs RxJS for component state**: signals first, RxJS second. RxJS is for streams (HTTP cold observables, WebSockets, debounced inputs). For "current value" state, `signal()` is simpler and integrates with change detection without the unsubscribe ceremony.
+- **`OnPush` everywhere**: set `changeDetection: ChangeDetectionStrategy.OnPush` on every component. Default change detection scans the whole tree on every event — `OnPush` only re-renders when inputs change, signals fire, or async pipe emits. Performance gap is huge on real apps.
+- **`inject()` over constructor injection**: `inject()` works in functions (guards, resolvers, factories), composes better, and reads cleaner. Constructor DI still works but is legacy for new code.
+- **Standalone over NgModules**: every new component standalone. NgModules add boilerplate without benefit at this point.
 
-## Services & Dependency Injection
-- Services are `@Injectable({ providedIn: 'root' })` for singletons.
-- Use `inject()` function instead of constructor injection.
-- Services handle business logic and API calls — components handle presentation.
-- Use `HttpClient` for HTTP requests, never raw `fetch`.
+## Patterns to Avoid
 
-## RxJS
-- Use `async` pipe in templates — avoid manual subscribe/unsubscribe.
-- Use `takeUntilDestroyed()` when manual subscription is necessary.
-- Prefer higher-order operators (`switchMap`, `mergeMap`) over nested subscriptions.
-- Use `toSignal()` / `toObservable()` for signal-RxJS interop.
+- **Don't write new code with NgModules.** They're being deprecated. New components are `standalone: true`.
+- **Don't use raw `fetch()` in Angular code.** Use `HttpClient` — gives you interceptors, request cancellation, testing utilities, automatic JSON parsing. `fetch` works but defeats the framework's HTTP layer.
+- **Don't subscribe manually in components without `takeUntilDestroyed()`** (Angular 16+). Memory leak otherwise — subscriptions outlive the component.
+- **Don't use `effect()` for state synchronization.** Use `computed()` for derived values. `effect()` is for side effects (DOM, fetch, persist) — using it to keep one signal in sync with another creates render loops.
+- **Don't use `[(ngModel)]` in reactive forms.** Pick one approach per form. Mixing causes circular update bugs.
+- **Don't put `async` calls in templates with `{{ getValue() }}`.** Function calls in templates run on every change-detection cycle. Bind to a signal or async pipe instead.
+- **Don't use `any` to silence type errors.** With `strictTemplates`, `any` propagates and disables template checking. Type the model properly.
+- **Don't bypass `HttpClient` interceptors with `XMLHttpRequest`.** Auth tokens, retry logic, error handling all live in interceptors — `XMLHttpRequest` skips them.
+- **Don't lazy-load every route.** Lazy loading has overhead on first navigation. Eager-load critical paths (login, dashboard); lazy-load admin sections, settings, rare flows.
+- **Don't write providers in component metadata when they belong in `providedIn: 'root'`.** Per-component providers create per-instance services — surprising for things meant to be singletons.
 
-## Forms
-- Use reactive forms (`FormGroup`, `FormControl`) for complex forms.
-- Use typed forms with `FormControl<string>`.
-- Validate with built-in validators + custom validator functions.
+## Routing — `/` MUST resolve to a real page
 
-## Routing
-- Lazy load routes with `loadComponent` / `loadChildren`.
-- Use functional guards and resolvers.
-- Use router signals: `input()` for route params.
+Same footgun as React/Vue. Routes file with only `/login`, `/dashboard` and no `/` redirect renders blank. Always:
 
-## File Structure
+```ts
+export const routes: Routes = [
+  { path: '', redirectTo: 'login', pathMatch: 'full' },
+  { path: 'login', component: LoginComponent },
+  // ...
+  { path: '**', redirectTo: 'login' },
+]
 ```
-feature/
-  feature.component.ts
-  feature.component.html
-  feature.component.scss
-  feature.service.ts
-  feature.routes.ts
-```
-
-## TypeScript
-- Strict mode always. No `any` types.
-- Use interfaces for data models, classes for services.
-- Enable `strictTemplates` in `tsconfig.json`.

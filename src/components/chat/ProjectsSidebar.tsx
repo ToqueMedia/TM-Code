@@ -88,8 +88,14 @@ function ProjectsSidebar() {
   const loadRecentProjects = useProjectStore(s => s.loadRecentProjects)
 
   // CMD mode projects are terminal-only — exclude them from the IDE sidebar
+  // UNLESS one is currently open in the IDE. Without this carve-out, a project
+  // that was once opened in CMD mode (so it lives in cmdModeProjectPaths) and
+  // is now being used in IDE/chat mode disappears from the sidebar — the user
+  // sees the empty pane even though they have a project loaded.
   const cmdPathSet = new Set(cmdModeProjectPaths)
-  const recentProjects = allRecentProjects.filter(p => !cmdPathSet.has(p.path))
+  const recentProjects = allRecentProjects.filter(
+    p => !cmdPathSet.has(p.path) || p.path === currentProject?.path,
+  )
 
   useEffect(() => {
     loadRecentProjects()

@@ -178,13 +178,14 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
           return (
             <Flex key={i} bg={bg} align="stretch">
               <Text
-                w={`${gutterDigits + 1}ch`}
+                w={`calc(${gutterDigits}ch + 0.75rem)`}
                 pl={1}
                 pr={1}
                 color={tokens.colors.diff.lineNumber}
                 fontFamily={tokens.fontFamily.mono}
                 fontSize="11px"
                 textAlign="right"
+                whiteSpace="nowrap"
                 userSelect="none"
                 flexShrink={0}
                 opacity={0.6}

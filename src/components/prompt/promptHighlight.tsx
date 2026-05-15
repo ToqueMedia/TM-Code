@@ -9,7 +9,16 @@ interface HighlightSegment {
   end: number
 }
 
-const HIGHLIGHT_STYLE = { color: tokens.colors.accent.primary, fontWeight: 600 }
+// Color-only highlight — DO NOT add fontWeight, letter-spacing, or any other
+// metric-changing property here. The overlay sits behind a transparent
+// textarea, and the textarea cannot bold/italicise sub-ranges. So if the
+// overlay renders a `#hashtag` at weight 600 while the textarea renders the
+// same chars at weight 400, the bold glyphs are physically wider in the
+// overlay → everything after the highlighted span drifts right → wrap
+// columns and caret position diverge → on long pastes (or Cmd+A when the
+// textarea's text becomes opaque under selection) the user sees ghost
+// glyphs and feels editing "from a distance". Color-only stays width-safe.
+const HIGHLIGHT_STYLE = { color: tokens.colors.accent.primary }
 
 /**
  * Render the prompt input value as styled spans, with TWO classes of token

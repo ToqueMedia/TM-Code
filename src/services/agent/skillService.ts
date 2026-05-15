@@ -34,6 +34,11 @@ interface SkillCache {
   timestamp: number
   projectPath: string
   mode: PromptMode
+  /** Filesystem version captured when the cache was filled. Cache misses when
+   *  the global fsVersion advances — i.e., any write happened since. Catches
+   *  the project-level skill edits (.toquemedia-studio/skills/*.md) without
+   *  needing a path-specific watcher. */
+  fsVersion: number
 }
 
 export type PromptMode = 'chat' | 'cmd'
@@ -123,7 +128,23 @@ const RICH_ARTIFACT_SKILLS = new Set([
 ])
 // Auth-scaffolding skills. Index-only entries (~150B in prompt each); the
 // agent fetches the body via read_skill only when it decides to wire up auth.
-const AUTH_SKILLS = new Set(['auth-proxy-gip', 'google-signin'])
+const AUTH_SKILLS = new Set(['auth-proxy', 'google-signin'])
+
+/** The canonical skill the agent must read when preparing any fullstack
+ *  project for publishing. Referenced from contextBuilder + toolExecutor —
+ *  rename here to propagate. */
+export const PUBLISHING_SKILL_NAME = 'publish-backend'
+
+/** The canonical tool name for registering a project's publish slot.
+ *  Re-export of the single source of truth in `toolNames.ts` — kept here
+ *  under the legacy name so existing imports keep compiling. */
+export { PROVISION_DEPLOY as PROVISION_DEPLOY_TOOL_NAME } from './toolNames'
+
+// Deploy-scaffolding skills. Same loading shape as AUTH_SKILLS — index-only
+// in the system prompt; agent fetches via read_skill when preparing a
+// project for the Publish flow (platform-managed backend + database scoped
+// by `apps/{appId}/...` + platform security rules).
+const DEPLOY_SKILLS = new Set([PUBLISHING_SKILL_NAME])
 
 // parseSkillFrontmatter + MAX_DESCRIPTION_CHARS live in ./skillFrontmatter (zero-deps)
 // so that scripts/verify-skills.ts can import the same implementation.
@@ -155,11 +176,18 @@ class SkillService {
     projectType?: string,
     mode: PromptMode = 'chat',
   ): Promise<Skill[]> {
-    // Check cache — invalidate when mode changes to avoid leaking chat-only skills into cmd or vice-versa
+    // Check cache — invalidate when mode changes to avoid leaking chat-only
+    // skills into cmd or vice-versa. The fsVersion check catches project-
+    // level skill edits without needing a per-path watcher: any write to the
+    // filesystem advances fsVersion, the cache misses, project skills are
+    // re-read. Cheap because the skill loaders read ~10 small markdown files.
+    const { getFsVersion } = await import('../fsVersion')
+    const fsVersion = getFsVersion()
     if (
       this.cache &&
       this.cache.projectPath === projectPath &&
       this.cache.mode === mode &&
+      this.cache.fsVersion === fsVersion &&
       Date.now() - this.cache.timestamp < CACHE_TTL_MS
     ) {
       return this.cache.skills
@@ -178,6 +206,7 @@ class SkillService {
       timestamp: Date.now(),
       projectPath,
       mode,
+      fsVersion,
     }
 
     return skills
@@ -477,12 +506,20 @@ ${lines.join('\n')}`
     // detected (see App.tsx).
     if (skillName === 'frontend-design') return false
 
-    // Auth-scaffolding skills (auth-proxy-gip, google-signin) — chat-only
+    // Auth-scaffolding skills (auth-proxy, google-signin) — chat-only
     // (CMD has no dev-server preview, the recipe doesn't apply there). No
     // projectType gate: empty projects are exactly when the agent is about
     // to scaffold auth, so the index entry must be visible. The model picks
     // it up only when the user asks for login/auth.
     if (AUTH_SKILLS.has(skillName)) {
+      return mode === 'chat'
+    }
+
+    // Deploy-scaffolding skills (publish-backend) — chat-only.
+    // The user triggers the recipe when they ask to prepare the project
+    // for Publish or hit a fullstack-backend-not-ready state from the
+    // modal. Same load-on-demand pattern as auth.
+    if (DEPLOY_SKILLS.has(skillName)) {
       return mode === 'chat'
     }
 

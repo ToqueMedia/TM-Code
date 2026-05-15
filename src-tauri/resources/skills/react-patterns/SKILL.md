@@ -1,41 +1,17 @@
 # React Patterns
 
-You are working in a React project. Follow these conventions:
-
-## Component Structure
-- Use functional components with hooks. Never use class components.
-- One component per file. File name matches component name (PascalCase).
-- Keep components small (< 200 lines). Extract sub-components when complexity grows.
-- Co-locate related files: `Button.tsx`, `Button.test.tsx`, `Button.module.css`.
-
-## State Management
-- Local state: `useState` for simple values, `useReducer` for complex state logic.
-- Shared state: prefer context + hooks or Zustand over prop drilling.
-- Derive state from existing state instead of duplicating it.
-- Avoid `useEffect` for state synchronization — compute during render instead.
-
-## Hooks
-- Custom hooks start with `use` prefix and encapsulate reusable logic.
-- Keep dependency arrays accurate — never suppress ESLint warnings with `// eslint-disable`.
-- Use `useCallback` and `useMemo` only when there's a measurable performance benefit.
-- Prefer `useRef` for mutable values that don't trigger re-renders.
-
-## Performance
-- Lazy load heavy components with `React.lazy()` + `Suspense`.
-- Use `React.memo()` for components that re-render with the same props frequently.
-- Avoid inline object/array literals in JSX props (causes unnecessary re-renders).
-- Key lists with stable, unique IDs — never use array index as key for dynamic lists.
+You are working in a React project. The following are non-obvious rules and footguns. Functional components, hooks, TypeScript, and basic dependency arrays are assumed knowledge — not repeated here.
 
 ## Patterns to Avoid
-- Don't use `dangerouslySetInnerHTML` unless explicitly required.
-- Don't mutate state directly — always create new objects/arrays.
-- Don't use `useEffect` as an event handler — call functions directly from event handlers.
-- Don't store derived data in state (e.g., filtered list when you have the full list + filter).
 
-## TypeScript
-- Type props with interfaces, not `type` aliases (interfaces are extendable).
-- Use `React.FC` sparingly — prefer explicit return types.
-- Generic components use `<T>` syntax: `function List<T>(props: ListProps<T>)`.
+- **Don't use `useEffect` for state synchronization.** Compute the value during render from existing state. `useEffect` is for side effects (subscribe, fetch, DOM measurement) — using it to keep one piece of state in sync with another doubles the renders and creates ordering bugs.
+- **Don't use `useEffect` as an event handler.** If a value should update on click/submit/change, call the function from the event handler — not in an effect that watches the value change.
+- **Don't store derived data in state.** A filtered list when you have the full list + a filter string is derivable in render. Storing it creates a stale-data bug waiting to happen.
+- **Don't mutate state directly.** Always create new objects/arrays. `arr.push(x)` then `setState(arr)` does nothing — React compares by reference.
+- **Don't use array index as key for dynamic lists.** Use a stable id. Index keys break reorder/insert/delete behaviour and cause input focus loss.
+- **Don't suppress ESLint deps warnings.** If the linter says a dep is missing, the missing dep is real — adding `// eslint-disable-next-line` is silently breaking the hook contract.
+- **Don't reach for `useCallback` / `useMemo` by default.** Both add overhead. Use them only when profiling shows a real re-render problem or when the value is a stable identity required by a downstream `React.memo` / hook deps.
+- **Don't use `dangerouslySetInnerHTML` unless rendering trusted markdown/sanitized HTML.** Default to text or proper components.
 
 ## Routing — `/` MUST resolve to a real page
 

@@ -1,6 +1,6 @@
 ---
 name: docx-document
-description: Generate Microsoft Word (.docx) files via pandoc or python-docx. Call when the user asks for Word output, meeting notes, proposals, editable docs.
+description: Generate Microsoft Word (.docx) files via pandoc or python-docx. Call when the user asks for Word output, meeting notes, proposals, editable docs. Multilingual triggers — invoke whenever the request mentions: "Word" / ".docx" / "documento Word" / "ata em Word" / "doc editável" (PT) / "rapport Word" / "document Word" (FR) / "informe Word" / "documento de Word" (ES) / "Word文档" / "Word 文件" (ZH).
 ---
 
 # Word Document Generation (.docx)

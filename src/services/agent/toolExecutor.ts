@@ -8,10 +8,22 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
+import { PUBLISHING_SKILL_NAME } from './skillService'
+import {
+  FORBIDDEN_FIREBASE_AUTH_NAMES,
+  FORBIDDEN_DATA_LAYER_DEPS,
+  FORBIDDEN_ITK_V2_PATH,
+  FORBIDDEN_SERVICE_ACCOUNT_KEY,
+  FRONTEND_BUILD_SCRIPT_PATTERNS,
+  DOCKERFILE_ANTI_PATTERNS,
+  DOCKERFILE_PATH,
+  REJECTION_REASONS,
+} from './forbiddenPatterns'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
-import { resolveWorkerUrl } from '../../utils/devUrls'
+import { resolveWorkerUrl, resolveDeployUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
+import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 // TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
@@ -105,6 +117,30 @@ class ToolExecutor {
    */
   private cmdModeCwd: string | null = null
 
+  /**
+   * Plan mode — when true, /plan is active and only architecture-producing
+   * tools may run. Implementation tools (provision_auth, request_credentials,
+   * execute_command, start_dev_server, install commands) are blocked at
+   * execute() entry with an instructive error so the model is forced back
+   * onto producing PLAN.md. Belt-and-braces over the architect system prompt:
+   * if a model with strong "build the thing" priors ignores the role, the
+   * mechanical block returns a tool result the model cannot ignore.
+   */
+  private planMode: boolean = false
+
+  /**
+   * Plan-mode progress flags. Together they enforce the architect contract:
+   *
+   *   1. update_tasks is BLOCKED until PLAN.md is written (no task list without a plan).
+   *   2. After both PLAN.md is written AND update_tasks has run once, ANY further
+   *      tool call is blocked — the architect's role is complete and continuing
+   *      drifts into implementation.
+   *
+   * Both reset to false on every enablePlanMode() so each /plan run starts clean.
+   */
+  private planFileWritten: boolean = false
+  private planTasksSeeded: boolean = false
+
   private constructor() {
     this.registerTools()
   }
@@ -124,6 +160,25 @@ class ToolExecutor {
   /** Disable CLI/CMD mode and return to IDE diff mode. */
   disableCmdMode(): void {
     this.cmdModeCwd = null
+  }
+
+  /** Enable architect mode for /plan: implementation tools are blocked.
+   *  Resets plan-progress flags so each /plan run starts clean. */
+  enablePlanMode(): void {
+    this.planMode = true
+    this.planFileWritten = false
+    this.planTasksSeeded = false
+  }
+
+  /** Restore the normal coding agent surface. */
+  disablePlanMode(): void {
+    this.planMode = false
+    this.planFileWritten = false
+    this.planTasksSeeded = false
+  }
+
+  isPlanMode(): boolean {
+    return this.planMode
   }
 
   /** Clears session-scoped state. Call on new sessions. */
@@ -169,6 +224,33 @@ class ToolExecutor {
     const filePath = (input.path || input.oldPath || '') as string
     if (this.isEnvFile(filePath) && ['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'].includes(toolName)) {
       return 'Blocked: .env files contain secrets and cannot be read or modified by the agent. Ask the developer what environment variables are needed, or create a .env.example with placeholder values.'
+    }
+
+    // /plan architect mode — block implementation tools so the architect role
+    // cannot drift into building the project. The model's *system prompt*
+    // already forbids these (see planCommand.ts:buildArchitectSystemPrompt),
+    // but strong-prior models (instruction-tuned for "build the thing") have
+    // been observed to call provision_auth on turn 1 anyway. The mechanical
+    // block returns an instructive error the model has to read in its next
+    // tool result, redirecting it back onto PLAN.md.
+    if (this.planMode) {
+      const planBlock = this.checkPlanModeAccess(toolName, filePath)
+      if (planBlock) return planBlock
+
+      // M4b — update_tasks must follow write_file('PLAN.md').
+      // The task list mirrors PLAN.md's Implementation Phases; without a
+      // written plan the tasks have no source-of-truth to derive from.
+      if (toolName === 'update_tasks' && !this.planFileWritten) {
+        return `Blocked in /plan architect mode: ${toolName} must follow write_file('PLAN.md'). The task list mirrors PLAN.md's Implementation Phases — write the plan first, then derive tasks from its phase structure (one task per coherent unit of work, IDs like "1.1", "1.2", "2.1" matching the phase numbering). Calling update_tasks before write_file is a contract violation.`
+      }
+
+      // M5 — Strict STOP after both PLAN.md and update_tasks have completed.
+      // The architect's role is finished; any further tool call drifts into
+      // implementation. The next phase (TODO generation, then execution) runs
+      // in a fresh turn after the developer approves the plan card.
+      if (this.planFileWritten && this.planTasksSeeded) {
+        return `Blocked in /plan architect mode: PLAN.md is written and the task tracker is seeded. Your role for this turn is complete. Stop calling tools and end the turn with a 3-sentence chat summary — TODO generation runs after the developer approves the plan card.`
+      }
     }
 
     // Sensitive files require explicit developer authorization
@@ -622,6 +704,246 @@ class ToolExecutor {
     }
   }
 
+  /**
+   * Forbidden Firebase JS SDK auth surface — every method below either pops a
+   * window (silently blocked in the IDE preview's wry/WKWebView child webview)
+   * or bypasses the project's auth-proxy contract. The auth-proxy +
+   * google-signin skills mandate the GIS button + /api/auth/proxy/* flow.
+   *
+   * This is defense-in-depth: the skill prompts forbid these in writing, but
+   * the model's training prior is overwhelmingly `signInWithPopup` (most
+   * Firebase tutorials use it) — without a mechanical check the prior wins
+   * a non-trivial fraction of the time.
+   *
+   * `onAuthStateChanged` is the ONE allowed import from `firebase/auth` and
+   * is excluded from the regex.
+   */
+  // Pattern moved to ./forbiddenPatterns — single source of truth shared
+  // with the SKILL build-time verifier and any future lint hook.
+
+  /**
+   * Returns a block message if the given content imports/calls forbidden
+   * Firebase auth methods, or null if it's clean. Scoped to TS/TSX/JS/JSX
+   * files — markdown, JSON, and config files are unaffected.
+   *
+   * Path-scoped to avoid false positives in the auth-proxy itself (which
+   * legitimately calls Identity Toolkit REST endpoints whose response
+   * payloads mention "GoogleAuthProvider" etc. in comments).
+   */
+  private checkForbiddenAuthImports(path: string, content: string): string | null {
+    if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(path)) return null
+    // Skip backend auth-proxy files — they legitimately hit Identity Toolkit.
+    // The forbidden pattern targets CLIENT-side firebase/auth imports.
+    if (/\/(server|backend|api)\/.*auth.*\.(ts|js)$/i.test(path)) return null
+
+    const importsFromFirebaseAuth = /(?:^|\n)\s*import[\s\S]+?from\s+['"]firebase\/auth['"]\s*;?/m.test(content)
+    if (!importsFromFirebaseAuth) return null
+
+    const match = content.match(FORBIDDEN_FIREBASE_AUTH_NAMES)
+    if (!match) return null
+
+    return REJECTION_REASONS.firebaseAuthImport(path, match[1])
+  }
+
+  /**
+   * Reject writes that hit `identitytoolkit.googleapis.com/v2/accounts:*`.
+   * Defense-in-depth alongside the auth-proxy SKILL's `/v1` rule —
+   * documented for ages but still violated under generation pressure
+   * (the model has both /v1 and /v2 in training and silently picks /v2
+   * ~30% of the time per the SKILL note). The runtime block forces a
+   * fix before the file lands.
+   *
+   * Scoped to TS/JS only — README.md and prompt notes legitimately
+   * mention the wrong URL when documenting the rule itself.
+   */
+  private checkForbiddenItkV2(path: string, content: string): string | null {
+    if (!/\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt)$/i.test(path)) return null
+    if (!FORBIDDEN_ITK_V2_PATH.test(content)) return null
+    return REJECTION_REASONS.itkV2Path(path)
+  }
+
+  /**
+   * Reject writes that import a `serviceAccountKey.json`. The platform
+   * runtime authenticates via the metadata server — there's no JSON key
+   * to ship, and the file doesn't exist in the project. Catching this
+   * at write time stops the agent from generating a code path that's
+   * irreparable without manual intervention.
+   */
+  private checkForbiddenServiceAccountImport(path: string, content: string): string | null {
+    if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(path)) return null
+    if (!FORBIDDEN_SERVICE_ACCOUNT_KEY.test(content)) return null
+    return REJECTION_REASONS.serviceAccountKey(path)
+  }
+
+  /**
+   * Reject Dockerfile writes that pair badly with the Cloud Run container
+   * contract. The skill's §8 anti-patterns enumerate the specific failures
+   * (frontend build script in the container, node running .ts, env-file
+   * pointing at .env). Each match cites the publish-backend SKILL recovery
+   * path — defense-in-depth so a Dockerfile that violates the SKILL never
+   * reaches Cloud Build, where the failure mode is opaque
+   * ("vite: not found", non-zero exit at step 6).
+   *
+   * The frontend-build-script check needs the project's package.json to
+   * resolve `npm run X` → script body (X) → "is X a frontend build?".
+   * We accept the project root via toolExecutor.cmdModeCwd or by walking
+   * up from the Dockerfile path until package.json is found.
+   */
+  private async checkForbiddenDockerfileShape(path: string, content: string): Promise<string | null> {
+    if (!DOCKERFILE_PATH.test(path)) return null
+
+    // 1. Cheap pattern checks first — no I/O.
+    for (const { pattern, kind } of DOCKERFILE_ANTI_PATTERNS) {
+      if (!pattern.test(content)) continue
+      if (kind === 'nodeRunsTs') {
+        this.emitDockerfileRejection('nodeRunsTs', path, false)
+        return REJECTION_REASONS.dockerfileNodeRunsTs(path)
+      }
+      if (kind === 'envFileInCmd') {
+        this.emitDockerfileRejection('envFileInCmd', path, false)
+        return REJECTION_REASONS.dockerfileEnvFileInCmd(path)
+      }
+    }
+
+    // 2. The frontend-build check: needs to resolve `RUN npm run <script>`
+    //    against the project's package.json to know what <script> actually
+    //    runs. Skip when no `RUN npm run …` (or yarn/pnpm equivalent) is
+    //    present — most Dockerfiles don't reach this branch.
+    const npmRunMatch = content.match(/RUN\s+(?:npm\s+run|yarn\s+(?!run\s)|pnpm\s+run)\s+([a-z0-9:_-]+)/i)
+    if (!npmRunMatch) return null
+    const scriptName = npmRunMatch[1]
+
+    // Walk up from the Dockerfile to find package.json (handles both flat
+    // layout and `Dockerfile` colocated with `server/package.json`).
+    const pkgPath = await this.findNearestPackageJson(path)
+    if (!pkgPath) return null
+    const scripts = await this.getCachedPackageScripts(pkgPath)
+    if (!scripts) return null
+    const scriptBody = scripts[scriptName]
+    if (!scriptBody) return null
+
+    const isFrontendBuild = FRONTEND_BUILD_SCRIPT_PATTERNS.some((p) => p.test(scriptBody))
+    if (!isFrontendBuild) return null
+    this.emitDockerfileRejection('frontendBuild', path, true)
+    return REJECTION_REASONS.dockerfileFrontendBuild(path, scriptName, scriptBody)
+  }
+
+  /** Per-projectRoot cache of the parsed `scripts` block. The Dockerfile
+   *  checker is called on every write; without this it would re-invoke
+   *  `read_file` on the same package.json several times in a row during a
+   *  scaffold turn (write Dockerfile → write .dockerignore → edit
+   *  Dockerfile). 60s TTL is short enough that the agent's own edits to
+   *  package.json invalidate naturally on the next sweep. */
+  private packageJsonCache: Map<string, { scripts: Record<string, string> | null; expiresAt: number }> = new Map()
+
+  private async getCachedPackageScripts(pkgPath: string): Promise<Record<string, string> | null> {
+    const now = Date.now()
+    const cached = this.packageJsonCache.get(pkgPath)
+    if (cached && cached.expiresAt > now) return cached.scripts
+    let raw: string
+    try {
+      raw = await invoke<string>('read_file', { path: pkgPath })
+    } catch {
+      return null
+    }
+    let scripts: Record<string, string> | null = null
+    try {
+      const parsed = JSON.parse(raw) as { scripts?: Record<string, string> }
+      scripts = parsed?.scripts ?? null
+    } catch {
+      scripts = null
+    }
+    this.packageJsonCache.set(pkgPath, { scripts, expiresAt: now + 60_000 })
+    return scripts
+  }
+
+  /** Fire-and-forget telemetry for Dockerfile rejections. Lets us answer
+   *  "is the harness catching this anti-pattern in production?" — without
+   *  the event we'd have no signal whether the rule is firing 5×/day
+   *  (systemic) or 0×/day (resolved). Path is hashed-prefix only to keep
+   *  PII out of analytics. */
+  private emitDockerfileRejection(
+    kind: 'nodeRunsTs' | 'envFileInCmd' | 'frontendBuild',
+    path: string,
+    hasFrontendBuild: boolean,
+  ): void {
+    import('../../services/analytics').then(({ trackEvent }) => {
+      void trackEvent('dockerfile_rejected', {
+        kind,
+        has_frontend_build: hasFrontendBuild,
+        // Last 32 chars of the path — enough to distinguish project layouts
+        // (`/Dockerfile` vs `/server/Dockerfile`) without leaking the user's
+        // home dir or full project name.
+        path_suffix: path.slice(-32),
+      })
+    }).catch(() => { /* analytics never blocks writes */ })
+  }
+
+  /** Walk parent dirs from `startPath` looking for a `package.json`.
+   *  Returns the absolute path or null. Bounded to 6 levels — the project
+   *  root is always close to a Dockerfile in practice. */
+  private async findNearestPackageJson(startPath: string): Promise<string | null> {
+    let dir = startPath.slice(0, startPath.lastIndexOf('/'))
+    for (let i = 0; i < 6; i++) {
+      if (!dir) return null
+      try {
+        const candidate = `${dir}/package.json`
+        await invoke<string>('read_file', { path: candidate })
+        return candidate
+      } catch {
+        const parent = dir.slice(0, dir.lastIndexOf('/'))
+        if (parent === dir) return null
+        dir = parent
+      }
+    }
+    return null
+  }
+
+  // FORBIDDEN_DATA_LAYER_DEPS moved to ./forbiddenPatterns — same module
+  // hosts FORBIDDEN_FIREBASE_AUTH_NAMES + the rejection-message builders
+  // so the SKILL verifier and any future lint hook share one source.
+
+  /**
+   * Reject writes to package.json that add forbidden SQL data-layer deps.
+   * Triggers on create_file / write_file / edit_file when the target is
+   * any package.json under the project root. Only fires when the NEW
+   * content contains a forbidden dep that's NOT in the OLD content — i.e.
+   * we don't block legitimate edits to existing legacy projects, only the
+   * act of scaffolding the wrong shape into a fresh project.
+   *
+   * Returns the block message (string) when the write should be rejected,
+   * null when it's allowed.
+   */
+  private checkForbiddenDataLayerDeps(path: string, newContent: string, oldContent: string = ''): string | null {
+    if (!/(?:^|\/)package\.json$/.test(path)) return null
+
+    let newPkg: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> }
+    try {
+      newPkg = JSON.parse(newContent)
+    } catch {
+      return null // not valid JSON yet — let the user fix that issue first
+    }
+    let oldDeps = new Set<string>()
+    if (oldContent) {
+      try {
+        const oldPkg = JSON.parse(oldContent) as typeof newPkg
+        oldDeps = new Set([
+          ...Object.keys(oldPkg.dependencies ?? {}),
+          ...Object.keys(oldPkg.devDependencies ?? {}),
+        ])
+      } catch { /* old content malformed — treat as empty */ }
+    }
+    const newDeps = new Set([
+      ...Object.keys(newPkg.dependencies ?? {}),
+      ...Object.keys(newPkg.devDependencies ?? {}),
+    ])
+    const newlyAdded = FORBIDDEN_DATA_LAYER_DEPS.filter(
+      (dep) => newDeps.has(dep) && !oldDeps.has(dep),
+    )
+    if (newlyAdded.length === 0) return null
+    return REJECTION_REASONS.dataLayerDeps(path, newlyAdded)
+  }
+
   // Files that may contain secrets — require explicit user authorization
   private static readonly SENSITIVE_FILE_PATTERNS = [
     /^\.env($|\.)/, // .env, .env.local, .env.production, etc.
@@ -638,6 +960,15 @@ class ToolExecutor {
     // Block all .env files EXCEPT exactly ".env.example"
     if (!filename.startsWith('.env')) return false
     return filename !== '.env.example'
+  }
+
+  /**
+   * Returns a block message if the call should be denied under planMode, or
+   * null if the call may proceed. Wraps the pure helper with the executor's
+   * current project root.
+   */
+  private checkPlanModeAccess(toolName: string, filePath: string): string | null {
+    return checkPlanModeAccess(toolName, filePath, this.getProjectRoot())
   }
 
   /**
@@ -896,9 +1227,31 @@ class ToolExecutor {
       timestamp: Date.now(),
       hash: this.simpleHash(newContent),
     })
-    // Invalidate the cached system prompt when prompt-relevant files change.
-    if (/(^|\/)(README|TMS|PLAN|TODO)\.md$|(^|\/)package\.json$|(^|\/)\.toquemedia-template$/.test(path)) {
-      import('./contextBuilder').then(m => m.default.getInstance().invalidatePromptCache()).catch(() => { /* non-critical */ })
+    // Bump the global filesystem fingerprint. Cache keys that include it
+    // (system prompt, skills) miss on the next read so the IDE sees the
+    // real post-write state. Path-agnostic by design — see fsVersion.ts.
+    import('../fsVersion').then(m => m.bumpFsVersion(`write:${path}`)).catch(() => { /* non-critical */ })
+    // Invalidate scaffolding detector cache when files that change scaffold
+    // state are written. Without this, the badge / smart-router / system-
+    // prompt section would lag the agent's own writes by up to the cache TTL
+    // (3s) — short, but observable when the agent finishes a scaffolding
+    // turn and the developer immediately tries to type a hashtag. Covers:
+    //   - package.json (payments deps)
+    //   - auth-proxy / authClient / useGoogleSignIn marker files
+    // .env writes are funneled through write_env_vars (which has its own
+    // invalidation hook in provision_auth) so we don't include .env here —
+    // the agent's write_file path can't reach it (mechanical block).
+    if (/(^|\/)package\.json$|(^|\/)(auth-proxy|authClient|useGoogleSignIn)\.(ts|tsx|js)$/.test(path)) {
+      const root = this.getProjectRoot()
+      if (root) {
+        import('../scaffoldingDetector').then(m => m.invalidateScaffoldingCache(root)).catch(() => { /* non-critical */ })
+      }
+    }
+    // Plan-mode progress: PLAN.md at the project root unblocks update_tasks
+    // and enables the strict-STOP guard once update_tasks has also run.
+    if (this.planMode && isPlanArtefactAtRoot(path, this.getProjectRoot())) {
+      const basename = path.replace(/\\/g, '/').split('/').pop()
+      if (basename === 'PLAN.md') this.planFileWritten = true
     }
   }
 
@@ -1081,6 +1434,20 @@ class ToolExecutor {
         const path = input.path as string
         const newContent = input.content as string
 
+        // Mechanical blocks on prompt-rule violations the model commits
+        // anyway under generation pressure. Each check has an inline
+        // comment explaining the recurring failure mode it catches.
+        // Order: cheapest checks first (regex on string) before the
+        // package.json parse.
+        const authBlock = this.checkForbiddenAuthImports(path, newContent)
+        if (authBlock) return authBlock
+        const itkBlock = this.checkForbiddenItkV2(path, newContent)
+        if (itkBlock) return itkBlock
+        const saBlock = this.checkForbiddenServiceAccountImport(path, newContent)
+        if (saBlock) return saBlock
+        const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, newContent)
+        if (dockerfileBlock) return dockerfileBlock
+
         // Read current content to generate diff data
         let oldContent = ''
         let isNewFile = true
@@ -1090,6 +1457,9 @@ class ToolExecutor {
         } catch {
           isNewFile = true
         }
+
+        const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, newContent, oldContent)
+        if (dataLayerBlock) return dataLayerBlock
 
         // Enforce read-before-write for existing files (like Claude Code).
         // The model must read a file before overwriting it to understand what it's replacing.
@@ -1155,6 +1525,18 @@ class ToolExecutor {
         this.validatePathWithinProject(input.path as string)
         const path = input.path as string
         const content = (input.content as string) || ''
+
+        // Mechanical blocks — see write_file for the rationale.
+        const authBlock = this.checkForbiddenAuthImports(path, content)
+        if (authBlock) return authBlock
+        const itkBlock = this.checkForbiddenItkV2(path, content)
+        if (itkBlock) return itkBlock
+        const saBlock = this.checkForbiddenServiceAccountImport(path, content)
+        if (saBlock) return saBlock
+        const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, content)
+        if (dockerfileBlock) return dockerfileBlock
+        const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, content)
+        if (dataLayerBlock) return dataLayerBlock
 
         // Check if file already exists
         try {
@@ -1250,6 +1632,9 @@ class ToolExecutor {
         this.closeEditorIfOpen(input.path as string)
         await invoke('delete_file_or_directory', { path: input.path })
         this.refreshFileTree()
+        // Deletes are filesystem mutations too — bump the version so the
+        // next system-prompt build sees the file tree without the gone path.
+        import('../fsVersion').then(m => m.bumpFsVersion(`delete:${input.path}`)).catch(() => {})
         return `Deleted successfully: ${input.path}`
       }
     })
@@ -1302,6 +1687,7 @@ class ToolExecutor {
           newName
         })
         this.refreshFileTree()
+        import('../fsVersion').then(m => m.bumpFsVersion(`rename:${input.oldPath}`)).catch(() => {})
         return `Renamed successfully: ${input.oldPath} -> ${newName}`
       }
     })
@@ -1332,6 +1718,17 @@ class ToolExecutor {
 
         this.validatePathWithinProject(path)
 
+        // Mechanical blocks on the new fragment — covers partial edits
+        // that introduce forbidden code without rewriting the file.
+        const authBlock = this.checkForbiddenAuthImports(path, newStr)
+        if (authBlock) return authBlock
+        const itkBlock = this.checkForbiddenItkV2(path, newStr)
+        if (itkBlock) return itkBlock
+        const saBlock = this.checkForbiddenServiceAccountImport(path, newStr)
+        if (saBlock) return saBlock
+        const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, newStr)
+        if (dockerfileBlock) return dockerfileBlock
+
         // Enforce read-before-edit: the model must have read the file to know what to edit
         const readState = this.readFileTimestamps.get(path)
         if (!readState) {
@@ -1358,6 +1755,11 @@ class ToolExecutor {
         }
 
         const newContent = content.replace(oldStr, newStr)
+
+        // Mechanical block on forbidden SQL data-layer deps in package.json.
+        // Edits that add Prisma/SQLite/Drizzle to a package.json get rejected.
+        const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, newContent, content)
+        if (dataLayerBlock) return dataLayerBlock
 
         // CMD mode: write directly to disk, still return diff JSON so the UI
         // renders the before/after. `alreadyApplied` skips approval queue.
@@ -1693,7 +2095,7 @@ class ToolExecutor {
         const command = input.command as string
         let projectKind = input.project_kind as 'frontend' | 'backend' | 'fullstack' | undefined
         const legacyServerType = input.server_type as 'frontend' | 'backend' | undefined
-        const frontendPortHint = typeof input.frontend_port_hint === 'number' ? input.frontend_port_hint : undefined
+        const explicitHint = typeof input.frontend_port_hint === 'number' ? input.frontend_port_hint : undefined
         this.validateCommand(command)
         const projectRoot = this.getProjectRoot()
 
@@ -1712,6 +2114,21 @@ class ToolExecutor {
           } catch { /* detection failure is non-fatal */ }
         }
         if (!projectKind) projectKind = 'frontend'
+
+        // Frontend-port hint precedence:
+        //   1. Explicit `frontend_port_hint` argument from the agent (the
+        //      escape hatch when the agent has observed a misclassification).
+        //   2. The `.toquemedia-template` manifest's `frontendPort` (scaffolds
+        //      ship this for known fullstack templates).
+        // Either source feeds the same classifier knob — the agent doesn't
+        // need to know which template was used.
+        let frontendPortHint = explicitHint
+        if (frontendPortHint === undefined) {
+          try {
+            const { resolveFrontendPortHint } = await import('../../services/templateService')
+            frontendPortHint = await resolveFrontendPortHint(projectRoot, projectKind)
+          } catch { /* missing manifest is fine — no hint to apply */ }
+        }
 
         try {
           await devServerManager.start(projectRoot, command, { projectKind, frontendPortHint })
@@ -1859,7 +2276,7 @@ class ToolExecutor {
     this.tools.set('read_dev_server_logs', {
       definition: {
         name: 'read_dev_server_logs',
-        description: 'Read output from the dev server AND browser runtime errors from the live preview. Includes: build errors, type errors, HMR failures (from dev server stdout/stderr), plus uncaught exceptions, unhandled promise rejections, and console.error from the preview browser (prefixed [runtime]). Use after file changes, after start_dev_server, or when asked about preview/console/browser errors. The buffer is CUMULATIVE — old errors are not cleared when the dev server reloads after a fix. Each entry comes with its timestamp; the response footer includes a cursor (`next_since: <ms>`). Pass that cursor as `since_timestamp` on the next call to get only entries that arrived AFTER your last read — this is how you tell whether your fix actually resolved the previous error vs. seeing the same stale entry. Without `since_timestamp`, you get the tail of the full buffer (default 50 lines).',
+        description: 'Read output from the dev server AND browser runtime errors from the live preview. Includes: build errors, type errors, HMR failures (from dev server stdout/stderr), plus uncaught exceptions, unhandled promise rejections, console.error, and HTTP 4xx/5xx responses from fetch/XMLHttpRequest in the preview browser (all prefixed [runtime]). Network failures appear as `[runtime] Network: METHOD URL → STATUS STATUSTEXT` — use them to confirm auth-proxy endpoints, /api/* routes, and backend integrations actually return 2xx during testing (a green dev server start does NOT mean the app works end-to-end). Use after file changes, after start_dev_server, or when asked about preview/console/browser/network errors. The buffer is CUMULATIVE — old errors are not cleared when the dev server reloads after a fix. Each entry comes with its timestamp; the response footer includes a cursor (`next_since: <ms>`). Pass that cursor as `since_timestamp` on the next call to get only entries that arrived AFTER your last read — this is how you tell whether your fix actually resolved the previous error vs. seeing the same stale entry. Without `since_timestamp`, you get the tail of the full buffer (default 50 lines).',
         input_schema: {
           type: 'object',
           properties: {
@@ -2317,6 +2734,12 @@ Project root: ${projectRoot}`
           ? (raw as Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>)
           : []
         useAgentStore.getState().setTasks(tasks)
+        // Plan-mode progress: a successful update_tasks after PLAN.md is the
+        // signal that the architect has finished. Combined with planFileWritten
+        // this trips the strict-STOP guard in execute() on any subsequent call.
+        if (this.planMode && this.planFileWritten) {
+          this.planTasksSeeded = true
+        }
         const completed = tasks.filter(t => t.status === 'completed').length
         return `Task list updated: ${completed}/${tasks.length} completed.`
       }
@@ -2364,23 +2787,31 @@ Project root: ${projectRoot}`
 
     // === verify (adversarial verification sub-agent) ===
     // === provision_auth ===
-    // One-shot tool that provisions GIP authentication for the current project:
-    // 1. Calls the backend to get-or-create a per-project GIP tenant
-    // 2. Writes the returned credentials to .env (via write_env_vars)
-    // 3. Copies the bundled auth-proxy boilerplate (routes, middleware, schema, authClient)
-    // 4. Returns a summary the agent can read before scaffolding the frontend
-    //    code via the auth-proxy-gip skill (read_skill('auth-proxy-gip')).
+    // One-shot tool that provisions authentication for the current project:
+    // 1. Calls the backend's /v1/auth/provision-gip to get-or-create the
+    //    per-project auth tenant on the shared platform project. Idempotent.
+    // 2. Writes the returned credentials to .env via write_env_vars: the
+    //    neutral TM_* names (preferred for new code) PLUS the legacy
+    //    FIREBASE_* / GIP_* / GCP_PROJECT_ID names (backward compat with
+    //    already-scaffolded projects whose code still references them).
+    // 3. Returns a structured summary with the auth contract (env keys, env
+    //    loading rules, auth-API call shape, frontend wiring, DB caveats,
+    //    smoke test) — read by the agent before it scaffolds the auth-proxy.
     //
     // The agent uses this when the user requests login/signup/auth in their
     // project. After this tool returns, the agent should:
-    //   - read_skill('auth-proxy-gip') for the frontend recipe
+    //   - read_skill('auth-proxy') for the frontend recipe
     //   - read_skill('google-signin') if Google sign-in is requested
     //   - mount the auth-proxy router in the backend entry (app.use('/api', authProxyRouter))
+    //
+    // This tool does NOT write code or copy boilerplate. The agent chooses the
+    // backend stack (Express / Hono / Fastify / Nest / FastAPI / Go / etc.) and
+    // implements routes following the skill — see authCommand.ts.
     this.tools.set('provision_auth', {
       definition: {
         name: 'provision_auth',
         description:
-          'Provision Google Identity Platform (GIP) authentication for the current project. Creates a per-project GIP tenant on the platform and writes the Firebase Web config to .env (VITE_FIREBASE_API_KEY, AUTH_DOMAIN, PROJECT_ID, TENANT_ID + backend GIP_TENANT_ID + GIP_FIREBASE_API_KEY + GCP_PROJECT_ID). Use ONCE per project when the user requests login/signup/auth. The agent then implements the auth-proxy and frontend in whatever stack fits the project (Express, Hono, Fastify, FastAPI, etc.) — see read_skill("auth-proxy-gip") for the protocol. After this returns, the project has EVERY credential it needs: the auth-proxy uses VITE_FIREBASE_API_KEY (a public Firebase Web key) for Identity Toolkit REST. Do NOT call request_credentials afterwards: Firebase service accounts, Firebase Admin SDK keys, GOOGLE_APPLICATION_CREDENTIALS, GIP_SERVICE_ACCOUNT_*, and any GCP infrastructure credential are platform-managed and live only on the TM Code worker — the user does not have them.',
+          'Set up TM Code Authentication for the current project. Reserves a per-project auth tenant on the platform and writes the necessary credentials to .env. Use ONCE per project when the user requests login/signup/auth. The agent then implements the auth-proxy and frontend in whatever stack fits the project (Express, Hono, Fastify, FastAPI, etc.) — see read_skill("auth-proxy") for the protocol. After this returns, the project has every credential it needs: the auth-proxy uses the public client key written to .env for identity provider calls. Skip request_credentials for any platform-managed credential (admin SDK keys, service-account files, infrastructure tokens) — they live only on the TM Code worker and the user does not have them.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2403,6 +2834,37 @@ Project root: ${projectRoot}`
         if (!project) {
           return 'No project is open. Open a project before provisioning auth.'
         }
+
+        // Early-return guard: if auth is already provisioned (detected from
+        // .env + filesystem markers), don't re-run the network call. The
+        // backend is idempotent (get-or-create) so re-running is safe — but
+        // returning early with an instructive message avoids wasted tokens
+        // AND signals to the agent "fix existing" instead of "re-scaffold".
+        // Defense-in-depth alongside the system-prompt section and the UI
+        // hint that warn before the tool is even invoked.
+        try {
+          const { detectScaffolding } = await import('../scaffoldingDetector')
+          const detected = await detectScaffolding(project.path)
+          const hasEmailAuth = detected.applied.includes('auth.email-password')
+          const hasGoogleAuth = detected.applied.includes('auth.google')
+          if (hasEmailAuth || hasGoogleAuth) {
+            const evidence: string[] = []
+            if (hasEmailAuth) evidence.push(...(detected.evidence['auth.email-password'] ?? []))
+            if (hasGoogleAuth) evidence.push(...(detected.evidence['auth.google'] ?? []))
+            // Telemetry for the agent-initiated re-provision path. The
+            // smart-router (chat-mode + cmd-mode) covers user-initiated
+            // hashtag re-runs; this captures the case where the model
+            // reaches for provision_auth on its own despite the system-
+            // prompt section. High frequency = system prompt isn't being
+            // attended to; consider strengthening the bookend.
+            import('../../services/analytics').then(({ trackEvent }) => {
+              void trackEvent('provision_auth_early_return', {
+                applied: [hasEmailAuth ? 'auth.email-password' : '', hasGoogleAuth ? 'auth.google' : ''].filter(Boolean).join(','),
+              })
+            }).catch(() => { /* non-critical */ })
+            return `Already provisioned. Detected: ${evidence.join(', ')}.\n\nDO NOT re-run provision_auth on the default path — the .env credentials already exist and the backend is idempotent (returns the same tenant). The default task is to FIX the existing implementation:\n  1. read_file the marker paths above to see what's there.\n  2. Diagnose the actual bug (read_dev_server_logs for runtime errors, get_diagnostics for type errors).\n  3. Edit the broken file with edit_file.\n\nEXCEPTION — explicit re-provisioning. If the developer's CURRENT message includes any of: "re-provision", "rotate credentials", "wipe and start over", "reset the auth", "delete and re-create the tenant", "reprovisiona", "rotaciona credenciais", "apaga e recomeça" — they have OPTED IN. In that case, ack in chat what you'll do, then call provision_auth again (the same call you just received). The platform is idempotent so the tenant won't duplicate; .env is overwritten with the same values; no destructive change to data. If the developer's intent is unclear, ASK before re-running.`
+          }
+        } catch { /* non-critical — fall through to normal provisioning */ }
 
         const firebaseAuth = FirebaseAuthService.getInstance()
         const idToken = await firebaseAuth.getIdToken()
@@ -2446,19 +2908,37 @@ Project root: ${projectRoot}`
         }
 
         // Write the credentials to .env via the same single-write-path used by
-        // request_credentials. Keys mirror what the auth-proxy-gip skill expects.
+        // request_credentials. Dual-write the new TM-prefixed names + the
+        // legacy Firebase/GIP/GCP names so existing user projects (which
+        // reference the legacy names in their code) continue to work, while
+        // new code generated by the agent uses the neutral names. Both sets
+        // hold the same values; the duplication is the migration cost paid
+        // once per project. The legacy names will be removed in a future
+        // release after enough projects have migrated.
         const envVars: Array<{ key: string; value: string }> = [
+          // Neutral names (preferred for new code)
+          { key: 'VITE_TM_AUTH_KEY', value: data.apiKey },
+          { key: 'VITE_TM_AUTH_DOMAIN', value: data.authDomain },
+          { key: 'VITE_TM_PROJECT_ID', value: data.projectId },
+          { key: 'VITE_TM_TENANT_ID', value: data.tenantId },
+          { key: 'TM_AUTH_KEY', value: data.apiKey },
+          { key: 'TM_TENANT_ID', value: data.tenantId },
+          { key: 'TM_PROJECT_ID', value: data.projectId },
+          // Legacy names (kept for backward compatibility with already-scaffolded
+          // projects). New agent-generated code reads the TM_* names above;
+          // these continue to be written so a re-provision on an old project
+          // doesn't break existing references.
           { key: 'VITE_FIREBASE_API_KEY', value: data.apiKey },
           { key: 'VITE_FIREBASE_AUTH_DOMAIN', value: data.authDomain },
           { key: 'VITE_FIREBASE_PROJECT_ID', value: data.projectId },
           { key: 'VITE_GIP_TENANT_ID', value: data.tenantId },
-          // Backend env (read by the auth-proxy boilerplate)
           { key: 'GCP_PROJECT_ID', value: data.projectId },
           { key: 'GIP_TENANT_ID', value: data.tenantId },
           { key: 'GIP_FIREBASE_API_KEY', value: data.apiKey },
         ]
         if (data.googleClientId) {
-          envVars.push({ key: 'VITE_GOOGLE_CLIENT_ID', value: data.googleClientId })
+          envVars.push({ key: 'VITE_TM_GOOGLE_CLIENT_ID', value: data.googleClientId })
+          envVars.push({ key: 'VITE_GOOGLE_CLIENT_ID', value: data.googleClientId }) // legacy
         }
 
         try {
@@ -2467,19 +2947,207 @@ Project root: ${projectRoot}`
           return `Wrote tenant ${data.tenantId} but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
         }
 
+        // .env just changed — invalidate detection cache so the next
+        // detectScaffolding call picks up the new credentials immediately.
+        try {
+          const { invalidateScaffoldingCache } = await import('../scaffoldingDetector')
+          invalidateScaffoldingCache(project.path)
+        } catch { /* non-critical */ }
+
+        // Structured contract: machine-readable header + skill-readable
+        // body. The header lists the env vars and the rules the agent must
+        // honour when implementing the proxy. Empirically (BugHunterKimi
+        // session, May 2026) the prose-only response let the agent forget
+        // canonical rules — `tenantId` was dropped from `signInWithIdp`,
+        // backend env was read from `VITE_*` instead of `GIP_*` mirrors,
+        // dotenv.config() was used manually instead of `--env-file`.
+        // The structured block makes each rule one bullet per scan line.
         const lines: string[] = []
-        lines.push(`GIP tenant ready: ${data.tenantId} (project ${data.projectId}).`)
+        // Tenant id is internal-ish (matters for diagnosing auth bugs) but
+        // the platform GCP project id is not relevant to the chat agent —
+        // it would leak the platform project name when the developer asks
+        // the agent to summarise what happened or generate manual-deploy
+        // scripts. Keep the tenant id (already in .env via VITE_GIP_TENANT_ID),
+        // drop the project id.
+        lines.push(`Authentication tenant ready: ${data.tenantId}.`)
         lines.push(`.env written: ${envVars.map((v) => v.key).join(', ')}.`)
         lines.push('')
-        lines.push('Next steps:')
-        lines.push('  1. read_skill("auth-proxy-gip") for the protocol — Identity Toolkit REST endpoints, JWT verification, recommended client/server patterns. Stack-agnostic; pick whatever backend the project already uses (or whichever the developer asked for).')
-        lines.push('  2. Implement the backend auth proxy in your chosen stack: signup, signin, google, refresh, sync. Use VITE_FIREBASE_API_KEY (or the equivalent server-side env var GIP_FIREBASE_API_KEY) to call Identity Toolkit. Verify Firebase JWTs with the Google JWKS (no Firebase Admin SDK needed).')
-        lines.push('  3. Implement the frontend: firebase init (auth.tenantId from VITE_GIP_TENANT_ID), Login/Signup/AuthGuard, an auth store with signup/login/logout/setUser. Only onAuthStateChanged is allowed from firebase/auth.')
-        lines.push('  4. If Google sign-in is requested: read_skill("google-signin") for the GIS button integration.')
+        lines.push('## Auth contract (do not improvise — these rules are not negotiable)')
         lines.push('')
-        lines.push('Layout note: .env is at the project root. If the frontend lives in a subdirectory (e.g. client/), set envDir in vite.config.ts (envDir: path.resolve(__dirname, "..")) — otherwise import.meta.env.VITE_* will be undefined and the GIS button / firebase init will silently fail.')
+        lines.push('### Env keys (already in .env — read them, do not regenerate)')
+        lines.push('  - Frontend (Vite, public): VITE_TM_AUTH_KEY, VITE_TM_AUTH_DOMAIN, VITE_TM_PROJECT_ID, VITE_TM_TENANT_ID' + (data.googleClientId ? ', VITE_TM_GOOGLE_CLIENT_ID' : ''))
+        lines.push('  - Backend (server-only): TM_AUTH_KEY, TM_TENANT_ID, TM_PROJECT_ID')
+        lines.push('  - The backend reads the server-only names (TM_* without VITE_ prefix), the frontend reads the VITE_TM_* mirrors. Both hold the same values; the split avoids the bug where the agent reads a frontend key on the server before dotenv loads.')
+        lines.push('  - Legacy names (VITE_FIREBASE_*, GIP_*, GCP_PROJECT_ID, VITE_GOOGLE_CLIENT_ID) are also written for backward compat with existing code. New code reads the TM_* names — explain to the developer as "your project credentials" in chat prose, not by listing variable names.')
         lines.push('')
-        lines.push('CREDENTIALS COMPLETE — do NOT call request_credentials for anything Firebase/GIP/GCP-related. The auth-proxy authenticates against Identity Toolkit REST using the PUBLIC VITE_FIREBASE_API_KEY (now in .env), not a service account. There is NO Firebase Admin SDK in this stack and the user does not have GOOGLE_APPLICATION_CREDENTIALS / serviceAccountKey.json / GIP_SERVICE_ACCOUNT_* — those live only on the TM Code platform worker.')
+        lines.push('### Env loading (eliminates the dotenv-config-after-imports class of bug)')
+        lines.push('  - Node 20.6+: pass --env-file=.env in the dev script (e.g. `tsx watch --env-file=../.env src/index.ts`).')
+        lines.push('  - Bun: loads .env automatically.')
+        lines.push('  - NestJS: ConfigModule.forRoot({ isGlobal: true }).')
+        lines.push('  - Older Node fallback only: `import \'dotenv/config\'` at the very top of the entry file. Never `dotenv.config({ path: ... })` after other imports — ESM hoists imports above the call.')
+        lines.push('')
+        lines.push('### Auth-API calls')
+        lines.push('  - Every signInWithIdp / signInWithPassword / signUp request body includes `tenantId` (read from `TM_TENANT_ID`). Without it, the auth API returns 400 with INVALID_ID_TOKEN or a tenant-mismatch error.')
+        lines.push('  - Map auth-API 4xx responses to 401 (auth failure), not 502. 502 is for upstream 5xx / network errors only.')
+        lines.push('')
+        lines.push('### Frontend wiring')
+        lines.push('  - Vite proxy MUST forward /api to the backend port — `server.proxy[\'/api\']` in vite.config.ts. Without it, every fetch(\'/api/...\') hits port 5173 and returns 404 HTML. CORS headers are NOT a substitute.')
+        lines.push('  - In a monorepo (vite.config.ts in client/ while .env is at root), set `envDir: path.resolve(__dirname, \'..\')`. In a flat layout, do NOT set envDir — over-set silently breaks all VITE_* reads.')
+        lines.push('  - firebase.ts: `auth.tenantId = import.meta.env.VITE_TM_TENANT_ID`. Inside an iframe (IDE preview), call `setPersistence(auth, inMemoryPersistence)`.')
+        lines.push('  - Only `onAuthStateChanged` is importable from firebase/auth. NEVER signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, etc. — popup is silently blocked in the IDE preview webview.')
+        lines.push('')
+        lines.push('### Data layer — publish-ready by DEFAULT')
+        lines.push('  - Use `firebase-admin` for persistence (users, sessions, anything that needs to survive). The harness rejects SQL-shape deps (`@prisma/client`, `prisma`, `drizzle-orm`, `@libsql/client`, `better-sqlite3`) on writes to package.json — they fail the write and bring you back here.')
+        lines.push('  - Define `APP_ID` in `server/lib/db.ts` with the dev-fallback pattern: `process.env.APP_ID || \\`local-dev-${slug(packageName)}\\``. This keeps `npm run dev` booting on the first try, before any Publish reservation runs.')
+        lines.push('  - Apply the read-once + in-memory cache pattern from the publish-backend skill. Platform-database reads bill per-operation; the cache turns a 5K-read session into a 5-read one.')
+        lines.push('')
+        lines.push('### Dockerfile — generated in the SAME scaffold turn')
+        lines.push('  - When the project has a backend (server/ or backend/ directory, or backend deps), generate a `Dockerfile` + `.dockerignore` at the project root in the same turn that creates the backend code. The Publish detector classifies a project as composite only when `Dockerfile` is present; without it, Publish ships the frontend and the backend stays unpublished — silent failure mode.')
+        lines.push('  - Templates by language in `read_skill("publish-backend")` §8. Node 22 is the default; Python (FastAPI/Flask) is the other shipped option.')
+        lines.push('  - Skip `cloudbuild.yaml` — the platform build pipeline runs an inline spec server-side; a file at the project root is unused.')
+        lines.push('')
+        lines.push('### Existing-project rule')
+        lines.push('  - When you find legacy SQL/Prisma in the project, port it to `firebase-admin` first, before adding auth code. A hybrid persistence layer breaks Publish.')
+        lines.push('  - For the auth-proxy boilerplate, `read_skill("auth-proxy")` covers Express, Fastify, NestJS, Hono, FastAPI.')
+        lines.push('')
+        lines.push('### After the phase that adds /api/auth/* — REQUIRED smoke test')
+        lines.push('  - `execute_command: curl -s -o /dev/null -w \'%{http_code} %{content_type}\\n\' http://localhost:5173/api/auth/me` MUST return `401 application/json`. If 404 HTML, the Vite proxy is missing — fix before claiming the phase done.')
+        lines.push('')
+        lines.push('## Next-step references')
+        lines.push('  1. read_skill("auth-proxy") for the full protocol.')
+        lines.push('  2. read_skill("google-signin") if Google sign-in is requested.')
+        lines.push('  3. CREDENTIALS COMPLETE — request_credentials is for third-party integrations the developer adds (OpenAI, Stripe, etc.), not for anything the platform manages. The public client key in .env is the only auth credential the project needs; admin keys and service-account files live only on the platform side.')
+
+        return lines.join('\n')
+      },
+    })
+
+    // === provision_deploy ===
+    // Mirrors provision_auth for the backend deploy side. With the Firestore
+    // data model there's no per-app database to provision — the app's data
+    // lives at apps/{APP_ID}/... under the shared (default) Firestore in
+    // dev-studio-projects, isolated by Security Rules. The tool:
+    // 1. Calls /v1/projects/deploy/init to reserve <slug>.toquemedia.net +
+    //    create the projectDeployments record (subscription/quota gated).
+    // 2. Writes APP_ID (= project.id) to .env so the server code can build
+    //    its paths under apps/${APP_ID}/...
+    // 3. Returns a summary the agent reads before swapping the DB layer to
+    //    the Firebase Admin SDK (read_skill('publish-backend')
+    //    for the cost-conscious access patterns).
+    //
+    // Reserved for the Publish flow. The agent should NOT call this during
+    // normal scaffolding — the system prompt's Publishing section explains
+    // the rationale (paid commitment, hostname reservation, quota slot).
+    // Idempotent: if APP_ID is already in .env, returns no-op.
+    this.tools.set('provision_deploy', {
+      definition: {
+        name: 'provision_deploy',
+        description:
+          "Reserve a public hostname for this project and register it in the platform's publish quota. Writes APP_ID to .env (the per-app data namespace). RESERVED for the Publish flow — do NOT call this from scaffolding turns. The publish-ready code shape (firebase-admin data layer, Dockerfile, cache pattern) must be in place BEFORE this is called; use APP_ID with a local-dev fallback in your db.ts so the backend runs without this tool ever firing. Idempotent: a second call when APP_ID already exists returns a no-op. May return DEPLOY_QUOTA (free=0/vibe=1/pro=2/max=5 active publishes) — surface verbatim and stop.",
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+      execute: async () => {
+        const project = useProjectStore.getState().currentProject
+        if (!project) {
+          return 'No project is open. Open a project before provisioning the deploy.'
+        }
+
+        // Defense-in-depth: the system prompt instructs the agent to NOT
+        // call provision_deploy during normal scaffolding turns — the
+        // Publish flow owns this. The agent may still call it (e.g., if a
+        // legacy prompt or a user instruction asks for it). Make it
+        // idempotent so a stray call from scaffolding doesn't double-
+        // reserve, double-consume quota, or trigger surprise public-host
+        // commitments. If APP_ID is already in .env, treat as no-op.
+        try {
+          const existing = await invoke<string>('read_file', {
+            path: `${project.path}/.env`,
+          })
+          if (typeof existing === 'string' && /^\s*APP_ID\s*=/m.test(existing)) {
+            return (
+              `provision_deploy already applied to "${project.name}" — APP_ID is in .env. ` +
+              `Skipping re-provision. If you intended to rotate the slug or move to a different ` +
+              `plan, the developer must do that from Settings → Deploys (not from the agent).`
+            )
+          }
+        } catch {
+          // .env doesn't exist yet — fine, continue with the normal flow.
+        }
+
+        const firebaseAuth = FirebaseAuthService.getInstance()
+        const idToken = await firebaseAuth.getIdToken()
+        if (!idToken) {
+          return 'Not authenticated to TM Code. Sign in first, then retry.'
+        }
+        const workerUrl = resolveDeployUrl()
+
+        // /init reserves the slug + creates the projectDeployments record
+        // (quota gated, idempotent on re-run). No DB provisioning — the
+        // platform database is a shared default with per-app path scoping;
+        // nothing to physically create up front.
+        let initRes: Awaited<ReturnType<typeof tauriFetch>>
+        try {
+          initRes = await tauriFetch(`${workerUrl}/v1/projects/deploy/init`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              projectId: project.id,
+              projectName: project.name,
+            }),
+          })
+        } catch (err) {
+          return `Failed to reach deploy/init: ${err instanceof Error ? err.message : String(err)}`
+        }
+        if (!initRes.ok) {
+          const body = await initRes.text().catch(() => '')
+          // Surface the structured DEPLOY_QUOTA / subscription codes so the
+          // agent can offer the right next step (upgrade vs. remove existing).
+          return `Deploy init failed (HTTP ${initRes.status}): ${body.slice(0, 300)}`
+        }
+        const initData = (await initRes.json()) as { slug?: string }
+        const slug = initData.slug
+        if (!slug) {
+          return 'Init returned without a slug — unexpected response shape.'
+        }
+
+        // Write APP_ID to .env. APP_ID is the project.id (same identifier
+        // used in projectDeployments + the path namespace under
+        // apps/{APP_ID}/... in Firestore). GCP_PROJECT_ID is already there
+        // from provision_auth; no other vars to add.
+        const envVars: Array<{ key: string; value: string }> = [
+          { key: 'APP_ID', value: project.id },
+        ]
+        try {
+          await invoke('write_env_vars', { projectPath: project.path, vars: envVars })
+        } catch (err) {
+          return `Reserved slug "${slug}" but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
+        }
+
+        // Invalidate scaffolding cache so detection picks up the new vars.
+        try {
+          const { invalidateScaffoldingCache } = await import('../scaffoldingDetector')
+          invalidateScaffoldingCache(project.path)
+        } catch { /* non-critical */ }
+
+        const lines: string[] = []
+        lines.push(`Deploy infrastructure ready for "${project.name}".`)
+        lines.push(`  - Public hostname: ${slug}.toquemedia.net (locked to this project)`)
+        lines.push(`  - Data namespace: apps/${project.id}/... (platform-managed)`)
+        lines.push(`  - .env written: APP_ID`)
+        lines.push('')
+        lines.push('## What to do next')
+        lines.push('')
+        lines.push(`1. Confirm the publish-ready code shape is already in place (it should be — that's the platform default): firebase-admin data layer with the local-dev APP_ID fallback, Dockerfile + cloudbuild.yaml at root, read-once + in-memory cache pattern applied. If anything is missing, read_skill("${PUBLISHING_SKILL_NAME}") and fill the gaps.`)
+        lines.push('2. The developer can now click Publish — the IDE handles build + bring-online from there.')
+        lines.push('')
+        lines.push('CREDENTIALS COMPLETE — do NOT call request_credentials for database / cloud / service-account keys. The platform runtime authenticates natively (no JSON keys, no API tokens). The only env vars the backend reads at runtime are APP_ID + the auth keys provision_auth already wrote.')
 
         return lines.join('\n')
       },
@@ -2495,7 +3163,7 @@ Project root: ${projectRoot}`
       definition: {
         name: 'request_credentials',
         description:
-          'Request API keys, tokens, or other secrets from the user via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by you). Never instruct the user to create or edit .env, and never ask them to paste secrets into the chat.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nDO NOT USE FOR: anything Firebase / Google Identity Platform / GCP-infrastructure related. The TM Code platform manages those: provision_auth handles GIP tenants and writes the necessary VITE_FIREBASE_* + GIP_* keys to .env automatically. The user does not have (and will never have) Firebase service account JSONs, serviceAccountKey.json, GOOGLE_APPLICATION_CREDENTIALS, GIP_SERVICE_ACCOUNT_CLIENT_EMAIL/PRIVATE_KEY, or any Firebase Admin SDK credential — those live only on the platform worker. Asking for them is incorrect and will confuse the user.',
+          'Request API keys, tokens, or other secrets from the developer via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by the agent). Never instruct the developer to create or edit .env manually, and never ask them to paste secrets into the chat.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nSKIP FOR: anything the platform manages — authentication, the platform database, the runtime, the build pipeline. provision_auth writes the auth credentials automatically; the developer does not have (and will never have) admin SDK keys, service-account files, or infrastructure tokens for the platform side. Those live only on the platform worker. Requesting them through this form is incorrect and will confuse the developer.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2710,7 +3378,7 @@ Adapt based on what was changed:
 - **Refactoring**: Existing tests MUST pass unchanged → spot-check behavior is identical
 
 === REQUIRED STEPS ===
-1. Read CLAUDE.md / package.json for build/test commands.
+1. Read TMS.md / package.json for build/test commands.
 2. Run the build (if applicable). Broken build = automatic FAIL.
 3. Run the project's test suite (if it exists). Failing tests = automatic FAIL.
 4. Run linters/type-checkers if configured (eslint, tsc --noEmit).

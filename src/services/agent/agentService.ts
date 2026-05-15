@@ -3,11 +3,16 @@ import DiffService from './diffService'
 import { devServerManager } from '../devServerManager'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { ServiceError } from '../../utils/errors'
-import { parseSSEStream, createThinkingDetector } from './streamParser'
+import { parseSSEStream, parseOpenAISSEStream, createThinkingDetector } from './streamParser'
+import { resolveThinkingHint } from './thinkingShapeDetection'
+import { streamLocalChat } from './byokLocalStream'
+import { anthropicToOpenAIBody } from './anthropicToOpenai'
 import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useByokStore } from '../../stores/byokStore'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { getByokStateSnapshot } from '../../hooks/useByokState'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
 import { resolveWorkerUrl } from '../../utils/devUrls'
@@ -72,10 +77,35 @@ const DEFAULT_CONTEXT_WINDOW = 131_072  // Conservative fallback (128K)
 //   openai_reasoning_effort  — reasoning_effort: 'minimal' | 'medium'
 //   qwen_enable_thinking     — enable_thinking: boolean
 //   gemini_thinking_budget   — thinking_budget: number (0 = off)
+//   openrouter_reasoning     — reasoning: { exclude: true } / { effort: 'medium' }
+//   mimo_chat_template_kwargs — chat_template_kwargs: { enable_thinking: boolean }
 //
 // Some BYOK models are "thinking-by-default" (e.g. o1/o3) and cannot be turned
 // fully off; we send the lowest effort instead so we at least minimise it.
-type ByokThinkingShape = 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget'
+//
+// `openrouter_reasoning` exists because models routed via OpenRouter (e.g.
+// xiaomi/mimo-v2.5-pro) silently ignore `reasoning_effort` (OpenAI shape)
+// and `enable_thinking` (Qwen shape). The OpenRouter-native `reasoning.*`
+// object is the only shape they honour. We send `{ reasoning: { exclude: true } }`
+// to disable rather than `{ reasoning: { enabled: false } }` because some
+// mandatory-reasoning models on OpenRouter reject `enabled: false`;
+// `exclude: true` is universal — the model still reasons internally but
+// doesn't emit reasoning tokens, so we don't waste display surface on it.
+//
+// `mimo_chat_template_kwargs` is the official Xiaomi MiMo API shape (used by
+// platform.xiaomimimo.com and self-hosted MiMo via SGLang). Unlike Qwen
+// which takes `enable_thinking` at the top level, MiMo's template wraps it
+// in `chat_template_kwargs.enable_thinking`. Mistaking one for the other is
+// silent — both APIs accept extra top-level fields, so the model just
+// keeps reasoning while the param is ignored.
+type ByokThinkingShape =
+  | 'anthropic'
+  | 'openai_reasoning_effort'
+  | 'qwen_enable_thinking'
+  | 'gemini_thinking_budget'
+  | 'openrouter_reasoning'
+  | 'mimo_chat_template_kwargs'
+  | 'moonshot_thinking'
 
 const BYOK_THINKING_BUDGET_TOKENS = 8_192
 const BYOK_GEMINI_THINKING_BUDGET = 24_000
@@ -96,8 +126,24 @@ function buildByokThinkingParam(
       return { enable_thinking: enabled }
     case 'gemini_thinking_budget':
       return { thinking_budget: enabled ? BYOK_GEMINI_THINKING_BUDGET : 0 }
+    case 'openrouter_reasoning':
+      return enabled
+        ? { reasoning: { effort: 'medium' } }
+        : { reasoning: { exclude: true } }
+    case 'mimo_chat_template_kwargs':
+      return { chat_template_kwargs: { enable_thinking: enabled } }
+    case 'moonshot_thinking':
+      // Kimi-specific `thinking` extension. The k2-thinking* SKUs reason
+      // unconditionally regardless of this flag — the param is meaningful
+      // only on K2.5 / K2.6 which expose both modes. Shape mirrors the
+      // Anthropic-style nested object, the closest convention to what the
+      // Kimi platform documents.
+      return enabled
+        ? { thinking: { type: 'enabled' } }
+        : { thinking: { type: 'disabled' } }
   }
 }
+
 
 // Context window is reported by the backend via X-Model-Context-Window header.
 // This map is ONLY used as a static fallback if the header is missing (e.g., backend not updated).
@@ -205,6 +251,11 @@ class AgentService {
   private lastPromptTokens = 0
   /** Context window size (tokens) — updated from API usage if available. */
   private contextWindowSize = DEFAULT_CONTEXT_WINDOW
+  /** SSE shape produced by the most recent callAPIOnce. processStreamedTurn
+   *  consults this to pick parseSSEStream (Anthropic, the default for both
+   *  TMS-routed and cloud BYOK) vs parseOpenAISSEStream (local BYOK —
+   *  Ollama / LM Studio /v1/chat/completions). */
+  private lastResponseShape: 'anthropic' | 'openai' = 'anthropic'
   /** Files accessed during the current agent session, ordered by recency. */
   private fileAccessLog: Array<{ path: string; action: 'read' | 'modified'; timestamp: number }> = []
   /** Circuit breaker: consecutive LLM summarization failures. After 3, skip LLM and go straight to mechanical. */
@@ -254,6 +305,26 @@ class AgentService {
 
   setRequestType(type: string | null) {
     this.requestType = type
+  }
+
+  /**
+   * Whether the next turn will have reasoning ON. Computed from the same
+   * inputs `buildRequestBody` uses internally so the UI can stamp the
+   * assistant message with `thinkingRequested` at start time and the
+   * MessageBubble can hide reasoning blocks when the user didn't ask for
+   * them (defense in depth — some BYOK reasoning models keep emitting
+   * reasoning even when the disable param is honoured).
+   */
+  isThinkingRequestedForNextTurn(): boolean {
+    const forceThinking =
+      this.requestType === 'plan'
+      || this.requestType === 'debug'
+      || this.requestType === 'review'
+      || this.requestType === 'e2e'
+    if (forceThinking) return true
+    // BYOK in play → manual toggle ignored, no force command → no thinking.
+    if (getByokStateSnapshot().byokInPlay) return false
+    return useSettingsStore.getState().thinkingEnabled
   }
 
   /**
@@ -327,7 +398,20 @@ class AgentService {
       // collapse to generic chat without it). The forced-on path matters
       // most for BYOK, where the backend can't override the body the way
       // it does for plan-managed models.
-      const isThinking = forceThinking || useSettingsStore.getState().thinkingEnabled
+      //
+      // BYOK rule: when the developer is using their own key, the manual
+      // Settings toggle is ignored — thinking is ON only for the known
+      // reasoning commands above. The matching toggle button is hidden in
+      // the UI via the same shared selector. Rationale: BYOK is per-token
+      // billing on the developer's wallet; a manual toggle is an easy way
+      // to accidentally burn budget on a code-edit turn where reasoning
+      // has zero marginal value.
+      const { getByokStateSnapshot } = await import('../../hooks/useByokState')
+      const { byokInPlay } = getByokStateSnapshot()
+      const userTogglesThinking = byokInPlay
+        ? false
+        : useSettingsStore.getState().thinkingEnabled
+      const isThinking = forceThinking || userTogglesThinking
 
       // Filter tools based on model capabilities.
       // web_search is exposed to the model when profile.supportsSearch is true.
@@ -818,23 +902,37 @@ class AgentService {
               ? undefined
               : mergedValue
 
-            // Add to chat so the user sees the message — INSERT before the
-            // streaming assistant message to keep visual order correct:
-            //   user_msg → queued_user_msg → assistant_response
-            //   (NOT: user_msg → assistant_response → queued_user_msg)
+            // Split the streaming assistant message: finalise the current
+            // bubble (so the work-so-far is visible as a complete reply),
+            // append the user's queued message AT THE END (where their
+            // viewport is locked by stick-to-bottom — placing it above the
+            // streaming assistant makes the bubble appear off-screen and
+            // the user reports the message "disappeared"), and start a new
+            // streaming assistant. Subsequent deltas/tool calls land in
+            // the new bubble.
             try {
               const { useChatStore: chatStoreImport } = await import('../../stores/chatStore')
-              chatStoreImport.getState().insertUserMessageBeforeAssistant(
+              chatStoreImport.getState().splitForQueuedMessage(
                 displayText,
                 displayAttachments,
                 promptBlocksList,
               )
             } catch { /* non-critical */ }
 
-            // Append to the tool_results user message (avoids consecutive user msgs)
+            // Append to the tool_results user message (avoids consecutive
+            // user msgs in the API conversation). The INTERRUPT framing
+            // tells the model the message is a side-channel from the
+            // developer — address it inline, then RESUME the original
+            // task. Without this hint, the model treats the message as a
+            // topic change, replies once, and exits the loop early —
+            // leaving the in-progress task half-done.
             toolResultBlocks.push({
               type: 'text',
-              text: `[USER_MESSAGE]\n${displayText}\n[/USER_MESSAGE]`,
+              text: `[USER_MESSAGE_INTERRUPT]
+The developer sent a side-channel message while you were mid-task. Address it inline as part of your next response, then RESUME the original task without asking for confirmation. Do NOT call onDone, do NOT treat this as the end of the session, do NOT abandon the in-progress work — your goal is unchanged unless the developer explicitly says "stop" or "cancel".
+
+Developer message: ${displayText}
+[/USER_MESSAGE_INTERRUPT]`,
             })
 
             logger.info(
@@ -926,11 +1024,19 @@ class AgentService {
                   .filter(b => b.type === 'attachment')
                   .map(b => b.attachment)
 
+            // Same split as mid-turn drain — finalise the current assistant
+            // bubble, drop the user's queued message at the end where their
+            // scroll lock keeps the viewport, start a fresh streaming
+            // assistant for the response.
             try {
               const { useChatStore: chatStoreImport } = await import('../../stores/chatStore')
-              chatStoreImport.getState().insertUserMessageBeforeAssistant(displayText, displayAttachments)
+              chatStoreImport.getState().splitForQueuedMessage(displayText, displayAttachments)
             } catch { /* non-critical */ }
 
+            // Different framing from mid-turn drain: pre-exit fires when the
+            // model wanted to STOP. The queued message is now the developer's
+            // follow-up — there's no in-progress task to "resume", just a
+            // request to address. Plain USER_MESSAGE wrapper is enough.
             messages.push({
               role: 'user',
               content: `[USER_MESSAGE]\n${displayText}\n[/USER_MESSAGE]`,
@@ -953,12 +1059,26 @@ class AgentService {
         callbacks.onTurnComplete(turnCount)
       }
 
-      callbacks.onError(new Error(`Agent exceeded maximum turns (${maxTurns})`))
+      callbacks.onError(new ServiceError(
+        `Agent exceeded maximum turns (${maxTurns})`,
+        'TURN_LIMIT',
+        false,
+      ))
     } catch (error) {
       // Clean exit on abort — don't treat as error
       if (this.abortController?.signal.aborted) return
       if (error instanceof DOMException && error.name === 'AbortError') return
-      callbacks.onError(error instanceof Error ? error : new Error(String(error)))
+      // Pass through ServiceErrors verbatim (their `code` drives the UI's
+      // post-error UX — error-aware system messages, retry hints, etc).
+      // Wrap plain throws into a generic ServiceError so downstream code
+      // can rely on `error.code` always being set without a regex fallback.
+      if (error instanceof ServiceError) {
+        callbacks.onError(error)
+      } else if (error instanceof Error) {
+        callbacks.onError(new ServiceError(error.message, 'UNKNOWN_ERROR', false))
+      } else {
+        callbacks.onError(new ServiceError(String(error), 'UNKNOWN_ERROR', false))
+      }
     } finally {
       // Pool telemetry: log + analytics for the entire agent loop.
       if (!this.lightweightOptions) {
@@ -1672,16 +1792,25 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       modelId: string
       baseURL: string
       custom: boolean
+      local: boolean
       capabilities?: { images: boolean; audio: boolean; video: boolean; tools: boolean }
     }
     let byokInject: ByokInjection | null = null
     if (activeSession?.byokSnapshot) {
       const snap = activeSession.byokSnapshot
+      // `local` may be absent on sessions persisted before the field existed —
+      // re-derive from byokStore in that case.
+      let local = snap.local === true
+      if (snap.local === undefined) {
+        const provider = useByokStore.getState().providers.find(p => p.id === snap.providerId)
+        local = provider?.local === true
+      }
       byokInject = {
         providerId: snap.providerId,
         modelId: snap.modelId,
         baseURL: snap.baseURL,
         custom: snap.custom,
+        local,
         capabilities: snap.capabilities,
       }
     } else {
@@ -1699,11 +1828,23 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
           modelId: active.model.id,
           baseURL: active.baseURL,
           custom: active.provider.custom === true,
+          local: active.provider.local === true,
           capabilities: sendCapabilities ? active.model.capabilities : undefined,
         }
       }
     }
-    if (byokInject) {
+    // Local providers (Ollama, LM Studio): the worker proxy refuses to route
+    // local URLs (proxy.ts:1111) and the WebView would hit CORS dialing
+    // localhost:11434 directly. The local route runs through the Rust SSE
+    // bridge after requestBody is built; here we just bookmark and skip the
+    // mandatory-key check below — local providers have no key by default.
+    if (byokInject?.local) {
+      this.lastResponseShape = 'openai'
+      useByokStore.getState().markUsed(byokInject.providerId)
+    } else {
+      this.lastResponseShape = 'anthropic'
+    }
+    if (byokInject && !byokInject.local) {
       let apiKey: string | null = null
       try {
         apiKey = await invoke<string | null>('byok_get_key', { provider: byokInject.providerId })
@@ -1757,23 +1898,70 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     // silently ignore — that's how the toggle was previously a no-op for BYOK.
     let byokThinkingHint: { supportsThinking: boolean; thinkingShape?: ByokThinkingShape } | null = null
     if (byokInject) {
-      let supportsThinking = activeSession?.byokSnapshot?.supportsThinking
-      let thinkingShape = activeSession?.byokSnapshot?.thinkingShape
-      // Snapshot may pre-date the supportsThinking/thinkingShape fields
-      // (older persisted sessions). Fall back to the live byokStore lookup.
-      if (supportsThinking === undefined) {
+      // Pull catalog inputs from the session snapshot first, then live store
+      // as fallback for older persisted sessions that pre-date the
+      // supportsThinking/thinkingShape fields.
+      let catalogSupportsThinking = activeSession?.byokSnapshot?.supportsThinking
+      let catalogShape = activeSession?.byokSnapshot?.thinkingShape
+      if (catalogSupportsThinking === undefined) {
         const active = useByokStore.getState().resolveActive()
         if (active && active.provider.id === byokInject.providerId && active.model.id === byokInject.modelId) {
-          supportsThinking = active.model.supportsThinking
-          thinkingShape = active.model.thinkingShape
+          catalogSupportsThinking = active.model.supportsThinking
+          catalogShape = active.model.thinkingShape
         }
       }
-      byokThinkingHint = {
-        supportsThinking: supportsThinking ?? false,
-        thinkingShape,
-      }
+      // Pure-function resolution — host wins over catalog; tested as a unit
+      // in thinkingShapeDetection.test.ts so the rule can't drift here.
+      byokThinkingHint = resolveThinkingHint({
+        baseURL: byokInject.baseURL,
+        catalogSupportsThinking,
+        catalogShape,
+      })
     }
     const requestBody = JSON.stringify(await this.buildRequestBody(messages, byokThinkingHint, forceThinking))
+
+    // Local BYOK route: Rust SSE bridge → OpenAI-shape /v1/chat/completions.
+    // Bypasses the worker entirely (proxy refuses local URLs) and bypasses
+    // the WebView's CORS by going through reqwest in Rust. Returns a
+    // standard Response wrapping the streamed body — processStreamedTurn
+    // dispatches on this.lastResponseShape='openai' to use parseOpenAISSEStream.
+    if (byokInject?.local) {
+      const anthropicBody = JSON.parse(requestBody) as Record<string, unknown>
+      const openaiBody = anthropicToOpenAIBody(anthropicBody, byokInject.modelId)
+      const localUrl = `${byokInject.baseURL.replace(/\/$/, '')}/v1/chat/completions`
+      const localHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      }
+      // Optional auth — supports LM Studio behind a private gateway etc.
+      // For Ollama-without-auth, byok_get_key returns null and we send no
+      // Authorization header.
+      try {
+        const apiKey = await invoke<string | null>('byok_get_key', { provider: byokInject.providerId })
+        if (apiKey) localHeaders['Authorization'] = `Bearer ${apiKey}`
+      } catch { /* no key — fine */ }
+
+      const localResp = await streamLocalChat(
+        localUrl,
+        JSON.stringify(openaiBody),
+        localHeaders,
+        this.abortController?.signal,
+      )
+      if (!localResp.ok || !localResp.body) {
+        const reachableHint = localResp.status === 0
+          ? `Não consegui contactar ${localUrl}. O servidor está iniciado?`
+          : `O servidor local respondeu ${localResp.status}: ${(localResp.errorBody ?? '').slice(0, 300)}`
+        throw new ServiceError(reachableHint, 'BYOK_LOCAL_ERROR', false)
+      }
+      const wrapped = new Response(localResp.body, {
+        status: 200,
+        headers: {
+          'X-Model-Name': byokInject.modelId,
+          'X-Model-Provider': byokInject.providerId,
+        },
+      })
+      return wrapped
+    }
 
     let response: Response
     try {
@@ -1872,9 +2060,13 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
 
     // Read model metadata from backend response headers
     const contextWindow = response.headers.get('X-Model-Context-Window')
+    let contextWindowForStore: number | null | undefined = undefined
     if (contextWindow) {
       const parsed = parseInt(contextWindow, 10)
-      if (parsed > 0) this.contextWindowSize = parsed
+      if (parsed > 0) {
+        this.contextWindowSize = parsed
+        contextWindowForStore = parsed
+      }
     }
 
     const modelName = response.headers.get('X-Model-Name')
@@ -1884,8 +2076,10 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       thinkingHeader === 'none' || thinkingHeader === 'toggleable' || thinkingHeader === 'mandatory'
         ? thinkingHeader
         : null
-    if (modelName || modelProvider || thinkingHeader) {
-      useAgentStore.getState().setModelInfo(modelName, modelProvider, thinkingMode)
+    if (modelName || modelProvider || thinkingHeader || contextWindowForStore !== undefined) {
+      useAgentStore
+        .getState()
+        .setModelInfo(modelName, modelProvider, thinkingMode, contextWindowForStore)
     }
 
     // Authoritative BYOK marker: the server confirms whether the request
@@ -1935,7 +2129,12 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
     // Detector for <think> blocks embedded in text (DashScope reasoning via text_delta)
     const thinkingDetector = createThinkingDetector()
 
-    await parseSSEStream(response, {
+    // Local BYOK responses arrive in OpenAI-compatible SSE shape — parser
+    // is set by callAPIOnce via this.lastResponseShape. The rest of the
+    // turn processing is shape-agnostic (StreamEvent is the common surface).
+    const parser = this.lastResponseShape === 'openai' ? parseOpenAISSEStream : parseSSEStream
+
+    await parser(response, {
       onEvent: (event: StreamEvent) => {
         switch (event.type) {
           case 'content_block_start': {
@@ -2053,7 +2252,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
           }
 
           case 'error': {
-            callbacks.onError(new Error(event.message))
+            callbacks.onError(new ServiceError(event.message, 'STREAM_ERROR', false))
             break
           }
 

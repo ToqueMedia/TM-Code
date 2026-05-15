@@ -30,6 +30,17 @@ export const theme = createSystem(defaultConfig, {
       userSelect: 'text',
       WebkitUserSelect: 'text',
     },
+    // Opt-in selectable subtree. The global rule above sets `user-select: none`
+    // on the whole app to keep buttons/labels/icons unselectable; marking a
+    // container with `data-selectable="true"` flips that for its subtree so
+    // chat bubbles and Terminal-mode transcripts can be highlighted and
+    // copied via Cmd/Ctrl+C. Descendants that still need to stay unselectable
+    // (row numbers, prefix glyphs, copy buttons) keep their explicit inline
+    // `userSelect="none"` and win on specificity.
+    '[data-selectable="true"], [data-selectable="true"] *:not([data-selectable="false"])': {
+      userSelect: 'text',
+      WebkitUserSelect: 'text',
+    },
     // Monaco context menu — cursor fix
     '.monaco-editor .monaco-menu, .monaco-editor .monaco-menu *': {
       cursor: 'default !important',

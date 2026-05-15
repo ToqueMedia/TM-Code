@@ -1,6 +1,6 @@
 ---
 name: html-document
-description: Self-contained HTML/CSS deliverables — reports, briefs, email templates, SVG-heavy artifacts. Single file, no build, optionally converts to PDF later.
+description: Self-contained HTML/CSS deliverables — reports, briefs, email templates, SVG-heavy artifacts. Single file, no build, optionally converts to PDF later. Multilingual triggers — invoke whenever the request mentions: "HTML page" / "email template" / "SVG" / "infographic" / "página HTML" / "email HTML" / "relatório web" / "infográfico" (PT) / "page HTML" / "modèle e-mail" / "infographie" (FR) / "página HTML" / "plantilla de correo" / "infografía" (ES) / "HTML 页面" / "电子邮件模板" / "SVG 图形" (ZH).
 ---
 
 # HTML Rich Document

@@ -1,6 +1,6 @@
 ---
 name: xlsx-spreadsheet
-description: Generate Microsoft Excel (.xlsx) workbooks via openpyxl or pandas. Call when the user asks for Excel, spreadsheets, tabular reports, data exports.
+description: Generate Microsoft Excel (.xlsx) workbooks via openpyxl or pandas. Call when the user asks for Excel, spreadsheets, tabular reports, data exports. Multilingual triggers — invoke whenever the request mentions: "Excel" / ".xlsx" / "spreadsheet" / "folha de cálculo" / "tabela em Excel" / "relatório em Excel" / "exportação de dados" (PT) / "feuille de calcul" / "tableur" (FR) / "hoja de cálculo" / "informe Excel" (ES) / "Excel表格" / "电子表格" (ZH).
 ---
 
 # Excel Spreadsheet Generation (.xlsx)

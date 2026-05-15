@@ -8,10 +8,9 @@ import { useAgentElapsed } from '../../hooks/useAgentElapsed'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useBillingStore, isInOverageState } from '../../stores/billingStore'
-import { useSettingsStore } from '../../stores/settingsStore'
+import { useThinkingToggle } from '../../hooks/useThinkingToggle'
 import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
 import { getCommandQueueSnapshot } from '../../services/agent/messageQueue'
-import { getProfileForPlan } from '../../services/agent/modelProfiles'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -90,24 +89,17 @@ function AgentStatusBar() {
   const { elapsedMs, isPaused } = useAgentElapsed('phase')
   const isBusy = status !== 'idle' && status !== 'error'
   const showElapsed = isBusy && elapsedMs >= 5000
-  // Thinking toggle — visibility driven by the BACKEND's authoritative answer
-  // (X-Model-Thinking-Mode header on the last response). The frontend's
-  // per-plan profile is only a pre-handshake fallback used before the first
-  // response arrives. This eliminates the frontend↔backend drift that
-  // happens when the admin changes a plan's ideModel in Firestore.
-  // Hidden when the backend reports 'none' (e.g. mimo-v2-flash) or 'mandatory'
-  // (always-on by design — toggle would be a no-op).
-  const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
-  const toggleThinking = useSettingsStore(s => s.setThinkingEnabled)
-  const backendThinkingMode = useAgentStore(s => s.thinkingMode)
-  const billingPlan = useBillingStore(s => s.plan)
-  const fallbackProfile = getProfileForPlan(billingPlan)
-  const effectiveMode = backendThinkingMode
-    ?? (fallbackProfile.supportsThinking
-        ? (fallbackProfile.thinkingMode === 'mandatory' ? 'mandatory' : 'toggleable')
-        : 'none')
-  const thinkingSupported = effectiveMode === 'toggleable'
-  const thinkingMandatory = effectiveMode === 'mandatory'
+  // Thinking toggle — unified via useThinkingToggle. The hook fuses
+  // (a) the backend's X-Model-Thinking-Mode answer with the per-plan
+  // fallback for the pre-handshake window, and (b) the BYOK gate (manual
+  // toggle hidden when BYOK is in play; thinking is auto-managed for the
+  // reasoning commands only). See src/hooks/useThinkingToggle.ts.
+  const {
+    toggleable: thinkingSupported,
+    mandatory: thinkingMandatory,
+    enabled: thinkingEnabled,
+    setEnabled: toggleThinking,
+  } = useThinkingToggle()
   const autoApproveDiffs = usePermissionStore(s => s.autoApproveDiffs)
 
   // Build info segments — derive counts from raw store data (avoids infinite re-render loop)

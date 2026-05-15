@@ -485,6 +485,21 @@ pub fn rename_file_or_directory(old_path: String, new_name: String) -> Result<Fi
         .map_err(FileTreeError::from)
 }
 
+/// Lightweight existence check — single stat call, no read. Use for marker
+/// probes (e.g. scaffolding detection) where you only care if a file is on
+/// disk, not its contents. Returns false on any error (path traversal,
+/// permission denied, missing parent) — callers treat "not exists" as the
+/// safe default. Synchronous because stat() is cheap (~µs) and async would
+/// add task-spawn overhead disproportionate to the work.
+#[tauri::command]
+pub fn path_exists(path: String) -> bool {
+    let p = Path::new(&path);
+    match validate_path_safe(p) {
+        Ok(canonical) => canonical.exists(),
+        Err(_) => false,
+    }
+}
+
 // Read file content (async — does not block the Tauri command queue)
 #[tauri::command]
 pub async fn read_file(path: String) -> Result<String> {

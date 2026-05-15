@@ -48,8 +48,22 @@ export async function setLiveModel(plan: AdminPlanGroup, modelId: string): Promi
   })
   if (!res.ok) {
     if (res.status === 403) throw new Error('FORBIDDEN')
-    const detail = await res.text().catch(() => '')
-    throw new Error(`Failed to update live model (${res.status}): ${detail.slice(0, 200)}`)
+    // The worker returns a structured JSON envelope: `{ error: string, detail?: string }`.
+    // Surface the human-readable `detail` when present (covers the
+    // common "Plan(s) not found in Firestore" case the user kept hitting
+    // — previously came through as a raw JSON dump in the UI error banner).
+    // Falls back to the raw body when not JSON / no detail field.
+    const raw = await res.text().catch(() => '')
+    let human = raw
+    try {
+      const parsed = JSON.parse(raw) as { error?: string; detail?: string }
+      if (parsed.detail) {
+        human = parsed.detail
+      } else if (parsed.error) {
+        human = parsed.error
+      }
+    } catch { /* not JSON — keep raw */ }
+    throw new Error(`Failed to update live model (${res.status}): ${human.slice(0, 300)}`)
   }
 }
 

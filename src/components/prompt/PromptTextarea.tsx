@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useState } from 'react'
+import React, { memo, useCallback, useLayoutEffect, useRef } from 'react'
 import { Box } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -33,11 +33,34 @@ const TEXT_STYLE: React.CSSProperties = {
 function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPaste, disabled, isAgentBusy }: PromptTextareaProps) {
   // Mirror the textarea's scrollTop onto the overlay so multi-line content
   // (>6 visible rows, when the textarea starts scrolling internally) keeps
-  // the colored highlight aligned with the real glyphs underneath.
-  const [scrollTop, setScrollTop] = useState(0)
+  // the coloured highlight aligned with the real glyphs underneath.
+  //
+  // Using a ref + imperative DOM write (instead of useState) means the
+  // overlay does NOT re-render on every scroll tick — at 60fps that's 60
+  // re-renders per second of an overlay containing the entire prompt + its
+  // highlight spans. The transform is the only thing that needs to change
+  // per scroll, and it's a CSS property React doesn't need to mediate.
+  const overlayRef = useRef<HTMLDivElement | null>(null)
   const handleScroll = useCallback(() => {
-    if (textareaRef.current) setScrollTop(textareaRef.current.scrollTop)
+    const ta = textareaRef.current
+    const ov = overlayRef.current
+    if (ta && ov) {
+      ov.style.transform = `translateY(-${ta.scrollTop}px)`
+    }
   }, [textareaRef])
+
+  // After every value change, re-sync the transform: typing past the visible
+  // window auto-scrolls the textarea (browser keeps the caret in view) but
+  // doesn't always fire a scroll event in time, and value-driven re-renders
+  // wipe inline styles set by handleScroll. useLayoutEffect runs synchronously
+  // after DOM commit so the user never sees a frame with the transform stale.
+  useLayoutEffect(() => {
+    const ta = textareaRef.current
+    const ov = overlayRef.current
+    if (ta && ov) {
+      ov.style.transform = `translateY(-${ta.scrollTop}px)`
+    }
+  }, [value, textareaRef])
 
   return (
     <Box px={4} pt={3} pb={1}>
@@ -94,16 +117,14 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPas
             caret-color keeps the cursor visible; selection still works
             because the textarea owns input. */}
         <Box
+          ref={overlayRef}
           aria-hidden
           position="absolute"
           inset={0}
           pointerEvents="none"
           color={tokens.colors.text.primary}
           opacity={disabled ? 0.5 : 1}
-          style={{
-            ...TEXT_STYLE,
-            transform: `translateY(-${scrollTop}px)`,
-          }}
+          style={TEXT_STYLE}
         >
           {renderHighlightedPrompt(value)}
           {/* Trailing space so a value ending in newline reserves a final

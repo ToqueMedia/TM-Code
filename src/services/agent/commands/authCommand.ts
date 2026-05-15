@@ -14,7 +14,7 @@ import { logger } from '../../../utils/logger'
  * The hashtag detector (see `hashtagRegistry.ts`) inspects the user's prompt
  * at submit time, parses the providers, strips the tags, and calls
  * `runAuthFlow` below. This pre-loads the authoritative skill content
- * (auth-proxy-gip SKILL.md, plus google-signin SKILL.md when Google is
+ * (auth-proxy SKILL.md, plus google-signin SKILL.md when Google is
  * requested) and injects it into the agent's prompt as `<auth_skill>`
  * context blocks. The agent gets a single, self-contained instruction with
  * everything needed to implement — no round-trip to read_skill mid-turn.
@@ -62,7 +62,7 @@ function buildPrompt(
   const wantsEmail = providers.includes('email-password')
 
   const skillsBlock = [
-    `<auth_skill name="auth-proxy-gip">`,
+    `<auth_skill name="auth-proxy">`,
     authProxySkill,
     `</auth_skill>`,
     ...(googleSigninSkill
@@ -90,13 +90,13 @@ function buildPrompt(
     ``,
     `Execution sequence — run in this order:`,
     ``,
-    `1. Call \`provision_auth(provider: "gip")\`. This creates the per-project GIP tenant on the platform and writes the Firebase config to \`.env\` (VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID, VITE_GIP_TENANT_ID, plus backend mirrors GIP_FIREBASE_API_KEY / GIP_TENANT_ID / GCP_PROJECT_ID). Do not skip — without this the credentials don't exist.`,
+    `1. Call \`provision_auth(provider: "gip")\`. This reserves the project's auth tenant on the platform and writes the auth credentials to \`.env\` automatically — both the neutral TM_* names (for new code) and the legacy FIREBASE_*/GIP_*/GCP_* names (backward compat). Without it the credentials don't exist; do not skip.`,
     ``,
     `2. Inspect the project to choose the backend stack: read package.json (existing deps like express, hono, fastify, @nestjs/core), or look for pyproject.toml / go.mod for non-Node projects. If the project is a fresh frontend-only repo and the developer didn't specify, ask which backend stack they prefer (one short question, then proceed).`,
     ``,
-    `3. Implement the auth-proxy backend in your chosen stack — endpoints from the skill: POST /api/auth/proxy/{signup,signin,google,refresh} + POST /api/auth/sync. Wire the Identity Toolkit calls with VITE_FIREBASE_API_KEY (or GIP_FIREBASE_API_KEY server-side). For JWT verification on /api/auth/sync, use the JWKS pattern from the skill (jose / jsonwebtoken / python-jose / golang-jwt depending on stack).`,
+    `3. Implement the auth-proxy backend in your chosen stack — endpoints from the skill: POST /api/auth/proxy/{signup,signin,google,refresh} + POST /api/auth/sync. The proxy forwards to the platform's auth API using the public client key in .env (the auth-proxy skill has the exact request shape for each endpoint). For JWT verification on /api/auth/sync, use the JWKS pattern from the skill (jose / jsonwebtoken / python-jose / golang-jwt depending on stack).`,
     ``,
-    `4. Define a users table/document in whatever DB the project uses (Postgres + Prisma/Drizzle, MongoDB, SQLite, Turso, Supabase, etc.). Minimum columns: uid (PK), email (unique), name, avatarUrl, role, createdAt, updatedAt. Custom columns MUST be nullable or have defaults — sync runs from JWT data on first sign-in.`,
+    `4. Persist users via the platform data layer — see the Publishing section of your system prompt. The auth-proxy is concerned with sign-in flow only; the user record (uid PK, email unique, name, avatarUrl, role, createdAt, updatedAt) is stored using \`firebase-admin\` under \`apps/{APP_ID}/users\`, NOT in a local SQL DB. The publish-backend skill has the exact shape. Custom columns are nullable or have defaults — sync runs from JWT data on first sign-in.`,
     ``,
     `5. Implement the frontend per the skill recipe:`,
     `   - src/lib/firebase.ts (init only — only onAuthStateChanged is allowed from firebase/auth)`,
@@ -123,13 +123,13 @@ function buildPrompt(
         ]
       : []),
     ``,
-    `Hard rules (do NOT break):`,
-    `- NEVER modify .env directly — TM Code injects credentials.`,
-    `- NEVER install firebase-admin. The auth-proxy uses the Identity Toolkit REST API with VITE_FIREBASE_API_KEY (a public key); there is no Admin SDK in this stack.`,
-    `- NEVER call request_credentials for anything Firebase / GIP / GCP-related. The user does not have GOOGLE_APPLICATION_CREDENTIALS, serviceAccountKey.json, or GIP_SERVICE_ACCOUNT_* — those live only on the TM Code platform worker.`,
-    `- NEVER import signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, or signOut from firebase/auth. Only onAuthStateChanged is allowed.`,
-    `- ALWAYS call /api/auth/sync after a successful proxy signup or signin to upsert the user row.`,
-    `- ALWAYS use authFetch (or the project's equivalent) for protected API calls.`,
+    `Hard rules:`,
+    `- The .env file is managed by the platform — \`request_credentials\` is the only legitimate write path, and TM Code uses it only for third-party developer keys (OpenAI, Stripe, etc.), never for platform-managed credentials.`,
+    `- Use the public client key in .env (the one provision_auth just wrote) for the auth-proxy's outbound calls. Admin SDK keys / service-account files / infrastructure tokens live only on the platform side and the project does not have them; \`request_credentials\` for them is incorrect.`,
+    `- The auth-proxy itself is a thin REST forwarder — it does NOT install \`firebase-admin\`. The data layer (the user record persistence) is a separate concern and uses \`firebase-admin\` per the Publishing section.`,
+    `- Client-side: only \`onAuthStateChanged\` is imported from \`firebase/auth\`. signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, signOut go through the proxy instead — the popup family is silently blocked in the IDE's preview webview.`,
+    `- After a successful proxy signup or signin, call /api/auth/sync to upsert the user record via the platform data layer.`,
+    `- Use authFetch (or the project's equivalent) for protected API calls.`,
   ].join('\n')
 }
 
@@ -147,6 +147,7 @@ export async function runAuthFlow(
   instructions: string,
   userMessageText: string,
   withDesign: boolean = false,
+  cmdOnlyMode: boolean = false,
 ): Promise<void> {
   const chatStore = useChatStore.getState()
   const wantsGoogle = providers.includes('google')
@@ -154,14 +155,14 @@ export async function runAuthFlow(
   // Load the bundled skill content in parallel so the agent gets the full
   // recipe(s) inline — no round-trip to read_skill mid-turn.
   const [authProxySkill, googleSigninSkill, designSkill] = await Promise.all([
-    fetchBundledSkill('auth-proxy-gip'),
+    fetchBundledSkill('auth-proxy'),
     wantsGoogle ? fetchBundledSkill('google-signin') : Promise.resolve(null),
     withDesign ? fetchBundledSkill('frontend-design') : Promise.resolve(null),
   ])
 
   if (!authProxySkill) {
     chatStore.addSystemMessage(
-      'Could not load the auth-proxy-gip skill. The bundled resources may be missing — reinstall TM Code if this persists.'
+      'Could not load the auth-proxy skill. The bundled resources may be missing — reinstall TM Code if this persists.'
     )
     return
   }
@@ -177,14 +178,14 @@ export async function runAuthFlow(
   }
 
   // Force-load the auth skills into the SkillService cache BEFORE the agent
-  // runs. Without this, the agent's `read_skill("auth-proxy-gip")` calls hit
+  // runs. Without this, the agent's `read_skill("auth-proxy")` calls hit
   // the relevance heuristic (which rejects auth skills for projects with no
   // detectable type, e.g. an empty directory) and return "not loaded" — the
   // agent then falls back to training-data implementations and ignores the
   // skill entirely. This keeps the system-prompt skill index, the read_skill
   // tool, and the inline `<auth_skill>` blocks in the prompt all consistent.
   const skillService = SkillService.getInstance()
-  skillService.forceLoadSkill('auth-proxy-gip')
+  skillService.forceLoadSkill('auth-proxy')
   if (wantsGoogle && googleSigninSkill) {
     skillService.forceLoadSkill('google-signin')
   }
@@ -198,6 +199,7 @@ export async function runAuthFlow(
     addUserMessage: true,
     userMessageText,
     useConversationHistory: true,
+    cmdOnlyMode,
   })
 }
 
@@ -211,6 +213,7 @@ export async function runAuthFlow(
 export async function runDesignFlow(
   instructions: string,
   userMessageText: string,
+  cmdOnlyMode: boolean = false,
 ): Promise<void> {
   const chatStore = useChatStore.getState()
   const designSkill = await fetchBundledSkill('frontend-design')
@@ -224,6 +227,7 @@ export async function runDesignFlow(
       addUserMessage: true,
       userMessageText,
       useConversationHistory: true,
+      cmdOnlyMode,
     })
     return
   }
@@ -245,5 +249,6 @@ export async function runDesignFlow(
     addUserMessage: true,
     userMessageText,
     useConversationHistory: true,
+    cmdOnlyMode,
   })
 }

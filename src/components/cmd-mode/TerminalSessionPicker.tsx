@@ -16,11 +16,11 @@ function formatRelativeTime(ts: number): string {
   const diffMin = Math.floor(diffMs / 60_000)
   const diffH = Math.floor(diffMs / 3_600_000)
   const diffD = Math.floor(diffMs / 86_400_000)
-  if (diffMin < 1) return t('cmdMode.picker.now')
-  if (diffMin < 60) return t('cmdMode.picker.minutesAgo').replace('{n}', String(diffMin))
-  if (diffH < 24) return t('cmdMode.picker.hoursAgo').replace('{n}', String(diffH))
-  if (diffD === 1) return t('cmdMode.picker.yesterday')
-  if (diffD < 7) return t('cmdMode.picker.daysAgo').replace('{n}', String(diffD))
+  if (diffMin < 1) return t('terminalMode.picker.now')
+  if (diffMin < 60) return t('terminalMode.picker.minutesAgo').replace('{n}', String(diffMin))
+  if (diffH < 24) return t('terminalMode.picker.hoursAgo').replace('{n}', String(diffH))
+  if (diffD === 1) return t('terminalMode.picker.yesterday')
+  if (diffD < 7) return t('terminalMode.picker.daysAgo').replace('{n}', String(diffD))
   const d = new Date(ts)
   return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`
 }
@@ -157,7 +157,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
             letterSpacing="0.08em"
             textTransform="uppercase"
           >
-            {t('cmdMode.picker.title')}
+            {t('terminalMode.picker.title')}
           </Text>
           <Text
             fontSize="10px"
@@ -165,7 +165,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
             fontFamily={tokens.fontFamily.mono}
             letterSpacing="0.04em"
           >
-            {t('cmdMode.picker.hint')}
+            {t('terminalMode.picker.hint')}
           </Text>
         </Flex>
 
@@ -173,7 +173,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
         {items.length === 0 ? (
           <Flex px={4} py={4} justify="center">
             <Text fontSize="12px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
-              {t('cmdMode.picker.empty')}
+              {t('terminalMode.picker.empty')}
             </Text>
           </Flex>
         ) : (
@@ -189,7 +189,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
               const isSelected = i === index
               const isActive = item.id === activeSessionId
               const n = String(i + 1).padStart(2, ' ')
-              const name = item.name || t('cmdMode.picker.unnamed')
+              const name = item.name || t('terminalMode.picker.unnamed')
               return (
                 <Flex
                   key={item.id}
@@ -239,7 +239,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
                           textTransform="uppercase"
                           flexShrink={0}
                         >
-                          {t('cmdMode.picker.active')}
+                          {t('terminalMode.picker.active')}
                         </Text>
                       )}
                     </Flex>
@@ -249,7 +249,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
                       fontFamily={tokens.fontFamily.mono}
                       truncate
                     >
-                      {formatRelativeTime(item.updatedAt)} · {item.messageCount} {item.messageCount !== 1 ? t('cmdMode.picker.messages') : t('cmdMode.picker.message')}
+                      {formatRelativeTime(item.updatedAt)} · {item.messageCount} {item.messageCount !== 1 ? t('terminalMode.picker.messages') : t('terminalMode.picker.message')}
                       {item.lastMessage ? ` · ${item.lastMessage.slice(0, 60)}` : ''}
                     </Text>
                   </Flex>

@@ -1,5 +1,43 @@
 import { create } from 'zustand'
 
+/**
+ * Best-effort summary of tool args for the chat transcript log line. The full
+ * args may be huge (read_file with 200K context); we want the user to see at a
+ * glance which file/command was being requested. Truncate at 120 chars and
+ * single-line so the system message bullet stays readable.
+ */
+function summarizeArgs(args: Record<string, unknown>): string {
+  const interesting = ['path', 'file_path', 'command', 'url', 'name', 'pattern']
+  for (const key of interesting) {
+    const v = args[key]
+    if (typeof v === 'string' && v.trim()) {
+      const oneLine = v.replace(/\s+/g, ' ').slice(0, 120)
+      return oneLine.length === 120 ? `${oneLine}…` : oneLine
+    }
+  }
+  // Fallback: keys list — gives at least some signal about what was queried.
+  const keys = Object.keys(args).join(', ')
+  return keys ? `(${keys})` : ''
+}
+
+/**
+ * Write an EPHEMERAL one-line system message to the active chat session
+ * whenever the permission modal opens / closes. The line gives the user
+ * momentary feedback ("agent asked for X", "you approved") that rises in
+ * the chat with the next messages and self-removes after ~8s — it does
+ * NOT pollute the persistent transcript. The modal itself is the
+ * authoritative interaction surface; this log line is just a breadcrumb.
+ *
+ * Side-effect-only: failures to load chatStore (very early boot) are
+ * swallowed — the permission flow itself must not depend on chat being ready.
+ */
+async function logPermission(message: string, level: 'info' | 'warn' | 'error' | 'success' = 'info'): Promise<void> {
+  try {
+    const { useChatStore } = await import('./chatStore')
+    useChatStore.getState().addSystemMessage(message, level, { ephemeral: true })
+  } catch { /* chatStore not ready — drop the log line silently */ }
+}
+
 /** Persist/reload autoApproveDiffs from localStorage */
 const STORAGE_KEY = 'chat_autoApproveDiffs'
 function loadAutoApproveDiffs(): boolean {
@@ -177,6 +215,18 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         // Dialog already showing — queue this request
         set(state => ({ permissionQueue: [...state.permissionQueue, entry] }))
       }
+      // Persist a transcript record. Done AFTER the state set so the chat
+      // bullet appears at the same time the modal opens, not seconds later.
+      const summary = summarizeArgs(args)
+      const reasonTag =
+        promptReason === 'sensitive_file' ? ' · ficheiro sensível' :
+        promptReason === 'dangerous_command' ? ' · comando potencialmente destrutivo' :
+        promptReason === 'browser_action' ? ' · ação no browser' :
+        ''
+      void logPermission(
+        `🔒 O agente pediu autorização para usar \`${toolName}\`${summary ? `: ${summary}` : ''}${reasonTag}`,
+        promptReason ? 'warn' : 'info',
+      )
     })
   },
 
@@ -189,6 +239,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         source: 'user',
         promptKind: pendingPermission.promptReason,
       })
+      void logPermission(`✓ Autorizaste \`${pendingPermission.toolName}\``, 'success')
       set({ pendingPermission: null })
       advanceQueue(set, get)
     }
@@ -204,6 +255,10 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       const scope = getToolScope(pendingPermission.toolName)
+      void logPermission(
+        `✓ Autorizaste \`${pendingPermission.toolName}\` e todas as ferramentas ${scope === 'core' ? 'internas' : 'MCP'} para esta sessão`,
+        'success',
+      )
       const scopes = new Set(get().approvedScopes)
       scopes.add(scope)
       // Auto-approve diffs when core tools are approved
@@ -241,6 +296,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         source: 'user',
         promptKind: pendingPermission.promptReason,
       })
+      void logPermission(`✗ Recusaste \`${pendingPermission.toolName}\``, 'warn')
       set({ pendingPermission: null })
       advanceQueue(set, get)
     }
@@ -256,6 +312,13 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
         denyReason: reason.trim() || undefined,
       })
+      const trimmed = reason.trim()
+      void logPermission(
+        trimmed
+          ? `✗ Recusaste \`${pendingPermission.toolName}\`: ${trimmed.slice(0, 140)}`
+          : `✗ Recusaste \`${pendingPermission.toolName}\``,
+        'warn',
+      )
       set({ pendingPermission: null })
       advanceQueue(set, get)
     }

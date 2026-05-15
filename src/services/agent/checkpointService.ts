@@ -394,6 +394,9 @@ class CheckpointService {
       const content = await this.loadContentFromDisk(checkpointId, file.filePathHash)
       await invoke('write_file', { path: file.filePath, content })
     }
+    // Reverts are filesystem mutations — bump the fs version so caches that
+    // depend on file state (system prompt tree) are rebuilt on next read.
+    import('../fsVersion').then(m => m.bumpFsVersion(`revert:${file.filePath}`)).catch(() => {})
   }
 
   /**
@@ -477,6 +480,29 @@ class CheckpointService {
       this.checkpoints = []
       this.sessionBaseline.clear()
       this.baselineIndex.clear()
+    }
+  }
+
+  /**
+   * Delete EVERY checkpoint (every session, every file snapshot) for a project.
+   * Called from projectStore.deleteProject so checkpoints don't outlive the
+   * project they reference. Also clears in-memory state if the project being
+   * deleted happens to be the one this service is currently scoped to.
+   */
+  async deleteAllProjectCheckpoints(projectPath: string): Promise<void> {
+    try {
+      const projectHash = await hashProjectPath(projectPath)
+      await invoke('delete_checkpoint_project', { projectHash })
+      // Drop in-memory caches if we're deleting the project we're scoped to.
+      if (this.currentProjectHash === projectHash) {
+        this.checkpoints = []
+        this.sessionBaseline.clear()
+        this.baselineIndex.clear()
+        this.currentProjectHash = null
+        this.currentSessionId = null
+      }
+    } catch (err) {
+      logger.error('checkpoint', 'Failed to delete project checkpoints:', err)
     }
   }
 

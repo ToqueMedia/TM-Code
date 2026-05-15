@@ -56,7 +56,7 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
             flex="1"
             lineHeight="1.4"
           >
-            {t('cmdMode.imageNotSupported')}
+            {t('terminalMode.imageNotSupported')}
           </Text>
           <Flex
             as="button"
@@ -88,7 +88,7 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
               fontWeight="600"
               letterSpacing="0.02em"
             >
-              {t('cmdMode.upgradeToPro')}
+              {t('terminalMode.upgradeToPro')}
             </Text>
             <FiArrowUpRight size={10} color={tokens.colors.accent.primary} />
           </Flex>
@@ -195,7 +195,7 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
                   e.stopPropagation()
                   onRemove(att.id)
                 }}
-                aria-label={t('cmdMode.removeAttachment')}
+                aria-label={t('terminalMode.removeAttachment')}
               >
                 <FiX size={11} />
               </Box>

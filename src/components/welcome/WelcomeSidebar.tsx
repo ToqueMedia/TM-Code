@@ -79,7 +79,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
     { id: 'new', icon: LuFilePlus2, label: t('welcome.newProject'), color: tokens.colors.accent.primary },
     { id: 'open', icon: LuFolderOpen, label: t('welcome.openProject'), color: tokens.colors.accent.greenBright },
     { id: 'clone', icon: LuGitBranch, label: t('welcome.cloneRepo'), color: tokens.colors.accent.purple },
-    { id: 'cmd', icon: LuTerminal, label: t('welcome.cmdMode'), color: tokens.colors.accent.purple },
+    { id: 'cmd', icon: LuTerminal, label: t('welcome.terminalMode'), color: tokens.colors.accent.purple },
   ]
 
   useEffect(() => {

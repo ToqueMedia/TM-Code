@@ -25,6 +25,7 @@ import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
 import { devServerManager } from '../services/devServerManager'
 import DevServerStatus from './chat/DevServerStatus'
+import PublishModal from './dialogs/PublishModal'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 
@@ -287,9 +288,22 @@ function MainLayout() {
       {/* Floating dev server status panel */}
       <DevServerStatus />
 
+      {/* Publish modal — single mount; trigger via layoutStore.setPublishModalOpen */}
+      <PublishModalMount />
+
       {/* Requirements check dialog removed — templates disabled */}
     </Flex>
   )
+}
+
+/**
+ * Thin wrapper so MainLayout doesn't re-render when only the modal-open
+ * flag flips. Subscribes to just the boolean and the close action.
+ */
+function PublishModalMount() {
+  const isOpen = useLayoutStore((s) => s.isPublishModalOpen)
+  const setOpen = useLayoutStore((s) => s.setPublishModalOpen)
+  return <PublishModal isOpen={isOpen} onClose={() => setOpen(false)} />
 }
 
 export default memo(MainLayout)

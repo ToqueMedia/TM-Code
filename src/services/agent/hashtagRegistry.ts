@@ -18,8 +18,8 @@ export interface HashtagOption {
 }
 
 export const HASHTAG_OPTIONS: HashtagOption[] = [
-  { tag: '#auth-email-password', description: 'Email + password auth (GIP proxy + Identity Toolkit)' },
-  { tag: '#auth-google',         description: 'Google sign-in via Google Identity Services (GIP proxy)' },
+  { tag: '#auth-email-password', description: 'Email + password authentication' },
+  { tag: '#auth-google',         description: 'Sign in with Google' },
   { tag: '#design',              description: 'Polished UI with bold aesthetic direction — typography, layout, motion' },
 ]
 

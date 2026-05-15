@@ -11,15 +11,15 @@ const EMULATOR_HOST = (import.meta.env.DEV && IS_WINDOWS) ? '192.168.64.1' : '12
 export const EMULATOR_CONFIG = {
   FUNCTIONS: {
     HOST: EMULATOR_HOST,
-    PORT: 5001,
+    PORT: 5003,
   },
   FIRESTORE: {
     HOST: EMULATOR_HOST,
-    PORT: 8081,
+    PORT: 8082,
   },
   AUTH: {
     HOST: EMULATOR_HOST,
-    PORT: 9099,
+    PORT: 9999,
   },
   STORAGE: {
     HOST: EMULATOR_HOST,

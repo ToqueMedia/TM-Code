@@ -36,6 +36,68 @@
 
 import type ToolExecutor from './toolExecutor'
 import { formatError } from '../../utils/errors'
+import { usePermissionStore } from '../../stores/permissionStore'
+
+/**
+ * Wrap `inner` in a timeout that does NOT count time spent waiting for the
+ * user to answer a permission dialog.
+ *
+ * Why: a tool's `execute()` promise covers BOTH the permission request and
+ * the actual work. With a flat `Promise.race(execute, setTimeout(timeoutMs))`,
+ * the deadline expires while the user is still reading the dialog — the user
+ * approves, the HTTP call fires, but the pool already rejected. The user sees
+ * a "timed out after 300 seconds" failure even though they approved within a
+ * normal human latency. Per project policy: permission waits are unbounded.
+ *
+ * How: track wall-clock elapsed minus accumulated permission-pending time.
+ * When the timer fires, recompute "active" elapsed; if still under
+ * `timeoutMs`, reschedule for the remainder. The permission store is the
+ * single source of truth for "am I currently waiting on the user?" — we
+ * subscribe so transitions in/out of pending state are recorded as they
+ * happen, not only when the timer ticks.
+ */
+export function createPermissionAwareTimeout(toolName: string, timeoutMs: number): {
+  promise: Promise<never>
+  cleanup: () => void
+} {
+  const startedAt = Date.now()
+  let pendingStartedAt: number | null =
+    usePermissionStore.getState().pendingPermission ? startedAt : null
+  let totalPausedMs = 0
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+
+  const unsubscribe = usePermissionStore.subscribe((state) => {
+    const isPending = !!state.pendingPermission
+    const wasPending = pendingStartedAt !== null
+    if (isPending && !wasPending) {
+      pendingStartedAt = Date.now()
+    } else if (!isPending && wasPending) {
+      totalPausedMs += Date.now() - pendingStartedAt!
+      pendingStartedAt = null
+    }
+  })
+
+  const promise = new Promise<never>((_, reject) => {
+    const tick = () => {
+      const now = Date.now()
+      const currentPause = pendingStartedAt !== null ? now - pendingStartedAt : 0
+      const activeMs = now - startedAt - totalPausedMs - currentPause
+      if (activeMs >= timeoutMs) {
+        reject(new Error(`Tool "${toolName}" timed out after ${timeoutMs / 1000} seconds`))
+        return
+      }
+      timeoutHandle = setTimeout(tick, timeoutMs - activeMs)
+    }
+    timeoutHandle = setTimeout(tick, timeoutMs)
+  })
+
+  const cleanup = () => {
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+    unsubscribe()
+  }
+
+  return { promise, cleanup }
+}
 
 /** A single tool call dispatched to the pool. */
 export interface PoolToolCall {
@@ -246,20 +308,17 @@ export async function executeToolCalls(
 
     let result: PoolToolResult
     try {
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined
       // Phase B: thread the loop's abort signal into the tool. Tools that
       // honor it (execute_command, web_fetch, install commands) will stop
       // their subprocess / reject their fetch as soon as the signal fires.
       // Tools that don't honor it just check it at entry and skip.
+      // The timeout pauses while a permission dialog is on screen — see
+      // createPermissionAwareTimeout for the rationale.
+      const timer = createPermissionAwareTimeout(toolCall.name, toolTimeoutMs)
       const raw = await Promise.race([
         toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id, abortSignal ?? undefined),
-        new Promise<never>((_, reject) => {
-          timeoutHandle = setTimeout(
-            () => reject(new Error(`Tool "${toolCall.name}" timed out after ${toolTimeoutMs / 1000} seconds`)),
-            toolTimeoutMs,
-          )
-        }),
-      ]).finally(() => clearTimeout(timeoutHandle))
+        timer.promise,
+      ]).finally(timer.cleanup)
 
       // Detect diff payload from write_file / edit_file / create_file
       let parsedDiff: PoolToolResult['parsedDiff'] = null
@@ -519,6 +578,29 @@ export class StreamingSafeToolPool {
   }
 
   private canStart(isSafe: boolean): boolean {
+    // Hard gate: while a permission modal is open we don't dispatch ANY new
+    // tool, safe or unsafe, parallel or serial. The user has been asked to
+    // authorise — until they click, the worker pool stays quiet so the
+    // agent isn't reading files / making API calls / doing anything else
+    // in the background while the user is mid-decision. Without this gate,
+    // a second tool call that arrived in the same turn (e.g., read_file
+    // after a write_file with a pending permission) would still fire,
+    // breaking the "wait unconditionally for user authorization" contract.
+    //
+    // Scope (be honest about what this DOESN'T cover):
+    //   • Tool calls executed OUTSIDE this pool — currently sub-agents via
+    //     `createLightweight` in toolExecutor run their own loop without
+    //     visiting this canStart(). They're a separate halt-point; for now
+    //     they're rare enough that the gap is acceptable.
+    //   • Streaming text from the model. The API turn is already in flight
+    //     by the time we ask for permission; the model emits whatever
+    //     content it had pending. We can't pause mid-response.
+    //   • InlineDiff approvals (write_file/edit_file/create_file). Those
+    //     bypass requestPermission entirely via HAS_OWN_APPROVAL and rely on
+    //     the "non-safe tool waits for empty in-flight" rule below — which
+    //     gives effective serial behaviour without needing this gate.
+    if (usePermissionStore.getState().pendingPermission) return false
+
     if (this.inFlight.size === 0) return true
     if (!isSafe) return false
     // Safe tool can join if all in-flight are safe and under cap
@@ -549,16 +631,11 @@ export class StreamingSafeToolPool {
   private async executeTool(toolCall: PoolToolCall, _isSafe: boolean): Promise<PoolToolResult> {
     let result: PoolToolResult
     try {
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+      const timer = createPermissionAwareTimeout(toolCall.name, this.toolTimeoutMs)
       const raw = await Promise.race([
         this.toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id, this.abortSignal ?? undefined),
-        new Promise<never>((_, reject) => {
-          timeoutHandle = setTimeout(
-            () => reject(new Error(`Tool "${toolCall.name}" timed out after ${this.toolTimeoutMs / 1000} seconds`)),
-            this.toolTimeoutMs,
-          )
-        }),
-      ]).finally(() => clearTimeout(timeoutHandle))
+        timer.promise,
+      ]).finally(timer.cleanup)
 
       let parsedDiff: PoolToolResult['parsedDiff'] = null
       try {

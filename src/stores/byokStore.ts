@@ -4,51 +4,13 @@ import { invoke } from '@tauri-apps/api/core'
 import { tauriFetch } from '../services/tauriFetch'
 import { resolveWorkerUrl } from '../utils/devUrls'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
+import { inferLocalModelCapabilities } from './byokModelCapabilities'
+import { cleanBaseURL } from './byokBaseURL'
 
-// ── Base URL normalisation ──
-//
-// Single source of truth for trimming user-supplied provider base URLs.
-// Applied uniformly for every provider (anthropic, openai, openrouter,
-// gemini, deepseek, xai, ollama, custom, …) by routing every Settings
-// input through `setBaseURL`, which calls this helper.
-//
-// Convention: the value stored is the API ROOT — the backend proxy
-// appends provider-specific paths (`/chat/completions`, `/v1/messages`,
-// `/api/chat`, …). Without trimming, users routinely copy the full
-// endpoint URL from provider docs and produce doubled paths like
-// `…/v1/chat/completions/chat/completions`.
-//
-// Patterns trimmed (case-insensitive, anchored at end):
-//   - trailing `/` (any number)
-//   - `/chat/completions`        — OpenAI-compatible providers
-//   - `/v1/chat/completions`     — same as above when user includes /v1
-//   - `/responses`               — OpenAI Responses API
-//   - `/v1/messages`             — Anthropic Messages API
-//   - `/api/chat`, `/api/generate` — Ollama native endpoints
-//   - `/embeddings`              — sometimes pasted from docs
-const BASE_URL_TRIM_PATTERNS: RegExp[] = [
-  /\/v1\/chat\/completions$/i,
-  /\/chat\/completions$/i,
-  /\/v1\/messages$/i,
-  /\/responses$/i,
-  /\/api\/chat$/i,
-  /\/api\/generate$/i,
-  /\/embeddings$/i,
-]
-
-export function cleanBaseURL(input: string | undefined): string | undefined {
-  if (input === undefined || input === null) return undefined
-  let cleaned = input.trim().replace(/\/+$/, '')
-  // Apply patterns iteratively — a pasted URL could end with both
-  // `/v1/chat/completions` and a trailing slash; one pass per call is
-  // sufficient because each pattern strips its own suffix.
-  for (const pattern of BASE_URL_TRIM_PATTERNS) {
-    cleaned = cleaned.replace(pattern, '')
-  }
-  // Strip trailing slash one more time in case a pattern left one.
-  cleaned = cleaned.replace(/\/+$/, '')
-  return cleaned.length === 0 ? undefined : cleaned
-}
+// Re-export the pure URL helper so any consumer that imports from byokStore
+// keeps working (callers may have grabbed `cleanBaseURL` from here before
+// it moved to its own pure module — see byokBaseURL.ts).
+export { cleanBaseURL }
 
 // ── Active-session snapshot sync ──
 //
@@ -113,6 +75,8 @@ export type ThinkingShape =
   | 'openai_reasoning_effort'
   | 'qwen_enable_thinking'
   | 'gemini_thinking_budget'
+  | 'openrouter_reasoning'
+  | 'mimo_chat_template_kwargs'
 
 export interface ByokModel {
   id: string
@@ -144,6 +108,17 @@ export interface ByokProviderConfig {
   /** Whether the keychain has a key for this provider. Sourced from
    *  byok_has_key Tauri command at load time and after set/delete. */
   hasKey: boolean
+  /** Last 4 characters of the saved key, captured at setKey time so the
+   *  Settings UI can render `sk-...abcd` for visual confirmation that the
+   *  saved key is the right one. The full key never leaves the OS keychain;
+   *  this hint is purely a memory aid and is safe to persist (4 chars don't
+   *  reduce key entropy meaningfully). Cleared on deleteKey. */
+  keyHint?: string
+  /** Local providers (Ollama, LM Studio) without auth: marked TRUE once the
+   *  user confirms the connection (Test passed) so resolveActive can route
+   *  to them without a key. Cloud providers ignore this — the implicit
+   *  "configured" signal there is `hasKey`. */
+  configured?: boolean
   /** User-supplied baseURL override (org gateway). Empty/undefined = use
    *  provider.defaultBaseURL. */
   baseURL?: string
@@ -159,6 +134,11 @@ export interface ByokProviderConfig {
     capabilities: ByokModelCapabilities
     supportsThinking: boolean
   }
+  /** For local providers: live model list pulled from the local server's
+   *  discovery endpoint (Ollama /api/tags, LM Studio /v1/models). NOT
+   *  persisted — refreshed on demand because the user can pull/delete
+   *  models via CLI between launches. */
+  dynamicCatalog?: { fetchedAt: number; models: ByokModel[] }
 }
 
 export interface TestKeyResult {
@@ -166,6 +146,100 @@ export interface TestKeyResult {
   latencyMs?: number
   error?: string
   statusCode?: number
+}
+
+// ── Local providers (hardcoded) ──
+//
+// Ollama and LM Studio are always available regardless of auth state, so the
+// user can run TM Code fully offline. They're merged into `providers` after
+// the cloud catalog is fetched from the worker (cloud entries with the same
+// id win — the worker may eventually serve these too).
+//
+// Both expose OpenAI-compatible /v1/chat/completions, so apiShape is openai_compat
+// and authHeader is empty (we don't inject Authorization for local-no-auth).
+// `models: []` is intentional — local models are dynamic; the IDE refreshes
+// them via `refreshLocalModels()` which calls the discovery endpoint.
+/**
+ * Provider IDs pinned to the top of the picker, in priority order. The catalog
+ * itself is Firestore-managed, so its natural document order is whatever the
+ * admin seeded; this list is the frontend-side priority overlay so featured
+ * providers always surface first regardless of upstream ordering. Any provider
+ * id not in this list keeps its catalog position.
+ */
+const TOP_PINNED_PROVIDER_IDS = ['xiaomi', 'moonshot']
+
+const LOCAL_PROVIDERS: ByokProvider[] = [
+  {
+    id: 'ollama',
+    name: 'Ollama',
+    enabled: true,
+    defaultBaseURL: 'http://localhost:11434',
+    authHeader: '',
+    authPrefix: '',
+    apiShape: 'openai_compat',
+    models: [],
+    local: true,
+  },
+  {
+    id: 'lm-studio',
+    name: 'LM Studio',
+    enabled: true,
+    defaultBaseURL: 'http://localhost:1234',
+    authHeader: '',
+    authPrefix: '',
+    apiShape: 'openai_compat',
+    models: [],
+    local: true,
+  },
+]
+
+// Discovery endpoint per local provider. Both return JSON that we map to
+// ByokModel entries; capabilities default to false (user can override per
+// model via the existing "Other model" capability checkboxes).
+const LOCAL_DISCOVERY_PATH: Record<string, string> = {
+  ollama: '/api/tags',
+  'lm-studio': '/v1/models',
+}
+
+// Map the provider-specific discovery payload to ByokModel[]. Capabilities
+// come from inferLocalModelCapabilities — see that function for the family
+// matrix. The user can override per-model via the "Other model" capability
+// checkboxes if our heuristic is wrong for their specific build.
+function parseLocalModels(providerId: string, data: Record<string, unknown>): ByokModel[] {
+  const buildModel = (id: string): ByokModel => {
+    const inferred = inferLocalModelCapabilities(id)
+    return {
+      id,
+      label: id,
+      capabilities: inferred.capabilities,
+      contextWindow: 0,
+      supportsThinking: inferred.supportsThinking,
+    }
+  }
+
+  if (providerId === 'ollama') {
+    const list = Array.isArray(data.models) ? data.models : []
+    return list
+      .map((m: unknown): ByokModel | null => {
+        if (!m || typeof m !== 'object') return null
+        const obj = m as Record<string, unknown>
+        const id = typeof obj.name === 'string' ? obj.name : null
+        return id ? buildModel(id) : null
+      })
+      .filter((x): x is ByokModel => x !== null)
+  }
+  if (providerId === 'lm-studio') {
+    const list = Array.isArray(data.data) ? data.data : []
+    return list
+      .map((m: unknown): ByokModel | null => {
+        if (!m || typeof m !== 'object') return null
+        const obj = m as Record<string, unknown>
+        const id = typeof obj.id === 'string' ? obj.id : null
+        return id ? buildModel(id) : null
+      })
+      .filter((x): x is ByokModel => x !== null)
+  }
+  return []
 }
 
 interface ByokState {
@@ -196,6 +270,14 @@ interface ByokState {
   toggle: (enabled: boolean) => void
   setActive: (providerId: string | null, modelId: string | null) => void
   markUsed: (providerId: string) => void
+  /** Mark a local provider as configured/unconfigured. Local providers don't
+   *  have a key, so `hasKey` is meaningless — `configured` is what gates
+   *  whether resolveActive returns them. Cloud providers should ignore this. */
+  markConfigured: (providerId: string, configured: boolean) => void
+  /** Hit the local provider's discovery endpoint and populate dynamicCatalog.
+   *  Returns the resolved model list (or null on failure with the error
+   *  surfaced via toast/UI by the caller). */
+  refreshLocalModels: (providerId: string) => Promise<ByokModel[] | null>
   /** Set the user-defined "Other model" for a curated provider — the user
    *  declared the model id and its capabilities themselves. Persists in
    *  localStorage so the option stays around between launches. */
@@ -225,36 +307,65 @@ export const useByokStore = create<ByokState>()(
       catalogLoaded: false,
 
       loadProviders: async () => {
+        // Local providers are always present, regardless of auth — the whole
+        // point of Ollama/LM Studio is offline use. Cloud catalog comes from
+        // the worker only when authenticated.
+        let cloudProviders: ByokProvider[] = []
         try {
           const token = await FirebaseAuthService.getInstance().getIdToken()
-          if (!token) return
-          const res = await tauriFetch(`${resolveWorkerUrl()}/v1/byok/providers`, {
-            headers: { Authorization: `Bearer ${token}` },
-          })
-          if (!res.ok) {
-            console.warn(`[byok] /v1/byok/providers returned ${res.status}`)
-            return
-          }
-          const data = await res.json() as { providers: ByokProvider[] }
-          const providers = Array.isArray(data.providers) ? data.providers : []
-
-          // Refresh hasKey for each known provider (keychain is the source of
-          // truth — persisted hasKey could be stale after a manual delete).
-          const config = { ...get().perProviderConfig }
-          for (const provider of providers) {
-            const existing = config[provider.id] || { hasKey: false }
-            try {
-              const present = await invoke<boolean>('byok_has_key', { provider: provider.id })
-              config[provider.id] = { ...existing, hasKey: present }
-            } catch (err) {
-              console.warn(`[byok] byok_has_key(${provider.id}) failed:`, err)
+          if (token) {
+            const res = await tauriFetch(`${resolveWorkerUrl()}/v1/byok/providers`, {
+              headers: { Authorization: `Bearer ${token}` },
+            })
+            if (res.ok) {
+              const data = await res.json() as { providers: ByokProvider[] }
+              cloudProviders = Array.isArray(data.providers) ? data.providers : []
+            } else {
+              console.warn(`[byok] /v1/byok/providers returned ${res.status}`)
             }
           }
-
-          set({ providers, perProviderConfig: config, catalogLoaded: true })
         } catch (err) {
           console.warn('[byok] loadProviders failed:', err)
         }
+
+        // Merge cloud + local. Cloud wins on id collision so admins can
+        // override the hardcoded defaults later via Firestore.
+        const merged = [...cloudProviders]
+        for (const local of LOCAL_PROVIDERS) {
+          if (!merged.find(p => p.id === local.id)) merged.push(local)
+        }
+
+        // Pin featured providers to the top in fixed priority order. The
+        // backend catalog order is admin-managed (Firestore document order)
+        // and can drift; this overlay guarantees Xiaomi MiMo is always the
+        // first entry regardless of catalog state. Missing ids are no-ops.
+        const pinnedSet = new Set(TOP_PINNED_PROVIDER_IDS)
+        const pinned = TOP_PINNED_PROVIDER_IDS
+          .map(id => merged.find(p => p.id === id))
+          .filter((p): p is ByokProvider => Boolean(p))
+        const rest = merged.filter(p => !pinnedSet.has(p.id))
+        const ordered = [...pinned, ...rest]
+
+        const config = { ...get().perProviderConfig }
+        // Cloud providers: refresh hasKey from keychain (source of truth —
+        // persisted hasKey could be stale after a manual delete).
+        for (const provider of cloudProviders) {
+          const existing = config[provider.id] || { hasKey: false }
+          try {
+            const present = await invoke<boolean>('byok_has_key', { provider: provider.id })
+            config[provider.id] = { ...existing, hasKey: present }
+          } catch (err) {
+            console.warn(`[byok] byok_has_key(${provider.id}) failed:`, err)
+          }
+        }
+        // Local providers: ensure a config entry exists so the UI can render
+        // the baseURL field. hasKey stays false; configured persists from
+        // localStorage if the user previously confirmed.
+        for (const local of ordered.filter(p => p.local)) {
+          if (!config[local.id]) config[local.id] = { hasKey: false }
+        }
+
+        set({ providers: ordered, perProviderConfig: config, catalogLoaded: true })
       },
 
       setKey: async (providerId, key) => {
@@ -266,7 +377,16 @@ export const useByokStore = create<ByokState>()(
         // surfaces the message to the UI.
         await invoke('byok_set_key', { provider: providerId, key })
         const config = { ...get().perProviderConfig }
-        config[providerId] = { ...(config[providerId] || {}), hasKey: true }
+        // Capture the last 4 chars as a visual hint for the Settings UI
+        // (sk-...abcd). The key itself stays in the keychain; this hint is
+        // a memory aid only. Trim defensive: callers should pass already
+        // trimmed but we don't want " abcd" hints from sloppy paste.
+        const trimmed = key.trim()
+        const keyHint = trimmed.length >= 4 ? trimmed.slice(-4) : undefined
+        // Setting a key implicitly configures the provider — covers the
+        // optional-auth case for local providers (LM Studio behind a private
+        // gateway, Ollama with a header rewriter).
+        config[providerId] = { ...(config[providerId] || { hasKey: false }), hasKey: true, configured: true, keyHint }
         set({ perProviderConfig: config })
         syncActiveSessionSnapshot()
       },
@@ -274,11 +394,23 @@ export const useByokStore = create<ByokState>()(
       deleteKey: async (providerId) => {
         await invoke('byok_delete_key', { provider: providerId })
         const config = { ...get().perProviderConfig }
-        config[providerId] = { ...(config[providerId] || { hasKey: false }), hasKey: false }
-        // If this was the active provider, deactivate to avoid sending headers
-        // for a provider that has no key.
+        const provider = get().providers.find(p => p.id === providerId)
+        // Local providers without auth: deleting "the key" only clears the
+        // hasKey flag — `configured` stays so the user doesn't lose their
+        // baseURL setup. Cloud providers: drop both — there's nothing left.
+        const stillConfigured = provider?.local === true
+          ? (config[providerId]?.configured === true)
+          : false
+        config[providerId] = {
+          ...(config[providerId] || { hasKey: false }),
+          hasKey: false,
+          configured: stillConfigured,
+          keyHint: undefined,
+        }
+        // If this was the active provider AND it's no longer reachable
+        // (cloud, or local that lost its configured flag), deactivate.
         const next: Partial<ByokState> = { perProviderConfig: config }
-        if (get().activeProvider === providerId) {
+        if (get().activeProvider === providerId && !stillConfigured) {
           next.activeProvider = null
           next.activeModel = null
           next.enabled = false
@@ -296,6 +428,34 @@ export const useByokStore = create<ByokState>()(
       },
 
       testKey: async (providerId, modelId, keyOverride, baseURLOverride) => {
+        const provider = get().providers.find(p => p.id === providerId)
+
+        // Local providers: the worker can't reach the user's localhost. Hit
+        // the discovery endpoint directly; success means the server is up
+        // and reachable from the WebView. Latency is measured from the
+        // tauriFetch round-trip (Rust HTTP client, no CORS).
+        if (provider?.local) {
+          const baseURL = (baseURLOverride ?? get().perProviderConfig[providerId]?.baseURL ?? provider.defaultBaseURL).replace(/\/$/, '')
+          const path = LOCAL_DISCOVERY_PATH[providerId]
+          if (!path) return { valid: false, error: `Discovery endpoint unknown for ${providerId}` }
+          const start = Date.now()
+          try {
+            const res = await tauriFetch(`${baseURL}${path}`, { timeoutSecs: 5 })
+            const latencyMs = Date.now() - start
+            if (!res.ok) {
+              return { valid: false, latencyMs, statusCode: res.status, error: `Local server returned ${res.status}` }
+            }
+            return { valid: true, latencyMs }
+          } catch (err) {
+            return {
+              valid: false,
+              error: err instanceof Error
+                ? `Cannot reach ${baseURL}: ${err.message}. Is the server running?`
+                : String(err),
+            }
+          }
+        }
+
         try {
           const token = await FirebaseAuthService.getInstance().getIdToken()
           if (!token) return { valid: false, error: 'Not authenticated' }
@@ -359,6 +519,55 @@ export const useByokStore = create<ByokState>()(
         set({ perProviderConfig: config })
       },
 
+      markConfigured: (providerId, configured) => {
+        const config = { ...get().perProviderConfig }
+        const existing = config[providerId] || { hasKey: false }
+        config[providerId] = { ...existing, configured }
+        // If un-configuring an active local provider, deactivate so requests
+        // don't try to route to a provider the user just disowned.
+        const next: Partial<ByokState> = { perProviderConfig: config }
+        if (!configured && get().activeProvider === providerId) {
+          next.activeProvider = null
+          next.activeModel = null
+        }
+        set(next as ByokState)
+        syncActiveSessionSnapshot()
+      },
+
+      refreshLocalModels: async (providerId) => {
+        const provider = get().providers.find(p => p.id === providerId)
+        if (!provider || !provider.local) return null
+
+        const baseURL = (get().perProviderConfig[providerId]?.baseURL || provider.defaultBaseURL).replace(/\/$/, '')
+        const path = LOCAL_DISCOVERY_PATH[providerId]
+        if (!path) {
+          console.warn(`[byok] no discovery path registered for ${providerId}`)
+          return null
+        }
+
+        try {
+          const res = await tauriFetch(`${baseURL}${path}`, { timeoutSecs: 5 })
+          if (!res.ok) {
+            console.warn(`[byok] refreshLocalModels(${providerId}) HTTP ${res.status}`)
+            return null
+          }
+          const data = await res.json() as Record<string, unknown>
+          const models = parseLocalModels(providerId, data)
+
+          const config = { ...get().perProviderConfig }
+          const existing = config[providerId] || { hasKey: false }
+          config[providerId] = {
+            ...existing,
+            dynamicCatalog: { fetchedAt: Date.now(), models },
+          }
+          set({ perProviderConfig: config })
+          return models
+        } catch (err) {
+          console.warn(`[byok] refreshLocalModels(${providerId}) failed:`, err)
+          return null
+        }
+      },
+
       setUserDefinedModel: (providerId, model) => {
         const config = { ...get().perProviderConfig }
         config[providerId] = {
@@ -386,18 +595,28 @@ export const useByokStore = create<ByokState>()(
         if (!provider) return null
 
         const config = perProviderConfig[activeProvider]
+
+        // Local providers must be explicitly marked configured (the user
+        // confirmed the local server is reachable). Cloud providers don't
+        // have this gate — the implicit signal is hasKey, enforced by the
+        // agentService BYOK_KEY_MISSING path.
+        if (provider.local && !config?.configured) return null
+
         const userDefined = config?.userDefinedModel
         const registryModel = provider.models.find(m => m.id === activeModel)
+        const dynamicModel = config?.dynamicCatalog?.models.find(m => m.id === activeModel)
         const baseURL = (config?.baseURL || provider.defaultBaseURL).replace(/\/$/, '')
 
-        // Three resolution paths, in order:
-        //   1. Catalog hit — use the registry entry as-is
-        //   2. User-defined "other model" matches the active selection —
-        //      synthesise from user-declared metadata
-        //   3. Custom provider with free-text model — synthesise minimal entry
-        //      (capabilities decided by the user in the custom provider's UI)
+        // Resolution paths, in order:
+        //   1. Catalog hit (server-curated)
+        //   2. Dynamic catalog hit (local discovery — Ollama /api/tags, LM Studio /v1/models)
+        //   3. User-defined "other model" — capabilities user-declared
+        //   4. Custom provider with free-text model
         if (registryModel) {
           return { provider, model: registryModel, baseURL }
+        }
+        if (dynamicModel) {
+          return { provider, model: dynamicModel, baseURL }
         }
         if (userDefined && userDefined.id === activeModel) {
           const synthesized: ByokModel = {
@@ -409,7 +628,7 @@ export const useByokStore = create<ByokState>()(
           }
           return { provider, model: synthesized, baseURL }
         }
-        if (provider.custom) {
+        if (provider.custom || provider.local) {
           const synthesized: ByokModel = {
             id: activeModel,
             label: activeModel,
@@ -427,11 +646,18 @@ export const useByokStore = create<ByokState>()(
       // Persist ONLY metadata. Never persist the key itself, never persist
       // the providers catalog (it can change server-side and is refetched
       // on every load). `catalogLoaded` is in-memory only.
+      // `dynamicCatalog` (local model lists) is also stripped — the user
+      // can pull/delete models via CLI between launches, so we refetch.
       partialize: (state) => ({
         enabled: state.enabled,
         activeProvider: state.activeProvider,
         activeModel: state.activeModel,
-        perProviderConfig: state.perProviderConfig,
+        perProviderConfig: Object.fromEntries(
+          Object.entries(state.perProviderConfig).map(([id, cfg]) => {
+            const { dynamicCatalog: _drop, ...rest } = cfg
+            return [id, rest]
+          }),
+        ),
       }),
     },
   ),

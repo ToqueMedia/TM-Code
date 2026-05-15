@@ -148,7 +148,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             color={tokens.colors.accent.purple}
             fontWeight="600"
           >
-            {t('cmdMode.dropToAttach')}
+            {t('terminalMode.dropToAttach')}
           </Text>
         </Flex>
       )}
@@ -273,7 +273,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             onBlur={handleBlur}
             onScroll={handleScroll}
             placeholder={isStreaming ? '' : 'Type a command or message…'}
-            aria-label="CMD Mode input"
+            aria-label="Terminal Mode input"
             rows={1}
             autoComplete="off"
             autoCorrect="off"
@@ -317,8 +317,8 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
               bg: 'rgba(163, 113, 247, 0.08)',
             }}
             onClick={handleAttachFiles}
-            aria-label={t('cmdMode.attachTooltip')}
-            title={t('cmdMode.attachTooltip')}
+            aria-label={t('terminalMode.attachTooltip')}
+            title={t('terminalMode.attachTooltip')}
           >
             <FiPaperclip size={13} />
           </Box>

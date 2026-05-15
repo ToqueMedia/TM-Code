@@ -39,6 +39,7 @@ import UpdateBanner from './components/ui/UpdateBanner';
 import { t } from '@/i18n';
 import { tokens } from '@/theme/tokens';
 
+
 function App() {
 	const { currentProject, openProject, hasHydrated } = useProjectStore();
 	const { isAuthenticated, isLoading: authLoading, signupComplete } = useAuthStore();
@@ -483,13 +484,24 @@ function App() {
 		function handlePreviewConsole(e: Event) {
 			const detail = (e as CustomEvent<{ level: string; text: string }>).detail;
 			const { level, text } = detail || { level: '', text: '' };
+			// Diagnostic: confirms the CustomEvent reaches App.tsx. Strip after
+			// the capture pipeline is verified working in the field.
+			console.log('[preview-capture] event arrived:', { level, text: text?.slice(0, 80) });
 			if (!text) return;
-			if (isPreviewProtocolNoise(text)) return;
+			if (isPreviewProtocolNoise(text)) {
+				console.log('[preview-capture] dropped — matched isPreviewProtocolNoise');
+				return;
+			}
 
 			useLayoutStore.getState().addDevServerLog(
 				`[runtime] ${text}`,
-				level === 'warn' ? 'warn' : 'error',
+				level === 'info' ? 'info' : level === 'warn' ? 'warn' : 'error',
 			);
+			// Read back to verify the entry actually landed in the store —
+			// catches a HMR-split where two store instances exist.
+			const after = useLayoutStore.getState().devServerLogs;
+			const lastTwo = after.slice(-2).map(l => l.text);
+			console.log('[preview-capture] addDevServerLog called. store size:', after.length, 'last 2:', lastTwo);
 
 			// GIS-in-iframe detection — only on errors. Dedup is per-preview-reload
 			// (the ref resets via the effect above) so the user gets one toast
@@ -622,14 +634,25 @@ function App() {
 		};
 	}, [currentProject?.path]);
 
-	// Save session on window close (beforeunload fires synchronously but we fire-and-forget the save)
+	// Save session + abort active stream on window close.
+	//
+	// `beforeunload` fires synchronously and ignores async work, so we limit
+	// ourselves to operations that complete (or initiate) synchronously:
+	//   - saveSessionToDisk(): fire-and-forget Tauri invoke (IPC, fast)
+	//   - cancelLoop(): AbortController.abort() is sync — the fetch reader
+	//     stops reading immediately, the Cloudflare Worker upstream sees
+	//     `request.signal.aborted` and cancels the LLM call. Without this,
+	//     the worker keeps generating and consuming tokens even though the
+	//     IDE is gone — exactly the "backend continues, nothing renders"
+	//     symptom the developer reported.
 	useEffect(() => {
 		const handleBeforeUnload = () => {
 			const project = useProjectStore.getState().currentProject;
 			if (project) {
-				// Force immediate flush — fire-and-forget is acceptable here
-				// because Tauri invoke is IPC (not network), it completes fast
 				useChatStore.getState().saveSessionToDisk();
+			}
+			if (useChatStore.getState().isStreaming) {
+				AgentService.getInstance().cancelLoop();
 			}
 		};
 

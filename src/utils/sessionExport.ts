@@ -1,17 +1,64 @@
 /**
  * Session export — serializes a chat session (messages + tool calls +
- * reasoning + attachments metadata) into JSON or Markdown for offline review,
- * bug reports, and agent debugging.
+ * reasoning + attachments metadata + provider snapshot) into JSON or Markdown
+ * for offline review, bug reports, and agent debugging.
+ *
+ * Two layers:
+ *   1. Session data (always sync, already in memory): messages, tool calls,
+ *      diffs, BYOK provider snapshot, project path, timestamps, token totals.
+ *   2. Environment snapshot (async, optional): the system prompt the agent
+ *      WOULD see RIGHT NOW (re-built via contextBuilder), current TMS/PLAN/
+ *      TODO contents, available skills, hashtag detection of the latest user
+ *      message. Labelled "at export time" because state may have drifted from
+ *      what each turn saw — but it's the closest reproduction of the agent's
+ *      context without persisting full prompts per-turn (which would 10x
+ *      session disk usage).
  *
  * Strips base64 image data from attachments to keep file sizes manageable
  * (a single screenshot can blow the export from 10KB to 5MB).
  */
 
-import type { ChatSession, ChatMessage, ToolCallDisplay, Attachment } from '../types/chat'
+import type { ChatSession, ChatMessage, ToolCallDisplay, Attachment, ByokSessionSnapshot } from '../types/chat'
+
+/**
+ * Environment context captured at export time. Reconstructed via the same
+ * services the live agent uses, so the debugger sees what the agent would
+ * see if it ran a new turn NOW. Build via `buildEnvironmentSnapshot()`.
+ *
+ * Intentionally NOT duplicated here: TMS.md, PLAN.md, TODO.md content and
+ * the package.json summary. Those are already embedded inside `systemPrompt`
+ * via the live contextBuilder sections (getProjectMemorySection,
+ * getActivePlanSection, getTaskListSection, getEnvironmentSection). Adding
+ * them as separate fields doubled the export payload for no extra debug
+ * value — they're searchable inside the prompt block anyway.
+ */
+export interface EnvironmentSnapshot {
+  /** ISO timestamp this snapshot was taken. */
+  capturedAt: string
+  /** System prompt the agent would receive on a fresh turn. Large (10-50KB).
+   *  Captures all the sticky-skill + hashtag-driven content + TMS/PLAN/TODO
+   *  + package summary. May differ from per-turn prompts if project state
+   *  changed since send-time. */
+  systemPrompt?: string
+  /** Why the systemPrompt is missing, when it is — e.g. "no active project". */
+  systemPromptError?: string
+  /** Hashtag-driven skill set detected on the LAST user message. Surface
+   *  signal: was `#auth-google` recognised by the regex? */
+  hashtagSkills: string[]
+  /** Names of skills currently sticky/loaded for this project + mode. */
+  availableSkills: string[]
+  /** Resolved project type — derived from the SESSION's project (not the
+   *  live IDE's currently-open one, which may differ after the user
+   *  switched projects). Same value fed into buildSystemPrompt. */
+  projectType: string
+}
 
 interface ExportOptions {
   /** Strip base64 from attachments to keep export small. Default true. */
   stripImageData?: boolean
+  /** Environment snapshot from `buildEnvironmentSnapshot`. When provided, the
+   *  export includes a final section with the system prompt + project state. */
+  envSnapshot?: EnvironmentSnapshot | null
 }
 
 function isoTimestamp(ms: number): string {
@@ -46,16 +93,33 @@ function sanitizeMessage(msg: ChatMessage, stripImageData: boolean): ChatMessage
   return cleaned
 }
 
+function sanitizeByokSnapshot(snap: ByokSessionSnapshot | null | undefined): ByokSessionSnapshot | null {
+  if (!snap) return null
+  // Provider/model/baseURL are non-secret — providerId identifies which BYOK
+  // entry was selected, modelId is the model name, baseURL is the (already
+  // user-known) endpoint. No API keys are persisted in the snapshot — keys
+  // live in the byokStore separately and never enter the session payload.
+  // This sanitizer exists as a forward-compat guard in case the snapshot
+  // shape ever grows a key-like field.
+  return snap
+}
+
 export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): string {
   const stripImageData = opts.stripImageData !== false
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     exportedAt: new Date().toISOString(),
     session: {
       id: session.id,
       name: session.name,
+      projectPath: session.projectPath,
+      status: session.status,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      byokSnapshot: sanitizeByokSnapshot(session.byokSnapshot),
       messages: session.messages.map(m => sanitizeMessage(m, stripImageData)),
     },
+    environment: opts.envSnapshot ?? null,
   }
   return JSON.stringify(payload, null, 2)
 }
@@ -209,13 +273,61 @@ function renderMessageMd(msg: ChatMessage): string {
   return lines.join('\n')
 }
 
-export function sessionToMarkdown(session: ChatSession, _opts: ExportOptions = {}): string {
+function renderByokSnapshotMd(snap: ByokSessionSnapshot | null | undefined): string[] {
+  if (!snap) return []
+  const lines: string[] = []
+  lines.push(`- **Provider:** \`${snap.providerId}\``)
+  lines.push(`- **Model:** \`${snap.modelId}\``)
+  lines.push(`- **Base URL:** \`${snap.baseURL}\``)
+  if (snap.thinkingShape) lines.push(`- **Thinking shape:** \`${snap.thinkingShape}\``)
+  if (snap.local) lines.push(`- **Local provider:** yes`)
+  if (snap.custom) lines.push(`- **Custom provider:** yes`)
+  return lines
+}
+
+function renderEnvironmentMd(env: EnvironmentSnapshot): string {
+  const out: string[] = []
+  out.push(`# Environment snapshot`)
+  out.push(``)
+  out.push(`> Reconstructed at export time (${env.capturedAt}). May differ from`)
+  out.push(`> what each individual turn saw if project state has changed since.`)
+  out.push(``)
+  out.push(`## Detection signals`)
+  out.push(``)
+  out.push(`- **Project type:** \`${env.projectType}\``)
+  out.push(`- **Hashtag skills (last user message):** ${env.hashtagSkills.length ? env.hashtagSkills.map(s => `\`${s}\``).join(', ') : '_(none)_'}`)
+  out.push(`- **Available skills:** ${env.availableSkills.length ? env.availableSkills.map(s => `\`${s}\``).join(', ') : '_(none)_'}`)
+  out.push(``)
+
+  out.push(`## System prompt (at export time)`)
+  out.push(``)
+  out.push(`> Contains TMS / PLAN / TODO / package summary inline — search within this block`)
+  out.push(`> rather than expecting separate sections.`)
+  out.push(``)
+  if (env.systemPromptError) {
+    out.push(`> Could not rebuild: ${env.systemPromptError}`)
+    out.push(``)
+  } else if (env.systemPrompt) {
+    out.push('```')
+    out.push(env.systemPrompt)
+    out.push('```')
+    out.push(``)
+  }
+  return out.join('\n')
+}
+
+export function sessionToMarkdown(session: ChatSession, opts: ExportOptions = {}): string {
   const out: string[] = []
   out.push(`# ${session.name || 'TM Code Session'}`)
   out.push(``)
   out.push(`- **Session ID:** \`${session.id}\``)
+  out.push(`- **Project path:** \`${session.projectPath}\``)
+  out.push(`- **Status:** \`${session.status}\``)
+  out.push(`- **Created:** ${isoTimestamp(session.createdAt)}`)
+  out.push(`- **Updated:** ${isoTimestamp(session.updatedAt)}`)
   out.push(`- **Exported at:** ${new Date().toISOString()}`)
   out.push(`- **Messages:** ${session.messages.length}`)
+  out.push(...renderByokSnapshotMd(session.byokSnapshot))
   out.push(``)
   out.push(`---`)
   out.push(``)
@@ -224,7 +336,91 @@ export function sessionToMarkdown(session: ChatSession, _opts: ExportOptions = {
     out.push(`---`)
     out.push(``)
   }
+  if (opts.envSnapshot) {
+    out.push(``)
+    out.push(renderEnvironmentMd(opts.envSnapshot))
+  }
   return out.join('\n')
+}
+
+/**
+ * Build the environment snapshot — async because it reads files (TMS.md etc.)
+ * and rebuilds the prompt via contextBuilder. Safe to call before export; all
+ * failures are absorbed into the returned object's `systemPromptError` field
+ * so the export itself never throws.
+ *
+ * Imports are dynamic (lazy) so this util doesn't drag the agent runtime into
+ * any bundle that just renders message bubbles.
+ */
+export async function buildEnvironmentSnapshot(session: ChatSession): Promise<EnvironmentSnapshot> {
+  const out: EnvironmentSnapshot = {
+    capturedAt: new Date().toISOString(),
+    hashtagSkills: [],
+    availableSkills: [],
+    projectType: 'unknown',
+  }
+
+  // Latest user message — used for hashtag detection. Walks backwards so a
+  // re-export after some assistant turns still captures the original signal.
+  let lastUserMessage = ''
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    if (session.messages[i].role === 'user') {
+      lastUserMessage = session.messages[i].content || ''
+      break
+    }
+  }
+
+  try {
+    const { skillsFromHashtags } = await import('../services/agent/contextBuilder')
+    out.hashtagSkills = skillsFromHashtags(lastUserMessage)
+  } catch { /* non-critical */ }
+
+  // Derive projectType from the SESSION's own package.json — not from
+  // `useProjectStore.currentProject`, which reflects whatever project is
+  // open in the IDE RIGHT NOW (may differ from the session's project if
+  // the user switched). The detection logic here mirrors a subset of
+  // contextBuilder.detectProjectType for the common frameworks.
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const raw = await invoke<string>('read_file', { path: `${session.projectPath}/package.json` })
+    const pkg = JSON.parse(raw) as { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> }
+    const deps = [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})]
+    if (deps.includes('next')) out.projectType = 'nextjs'
+    else if (deps.includes('nuxt')) out.projectType = 'nuxt'
+    else if (deps.includes('@angular/core')) out.projectType = 'angular'
+    else if (deps.includes('svelte')) out.projectType = 'svelte'
+    else if (deps.includes('vue')) out.projectType = 'vue'
+    else if (deps.includes('react')) out.projectType = 'react'
+    else out.projectType = 'node'
+  } catch { /* not a Node project, or no package.json — leave as 'unknown' */ }
+
+  // Skills available for this project + chat mode. loadSkills is cached, so
+  // calling it here doesn't double-cost when the live agent already ran.
+  try {
+    const { default: SkillService } = await import('../services/agent/skillService')
+    const skills = await SkillService.getInstance().loadSkills(session.projectPath, out.projectType, 'chat')
+    out.availableSkills = skills.map((s) => s.name)
+  } catch { /* non-critical */ }
+
+  // Rebuild system prompt — the expensive step. Already embeds TMS/PLAN/TODO
+  // and package summary via contextBuilder's internal sections, so we don't
+  // duplicate them as separate fields here. Errors absorbed into the
+  // snapshot so export never throws on a partial build.
+  try {
+    const { default: ContextBuilder } = await import('../services/agent/contextBuilder')
+    const builder = ContextBuilder.getInstance()
+    out.systemPrompt = await builder.buildSystemPrompt(
+      session.projectPath,
+      out.projectType,
+      [], // mcpTools — empty for snapshot; the live agent path includes them at send time
+      undefined,
+      lastUserMessage,
+    )
+  } catch (err) {
+    out.systemPromptError = err instanceof Error ? err.message : String(err)
+  }
+
+  return out
 }
 
 /**

@@ -1136,11 +1136,24 @@ pub async fn check_server_health(url: String) -> Result<bool, String> {
 /// for fullstack projects that expose multiple URLs.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerProbeResult {
+    /// TCP-reachable AND HTTP responded (any status). Used by the probe loop
+    /// to decide "the server is up enough to classify". A 4xx/5xx still
+    /// satisfies this — the response was received.
     pub ok: bool,
+    /// HTTP status code from the final response (0 when ok=false).
+    pub status: u16,
+    /// Whether this response can legitimately be classified as a real
+    /// frontend page. True only when status is 2xx AND content-type is HTML.
+    /// HTML error pages (Express's "Cannot GET /") are reachable but NOT
+    /// usable — the dev-server classifier uses this flag to avoid promoting
+    /// them to `frontendUrl` and stealing the slot from the real frontend.
+    pub usable_as_frontend: bool,
     /// Raw Content-Type header (may be null if not present).
     pub content_type: Option<String>,
-    /// Best-effort classification derived from content-type:
+    /// Best-effort classification derived from content-type AND status:
     ///   "html" | "json" | "other" | null (when ok=false).
+    /// An HTML response with status >= 400 is downgraded to "other" so the
+    /// classifier routes it to the backend slot (where errors belong).
     pub kind: Option<String>,
 }
 
@@ -1158,31 +1171,53 @@ pub async fn probe_server(url: String) -> Result<ServerProbeResult, String> {
 
     match client.get(&url).send().await {
         Ok(resp) => {
+            let status = resp.status().as_u16();
             let content_type = resp
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
 
-            let kind = content_type.as_deref().map(|ct| {
-                let lower = ct.to_lowercase();
-                if lower.starts_with("text/html") || lower.starts_with("application/xhtml") {
-                    "html".to_string()
-                } else if lower.contains("json") {
-                    "json".to_string()
-                } else {
-                    "other".to_string()
-                }
-            });
+            let is_html = content_type
+                .as_deref()
+                .map(|ct| {
+                    let lower = ct.to_lowercase();
+                    lower.starts_with("text/html") || lower.starts_with("application/xhtml")
+                })
+                .unwrap_or(false);
+            let is_json = content_type
+                .as_deref()
+                .map(|ct| ct.to_lowercase().contains("json"))
+                .unwrap_or(false);
+            let is_2xx = (200..300).contains(&status);
+
+            let kind = if is_html && !is_2xx {
+                // 4xx/5xx HTML is an error page (Express's "Cannot GET /",
+                // Vite's "Internal Server Error" overlay during boot, etc.).
+                // Real frontends serve 2xx HTML for `/`.
+                Some("other".to_string())
+            } else if is_html {
+                Some("html".to_string())
+            } else if is_json {
+                Some("json".to_string())
+            } else if content_type.is_some() {
+                Some("other".to_string())
+            } else {
+                None
+            };
 
             Ok(ServerProbeResult {
                 ok: true,
+                status,
+                usable_as_frontend: is_html && is_2xx,
                 content_type,
                 kind,
             })
         }
         Err(_) => Ok(ServerProbeResult {
             ok: false,
+            status: 0,
+            usable_as_frontend: false,
             content_type: None,
             kind: None,
         }),

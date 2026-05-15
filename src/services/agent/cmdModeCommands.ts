@@ -9,8 +9,11 @@ import { useProjectStore } from '../../stores/projectStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
+import { useLayoutStore } from '../../stores/layoutStore'
+import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import AgentService from './agentService'
 import MCPService from '../mcp/mcpService'
+import { devServerManager } from '../devServerManager'
 import { MCP_REGISTRY, findRegistryEntry, buildConfigEntry, type McpRegistryEntry } from '../../utils/mcpRegistry'
 import { clearPromptHistory } from '../cmdPromptHistory'
 import { t } from '../../i18n/useTranslation'
@@ -84,7 +87,7 @@ async function executeNew(_args: string, projectPath: string): Promise<void> {
 
   // 4. Create a fresh session
   state.createSession(projectPath)
-  state.addSystemMessage('Nova sessão criada. Contexto limpo.', 'success')
+  state.addSystemMessage('Nova sessão criada. Contexto limpo.', 'success', { ephemeral: true })
 }
 
 // ─── /clear — Stop agent → Clear messages (keeps session, resets tokens/turns) ───
@@ -101,7 +104,7 @@ async function executeClear(_args: string, _projectPath: string): Promise<void> 
 
   // Clear messages but keep the session alive; also resets tokens and turn count
   state.clearSessionMessages(activeSession.id)
-  state.addSystemMessage('Contexto limpo. Sessão mantida. Tokens resetados.', 'success')
+  state.addSystemMessage('Contexto limpo. Sessão mantida. Tokens resetados.', 'success', { ephemeral: true })
 }
 
 // ─── /save <name> — Persist name on session object ───
@@ -132,7 +135,7 @@ async function executeSave(args: string, _projectPath: string): Promise<void> {
     logger.error('cmd', 'Failed to persist session name:', err)
   }
 
-  state.addSystemMessage(`Sessão renomeada para "${name}".`, 'success')
+  state.addSystemMessage(`Sessão renomeada para "${name}".`, 'success', { ephemeral: true })
 }
 
 // ─── /resume — Open the keyboard-driven session picker overlay ───
@@ -179,14 +182,14 @@ export async function loadSessionById(sessionId: string, projectPath: string): P
     const session = state.sessions.get(sessionId)
     const name = session?.name || `#${sessionId.slice(0, 6)}`
     useCheckpointStore.getState().clear()
-    state.addSystemMessage(`Sessão ${name} carregada.`, 'success')
+    state.addSystemMessage(`Sessão ${name} carregada.`, 'success', { ephemeral: true })
     return
   }
   try {
     await state.switchSession(projectPath, sessionId)
     const loadedSession = state.getActiveSession()
     const name = loadedSession?.name || `#${sessionId.slice(0, 6)}`
-    state.addSystemMessage(`Sessão ${name} carregada.`, 'success')
+    state.addSystemMessage(`Sessão ${name} carregada.`, 'success', { ephemeral: true })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     logger.error('cmd', `Failed to resume session ${sessionId}:`, err)
@@ -232,7 +235,7 @@ async function executeResumeTarget(target: string, projectPath: string): Promise
     const session = state.sessions.get(resolvedId)
     const name = session?.name || `#${n || resolvedId.slice(0, 6)}`
     useCheckpointStore.getState().clear()
-    state.addSystemMessage(`Sessão ${name} carregada.`, 'success')
+    state.addSystemMessage(`Sessão ${name} carregada.`, 'success', { ephemeral: true })
     return
   }
 
@@ -241,7 +244,7 @@ async function executeResumeTarget(target: string, projectPath: string): Promise
     await state.switchSession(projectPath, resolvedId)
     const loadedSession = state.getActiveSession()
     const name = loadedSession?.name || `#${n || resolvedId.slice(0, 6)}`
-    state.addSystemMessage(`Sessão ${name} carregada.`, 'success')
+    state.addSystemMessage(`Sessão ${name} carregada.`, 'success', { ephemeral: true })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     logger.error('cmd', `Failed to resume session ${resolvedId}:`, err)
@@ -408,7 +411,115 @@ async function executeHistoryClear(_args: string, projectPath: string): Promise<
   }
 }
 
-// ─── /exit — Save → Stop → Brief feedback → Return to WelcomeScreen ───
+// ─── /start-server, /stop-server — Manual dev server control in Terminal mode ───
+//
+// Terminal mode has no preview, so dev servers don't auto-start the way they do
+// in chat mode. These commands let the user explicitly fire / stop the project's
+// dev script. Detection: lockfile picks the PM, package.json picks the script.
+
+async function readPackageJsonScripts(projectPath: string): Promise<Record<string, string> | null> {
+  try {
+    const raw = await invoke<string>('read_file', { path: `${projectPath}/package.json` })
+    const parsed = JSON.parse(raw)
+    const scripts = parsed?.scripts
+    return scripts && typeof scripts === 'object' ? scripts as Record<string, string> : null
+  } catch {
+    return null
+  }
+}
+
+async function detectProjectPackageManager(projectPath: string): Promise<'yarn' | 'pnpm' | 'bun' | 'npm'> {
+  const checks: Array<[string, 'yarn' | 'pnpm' | 'bun' | 'npm']> = [
+    ['pnpm-lock.yaml', 'pnpm'],
+    ['bun.lockb', 'bun'],
+    ['yarn.lock', 'yarn'],
+    ['package-lock.json', 'npm'],
+  ]
+  for (const [file, pm] of checks) {
+    try {
+      await invoke<string>('read_file', { path: `${projectPath}/${file}` })
+      return pm
+    } catch {
+      // file not present, try next
+    }
+  }
+  return 'npm'
+}
+
+function buildDevCommand(pm: 'yarn' | 'pnpm' | 'bun' | 'npm', scriptName: string): string {
+  // yarn 1.x and pnpm accept the bare script name; npm/bun require `run`.
+  if (pm === 'yarn' || pm === 'pnpm') return `${pm} ${scriptName}`
+  return `${pm} run ${scriptName}`
+}
+
+async function executeStartServer(_args: string, projectPath: string): Promise<void> {
+  const state = useChatStore.getState()
+  const existing = useLayoutStore.getState().devServer
+  if (existing && existing.status !== 'stopped') {
+    const url = existing.frontendUrl || existing.backendUrl || 'unknown URL'
+    state.addSystemMessage(`Dev server já está a correr (PID ${existing.pid}) — ${url}`, 'info')
+    return
+  }
+
+  const scripts = await readPackageJsonScripts(projectPath)
+  if (!scripts) {
+    state.addSystemMessage('Não encontrei package.json válido na raiz do projecto.', 'error')
+    return
+  }
+  const scriptName = scripts.dev ? 'dev' : scripts.start ? 'start' : null
+  if (!scriptName) {
+    state.addSystemMessage('package.json não tem script "dev" nem "start". Adiciona um e tenta de novo.', 'error')
+    return
+  }
+
+  const pm = await detectProjectPackageManager(projectPath)
+  const command = buildDevCommand(pm, scriptName)
+
+  state.addSystemMessage(`A iniciar dev server: ${command}`, 'info')
+  try {
+    const { resolveFrontendPortHint } = await import('../templateService')
+    const frontendPortHint = await resolveFrontendPortHint(projectPath, 'fullstack')
+    await devServerManager.start(projectPath, command, { projectKind: 'fullstack', frontendPortHint })
+    // Brief pause so URL detection has a chance to populate the slot.
+    await new Promise(resolve => setTimeout(resolve, 600))
+    const slot = useLayoutStore.getState().devServer
+    if (slot && (slot.frontendUrl || slot.backendUrl)) {
+      const urls = [slot.frontendUrl, slot.backendUrl].filter(Boolean).join(' · ')
+      state.addSystemMessage(`Dev server activo (PID ${slot.pid}) — ${urls}`, 'success', { ephemeral: true })
+    } else if (slot) {
+      state.addSystemMessage(`Dev server lançado (PID ${slot.pid}). URL ainda a aparecer nos logs.`, 'info', { ephemeral: true })
+    }
+  } catch (err) {
+    logger.error('cmd', 'Failed to start dev server:', err)
+    const msg = err instanceof Error ? err.message : String(err)
+    state.addSystemMessage(`Falhou ao iniciar dev server: ${msg}`, 'error')
+  }
+}
+
+async function executeStopServer(_args: string, _projectPath: string): Promise<void> {
+  const state = useChatStore.getState()
+  const slot = useLayoutStore.getState().devServer
+  if (!slot) {
+    state.addSystemMessage('Nenhum dev server activo.', 'info')
+    return
+  }
+  try {
+    await devServerManager.stop()
+    state.addSystemMessage('Dev server parado.', 'success', { ephemeral: true })
+  } catch (err) {
+    logger.error('cmd', 'Failed to stop dev server:', err)
+    const msg = err instanceof Error ? err.message : String(err)
+    state.addSystemMessage(`Falhou ao parar dev server: ${msg}`, 'error')
+  }
+}
+
+// ─── /terminal — Toggle the side PTY panel (xterm.js + real shell) ───
+
+async function executeTerminal(_args: string, _projectPath: string): Promise<void> {
+  useTerminalPanelStore.getState().toggle()
+}
+
+// ─── /exit — Save → Stop → Close terminal panel → Return to WelcomeScreen ───
 
 async function executeExit(_args: string, _projectPath: string): Promise<void> {
   const state = useChatStore.getState()
@@ -417,10 +528,14 @@ async function executeExit(_args: string, _projectPath: string): Promise<void> {
     await stopAgent()
   }
 
+  // Kill the PTY before leaving so we don't strand a shell process when the
+  // user comes back to a different project.
+  useTerminalPanelStore.getState().close()
+
   const activeSession = state.getActiveSession()
   if (activeSession && activeSession.messages.length > 0) {
     await state.saveSessionToDisk()
-    state.addSystemMessage('Sessão guardada.', 'success')
+    state.addSystemMessage('Sessão guardada.', 'success', { ephemeral: true })
     // Brief pause so the user sees the confirmation before the view closes
     await new Promise(resolve => setTimeout(resolve, 380))
   }
@@ -479,6 +594,24 @@ export const CMD_MODE_COMMANDS: SlashCommand[] = [
     description: 'Limpar histórico de prompts (ArrowUp) deste projeto',
     enabled: true,
     execute: executeHistoryClear,
+  },
+  {
+    name: '/start-server',
+    description: 'Arrancar dev server do projecto (npm/yarn/pnpm/bun run dev)',
+    enabled: true,
+    execute: executeStartServer,
+  },
+  {
+    name: '/stop-server',
+    description: 'Parar dev server activo',
+    enabled: true,
+    execute: executeStopServer,
+  },
+  {
+    name: '/terminal',
+    description: 'Abrir/fechar painel de terminal real (PTY)',
+    enabled: true,
+    execute: executeTerminal,
   },
   {
     name: '/exit',

@@ -1,50 +1,43 @@
 # Svelte Patterns
 
-You are working in a Svelte project. Follow these conventions:
+You are working in a Svelte project. Check `package.json` for the Svelte version BEFORE writing reactive code — Svelte 5 (runes) and Svelte 4 (`let` + `$:`) have incompatible syntaxes.
 
-## Svelte 5 Runes (preferred)
-- Use `$state()` for reactive state declarations.
-- Use `$derived()` for computed values.
-- Use `$effect()` for side effects.
-- Use `$props()` for component props.
-- Use `$bindable()` for two-way binding props.
+## Svelte 5 (runes — preferred for new code)
 
-## Svelte 4 Fallback
-- If project uses Svelte 4: use `let` for reactive state, `$:` for derived/effects.
-- Check `package.json` for Svelte version before choosing syntax.
+- `$state()` — reactive state declarations.
+- `$derived()` — computed values from other state.
+- `$effect()` — side effects that react to state changes.
+- `$props()` — declare component props.
+- `$bindable()` — opt-in to two-way binding from parent.
 
-## Component Structure
-- One component per `.svelte` file.
-- Script at top, markup in middle, styles at bottom.
-- Use `<script lang="ts">` for TypeScript.
-- Keep components under 200 lines.
+Cross-component shared state goes in a `.svelte.ts` file using `$state` runes. Stores (`writable`, `readable`) still work but are legacy for new Svelte 5 code.
 
-## State Management
-- Local state: runes (`$state`) in components.
-- Shared state: Svelte stores (`writable`, `readable`, `derived`).
-- For complex state: use a store file in `lib/stores/`.
-- Svelte 5: prefer `$state` in `.svelte.ts` files for shared state.
+## SvelteKit conventions (when applicable)
 
-## Styling
-- Use `<style>` block — styles are scoped by default.
-- Use CSS custom properties for theming.
-- Use `:global()` sparingly — only for third-party component overrides.
+- `+page.svelte` is the route component, `+page.ts` runs in browser AND server (universal load), `+page.server.ts` runs server-only (use for secrets, DB).
+- Form actions in `+page.server.ts` for mutations; use `<form method="POST">` + progressive enhancement.
+- `$app/stores` for `page`, `navigating`, `updated` — these are SvelteKit-provided, not user code.
 
-## Best Practices
-- Use `{#each items as item (item.id)}` — always key iterations.
-- Use `{#await promise}` for async data in templates.
-- Prefer `bind:value` over manual event handlers for form inputs.
-- Use `<svelte:component>` for dynamic components.
-- Use `onMount` for DOM-dependent initialization.
-- Use `onDestroy` for cleanup (timers, subscriptions).
+## Patterns to Avoid
 
-## SvelteKit
-- Use `+page.svelte`, `+layout.svelte`, `+page.server.ts` conventions.
-- Load data in `+page.ts` / `+page.server.ts` with `load` functions.
-- Use form actions for mutations (`+page.server.ts` actions).
-- Use `$app/stores` for page, navigating, updated stores.
+- **Don't mix Svelte 4 and Svelte 5 syntax in the same file.** A file using `$state()` cannot also use `$:` reactive declarations — pick one mode based on the project's Svelte version.
+- **Don't use `writable()` from `svelte/store` in new Svelte 5 code** when a `$state` rune in a `.svelte.ts` file does the same job with simpler ergonomics. Stores are still valid for cross-package sharing or `subscribe()` interop.
+- **Don't load secrets in `+page.ts`** — that file runs in the browser. Server-only logic goes in `+page.server.ts`.
+- **Don't iterate without a key**: `{#each items as item}` re-creates components on mutation. Use `{#each items as item (item.id)}`.
+- **Don't use `bind:` for read-only data.** `bind:` implies parent owns mutation. Use `{value}` prop + `on:change` event instead.
+- **Don't mutate props inside a child component.** Use `$bindable` if mutation must propagate; otherwise emit an event.
+- **Don't put expensive computations in `$:` or `$derived` without memoization checks.** Reactive blocks re-run on every dependency change. Cache when work is heavy.
+- **Don't access `window` / `document` at module top-level.** SvelteKit SSR will crash. Guard with `import { browser } from '$app/environment'` or move to `onMount`.
+- **Don't reach for `goto()` from `$app/navigation` for external URLs.** It's for SvelteKit internal routes only — use `<a href>` with `target="_blank"`.
 
-## Performance
-- Svelte compiles away the framework — focus on algorithmic efficiency.
-- Use `{#key expression}` to force re-creation of components.
-- Lazy load with dynamic `import()` for heavy components.
+## Routing — `/` MUST resolve to a real page
+
+SvelteKit routes that only define `src/routes/login/+page.svelte` and `src/routes/dashboard/+page.svelte` render a blank page at `/`. Add `src/routes/+page.svelte` (the root) — it can simply redirect:
+
+```svelte
+<script>
+  import { goto } from '$app/navigation';
+  import { onMount } from 'svelte';
+  onMount(() => goto('/login', { replaceState: true }));
+</script>
+```

@@ -29,6 +29,12 @@ export type ContentBlock =
       durationMs?: number
       /** Internal: epoch ms when the block was first created. Used to derive durationMs. */
       startedAt?: number
+      /** Per-block expansion state. When undefined, falls back to the
+       *  message-level `isReasoningVisible` flag (legacy behaviour).
+       *  When defined, this overrides the message flag — set by
+       *  `toggleReasoningBlock` so each reasoning block can be
+       *  expanded independently of its siblings. */
+      isVisible?: boolean
     }
 
 /** Ordered prompt block — tracks the interleaving of user text and
@@ -121,9 +127,9 @@ export interface CredentialFieldDescriptor {
 }
 
 export interface ChatMessageCard {
-  type: 'plan_approval' | 'todo_list' | 'credential_request'
+  type: 'plan_approval' | 'todo_list' | 'credential_request' | 'permission_request'
   projectPath: string
-  status: 'pending' | 'approved' | 'changes_requested' | 'rejected' | 'submitted' | 'cancelled'
+  status: 'pending' | 'approved' | 'changes_requested' | 'rejected' | 'submitted' | 'cancelled' | 'expired'
   /** credential_request only: identifies the pending entry in credentialRequestStore */
   requestId?: string
   /** credential_request only: service name (e.g. "OpenAI", "Stripe") shown in the form header */
@@ -132,15 +138,43 @@ export interface ChatMessageCard {
   fields?: CredentialFieldDescriptor[]
   /** credential_request only: keys actually submitted (no values) — populated after submit */
   submittedKeys?: string[]
+  /** permission_request only: identifies the pending entry in permissionStore.
+   *  When the user clicks Allow/Deny after a reload, the in-memory entry is
+   *  gone — we use this id to detect the "stale card" path and instruct the
+   *  user to resume via "Continue" instead of silently no-op'ing. */
+  permissionId?: string
+  /** permission_request only: tool whose execution is being gated. */
+  toolName?: string
+  /** permission_request only: snapshot of the tool args, truncated for display. */
+  argsSummary?: string
+  /** permission_request only: extra friction signal (sensitive file, dangerous
+   *  command, browser action). Drives the UI emphasis ("requires approval"). */
+  promptReason?: 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
 }
 
 export type SystemMessageLevel = 'info' | 'success' | 'error' | 'warn'
+
+/**
+ * Discriminator for special system messages whose rendering differs from the
+ * default bullet+text layout (compact boundary, future kinds).
+ *
+ * - `compact_boundary`: marks the point where the agent compressed the
+ *   conversation. Renders as a claude-vaz-style horizontal rule with the
+ *   "✻ Conversa comprimida" label, and the ChatView hides every message
+ *   above the latest boundary (pre-compression history stays in storage
+ *   but is folded away from the transcript — same as claude-vaz).
+ */
+export type SystemMessageKind = 'compact_boundary'
 
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
   /** For role === 'system': semantic level used for colour-coding in the terminal UI */
   level?: SystemMessageLevel
+  /** For role === 'system': discriminator for special rendering (e.g., compact boundary). */
+  kind?: SystemMessageKind
+  /** Optional pre-compression token count, set on compact_boundary messages. */
+  compactBeforeTokens?: number
   content: string
   timestamp: number
   codeBlocks?: CodeBlock[]
@@ -155,6 +189,22 @@ export interface ChatMessage {
   reasoningStartedAt?: number
   /** Duration in ms of the reasoning phase */
   reasoningDurationMs?: number
+  /**
+   * Did the developer ask for reasoning on the request that produced this
+   * assistant message?
+   *
+   * - `true`  → user toggled thinking ON (non-BYOK plans) OR fired a
+   *             reasoning command (/plan, /debug, /review, /te2e). The
+   *             reasoning blocks render normally.
+   * - `false` → BYOK in play OR toggle OFF AND no reasoning command. Even
+   *             if the model produces reasoning (BYOK reasoning models often
+   *             always think regardless of `reasoning_effort: 'minimal'`),
+   *             the IDE suppresses the blocks in the UI — the developer
+   *             asked for code, not for a chain-of-thought dump.
+   * - `undefined` → legacy session from before the flag existed. Render as
+   *             before (no behavioural change for old data).
+   */
+  thinkingRequested?: boolean
   /** Inline card (plan approval, todo list) */
   card?: ChatMessageCard
   /** Attachments included with this message (metadata only — content is resolved into message.content at send-time) */
@@ -175,6 +225,14 @@ export interface ChatMessage {
   turnDurationMs?: number
   turnInputTokens?: number
   turnOutputTokens?: number
+  /**
+   * Ephemeral system messages: appear momentarily in the transcript, scroll
+   * up as new messages arrive, and auto-remove after a short timeout. Used
+   * for transient status (permission grants, "session saved", dev-server
+   * lifecycle) where the event itself is interesting but not worth keeping
+   * in the conversation history. Not persisted to disk (sanitizer drops them).
+   */
+  ephemeral?: boolean
 }
 
 export interface CodeBlock {
@@ -211,6 +269,14 @@ export interface ByokSessionSnapshot {
   /** Whether the provider is `custom`. Drives the X-BYOK-Capabilities
    *  header inclusion on each request. */
   custom: boolean
+  /** Whether the provider is `local` (Ollama, LM Studio). Critical for the
+   *  agentService routing decision: local providers MUST be called direct
+   *  from the IDE — the worker proxy refuses local routes (proxy.ts:1111).
+   *  Without this flag, a session re-hydrated after a restart would lose
+   *  the local-routing decision and try the worker. Optional for backward
+   *  compatibility with sessions persisted before this field existed —
+   *  agentService re-derives via byokStore lookup when absent. */
+  local?: boolean
   /** For custom providers: declared capabilities frozen at snapshot. */
   capabilities?: {
     images: boolean
@@ -232,7 +298,7 @@ export interface ByokSessionSnapshot {
    *  Plan-profile shapes (`enable_thinking` / `reasoning.enabled`) are
    *  silently ignored by Anthropic/OpenAI/Gemini upstreams, which is why
    *  the toggle was a no-op for BYOK before this field existed. */
-  thinkingShape?: 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget'
+  thinkingShape?: 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget' | 'openrouter_reasoning' | 'mimo_chat_template_kwargs'
 }
 
 export interface SessionContext {
@@ -260,6 +326,23 @@ export interface SessionTokenUsage {
   totalTurns: number
 }
 
+/** Snapshot of the last on-wire turn's token counters + model identity.
+ *  Persisted so the context-window indicator survives a session reload —
+ *  without this, every reopen flashes the bar to 0% until the user sends
+ *  a new message and the next turn handshake re-populates the live state. */
+export interface SessionTurnSnapshot {
+  /** Last turn's input tokens — drives the pressure bar. */
+  promptTokens: number
+  /** Last turn's output tokens — tooltip breakdown only. */
+  responseTokens: number
+  /** Server-reported model context window (X-Model-Context-Window) at the
+   *  last turn. Null when the session was saved before any turn ran. */
+  contextWindow: number | null
+  /** Friendly model name (X-Model-Name) at the last turn, restored so the
+   *  tooltip reads correctly until the next turn handshakes. */
+  modelName: string | null
+}
+
 export interface PersistedSession {
   id: string
   projectPath: string
@@ -269,5 +352,6 @@ export interface PersistedSession {
   messages: ChatMessage[]
   context?: SessionContext
   tokenUsage?: SessionTokenUsage
+  lastTurnSnapshot?: SessionTurnSnapshot
   byokSnapshot?: ByokSessionSnapshot | null
 }

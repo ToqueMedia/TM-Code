@@ -1,0 +1,28 @@
+// Prisma schema with the canonical users table the auth-proxy expects.
+// DATABASE_URL resolves at runtime to an absolute path via scripts/db-setup.mjs
+// so the SQLite file lives at <project-root>/prisma/dev.db regardless of cwd.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Required by /api/auth/sync. Add app-specific columns after this baseline —
+// keep any custom columns NULLABLE so the first sync (driven by JWT data only)
+// succeeds before the app collects those fields.
+model User {
+  id        String   @id @default(uuid())
+  uid       String   @unique
+  email     String   @unique
+  name      String?
+  avatarUrl String?
+  role      String   @default("user")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}

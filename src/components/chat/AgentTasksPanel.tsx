@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiCheck, FiLoader, FiChevronDown, FiChevronUp, FiCheckSquare } from 'react-icons/fi'
 import { useAgentStore, type AgentTask } from '../../stores/agentStore'
+import { computeSlidingWindow } from '../../utils/taskWindow'
 import { tokens } from '@/theme/tokens'
 
 /**
@@ -69,37 +70,63 @@ function AgentTasksPanel() {
         )}
       </Flex>
 
-      {/* Task list */}
-      {!collapsed && (
-        <Box px={3} pb={2.5} maxH="180px" overflowY="auto" css={{
-          '&::-webkit-scrollbar': { width: '3px' },
-          '&::-webkit-scrollbar-thumb': {
-            background: tokens.colors.border.panel,
-            borderRadius: '2px',
-          },
-        }}>
-          {tasks.map((task: AgentTask) => (
-            <Flex key={task.id} align="flex-start" gap={2} py="3px">
-              <Box mt="2px" flexShrink={0}>
-                <StatusIcon status={task.status} />
-              </Box>
-              <Text
-                fontSize="12px"
-                color={task.status === 'completed'
-                  ? tokens.colors.text.disabled
-                  : task.status === 'in_progress'
-                    ? tokens.colors.text.primary
-                    : tokens.colors.text.secondary}
-                textDecoration={task.status === 'completed' ? 'line-through' : 'none'}
-                fontWeight={task.status === 'in_progress' ? 500 : 400}
-                lineHeight="1.45"
-              >
-                {task.description}
+      {/* Task list — 3-task sliding window with in-progress always visible.
+          Same UX rule as the post-plan TodoListCard: the panel stays short
+          (no 180px scrollable strip pushing the prompt off-screen), and the
+          window slides so the row the agent is on right now is never hidden.
+          Tasks before/after the window are summarised as "· N earlier/more". */}
+      {!collapsed && (() => {
+        const inProgressIdx = tasks.findIndex(t => t.status === 'in_progress')
+        const firstPendingIdx = tasks.findIndex(t => t.status === 'pending')
+        // Anchor: prefer in-progress (explicit status from update_tasks);
+        // else first pending; else fall back to "show tail" (all complete
+        // → recap last 3). Distinct from TodoListCard's "first non-completed"
+        // because here we have an explicit `in_progress` field — preferring it
+        // tracks the agent's own claim about what it's working on rather than
+        // inferring from completion order.
+        const anchorIdx =
+          inProgressIdx !== -1 ? inProgressIdx
+          : firstPendingIdx !== -1 ? firstPendingIdx
+          : -1 // helper handles -1 → show tail
+        const { start: startIdx, end: endIdx, hiddenAbove, hiddenBelow } =
+          computeSlidingWindow(tasks.length, anchorIdx)
+        const visible = tasks.slice(startIdx, endIdx + 1)
+
+        return (
+          <Box px={3} pb={2.5}>
+            {hiddenAbove > 0 && (
+              <Text fontSize="10px" color={tokens.colors.text.disabled} py="2px">
+                · {hiddenAbove} earlier {hiddenAbove === 1 ? 'task' : 'tasks'}
               </Text>
-            </Flex>
-          ))}
-        </Box>
-      )}
+            )}
+            {visible.map((task: AgentTask) => (
+              <Flex key={task.id} align="flex-start" gap={2} py="3px">
+                <Box mt="2px" flexShrink={0}>
+                  <StatusIcon status={task.status} />
+                </Box>
+                <Text
+                  fontSize="12px"
+                  color={task.status === 'completed'
+                    ? tokens.colors.text.disabled
+                    : task.status === 'in_progress'
+                      ? tokens.colors.text.primary
+                      : tokens.colors.text.secondary}
+                  textDecoration={task.status === 'completed' ? 'line-through' : 'none'}
+                  fontWeight={task.status === 'in_progress' ? 500 : 400}
+                  lineHeight="1.45"
+                >
+                  {task.description}
+                </Text>
+              </Flex>
+            ))}
+            {hiddenBelow > 0 && (
+              <Text fontSize="10px" color={tokens.colors.text.disabled} py="2px">
+                · {hiddenBelow} more {hiddenBelow === 1 ? 'task' : 'tasks'}
+              </Text>
+            )}
+          </Box>
+        )
+      })()}
     </Box>
   )
 }

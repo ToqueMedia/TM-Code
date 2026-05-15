@@ -200,3 +200,17 @@ pub async fn delete_checkpoint_session(
         Err(e) => Err(format!("Failed to delete checkpoint session: {}", e)),
     }
 }
+
+/// Delete ALL checkpoint data for a project (every session, every snapshot).
+/// Called from the project-deletion flow so checkpoints don't outlive the
+/// project they reference. Idempotent — NotFound is treated as success.
+#[tauri::command]
+pub async fn delete_checkpoint_project(project_hash: String) -> Result<(), String> {
+    let base = checkpoints_base()?;
+    let dir = base.join(&project_hash);
+    match tokio::fs::remove_dir_all(&dir).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to delete project checkpoints: {}", e)),
+    }
+}

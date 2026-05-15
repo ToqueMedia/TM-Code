@@ -360,3 +360,45 @@ describe('resolveIsWrapper — recursive script indirection', () => {
     expect(resolveIsWrapper('npm run nonexistent', lookup)).toBe(false)
   })
 })
+
+describe('HTML-error race regression — Express 404 must not steal frontendUrl', () => {
+  // The bug this guards: Express boots first and serves "Cannot GET /"
+  // (text/html, status 404). The probe used to classify this as HTML and
+  // assign it to frontendUrl. Vite arriving seconds later with real 200 HTML
+  // would then be ignored because frontendUrl was already set.
+  //
+  // Defense layer 1 (Rust probe): downgrade HTML+status>=400 to kind='other'.
+  // Defense layer 2 (classifier): when kind='other', goes to backendUrl.
+  // Defense layer 3 (port hint): if Vite's port is known up front, force the
+  // 200 HTML response to frontend regardless of what arrived first.
+  //
+  // The classifier test exercises the layer-2/3 cooperation — Express HTML
+  // gets demoted by the probe (already tested in Rust); we validate the
+  // downstream behaviour here.
+
+  it('Express 404 (demoted to kind=other) → backendUrl, Vite 200 HTML → frontendUrl', () => {
+    let slot = emptySlot('fullstack')
+
+    // Express probes first. Rust probe has already downgraded the HTML 404
+    // to 'other' before this call (status-aware logic in probe_server).
+    const expressActions = classify('http://127.0.0.1:3000/', 'other', slot)
+    expect(expressActions).toEqual([{ type: 'assignBackend', url: 'http://127.0.0.1:3000/', mirrored: false }])
+
+    slot = { ...slot, backendUrl: 'http://127.0.0.1:3000/', backendUrlMirrored: false }
+
+    // Vite arrives later with real 200 HTML. The frontend slot is still
+    // empty, so it claims it without contention.
+    const viteActions = classify('http://127.0.0.1:5173/', 'html', slot)
+    expect(viteActions).toEqual([{ type: 'assignFrontend', url: 'http://127.0.0.1:5173/' }])
+  })
+
+  it('frontendPortHint forces 5173 → frontend even if probed before content-type', () => {
+    // Belt-and-braces: even if Vite's first response happens to be ambiguous
+    // (e.g. 'other'), the port hint pins it to the frontend slot.
+    const slot = emptySlot('fullstack')
+    const actions = classify('http://127.0.0.1:5173/', 'other', slot, 5173)
+    // Port-hint matches → forced into frontend slot (mirror is only added
+    // when content-type is HTML; 'other' alone is the trigger).
+    expect(actions).toContainEqual({ type: 'assignFrontend', url: 'http://127.0.0.1:5173/' })
+  })
+})

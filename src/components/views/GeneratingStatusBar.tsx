@@ -1,5 +1,6 @@
-import { memo, useState, useEffect } from 'react'
+import { memo, useState, useEffect, type ReactNode } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
+import { FiArrowDown, FiArrowUp } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 
 function formatTokens(count: number): string {
@@ -19,7 +20,7 @@ function formatElapsed(ms: number): string {
 const statusConfig: Record<string, { color: string; label: string }> = {
   idle: { color: tokens.colors.text.disabled, label: 'Ready' },
   awaiting_response: { color: tokens.colors.toolCall.runningText, label: 'Awaiting response...' },
-  reasoning: { color: tokens.colors.accent.purple, label: 'Reasoning...' },
+  reasoning: { color: tokens.colors.accent.purple, label: 'A pensar...' },
   generating: { color: tokens.colors.accent.primary, label: 'Generating...' },
   applying: { color: tokens.colors.accent.green, label: 'Applying changes...' },
   compressing: { color: tokens.colors.accent.orange, label: 'Compressing context...' },
@@ -41,6 +42,41 @@ interface GeneratingStatusBarProps {
 function GeneratingStatusBar({ status, isStreaming, inputTokens, outputTokens, currentTurnCount, agentStartTime }: GeneratingStatusBarProps) {
   const config = statusConfig[status] || statusConfig.idle
   const [elapsed, setElapsed] = useState(0)
+
+  // Direction arrow next to the token total: ArrowUp while sending (agent is
+  // serialising the prompt), ArrowDown while receiving (model is streaming
+  // back), nothing when the loop is idle / errored. The number itself is
+  // always input + output combined so the user reads "total traffic" — the
+  // arrow tells them where on the wire we are RIGHT NOW. Icons (react-icons)
+  // instead of the previous string glyphs so the visual is crisp on hi-DPI
+  // displays where unicode arrows render with the body font's slightly
+  // off-grid baseline.
+  const totalTokens = inputTokens + outputTokens
+  const isSending = status === 'awaiting_response' || status === 'compressing'
+  const isReceiving = status === 'generating' || status === 'reasoning' || status === 'applying'
+  const directionIcon: ReactNode = isSending ? (
+    <Box
+      as="span"
+      display="inline-flex"
+      alignItems="center"
+      color={tokens.colors.accent.orange}
+      mr="3px"
+      verticalAlign="-2px"
+    >
+      <FiArrowUp size={11} strokeWidth={2.5} />
+    </Box>
+  ) : isReceiving ? (
+    <Box
+      as="span"
+      display="inline-flex"
+      alignItems="center"
+      color={tokens.colors.accent.green}
+      mr="3px"
+      verticalAlign="-2px"
+    >
+      <FiArrowDown size={11} strokeWidth={2.5} />
+    </Box>
+  ) : null
 
   // Update elapsed time every second while streaming
   useEffect(() => {
@@ -84,9 +120,16 @@ function GeneratingStatusBar({ status, isStreaming, inputTokens, outputTokens, c
         </Text>
       </Flex>
       <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-        {/* Up = context size on the wire, Down = tokens emitted by the model. */}
-        {inputTokens > 0 && (<>{'\u2191 '}{formatTokens(inputTokens)}{' '}</>)}
-        {outputTokens > 0 && (<>{'\u2193 '}{formatTokens(outputTokens)}{' '}</>)}
+        {/* Up + Down combined into a single "total traffic" counter (UX
+            request 2026-05-12). Up was context-size-on-wire (max across
+            turns); Down was output (sum across turns). The two semantics
+            diverge but the user wants the at-a-glance total \u2014 the directional
+            split stays available in the session export snapshot. */}
+        {totalTokens > 0 && (
+          <>
+            {directionIcon}{formatTokens(totalTokens)}{' '}
+          </>
+        )}
         · {currentTurnCount} steps{elapsed > 0 ? ` · ${formatElapsed(elapsed)}` : ''}
       </Text>
     </Flex>

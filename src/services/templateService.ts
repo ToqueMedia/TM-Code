@@ -23,6 +23,13 @@ export interface Template {
   workspaces?: string[]
   /** Runtime requirements to check before scaffolding. */
   requirements?: Requirement[]
+  /** For fullstack templates: the port the frontend binds to (Vite=5173, Next=3000,
+   *  etc.). Passed as `frontendPortHint` to the dev-server classifier so the
+   *  iframe never accidentally previews the backend when both servers happen
+   *  to respond with text/html (e.g. Express's default 404 page wins the
+   *  content-type probe race). Frontend-only and backend-only templates leave
+   *  this unset. */
+  frontendPort?: number
 }
 
 const NODE_REQUIREMENTS: Requirement[] = [
@@ -45,6 +52,14 @@ export interface TemplateManifest {
   installCommand: string
   devCommand: string
   scaffoldedAt: string
+  /** For fullstack projects: the port the frontend binds to. Read by every
+   *  `start_dev_server` call site (scaffold, manual restart, agent tool, cmd
+   *  mode) so the dev-server classifier never accidentally promotes the
+   *  backend URL when both servers respond with text/html (Express's default
+   *  404 wins the content-type probe race otherwise). Optional — only set
+   *  on fullstack scaffolds that ship a `frontendPort` in their Template
+   *  definition. Non-fullstack projects leave this undefined. */
+  frontendPort?: number
 }
 
 const TEMPLATES: Template[] = [
@@ -169,6 +184,20 @@ const TEMPLATES: Template[] = [
     tags: ['react', 'express', 'fullstack', 'monorepo', 'typescript'],
     workspaces: ['client', 'server'],
     requirements: NODE_REQUIREMENTS,
+    frontendPort: 5173,
+  },
+  {
+    id: 'react-express-prisma-auth',
+    name: 'React + Express + Auth (Monorepo)',
+    description: 'Full-stack starter pre-wired for email/password + Google sign-in and a working /api/auth/* proxy. The agent migrates the persistence layer to the platform default on the first scaffold so the project is publish-ready from day one.',
+    category: 'fullstack',
+    framework: 'react+express+prisma',
+    installCommand: 'npm install',
+    devCommand: 'npm run dev',
+    tags: ['react', 'express', 'auth', 'login', 'signup', 'fullstack', 'monorepo', 'typescript', 'google'],
+    workspaces: ['client', 'server'],
+    requirements: NODE_REQUIREMENTS,
+    frontendPort: 5173,
   }
 ]
 
@@ -224,6 +253,7 @@ class TemplateService {
       installCommand: adaptCommand(template.installCommand, pm),
       devCommand: adaptCommand(template.devCommand, pm),
       scaffoldedAt: new Date().toISOString(),
+      ...(template.frontendPort !== undefined ? { frontendPort: template.frontendPort } : {}),
     }
 
     await invoke('write_file', {
@@ -234,3 +264,34 @@ class TemplateService {
 }
 
 export const templateService = new TemplateService()
+
+/**
+ * Read the `.toquemedia-template` manifest at the project root. Returns null
+ * when the file is absent, unreadable, or invalid JSON — never throws. Used
+ * by every dev-server start path so the classifier's frontend-port hint is
+ * applied consistently (not just on the scaffold-and-run path).
+ */
+export async function readTemplateManifest(projectPath: string): Promise<TemplateManifest | null> {
+  try {
+    const raw = await invoke<string>('read_file', { path: `${projectPath}/.toquemedia-template` })
+    return JSON.parse(raw) as TemplateManifest
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve the `frontendPortHint` to pass to devServerManager.start() for a
+ * project. Reads the `.toquemedia-template` manifest; returns undefined for
+ * projects without a manifest, non-fullstack projects, or templates that
+ * didn't ship a `frontendPort` (e.g. user-imported repos). Pure-ish: only
+ * the manifest read is async.
+ */
+export async function resolveFrontendPortHint(
+  projectPath: string,
+  projectKind: 'frontend' | 'backend' | 'fullstack',
+): Promise<number | undefined> {
+  if (projectKind !== 'fullstack') return undefined
+  const manifest = await readTemplateManifest(projectPath)
+  return manifest?.frontendPort
+}

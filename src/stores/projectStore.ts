@@ -11,12 +11,35 @@ import { useLayoutStore } from './layoutStore';
 import RecoveryService from '../services/recoveryService';
 import WindowService from '../services/windowService';
 import { sessionService } from '../services/agent/sessionService';
+import CheckpointService from '../services/agent/checkpointService';
 import { useChatStore } from './chatStore';
 import { useProblemsStore } from './problemsStore';
 import { IS_VITE_DEV } from '../utils/viteEnv';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
 import { t } from '../i18n';
+
+/**
+ * Dedupe a recent-projects list by `path`. Rust's `get_recent_projects`
+ * returns entries sorted by lastOpened DESC; the same project can appear
+ * twice when the registry stores it with two different IDs (e.g. opened
+ * once via CMD-mode auto-create and once via "Open folder"). Keeping the
+ * FIRST occurrence preserves the most recent timestamp and matches what
+ * the UI expects ("Recents" should be distinct projects, not entries).
+ *
+ * Until the Rust side dedupes at save-time, this is the frontend safety
+ * net — UI consumers never have to worry about repeats.
+ */
+function dedupeRecentProjects(projects: RecentProject[]): RecentProject[] {
+  const seen = new Set<string>();
+  const out: RecentProject[] = [];
+  for (const p of projects) {
+    if (seen.has(p.path)) continue;
+    seen.add(p.path);
+    out.push(p);
+  }
+  return out;
+}
 
 interface ProjectStore {
   currentProject: ProjectInfo | null;
@@ -206,7 +229,7 @@ export const useProjectStore = create<ProjectStore>()(
           const recentProjects = await invoke<RecentProject[]>('get_recent_projects').catch(() => get().recentProjects);
           set({
             currentProject: projectInfo,
-            recentProjects,
+            recentProjects: dedupeRecentProjects(recentProjects),
             loading: false
           });
 
@@ -246,18 +269,44 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'Failed to load project state:', error);
           }
 
-          // Check for TMS.md — suggest /init if missing so the agent has project context
+          // Check for TMS.md — suggest /init only when (a) it's missing AND
+          // (b) the project actually has content to analyze. Suggesting it on
+          // a freshly-opened empty folder is noise: there is nothing to
+          // memorize and the agent's first natural turn will start TMS.md
+          // organically as work happens.
           try {
             await invoke('read_file', { path: `${path}/TMS.md` });
           } catch {
-            // TMS.md doesn't exist — suggest initialization after a brief delay
-            // so the chat session is ready
-            setTimeout(() => {
-              const chatState = useChatStore.getState();
-              if (chatState.activeSessionId) {
-                chatState.addSystemMessage(t('common.noTmsFile'));
-              }
-            }, 600);
+            // TMS.md missing — check if the project has any real content.
+            // Look for top-level entries other than TM Code's own marker
+            // (.toquemedia-id), git metadata (.git), and OS junk (.DS_Store).
+            let projectHasContent = false;
+            try {
+              const entries = await invoke<string[]>('glob_files', {
+                pattern: '*',
+                directory: path,
+              });
+              const meaningful = entries.filter((entry) => {
+                const name = entry.split('/').pop() ?? entry;
+                return name !== '.toquemedia-id'
+                  && name !== '.git'
+                  && name !== '.DS_Store'
+                  && name !== 'Thumbs.db';
+              });
+              projectHasContent = meaningful.length > 0;
+            } catch {
+              // glob_files failed — fail open (don't suggest) so we don't
+              // nag on a transient FS hiccup.
+              projectHasContent = false;
+            }
+            if (projectHasContent) {
+              setTimeout(() => {
+                const chatState = useChatStore.getState();
+                if (chatState.activeSessionId) {
+                  chatState.addSystemMessage(t('common.noTmsFile'));
+                }
+              }, 600);
+            }
           }
         } catch (error: unknown) {
           set({
@@ -305,7 +354,7 @@ export const useProjectStore = create<ProjectStore>()(
         try {
           const recentProjects: RecentProject[] = await invoke('get_recent_projects');
           set({
-            recentProjects,
+            recentProjects: dedupeRecentProjects(recentProjects),
             loading: false
           });
         } catch (error: unknown) {
@@ -393,11 +442,22 @@ export const useProjectStore = create<ProjectStore>()(
             recentProjects: state.recentProjects.filter(p => p.id !== projectId),
           }));
 
-          // Remove from persisted recent list so it doesn't reappear on WelcomeScreen
-          await invoke('remove_from_recent_projects', { projectId }).catch(() => {});
+          // Remove from persisted recent list so it doesn't reappear on
+          // WelcomeScreen after restart. Logged on failure (was previously
+          // .catch(()=>{}) which silently let the project come back).
+          try {
+            await invoke('remove_from_recent_projects', { projectId });
+          } catch (err) {
+            logger.warn('project', 'remove_from_recent_projects failed:', err);
+          }
 
-          // Async cleanup: delete sessions and project files from disk
+          // Async cleanup: delete every per-project artefact under
+          // ~/.toquemedia-studio/. Sessions live at sessions/{hash}/,
+          // checkpoints at checkpoints/{hash}/. Both must go — leaving
+          // checkpoints behind would orphan snapshot files that can never
+          // be loaded again (their parent project is gone).
           await sessionService.deleteAllProjectSessions(projectPath);
+          await CheckpointService.getInstance().deleteAllProjectCheckpoints(projectPath);
           await invoke('delete_project', { projectId, projectPath });
         } catch (error) {
           logger.error('project', 'Failed to delete project:', error);

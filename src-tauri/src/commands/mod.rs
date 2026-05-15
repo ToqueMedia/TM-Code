@@ -13,6 +13,7 @@ pub mod issue_reporter;
 pub mod mcp;
 pub mod project;
 pub mod sandbox;
+pub mod screenshot;
 pub mod search;
 pub mod terminal;
 pub mod version;

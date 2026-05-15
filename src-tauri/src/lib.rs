@@ -14,6 +14,7 @@ use commands::issue_reporter::*;
 use commands::mcp::*;
 use commands::project::*;
 use commands::sandbox::*;
+use commands::screenshot::*;
 use commands::search::*;
 use commands::terminal::*;
 use commands::version::*;
@@ -122,6 +123,22 @@ fn open_preview_webview(
                     } catch(_) {}
                 };
 
+                // One-shot heartbeat on script load — confirms the capture
+                // pipeline is live (init_script ran, window.ipc reachable, IPC
+                // handler routes back to main, App.tsx listener works). If the
+                // user reports "no [runtime] entries", first thing to check is
+                // whether this heartbeat appears. Absent → pipeline broken
+                // upstream (rebuild needed, IPC not mounted, etc.). Present →
+                // pipeline works, the issue is a specific listener (e.g. CORS
+                // intercepts fetch BEFORE our wrapper).
+                try {
+                    window.ipc.postMessage(JSON.stringify({
+                        type: 'console',
+                        level: 'info',
+                        text: 'preview-capture: ready (errors, rejections, console.error, network 4xx/5xx)'
+                    }));
+                } catch(_) {}
+
                 var _send = function(level, msg) {
                     var now = Date.now();
                     // Deduplicate identical consecutive messages (within 2s)
@@ -174,6 +191,78 @@ fn open_preview_webview(
                     }
                     _send('error', parts.join(' '));
                 };
+
+                // Network failure capture — wrap fetch() and XMLHttpRequest so
+                // that 4xx/5xx responses surface in the IDE's Preview console.
+                // Without this, the browser's DevTools shows red entries for
+                // failed requests but no JS event fires (the response is just a
+                // Response object with status=4xx) — meaning the agent's
+                // read_dev_server_logs check after start_dev_server would miss
+                // backend errors that DevTools makes obvious to a human.
+                //
+                // Format: "Network: METHOD URL → STATUS STATUSTEXT"
+                // Same _send throttle/dedup applies, so a polling loop hitting
+                // 401 once a second produces one log line, not a flood.
+                var _origFetch = window.fetch;
+                if (typeof _origFetch === 'function') {
+                    window.fetch = function() {
+                        var args = arguments;
+                        var url = '';
+                        var method = 'GET';
+                        try {
+                            var input = args[0];
+                            var init = args[1] || {};
+                            if (typeof input === 'string') {
+                                url = input;
+                            } else if (input && typeof input === 'object') {
+                                if (input.url) url = input.url;
+                                if (input.method) method = input.method;
+                            }
+                            if (init && init.method) method = init.method;
+                        } catch(_) {}
+                        return _origFetch.apply(this, args).then(function(res) {
+                            try {
+                                if (res && typeof res.status === 'number' && res.status >= 400) {
+                                    _send('error', 'Network: ' + String(method).toUpperCase() + ' ' + url + ' → ' + res.status + (res.statusText ? ' ' + res.statusText : ''));
+                                }
+                            } catch(_) {}
+                            return res;
+                        }).catch(function(err) {
+                            try {
+                                _send('error', 'Network: ' + String(method).toUpperCase() + ' ' + url + ' → ' + (err && err.message ? err.message : String(err)));
+                            } catch(_) {}
+                            throw err;
+                        });
+                    };
+                }
+
+                try {
+                    var _origXhrOpen = XMLHttpRequest.prototype.open;
+                    var _origXhrSend = XMLHttpRequest.prototype.send;
+                    XMLHttpRequest.prototype.open = function(method, url) {
+                        try {
+                            this.__tmcMethod = method;
+                            this.__tmcUrl = url;
+                        } catch(_) {}
+                        return _origXhrOpen.apply(this, arguments);
+                    };
+                    XMLHttpRequest.prototype.send = function() {
+                        var xhr = this;
+                        try {
+                            xhr.addEventListener('loadend', function() {
+                                try {
+                                    if (xhr.status >= 400) {
+                                        _send('error', 'Network: ' + String(xhr.__tmcMethod || 'GET').toUpperCase() + ' ' + (xhr.__tmcUrl || '') + ' → ' + xhr.status + (xhr.statusText ? ' ' + xhr.statusText : ''));
+                                    } else if (xhr.status === 0 && xhr.readyState === 4) {
+                                        // status 0 + readyState DONE = network failure (CORS, abort, offline)
+                                        _send('error', 'Network: ' + String(xhr.__tmcMethod || 'GET').toUpperCase() + ' ' + (xhr.__tmcUrl || '') + ' → connection failed');
+                                    }
+                                } catch(_) {}
+                            });
+                        } catch(_) {}
+                        return _origXhrSend.apply(this, arguments);
+                    };
+                } catch(_) {}
 
                 // Proactive Google Identity Services (GIS) probe.
                 //
@@ -234,9 +323,15 @@ fn open_preview_webview(
         // because the wry IPC closure doesn't have access to Tauri's Emitter trait.
         .with_ipc_handler(move |request| {
             let body = request.body();
+            // Diagnostic: confirms IPC handler is firing. Strip after the
+            // capture pipeline is verified working in the field.
+            eprintln!("[preview-ipc] received {} bytes", body.len());
             let parsed: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
-                Err(_) => return,
+                Err(e) => {
+                    eprintln!("[preview-ipc] JSON parse failed: {}", e);
+                    return;
+                }
             };
             let msg_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
@@ -252,11 +347,20 @@ fn open_preview_webview(
                         .replace('\n', "\\n")
                         .replace('\r', "");
                     let safe_level = level.replace('\'', "\\'");
-                    if let Some(win) = app_for_ipc.get_webview_window("main") {
-                        let _ = win.eval(format!(
-                            "window.dispatchEvent(new CustomEvent('preview-console',{{detail:{{level:'{}',text:'{}'}}}}));",
-                            safe_level, safe_text
-                        ));
+                    match app_for_ipc.get_webview_window("main") {
+                        Some(win) => {
+                            let snippet: String = text.chars().take(80).collect();
+                            eprintln!("[preview-ipc] → main: level={} text={:?}", level, snippet);
+                            if let Err(e) = win.eval(format!(
+                                "window.dispatchEvent(new CustomEvent('preview-console',{{detail:{{level:'{}',text:'{}'}}}}));",
+                                safe_level, safe_text
+                            )) {
+                                eprintln!("[preview-ipc] eval into main FAILED: {}", e);
+                            }
+                        }
+                        None => {
+                            eprintln!("[preview-ipc] get_webview_window(\"main\") returned None — message dropped");
+                        }
                     }
                 }
                 "gis-detected" => {
@@ -1025,6 +1129,7 @@ pub fn run() {
             delete_file_or_directory,
             rename_file_or_directory,
             read_file,
+            path_exists,
             write_file,
             append_file,
             create_file,
@@ -1073,6 +1178,7 @@ pub fn run() {
             glob_files,
             write_env_vars,
             collect_deploy_bundle,
+            collect_backend_tarball,
             list_skills_bundled,
             read_skill_content,
             mcp_start_server,
@@ -1088,6 +1194,7 @@ pub fn run() {
             load_checkpoint_index,
             delete_checkpoint_files,
             delete_checkpoint_session,
+            delete_checkpoint_project,
             set_active_project,
             clear_active_project,
             fim_completion,
@@ -1106,6 +1213,9 @@ pub fn run() {
             git_pull,
             http_client_request,
             send_issue_report,
+            capture_screen_region,
+            #[cfg(target_os = "macos")]
+            capture_screen_region_macos_native,
             sandbox_set_enabled,
             sandbox_status,
             sandbox_check_deps,
@@ -1113,6 +1223,7 @@ pub fn run() {
             byok_get_key,
             byok_delete_key,
             byok_has_key,
+            byok_local_chat_stream,
             open_preview_webview,
             close_preview_webview,
             resize_preview_webview,

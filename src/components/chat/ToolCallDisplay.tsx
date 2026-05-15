@@ -56,6 +56,27 @@ const TOOL_LABELS: Record<string, string> = {
   verify: 'Verifying',
   update_tasks: 'Updating tasks',
   request_thinking: 'Activating reasoning',
+  read_skill: 'Loading guide',
+}
+
+/**
+ * Friendly, non-technical descriptions for each skill the agent might load.
+ * Shown in the chat in place of the raw skill body (which contains internal
+ * provider names and implementation notes the developer never needs). Keyed
+ * by the skill's directory name.
+ *
+ * Default fallback for unknown skills: a generic "Loaded a TM Code guide"
+ * label, so a future skill ships without leaking until this map is updated.
+ */
+const SKILL_DESCRIPTIONS: Record<string, string> = {
+  'publish-backend': 'Loaded TM Code\'s publish-readiness guide for backends',
+  'auth-proxy': 'Loaded TM Code\'s authentication guide',
+  'google-signin': 'Loaded TM Code\'s Google sign-in guide',
+  'frontend-design': 'Loaded TM Code\'s design system guide',
+}
+
+function describeSkill(name: string): string {
+  return SKILL_DESCRIPTIONS[name] || 'Loaded a TM Code guide'
 }
 
 function getToolLabel(toolName: string): string {
@@ -124,6 +145,11 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
     }
     case 'request_thinking':
       return 'deep reasoning mode'
+    case 'read_skill':
+      // User-facing summary — never the raw skill content, which contains
+      // provider names and implementation details that aren't useful to
+      // surface in the chat. The agent has the body in its context.
+      return describeSkill(String(input.name || ''))
     default: {
       // MCP tools: show just the tool name part
       if (toolName.startsWith('mcp__')) {
@@ -238,11 +264,27 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   // result panel on the parent to avoid showing the same text twice.
   const SUBAGENT_SPAWNERS = new Set(['research', 'verify', 'spawn_background_agent'])
   const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(toolCall.toolName)
+  // read_skill body carries platform/provider names + implementation
+  // details aimed at the agent. Render the friendly description in the
+  // header (via getInputSummary) and keep the body hidden — no expand
+  // chevron, no markdown preview.
+  const isSkillRead = toolCall.toolName === 'read_skill'
 
   // Standard tool call rendering
   const resultLines = resultText.split('\n')
-  const hasOutput = resultText.length > 0 && !isRunning && !isSubAgentSpawner
+  const hasOutput = resultText.length > 0 && !isRunning && !isSubAgentSpawner && !isSkillRead
   const showExpand = resultLines.length > 4 && !expanded
+
+  // For execute_command, surface the full command on expand. The header
+  // summary truncates at 60 chars so long commands get '…' — the expand
+  // chevron is the only way to see what actually ran. Available even while
+  // running, so the user can audit the command in flight.
+  const fullCommand = toolCall.toolName === 'execute_command'
+    ? String(toolCall.input.command || '')
+    : ''
+  const showFullCommand = fullCommand.length > 0
+    && (fullCommand.length > 60 || isRunning || isFailed)
+  const canExpand = hasOutput || showFullCommand
   const displayResult = showExpand ? resultLines.slice(0, 4).join('\n') : resultText
 
   return (
@@ -261,10 +303,10 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
         gap={2}
         px={3}
         py="8px"
-        cursor={hasOutput ? 'pointer' : 'default'}
-        _hover={hasOutput ? { bg: 'rgba(255, 255, 255, 0.02)' } : undefined}
+        cursor={canExpand ? 'pointer' : 'default'}
+        _hover={canExpand ? { bg: 'rgba(255, 255, 255, 0.02)' } : undefined}
         transition="background 0.1s"
-        onClick={() => { if (hasOutput) setExpanded(!expanded) }}
+        onClick={() => { if (canExpand) setExpanded(!expanded) }}
       >
         {/* Status indicator */}
         {isRunning ? (
@@ -325,12 +367,43 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
         </Text>
 
         {/* Expand chevron */}
-        {hasOutput && (
+        {canExpand && (
           <Box color={tokens.colors.text.disabled} flexShrink={0} transition="transform 0.15s">
             {expanded ? <FiChevronDown size={13} /> : <FiChevronRight size={13} />}
           </Box>
         )}
       </Flex>
+
+      {/* Expanded full command — shown for execute_command regardless of
+          running/completed state so the user can audit long commands that
+          the header summary truncates at 60 chars. */}
+      {expanded && showFullCommand && (
+        <Box
+          px={3}
+          py="8px"
+          borderTop={`1px solid rgba(255, 255, 255, 0.04)`}
+          bg="rgba(0, 0, 0, 0.18)"
+          maxH="160px"
+          overflowY="auto"
+          css={{
+            '&::-webkit-scrollbar': { width: '4px', height: '4px' },
+            '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.1)', borderRadius: '2px' },
+          }}
+        >
+          <Text
+            fontSize="11px"
+            fontFamily={tokens.fontFamily.mono}
+            color={tokens.colors.text.secondary}
+            whiteSpace="pre-wrap"
+            wordBreak="break-all"
+            lineHeight="1.55"
+            userSelect="text"
+            data-selectable="true"
+          >
+            {fullCommand}
+          </Text>
+        </Box>
+      )}
 
       {/* Running: progress bar + live status for sub-agents */}
       {isRunning && (

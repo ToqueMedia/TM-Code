@@ -39,6 +39,14 @@ interface RunAgentOptions {
    * a SECOND empty assistant bubble and confuse the streaming target.
    */
   skipStartAssistantMessage?: boolean
+  /**
+   * Replace the default IDE system prompt with a caller-supplied one. Used by
+   * /plan to swap in a pure architect role — without this, the regular IDE
+   * "coding agent" instructions sit alongside the architect prompt sent as a
+   * user message, and the model defaults to building things instead of
+   * producing PLAN.md. When set, ContextBuilder is bypassed entirely.
+   */
+  systemPromptOverride?: string
 }
 
 /**
@@ -83,6 +91,7 @@ async function runAgentInternal(
     useConversationHistory = false,
     cmdOnlyMode = false,
     skipStartAssistantMessage = false,
+    systemPromptOverride,
   } = options
 
   const chatStore = useChatStore.getState()
@@ -113,6 +122,12 @@ async function runAgentInternal(
     sessionId = chatStore.createSession(cmdCwd || projectPath)
   }
 
+  // Pull the agent service early so we can ask it about the upcoming turn
+  // (specifically, whether reasoning is requested) before creating the
+  // assistant message. The actual prompt + tools setup still happens
+  // later — this is just an early handle to a singleton.
+  const agentService = AgentService.getInstance()
+
   // Add user message to chat (with optional attachments and block order)
   if (addUserMessage) {
     chatStore.addUserMessage(
@@ -135,7 +150,11 @@ async function runAgentInternal(
   // boot, then streams into that same bubble). Creating a second one would
   // leave the placeholder orphaned with the streaming target diverging.
   if (!skipStartAssistantMessage) {
-    chatStore.startAssistantMessage()
+    // Stamp the message with whether this turn requested reasoning. The
+    // MessageBubble uses this to suppress reasoning blocks when the user
+    // didn't ask for them (BYOK reasoning models sometimes keep emitting
+    // chain-of-thought even when the disable param is set correctly).
+    chatStore.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
   }
   // 'awaiting_response': prompt is about to be sent; nothing has streamed yet.
   // Flips to 'reasoning' or 'generating' once the first delta lands.
@@ -171,11 +190,21 @@ async function runAgentInternal(
   const coreToolCount = toolExecutor.getCoreToolCount()
 
   let systemPrompt: string
-  if (cmdOnlyMode && cmdCwd) {
-    systemPrompt = await contextBuilder.buildCmdModeSystemPrompt(cmdCwd, cmdHomeDir, mcpToolSummaries)
+  if (systemPromptOverride) {
+    systemPrompt = systemPromptOverride
+  } else if (cmdOnlyMode && cmdCwd) {
+    // userMessageText is forwarded so CMD mode can detect skill-trigger
+    // hashtags (#auth-google etc.) and inline the corresponding CRITICAL
+    // rules at turn 1 — same mechanism as chat mode. Without this, the
+    // hashtag regex never fires in CMD and the model improvises auth from
+    // training prior, producing scaffolds with placeholder credentials.
+    systemPrompt = await contextBuilder.buildCmdModeSystemPrompt(cmdCwd, cmdHomeDir, mcpToolSummaries, userMessageText)
   } else {
     const projectType = currentProject?.projectType || 'unknown'
-    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount)
+    // userMessageText carries the raw user input so contextBuilder can detect
+    // skill-trigger hashtags (#auth-google etc.) and inline the corresponding
+    // CRITICAL rules at turn 1.
+    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText)
   }
 
   // Get conversation history
@@ -183,7 +212,6 @@ async function runAgentInternal(
     ? useChatStore.getState().conversationHistory
     : []
 
-  const agentService = AgentService.getInstance()
   agentService.setSystemPrompt(systemPrompt)
 
   // ── Build user content (text-only or multimodal) ──

@@ -7,6 +7,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { ChatMessage } from '../../types/chat'
 import { useChatStore } from '../../stores/chatStore'
+import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import CodeBlockAction from './CodeBlockAction'
 import ToolCallDisplayComponent from './ToolCallDisplay'
 import AgentLogo from '../ui/AgentLogo'
@@ -19,10 +20,53 @@ import {
   sessionToMarkdown,
   triggerDownload,
   defaultExportFilename,
+  buildEnvironmentSnapshot,
 } from '../../utils/sessionExport'
 import { useToastStore } from '../../stores/toastStore'
+import { normalizeAssistantText } from '../../utils/normalizeAssistantText'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+
+/**
+ * Toggle a reasoning block while keeping the clicked header in the SAME
+ * visual position. The previous approach snapshot raw `scrollTop` and
+ * restored it after the toggle — that fails when the toggle changes the
+ * height of content ABOVE the user's viewport, because scrollTop counted
+ * from the top moves the user to a different region of content than they
+ * were reading.
+ *
+ * Rect-based approach: snapshot `anchor.getBoundingClientRect().top`
+ * BEFORE the toggle (the anchor's distance from the viewport top), run the
+ * toggle, then in each of the next ~12 frames re-measure and adjust
+ * `scrollTop` by the delta so the anchor stays put. ~200ms covers the
+ * Framer-Motion / Chakra height animations that resolve over multiple
+ * frames; the loop exits early when the rect stabilises.
+ */
+function toggleReasoningPreservingScroll(anchor: HTMLElement, toggle: () => void): void {
+  const scrollEl = document.querySelector('[role="log"]') as HTMLElement | null
+  if (!scrollEl) { toggle(); return }
+  const beforeTop = anchor.getBoundingClientRect().top
+  // Layer 1: signal "user scrolled away" so useStickToBottom doesn't try
+  // to auto-follow the resize. A 1-px nudge synchronously fires a scroll
+  // event the package treats as user interaction.
+  const beforeScroll = scrollEl.scrollTop
+  scrollEl.scrollTop = Math.max(0, beforeScroll - 1)
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('chat-toggle-interaction'))
+  }
+  toggle()
+  // Layer 2: keep the anchor at the same viewport-y across frames.
+  let frames = 0
+  const stabilize = () => {
+    const afterTop = anchor.getBoundingClientRect().top
+    const delta = afterTop - beforeTop
+    if (Math.abs(delta) > 1) {
+      scrollEl.scrollTop += delta
+    }
+    if (frames++ < 12) requestAnimationFrame(stabilize)
+  }
+  requestAnimationFrame(stabilize)
+}
 
 interface MessageBubbleProps {
   message: ChatMessage
@@ -255,6 +299,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const isSystem = message.role === 'system'
   const updateCodeBlockStatus = useChatStore(s => s.updateCodeBlockStatus)
   const toggleReasoning = useChatStore(s => s.toggleReasoning)
+  const toggleReasoningBlock = useChatStore(s => s.toggleReasoningBlock)
   const [messageCopied, setMessageCopied] = useState(false)
 
   // Build plain-text representation of this assistant message for copying.
@@ -330,7 +375,16 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     if (!session) return
     setExportMenuOpen(false)
     const filename = defaultExportFilename(session, format)
-    const content = format === 'json' ? sessionToJson(session) : sessionToMarkdown(session)
+    // Build the environment snapshot (system prompt + TMS/PLAN/TODO + skills
+    // + hashtag detection) before serialising. Async and may take a second on
+    // the first call (loadSkills + buildSystemPrompt both walk the project),
+    // so this happens BEFORE we open the save dialog — that way the user
+    // doesn't see a stale dialog while we crunch in the background. The fn
+    // never throws (failures land in envSnapshot.systemPromptError).
+    const envSnapshot = await buildEnvironmentSnapshot(session)
+    const content = format === 'json'
+      ? sessionToJson(session, { envSnapshot })
+      : sessionToMarkdown(session, { envSnapshot })
     const mimeType = format === 'json' ? 'application/json' : 'text/markdown'
     try {
       const savedPath = await triggerDownload(filename, content, mimeType)
@@ -384,20 +438,75 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       }
     }
 
+    // Compact boundary — claude-vaz parity: horizontal rule + ✻ marker.
+    // ChatView already slices the transcript at the latest boundary so
+    // pre-compression turns disappear from view; this is the visual
+    // checkpoint the user sees at the top of the post-compression history.
+    if (message.kind === 'compact_boundary') {
+      const beforeK =
+        typeof message.compactBeforeTokens === 'number'
+          ? Math.round(message.compactBeforeTokens / 1000)
+          : null
+      return (
+        <Box py={3} px={3} mb={2} role="separator" aria-label="Conversation compacted">
+          <Flex align="center" gap={2} mb={1.5}>
+            <Box flex="1" h="1px" bg={tokens.colors.border.panel} opacity={0.5} />
+            <Text
+              fontSize="11px"
+              color={tokens.colors.accent.primary}
+              fontFamily={tokens.fontFamily.ui}
+              fontWeight="600"
+              letterSpacing="0.05em"
+              textTransform="uppercase"
+            >
+              ✻ Conversa comprimida{beforeK !== null ? ` · ${beforeK}K tokens` : ''}
+            </Text>
+            <Box flex="1" h="1px" bg={tokens.colors.border.panel} opacity={0.5} />
+          </Flex>
+          <Text
+            fontSize="11px"
+            color={tokens.colors.text.muted}
+            fontFamily={tokens.fontFamily.ui}
+            textAlign="center"
+            lineHeight="1.5"
+          >
+            Mensagens anteriores foram resumidas. Skills invocados re-injectados — o agente continua com as regras CRITICAL intactas.
+          </Text>
+        </Box>
+      )
+    }
+
+    // Level-driven colour: an `error` system message must read AS error,
+    // not as the generic-info bullet that everything else uses. Was missing
+    // before — error-level messages rendered identically to info, hiding
+    // recovery hints inside the visual noise.
+    const level = message.level
+    const dotColor =
+      level === 'error' ? tokens.colors.accent.red
+      : level === 'warn' ? tokens.colors.accent.orange
+      : level === 'success' ? tokens.colors.accent.green
+      : tokens.colors.text.disabled
+    const textColor =
+      level === 'error' ? tokens.colors.accent.red
+      : level === 'warn' ? tokens.colors.accent.orange
+      : level === 'success' ? tokens.colors.accent.green
+      : tokens.colors.text.secondary
+
     return (
       <Flex
         py={1.5}
         px={3}
         mb={1}
-        align="center"
+        align="flex-start"
         gap={2}
       >
-        <Box w="4px" h="4px" borderRadius="full" bg={tokens.colors.text.disabled} flexShrink={0} />
+        <Box w="4px" h="4px" borderRadius="full" bg={dotColor} flexShrink={0} mt="7px" />
         <Text
           fontSize="12px"
-          color={tokens.colors.text.secondary}
+          color={textColor}
           fontFamily={tokens.fontFamily.ui}
           lineHeight="1.5"
+          whiteSpace="pre-wrap"
         >
           {message.content}
         </Text>
@@ -487,53 +596,15 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             in the stream rather than being collapsed back into this top block. */}
         {message.reasoningContent
           && !message.contentBlocks?.some(b => b.type === 'reasoning')
+          && message.thinkingRequested !== false
           && (
             <ReasoningBlock
               content={message.reasoningContent}
               isVisible={message.isReasoningVisible || false}
               isStreaming={isStreaming === true && message.reasoningDurationMs == null}
               durationMs={message.reasoningDurationMs}
-              onToggle={() => {
-                // Two layers of protection because useStickToBottom does a
-                // SMOOTH scroll on resize (`resize: 'smooth'`) which spans
-                // many frames, and a single RAF restore loses the race:
-                //
-                //   1. Decrement scrollTop by 1 BEFORE the toggle. This
-                //      synchronously fires a 'scroll' event that the
-                //      package treats as the user moving away — its
-                //      escapedFromLock flag flips to true and the next
-                //      auto-follow is suppressed.
-                //   2. Run a restore loop over ~10 frames (≈166ms @ 60fps)
-                //      so any tail-end smooth-scroll animation that did
-                //      slip through gets corrected back to the original
-                //      position.
-                const scrollEl = document.querySelector(
-                  '[role="log"]'
-                ) as HTMLElement | null
-                if (!scrollEl) {
-                  toggleReasoning(message.id)
-                  return
-                }
-                const before = scrollEl.scrollTop
-                // Layer 1: signal "user scrolled away" so useStickToBottom
-                // doesn't try to auto-follow the resize.
-                scrollEl.scrollTop = Math.max(0, before - 1)
-                if (typeof window !== 'undefined') {
-                  window.dispatchEvent(new CustomEvent('chat-toggle-interaction'))
-                }
-                toggleReasoning(message.id)
-                // Layer 2: restore position across multiple frames, in case
-                // the package's smooth-scroll animation still fires.
-                let frames = 0
-                const restore = () => {
-                  if (Math.abs(scrollEl.scrollTop - before) > 4) {
-                    scrollEl.scrollTop = before
-                  }
-                  if (frames++ < 10) {
-                    requestAnimationFrame(restore)
-                  }
-                }
-                requestAnimationFrame(restore)
+              onToggle={(anchor) => {
+                toggleReasoningPreservingScroll(anchor, () => toggleReasoning(message.id))
               }}
             />
           )}
@@ -543,6 +614,13 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           <>
             {message.contentBlocks.map((block, idx) => {
               if (block.type === 'reasoning') {
+                // Hide reasoning blocks when the developer didn't ask for
+                // reasoning on this turn. Some BYOK reasoning models emit
+                // chain-of-thought even after we send the disable param —
+                // suppress at render rather than dumping the noise into
+                // the chat. Legacy messages (thinkingRequested undefined)
+                // render reasoning normally.
+                if (message.thinkingRequested === false) return null
                 // Streaming flag: only the LAST reasoning block in the message
                 // can still be live. A finalized block (durationMs set) renders
                 // collapsed; the active one streams as movie credits.
@@ -550,63 +628,41 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 const blockIsStreaming = isStreaming === true
                   && isLastBlock
                   && block.durationMs === undefined
+                // Per-block visibility: when the block has its own isVisible
+                // flag, use it; otherwise fall back to the message-level
+                // flag. This breaks the "expand-one-expands-all" bug while
+                // keeping older sessions (with only message-level state)
+                // working as before.
+                const blockIsVisible = block.isVisible !== undefined
+                  ? block.isVisible
+                  : (message.isReasoningVisible || false)
                 return (
                   <ReasoningBlock
                     key={`reasoning-${idx}`}
                     content={block.text}
-                    isVisible={message.isReasoningVisible || false}
+                    isVisible={blockIsVisible}
                     isStreaming={blockIsStreaming}
                     durationMs={block.durationMs}
-                    onToggle={() => {
-                // Two layers of protection because useStickToBottom does a
-                // SMOOTH scroll on resize (`resize: 'smooth'`) which spans
-                // many frames, and a single RAF restore loses the race:
-                //
-                //   1. Decrement scrollTop by 1 BEFORE the toggle. This
-                //      synchronously fires a 'scroll' event that the
-                //      package treats as the user moving away — its
-                //      escapedFromLock flag flips to true and the next
-                //      auto-follow is suppressed.
-                //   2. Run a restore loop over ~10 frames (≈166ms @ 60fps)
-                //      so any tail-end smooth-scroll animation that did
-                //      slip through gets corrected back to the original
-                //      position.
-                const scrollEl = document.querySelector(
-                  '[role="log"]'
-                ) as HTMLElement | null
-                if (!scrollEl) {
-                  toggleReasoning(message.id)
-                  return
-                }
-                const before = scrollEl.scrollTop
-                // Layer 1: signal "user scrolled away" so useStickToBottom
-                // doesn't try to auto-follow the resize.
-                scrollEl.scrollTop = Math.max(0, before - 1)
-                if (typeof window !== 'undefined') {
-                  window.dispatchEvent(new CustomEvent('chat-toggle-interaction'))
-                }
-                toggleReasoning(message.id)
-                // Layer 2: restore position across multiple frames, in case
-                // the package's smooth-scroll animation still fires.
-                let frames = 0
-                const restore = () => {
-                  if (Math.abs(scrollEl.scrollTop - before) > 4) {
-                    scrollEl.scrollTop = before
-                  }
-                  if (frames++ < 10) {
-                    requestAnimationFrame(restore)
-                  }
-                }
-                requestAnimationFrame(restore)
-              }}
+                    onToggle={(anchor) => {
+                      toggleReasoningPreservingScroll(anchor, () =>
+                        toggleReasoningBlock(message.id, idx),
+                      )
+                    }}
                   />
                 )
               }
               if (block.type === 'text' && block.text) {
+                // Restore paragraph breaks the model sometimes omits when
+                // narrating multiple actions in one chunk ("agora.O ReportBug"
+                // → "agora.\n\nO ReportBug"). Without this the chat reads as
+                // an unbroken wall of text. mb={3} on every text block except
+                // the very last keeps consecutive text blocks visually
+                // separated even when no tool card sits between them.
+                const isLastBlock = idx === (message.contentBlocks?.length ?? 0) - 1
                 return (
-                  <Box key={`text-${idx}`} css={markdownStyles}>
+                  <Box key={`text-${idx}`} css={markdownStyles} mb={isLastBlock ? 0 : 3}>
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                      {block.text}
+                      {normalizeAssistantText(block.text)}
                     </ReactMarkdown>
                   </Box>
                 )
@@ -624,11 +680,78 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           <>
             {/* Fallback for legacy messages without contentBlocks */}
             {message.content && (
-              <Box css={markdownStyles}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                  {message.content}
-                </ReactMarkdown>
-              </Box>
+              isUser ? (
+                // User bubbles render slash commands and known hashtags in
+                // the brand-pink colour to match the prompt input editor.
+                // ReactMarkdown is intentionally skipped here — user messages
+                // are plain text + routing tokens; running them through a
+                // markdown renderer would convert `*foo*` or `#word` into
+                // formatted text the user never asked for. whiteSpace
+                // preserves intentional line breaks in pasted content.
+                <Box
+                  fontSize={tokens.fontSize.lg}
+                  fontFamily={tokens.fontFamily.ui}
+                  color={tokens.colors.text.primary}
+                  lineHeight="1.5"
+                  whiteSpace="pre-wrap"
+                  wordBreak="break-word"
+                >
+                  {renderHighlightedPrompt(message.content)}
+                </Box>
+              ) : (
+                <Box css={markdownStyles}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                    {normalizeAssistantText(message.content)}
+                  </ReactMarkdown>
+                </Box>
+              )
+            )}
+            {/* User-message attachments: image thumbnails + filename chips.
+                Without this block, screenshots and other attached files were
+                invisible in chat-mode (only cmd-mode's TerminalMessageRenderer
+                had the equivalent rendering). The data was always on
+                `message.attachments`; the bug was missing UI. */}
+            {isUser && message.attachments && message.attachments.length > 0 && (
+              <Flex gap={2} flexWrap="wrap" mt={2}>
+                {message.attachments.map(att => {
+                  const isImage = att.type === 'image'
+                  const hasPreview = isImage && att.base64
+                  return (
+                    <Flex
+                      key={att.id}
+                      align="center"
+                      gap={2}
+                      pl={hasPreview ? 0 : 2}
+                      pr={3}
+                      py={hasPreview ? 0 : '4px'}
+                      bg="rgba(255, 255, 255, 0.04)"
+                      border="1px solid rgba(255, 255, 255, 0.08)"
+                      borderRadius="6px"
+                      maxW="280px"
+                      overflow="hidden"
+                    >
+                      {hasPreview ? (
+                        <Box w="44px" h="44px" borderRadius="5px 0 0 5px" overflow="hidden" flexShrink={0}>
+                          <img
+                            src={att.base64}
+                            alt={att.name}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                          />
+                        </Box>
+                      ) : null}
+                      <Text
+                        fontSize="11px"
+                        color={tokens.colors.text.secondary}
+                        truncate
+                        maxW="200px"
+                        lineHeight="1.4"
+                      >
+                        {att.name}
+                      </Text>
+                    </Flex>
+                  )
+                })}
+              </Flex>
             )}
             {message.toolCalls && message.toolCalls.length > 0 && (
               <Box mt={message.content ? 3 : 0}>

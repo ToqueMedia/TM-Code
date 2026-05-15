@@ -8,7 +8,12 @@ interface ReasoningBlockProps {
   isVisible: boolean
   isStreaming: boolean
   durationMs?: number
-  onToggle: () => void
+  /** Called when the user clicks the header. The anchor element is the
+   *  header element itself — passed so the caller can snapshot its
+   *  bounding-rect.top BEFORE the toggle and restore the same visual
+   *  position AFTER, instead of trying to restore raw scrollTop (which
+   *  fails when content above the block changes height). */
+  onToggle: (anchor: HTMLElement) => void
 }
 
 /**
@@ -105,7 +110,7 @@ function ReasoningBlock({ content, isVisible, isStreaming, durationMs, onToggle 
         align="center"
         gap={1.5}
         cursor="pointer"
-        onClick={onToggle}
+        onClick={(e) => onToggle(e.currentTarget as HTMLElement)}
         py="5px"
         px="8px"
         borderRadius="6px"

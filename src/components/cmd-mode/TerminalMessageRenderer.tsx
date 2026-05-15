@@ -7,6 +7,7 @@ import { tokens } from '@/theme/tokens'
 import { terminalMarkdownComponents } from './terminalHelpers'
 import { TerminalToolCall } from './TerminalToolCall'
 import { TerminalCodeBlock } from './TerminalCodeBlock'
+import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 
 // ─── ContentBlocksRenderer ───
 
@@ -156,7 +157,7 @@ function TerminalMessageRendererInner({
               lineHeight="1.55"
               fontWeight="500"
             >
-              {message.content}
+              {renderHighlightedPrompt(message.content)}
             </Text>
             {hasAttachments && (
               <UserMessageAttachments attachments={message.attachments!} />

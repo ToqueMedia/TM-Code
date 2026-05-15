@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDisplay, ByokSessionSnapshot } from '../../types/chat'
+import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDisplay, ByokSessionSnapshot, SessionTurnSnapshot } from '../../types/chat'
 import { logger } from '../../utils/logger'
 import { hashProjectPath, encryptSession, decryptSession } from '../../utils/crypto'
 import { useByokStore } from '../../stores/byokStore'
@@ -19,11 +19,13 @@ export function captureByokSnapshot(): ByokSessionSnapshot | null {
   if (!active) return null
   const inRegistry = active.provider.models.some(m => m.id === active.model.id)
   const isCustom = active.provider.custom === true
+  const isLocal = active.provider.local === true
   return {
     providerId: active.provider.id,
     modelId: active.model.id,
     baseURL: active.baseURL,
     custom: isCustom,
+    local: isLocal,
     capabilities: !inRegistry ? active.model.capabilities : undefined,
     // Thinking shape is part of the model spec — freeze it on the snapshot
     // so the request body sends the right param shape per BYOK provider
@@ -45,6 +47,17 @@ class SessionService {
   private saving = false
   private getSessionFn: (() => ChatSession | null) | null = null
   private getTokenUsageFn: (() => { input: number; output: number; turns: number }) | null = null
+  private getTurnSnapshotFn: (() => SessionTurnSnapshot | null) | null = null
+  // Tracks the promise of the most recent saveSession invocation. Used by
+  // deleteAllProjectSessions to await any in-flight write before unlinking
+  // the directory — otherwise Tauri's thread pool can interleave write_file
+  // and delete_file_or_directory, recreating a session file inside (or just
+  // after) the directory we're trying to remove.
+  private currentSavePromise: Promise<void> | null = null
+  // Set to true while deleteAllProjectSessions is running so any in-flight
+  // saveSession that completes between the await and the actual unlink
+  // becomes a no-op rather than re-creating the file. Reset after delete.
+  private deletingProjectPath: string | null = null
 
   static getInstance(): SessionService {
     if (!SessionService.instance) {
@@ -59,6 +72,13 @@ class SessionService {
 
   setTokenUsageGetter(fn: () => { input: number; output: number; turns: number }) {
     this.getTokenUsageFn = fn
+  }
+
+  /** Snapshot of the last on-wire turn — persisted alongside the session so
+   *  the context-window indicator survives a reload (otherwise the bar
+   *  shows 0% until the next turn). Read at save time only; no-op when unset. */
+  setTurnSnapshotGetter(fn: () => SessionTurnSnapshot | null) {
+    this.getTurnSnapshotFn = fn
   }
 
   private async getBasePath(): Promise<string> {
@@ -147,7 +167,11 @@ class SessionService {
       // Truncate tool results that may have been saved with full content
       const messages = persisted.messages.map(msg => this.sanitizeMessage(msg))
 
-      return {
+      // Carry the persisted turn snapshot through on the returned session
+      // even though it isn't a formal ChatSession field — the chatStore
+      // loader reads it via type assertion to restore the context-window
+      // indicator without requiring a parallel return value.
+      const out = {
         id: persisted.id,
         projectPath: persisted.projectPath,
         messages,
@@ -155,7 +179,9 @@ class SessionService {
         createdAt: persisted.createdAt,
         updatedAt: persisted.updatedAt,
         byokSnapshot: persisted.byokSnapshot ?? null,
-      }
+      } as ChatSession & { lastTurnSnapshot?: SessionTurnSnapshot }
+      if (persisted.lastTurnSnapshot) out.lastTurnSnapshot = persisted.lastTurnSnapshot
+      return out
     } catch (error) {
       logger.error('session', `Failed to load session ${sessionId}:`, error)
       return null
@@ -163,6 +189,21 @@ class SessionService {
   }
 
   async saveSession(session: ChatSession, tokenUsage?: { input: number; output: number; turns: number }): Promise<void> {
+    // Refuse new saves for a project that's mid-deletion. Without this guard
+    // a debounced save fired just before deleteProject ran could complete
+    // its write_file AFTER the directory was removed, recreating it with a
+    // stale session file inside.
+    if (this.deletingProjectPath === session.projectPath) return
+    const promise = this._writeSessionToDisk(session, tokenUsage)
+    this.currentSavePromise = promise
+    try {
+      await promise
+    } finally {
+      if (this.currentSavePromise === promise) this.currentSavePromise = null
+    }
+  }
+
+  private async _writeSessionToDisk(session: ChatSession, tokenUsage?: { input: number; output: number; turns: number }): Promise<void> {
     try {
       const filePath = await this.getSessionFilePath(session.projectPath, session.id)
 
@@ -172,7 +213,9 @@ class SessionService {
         status: session.status,
         createdAt: session.createdAt,
         updatedAt: Date.now(),
-        messages: session.messages.map(msg => this.sanitizeMessageForSave(msg)),
+        messages: session.messages
+          .map(msg => this.sanitizeMessageForSave(msg))
+          .filter((m): m is ChatMessage => m !== null),
         byokSnapshot: session.byokSnapshot ?? null,
       }
 
@@ -184,8 +227,17 @@ class SessionService {
         }
       }
 
+      const turnSnapshot = this.getTurnSnapshotFn?.()
+      if (turnSnapshot) {
+        persisted.lastTurnSnapshot = turnSnapshot
+      }
+
       const json = JSON.stringify(persisted, null, 2)
       const encrypted = await encryptSession(json, session.projectPath)
+      // Re-check the kill switch right before the actual write. Between the
+      // start of this method and now, JSON encoding + crypto have run; the
+      // user may have triggered deletion in that window.
+      if (this.deletingProjectPath === session.projectPath) return
       await invoke('write_file', { path: filePath, content: encrypted })
       // Restrict file permissions to owner-only (600) to protect sensitive session data
       try {
@@ -209,12 +261,34 @@ class SessionService {
   }
 
   async deleteAllProjectSessions(projectPath: string): Promise<void> {
+    // 1. Latch the kill switch so any saveSession invocation racing with
+    //    this delete becomes a no-op once it observes the flag.
+    this.deletingProjectPath = projectPath
     try {
+      // 2. Wait for the in-flight save (if any) started BEFORE the latch
+      //    was set. _writeSessionToDisk re-checks the latch right before
+      //    invoke('write_file'), so a save that started the JSON encoding
+      //    pass earlier will short-circuit before touching disk. Awaiting
+      //    here makes the ordering deterministic — without it the JS
+      //    promise + Tauri thread-pool interleaving could complete the
+      //    write AFTER our delete_file_or_directory call returns.
+      if (this.currentSavePromise) {
+        try { await this.currentSavePromise } catch { /* swallowed in saveSession */ }
+      }
+      // 3. Now safe to remove the directory. Subsequent debounced/streaming
+      //    saves that try to fire will hit the latch and bail.
       const dir = await this.getSessionsDir(projectPath)
       await invoke('delete_file_or_directory', { path: dir })
       logger.info('session', `Deleted all sessions for project: ${projectPath}`)
     } catch (error) {
       logger.error('session', 'Failed to delete all project sessions:', error)
+    } finally {
+      // 4. Clear the latch so opening a different project later isn't blocked
+      //    from saving. (Per-project: only writes targeting `projectPath`
+      //    were blocked; other paths were always allowed.)
+      if (this.deletingProjectPath === projectPath) {
+        this.deletingProjectPath = null
+      }
     }
   }
 
@@ -309,13 +383,41 @@ class SessionService {
     }
   }
 
-  private sanitizeMessageForSave(msg: ChatMessage): ChatMessage {
+  private sanitizeMessageForSave(msg: ChatMessage): ChatMessage | null {
+    // Drop ephemeral status messages from the persisted session. They were
+    // transient by design (permission grants, "session saved" feedback,
+    // dev-server lifecycle) — the in-memory timer already removes them after
+    // ~8s, persisting would resurrect them on the next reload as stale noise.
+    if (msg.ephemeral) return null
+
     const sanitized: ChatMessage = {
       id: msg.id,
       role: msg.role,
       content: msg.content,
       timestamp: msg.timestamp,
     }
+
+    // Persist UI-discriminator + meta fields. These were silently dropped by
+    // the earlier "copy these 7 fields" sanitizer — bug exposed when the user
+    // reloaded a chat with a pending plan_approval card and the card returned
+    // as an empty system message (no approve/reject buttons). Same class of
+    // bug for the compact_boundary marker and per-turn token stats.
+    //
+    // Rule: anything that drives rendering OR resumes a user-actionable flow
+    // (cards, permission requests) goes in here. Anything that's purely
+    // runtime state (isStreaming, in-flight resolve promises) does NOT.
+    if (msg.card) sanitized.card = msg.card
+    if (msg.level) sanitized.level = msg.level
+    if (msg.kind) sanitized.kind = msg.kind
+    if (typeof msg.compactBeforeTokens === 'number') {
+      sanitized.compactBeforeTokens = msg.compactBeforeTokens
+    }
+    if (typeof msg.thinkingRequested === 'boolean') {
+      sanitized.thinkingRequested = msg.thinkingRequested
+    }
+    if (typeof msg.turnDurationMs === 'number') sanitized.turnDurationMs = msg.turnDurationMs
+    if (typeof msg.turnInputTokens === 'number') sanitized.turnInputTokens = msg.turnInputTokens
+    if (typeof msg.turnOutputTokens === 'number') sanitized.turnOutputTokens = msg.turnOutputTokens
 
     // Persist attachment metadata WITHOUT base64. The base64 data URI is
     // potentially several MB per image and would bloat the encrypted

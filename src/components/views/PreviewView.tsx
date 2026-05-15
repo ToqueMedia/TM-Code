@@ -1,11 +1,17 @@
 import { memo, useRef, useEffect, useCallback, useMemo, useState } from 'react'
-import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
+import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { Flex, Box, Text, IconButton, HStack, Button } from '@chakra-ui/react'
+import { IS_MAC } from '@/utils/platform'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap, FiSend } from 'react-icons/fi'
+import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap, FiSend, FiUpload, FiCamera } from 'react-icons/fi'
 import { useChatStore, generateId } from '../../stores/chatStore'
 import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { useBillingStore } from '../../stores/billingStore'
+import { useToastStore } from '../../stores/toastStore'
+import { createImageAttachmentFromClipboard } from '../../services/attachmentService'
 import { devServerManager } from '../../services/devServerManager'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
 import MessageBubble from '../chat/MessageBubble'
@@ -41,6 +47,20 @@ function PreviewView() {
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
+  const billingPlan = useBillingStore(s => s.plan)
+  // Gate matches the BACKEND's multimodal-preprocessing condition exactly:
+  //   proxy.ts: `if (planConfig.planId !== 'explorer' && ...) processMultimodal()`
+  // Any non-explorer plan reaches the vision sidecar at the worker. Mirroring
+  // that here keeps the button visible whenever the action will succeed —
+  // previously a tighter "vibe/pro/max" whitelist hid the button on accounts
+  // whose plan string didn't match the literal list (legacy values, hydration
+  // races, future tiers added in Firestore before the IDE knows them). When
+  // plan is undefined/null (auth still hydrating), default to visible: at worst
+  // the click surfaces a backend 4xx, which is a clearer signal than a
+  // permanently-missing button.
+  const canUseVision = billingPlan !== 'explorer'
+  const previewContainerRef = useRef<HTMLDivElement>(null)
+  const [isCapturing, setIsCapturing] = useState(false)
   const frontendUrl = useLayoutStore(selectFrontendUrl)
   const backendUrl = useLayoutStore(selectBackendUrl)
   const projectKind = useLayoutStore(selectProjectKind)
@@ -214,6 +234,7 @@ function PreviewView() {
     }
   }
 
+
   const handleStopServer = useCallback(async () => {
     closePreviewWebview()
     await devServerManager.stop()
@@ -222,6 +243,178 @@ function PreviewView() {
     const prev = layout.previousViewMode
     layout.setViewMode(prev && prev !== 'generating' && prev !== 'preview' ? prev : 'chat')
   }, [])
+
+  // ── Preview screenshot → chat attachment ─────────────────────────────
+  //
+  // Same html2canvas approach as IssueReporterDialog (proven working in
+  // production). Captures the DOM tree at the preview-container ref. Known
+  // limitations inherited from that pattern:
+  //   - Cross-origin iframe content paints as empty (the dev server is on
+  //     localhost:PORT; the IDE on a Tauri custom protocol → cross-origin).
+  //   - On macOS the native wry child webview lives outside the DOM, so
+  //     html2canvas sees the empty wrapper Box. Still captures the
+  //     surrounding chrome (toolbar, etc) within the preview area.
+  // Trade-off accepted: matches the IDE's existing screenshot pattern,
+  // zero native deps, works cross-platform without OS-level permissions.
+  // For high-fidelity content capture (mac native webview / real iframe
+  // pixels) a future native path can be added — out of scope for V1.
+  const handleScreenshotToChat = useCallback(async () => {
+    console.log('[screenshot] handler invoked', {
+      canUseVision,
+      isMac: IS_MAC,
+      hasContainer: !!previewContainerRef.current,
+      isCapturing,
+    })
+    if (!canUseVision) {
+      console.warn('[screenshot] aborting — canUseVision=false (plan blocks vision)')
+      useToastStore.getState().addToast(
+        'warning',
+        t('preview.screenshotPaidOnly'),
+      )
+      return
+    }
+    const container = previewContainerRef.current
+    if (!container) {
+      console.warn('[screenshot] previewContainerRef.current is null — aborting')
+      useToastStore.getState().addToast(
+        'error',
+        'Preview area not ready. Reload the preview and try again.',
+      )
+      return
+    }
+
+    setIsCapturing(true)
+    try {
+      let blob: Blob | null = null
+
+      if (IS_MAC) {
+        // macOS native path. html2canvas can't capture the wry native
+        // child webview (it lives outside the DOM tree), so on mac the
+        // image came back all black. `screencapture` CLI reads the actual
+        // framebuffer including the native webview's pixels.
+        //
+        // Coordinate sourcing: do NOT trust `window.screenX/Y`. The wry
+        // webview on macOS reports those in the Cocoa AppKit coordinate
+        // space (origin bottom-left of the primary display), which produced
+        // a y value of ~2277 for a window that was actually near the top of
+        // the screen → screencapture rejected with "rect does not intersect
+        // any displays". `getCurrentWindow().outerPosition()` from Tauri
+        // returns the window's top-left in **physical** pixels with origin
+        // at the top-left of the primary display — the same frame
+        // `screencapture -R` expects (after dividing by DPR to get points).
+        const win = getCurrentWindow()
+        const outer = await win.outerPosition()
+        const scale = await win.scaleFactor()
+        const windowTopLeftLogicalX = outer.x / scale
+        const windowTopLeftLogicalY = outer.y / scale
+        const rect = container.getBoundingClientRect()
+        const x = Math.round(windowTopLeftLogicalX + rect.left)
+        const y = Math.round(windowTopLeftLogicalY + rect.top)
+        const w = Math.round(rect.width)
+        const h = Math.round(rect.height)
+        console.log('[screenshot] mac native capture invoking', {
+          x, y, w, h,
+          windowOuter: { x: outer.x, y: outer.y },
+          scaleFactor: scale,
+          windowTopLeftLogical: { x: windowTopLeftLogicalX, y: windowTopLeftLogicalY },
+          rectLeft: rect.left,
+          rectTop: rect.top,
+          rectW: rect.width,
+          rectH: rect.height,
+        })
+        const t0 = performance.now()
+        const base64 = await invoke<string>('capture_screen_region_macos_native', {
+          x, y, width: w, height: h,
+        })
+        const t1 = performance.now()
+        console.log('[screenshot] invoke returned', {
+          elapsedMs: Math.round(t1 - t0),
+          base64Length: base64?.length ?? 0,
+          base64Head: base64?.slice(0, 40),
+        })
+        const binary = atob(base64)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+        blob = new Blob([bytes], { type: 'image/png' })
+        console.log('[screenshot] blob built', { size: blob.size, type: blob.type })
+      } else {
+        // Windows / Linux fallback — html2canvas. Iframe is in-DOM on
+        // these platforms so the capture works partially (iframe element
+        // bounds at minimum; content opaque if cross-origin). The Tauri
+        // webview on Win/Linux is also a regular iframe under the hood
+        // so this path covers both.
+        const html2canvas = (await import('html2canvas')).default
+        const canvas = await html2canvas(container, {
+          backgroundColor: '#ffffff',
+          scale: 1,
+          logging: false,
+          useCORS: true,
+          allowTaint: true,
+        })
+        // Compress to JPEG ~0.8 quality, max-width 1280 — matches the
+        // feedback-dialog defaults (kept image payload under ~400 KB).
+        const MAX_W = 1280
+        let outCanvas: HTMLCanvasElement = canvas
+        if (canvas.width > MAX_W) {
+          const ratio = MAX_W / canvas.width
+          outCanvas = document.createElement('canvas')
+          outCanvas.width = MAX_W
+          outCanvas.height = Math.round(canvas.height * ratio)
+          const ctx = outCanvas.getContext('2d')
+          if (ctx) ctx.drawImage(canvas, 0, 0, outCanvas.width, outCanvas.height)
+        }
+        blob = await new Promise<Blob | null>(resolve =>
+          outCanvas.toBlob(b => resolve(b), 'image/jpeg', 0.8),
+        )
+      }
+
+      if (!blob) throw new Error('capture produced no image data')
+
+      console.log('[screenshot] building attachment from blob', { size: blob.size, type: blob.type })
+      const attachment = await createImageAttachmentFromClipboard(blob)
+      const ext = blob.type === 'image/png' ? 'png' : 'jpg'
+      attachment.name = `preview-screenshot-${Date.now()}.${ext}`
+      console.log('[screenshot] calling addDraftAttachment', {
+        id: attachment.id,
+        name: attachment.name,
+        type: attachment.type,
+        hasBase64: !!attachment.base64,
+        base64Length: attachment.base64?.length ?? 0,
+      })
+      useChatStore.getState().addDraftAttachment(attachment)
+      const draftAfter = useChatStore.getState().draftAttachments
+      console.log('[screenshot] draft after attach', {
+        count: draftAfter.length,
+        last: draftAfter.length > 0 ? {
+          id: draftAfter[draftAfter.length - 1].id,
+          name: draftAfter[draftAfter.length - 1].name,
+        } : null,
+      })
+      useToastStore.getState().addToast(
+        'success',
+        t('preview.screenshotAttached'),
+      )
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[screenshot] capture failed:', err)
+      // macOS Screen Recording permission denial — surface the actionable
+      // hint. The Rust side returns a sentinel string when the captured
+      // file is suspiciously small (a black image is the symptom of
+      // declined permission); we also catch the generic "permission"
+      // wording from any layer below.
+      const isPermissionDenied =
+        /screen recording|permission|denied|not permitted|unexpectedly small/i.test(msg)
+      useToastStore.getState().addToast(
+        'error',
+        isPermissionDenied
+          ? t('preview.screenshotPermissionDenied')
+          : `${t('preview.screenshotFailed')}: ${msg}`,
+        10_000,
+      )
+    } finally {
+      setIsCapturing(false)
+    }
+  }, [canUseVision])
 
   // Horizontal resize (chat width)
   const handleResizeStart = useCallback((e: React.PointerEvent) => {
@@ -563,6 +756,50 @@ function PreviewView() {
             </IconButton>
 
             {/* Open in system browser */}
+            {/* Screenshot → chat (paid plans only). Lives in the toolbar
+                rather than floating over the iframe because macOS uses a
+                native wry child webview that paints ABOVE every DOM element
+                — a floating button positioned over the webview area is
+                literally invisible on macOS regardless of z-index. The
+                toolbar sits above the webview rect, in pure DOM. Pink
+                accent (brand color) so it reads as an action distinct from
+                the surrounding ghost icons. */}
+            {(() => {
+              const shouldRender = canUseVision && hasPreview && showIframe
+              // One-shot diagnostic: prints which gates pass/fail every render.
+              // Cheap (3 booleans) and self-explanatory in DevTools.
+              if (typeof window !== 'undefined') {
+                ;(window as unknown as { __tmShotGates?: unknown }).__tmShotGates = {
+                  canUseVision, hasPreview, showIframe, shouldRender,
+                }
+              }
+              return shouldRender ? (
+                <IconButton
+                  aria-label={t('preview.screenshotToChat')}
+                  title={t('preview.screenshotToChat')}
+                  size="xs"
+                  variant="ghost"
+                  color={tokens.colors.accent.primary}
+                  disabled={isCapturing}
+                  _hover={{
+                    bg: `${tokens.colors.accent.primary}22`,
+                    color: tokens.colors.accent.primary,
+                  }}
+                  borderRadius="6px"
+                  onPointerDown={() => console.log('[screenshot] pointerdown on button')}
+                  onClick={(e) => {
+                    console.log('[screenshot] click event fired', {
+                      defaultPrevented: e.defaultPrevented,
+                      isCapturing,
+                    })
+                    void handleScreenshotToChat()
+                  }}
+                >
+                  <FiCamera size={13} />
+                </IconButton>
+              ) : null
+            })()}
+
             {previewUrl && (
               <IconButton
                 aria-label={t("view.openInBrowser")}
@@ -591,6 +828,29 @@ function PreviewView() {
                 <FiSquare size={12} />
               </IconButton>
             )}
+
+            {/* Publish — opens the deploy modal. Free plan sees an upgrade
+                CTA inside the modal rather than the deploy flow. */}
+            <Button
+              aria-label="Publish project"
+              size="xs"
+              variant="solid"
+              bg={tokens.colors.accent.primary}
+              color="white"
+              _hover={{ bg: tokens.colors.accent.primaryDark, color: 'white' }}
+              _active={{ bg: tokens.colors.accent.primaryDark }}
+              borderRadius="6px"
+              fontSize="11px"
+              fontWeight="600"
+              h="22px"
+              px={2.5}
+              gap={1}
+              onClick={() => useLayoutStore.getState().setPublishModalOpen(true)}
+              ml={1.5}
+            >
+              <FiUpload size={11} />
+              Publish
+            </Button>
           </HStack>
         </Flex>
 
@@ -603,7 +863,7 @@ function PreviewView() {
         ) : (
           <Box flex="1" bg={tokens.colors.text.inverse} position="relative" overflow="hidden">
             {hasPreview && showIframe ? (
-              <Box position="relative" w="100%" h="100%">
+              <Box ref={previewContainerRef} position="relative" w="100%" h="100%">
                 <TauriWebview
                   url={previewMode === 'static' ? undefined : previewUrl!}
                   html={previewMode === 'static' ? previewHtmlContent! : undefined}
@@ -879,14 +1139,19 @@ function PreviewView() {
 }
 
 function sendLogToAgent(entry: DevServerLogEntry): void {
-  // Wrap the raw log line in a fenced code block so the agent can tell the
-  // captured output apart from the framing question, and prefix the level
-  // so error/warn context isn't lost. Queue priority 'next' matches the
-  // prompt bar — dispatches immediately when the agent is idle, otherwise
-  // queues behind the in-flight turn.
+  // Wrap the captured output in a fenced code block so the agent can tell
+  // it apart from the framing question, and prefix the level so error/warn
+  // context isn't lost. entry.text may be MULTI-LINE — the dev-server log
+  // pipeline coalesces console.log({obj}) dumps and stack traces into one
+  // entry so the agent receives the whole block, not just one fragment.
+  // Queue priority 'next' matches the prompt bar — dispatches immediately
+  // when the agent is idle, otherwise queues behind the in-flight turn.
   const time = new Date(entry.timestamp).toLocaleTimeString('en-GB', { hour12: false })
   const levelLabel = entry.level === 'error' ? 'ERROR' : entry.level === 'warn' ? 'WARN' : 'INFO'
-  const prompt = `Help me with this dev server console line:\n\n\`\`\`\n[${levelLabel}] ${time}  ${entry.text}\n\`\`\``
+  const header = `[${levelLabel}] ${time}`
+  const isMultiline = entry.text.includes('\n')
+  const body = isMultiline ? `${header}\n${entry.text}` : `${header}  ${entry.text}`
+  const prompt = `Help me with this dev server console output:\n\n\`\`\`\n${body}\n\`\`\``
   enqueueMessage({
     value: prompt,
     mode: 'prompt',

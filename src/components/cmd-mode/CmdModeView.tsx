@@ -1,14 +1,16 @@
-import React, { useCallback, useEffect, useRef } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
+import { useTerminalPanelStore, TERMINAL_PANEL_MIN_WIDTH } from '../../stores/terminalPanelStore'
 import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands'
 import CmdModePromptInput, { type CmdModePromptInputRef } from './CmdModePromptInput'
 import { TerminalTitleBar } from './TerminalTitleBar'
 import { TerminalStatusLine } from './TerminalStatusLine'
 import { TerminalMessageRenderer } from './TerminalMessageRenderer'
 import { TerminalGreeting } from './TerminalGreeting'
+import { TerminalPanel } from './TerminalPanel'
 import { BillingOverageBanner } from './BillingOverageBanner'
 import { ErrorBoundary } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
@@ -173,17 +175,72 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
     stickToBottom()
   }, [messages.length, stickToBottom])
 
+  // Close the terminal panel automatically when leaving the project.
+  useEffect(() => {
+    return () => { useTerminalPanelStore.getState().close() }
+  }, [])
+
+  // Track outer container width so we can clamp the panel to max 50% of the IDE.
+  const outerRef = useRef<HTMLDivElement | null>(null)
+  const [outerWidth, setOuterWidth] = useState<number>(0)
+  useEffect(() => {
+    if (!outerRef.current) return
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0
+      setOuterWidth(w)
+    })
+    ro.observe(outerRef.current)
+    return () => ro.disconnect()
+  }, [])
+
+  // Subscribe to terminal-panel state.
+  const terminalOpen = useTerminalPanelStore(s => s.isOpen)
+  const terminalWidthPref = useTerminalPanelStore(s => s.widthPx)
+  const setTerminalWidth = useTerminalPanelStore(s => s.setWidth)
+
+  const maxPanelWidth = outerWidth > 0 ? Math.floor(outerWidth * 0.5) : terminalWidthPref
+  const clampedPanelWidth = Math.min(terminalWidthPref, Math.max(TERMINAL_PANEL_MIN_WIDTH, maxPanelWidth))
+
+  // Divider drag — captures pointer, updates width store.
+  const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null)
+  const handleDividerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    dragStateRef.current = { startX: e.clientX, startWidth: clampedPanelWidth }
+    ;(e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId)
+  }, [clampedPanelWidth])
+  const handleDividerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current
+    if (!drag || outerWidth === 0) return
+    // Cursor moving left widens the panel (panel is on the right edge).
+    const next = drag.startWidth - (e.clientX - drag.startX)
+    setTerminalWidth(Math.min(Math.floor(outerWidth * 0.5), Math.max(TERMINAL_PANEL_MIN_WIDTH, next)))
+  }, [outerWidth, setTerminalWidth])
+  const handleDividerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragStateRef.current) {
+      dragStateRef.current = null
+      ;(e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId)
+    }
+  }, [])
+
   return (
     <Flex
-      direction="column"
+      ref={outerRef}
+      direction="row"
       flex="1"
       minH={0}
+      minW={0}
       bg={tokens.colors.terminal.background}
       color={tokens.colors.terminal.foreground}
       fontFamily={tokens.fontFamily.mono}
       fontSize="14px"
       position="relative"
       overflow="hidden"
+    >
+    <Flex
+      direction="column"
+      flex="1"
+      minW={0}
+      minH={0}
       data-cmd-mode-root
       onDragOver={onViewDragOver}
       onDragEnter={onViewDragEnter}
@@ -221,7 +278,7 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
           ) : messages.length === 0 ? (
             <TerminalGreeting projectPath={projectPath} />
           ) : (
-            <Box pb={1}>
+            <Box pb={1} data-selectable="true">
               {messages.map(msg => (
                 <ErrorBoundary key={msg.id}>
                   <TerminalMessageRenderer
@@ -262,6 +319,26 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
       <Box display={pendingPermission ? 'none' : undefined} data-no-focus-steal>
         <CmdModePromptInput ref={promptInputRef} />
       </Box>
+    </Flex>
+      {terminalOpen && (
+        <>
+          <Box
+            width="4px"
+            flexShrink={0}
+            cursor="col-resize"
+            bg="rgba(255,255,255,0.04)"
+            _hover={{ bg: 'rgba(254,16,99,0.4)' }}
+            transition="background 0.12s"
+            onPointerDown={handleDividerDown}
+            onPointerMove={handleDividerMove}
+            onPointerUp={handleDividerUp}
+            onPointerCancel={handleDividerUp}
+            aria-label="Resize terminal panel"
+            role="separator"
+          />
+          <TerminalPanel projectPath={projectPath} widthPx={clampedPanelWidth} />
+        </>
+      )}
     </Flex>
   )
 }

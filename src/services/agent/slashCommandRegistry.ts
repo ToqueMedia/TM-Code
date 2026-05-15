@@ -13,11 +13,20 @@ export interface SlashCommandArg {
   description: string
 }
 
+/**
+ * Where the slash command was invoked from. Most commands ignore it (their
+ * behaviour is mode-agnostic), but `/plan` branches on this to compose the
+ * architect's system prompt with platform-deploy constraints (`chat`) vs.
+ * a free-form architect prompt (`terminal`). Default is `'chat'` so older
+ * call sites continue to behave as before.
+ */
+export type SlashCommandMode = 'chat' | 'terminal'
+
 export interface SlashCommand {
   name: string
   description: string
   enabled: boolean
-  execute: (args: string, projectPath: string) => Promise<void>
+  execute: (args: string, projectPath: string, mode?: SlashCommandMode) => Promise<void>
   /**
    * Optional canonical values the menu offers after the user types
    * `<cmd> ` (space). Suggestions are filtered by the partial word the

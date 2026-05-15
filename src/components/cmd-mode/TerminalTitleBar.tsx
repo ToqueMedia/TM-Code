@@ -2,11 +2,9 @@ import { memo } from 'react'
 import { Box, Flex, HStack, Text } from '@chakra-ui/react'
 import { useBillingStore } from '../../stores/billingStore'
 import { useMcpStore } from '../../stores/mcpStore'
-import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
-import { useAgentStore } from '../../stores/agentStore'
-import { useByokStore } from '../../stores/byokStore'
-import { getProfileForPlan } from '../../services/agent/modelProfiles'
+import { useByokState } from '../../hooks/useByokState'
+import { useThinkingToggle } from '../../hooks/useThinkingToggle'
 import { CreditIndicator } from '../ui/CreditIndicator'
 import { McpIndicator } from '../ui/StatusIndicators'
 import ModelIndicator from '../chat/ModelIndicator'
@@ -30,27 +28,16 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
   const isStreaming = useChatStore(s => s.isStreaming)
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
-  const thinkingEnabled = useSettingsStore(s => s.thinkingEnabled)
-  const backendThinkingMode = useAgentStore(s => s.thinkingMode)
-  // BYOK indicator gating — mirrors ChatView so the pill swaps in for credits
-  // whenever the next request would route through the user's key. CMD mode
-  // uses the same AgentService singleton, so BYOK applies here too.
-  const byokActive = useAgentStore(s => s.byokActive)
-  const byokEnabled = useByokStore(s => s.enabled)
-  const byokActiveProvider = useByokStore(s => s.activeProvider)
-  const byokActiveModel = useByokStore(s => s.activeModel)
-  const activeSessionId = useChatStore(s => s.activeSessionId)
-  const sessions = useChatStore(s => s.sessions)
-  const sessionByokSnapshot = (activeSessionId ? sessions.get(activeSessionId)?.byokSnapshot : null) ?? null
-  const byokConfigured = sessionByokSnapshot !== null
-    || (byokEnabled && byokActiveProvider !== null && byokActiveModel !== null)
-  const showModelIndicator = byokActive || byokConfigured
-  const fallbackProfile = getProfileForPlan(billingPlan)
-  const effectiveMode = backendThinkingMode
-    ?? (fallbackProfile.supportsThinking
-        ? (fallbackProfile.thinkingMode === 'mandatory' ? 'mandatory' : 'toggleable')
-        : 'none')
-  const thinkingSupported = effectiveMode === 'toggleable'
+  // BYOK state + thinking-toggle state — both via shared hooks so this
+  // component never drifts from AgentStatusBar / ChatView. CMD mode uses
+  // the same AgentService singleton, so BYOK + thinking rules apply
+  // identically here.
+  const { byokInPlay: showModelIndicator } = useByokState()
+  const {
+    toggleable: thinkingSupported,
+    enabled: thinkingEnabled,
+    setEnabled: setThinkingEnabled,
+  } = useThinkingToggle()
 
   // Show basename prominently, full path dimmed (cross-platform: handles \ and /)
   const projectName = basename(projectPath) || projectPath
@@ -122,7 +109,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
             bg={thinkingEnabled ? 'rgba(163,113,247,0.1)' : 'transparent'}
             border="1px solid"
             borderColor={thinkingEnabled ? 'rgba(163,113,247,0.2)' : 'rgba(255,255,255,0.07)'}
-            onClick={() => useSettingsStore.getState().setThinkingEnabled(!thinkingEnabled)}
+            onClick={() => setThinkingEnabled(!thinkingEnabled)}
             cursor="pointer"
             transition="all 0.12s"
             _hover={{ bg: thinkingEnabled ? 'rgba(163,113,247,0.15)' : 'rgba(255,255,255,0.04)' }}
@@ -162,7 +149,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
         <Box
           as="button"
           onClick={onBack}
-          aria-label="Exit CMD mode (Esc)"
+          aria-label="Exit Terminal mode (Esc)"
           title="Exit (Esc)"
           fontSize="9px"
           fontWeight="700"

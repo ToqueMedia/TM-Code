@@ -31,6 +31,12 @@ export interface DeployRecord {
   startedAt: number | null
   /** Epoch ms when this deploy reached a terminal state. */
   finishedAt: number | null
+  /** Monotonically incremented on each startDeploy. Long-running tasks (the
+   *  container-build poll loop) capture this at start and check it before
+   *  every tick — a mismatch means a newer attempt superseded them, so they
+   *  bail without writing further updates. Defends against zombie polls
+   *  after the user re-deploys the same projectId. */
+  attemptId: number
 }
 
 interface DeployState {
@@ -64,6 +70,7 @@ function blank(projectId: string): DeployRecord {
     error: null,
     startedAt: null,
     finishedAt: null,
+    attemptId: 0,
   }
 }
 
@@ -73,10 +80,14 @@ export const useDeployStore = create<DeployState & DeployActions>((set, get) => 
   startDeploy: (projectId) => {
     set((state) => {
       const next = new Map(state.records)
+      const previous = next.get(projectId)
       next.set(projectId, {
         ...blank(projectId),
         phase: 'in_progress',
         startedAt: Date.now(),
+        // Bump the attempt counter so any in-flight polls from a prior
+        // deploy of this same projectId see a mismatch and exit cleanly.
+        attemptId: (previous?.attemptId ?? 0) + 1,
       })
       return { records: next }
     })

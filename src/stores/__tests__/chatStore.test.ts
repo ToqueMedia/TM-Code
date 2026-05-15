@@ -3,6 +3,7 @@ jest.mock('../../services/agent/sessionService', () => ({
   sessionService: {
     setSessionGetter: jest.fn(),
     setTokenUsageGetter: jest.fn(),
+    setTurnSnapshotGetter: jest.fn(),
     markDirty: jest.fn(),
     flushNow: jest.fn().mockResolvedValue(undefined),
     init: jest.fn().mockResolvedValue(undefined),
@@ -155,6 +156,73 @@ describe('chatStore', () => {
     })
   })
 
+  describe('splitForQueuedMessage', () => {
+    it('finalises the streaming assistant, appends user msg AT THE END, and starts a new streaming assistant', () => {
+      useChatStore.getState().createSession('/test/project')
+      useChatStore.getState().addUserMessage('start the build')
+      const oldAssistantId = useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().appendTextDelta('Working on Task 1...')
+
+      // Simulate a queued message dispatching mid-stream
+      const newAssistantId = useChatStore
+        .getState()
+        .splitForQueuedMessage('also use mercury-2 instead of mercury-coder-small')
+
+      const session = useChatStore.getState().getActiveSession()!
+      // Messages should be: user, oldAssistant, queuedUser, newAssistant
+      expect(session.messages).toHaveLength(4)
+      expect(session.messages[0]?.role).toBe('user')
+      expect(session.messages[1]?.id).toBe(oldAssistantId)
+      expect(session.messages[1]?.role).toBe('assistant')
+      expect(session.messages[1]?.isStreaming).toBe(false) // finalised
+      expect(session.messages[2]?.role).toBe('user')
+      expect(session.messages[2]?.content).toBe('also use mercury-2 instead of mercury-coder-small')
+      expect(session.messages[3]?.id).toBe(newAssistantId)
+      expect(session.messages[3]?.role).toBe('assistant')
+      expect(session.messages[3]?.isStreaming).toBe(true)
+
+      // streamingMessageId now points to the NEW assistant
+      expect(useChatStore.getState().streamingMessageId).toBe(newAssistantId)
+      // overall streaming state remains true (the loop is ongoing)
+      expect(useChatStore.getState().isStreaming).toBe(true)
+    })
+
+    it('routes subsequent appendTextDelta calls into the new assistant bubble', () => {
+      useChatStore.getState().createSession('/test/project')
+      const oldAssistantId = useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().appendTextDelta('Phase 1 progress...')
+
+      const newAssistantId = useChatStore.getState().splitForQueuedMessage('quick question about X')
+
+      // After split, deltas land in the new bubble — not the finalised one.
+      useChatStore.getState().appendTextDelta('Answering quickly: ')
+      useChatStore.getState().appendTextDelta('Y is the reason. Resuming...')
+
+      const session = useChatStore.getState().getActiveSession()!
+      const oldMsg = session.messages.find(m => m.id === oldAssistantId)!
+      const newMsg = session.messages.find(m => m.id === newAssistantId)!
+      expect(oldMsg.content).toBe('Phase 1 progress...')
+      expect(newMsg.content).toBe('Answering quickly: Y is the reason. Resuming...')
+    })
+
+    it('preserves attachments and promptBlocks on the queued user message', () => {
+      useChatStore.getState().createSession('/test/project')
+      useChatStore.getState().startAssistantMessage()
+
+      useChatStore.getState().splitForQueuedMessage(
+        'with attachment',
+        [{ id: 'att-1', name: 'screenshot.png', path: '/tmp/screenshot.png', type: 'image', mimeType: 'image/png', sizeBytes: 100 }],
+        [{ type: 'text', text: 'with attachment' }],
+      )
+
+      const session = useChatStore.getState().getActiveSession()!
+      const queuedUserMsg = session.messages.find(m => m.role === 'user')!
+      expect(queuedUserMsg.attachments).toHaveLength(1)
+      expect(queuedUserMsg.attachments?.[0]?.name).toBe('screenshot.png')
+      expect(queuedUserMsg.promptBlocks).toHaveLength(1)
+    })
+  })
+
   describe('setError', () => {
     it('sets and clears error', () => {
       useChatStore.getState().setError('Something broke')
@@ -191,17 +259,23 @@ describe('chatStore', () => {
   })
 
   describe('token usage tracking', () => {
-    it('input takes max (current context size), output accumulates (new tokens emitted)', () => {
-      // Each turn re-sends the full conversation, so input=200 already
-      // contains the work that input=100 represented. Summing inputs would
-      // double-count. Output, by contrast, is fresh tokens generated each
-      // turn — those add up.
+    it('totalTokensUsed sums both input and output across calls', () => {
+      // `totalTokensUsed` is the cumulative WIRE COST across turns of the
+      // current user message — both input and output sum because each turn
+      // literally re-transmits the prior conversation as new input bytes.
+      // The window-pressure pill uses `currentPromptTokens` (the per-turn
+      // value, replaced not summed) so it doesn't double-count there.
+      // See addTokenUsage's comment block for the full rationale.
       useChatStore.getState().addTokenUsage(100, 50)
       useChatStore.getState().addTokenUsage(200, 75)
 
-      const { totalTokensUsed } = useChatStore.getState()
-      expect(totalTokensUsed.input).toBe(200)
+      const { totalTokensUsed, currentPromptTokens, currentResponseTokens } = useChatStore.getState()
+      expect(totalTokensUsed.input).toBe(300)
       expect(totalTokensUsed.output).toBe(125)
+      // Per-turn fields: input is replaced (last positive value wins);
+      // output is always overwritten with the latest call.
+      expect(currentPromptTokens).toBe(200)
+      expect(currentResponseTokens).toBe(75)
     })
   })
 

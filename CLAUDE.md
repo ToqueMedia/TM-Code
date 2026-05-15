@@ -143,8 +143,35 @@ If you add a template, you must add **both** the entry in `templateService.ts` a
 | Category | IDs |
 |---|---|
 | Frontend | `react-ts-vite`, `nextjs-ts`, `nuxt-ts`, `vue-ts-vite`, `svelte-ts-vite`, `astro`, `angular-ts` |
-| Fullstack | `react-express-ts` |
+| Fullstack | `react-express-ts`, `react-express-prisma-auth` |
 | Backend | `express-ts`, `fastify-ts`, `nestjs-ts` |
+
+### `react-express-prisma-auth` (May 2026) — auth-pre-wired
+
+Use when the prompt mentions login, signup, auth, users, or `#auth-google`. The template is the structural fix for the BugHunterKimi class of bugs (8 distinct failures across one auth-flow scaffold). Pre-wired against:
+
+- **dotenv-after-imports**: `tsx watch --env-file=../.env` in the server dev script. No `dotenv.config()` at module top-level.
+- **Vite proxy missing**: `vite.config.ts` ships with `server.proxy['/api']` already pointing at `:3001`.
+- **Prisma P2021** (table doesn't exist): `predev` hook runs `scripts/db-setup.mjs` which idempotently runs `prisma migrate dev --name init` (or `migrate deploy` if migrations exist). DATABASE_URL is forced to an absolute file:// URL so cwd-relative bugs can't surface.
+- **`tenantId` dropped from Identity Toolkit**: required + present on every signInWith{Idp,Password} / signUp call in `server/src/routes/auth.ts`. ITK 4xx → 401 (not 502).
+- **Backend reads `VITE_*`**: routes read `GIP_FIREBASE_API_KEY` / `GIP_TENANT_ID` / `GCP_PROJECT_ID` mirrors (with VITE_* as fallback only).
+- **Fail-fast guard**: `server/src/index.ts` exits with a useful message when GIP env is missing rather than letting requests fail with cryptic ITK errors.
+- **Offline test**: `tests/templates/test-react-express-prisma-auth.sh` runs the full scaffold → install → migrate → curl flow against a local ITK mock (`tests/templates/itk-mock.mjs`) via `ITK_BASE_URL_OVERRIDE`. Production never sets that override.
+
+**Dotfile bundling**: source files use `_gitignore` and `_env.example` (underscore prefix) because Tauri's resource bundler glob excludes dotfiles. The Rust `copy_template_dir` in `src-tauri/src/commands/filesystem.rs` restores the dot at scaffold time via a whitelist. Add to the whitelist when introducing a new dotfile.
+
+**Deploy gap (known, P0 follow-up)**: this template uses Express + Prisma + SQLite, which does NOT deploy via the Cloudflare pipeline (Workers + R2 + D1). It builds for local dev only — `collect_deploy_bundle` will fail because the backend isn't a Worker bundle. A sibling `react-hono-drizzle-d1-auth` template needs to be added to match the deploy target before the IDE can claim "1-prompt to ship". Until then, surface this trade-off when picking the template.
+
+### Auth-route smoke test (REQUIRED after any /api/auth/* edit)
+
+Whenever a phase touches `/api/auth/*`, before claiming done:
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' http://localhost:5173/api/auth/me
+# expected: 401 application/json
+```
+
+Anything else is a regression — `404 text/html` means the Vite proxy isn't wired; `500` means the backend crashed (read_dev_server_logs). The full diagnosis tree is in `src/services/agent/commands/planCommand.ts` under "Auth-route smoke test".
 
 ## Deploy Pipeline
 
@@ -169,7 +196,7 @@ Deploy is **single-target Cloudflare** (R2 for assets + Workers for backend + D1
 
 **Template ↔ deploy compatibility**:
 - ✅ Out-of-the-box: `react-ts-vite`, `vue-ts-vite`, `svelte-ts-vite`, `astro` (all build to flat `dist/`). Backend can be added by the agent via `provision_auth` (writes the Hono+Drizzle boilerplate into `backend/`).
-- ⚠️ Partial: `react-express-ts` — Express scaffold isn't a Worker bundle; deploy would require swapping to Hono first.
+- ⚠️ Partial: `react-express-ts`, `react-express-prisma-auth` — Express scaffold isn't a Worker bundle; deploy would require swapping the backend to Hono and the DB to D1. `react-express-prisma-auth` is local-dev only by design today; sibling `react-hono-drizzle-d1-auth` template is the planned fix.
 - ❌ Not deployable today: `nextjs-ts` (`.next/` output, needs `@cloudflare/next-on-pages`), `nuxt-ts` (`.output/`), `angular-ts` (nested `dist/<app>/`), `express-ts` / `fastify-ts` / `nestjs-ts` (Node servers, not Workers).
 
 There is no framework-detection guard yet — deploys for non-compatible templates fail at `collect_deploy_bundle` with a "dist/ not found" error rather than a precise "Next.js not supported" message.

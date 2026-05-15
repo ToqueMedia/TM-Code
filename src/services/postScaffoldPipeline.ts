@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { useProjectStore } from '../stores/projectStore'
 import { useLayoutStore } from '../stores/layoutStore'
 import { devServerManager } from './devServerManager'
-import { templateService, Template } from './templateService'
+import { templateService, Template, resolveFrontendPortHint } from './templateService'
 import { detectSystemPackageManager, adaptCommand } from './packageManagerDetector'
 import { logger } from '../utils/logger'
 
@@ -61,7 +61,12 @@ async function postScaffoldPipeline(
       template.category === 'backend' ? 'backend'
       : template.category === 'fullstack' ? 'fullstack'
       : 'frontend'
-    await devServerManager.start(projectPath, devCmd, { projectKind })
+    // Read the frontend port from the same source every start path uses (the
+    // .toquemedia-template manifest). Defence-in-depth alongside the Rust
+    // probe's `usable_as_frontend` filter — if both fire, we lose neither
+    // the explicit port hint nor the content-type signal.
+    const frontendPortHint = await resolveFrontendPortHint(projectPath, projectKind)
+    await devServerManager.start(projectPath, devCmd, { projectKind, frontendPortHint })
     layoutStore.setScaffoldPhase('ready', 'Dev server is running')
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)

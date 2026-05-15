@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { Box, Button, Flex, Input, Text } from '@chakra-ui/react'
 import { FiCheck, FiEye, FiEyeOff, FiKey, FiShield, FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
@@ -84,6 +84,21 @@ function CredentialRequestCard({ messageId, card }: CredentialRequestCardProps) 
   const toggleReveal = useCallback((id: string) => {
     setRevealed((prev) => ({ ...prev, [id]: !prev[id] }))
   }, [])
+
+  // Auto-remove the card from the transcript shortly after the user has acted.
+  // The tool result already carries the outcome ("Saved N credentials..." or
+  // "User cancelled..."), so the model has full context — keeping the card
+  // around just clutters the chat. Several cards in sequence stack at the end
+  // of the transcript and displace the actual conversation flow (the agent's
+  // ongoing work appears above them in scroll order). 2.5s gives the user
+  // time to read the success/cancel state before it disappears.
+  useEffect(() => {
+    if (status !== 'submitted' && status !== 'cancelled') return
+    const timer = setTimeout(() => {
+      useChatStore.getState().removeMessage(messageId)
+    }, 2500)
+    return () => clearTimeout(timer)
+  }, [status, messageId])
 
   if (status === 'submitted') {
     const keys = submittedKeys ?? []

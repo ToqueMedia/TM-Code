@@ -64,8 +64,8 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, o
     {
       id: 'cmd',
       icon: LuTerminal,
-      title: t('welcome.cmdMode'),
-      description: t('welcome.cmdModeDesc'),
+      title: t('welcome.terminalMode'),
+      description: t('welcome.terminalModeDesc'),
       shortcutId: null,
       color: tokens.colors.accent.purple,
     },

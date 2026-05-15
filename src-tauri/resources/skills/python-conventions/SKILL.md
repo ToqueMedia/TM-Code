@@ -1,69 +1,26 @@
 # Python Conventions
 
-You are working in a Python project. Follow these conventions:
+You are working in a Python project. PEP 8 naming, type hints (`def f(x: int) -> str`), `pytest` for tests, virtual environments, f-strings, dataclasses — these are assumed knowledge. The rules below cover footguns and decisions where models drift from idiomatic Python.
 
-## Project Structure
-- Use `src/` layout or flat layout depending on project convention.
-- `__init__.py` in every package directory.
-- `main.py` or `__main__.py` as entry point.
-- `requirements.txt` or `pyproject.toml` for dependencies.
-- Virtual environment: `venv/` or `.venv/` (never commit it).
+## Patterns to Avoid
 
-## Naming (PEP 8)
-- Functions and variables: `snake_case`.
-- Classes: `PascalCase`.
-- Constants: `UPPER_SNAKE_CASE`.
-- Private: prefix with `_` (convention), `__` for name mangling.
-- Module names: short, lowercase, no underscores if possible.
+- **Don't use mutable defaults in function signatures.** `def f(items=[])` shares the SAME list across calls. Use `def f(items: list | None = None)` and `if items is None: items = []`.
+- **Don't catch bare `except:`** — swallows `KeyboardInterrupt` and `SystemExit`. Use `except Exception:` for broad catches, or specific types (`except ValueError`).
+- **Don't compare with `==` to `None`, `True`, `False`.** Use `is None`, `is True`, `is False` — `==` invokes `__eq__` which can be overridden weirdly.
+- **Don't use `type(x) == X`.** Use `isinstance(x, X)` — handles inheritance correctly.
+- **Don't import inside functions to "speed up startup" unless you've measured.** Imports cost is paid once (cached in `sys.modules`); imports inside functions add per-call overhead and hide dependencies from static analysis.
+- **Don't return `None` to signal failure.** Raise an exception or return a typed `Result`/`Either`. `None` returns force callers to check explicitly and forget to.
+- **Don't use `Dict`, `List`, `Optional` from `typing` in new code (Python 3.9+).** Use built-ins: `dict[str, int]`, `list[str]`, `T | None`. The `typing` aliases are deprecated in stubs.
+- **Don't use `os.path` for path manipulation in new code.** Use `pathlib.Path` — `Path('a') / 'b' / 'c.txt'` over `os.path.join`. Cleaner, type-safe, OS-agnostic.
+- **Don't iterate while mutating.** `for x in lst: lst.remove(x)` skips elements. Iterate over a copy (`lst[:]` or `list(lst)`) or build a new list.
+- **Don't use `eval()` / `exec()` on untrusted input.** Code injection. Use `ast.literal_eval` for safe literal parsing.
+- **Don't conflate `Optional[T]` with "nullable parameter".** `Optional[T]` is `T | None` — must accept `None`. If a parameter is required but defaults can vary, use a sentinel (`_MISSING = object()`) instead.
+- **Don't mix sync and async I/O in the same call chain.** Async event loop blocks on sync I/O — defeats the point. Use `aiohttp`/`httpx` async clients in async code.
+- **Don't use `print` for logs in production code.** Use the `logging` module — gives you levels, handlers, formatters, and the ability to silence/redirect downstream.
 
-## Type Hints
-- Use type hints on all function signatures: `def get_user(user_id: int) -> User:`.
-- Use `from __future__ import annotations` for forward references.
-- Use `Optional[T]` or `T | None` (Python 3.10+) for nullable types.
-- Use `list[str]`, `dict[str, int]` (Python 3.9+) instead of `List`, `Dict`.
-- Use `TypeVar`, `Generic`, `Protocol` for generic code.
+## Convention reminders (often missed)
 
-## Error Handling
-- Use specific exceptions: `ValueError`, `TypeError`, `KeyError`.
-- Create custom exceptions inheriting from `Exception`.
-- Use `try/except` with specific exception types, never bare `except:`.
-- Use context managers (`with`) for resource management.
-
-## Classes
-- Use `@dataclass` for data-holding classes.
-- Use `@property` for computed attributes.
-- Prefer composition over inheritance.
-- Use `__slots__` for performance-critical classes with many instances.
-- Use `Protocol` for structural typing (duck typing with type safety).
-
-## Functions
-- Keep functions short (< 30 lines ideally).
-- Use `*args` and `**kwargs` judiciously.
-- Use keyword-only arguments after `*`: `def f(*, name: str)`.
-- Return early for guard clauses.
-- Use generators (`yield`) for lazy evaluation of sequences.
-
-## Async
-- Use `async/await` with `asyncio` for I/O-bound concurrency.
-- Use `aiohttp` or `httpx` for async HTTP.
-- Never mix sync and async I/O in the same call chain.
-- Use `asyncio.gather()` for concurrent tasks.
-
-## Testing
-- Use `pytest` (not unittest) as test runner.
-- Test files: `test_*.py` or `*_test.py`.
-- Use fixtures (`@pytest.fixture`) for setup/teardown.
-- Use `pytest.raises` for exception testing.
-- Use `parametrize` for table-driven tests.
-
-## Dependencies
-- Use `pip install` with `requirements.txt` or `poetry` / `uv`.
-- Pin versions in production: `requests==2.31.0`.
-- Use virtual environments always.
-- Run `pip freeze > requirements.txt` to lock versions.
-
-## Code Style
-- Follow PEP 8. Use `ruff` or `black` for formatting.
-- Max line length: 88 (black) or 79 (PEP 8).
-- Use f-strings for string formatting: `f"Hello {name}"`.
-- Use list/dict/set comprehensions over `map`/`filter` when readable.
+- **`__init__.py` is needed in every package** for explicit packages (PEP 420 namespace packages exist but are rare). Missing it breaks `from x import y` even with `sys.path` set.
+- **`pyproject.toml` is the modern config** — `requirements.txt` is legacy. New projects use `[project]` tables, `uv` or `poetry` for dependencies.
+- **`@dataclass(slots=True, frozen=True)`** for value objects — gets you `__init__`, `__eq__`, `__hash__`, immutability, and slots-based memory savings in one decorator.
+- **`Protocol` for structural typing** when you want duck typing with type safety — beats `ABC` for "anything with `.read()`" interfaces.
