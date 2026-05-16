@@ -353,6 +353,20 @@ interface OpenAIChunk {
     completion_tokens?: number
     total_tokens?: number
   }
+  /**
+   * Synthetic error envelope emitted by our worker when the upstream stream
+   * drops mid-flight (see proxy.ts `wrapStreamWithErrorCapture`). Not part of
+   * OpenAI's published SSE shape, but compatible with the OpenAI SDK's
+   * stream-error contract (the SDK reads root-level `error` on any chunk).
+   * Surfacing it as a typed parser event lets the agent retry sensibly
+   * instead of treating the truncated stream as a successful `end_turn`.
+   */
+  error?: {
+    type?: string
+    message?: string
+    provider?: string
+    model?: string
+  }
 }
 
 export async function parseOpenAISSEStream(
@@ -404,6 +418,27 @@ export async function parseOpenAISSEStream(
   }
 
   const processChunk = (chunk: OpenAIChunk) => {
+    // Mid-stream upstream interruption captured by the worker's
+    // wrapStreamWithErrorCapture (proxy.ts). The worker keeps `outcome: "ok"`
+    // and emits this chunk + `data: [DONE]` so the parser closes cleanly
+    // and the agent sees a typed error event instead of pretending the
+    // truncated stream was a clean end_turn (which would surface as the
+    // agent silently freezing — see BugHunter sess_1778939230235_o3x3ar
+    // for the symptom this fix addresses).
+    if (chunk.error && typeof chunk.error.message === 'string') {
+      closeOpenTextBlock()
+      closeAllToolBlocks()
+      const errType = chunk.error.type || 'upstream_error'
+      const msg = errType === 'upstream_stream_interrupted'
+        ? `The model's response was interrupted mid-stream (upstream: ${chunk.error.provider || 'unknown'}). ` +
+          `This is usually a transient network issue. Retry the request.`
+        : `Upstream error (${errType}): ${chunk.error.message}`
+      callbacks.onEvent({ type: 'error', message: msg })
+      // Don't emit `done` — the agent's onError handler is the right
+      // termination path; emitting both would race.
+      messageStopEmitted = true
+      return
+    }
     // Some Ollama builds send a final-only object with usage and no choices
     // — treat as usage-only update.
     if (chunk.usage) {
