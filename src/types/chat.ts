@@ -256,6 +256,14 @@ export interface ChatSession {
    *  NOT migrate active sessions. Null when the session was created
    *  without BYOK (TMS-routed). */
   byokSnapshot?: ByokSessionSnapshot | null
+  /** Last known input-token count for the next turn, captured from the
+   *  most recent assistant response's usage header. Persisted with the
+   *  session so the context-window indicator restores correct pressure
+   *  when the user reopens the session in a future app run.
+   *  Missing on legacy sessions (pre-v0.6.2) — the loader falls back to
+   *  a char-based estimate from the message history. */
+  lastPromptTokens?: number
+  lastResponseTokens?: number
 }
 
 /** Per-session frozen reference to the BYOK selection at creation time.

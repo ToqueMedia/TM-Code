@@ -221,6 +221,61 @@ export function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${idCounter}`
 }
 
+/**
+ * Recover the ctx-pill values for a session that is becoming active. The
+ * indicator reads `currentPromptTokens` and `currentResponseTokens` from
+ * the chatStore — they are global state by design, but a session-load
+ * must restore them so the pill reflects the loaded session's pressure
+ * rather than whatever the previous session left.
+ *
+ * Two paths:
+ *
+ *  1. If the session has `lastPromptTokens` persisted (saved by
+ *     `addTokenUsage`), use it directly — this is the authoritative value
+ *     from the most recent assistant response's usage header.
+ *
+ *  2. Legacy sessions saved before v0.6.2 have no persisted count. Fall
+ *     back to a char-based estimate: total message text ÷ 4 (rough
+ *     tokens-per-char heuristic used widely as a pre-API approximation).
+ *     The estimate is upper-bounded so a runaway session doesn't show
+ *     a misleading 200% pressure on load; once the next turn lands, the
+ *     real usage header replaces the estimate.
+ */
+function hydrateTokenCountsFromSession(session: ChatSession): { promptTokens: number; responseTokens: number } {
+  if (typeof session.lastPromptTokens === 'number' && session.lastPromptTokens >= 0) {
+    return {
+      promptTokens: session.lastPromptTokens,
+      responseTokens: session.lastResponseTokens ?? 0,
+    }
+  }
+  // Legacy fallback — empty session shows 0%, non-empty shows an estimate.
+  if (!session.messages || session.messages.length === 0) {
+    return { promptTokens: 0, responseTokens: 0 }
+  }
+  let totalChars = 0
+  for (const msg of session.messages) {
+    const content: unknown = msg.content
+    if (typeof content === 'string') {
+      totalChars += content.length
+    } else if (Array.isArray(content)) {
+      for (const part of content as Array<{ type: string; text?: string }>) {
+        if (part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string') {
+          totalChars += part.text.length
+        }
+      }
+    }
+    if (msg.contentBlocks) {
+      for (const block of msg.contentBlocks) {
+        if (block.type === 'text' || block.type === 'reasoning') {
+          totalChars += block.text.length
+        }
+      }
+    }
+  }
+  const estimate = Math.round(totalChars / 4)
+  return { promptTokens: estimate, responseTokens: 0 }
+}
+
 // === Project-scope epoch ===
 //
 // Sessions are project-scoped: a session belongs only to the project that
@@ -835,9 +890,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     setActiveSession: (sessionId: string) => {
-      set({ activeSessionId: sessionId })
-      // Re-scope the queue log to the newly-active session.
       const session = get().sessions.get(sessionId)
+      // Hydrate the ctx-pill state from the session. `currentPromptTokens`
+      // is global state that the indicator reads — without this step, a
+      // freshly-loaded session shows whatever the previous session left
+      // (or 0% if first session of the app run), regardless of how much
+      // history it actually carries. Restore from the persisted last-known
+      // counts; fall back to a char-based estimate for legacy sessions
+      // saved before v0.6.2 (no lastPromptTokens field on disk).
+      const hydrated = session ? hydrateTokenCountsFromSession(session) : null
+      set({
+        activeSessionId: sessionId,
+        currentPromptTokens: hydrated?.promptTokens ?? 0,
+        currentResponseTokens: hydrated?.responseTokens ?? 0,
+      })
+      // Re-scope the queue log to the newly-active session.
       if (session) setQueueLogContext(session.projectPath, sessionId)
     },
 
@@ -1984,17 +2051,46 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // (services/api/claude.ts:2918-2922 in claude-vaz) and applies the
       // same > 0 guard. Output is always a fresh per-turn value, so it
       // overwrites unconditionally.
-      set(state => ({
-        totalTokensUsed: {
-          input: state.totalTokensUsed.input + input,
-          output: state.totalTokensUsed.output + output,
-        },
-        currentPromptTokens: input > 0 ? input : state.currentPromptTokens,
-        currentResponseTokens: output,
-      }))
+      set(state => {
+        const nextPrompt = input > 0 ? input : state.currentPromptTokens
+        const nextResponse = output
+        // Persist last-known token counts onto the active session so the
+        // ctx pill restores correctly when the user reopens this session
+        // in a future app run. Without this, currentPromptTokens is global
+        // state and a freshly-loaded session shows 0% even with 50 turns
+        // of accumulated history.
+        let nextSessions = state.sessions
+        if (state.activeSessionId) {
+          const active = state.sessions.get(state.activeSessionId)
+          if (active) {
+            nextSessions = new Map(state.sessions)
+            nextSessions.set(state.activeSessionId, {
+              ...active,
+              lastPromptTokens: nextPrompt,
+              lastResponseTokens: nextResponse,
+              updatedAt: Date.now(),
+            })
+          }
+        }
+        return {
+          totalTokensUsed: {
+            input: state.totalTokensUsed.input + input,
+            output: state.totalTokensUsed.output + output,
+          },
+          currentPromptTokens: nextPrompt,
+          currentResponseTokens: nextResponse,
+          sessions: nextSessions,
+        }
+      })
     },
 
     resetTokenUsage: () => {
+      // Per-request reset: zero the current-turn counters so the ctx pill
+      // doesn't show stale numbers while the next request streams. The
+      // session-persisted lastPromptTokens / lastResponseTokens are NOT
+      // touched — they're authoritative for "what was the context size at
+      // the end of the last completed turn" and the indicator falls back
+      // to them when the new turn hasn't produced usage data yet.
       set({
         totalTokensUsed: { input: 0, output: 0 },
         currentPromptTokens: 0,

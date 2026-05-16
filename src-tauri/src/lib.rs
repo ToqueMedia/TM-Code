@@ -503,8 +503,7 @@ fn is_directory(path: String) -> bool {
 /// no-op surface.
 #[tauri::command]
 fn open_new_instance() -> std::result::Result<(), String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("current_exe failed: {}", e))?;
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {}", e))?;
     std::process::Command::new(&exe)
         .spawn()
         .map(|_| ())
