@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useAgentStore } from '../stores/agentStore'
 import { useChatStore } from '../stores/chatStore'
 import { usePermissionStore } from '../stores/permissionStore'
+import { useCredentialRequestStore } from '../stores/credentialRequestStore'
 
 /**
  * Elapsed-time ticker for any UI that surfaces "the agent is busy for N seconds".
@@ -16,8 +17,17 @@ import { usePermissionStore } from '../stores/permissionStore'
  *    AgentStatusBar — "12s in awaiting_response" is more useful than total).
  *  - `mode: 'session'` runs from when streaming started (used by the activity
  *    indicator and terminal status — they want total wall time per request).
- *  - **Both modes freeze when a permission dialog is open.** The user is the one
- *    working then, not the agent. The frozen value is preserved exactly.
+ *  - **Both modes freeze when the agent is waiting on the user.** Three wait
+ *    states qualify:
+ *      1. permissionStore.pendingPermission — tool-permission dialog open.
+ *      2. credentialRequestStore.pending.size > 0 — request_credentials form
+ *         rendered in chat, awaiting submit/skip.
+ *      3. chatStore.pendingDiffs.length > 0 — write/edit diff awaiting
+ *         approve/reject inline.
+ *     In any of these the user is the one working; the agent's wall clock
+ *     would lie ("11m 25s applying changes…" while the agent has been
+ *     blocked on a credentials form for 8 of those minutes). Freeze the
+ *     value during the wait; resume from the same instant.
  */
 export function useAgentElapsed(mode: 'phase' | 'session'): {
   elapsedMs: number
@@ -26,11 +36,13 @@ export function useAgentElapsed(mode: 'phase' | 'session'): {
   const status = useAgentStore(s => s.status)
   const isStreaming = useChatStore(s => s.isStreaming)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
+  const pendingCredentialCount = useCredentialRequestStore(s => s.pending.size)
+  const pendingDiffCount = useChatStore(s => s.pendingDiffs.length)
 
   const isBusy = mode === 'phase'
     ? status !== 'idle' && status !== 'error'
     : isStreaming
-  const isPaused = !!pendingPermission
+  const isPaused = !!pendingPermission || pendingCredentialCount > 0 || pendingDiffCount > 0
 
   const [elapsedMs, setElapsedMs] = useState(0)
   const phaseStartRef = useRef<number>(0)

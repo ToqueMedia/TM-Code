@@ -2020,34 +2020,38 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     addTokenUsage: (input: number, output: number) => {
-      // Two concerns, two destinations (formerly conflated into one field):
+      // Three counters, three semantics. Get this right or the UI lies in
+      // ways that take a user-reported "904k tokens sent to a 256k window"
+      // to root-cause.
       //
-      //   totalTokensUsed: cumulative WIRE COST across the turns of the
-      //     current user message. Both input and output SUMMED — yes input
-      //     too: each turn's prompt re-sends the prior turns, so the wire
-      //     literally carried that many tokens. This is what the activity
-      //     indicator shows ("↑ Nk · Mk") and matches the user's intuition
-      //     that "total tokens used" should grow as the agent works.
+      //   totalTokensUsed.input: MAX(prev, newInput) across the turns of
+      //     the current user message. Every agent-loop iteration re-sends
+      //     the full conversation history, so each iteration's input
+      //     ALREADY contains the previous iterations' inputs. Summing
+      //     produces double-count (n turns × ~history-size = inflated
+      //     total; this is what gave a real user "↑ 904k" while the actual
+      //     context-pressure pill read 15 % of 256 K = 38 K). MAX is the
+      //     peak wire-size during the request — bounded by the context
+      //     window AND robust to mid-request compaction shrinking the
+      //     prompt. The activity indicator ("↑ Nk") shows this.
       //
-      //   currentPromptTokens: REPLACED on every call — represents the size
-      //     of the most recent prompt sent. This is the natural denominator
-      //     for the context-window pressure pill (X% of 200K). NOT
-      //     interesting for "total cost" — that's the cumulative above.
+      //   totalTokensUsed.output: SUMMED across turns. Each turn emits
+      //     NEW output tokens (not history echo), so summing is the real
+      //     "tokens we generated this request".
       //
-      // The conflation in the earlier "input = max-across-turns" version
-      // gave WRONG numbers to both consumers: the activity indicator got a
-      // value that didn't grow turn-by-turn ("não soma" was the user's
-      // complaint), and the window-pressure pill was technically right but
-      // for the wrong reason (max happened to coincide with last because
-      // prompts only grow). Splitting the fields makes each consumer use
-      // the value that matches its meaning.
+      //   currentPromptTokens: REPLACED on every call — the size of the
+      //     most recent prompt on the wire. The natural denominator for
+      //     the context-window pressure pill (X % of 256 K). REPLACED
+      //     (not MAX) so compaction events are visible to the pill —
+      //     "we shrank the prompt" is information the user should see.
+      //
       // Anti-overwrite guard. Anthropic streaming sends usage info twice
       // per turn: `message_start` carries the real input_tokens; the final
       // `message_delta` carries the output_tokens AND — depending on
       // upstream — either echoes input_tokens or sends 0 for it. Letting
       // the 0 win produces the visible "pill bounces up/down" symptom:
-      // pill at 35% during the turn → drops to ~response/window at delta →
-      // climbs back next turn. Claude Code documents this exact behaviour
+      // pill at 35 % during the turn → drops to ~response/window at delta →
+      // climbs back next turn. Claude Code documents the exact behaviour
       // (services/api/claude.ts:2918-2922 in claude-vaz) and applies the
       // same > 0 guard. Output is always a fresh per-turn value, so it
       // overwrites unconditionally.
@@ -2074,7 +2078,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
         return {
           totalTokensUsed: {
-            input: state.totalTokensUsed.input + input,
+            // MAX, not SUM. See header comment for the 904k-vs-38k bug
+            // this prevents. `input > 0` guard piggy-backs on the same
+            // anti-zero-overwrite logic as currentPromptTokens.
+            input: input > 0 ? Math.max(state.totalTokensUsed.input, input) : state.totalTokensUsed.input,
             output: state.totalTokensUsed.output + output,
           },
           currentPromptTokens: nextPrompt,
