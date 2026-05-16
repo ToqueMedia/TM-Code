@@ -447,7 +447,13 @@ Before writing PLAN.md, work through these steps using your read-only tools:
 2. Identify constraints: what exists that you must integrate with? What patterns does the codebase follow?
 3. Consider at least 2 architectural approaches. Choose one with explicit reasoning.
 4. Identify what can go wrong — failure modes, edge cases, integration risks.
-5. Then write PLAN.md.`
+5. Then write PLAN.md.
+
+## Research budget (hard cap)
+
+You have at most **3 web tool calls** combined (web_search + web_fetch) for this turn. Each fetched page consumes output budget you need to write PLAN.md, and reasoning tokens you need to weigh trade-offs in §7. Once you reach 3, stop researching and write the plan with what you have — record any remaining unknowns in §14 Open Questions instead of chasing them.
+
+Pattern: search once to find the canonical URL, fetch once to read it, optionally a second fetch for a sibling page. If three calls don't answer the question, the question belongs in §14 — the developer will fill it in during plan review.`
 }
 
 function getComplexityClassification(): string {

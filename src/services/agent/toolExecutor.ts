@@ -322,6 +322,12 @@ class ToolExecutor {
       const parsed = JSON.parse(result)
       if (parsed?.type === 'diff') return result
     } catch { /* not JSON — proceed to truncation */ }
+    // read_large_result already produced a model-bounded slice (limit ≤ 30000) +
+    // a continuation suffix. Passing it through truncateResult would nest a new
+    // large_result every time the slice + suffix exceeds the 30K threshold —
+    // the model then chases pagination of pagination, doubling content in
+    // context and starving the output budget before write_file lands.
+    if (toolName === 'read_large_result') return result
     return this.truncateResult(result)
   }
 
@@ -1884,22 +1890,42 @@ class ToolExecutor {
 
         const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
 
-        let response: Awaited<ReturnType<typeof tauriFetch>>
-        try {
-          response = await tauriFetch(`${workerUrl}/v1/web-fetch`, {
+        const callWebFetch = async (token: string) =>
+          tauriFetch(`${workerUrl}/v1/web-fetch`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${idToken}`
+              'Authorization': `Bearer ${token}`,
             },
             body: JSON.stringify({ url, maxLength }),
             signal,
           })
+
+        let response: Awaited<ReturnType<typeof tauriFetch>>
+        try {
+          response = await callWebFetch(idToken)
         } catch (err) {
           if (err instanceof DOMException && err.name === 'AbortError') {
             return `Web fetch cancelled by user (${url}).`
           }
           throw err
+        }
+
+        // 401 retry with a force-refreshed token — covers the case where the
+        // SDK's cached token was stale (e.g. wake-from-sleep). Mirrors the
+        // same pattern used in agentService for /v1/chat/completions.
+        if (response.status === 401) {
+          const refreshed = await firebaseAuth.getIdToken(true)
+          if (refreshed) {
+            try {
+              response = await callWebFetch(refreshed)
+            } catch (err) {
+              if (err instanceof DOMException && err.name === 'AbortError') {
+                return `Web fetch cancelled by user (${url}).`
+              }
+              throw err
+            }
+          }
         }
 
         if (!response.ok) {
@@ -2245,7 +2271,7 @@ class ToolExecutor {
           properties: {
             id: { type: 'string', description: 'Reference ID (e.g., "large_result_1")' },
             offset: { type: 'number', description: 'Character offset to start reading from. Default: 0.' },
-            limit: { type: 'number', description: 'Maximum characters to return. Default: 10000. Max: 30000.' }
+            limit: { type: 'number', description: 'Maximum characters to return. Default: 10000. Max: 25000 — read in 2–3 well-targeted pages instead of one giant slice; the suffix tells you exactly how many chars remain.' }
           },
           required: ['id']
         },
@@ -2259,7 +2285,7 @@ class ToolExecutor {
         }
 
         const offset = Math.max(0, (input.offset as number) || 0)
-        const limit = Math.min((input.limit as number) || 10000, 30000)
+        const limit = Math.min((input.limit as number) || 10000, 25000)
         const slice = content.slice(offset, offset + limit)
         const hasMore = offset + limit < content.length
         const remaining = content.length - offset - limit

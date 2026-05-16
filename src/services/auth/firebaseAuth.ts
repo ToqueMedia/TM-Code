@@ -639,7 +639,49 @@ class FirebaseAuthService {
       console.warn('[auth] getIdToken: currentUser is null')
       return null
     }
-    return this.currentUser.getIdToken(forceRefresh)
+    // Firebase ID tokens expire after 1h (Google-imposed, not configurable).
+    // The Web SDK already auto-refreshes when the cached token is within ~5min
+    // of expiry — calling getIdToken() without args is enough in the steady
+    // state. The fallback below covers two edge cases:
+    //   1. Laptop sleep beyond the proactive-refresh timer — first call after
+    //      wake may return an expired/near-expired token; we retry with force.
+    //   2. SDK cache corruption — rare but observed when IndexedDB is purged.
+    // The cost is one extra Identity Toolkit RTT when the cached token is
+    // already stale; happy path is unchanged because Firebase decodes the JWT
+    // locally before deciding to refresh.
+    try {
+      const token = await this.currentUser.getIdToken(forceRefresh)
+      if (token && !forceRefresh && this.isTokenNearExpiry(token)) {
+        return await this.currentUser.getIdToken(true)
+      }
+      return token
+    } catch (err) {
+      // SDK refresh itself failed (network blip, revoked refresh token).
+      // Surface null so callers can decide between "session expired" UX vs.
+      // a transient retry — same contract as before for the no-user branch.
+      console.warn('[auth] getIdToken refresh failed:', err)
+      return null
+    }
+  }
+
+  /**
+   * Decode the JWT payload without verification and check whether the exp
+   * claim is within 60s of now. Local-only — used to decide whether to
+   * proactively force-refresh before handing the token to a long-running
+   * call (chat streaming, deploy upload). No verification because the SDK
+   * just minted/cached this token; if it's tampered the upstream JWKS
+   * verification will reject it.
+   */
+  private isTokenNearExpiry(token: string): boolean {
+    try {
+      const [, payload] = token.split('.')
+      if (!payload) return false
+      const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))) as { exp?: number }
+      if (typeof decoded.exp !== 'number') return false
+      return decoded.exp * 1000 - Date.now() < 60_000
+    } catch {
+      return false
+    }
   }
 
   isAuthenticated(): boolean {

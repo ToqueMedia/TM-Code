@@ -486,6 +486,31 @@ fn is_directory(path: String) -> bool {
     std::path::Path::new(&path).is_dir()
 }
 
+/// Launch another TM Code window as an independent OS process. Each instance
+/// gets its own Rust state, its own Zustand stores, its own MCP processes —
+/// the only thing they share is Firebase auth (persisted in the per-user data
+/// dir's IndexedDB, so all instances stay logged in to the same account).
+///
+/// Cross-platform notes:
+///   * macOS — direct binary spawn bypasses Launch Services' "one instance per
+///     .app" check. `open -n /Applications/TM Code.app` works equivalently
+///     from the terminal.
+///   * Windows / Linux — each spawn is a separate process by default; no
+///     special handling needed.
+///
+/// We intentionally do NOT add `tauri-plugin-single-instance`; that plugin
+/// would defeat this command. If it ever gets added, this command becomes a
+/// no-op surface.
+#[tauri::command]
+fn open_new_instance() -> std::result::Result<(), String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("current_exe failed: {}", e))?;
+    std::process::Command::new(&exe)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("spawn failed: {}", e))
+}
+
 /// AppHandle stash for the macOS dock menu handler. The handler is an
 /// Objective-C object whose selector methods can't take Rust closures or
 /// Tauri's State<T>, so the handle has to live in a static. Wrapped in
@@ -695,6 +720,15 @@ pub fn run() {
                     .build()?;
 
                 let file_menu = SubmenuBuilder::new(handle, "File")
+                    // `CmdOrCtrl+Alt+N` instead of `CmdOrCtrl+Shift+N` — the
+                    // shift variant is already bound to "New Project" by the
+                    // frontend's keybindings (settingsStore.shortcuts.newProject
+                    // listened in WelcomeHero). Two handlers firing on the same
+                    // keystroke would spawn an instance AND open the new-project
+                    // wizard. CmdOrCtrl+Alt+N is conflict-free and matches the
+                    // "less common, deliberate" feel of opening a new window.
+                    .item(&MenuItemBuilder::with_id("new-window", "New Window").accelerator("CmdOrCtrl+Alt+N").build(handle)?)
+                    .separator()
                     .item(&MenuItemBuilder::with_id("open-file", "Open File…").accelerator("CmdOrCtrl+Shift+O").build(handle)?)
                     .item(&MenuItemBuilder::with_id("open-folder", "Open Folder…").accelerator("CmdOrCtrl+O").build(handle)?)
                     .separator()
@@ -788,6 +822,16 @@ pub fn run() {
                     let safe_id: String = id.chars()
                         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
                         .collect();
+                    // "New Window" is a backend-only action — spawn a fresh OS
+                    // process directly here instead of round-tripping through
+                    // the frontend. The current instance keeps its state; the
+                    // new process starts with a clean splash + window.
+                    if safe_id == "new-window" {
+                        if let Err(err) = open_new_instance() {
+                            eprintln!("[menu] new-window spawn failed: {}", err);
+                        }
+                        return;
+                    }
                     if let Some(window) = app_handle.get_webview_window("main") {
                         let _: std::result::Result<(), _> = window.eval(format!(
                             "window.dispatchEvent(new CustomEvent('native-menu', {{ detail: {{ id: '{}' }} }}))",
@@ -1232,7 +1276,8 @@ pub fn run() {
             detect_test_browsers,
             app_ready,
             take_pending_open_files,
-            is_directory
+            is_directory,
+            open_new_instance
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

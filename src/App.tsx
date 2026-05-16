@@ -153,16 +153,52 @@ function App() {
 		async function openManyInEditor(paths: string[]) {
 			if (paths.length === 0) return
 			try {
-				const projectRoot = commonAncestor(paths)
 				const { useProjectStore } = await import('@/stores/projectStore')
-				const already = useProjectStore.getState().currentProject?.path
-				if (already !== projectRoot) {
-					await useProjectStore.getState().openProject(projectRoot)
-				}
+				const projectStore = useProjectStore.getState()
+				const already = projectStore.currentProject?.path
+
+				// File-only opens (single file or a few siblings) MUST NOT mount
+				// the surrounding folder as a TM Code project — that pollutes
+				// recents with directories the user never intended to track
+				// (e.g. /Users/me/Documents because they "Open With" a stray
+				// .md). XCode-style behaviour: show the file in a bare editor,
+				// touch nothing else. If a project is already open we just open
+				// the file in its editor; otherwise we drop into a "no project,
+				// file viewer" state without persisting anything to recents.
+				const { invoke } = await import('@tauri-apps/api/core')
+				// is_directory failure must NOT silently downgrade a folder to a
+				// "file open" — the next step would skip openProject and try to
+				// open the directory path in the editor, breaking the user flow
+				// with no visible reason. Default to `true` on IPC failure so we
+				// preserve the previous behaviour (mount as project) when the
+				// probe is inconclusive. Only treat as file-only when EVERY probe
+				// definitively returned false.
+				const probes = await Promise.all(
+					paths.map(p => invoke<boolean>('is_directory', { path: p }).catch(() => true))
+				)
+				const onlyFiles = probes.every(isDir => isDir === false)
+
 				const { useEditorRepository } = await import('@/stores/editorStore')
+				const { useLayoutStore } = await import('@/stores/layoutStore')
+
+				if (onlyFiles) {
+					// No openProject call. If there's already a project open, the
+					// files open inside it (same UX as drag-drop onto the editor
+					// pane). If not, the editor shows the file alone over the
+					// welcome backdrop — recents stays untouched.
+					const repo = useEditorRepository.getState()
+					for (const p of paths) repo.openFile(p)
+					useLayoutStore.getState().setViewMode('editor')
+					return
+				}
+
+				// Folder open (or mixed) — keep the project-mount path.
+				const projectRoot = commonAncestor(paths)
+				if (already !== projectRoot) {
+					await projectStore.openProject(projectRoot)
+				}
 				const repo = useEditorRepository.getState()
 				for (const p of paths) repo.openFile(p)
-				const { useLayoutStore } = await import('@/stores/layoutStore')
 				useLayoutStore.getState().setViewMode('editor')
 			} catch (err) {
 				logger.error('app', 'open-with batch failed:', err)

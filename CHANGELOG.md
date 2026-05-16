@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.6.2] — 2026-05-16
+
+Patch release focused on a `/plan` silent-failure bug, multi-instance support, file-open hygiene, and proactive auth refresh.
+
+### Fixed
+
+- **`/plan` silent failure when reading long skills.** The architect could read `auth-proxy` (~37 KB) and then chain `read_large_result` calls that each tripped the 30 KB tool-output truncate threshold — every page-read created a NESTED `large_result_N` reference and the model chased pagination of pagination until output budget collapsed before `write_file` landed. The session ended cleanly (status=idle) with the system message "Plan generation did not finish — PLAN.md was not written" and no error. Now `read_large_result` bypasses truncation (the slice is already model-bounded), the per-page `limit` is capped at 25 K instead of 30 K so slice + continuation suffix never re-triggers truncate, and the schema description hints at smaller targeted pages.
+- **Backend Firestore 403 noise + plan misclassification.** `getUserPlan` in the worker didn't accept the `env` parameter, so its internal `getUserData` call fell back to user-idToken auth on Firestore. With the v2 deny-all Security Rules, every call logged `[firestore] getUserData failed (403) ... — defaulting to explorer` and used explorer rate limits regardless of the user's real plan. Three callsites threaded fixed (`/v1/commit-message`, `/v1/web-fetch`, `/v1/summarize`). Chat completions was already correct.
+- **"Open With → TM Code" on a single file mounted the parent folder as a project.** Opening a stray `.md` from Finder/Explorer would add `/Users/<you>/Documents` (or wherever the file lived) to the recent projects list — clutter the user never asked for. The opener now probes each path with `is_directory`; if every queued path is a file, the file opens in the editor without `openProject` running. Mirrors the XCode pattern.
+- **Stale ID token caused intermittent 401s after laptop wake.** Firebase ID tokens expire after 1 h (Google-imposed, not configurable); the Web SDK auto-refreshes ~5 min before expiry but the proactive timer can miss after long suspensions. `FirebaseAuthService.getIdToken()` now decodes the cached JWT and force-refreshes when `exp` is within 60 s of `Date.now()`. The `web_fetch` tool also retries with a force-refreshed token on a 401 — same pattern the chat completions path already uses.
+
+### Added
+
+- **Multiple instances.** "File → New Window" (`Cmd/Ctrl+Alt+N`) launches another TM Code process. Each instance is an independent OS process with its own backend state, Zustand stores, and MCP children; Firebase auth persists in the per-user data dir so all instances stay logged in to the same account. Token-budget gauges reflect server-side state via Firestore listeners, so a quota change in one window appears in the other automatically. Memory cost: ~250–400 MB per extra instance — same trade-off as VS Code's multi-window model.
+- **`/plan` research budget.** The architect prompt now caps web research at 3 calls (`web_search` + `web_fetch` combined). Remaining unknowns go into `§14 Open Questions` instead of more fetches. This will relax in v0.7.0 when the `task` sub-agent ships and broad research moves off the parent context entirely.
+
+### Documentation
+
+- New: `docs/PLAN-SUBAGENTS-V0.7.0.md` — design doc for the v0.7.0 `task` tool + built-in `Explore` / `Research` sub-agents. ~90% port of `claude-vaz/tools/AgentTool` with explicit Chat-Mode + Terminal-Mode support.
+- Removed: `docs/PLAN-PREVIEW-BROWSER-PARITY.md` (shipped in v0.6.1), `docs/PLAN-NATIVE-PREVIEW.md` (superseded by Preview Browser Parity).
+
+### Deployment notes
+
+The Firestore 403 fix is server-side. Tagging this release ships the IDE but **does not deploy the worker** — run `wrangler deploy --env production` in `toquemedia-studio-api` to land the backend half. Until then, the IDE is on 0.6.2 against a 0.6.1-era worker; the user-facing impact is only the noisy 403 logs in observability and the rate-limit misclassification on `/v1/web-fetch` and `/v1/commit-message`.
+
 ## [0.6.0] — 2026-05-07
 
 **BYOK lands.** Bring your own API keys for the providers you already pay for and route requests through them directly — your tokens, your bill, the same chat-first IDE.
