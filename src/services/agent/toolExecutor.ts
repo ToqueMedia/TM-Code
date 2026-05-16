@@ -102,6 +102,54 @@ function createLinkedAbortController(parentSignal?: AbortSignal): AbortControlle
   return child
 }
 
+// ── Platform-managed credential gate ────────────────────────────────
+//
+// `request_credentials` rejects fields whose IDs match any of these names —
+// those credentials live ONLY on the TM Code worker / are written by
+// provision_auth / provision_deploy. Asking the developer for them shows a
+// dialog they cannot satisfy. The auth-proxy skill (hard rule #2) and the
+// publish-backend skill both forbid this in prose; this is the mechanical
+// enforcement after a real session (sess_1778931389233_p1v9ao, 2026-05-16)
+// where the model fell back to request_credentials after provision_auth
+// returned a soft-failure string. Lists current TM_* names + every legacy
+// name still written by provision_auth for backward-compat.
+const PLATFORM_MANAGED_FIELD_IDS = new Set<string>([
+  // Canonical TM_* names (written by provision_auth)
+  'TM_AUTH_KEY', 'VITE_TM_AUTH_KEY',
+  'TM_AUTH_DOMAIN', 'VITE_TM_AUTH_DOMAIN',
+  'TM_PROJECT_ID', 'VITE_TM_PROJECT_ID',
+  'TM_TENANT_ID', 'VITE_TM_TENANT_ID',
+  'VITE_TM_GOOGLE_CLIENT_ID',
+  // Legacy mirrors (dual-written by provision_auth for old projects)
+  'VITE_FIREBASE_API_KEY', 'VITE_FIREBASE_AUTH_DOMAIN', 'VITE_FIREBASE_PROJECT_ID',
+  'VITE_FIREBASE_APP_ID', 'VITE_FIREBASE_MESSAGING_SENDER_ID',
+  'VITE_FIREBASE_STORAGE_BUCKET', 'VITE_FIREBASE_MEASUREMENT_ID',
+  'VITE_GIP_TENANT_ID', 'VITE_GOOGLE_CLIENT_ID',
+  'GIP_FIREBASE_API_KEY', 'GIP_TENANT_ID', 'GIP_PROJECT_ID', 'GCP_PROJECT_ID',
+  // Deploy / data layer (written by provision_deploy or never user-supplied)
+  'APP_ID', 'FIREBASE_PROJECT_ID', 'FIREBASE_APP_ID',
+  'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY',
+  // Database — the platform DB is reached via runtime IAM, no URL/key
+  'DATABASE_URL', 'FIRESTORE_EMULATOR_HOST',
+])
+
+function describePlatformManagedField(id: string): string | null {
+  if (!PLATFORM_MANAGED_FIELD_IDS.has(id)) return null
+  return (
+    `Blocked: "${id}" is a PLATFORM-MANAGED credential — never request it via this form. ` +
+    `It is written automatically by provision_auth (auth/GIP credentials) or provision_deploy (deploy/DB credentials), ` +
+    `not collected from the developer.\n\n` +
+    `If you reached for request_credentials because provision_auth FAILED, that is the wrong recovery path. ` +
+    `provision_auth failure means the platform tenant could not be created — the credential simply doesn't exist yet. ` +
+    `Asking the developer to type it in cannot succeed; the developer has no way to obtain it themselves.\n\n` +
+    `Correct recovery:\n` +
+    `  1. Stop the auth implementation.\n` +
+    `  2. Tell the developer in chat that provision_auth failed and report the exact error message it returned.\n` +
+    `  3. Ask the developer whether to retry provision_auth or skip the auth feature entirely.\n` +
+    `Do NOT continue scaffolding auth code that depends on these credentials.`
+  )
+}
+
 // === Tool Executor ===
 
 class ToolExecutor {
@@ -2913,12 +2961,43 @@ Project root: ${projectRoot}`
             }),
           })
         } catch (err) {
-          return `Failed to reach auth provisioning endpoint: ${err instanceof Error ? err.message : String(err)}`
+          // Same hard-stop contract as the HTTP-error path below. Network
+          // failures used to read as transient by the model and trigger
+          // "let me ask the developer for the credentials instead", which
+          // is always wrong (the credentials don't exist until provision_auth
+          // succeeds).
+          return (
+            `PROVISION_AUTH FAILED — STOP THE AUTH IMPLEMENTATION NOW.\n\n` +
+            `Network error reaching the auth provisioning endpoint: ${err instanceof Error ? err.message : String(err)}\n\n` +
+            `Do NOT fall back to request_credentials for VITE_FIREBASE_*, VITE_TM_*, VITE_GOOGLE_CLIENT_ID. ` +
+            `Those credentials do not exist until provision_auth succeeds; asking the developer to type them is impossible to satisfy.\n\n` +
+            `Required recovery: report the network error to the developer in chat, suggest checking their connection, and wait for them to decide whether to retry. Do not auto-retry.`
+          )
         }
 
         if (!provisionRes.ok) {
           const body = await provisionRes.text().catch(() => '')
-          return `GIP provisioning failed (HTTP ${provisionRes.status}): ${body.slice(0, 300)}`
+          // STOP signal — without this, the model rationalises around the
+          // failure and falls back to request_credentials for VITE_FIREBASE_*
+          // and friends, which only ever produces a form the developer
+          // cannot satisfy. Hard-block the rationalisation by naming the
+          // exact wrong-next-steps and prescribing the correct recovery.
+          return (
+            `PROVISION_AUTH FAILED — STOP THE AUTH IMPLEMENTATION NOW.\n\n` +
+            `Error from worker (HTTP ${provisionRes.status}): ${body.slice(0, 300)}\n\n` +
+            `What this means: the platform tenant for this project could not be created. ` +
+            `Without it, NONE of the auth credentials exist — there is no Firebase API key, no auth domain, ` +
+            `no tenant id, no Google client id. Auth simply cannot be implemented until provision_auth succeeds.\n\n` +
+            `Wrong recovery paths (DO NOT TAKE):\n` +
+            `  ✗ request_credentials for VITE_FIREBASE_*, VITE_TM_*, VITE_GOOGLE_CLIENT_ID — the developer does not have these; the form will block on the platform-managed field IDs anyway.\n` +
+            `  ✗ "implement auth-proxy manually" — the proxy still needs the platform tenant; without it every call returns API_KEY_INVALID.\n` +
+            `  ✗ scaffold a LoginScreen / Firebase init expecting VITE_FIREBASE_API_KEY to exist later.\n\n` +
+            `Required recovery:\n` +
+            `  1. STOP the auth task. Do not write any auth-related code.\n` +
+            `  2. Tell the developer in chat what happened — quote the error above verbatim.\n` +
+            `  3. Suggest one of: (a) retry provision_auth in a new chat turn if this is a transient error, (b) report the error to TM Code support if it persists, (c) skip the auth feature for now.\n` +
+            `  4. Wait for the developer's decision. Do not auto-retry.`
+          )
         }
 
         const data = (await provisionRes.json()) as {
@@ -3262,6 +3341,18 @@ Project root: ${projectRoot}`
           }
           if (!/^[A-Z_][A-Z0-9_]*$/.test(id)) {
             return `Field id "${id}" is not a valid env var key (must match /^[A-Z_][A-Z0-9_]*$/).`
+          }
+          // Mechanical blocklist for platform-managed credentials. These are
+          // written by provision_auth / provision_deploy when those tools
+          // succeed; asking the developer for them surfaces a form they
+          // cannot satisfy. Documented in the auth-proxy skill's hard rules
+          // (rule #2). The prose-only directive in the tool description was
+          // ignored repeatedly (BugHunter session 2026-05-16) when
+          // provision_auth failed and the model fell back to "let me just
+          // ask the developer for these" — so the gate is now mechanical.
+          const blockReason = describePlatformManagedField(id)
+          if (blockReason) {
+            return blockReason
           }
           if (seenIds.has(id)) {
             return `Duplicate field id "${id}".`
