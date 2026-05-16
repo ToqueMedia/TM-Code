@@ -61,6 +61,12 @@ const WORKER_URL = resolveWorkerUrl()
 const MAX_OUTPUT_TOKENS = 32768
 // Max auto-continuations when model hits token limit mid-response
 const MAX_CONTINUATIONS = 3
+// Max retries when the upstream→worker SSE drops mid-stream
+// (worker emits `upstream_stream_interrupted` typed event). Separate from
+// MAX_CONTINUATIONS because the trigger is network-side, not model-side.
+// 2 retries = 3 total attempts — covers ~90% of transient blips while
+// failing fast enough that a real outage doesn't keep the user waiting.
+const MAX_INTERRUPT_RETRIES = 2
 
 // Context compression: percentage-based threshold (like Claude Code's ~83.5%).
 // Model context windows vary (128K, 200K, 1M) — percentage adapts automatically.
@@ -590,6 +596,7 @@ class AgentService {
 
     let turnCount = 0
     let continuationCount = 0
+    let interruptRetryCount = 0
     let enforcementRetries = 0
     const MAX_ENFORCEMENT_RETRIES = 3
 
@@ -701,6 +708,55 @@ class AgentService {
           })
           callbacks.onTurnComplete(turnCount)
           continue
+        }
+
+        // Handle mid-stream upstream interruption — set by processStreamedTurn
+        // when the parser receives the worker's `upstream_stream_interrupted`
+        // typed event. The conversation state is intact; we re-send the same
+        // turn with any partial text/reasoning preserved (so the user doesn't
+        // see flicker) and a continuation hint to the model. Capped separately
+        // from `length` continuations because the failure modes are different
+        // — `length` means "model has more to say"; `stream_interrupted` means
+        // "network blip, model may or may not have actually emitted anything".
+        if (turnResult.finishReason === 'stream_interrupted' && interruptRetryCount < MAX_INTERRUPT_RETRIES) {
+          interruptRetryCount++
+          const partialBlocks: AnthropicContentBlock[] = []
+          if (this.preserveReasoningBetweenTurns && turnResult.reasoningContent) {
+            partialBlocks.push({ type: 'thinking', thinking: turnResult.reasoningContent })
+          }
+          if (turnResult.textContent) {
+            partialBlocks.push({ type: 'text', text: turnResult.textContent })
+          }
+          // If nothing was emitted yet, just re-send the original last user
+          // message (skip the assistant placeholder + continue prompt). The
+          // model gets the same input and produces a fresh response.
+          if (partialBlocks.length === 0) {
+            logger.info('agent', `[stream] retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES}: empty partial, re-issuing same turn`)
+          } else {
+            messages.push({
+              role: 'assistant',
+              content: partialBlocks,
+            })
+            messages.push({
+              role: 'user',
+              content: 'The previous response was cut off by a network issue. Continue exactly where you left off — do not restart, do not summarise, do not apologise.',
+            })
+            logger.info('agent', `[stream] retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES}: appended partial (${(turnResult.textContent || '').length} chars text, reasoning=${!!turnResult.reasoningContent})`)
+          }
+          callbacks.onTurnComplete(turnCount)
+          continue
+        }
+        if (turnResult.finishReason === 'stream_interrupted' && interruptRetryCount >= MAX_INTERRUPT_RETRIES) {
+          // Exhausted retries — propagate the failure to the UI so the user
+          // can take over. The conversation state is preserved; they can
+          // type a new prompt or click Stop.
+          logger.error('agent', `[stream] exhausted ${MAX_INTERRUPT_RETRIES} retries — surfacing to user`)
+          callbacks.onError(new ServiceError(
+            `Conexão com o modelo interrompida ${MAX_INTERRUPT_RETRIES + 1} vezes seguidas. Verifica a tua ligação e tenta novamente.`,
+            'STREAM_INTERRUPTED_EXHAUSTED',
+            false,
+          ))
+          break
         }
 
         // Add assistant message to history in Anthropic content blocks format.
@@ -2252,6 +2308,19 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
           }
 
           case 'error': {
+            // Mid-stream upstream drop is a TRANSIENT class — the worker
+            // emitted a typed event (`upstream_stream_interrupted`) because
+            // the TCP between worker→provider died but the conversation
+            // state is intact. Don't propagate to the UI as a hard error;
+            // signal the outer runAgentLoop to retry via a sentinel
+            // finishReason (`stream_interrupted`), which the loop maps to
+            // the same partial-response continuation path used for
+            // `finish_reason='length'`. See MAX_INTERRUPT_RETRIES.
+            if (event.errorType === 'upstream_stream_interrupted') {
+              finishReason = 'stream_interrupted'
+              logger.warn('agent', `[stream] interrupted mid-stream — will auto-retry: ${event.message}`)
+              break
+            }
             callbacks.onError(new ServiceError(event.message, 'STREAM_ERROR', false))
             break
           }

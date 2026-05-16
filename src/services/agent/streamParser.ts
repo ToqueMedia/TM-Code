@@ -52,7 +52,7 @@ export type StreamEvent =
       plan: UserPlanName
       usedOverage: boolean
     }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; errorType?: string }
   | { type: 'done' }
 
 interface StreamParserCallbacks {
@@ -431,9 +431,9 @@ export async function parseOpenAISSEStream(
       const errType = chunk.error.type || 'upstream_error'
       const msg = errType === 'upstream_stream_interrupted'
         ? `The model's response was interrupted mid-stream (upstream: ${chunk.error.provider || 'unknown'}). ` +
-          `This is usually a transient network issue. Retry the request.`
+          `This is usually a transient network issue — retrying.`
         : `Upstream error (${errType}): ${chunk.error.message}`
-      callbacks.onEvent({ type: 'error', message: msg })
+      callbacks.onEvent({ type: 'error', message: msg, errorType: errType })
       // Don't emit `done` — the agent's onError handler is the right
       // termination path; emitting both would race.
       messageStopEmitted = true
