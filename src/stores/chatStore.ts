@@ -2039,24 +2039,35 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       //     NEW output tokens (not history echo), so summing is the real
       //     "tokens we generated this request".
       //
-      //   currentPromptTokens: REPLACED on every call — the size of the
-      //     most recent prompt on the wire. The natural denominator for
-      //     the context-window pressure pill (X % of 256 K). REPLACED
-      //     (not MAX) so compaction events are visible to the pill —
-      //     "we shrank the prompt" is information the user should see.
+      //   currentPromptTokens: WITHIN A TURN, monotonically grows via
+      //     Math.max — the size of the prompt on the wire only ever
+      //     increases as more events stream in. The natural denominator
+      //     for the context-window pressure pill (X % of 256 K). Reset
+      //     to 0 between turns by `resetTokenUsage` (called from
+      //     `agentRunner` at request start) AND by the compaction marker
+      //     handler — both points are the only places it can decrease.
+      //     Compaction shrinkage is therefore still visible to the pill
+      //     because the reset happens explicitly before the next turn's
+      //     `message_start` lands.
       //
-      // Anti-overwrite guard. Anthropic streaming sends usage info twice
+      // Anti-overwrite guards. Anthropic streaming sends usage info twice
       // per turn: `message_start` carries the real input_tokens; the final
       // `message_delta` carries the output_tokens AND — depending on
-      // upstream — either echoes input_tokens or sends 0 for it. Letting
-      // the 0 win produces the visible "pill bounces up/down" symptom:
-      // pill at 35 % during the turn → drops to ~response/window at delta →
-      // climbs back next turn. Claude Code documents the exact behaviour
-      // (services/api/claude.ts:2918-2922 in claude-vaz) and applies the
-      // same > 0 guard. Output is always a fresh per-turn value, so it
-      // overwrites unconditionally.
+      // upstream — either echoes input_tokens, sends 0, OR (BYOK adapters
+      // such as DashScope GLM-5.1, OpenRouter Mimo) sends a SMALLER
+      // non-zero value (only the billable / non-cached portion). Plain
+      // REPLACE produces the visible "pill bounces 13 % → 10 %" symptom
+      // when the message_delta's smaller value wins over message_start's
+      // total. Math.max + the `> 0` guard between them: zero never wins
+      // (claude-vaz parity, services/api/claude.ts:2918-2922), and a
+      // non-zero smaller value never replaces a non-zero larger one.
+      // Output is always a fresh per-turn value, so it overwrites
+      // unconditionally.
       set(state => {
-        const nextPrompt = input > 0 ? input : state.currentPromptTokens
+        const nextPrompt =
+          input > 0
+            ? Math.max(state.currentPromptTokens, input)
+            : state.currentPromptTokens
         const nextResponse = output
         // Persist last-known token counts onto the active session so the
         // ctx pill restores correctly when the user reopens this session
@@ -2237,13 +2248,30 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // (the bar would otherwise tween from 0% on every session open).
         const snapshot = (session as ChatSession & { lastTurnSnapshot?: import('../types/chat').SessionTurnSnapshot }).lastTurnSnapshot ?? null
 
+        // Mirror the snapshot values onto the session record itself so the
+        // ContextWindowIndicator's fallback (currentPromptTokens === 0 →
+        // session.lastPromptTokens) works on the very first turn after load.
+        // Without this, `resetTokenUsage` (fired by agentRunner at the start
+        // of every new request) zeros currentPromptTokens, the fallback hits
+        // an undefined session field, and the pill collapses to 0% until the
+        // new turn's message_start lands — the exact symptom reported on a
+        // freshly-opened session with history.
+        const sessionWithTokens: ChatSession =
+          snapshot
+            ? {
+                ...session,
+                lastPromptTokens: snapshot.promptTokens,
+                lastResponseTokens: snapshot.responseTokens,
+              }
+            : session
+
         set(() => {
           // Only keep the loaded session in memory to avoid unbounded growth
           const sessions = new Map<string, ChatSession>()
-          sessions.set(session.id, session)
+          sessions.set(sessionWithTokens.id, sessionWithTokens)
           return {
             sessions,
-            activeSessionId: session.id,
+            activeSessionId: sessionWithTokens.id,
             conversationHistory,
             currentTurnCount: 0,
             totalTokensUsed: { input: 0, output: 0 },

@@ -24,6 +24,7 @@
 // (no event: prefix) — handled inline.
 
 import type { CostBudgetStatus, UserPlanName } from '../../stores/billingStore'
+import { logger } from '../../utils/logger'
 
 export type StreamEvent =
   // Content events
@@ -65,6 +66,75 @@ interface StreamParserCallbacks {
  * Handles both event:+data: Anthropic events AND bare data: billing events
  * (TM Code extension injected by billingStream before the converter).
  */
+/**
+ * Streaming-idle watchdog: if the upstream emits no bytes for this long,
+ * treat the stream as silently broken and surface it as `upstream_stream_interrupted`
+ * so the agent loop's retry path kicks in (`agentService.ts:789-823`).
+ *
+ * Without this, a stalled upstream (DashScope / OpenRouter / direct-BYOK)
+ * holds the IDE in `await reader.read()` indefinitely because the SDK's
+ * request timeout only covers the initial fetch, not the streamed body.
+ *
+ * Claude-vaz parity: `services/api/claude.ts:1868-1928` uses the same
+ * 90 s value (`STREAM_IDLE_TIMEOUT_MS`) with a half-time warning. We skip
+ * the warning here — the retry path is the visible UX, no separate
+ * "warning" state to surface.
+ *
+ * The worker already sends SSE heartbeats (`fix(proxy): heartbeated SSE
+ * response`), so a healthy upstream resets the timer at least once every
+ * heartbeat interval. The watchdog only fires when both the upstream AND
+ * the heartbeat have gone silent — i.e. genuine stall.
+ *
+ * Build-time override via Vite env: `VITE_STREAM_IDLE_TIMEOUT_MS=180000`.
+ * Useful for local BYOK with heavy models (70B+ on consumer hardware can
+ * legitimately take >90s for the first token). Minimum 10 s floor so a
+ * misconfigured value doesn't disable the watchdog entirely.
+ */
+function getStreamIdleTimeoutMs(): number {
+  try {
+    const meta = import.meta as unknown as { env?: Record<string, string | undefined> }
+    const raw = meta.env?.VITE_STREAM_IDLE_TIMEOUT_MS
+    if (raw) {
+      const v = parseInt(raw, 10)
+      if (Number.isFinite(v) && v >= 10_000) return v
+    }
+  } catch {
+    /* import.meta not available (e.g. Jest) — fall back to default */
+  }
+  return 90_000
+}
+const STREAM_IDLE_TIMEOUT_MS = getStreamIdleTimeoutMs()
+
+/**
+ * Race one read() against an idle-timeout. Promise.race is the defensive
+ * pattern over `reader.cancel()`-from-a-timer: if the underlying cancel
+ * doesn't unblock the pending read (which can happen on some streams), we
+ * still resolve via the timer branch and exit the parser loop. The pending
+ * read promise leaks briefly but the stream is cancelled and the loop
+ * exits cleanly. Single source of truth for both parsers below.
+ */
+type ReadOrTimeout =
+  | { kind: 'chunk'; done: boolean; value?: Uint8Array }
+  | { kind: 'timeout' }
+
+async function readChunkOrTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number,
+): Promise<ReadOrTimeout> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeoutPromise = new Promise<ReadOrTimeout>(resolve => {
+    timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs)
+  })
+  try {
+    return await Promise.race([
+      reader.read().then(r => ({ kind: 'chunk' as const, done: r.done, value: r.value })),
+      timeoutPromise,
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export async function parseSSEStream(
   response: Response,
   callbacks: StreamParserCallbacks,
@@ -78,10 +148,21 @@ export async function parseSSEStream(
     while (true) {
       if (signal?.aborted) return
 
-      const { done, value } = await reader.read()
-      if (done) break
+      const r = await readChunkOrTimeout(reader, STREAM_IDLE_TIMEOUT_MS)
+      if (r.kind === 'timeout') {
+        logger.warn('agent', `[stream-watchdog] anthropic SSE — no upstream bytes for ${STREAM_IDLE_TIMEOUT_MS / 1000}s, emitting upstream_stream_interrupted`)
+        callbacks.onEvent({
+          type: 'error',
+          message: `Stream idle timeout — no bytes from upstream for ${STREAM_IDLE_TIMEOUT_MS / 1000}s. Treating as interrupted; the agent loop will retry.`,
+          errorType: 'upstream_stream_interrupted',
+        })
+        reader.cancel().catch(() => { /* best-effort, the read may stay pending */ })
+        return
+      }
+      if (r.done) break
+      if (!r.value) continue
 
-      buffer += decoder.decode(value, { stream: true })
+      buffer += decoder.decode(r.value, { stream: true })
 
       const lastNewline = buffer.lastIndexOf('\n')
       if (lastNewline === -1) continue
@@ -562,12 +643,27 @@ export async function parseOpenAISSEStream(
     }
   }
 
+  // Same streaming-idle watchdog as parseSSEStream — local BYOK (Ollama,
+  // LM Studio) is at least as susceptible: a hung local model server has
+  // no heartbeat at all. Promise.race shape so cancel() not unblocking
+  // doesn't trap us.
   try {
     while (true) {
       if (signal?.aborted) return
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
+      const r = await readChunkOrTimeout(reader, STREAM_IDLE_TIMEOUT_MS)
+      if (r.kind === 'timeout') {
+        logger.warn('agent', `[stream-watchdog] openai SSE — no upstream bytes for ${STREAM_IDLE_TIMEOUT_MS / 1000}s, emitting upstream_stream_interrupted`)
+        callbacks.onEvent({
+          type: 'error',
+          message: `Stream idle timeout — no bytes from upstream for ${STREAM_IDLE_TIMEOUT_MS / 1000}s. Treating as interrupted; the agent loop will retry.`,
+          errorType: 'upstream_stream_interrupted',
+        })
+        reader.cancel().catch(() => { /* best-effort */ })
+        return
+      }
+      if (r.done) break
+      if (!r.value) continue
+      buffer += decoder.decode(r.value, { stream: true })
 
       const lastNewline = buffer.lastIndexOf('\n')
       if (lastNewline === -1) continue

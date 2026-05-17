@@ -65,9 +65,12 @@ const MAX_CONTINUATIONS = 3
 // Max retries when the upstream→worker SSE drops mid-stream
 // (worker emits `upstream_stream_interrupted` typed event). Separate from
 // MAX_CONTINUATIONS because the trigger is network-side, not model-side.
-// 2 retries = 3 total attempts — covers ~90% of transient blips while
-// failing fast enough that a real outage doesn't keep the user waiting.
-const MAX_INTERRUPT_RETRIES = 2
+// 1 retry = 2 total attempts. With the 90 s stream-idle watchdog in
+// streamParser.ts, the worst case before surfacing to the user is
+// 2 × 90 s = 3 min — bounded enough that the user gets feedback instead
+// of staring at a frozen UI. Was 2 retries (4.5 min worst case) before
+// the watchdog made the per-attempt cap reliable.
+const MAX_INTERRUPT_RETRIES = 1
 
 // Context compression threshold is now token-absolute (claude-vaz pattern):
 // effective window = raw − 20K (summary headroom)
@@ -1282,10 +1285,29 @@ Developer message: ${displayText}
     } else {
       try {
         summary = await this.callSummarizationAPI(oldMessages)
+        if (this.summarizationFailures > 0) {
+          // Recovered before tripping the breaker — log once so the
+          // mechanical-fallback streak ends visibly in telemetry.
+          logger.info('agent', `[compaction] summarization recovered after ${this.summarizationFailures} failure(s) — back to LLM summaries`)
+        }
         this.summarizationFailures = 0 // reset on success
-      } catch {
+      } catch (err) {
         this.summarizationFailures++
-        logger.warn('agent', `Summarization failed (${this.summarizationFailures}/3) — using mechanical fallback`)
+        const reason = err instanceof Error ? err.message : String(err)
+        logger.warn('agent', `Summarization failed (${this.summarizationFailures}/3) — using mechanical fallback. Reason: ${reason}`)
+        // Surface the transition to the user when the breaker just tripped.
+        // Below 3 is a single hiccup — silent fallback is fine. At exactly 3
+        // every subsequent compaction is mechanical (lower-quality summary
+        // = lower-quality recovered context), so the user needs to know
+        // their session is degrading and a restart will help. Single shot
+        // per breaker open — don't spam.
+        if (this.summarizationFailures === 3 && !this.lightweightOptions) {
+          try {
+            useChatStore.getState().addSystemMessage(
+              'Compaction is using a mechanical fallback after 3 LLM-summarize failures. Recovered context may be lower-quality from now on. Open a new chat for a fresh start, or wait for the upstream to recover.',
+            )
+          } catch { /* chatStore may be torn down */ }
+        }
         summary = this.mechanicalFallback(oldMessages)
       }
     }
@@ -1378,21 +1400,52 @@ Developer message: ${displayText}
     const firebaseToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!firebaseToken) throw new Error('Auth expired during compression')
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${firebaseToken}`,
-      },
-      body: JSON.stringify({
-        max_tokens: 16384,
-        messages: [
-          { role: 'system', content: summaryPrompt },
-          { role: 'user', content: serialized },
-        ],
-      }),
-      signal: this.abortController?.signal,
-    })
+    // Wall-clock timeout so a stalled /v1/summarize call can't hang the
+    // agent loop indefinitely. Compaction is triggered between turns
+    // (`agentService.ts:651-669`) — without this timeout, a hung summarize
+    // fetch holds the UI on its previous state (e.g. "Wrote" after the
+    // last write_file) and the user has no way out short of Stop. The
+    // catch site at line 1287 routes timeouts to `mechanicalFallback`,
+    // so the loop continues with degraded-but-functional context.
+    // 90 s aligns with the SSE idle watchdog in streamParser.ts.
+    const SUMMARIZE_TIMEOUT_MS = 90_000
+    const timeoutCtl = new AbortController()
+    const onParentAbort = () => timeoutCtl.abort()
+    const parentSignal = this.abortController?.signal
+    if (parentSignal?.aborted) {
+      timeoutCtl.abort()
+    } else {
+      parentSignal?.addEventListener('abort', onParentAbort)
+    }
+    const timeoutId = setTimeout(() => timeoutCtl.abort(), SUMMARIZE_TIMEOUT_MS)
+
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${firebaseToken}`,
+        },
+        body: JSON.stringify({
+          max_tokens: 16384,
+          messages: [
+            { role: 'system', content: summaryPrompt },
+            { role: 'user', content: serialized },
+          ],
+        }),
+        signal: timeoutCtl.signal,
+      })
+    } catch (err) {
+      if (timeoutCtl.signal.aborted && !parentSignal?.aborted) {
+        logger.warn('agent', `[compaction-watchdog] /v1/summarize timed out after ${SUMMARIZE_TIMEOUT_MS / 1000}s — falling back to mechanical compaction`)
+        throw new Error(`Summarization API timeout after ${SUMMARIZE_TIMEOUT_MS / 1000}s — falling back to mechanical compaction`)
+      }
+      throw err
+    } finally {
+      clearTimeout(timeoutId)
+      parentSignal?.removeEventListener('abort', onParentAbort)
+    }
 
     if (!response.ok) {
       throw new Error(`Summarization API failed: ${response.status}`)

@@ -71,7 +71,20 @@ function formatTokens(n: number): string {
 }
 
 function ContextWindowIndicator() {
-  const inputTokens = useChatStore((s) => s.currentPromptTokens)
+  // Read the per-turn input count, but fall back to the active session's
+  // last-known prompt size when the per-turn counter is 0. `resetTokenUsage`
+  // zeroes `currentPromptTokens` at the start of every new request
+  // (agentRunner.ts:146) — without the fallback the pill collapses to 0%
+  // during the gap between user-clicks-send and the new turn's first
+  // `message_start` event, producing the visible "ended at 13% / restarted
+  // at 7%" jump the user reported. The session field is written on every
+  // `addTokenUsage` (chatStore.ts:2084), so it always reflects the most
+  // recently completed turn.
+  const inputTokens = useChatStore((s) => {
+    if (s.currentPromptTokens > 0) return s.currentPromptTokens
+    if (!s.activeSessionId) return 0
+    return s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
+  })
   const outputTokens = useChatStore((s) => s.currentResponseTokens)
   const plan = useBillingStore((s) => s.plan)
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
