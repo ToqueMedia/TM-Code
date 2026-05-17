@@ -48,6 +48,11 @@ interface AnthropicToolDef {
   name: string
   description?: string
   input_schema?: Record<string, unknown>
+  /** Anthropic prompt-cache marker. Local BYOK upstreams (Ollama / LM Studio)
+   *  don't support prefix caching, so the converter below silently drops
+   *  this field — keeping it in the type lets typescript flow the value
+   *  through without complaint when it arrives from buildRequestBody. */
+  cache_control?: { type: 'ephemeral'; ttl?: string }
 }
 
 // Anthropic's system field accepts EITHER a plain string OR an array of
@@ -178,6 +183,9 @@ export function anthropicToOpenAIBody(
     }
   }
 
+  // cache_control on tools is dropped here — OpenAI-shape /v1/chat/completions
+  // on local providers has no prefix-cache concept. Caching only matters on
+  // the worker route (which doesn't go through this converter).
   const tools = (a.tools ?? []).map(t => ({
     type: 'function' as const,
     function: {

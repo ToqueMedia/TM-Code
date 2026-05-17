@@ -6,6 +6,7 @@ import { ServiceError } from '../../utils/errors'
 import { parseSSEStream, parseOpenAISSEStream, createThinkingDetector } from './streamParser'
 import { getProfileForPlan } from './modelProfiles'
 import { resolveThinkingHint } from './thinkingShapeDetection'
+import { buildCompactPrompt, formatCompactSummary } from './compactPrompt'
 import { streamLocalChat } from './byokLocalStream'
 import { anthropicToOpenAIBody } from './anthropicToOpenai'
 import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
@@ -168,10 +169,24 @@ const MAX_KEEP_RECENT_TURNS = 12
 // Layer 1: Microcompaction — keep last N tool results in full, compact older ones.
 // A typical turn has 1-3 tool calls; 8 means ~3-4 recent turns have full results.
 const MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS = 8
+
+// Time-based microcompaction (claude-vaz parity, services/compact/timeBasedMCConfig.ts).
+// When (now − last assistant timestamp) exceeds this gap, switch to a more
+// aggressive keepRecent. Rationale: the upstream's prompt-cache TTL is 1h, so
+// after 60min of idle the cache is GUARANTEED expired — the full prefix gets
+// retransmitted anyway. Shrinking the prefix BEFORE the request shortens the
+// retransmit. We use a 60min threshold to match the cache TTL exactly.
+const MICROCOMPACT_GAP_THRESHOLD_MS = 60 * 60 * 1000
+// Aggressive mode keep count — 5 (vs default 8) when the gap fires.
+const MICROCOMPACT_GAP_KEEP_RECENT = 5
 // Maximum files to re-read after compaction for context recovery.
 const POST_COMPACTION_REREAD_FILES = 5
 // Max chars per re-read file (prevents re-blowing context).
 const POST_COMPACTION_FILE_MAX_CHARS = 8000
+
+// Compact-summary prompt + post-processing live in a zero-dependency
+// module so they can be unit-tested without the store/Firebase chain.
+// See `compactPrompt.ts` for the claude-vaz-parity prompt body.
 
 // === Callbacks ===
 
@@ -252,6 +267,15 @@ class AgentService {
   private requestType: string | null = null
   /** Real prompt token count from the last API response (from usage event). */
   private lastPromptTokens = 0
+  /** Wall-clock timestamp (ms) of the last completed assistant turn. Drives
+   *  time-based microcompaction: when the gap before the next API call
+   *  exceeds MICROCOMPACT_GAP_THRESHOLD_MS (60min, the upstream cache TTL),
+   *  we switch to a more aggressive keepRecent because the cache is
+   *  guaranteed expired and the full prefix gets retransmitted anyway.
+   *  Persists across `runAgentLoop` invocations on the singleton instance
+   *  so idle-between-prompts gaps are measured correctly. Null until the
+   *  first assistant turn completes. */
+  private lastAssistantMessageAt: number | null = null
   /** Context window size (tokens) — updated from API usage if available. */
   private contextWindowSize = DEFAULT_CONTEXT_WINDOW
   /** SSE shape produced by the most recent callAPIOnce. processStreamedTurn
@@ -403,16 +427,42 @@ class AgentService {
         return true
       })
 
-      // Convert tools to Anthropic format
-      const anthropicTools = filteredTools.map(t => ({
-        name: t.function.name,
-        description: t.function.description,
-        input_schema: t.function.parameters,
-      }))
+      // Convert tools to Anthropic format. The LAST tool gets a
+      // `cache_control: { type: 'ephemeral' }` marker — the Anthropic
+      // prompt-caching spec caches the request prefix UP TO any block
+      // carrying that marker, so the entire tools array (the largest
+      // stable prefix segment, ~10K tokens of schemas) becomes one
+      // cache entry. The marker is harmless on upstreams that don't
+      // support caching (treated as an extra field and ignored). For
+      // BYOK users on Anthropic-native it's an immediate cost win;
+      // for DashScope/OpenRouter the worker has the hint available
+      // to use for its own server-side cache key in the future.
+      // Reference: claude-vaz utils/api.ts:72-133.
+      const anthropicTools = filteredTools.map((t, idx, arr) => {
+        const base = {
+          name: t.function.name,
+          description: t.function.description,
+          input_schema: t.function.parameters,
+        }
+        return idx === arr.length - 1
+          ? { ...base, cache_control: { type: 'ephemeral' as const } }
+          : base
+      })
 
-      // Anthropic Messages API body — system is top-level, not in messages
+      // Anthropic Messages API body — system is top-level, not in messages.
+      // System is sent as a single-block array (not a bare string) so we
+      // can attach cache_control. Anthropic accepts BOTH shapes; the
+      // converter at anthropicToOpenai.ts:79-86 already collapses the
+      // array form to a string for local BYOK paths (Ollama/LM Studio)
+      // where caching doesn't apply.
       const body: Record<string, unknown> = {
-        system: this.systemPrompt,
+        system: [
+          {
+            type: 'text' as const,
+            text: this.systemPrompt,
+            cache_control: { type: 'ephemeral' as const },
+          },
+        ],
         messages,
         tools: anthropicTools,
         max_tokens: MAX_OUTPUT_TOKENS,  // Default; overwritten by buildSamplingParams for main agent
@@ -451,15 +501,29 @@ class AgentService {
 
       return body
     } catch {
+      // Emergency fallback when dynamic imports fail. Keep cache_control
+      // markers consistent with the main path — they cost nothing where
+      // unsupported and the upstream-routing rules are the same.
       const filteredTools = this.tools.filter(t => t.function.name !== 'web_search')
       const body: Record<string, unknown> = {
-        system: this.systemPrompt,
+        system: [
+          {
+            type: 'text' as const,
+            text: this.systemPrompt,
+            cache_control: { type: 'ephemeral' as const },
+          },
+        ],
         messages,
-        tools: filteredTools.map(t => ({
-          name: t.function.name,
-          description: t.function.description,
-          input_schema: t.function.parameters,
-        })),
+        tools: filteredTools.map((t, idx, arr) => {
+          const base = {
+            name: t.function.name,
+            description: t.function.description,
+            input_schema: t.function.parameters,
+          }
+          return idx === arr.length - 1
+            ? { ...base, cache_control: { type: 'ephemeral' as const } }
+            : base
+        }),
         max_tokens: MAX_OUTPUT_TOKENS,
         stream: true,
       }
@@ -607,7 +671,27 @@ class AgentService {
         // Layer 1: Microcompact old tool results before sending to API.
         // Creates a lightweight copy — original messages retain full content
         // for future LLM summarization (which needs full detail).
-        const apiMessages = this.microcompactToolResults(messages)
+        //
+        // Time-based mode: when the gap since the last assistant turn
+        // exceeds the upstream cache TTL (~60min), the prompt cache is
+        // guaranteed expired and the full prefix gets retransmitted by
+        // the upstream regardless. Shrinking the prefix BEFORE the
+        // request shortens that retransmit — saves cost on the request
+        // that would have paid full price anyway. Sub-agents skip this
+        // because their short lifetimes mean gap-eviction doesn't apply
+        // (the gap field is null for them too — extra defence).
+        let microcompactKeepRecent = MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS
+        if (!this.lightweightOptions && this.lastAssistantMessageAt !== null) {
+          const gapMs = Date.now() - this.lastAssistantMessageAt
+          if (gapMs > MICROCOMPACT_GAP_THRESHOLD_MS) {
+            microcompactKeepRecent = MICROCOMPACT_GAP_KEEP_RECENT
+            logger.info(
+              'agent',
+              `[microcompact] time-based eviction firing: gap=${Math.round(gapMs / 60_000)}min > ${MICROCOMPACT_GAP_THRESHOLD_MS / 60_000}min — keepRecent=${MICROCOMPACT_GAP_KEEP_RECENT} (default ${MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS})`,
+            )
+          }
+        }
+        const apiMessages = this.microcompactToolResults(messages, microcompactKeepRecent)
 
         // Telemetry: log microcompaction savings (only when compaction actually ran).
         // contentAsText handles both string and ContentPart[] shapes; for
@@ -647,6 +731,15 @@ class AgentService {
 
         // Process the stream (text deltas + tool dispatch emitted during this call)
         const turnResult = await this.processStreamedTurn(response, callbacks, streamingPool)
+
+        // Stamp the assistant-turn timestamp so the NEXT API call can compute
+        // gap-since-last-turn for time-based microcompaction. We update
+        // regardless of finishReason — even a stream_interrupted turn produced
+        // some output and committed wall-clock time. Sub-agents skip (their
+        // `lastAssistantMessageAt` is unused; main-agent only).
+        if (!this.lightweightOptions) {
+          this.lastAssistantMessageAt = Date.now()
+        }
 
         // Seal the pool — no more tools will be added after the stream ends
         streamingPool.seal()
@@ -1258,55 +1351,28 @@ Developer message: ${displayText}
   /**
    * Calls the dedicated /v1/summarize endpoint on the worker.
    * This endpoint: no streaming, no thinking (enable_thinking off), JSON response.
+   *
+   * Prompt structure ported from claude-vaz services/compact/prompt.ts:
+   * (a) NO_TOOLS_PREAMBLE + trailer — belt-and-braces "text-only response"
+   *     guards. Our /v1/summarize endpoint already disables tools server-side
+   *     so this is redundant for our worker, but matters when /v1/summarize
+   *     itself runs on a model that interprets the conversation history as
+   *     a tool-aware context (the DashScope summarizer model occasionally
+   *     tries to "call" a tool from the previous turn's tool_use blocks).
+   * (b) 9-section output — Primary Request / Key Technical Concepts /
+   *     Files and Code Sections / Errors and Fixes / Problem Solving /
+   *     All user messages / Pending Tasks / Current Work / **Optional
+   *     Next Step**. The last two — Current Work + Optional Next Step —
+   *     are what give the agent "I was halfway through Y, next is Z"
+   *     continuity after auto-compact. The bullet-list prompt this
+   *     replaces had 7 sections and was missing both.
+   * (c) `<analysis>` drafting block — the model thinks before writing the
+   *     summary. Stripped post-hoc by formatCompactSummary().
    */
   private async callSummarizationAPI(messages: AnthropicMessage[]): Promise<string> {
     const serialized = this.serializeMessagesForSummary(messages)
 
-    const summaryPrompt = `You are a context compressor for a coding agent. Summarize the conversation below into structured bullet points that a coding agent can use to continue its work without the full history.
-
-Capture with high fidelity:
-- **User requests**: what the user asked for, in order
-- **Files read**: file paths + key content discovered (structures, patterns, bugs, important code sections)
-- **Changes made**: file paths + what was changed and why (include function/variable names)
-- **Commands run**: what was executed, output summary, exit codes
-- **Errors encountered**: what failed, exact error messages, how it was resolved or not
-- **Decisions made**: choices the agent took and reasoning
-- **Current state**: what is done, what remains incomplete
-
-Be specific — include file paths, function names, error messages, and key code patterns.
-Respond in the same language the conversation uses.
-Do NOT omit technical details. The agent will only see this summary, not the original messages.
-Target length: 2000–4000 words. Shorter conversations may produce shorter summaries, but never sacrifice detail to save space.
-
-<example>
-<input>A conversation where the user asked to add authentication to a Next.js app. The agent read several files, installed next-auth, created API routes, and encountered a TypeScript error that was fixed.</input>
-<output>
-## User Requests
-- Add authentication to the Next.js app using NextAuth.js with Google and GitHub providers
-
-## Files Read
-- \`src/app/layout.tsx\`: Root layout wrapping children in \`<html>\` + \`<body>\`, no providers
-- \`package.json\`: Next.js 14.1, React 18, no auth dependencies
-- \`src/app/page.tsx\`: Landing page with static content, no auth-aware UI
-
-## Changes Made
-- \`package.json\`: Added \`next-auth@4.24.5\` dependency
-- \`src/app/api/auth/[...nextauth]/route.ts\`: Created NextAuth route handler with GoogleProvider and GitHubProvider, using env vars \`GOOGLE_CLIENT_ID\`, \`GOOGLE_CLIENT_SECRET\`, \`GITHUB_ID\`, \`GITHUB_SECRET\`
-- \`src/app/layout.tsx\`: Wrapped children in \`<SessionProvider>\` from next-auth/react
-- \`src/components/AuthButton.tsx\`: Created sign-in/sign-out button using \`useSession()\`
-- \`src/app/page.tsx\`: Added \`<AuthButton />\` to header
-
-## Commands Run
-- \`npm install next-auth\`: exit 0, installed next-auth@4.24.5
-- \`npx tsc --noEmit\`: exit 1 — error TS2345 in layout.tsx: SessionProvider requires \`"use client"\` directive
-
-## Errors Encountered
-- TypeScript error TS2345 in \`layout.tsx\`: SessionProvider is a client component but layout.tsx was a server component. Fixed by extracting provider wrapper into \`src/components/Providers.tsx\` with \`"use client"\` directive.
-
-## Current State
-- Authentication is fully implemented and compiles. User has not yet tested in browser. Environment variables (.env.local) need to be set by the developer.
-</output>
-</example>`
+    const summaryPrompt = buildCompactPrompt()
 
     const url = `${WORKER_URL}/v1/summarize`
     const firebaseToken = await FirebaseAuthService.getInstance().getIdToken()
@@ -1336,11 +1402,18 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       choices: Array<{ message: { content: string } }>
     }
 
-    const content = data.choices[0]?.message?.content || ''
-    if (content.length < 100) {
+    const rawContent = data.choices[0]?.message?.content || ''
+    if (rawContent.length < 100) {
       throw new Error('Summary too short or empty — falling back to mechanical extraction')
     }
-    return content
+    // Strip the `<analysis>` drafting scratchpad and unwrap the `<summary>`
+    // tag before the summary becomes context for the next turn. The model
+    // was instructed to write both blocks; we keep the value of the
+    // analysis (it improves summary quality during generation) without
+    // paying the token cost in subsequent turns. If the model didn't
+    // emit the tags (older models, generation drift), formatCompactSummary
+    // returns the original text unchanged.
+    return formatCompactSummary(rawContent)
   }
 
   /**
@@ -1440,7 +1513,10 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
    * messages that contain tool_result blocks, counts them, and replaces
    * old ones (beyond the last N) with one-line summaries.
    */
-  private microcompactToolResults(messages: AnthropicMessage[]): AnthropicMessage[] {
+  private microcompactToolResults(
+    messages: AnthropicMessage[],
+    keepRecent: number = MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS,
+  ): AnthropicMessage[] {
     // Collect indices of user messages that contain tool_result blocks
     const toolResultMsgIndices: number[] = []
     for (let i = 0; i < messages.length; i++) {
@@ -1451,11 +1527,11 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       }
     }
 
-    if (toolResultMsgIndices.length <= MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS) {
+    if (toolResultMsgIndices.length <= keepRecent) {
       return messages
     }
 
-    const compactUpTo = toolResultMsgIndices.length - MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS
+    const compactUpTo = toolResultMsgIndices.length - keepRecent
     const indicesToCompact = new Set(toolResultMsgIndices.slice(0, compactUpTo))
 
     return messages.map((msg, idx) => {

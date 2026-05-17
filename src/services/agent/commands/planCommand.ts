@@ -24,6 +24,39 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * Plan readiness check. With the scaffold + iterative-edits flow, the file
+ * exists from the very first Write — but the plan isn't ready until the
+ * architect's final Edit flips `Status: DRAFT` → `Status: PENDING APPROVAL`.
+ * Without this check the IDE would render the approval card over a partially-
+ * filled scaffold if the run is cut between Edits.
+ *
+ * Returns `{ ready: true }` only when the file is on disk AND contains the
+ * PENDING APPROVAL marker. Returns `{ ready: false, reason }` otherwise so
+ * the caller can surface why.
+ */
+type PlanReadiness = {
+  ready: boolean
+  reason?: 'missing' | 'draft' | 'unknown'
+  content?: string
+}
+
+async function readPlanReadiness(path: string): Promise<PlanReadiness> {
+  let content: string
+  try {
+    content = await FileService.readFile(path)
+  } catch {
+    return { ready: false, reason: 'missing' }
+  }
+  // Match the marker case-insensitively and tolerant of leading "> " quote
+  // prefix (the template renders frontmatter as a markdown blockquote, but
+  // the architect occasionally drops the prefix). Anchored to a line start.
+  const hasReady = /^[>\s]*Status:\s*PENDING\s+APPROVAL\b/im.test(content)
+  if (hasReady) return { ready: true, content }
+  const hasDraft = /^[>\s]*Status:\s*DRAFT\b/im.test(content)
+  return { ready: false, reason: hasDraft ? 'draft' : 'unknown', content }
+}
+
 export async function executePlan(
   args: string,
   projectPath: string,
@@ -92,14 +125,23 @@ export async function executePlan(
     permStore.setAutoApproveDiffs(prevAutoApprove)
   }
 
-  // Only show the approval card if PLAN.md was actually written. Aborts and
-  // silent write failures don't always flip agent status to 'error', so the
-  // file itself is the authoritative signal.
+  // Only show the approval card if PLAN.md is on disk AND complete. With the
+  // scaffold + iterative-edits flow, the file exists from turn 2 — we wait
+  // for the architect's final Edit that flips `Status: DRAFT` → `Status:
+  // PENDING APPROVAL` before treating the plan as ready. Aborts and silent
+  // write failures don't always flip agent status to 'error', so the Status
+  // marker is the authoritative signal.
   if (useAgentStore.getState().status === 'error') return
-  if (!(await fileExists(`${projectPath}/PLAN.md`))) {
-    chatStore.addSystemMessage(
-      'Plan generation did not finish — PLAN.md was not written. Run /plan again to retry.',
-    )
+  const readiness = await readPlanReadiness(`${projectPath}/PLAN.md`)
+  if (!readiness.ready) {
+    const reason = readiness.reason
+    const message =
+      reason === 'missing'
+        ? 'Plan generation did not finish — PLAN.md was not written. Run /plan again to retry.'
+        : reason === 'draft'
+        ? 'Plan generation was cut off — PLAN.md is still in DRAFT. Type "Continue" to resume from the next unfilled section.'
+        : 'Plan generation did not complete — PLAN.md is on disk but has no PENDING APPROVAL marker. Type "Continue" to let the architect finish, or run /plan again to retry from scratch.'
+    chatStore.addSystemMessage(message)
     return
   }
   chatStore.addCardMessage('plan_approval', projectPath)
@@ -347,27 +389,34 @@ const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'
 // ── Section builders (static) ──
 
 function getChannelRuleSection(): string {
-  // Phrasing rationale (2026-05-08, no eval ID — reasoning-based):
-  // GLM-5.1 was observed (session sess_1778262531711_ov2exj) to output the
-  // plan as a markdown reply in chat and ask "Posso prosseguir?", skipping
-  // write_file entirely. Hypothesis: explicit contrast between "file" and
-  // "chat" plus a concrete tool-call signature forces write_file to be
-  // treated as the deliverable rather than as a save-after-presenting step.
-  // Bookended in getReminder() (technique #12). Promote to eval-validated
-  // when A/B infra exists.
+  // Phrasing rationale (2026-05-17, no eval ID — reasoning-based):
+  // The previous shape forced a single monolithic ${WRITE_FILE} with the full
+  // PLAN.md body as the \`content\` argument. On long sessions (DashScope and
+  // OpenRouter both observed) the upstream socket dropped mid-input_json_delta
+  // and the partial tool_use was discarded — the architect had to refuse the
+  // entire document. The new shape splits writing into a scaffold ${WRITE_FILE}
+  // + many small ${EDIT_FILE} calls (one per section). Each call is a short
+  // stream; a network drop loses at most one section, not the whole plan.
+  // Inspired by Kilo Code's plan mode and claude-vaz's incremental write pattern.
+  // Bookended in getReminder() (technique #12).
   return `# Your output channel is the PLAN.md file — not chat
 
-Your deliverables this turn are TWO tool calls, in strict order:
+Your deliverable this turn is a complete PLAN.md, produced via a sequence of small tool calls. The shape is **scaffold first, then iterate**:
 
-  1. \`${WRITE_FILE}\`({ path: "<projectPath>/PLAN.md", content: "<full document>" })
-  2. \`${UPDATE_TASKS}\`({ tasks: [...] })  — seeded from PLAN.md's Implementation Phases
+  1. \`${WRITE_FILE}\`({ path: "<projectPath>/PLAN.md", content: "<scaffold with frontmatter + every section heading from §1 to §14; each section body is a one-line placeholder>" })
+  2. A series of \`${EDIT_FILE}\`({ path: "<projectPath>/PLAN.md", old_string, new_string }) calls — ONE per section — replacing each placeholder with finished content.
+  3. A final \`${EDIT_FILE}\` flips frontmatter \`Status: DRAFT\` to \`Status: PENDING APPROVAL\`. This is the IDE's machine-readable "ready" marker.
+  4. \`${UPDATE_TASKS}\`({ tasks: [...] }) — seeded from PLAN.md's Implementation Phases (§13).
+  5. A final 3-sentence chat summary. Then STOP.
+
+This many-small-edits shape exists because a single \`${WRITE_FILE}\` with the whole document body in \`content\` is a long brittle stream. Many small edits each fit in seconds; if the network drops between two edits, the work already on disk persists and you continue from the next section.
 
 The chat is NOT a presentation channel. You do NOT:
 - Output the architecture as a markdown reply, table, or summary BEFORE \`${WRITE_FILE}\` runs.
 - Preview sections, ask "Shall I write this?", or wait for a "go ahead".
-- Ask for verbal approval ("Posso prosseguir?" / "Ready to implement?" / "Approve to continue?") — there is a programmatic Approve / Request changes / Reject card the IDE renders the moment \`${WRITE_FILE}\` completes successfully.
+- Ask for verbal approval ("Posso prosseguir?" / "Ready to implement?" / "Approve to continue?") — there is a programmatic Approve / Request changes / Reject card the IDE renders the moment Status flips to PENDING APPROVAL.
 
-If you produce architecture content as chat text instead of as the \`content\` parameter of \`${WRITE_FILE}\`, the developer never sees the approval card and the entire turn is wasted. The chat is reserved for ONE thing: a 3-sentence summary AFTER both tool calls succeed.`
+If you produce architecture content as chat text instead of going through \`${WRITE_FILE}\` + \`${EDIT_FILE}\`, the developer never sees the approval card and the entire turn is wasted. The chat is reserved for ONE thing: a 3-sentence summary AFTER all the tool calls succeed.`
 }
 
 function getRoleDeclaration(): string {
@@ -379,15 +428,23 @@ You analyze the existing codebase, identify constraints, evaluate trade-offs bet
 function getCompletionRule(): string {
   return `# Completion rule
 
-Write a complete PLAN.md with every section from the template below. Do not skip sections. If a section does not apply, write "N/A — {reason}" instead of omitting it. After \`${WRITE_FILE}\` completes for PLAN.md, your second and final tool call is \`${UPDATE_TASKS}\` (see "Task list" below). Then give a 3–5 sentence summary in the chat and STOP — do not call any other tools, do not begin implementation.`
+Build a complete PLAN.md with every section from the template below. The pattern is **scaffold first, then iterate**:
+
+1. \`${WRITE_FILE}\` lays down the structure: frontmatter (with \`Status: DRAFT\`) + every section heading from §1 to §14. Each section body is the literal placeholder \`_In progress._\` — use exactly this phrasing on every section so the subsequent Edits can match it via \`old_string\` containing the section heading + this placeholder line.
+2. Successive \`${EDIT_FILE}\` calls replace each placeholder with finished content. **Every Edit's \`old_string\` MUST start with the section heading line and include the \`_In progress._\` placeholder on the next line.** All 14 sections share the same placeholder text — without the heading prefix the match is ambiguous and the Edit fails with "non-unique match". Do not skip sections — if a section does not apply, write "N/A — {reason}" in place of the placeholder.
+3. When every section has real content, a final \`${EDIT_FILE}\` changes the frontmatter \`Status: DRAFT\` to \`Status: PENDING APPROVAL\`. This is what tells the IDE the plan is ready.
+4. Call \`${UPDATE_TASKS}\` (see "Task list" below).
+5. Post a 3–5 sentence summary in chat and STOP.
+
+After step 4, do NOT call any more tools — the executor enforces this. Begin implementation only after the developer approves the plan card.`
 }
 
 function getAllowedToolsSection(): string {
   return `# Allowed tools
 
-For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${GET_DIAGNOSTICS}\`, \`${READ_SKILL}\`. For the deliverable: \`${WRITE_FILE}\` (PLAN.md only).
+For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${GET_DIAGNOSTICS}\`, \`${READ_SKILL}\`. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
 
-You MUST NOT call: \`${PROVISION_AUTH}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
+You MUST NOT call: \`${PROVISION_AUTH}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
 }
 
 function getApprovalFlowSection(): string {
@@ -401,13 +458,14 @@ function getApprovalFlowSection(): string {
 
 The IDE handles approval through a UI card, not through chat. Strict sequence:
 
-1. You call \`${WRITE_FILE}\`({ path: "...PLAN.md", content: ... }).
-2. \`${WRITE_FILE}\` returns success.
-3. You call \`${UPDATE_TASKS}\`({ tasks: [...] }) seeded from PLAN.md's Implementation Phases.
-4. You post a 3-sentence summary in chat.
-5. You stop — the turn ends.
-6. The IDE detects PLAN.md, renders an Approve / Request changes / Reject card automatically.
-7. The developer clicks. The IDE dispatches the next phase (TODO generation, then execution).
+1. You call \`${WRITE_FILE}\`({ path: "...PLAN.md", content: "<scaffold>" }) with frontmatter (\`Status: DRAFT\`) and every section heading from §1 to §14 with a placeholder body.
+2. You call \`${EDIT_FILE}\` repeatedly — one call per section — replacing each placeholder with finished content.
+3. A final \`${EDIT_FILE}\` flips frontmatter \`Status: DRAFT\` → \`Status: PENDING APPROVAL\`. This is the user-visible "ready" marker.
+4. You call \`${UPDATE_TASKS}\`({ tasks: [...] }) seeded from PLAN.md's Implementation Phases.
+5. You post a 3-sentence summary in chat.
+6. You stop — the turn ends.
+7. The IDE detects PLAN.md is PENDING APPROVAL and renders an Approve / Request changes / Reject card.
+8. The developer clicks. The IDE dispatches the next phase (TODO generation, then execution).
 
 You DO NOT:
 - Ask "Posso prosseguir?", "Shall I implement?", "Ready to start?" — the card is the channel, the chat reply is wasted.
@@ -423,15 +481,17 @@ function getTaskListSection(): string {
   // (strict order)" enumeration eliminates ambiguity vs. a prose paragraph.
   // Granularity numeric anchors (technique #7) — "6–20 tasks", "max 3-4
   // files" — replace qualitative "small tasks" guidance.
-  return `# Task list — created with PLAN.md, updated during implementation
+  return `# Task list — seeded after the plan is complete, updated during implementation
 
-After \`${WRITE_FILE}\` returns success, your second and final tool call this turn is \`${UPDATE_TASKS}\` — seeded directly from PLAN.md's Implementation Phases section. The task list is what the developer sees in the UI's task tracker, and what the implementation agent updates phase by phase after approval.
+After every section of PLAN.md has finished content AND the frontmatter \`Status:\` has been flipped to \`PENDING APPROVAL\` via the final \`${EDIT_FILE}\`, your next tool call is \`${UPDATE_TASKS}\` — seeded directly from PLAN.md's Implementation Phases section. The task list is what the developer sees in the UI's task tracker, and what the implementation agent updates phase by phase after approval.
 
 Sequence (strict order):
-1. \`${WRITE_FILE}\`({ path: "<projectPath>/PLAN.md", content: ... })
-2. \`${UPDATE_TASKS}\`({ tasks: [{ id, description, status: "pending" }, ...] })
-3. 3-sentence chat summary.
-4. STOP.
+1. \`${WRITE_FILE}\`({ path: "<projectPath>/PLAN.md", content: "<scaffold with headings + placeholders, Status: DRAFT>" })
+2. \`${EDIT_FILE}\` × N — one call per section, replacing the placeholder with finished content.
+3. A final \`${EDIT_FILE}\` flips \`Status: DRAFT\` to \`Status: PENDING APPROVAL\`.
+4. \`${UPDATE_TASKS}\`({ tasks: [{ id, description, status: "pending" }, ...] })
+5. 3-sentence chat summary.
+6. STOP.
 
 Rules for the task list:
 - IDs map to phases (e.g., "1.1", "1.2", "2.1") — match PLAN.md's structure so the implementation agent can correlate the tracker row to the right TODO.md task.
@@ -440,7 +500,7 @@ Rules for the task list:
 - One task per coherent unit of work in a phase. A phase with 4 sub-tasks in PLAN.md becomes 4 tasks here.
 - Granularity: 6–20 tasks total for most projects. Fewer than 4 means the phases were under-decomposed in PLAN.md; more than 25 means tasks are too fine.
 
-Calling \`${UPDATE_TASKS}\` BEFORE \`${WRITE_FILE}\` is a contract violation — the task list must derive from a written plan, not from the developer's prompt directly.`
+Calling \`${UPDATE_TASKS}\` before the Status flip is a contract violation — the task list must derive from a fully-written plan, not from an in-progress draft. The executor rejects \`${UPDATE_TASKS}\` if PLAN.md has not been written yet.`
 }
 
 function getApproachSection(): string {
@@ -455,7 +515,7 @@ Before writing PLAN.md, work through these steps using your read-only tools:
 
 ## Research budget (hard cap)
 
-You have at most **3 web tool calls** combined (web_search + web_fetch) for this turn. Each fetched page consumes output budget you need to write PLAN.md, and reasoning tokens you need to weigh trade-offs in §7. Once you reach 3, stop researching and write the plan with what you have — record any remaining unknowns in §14 Open Questions instead of chasing them.
+You have at most **3 web tool calls** combined (web_search + web_fetch) **across this entire plan run** — not 3 per turn. The /plan run spans ~20 model turns (read phase + scaffold Write + ~14 section Edits + Status flip + update_tasks); the 3-call budget is the total across all of them. Each fetched page consumes output budget you need to write PLAN.md, and reasoning tokens you need to weigh trade-offs in §7. Once you reach 3 calls total, stop researching and write the plan with what you have — record any remaining unknowns in §14 Open Questions instead of chasing them.
 
 Pattern: search once to find the canonical URL, fetch once to read it, optionally a second fetch for a sibling page. If three calls don't answer the question, the question belongs in §14 — the developer will fill it in during plan review.`
 }
@@ -474,7 +534,7 @@ The complexity determines which sections are REQUIRED vs N/A. Mark sections that
 function getPlanMdTemplate(): string {
   return `# PLAN.md template
 
-The PLAN.md must follow this structure exactly:
+The PLAN.md must follow this structure exactly. The frontmatter \`Status:\` shown below is the FINAL state; the scaffold step writes \`Status: DRAFT\` and the final \`${EDIT_FILE}\` flips it to \`Status: PENDING APPROVAL\` once every section has been filled.
 
 # Architecture: {feature name}
 
@@ -636,18 +696,101 @@ If any check fails, fix the gap before writing the file.`
 }
 
 function getWorkedExample(): string {
+  // Section names below match getPlanMdTemplate() exactly. Any drift between
+  // the two will confuse the model — keep them in sync.
   return `# Worked example
 
 User idea: "Add WebSocket support for real-time collaboration."
 
-The tool calls you make (this is the deliverable — NOT a chat post):
+Tool calls you make (this IS the deliverable — NOT a chat post):
 
 \`\`\`
+// Step 1 — Scaffold. Status starts as DRAFT. Every section heading present;
+// section bodies are the literal placeholder \`_In progress._\` — same phrasing
+// on every section so the upcoming Edits can match it by including the
+// heading + the placeholder line in \`old_string\`.
 ${WRITE_FILE}({
   path: "<projectPath>/PLAN.md",
-  content: \`<the full document below — sections 1 through 14>\`
+  content: \`# Architecture: Real-Time Collaboration via WebSocket
+
+> Author: TM Code Architect
+> Date: 2026-03-20
+> Status: DRAFT
+> Complexity: FULLSTACK
+
+## 1. Context
+_In progress._
+
+## 2. Goals & Non-Goals
+_In progress._
+
+## 3. Architecture
+_In progress._
+
+## 4. Domain Schema
+_In progress._
+
+## 5. State Management
+_In progress._
+
+## 6. Interface Contracts
+_In progress._
+
+## 7. Technical Decisions
+_In progress._
+
+## 8. Business Rules & Validation
+_In progress._
+
+## 9. Quality Attributes
+_In progress._
+
+## 10. Risks
+_In progress._
+
+## 11. UI/UX Design
+_In progress._
+
+## 12. File Structure
+_In progress._
+
+## 13. Implementation Phases
+_In progress._
+
+## 14. Open Questions
+_In progress._
+\`
 })
 
+// Step 2 — Fill §1 (Context) with one targeted Edit. Include the section
+// heading in \`old_string\` so the match is unambiguous (every section starts
+// with the same placeholder string).
+${EDIT_FILE}({
+  path: "<projectPath>/PLAN.md",
+  old_string: \`## 1. Context
+_In progress._\`,
+  new_string: \`## 1. Context
+
+**Current state:** The app uses HTTP request/response for all client-server communication. File changes are detected via filesystem polling every 2 seconds.
+**Problem:** Two developers editing the same file see each other's changes only after a 2s delay and with no conflict resolution — last write wins silently.
+**System boundary:** Affects the transport layer (new WS server), file sync service, and editor cursors. Does NOT affect the Monaco editor core, the terminal, or the authentication system.\`
+})
+
+// ... §2 through §14 each get their own Edit call, same shape: include the
+// section heading + the \`_In progress._\` line in \`old_string\`, finished
+// content in \`new_string\`. Sections that don't apply still need an Edit —
+// replace the placeholder with "N/A — {reason}".
+
+// Step N — Final Edit flips Status. The IDE waits for THIS marker before
+// rendering the approval card. The \`old_string\` here is just the line, not
+// the section, because the Status line is already unique in the document.
+${EDIT_FILE}({
+  path: "<projectPath>/PLAN.md",
+  old_string: "> Status: DRAFT",
+  new_string: "> Status: PENDING APPROVAL"
+})
+
+// Step N+1 — Seed the task tracker from §13 Implementation Phases.
 ${UPDATE_TASKS}({
   tasks: [
     { id: "1.1", description: "WS server accepts connections + echoes messages", status: "pending" },
@@ -662,131 +805,11 @@ ${UPDATE_TASKS}({
 })
 \`\`\`
 
-The chat reply you post AFTER both tool calls return success (and ONLY then):
+The chat reply you post AFTER all tool calls return success (and ONLY then):
 
 > "Plan written to PLAN.md — Real-time collaboration via WebSocket transport, OT-based conflict resolution. 4 phases, 8 tasks seeded in tracker. Approve the card above to proceed."
 
-Below is the full PLAN.md content (the value you put in the \`content\` parameter):
-
-# Architecture: Real-Time Collaboration via WebSocket
-
-> Author: TM Code Architect
-> Date: 2026-03-20
-> Status: PENDING APPROVAL
-
-## 1. Context
-
-**Current state:** The app uses HTTP request/response for all client-server communication. File changes are detected via filesystem polling every 2 seconds.
-**Problem:** Two developers editing the same file see each other's changes only after a 2s delay and with no conflict resolution — last write wins silently.
-**System boundary:** Affects the transport layer (new WS server), file sync service, and editor cursors. Does NOT affect the Monaco editor core, the terminal, or the authentication system.
-
-## 2. Goals & Non-Goals
-
-### Goals
-- Changes propagate to all connected clients within 100ms
-- Concurrent edits on the same file are merged without data loss (OT or CRDT)
-- Presence indicators show who is editing which file
-
-### Non-Goals
-- Voice/video communication
-- Conflict resolution UI for non-text files (images, binaries)
-- Offline-first sync (requires a different architecture entirely)
-
-## 3. Architecture
-
-### Design
-Client A                 Server                  Client B
-   │                       │                        │
-   ├──WS: edit(op)────────>│                        │
-   │                       ├──transform(op)         │
-   │                       ├──WS: broadcast(op')───>│
-   │                       ├──persist(file)         │
-   │<──WS: ack(rev)────────┤                        │
-
-### Components
-- **WsServer** (Rust, commands/ws.rs) — Accepts WebSocket connections, routes messages. Receives: client ops. Produces: transformed + broadcast ops.
-- **OTEngine** (Rust, services/ot.rs) — Operational Transform logic. Receives: concurrent ops + document state. Produces: transformed ops preserving intent.
-- **CollabService** (TS, services/collabService.ts) — Client-side WS wrapper. Receives: local editor changes. Produces: ops to send, remote ops to apply.
-- **PresenceOverlay** (React, components/editor/PresenceOverlay.tsx) — Renders remote cursors. Receives: presence state from CollabService.
-
-### Key Interactions
-**Happy path:** Client A types → CollabService sends op → WsServer transforms against concurrent ops → broadcasts to Client B → CollabService applies remote op to Monaco.
-**Failure path:** WS disconnects → CollabService queues local ops, shows "reconnecting" indicator → on reconnect, sends queued ops with last-known revision → server rebases and re-syncs full document state if revision gap > 50 ops.
-
-## 4. Data Design
-
-- Operation { type: 'insert' | 'delete' | 'retain', position: number, content?: string, length?: number, revision: number, clientId: string, timestamp: number }
-- Presence { clientId: string, filePath: string, cursor: { line: number, column: number }, displayName: string, color: string }
-
-Stored in: in-memory on server (operations buffer, max 1000 ops per file). Persisted: file written to disk after 500ms debounce of last op.
-No migration needed — new system, no existing collab data.
-
-## 5. Interface Contracts
-
-WebSocket messages (JSON):
-- Client → Server: { type: "op", fileId: string, op: Operation } | { type: "presence", presence: Presence }
-- Server → Client: { type: "op", fileId: string, op: Operation, revision: number } | { type: "presence", presences: Presence[] } | { type: "sync", fileId: string, content: string, revision: number }
-- Error: { type: "error", code: "CONFLICT" | "FILE_NOT_FOUND" | "RATE_LIMITED", message: string }
-
-## 6. Technical Decisions
-
-| Decision | Chosen | Alternatives considered | Trade-off |
-|----------|--------|------------------------|-----------|
-| Conflict resolution | OT (Operational Transform) | CRDT (Yjs/Automerge) | OT = simpler server, smaller payloads, proven in Google Docs scale. Sacrifice: server must be single coordinator (no P2P). Acceptable because we already have a centralized server. |
-| Transport | Native WebSocket (tungstenite) | Socket.IO, gRPC streams | Native WS = no extra dependency, Tauri already has tokio. Sacrifice: no built-in reconnection/rooms (must implement). Acceptable for scope. |
-| Editor integration | Monaco deltaDecorations API | Custom overlay canvas | deltaDecorations is Monaco-native, handles scrolling/folding automatically. Sacrifice: limited styling options for cursors. Acceptable — standard cursor indicators suffice. |
-
-## 7. Quality Attributes
-
-- **Performance:** Op propagation < 100ms end-to-end on LAN. OT transform < 5ms for 100 concurrent ops.
-- **Reliability:** Client buffers ops during disconnect (up to 500 ops / 30 seconds). Full resync if gap exceeds buffer. No data loss — file on disk is always consistent.
-- **Security:** WS connections authenticated via existing session token. Ops validated server-side (position bounds, content sanitization). Rate limit: 100 ops/second per client.
-
-## 8. Risks
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| OT transform bugs cause document divergence | Users see different file content, potential data loss | Periodic checksum verification — server sends hash every 50 ops, client resyncs on mismatch |
-| High op volume on large files degrades performance | Latency exceeds 100ms target, UI stutters | Batch ops in 16ms frames, compress sequential inserts into single op |
-| WebSocket blocked by corporate proxies | Feature unusable for some users | Detect WS failure, fall back to HTTP long-polling with 500ms interval, show degraded-mode indicator |
-
-## 9. Testing Strategy
-
-- Unit: OT transform correctness — property-based tests (2 random op sequences, apply in both orders, verify convergence)
-- Integration: 2 simulated clients editing same file, assert final content matches
-- Manual: Disconnect/reconnect scenarios, high-latency simulation
-- Hard to test: Race conditions under real network jitter — mitigate with checksum verification rather than trying to test exhaustively
-
-## 10. Implementation Phases
-
-### Phase 1 — Transport layer: WS connection established, echo server
-- Create src-tauri/src/commands/ws.rs (WS accept + echo)
-- Create src/services/collabService.ts (connect, send, receive)
-- Depends on: none
-
-### Phase 2 — OT engine: ops transform and merge correctly
-- Create src-tauri/src/services/ot.rs (transform algorithm)
-- Add op routing to ws.rs
-- Unit tests for OT convergence
-- Depends on: Phase 1
-
-### Phase 3 — Editor integration: remote changes appear in Monaco
-- Create src/components/editor/PresenceOverlay.tsx
-- Integrate CollabService with Monaco onChange/onDidChangeCursorPosition
-- Depends on: Phase 2
-
-### Phase 4 — Resilience: reconnection, resync, edge cases
-- Add disconnect detection, op buffering, full resync protocol
-- Add checksum verification
-- Depends on: Phase 3
-
-**Critical path:** Phase 1 → 2 → 3 → 4 (linear — each builds on the previous). Phase 4 can begin partially during Phase 3 (buffering logic is independent of UI).
-
-## 12. Open Questions
-
-- Should presence show only cursor position or also selection ranges?
-- Maximum number of concurrent editors per file? (Affects OT performance budget)
-- Should the op log be persisted for undo-across-sessions, or is in-memory sufficient?`
+The exact section names above (\`Context\`, \`Goals & Non-Goals\`, \`Architecture\`, \`Domain Schema\`, \`State Management\`, \`Interface Contracts\`, \`Technical Decisions\`, \`Business Rules & Validation\`, \`Quality Attributes\`, \`Risks\`, \`UI/UX Design\`, \`File Structure\`, \`Implementation Phases\`, \`Open Questions\`) are the canonical 14 — they must match the template in the previous section verbatim, or your Edits won't find them.`
 }
 
 function getConstraints(): string {
@@ -824,13 +847,20 @@ function getReminder(): string {
 
 Complete every section ("N/A — {reason}" is acceptable, omitting a section is not). Decisions require alternatives and trade-offs. Quality attributes must be measurable.
 
-CRITICAL — channel and stop rules (these end the turn correctly):
+CRITICAL — channel, shape, and stop rules:
 
-1. The architecture goes into \`${WRITE_FILE}\`'s \`content\` parameter, NEVER into chat. Producing the plan as a markdown reply means the developer never sees the approval card and the turn is wasted.
-2. After \`${WRITE_FILE}\` PLAN.md + \`${UPDATE_TASKS}\`, post a 3-sentence summary and STOP. Calling any further tool — including another read_file, web_search, or update_tasks — is a contract violation; the executor will block it.
-3. The IDE renders an Approve / Request changes / Reject card automatically the moment PLAN.md is written. Do NOT ask "Posso prosseguir?", "Shall I implement?", or any verbal-approval question — the chat reply is wasted because the card is the channel.
+1. The architecture goes into PLAN.md via \`${WRITE_FILE}\` (scaffold) + a series of \`${EDIT_FILE}\` calls (one per section), NEVER into chat. Producing the plan as a markdown reply means the developer never sees the approval card and the turn is wasted.
+2. The scaffold lays down frontmatter (\`Status: DRAFT\`) + every section heading with \`_In progress._\` placeholders. Each subsequent Edit replaces one placeholder with finished content.
+3. The FINAL Edit flips \`Status: DRAFT\` → \`Status: PENDING APPROVAL\`. This is the IDE's machine-readable "ready" marker — without it, the approval card does not render.
+4. After Status flips, call \`${UPDATE_TASKS}\`, post a 3-sentence summary, and STOP. Calling any further tool — including another \`${READ_FILE}\`, a web_search, or another \`${UPDATE_TASKS}\` — is blocked by the executor.
+5. Do NOT ask "Posso prosseguir?", "Shall I implement?", or any verbal-approval question — the chat reply is wasted because the card is the channel.
 
-If you find yourself about to type the architecture into chat, stop and call \`${WRITE_FILE}\` instead. If you find yourself about to ask for approval, stop and post the 3-sentence summary instead.`
+RECOVERY — when something doesn't go to plan:
+
+6. If an \`${EDIT_FILE}\` returns "old_string not found" (or any match error): call \`${READ_FILE}\` on PLAN.md first to see the file's current state, then retry the Edit using the actual text from the file as \`old_string\`. Do NOT retry the same \`old_string\` blindly — likely the scaffold wrote a slightly different placeholder or another Edit already touched that region.
+7. If the developer typed "Continue" or this turn resumed after a network interrupt and you're unsure which sections are already filled: call \`${READ_FILE}\` on PLAN.md first. The sections still showing \`_In progress._\` are the unfilled ones; sections with real content are done. Resume from the first unfilled section. Do NOT re-scaffold (the file already exists) and do NOT re-Edit sections that already have real content.
+
+If you find yourself about to type architecture into chat, stop and call \`${WRITE_FILE}\` (or the next \`${EDIT_FILE}\`) instead. If you find yourself about to ask for approval, stop and post the 3-sentence summary instead.`
 }
 
 function getModelCounterweights(modelId?: string): string {

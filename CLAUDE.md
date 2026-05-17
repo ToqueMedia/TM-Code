@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+**Ler sempre o código a cada pergunta/dúvida/questionamento do user sobre o projecto.** Nunca responder com base em memória, suposição ou descrição de arquitectura — abrir os ficheiros relevantes, confirmar o estado actual, e só depois responder. Se houver discrepância entre o que se "lembra" e o que está no código, o código é a fonte de verdade.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview

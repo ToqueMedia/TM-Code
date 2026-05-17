@@ -1385,8 +1385,42 @@ class ToolExecutor {
         this.validatePathWithinProject(filePath)
         try {
           const content = await invoke<string>('read_file', { path: filePath })
-          // Track read timestamp + content hash for read-before-write enforcement
-          this.readFileTimestamps.set(filePath, { timestamp: Date.now(), hash: this.simpleHash(content) })
+          const newHash = this.simpleHash(content)
+
+          // Detect external modification BEFORE overwriting the stored
+          // timestamp. If the file's content hash differs from what we
+          // saw on the previous read — and the agent itself didn't write
+          // through our tools in between (write_file / edit_file update
+          // this map on success) — something else touched the file
+          // (formatter, git pull, manual edit, dev server output). Inject
+          // a system-reminder INSIDE the tool result so the model sees
+          // it in the same turn the read completes. Same shape as
+          // claude-vaz FileReadTool.ts:706-730.
+          const prev = this.readFileTimestamps.get(filePath)
+          const externalChange = prev !== undefined && prev.hash !== newHash
+
+          // Track read timestamp + content hash for read-before-write enforcement.
+          // Set AFTER the externalChange comparison so the comparison uses the
+          // truly-previous state.
+          this.readFileTimestamps.set(filePath, { timestamp: Date.now(), hash: newHash })
+
+          // Empty file: the model often assumes a non-empty file when none
+          // was returned and proceeds to "modify" by writing whole files.
+          // The reminder makes the empty-ness explicit before the next turn.
+          if (content.length === 0) {
+            return '<system-reminder>The file exists but the contents are empty.</system-reminder>'
+          }
+
+          if (externalChange) {
+            const reminder =
+              '<system-reminder>The contents of this file have changed since you last read it '
+              + '(external modification — a formatter, git pull, dev server output, or manual edit '
+              + 'touched it). Treat the content below as authoritative; assumptions from the previous '
+              + 'read are stale and any planned edit must be reconciled against this new content.'
+              + '</system-reminder>\n\n'
+            return reminder + content
+          }
+
           return content
         } catch (error) {
           // formatError handles Tauri's plain-object throws — the previous

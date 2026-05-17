@@ -462,3 +462,422 @@ Direct port of claude-vaz's `AGENT_COLORS` palette, narrowed to the two built-in
 - How does the parent prompt handle a sub-agent abort result? Should we hint NOT to retry? Yes — add to `task` tool description in Phase 3.
 - For Explore: should `glob` be allowed to walk outside the project root (e.g. `node_modules`)? **claude-vaz allows it; we will too** — restrict only writes, not reads. Confirm during Phase 1.
 - Does the architect prompt need to MENTION `task` in addition to having it in the tool index? **Yes** — empirically, tools without few-shot examples get under-used. Add a few-shot in Phase 5. **Same finding documented by claude-vaz** in their `prompt.ts` "When NOT to use" anti-examples block — port that pattern too.
+
+---
+
+# Additional 0.7.0 Scope
+
+> Added: 2026-05-17
+> Status: ranges from DONE (working tree, not committed) to PLANNED to DEFERRED.
+
+This file was originally scoped to the sub-agents feature (sections 1–14 above). The sections below document the **rest of the 0.7.0 release plan** so there's a single canonical reference.
+
+The 0.7.0 release groups four buckets:
+
+| Bucket | Status | Section |
+|---|---|---|
+| Sub-agents (`task` tool) | PLANNED | Sections 1–14 |
+| Hooks via `settings.json` | PLANNED | A |
+| Custom commands via `.claude/commands/*.md` | PLANNED | B |
+| Already implemented in working tree | DONE — needs commit + release | C |
+| Audit items considered but deprioritized | DEFERRED to 0.7.1+ | D |
+| `/plan-feature` command (sibling to `/plan`) | DEFERRED — design to follow | E |
+
+---
+
+## A. Hooks via `settings.json`
+
+> Source of truth: claude-vaz `setup.ts:283-327` + `constants/prompts.ts:128` (event names, blocking semantics, output wrapping).
+
+### A.1 — Context
+
+claude-vaz exposes a generic hook mechanism: shell commands fire in response to agent-lifecycle events. Users can enforce project conventions ("format on save", "tests before complete"), gate dangerous operations (block `execute_command` unless a pre-condition passes), or inject side effects (notify on session start, log on PreCompact). TM Code today has none of this — every automation is baked into the IDE code or hand-driven by the user.
+
+The gap was flagged in audit 2 (#2 "Hook system", high impact / extensibility).
+
+### A.2 — Goals
+
+1. Users declare hooks in `settings.json` under `hooks: { <event>: HookConfig[] }`.
+2. Hook events fired by the IDE harness: `SessionStart`, `PreToolCall`, `PostToolCall`, `PreCompact`, `OnError`, `Stop`.
+3. Each hook is a shell command. The command's stdout/stderr is captured and may be surfaced as a `<user-prompt-submit-hook>`-wrapped system reminder (claude-vaz parity).
+4. Hooks can be **blocking** (`blocking: true` — exit code non-zero blocks the action) or **non-blocking** (fire-and-forget).
+5. Hook execution is gated by sandboxing: respects the same allowlist/denylist as `execute_command`.
+
+### A.3 — Non-goals (0.7.0)
+
+- No GUI for hook configuration — users edit `settings.json` by hand.
+- No multi-host hooks (e.g. webhooks). Local shell only.
+- No streaming hook output to the chat in real time — captured then surfaced atomically on completion.
+- No `WorktreeCreate` hook — only relevant once we add worktree isolation (deferred).
+
+### A.4 — Architecture
+
+```
+┌──────────────────────────────┐
+│ AgentService / toolExecutor  │
+│   emits event:               │
+│   { name, payload }          │
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│ HookDispatcher (new)         │
+│ • reads settings.hooks       │
+│ • resolves matching configs  │
+│ • spawns shell per config    │
+│ • collects stdout/exit       │
+│ • returns aggregate result   │
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│ Outcomes:                    │
+│ • exit ≠ 0 + blocking → tool │
+│   call aborts with hook msg  │
+│ • stdout → wrapped reminder  │
+│ • side effects: free reign   │
+└──────────────────────────────┘
+```
+
+### A.5 — Domain schema
+
+```ts
+interface HookConfig {
+  /** Shell command. Runs via the same Tauri execute_command pipeline so
+   *  sandbox + flaggedCommands rules apply. Env: HOOK_EVENT, HOOK_PAYLOAD
+   *  (JSON-stringified event payload), TM_PROJECT_PATH, TM_CWD. */
+  command: string
+  /** When true, non-zero exit BLOCKS the originating action and the IDE
+   *  surfaces the hook's stderr to the agent as a tool-result error.
+   *  When false (default), the IDE logs the hook result but proceeds. */
+  blocking?: boolean
+  /** Filter — only fire for tool calls matching this name. Empty = all. */
+  toolNames?: string[]
+  /** Filter — only fire for the matching slash command. Empty = all. */
+  slashCommands?: string[]
+  /** Timeout in ms. Default 10s; max 60s. */
+  timeoutMs?: number
+}
+
+interface HooksConfig {
+  SessionStart?: HookConfig[]
+  PreToolCall?: HookConfig[]
+  PostToolCall?: HookConfig[]
+  PreCompact?: HookConfig[]
+  OnError?: HookConfig[]
+  Stop?: HookConfig[]
+}
+```
+
+### A.6 — File structure
+
+| File | Action | Purpose |
+|---|---|---|
+| `src/services/hooks/types.ts` | CREATE | `HookConfig`, `HooksConfig`, `HookEvent`, `HookResult` |
+| `src/services/hooks/hookDispatcher.ts` | CREATE | `dispatchHook(event, payload) → HookResult[]` |
+| `src/services/hooks/__tests__/dispatcher.test.ts` | CREATE | Unit tests (exit code, blocking, timeout, filter matching) |
+| `src/stores/settingsStore.ts` | UPDATE | Add `hooks?: HooksConfig` field + persistence |
+| `src/services/agent/agentService.ts` | UPDATE | Emit `SessionStart`/`PreCompact`/`Stop` events |
+| `src/services/agent/toolExecutor.ts` | UPDATE | Emit `PreToolCall`/`PostToolCall`/`OnError`; honour blocking result |
+| `docs/HOOKS.md` | CREATE | User-facing docs: events, payloads, examples |
+
+### A.7 — Implementation phases
+
+- **Phase A1** — Types + `HookDispatcher` (pure, no caller wiring). Unit tests.
+- **Phase A2** — `settingsStore` carries `hooks?: HooksConfig`. Reads from `settings.json` on load.
+- **Phase A3** — Wire `PreToolCall` + `PostToolCall` in toolExecutor. Most-impactful pair. Test blocking semantics.
+- **Phase A4** — Wire `SessionStart`, `PreCompact`, `OnError`, `Stop`.
+- **Phase A5** — `docs/HOOKS.md` + few-shot example hooks shipped in the IDE templates.
+
+Critical path: A1 → A2 → A3 → A4 → A5.
+
+### A.8 — Risks
+
+| Risk | Mitigation |
+|---|---|
+| Malicious hook in project `.claude/settings.json` runs arbitrary code | Hooks pulled from PROJECT-LEVEL settings prompt the user once for "trust this project's hooks?" (Y/N persistent). User-level `~/.claude/settings.json` trusted by default. |
+| Hook timeout hangs the IDE | Default 10s, hard cap 60s. Kill on timeout. |
+| Blocking hook + infinite retry loop | `OnError` hook does NOT re-fire on its own errors (single-shot per event). |
+| Hooks fire from sub-agents and double-bill | Sub-agents skip the `PreToolCall`/`PostToolCall` hook events for 0.7.0. Parent-only. |
+
+---
+
+## B. Custom commands via `.claude/commands/*.md`
+
+> Source of truth: claude-vaz `skills/loadSkillsDir.ts:566-623`. We adopt the directory layout, frontmatter convention, and discovery semantics; the registration shape lives in our existing `slashCommandRegistry`.
+
+### B.1 — Context
+
+Today the slash command registry (`src/services/agent/slashCommandRegistry.ts`) hard-codes `/init`, `/plan`, `/debug`, `/payments`, `/te2e`, `/review`. Adding `/deploy-staging` or `/run-my-test-suite` requires editing TS + rebuilding the IDE. claude-vaz CLI users get this for free via `~/.claude/commands/*.md` and `<project>/.claude/commands/*.md`.
+
+Gap flagged in audit 2 (#3 "Custom commands", high impact / extensibility).
+
+### B.2 — Goals
+
+1. The IDE discovers `~/.claude/commands/*.md` (global) and `<projectRoot>/.claude/commands/*.md` (project-scoped) at session start and on file-watcher events.
+2. Each `.md` file = one slash command. Frontmatter declares name + description + optional arg suggestions + plan gating.
+3. Markdown body = the prompt template, with `{{args}}` interpolation for user-supplied arguments.
+4. Discovered commands appear in the slash menu next to built-ins; project-scoped wins on name collision.
+5. Renaming or deleting a file removes the command on the next discovery tick.
+
+### B.3 — Non-goals (0.7.0)
+
+- No script execution from custom commands — they're prompt templates only (no shell, no Node hooks). Users wanting "run this command" wire it through hooks (Section A).
+- No nested directories — flat `commands/*.md` for 0.7.0.
+- No live preview of the rendered prompt in the slash menu.
+- No marketplace / share-link for commands. Local files only.
+
+### B.4 — File format (frontmatter + body)
+
+```markdown
+---
+name: deploy-staging
+description: Deploy current branch to staging via the project's deploy script.
+args:
+  - value: ""
+    description: optional release notes (will be passed to the deploy script as $1)
+requires-paid-plan: false
+---
+
+The developer wants to deploy the current branch to staging. The project has
+`scripts/deploy-staging.sh` (verify with `read_file` first if unsure of the
+path). Run it via `execute_command`, surface its output, and capture the
+returned URL.
+
+User-supplied release notes: {{args}}
+```
+
+### B.5 — Domain schema
+
+```ts
+interface CustomCommandFile {
+  /** Absolute path on disk. */
+  filePath: string
+  /** Scope inferred from path: user vs. project. */
+  scope: 'user' | 'project'
+  /** Parsed frontmatter. */
+  meta: {
+    name: string
+    description: string
+    args?: Array<{ value: string; description: string }>
+    requiresPaidPlan?: boolean
+  }
+  /** Markdown body (frontmatter stripped). Sent as the prompt template. */
+  body: string
+}
+```
+
+### B.6 — File structure
+
+| File | Action | Purpose |
+|---|---|---|
+| `src/services/agent/customCommands/discover.ts` | CREATE | `discoverCustomCommands(projectRoot) → CustomCommandFile[]` |
+| `src/services/agent/customCommands/parser.ts` | CREATE | Frontmatter + body parsing (zero-deps; yaml-lite for FM) |
+| `src/services/agent/customCommands/__tests__/parser.test.ts` | CREATE | Pure unit tests for parser |
+| `src/services/agent/slashCommandRegistry.ts` | UPDATE | Merge custom commands into the registry; project overrides user; precedence over built-ins documented |
+| `src/services/agent/customCommands/executor.ts` | CREATE | `executeCustomCommand(file, args, mode)` — interpolates `{{args}}`, calls `runAgentWithCallbacks` |
+| `src/components/prompt/slashCommandMenu.tsx` | UPDATE | Render badge `user` / `project` next to custom commands |
+| `docs/CUSTOM-COMMANDS.md` | CREATE | User docs: frontmatter schema, examples |
+
+### B.7 — Implementation phases
+
+- **Phase B1** — Parser + types. Pure unit tests.
+- **Phase B2** — `discoverCustomCommands` reads both dirs, returns merged list with project-wins semantics. File-watcher hook re-discovers on changes.
+- **Phase B3** — Registry merges. Slash menu surfaces them.
+- **Phase B4** — Execution path: interpolate args, dispatch to main agent the same way built-ins do (via `runAgentWithCallbacks` with `cmdOnlyMode` propagated).
+- **Phase B5** — `docs/CUSTOM-COMMANDS.md` + ship one example command in the IDE's user templates.
+
+### B.8 — Decisions
+
+| Decision | Chosen | Rationale |
+|---|---|---|
+| Discovery scope | `~/.claude/commands/*.md` + `<projectRoot>/.claude/commands/*.md` | claude-vaz uses the same two paths. Matches existing user mental model. |
+| Name collision | Project > User > Built-in | Project context is the most specific. Built-ins are last resort because they're the most generic. Same precedence as claude-vaz. |
+| Prompt template syntax | `{{args}}` (Handlebars-lite) | Simplest interpolation. Future-proof for `{{file}}`, `{{branch}}` etc. without committing to a full templating engine. |
+| Hot-reload | File-watcher on both dirs | Discovery in steady-state must reflect on-disk reality without an IDE restart. Existing `fileWatcherService` already watches the project; extend to `~/.claude/commands/`. |
+| Plan gating | `requires-paid-plan: bool` in frontmatter | Same shape as built-ins (`requiresPaidPlan`). User-written commands can opt themselves into Pro-only if they want. |
+
+### B.9 — Risks
+
+| Risk | Mitigation |
+|---|---|
+| Project `.claude/commands/rm.md` overrides built-in `/rm` (if we add one) | Project-wins precedence is intentional, but the slash menu visibly badges with `project` so user knows. |
+| Malformed YAML frontmatter | Parser returns a parse error; menu shows the command grayed out with the error in tooltip. Loud failure, not silent skip. |
+| `{{args}}` injection (e.g. command with `; rm -rf /` in args) | Args are interpolated as TEXT into the PROMPT — they never reach a shell. Shell execution only happens if the prompt instructs the agent to `execute_command`, which goes through normal permission flow. |
+
+---
+
+## C. Already implemented in working tree (queued for 0.7.0 release)
+
+> Status: DONE — code in working tree, not yet committed. Listed here so the 0.7.0 changelog has a single source of truth.
+
+These were built across multiple sessions of claude-vaz-parity work and are technically "feature changes" that warrant the 0.7.0 minor bump rather than a 0.6.2 patch.
+
+### C.1 — Thinking model rationalization
+
+- **Removed** the mid-session "⚡ Thinking" toggle UI from `AgentStatusBar.tsx`, `TerminalTitleBar.tsx`, `ChatView.tsx`.
+- **Hard-coded** `preserveReasoningBetweenTurns = true` in `agentService.ts:354`.
+- **Reasoning always-on** when `profile.supportsThinking === true` — slash-command request types (`plan`/`debug`/`review`/`e2e`) no longer "force" thinking, since every active coder profile already supports it. The backend belt-and-braces force at `proxy.ts:867` stays as redundancy.
+- **Removed** `thinkingEnabled` / `setThinkingEnabled` from `settingsStore.ts` (dead).
+- **Simplified** `useThinkingToggle` hook to return only `{ mandatory: boolean }` for the static badge.
+
+claude-vaz parity: their thinking config is global / launch-flag based, no mid-session UI. We match.
+
+### C.2 — Verification gate for `#auth-*` scaffold flow (`verifyAuthFlow`)
+
+- **New** `src/services/agent/commands/verifyAuthFlow.ts` + `authVerdict.ts` (pure parseVerdict).
+- **Wired** into `authCommand.runAuthFlow` AFTER the scaffold turn. Adversarial sub-agent runs auth-specific probes (bogus-token curl, MISSING_REQUEST_URI / INVALID_CREDENTIAL_OR_PROVIDER_ID / `/v2` slip / Vite proxy missing detection). On FAIL, diagnostic feeds back to main agent for up to 2 fix passes, then re-verifies. Caps prevent infinite loops.
+- **Skill hardened** — `auth-proxy/SKILL.md:334` got a dedicated `### CRITICAL —` block for the `signInWithIdp` body shape (postBody + requestUri, not bare idToken).
+- **CMD-mode aware** — verifier enables `toolExecutor.enableCmdMode(projectPath)` for its duration when the parent flow was CMD-launched. Without this every file read in the verifier failed with "No project is open."
+- **Abort / error guards** — `userAborted` flag captured via `agent-stop-requested` listener; the loop honours Stop AND skips verification when the scaffold turn ended in error.
+
+claude-vaz parity: their `verificationAgent.ts` adversarial pattern, adapted to auth specifically.
+
+### C.3 — Slash command `cmdOnlyMode` propagation
+
+- `/init`, `/plan`, `/debug`, `/payments`, `/te2e`, `/review` now accept `mode: SlashCommandMode` and propagate `cmdOnlyMode: mode === 'terminal'` to `runAgentWithCallbacks`.
+- `/review` additionally wraps its sub-agent run with `enableCmdMode` / `disableCmdMode` because it goes through `createLightweight` instead of `runAgentWithCallbacks`.
+
+Without this fix every slash command was broken in CMD mode — tool calls fell back to `useProjectStore.currentProject` which is empty in CMD.
+
+### C.4 — Skill section extraction — orphan H3 support
+
+- `extractCriticalSections` (`contextBuilder.ts`) now captures `### CRITICAL —` H3 blocks living under non-critical H2 parents, not just H2-nested ones. This unblocks the verifier's slice-only prompt (the `MISSING_REQUEST_URI` rule lives at H3 under "## the auth API REST endpoints", which the old extractor silently dropped).
+- 3 new test cases cover orphan H3, H3→H3 boundary, H3→H2 boundary.
+
+### C.5 — Compact summary structure (9-section template)
+
+- New `compactPrompt.ts` (zero-deps, testable): `buildCompactPrompt()` + `formatCompactSummary()`. 9-section claude-vaz template + `<analysis>` drafting wrapper stripped post-hoc.
+- 13 unit tests.
+- `agentService.callSummarizationAPI` uses both.
+
+NB: technically committed against the 0.6.2 line because the user picked it as a chat-mode quality item. Listed here for completeness.
+
+### C.6 — Prompt cache_control markers
+
+- `system` block serialized as `[{type:'text', text, cache_control:{type:'ephemeral'}}]` array form.
+- Last tool definition carries `cache_control: { type: 'ephemeral' }`.
+- IDE-side only — full upstream effect requires backend hook to forward the markers (0.7.x backlog).
+
+NB: same as C.5, committed into 0.6.2. Listed for changelog completeness.
+
+### C.7 — System reminder injection in `read_file`
+
+- `read_file` injects `<system-reminder>` inside the tool result for empty files + externally-modified files (hash mismatch detected without going through our write tools).
+- claude-vaz parity: `FileReadTool.ts:706-730`.
+
+### C.8 — Time-based microcompaction
+
+- `lastAssistantMessageAt` tracks wall-clock of last completed turn.
+- When gap > 60min (matches upstream cache TTL), aggressive `keepRecent=5` (vs default 8) — cache is guaranteed expired anyway.
+
+NB: shipped as 0.6.2 item; documented here for traceability.
+
+### C.9 — Miscellaneous polish
+
+- Adaptive warn buffer on context window (`utils/contextWindow.ts`) — was 20K flat, now `max(20K, effective × 7%)` so orange fires earlier on 1M-context models.
+- Overrun icon (`FiAlertOctagon`) distinct from compact-imminent (`FiArchive`).
+- Stale `MODEL_CONTEXT_WINDOWS_FALLBACK` table removed.
+- Dead `setContextWindowSize` method removed.
+- Language consistency: all retry / exhausted messages converted PT → EN to match the chat surface.
+
+### C.10 — `/plan` multi-write+edit refactor (resilience fix)
+
+- **Problem fixed**: the architect was emitting PLAN.md as a single `${WRITE_FILE}`({ path, content: "<full document>" }). The whole markdown body crossed the stream as JSON-escaped `input_json_delta` events. On long sessions (DashScope GLM-5.1 direct AND Xiaomi Mimo via OpenRouter both observed), the upstream socket dropped mid-stream → `content_block_stop` for the tool_use never arrived → the tool was silently dropped from `turnResult.toolCalls`. The retry path (`agentService.ts:789-823`) re-issued the turn with the same `X-Request-Type=plan` header (forcing reasoning ON again) plus the architect prompt (~10K chars) plus the same monolithic Write expectation → re-cut at the same point → exhaust `MAX_INTERRUPT_RETRIES` → surface to user. Symptom: PLAN.md never landed. Workaround: user typed "Continue" and got a degraded plan (default IDE prompt, no architect template).
+
+- **Fix shape**: ported the incremental write pattern from claude-vaz (Write the plan file in multiple turns) and Kilo Code (incremental Write+Edit on a single plan file at a deterministic path). Architect prompt now produces:
+  1. `${WRITE_FILE}` of a scaffold (frontmatter with `Status: DRAFT` + every section heading from §1 to §14 with `_In progress._` placeholders).
+  2. A sequence of `${EDIT_FILE}` calls — one per section — replacing each placeholder with finished content. Each Edit is a short stream; a mid-stream drop loses at most one section, not the whole plan.
+  3. A FINAL `${EDIT_FILE}` flips frontmatter `Status: DRAFT` → `Status: PENDING APPROVAL`. This is the IDE's machine-readable "plan is ready" marker.
+  4. `${UPDATE_TASKS}` seeds the tracker.
+  5. 3-sentence summary, then STOP.
+
+- **Mechanical layer already supported the new shape**: `planMode.ts` already lists `EDIT_FILE` in `PLAN_MODE_ALLOWED_TOOLS` and path-restricts it to PLAN.md/TODO.md at the project root. The strict-STOP guard at `toolExecutor.ts:299` fires only AFTER both `planFileWritten` and `planTasksSeeded` are true — multiple Edits between Write and `update_tasks` don't trip it. No executor changes needed.
+
+- **IDE readiness check upgraded**: `executePlan` no longer treats `fileExists(PLAN.md)` as the "done" signal — with the scaffold flow, the file exists from turn 2. The new `readPlanReadiness()` helper checks the file is on disk AND contains `Status: PENDING APPROVAL` (case-insensitive, blockquote-prefix-tolerant). If the marker is missing the IDE surfaces a tailored message: "Plan generation was cut off — PLAN.md is still in DRAFT. Type 'Continue' to resume from the next unfilled section." This converts what used to be silent corruption into a clear user-facing recovery path.
+
+- **Files changed**:
+  - `src/services/agent/commands/planCommand.ts` — `getChannelRuleSection`, `getCompletionRule`, `getAllowedToolsSection`, `getApprovalFlowSection`, `getTaskListSection`, `getWorkedExample`, `getReminder`, `getPlanMdTemplate` (frontmatter note); `executePlan` end-of-flow readiness gate; new `readPlanReadiness` helper.
+
+- **Not yet refactored**: `buildTodoPrompt` (TODO generation after plan approval) still uses a single `${WRITE_FILE}` for TODO.md. TODO is smaller than PLAN.md (table + checklist, not 14 prose sections) so the cut risk is lower, but for consistency it should follow the same pattern in a follow-up. Tracked under D.7.
+
+- **Paired follow-up**: the auto-retry path in `agentService.ts:789-823` still re-sends `X-Request-Type: plan` on each interrupt retry, re-forcing reasoning ON and re-inflating the stream that just cut. With C.10 the surface is smaller per Edit, so the cut is unlikely to recur — but the retry path should still be hardened. Tracked under D.7.
+
+- **claude-vaz / Kilo Code parity**: matches the spirit of both. claude-vaz writes its plan file across multiple turns under the `plan` permission mode; Kilo Code's plan-mode reminder explicitly says "build your plan incrementally by writing to or editing this file". Neither uses a single monolithic Write. We're now aligned.
+
+---
+
+## D. Considered but deferred (audit items not picked for 0.7.0)
+
+> Listed for memory. Each was flagged in the claude-vaz divergence audits but pushed past 0.7.0 in favour of the items above.
+
+| # | Item | Reason for deferral |
+|---|---|---|
+| D.1 | **Cost tracking per-model** (audit 2 #1) — `/cost` command, per-model breakdown, cache hit stats, session-scoped cost persistence | Requires changes in the billing pipeline (worker → IDE) — bigger than 0.7.0 wants to absorb. Standalone 0.7.1 item. |
+| D.2 | **File staleness with mtime** (audit 1 #3) — current hash-only check misses byte-preserving touches (formatter, sort-imports) | Real bug but rare. C.7 (system-reminder injection) partially mitigates by surfacing hash mismatch loudly when it does fire. Full fix in 0.7.1. |
+| D.3 | **Read tool `cat -n` line numbering** (audit 1 #4) | Mostly affects long-file references. The IDE's offset/limit + tooling around line refs already covers most cases. Defer; pick up if eval shows the model wasting turns on line counting. |
+| D.4 | **TodoWrite one-in-progress discipline + turn-since-write reminder** (audit 1 #5) | Quality-of-life. The `update_tasks` tool works; users haven't reported the chaos pattern observed in claude-vaz dogfood. Defer; revisit if user-reported. |
+| D.5 | **Background agents follow-up** (audit 1 #6) — make `spawn_background_agent` accept SendMessage continuations | Power-user feature. Current one-shot covers 95% of use cases. Defer behind sub-agents (Sections 1–14) which is the higher-leverage piece. |
+| D.6 | **Worker-side prompt-cache key from `cache_control` hints** | C.6 markers are emitted by the IDE but the worker doesn't yet translate them into upstream cache-key/Anthropic cache_control on the forward path. Plan-managed users (DashScope/OpenRouter) currently get no token savings from the markers. Backend work for 0.7.1+. |
+| D.7 | **Retry path clears `X-Request-Type` + `buildTodoPrompt` multi-write+edit** (paired with C.10) | Two small follow-ups to the /plan resilience fix. (a) When the stream-interrupted retry re-issues a turn, the singleton `agentService.requestType` is still `'plan'` so reasoning is forced ON again — should be temporarily cleared for the retry only, then restored. Touches `agentService.ts:789-823`. (b) `buildTodoPrompt` should mirror C.10's scaffold + edits shape for TODO.md so a long task list doesn't regress to the same cut symptom. Both small enough to land mid-0.7.0 but split from C.10 for separate test coverage. |
+| D.8 | **Resume `/plan` when user types "Continue" with DRAFT plan on disk** (gap in C.10) | C.10 added a tailored "Plan generation was cut off — PLAN.md is still in DRAFT. Type 'Continue' to resume from the next unfilled section" message when the architect's auto-retries exhaust. But "Continue" goes through the default chat path — the architect `systemPromptOverride` is gone by then (it was scoped to the single `runAgentWithCallbacks` call in `executePlan`, and the `finally` block reset `requestType` and `planMode`). So the model recovering on user-typed "Continue" sees the default IDE prompt, NOT the architect role, and may improvise a degraded plan — the exact failure mode C.10 was trying to fix. Fix: in `usePromptBar` (or `PromptInput.handleSend`), before dispatching a normal chat turn, check if PLAN.md exists in `<projectRoot>` with `Status: DRAFT` (reuse `readPlanReadiness`). If yes AND the user message is a short continuation cue ("continue", "continua", "go on", etc.), re-dispatch through `executePlan` instead of the default chat path. Recovers the architect role with the same plan-mode permissions and prompt. Small but touches prompt-dispatch routing — wants its own integration test. |
+
+---
+
+## E. `/plan-feature` command (deferred — post-0.7.0)
+
+> Status: NOT STARTED. Full design to be authored separately when 0.7.0 sub-agents (Sections 1–14) ship.
+> Source-of-truth references: claude-vaz `EnterPlanModeTool` / `ExitPlanModeTool` pair (`tools/EnterPlanModeTool/`, `tools/ExitPlanModeTool/`); Kilo Code Plan mode (`packages/opencode/src/session/prompt.ts`, `src/tool/plan.ts`, `src/session/session.ts:328` for plan-file path resolution).
+
+### E.1 — Context
+
+Today's `/plan` produces full-application architecture: 14-section FULLSTACK template, platform-publish constraints, file structure tabulated by phase, alternatives + risks + quality attributes. Appropriate for greenfield apps. **Overkill for feature-level changes** inside an existing project — "add OAuth", "refactor the search bar", "introduce dark mode". The model spends most of its budget filling sections that are N/A for a feature-scoped change, and the user gets a document that doesn't match the granularity of the work.
+
+`/plan-feature` is a sibling command for feature-level planning, modelled on Kilo Code's Plan mode and claude-vaz's plan mode. Short, incremental, written to a `.tmcode/plans/` directory rather than top-level `PLAN.md`, multiple Write+Edit turns instead of one giant tool_use, and (once 0.7.0 sub-agents land) parallel exploration via `task`.
+
+### E.2 — Shape (sketch only — full design deferred)
+
+- **Plan file path**: `<projectRoot>/.tmcode/plans/<timestamp>-<slug>.md` (mirrors Kilo Code's `.kilo/plans/<ts>-<slug>.md`). Multiple plans coexist; old plans stay in disk for reference.
+- **Activation**: slash command flips a per-session `planFeatureMode` flag — no `systemPromptOverride`. Default system prompt stays; a per-turn `<system-reminder>` is injected describing the mode + the plan file path.
+- **Permission ruleset**: writes blocked everywhere except on the plan file (hard-enforced at the executor, mirrors Kilo Code's `hardPermissions`). Survives a model that ignores the prompt.
+- **Sub-agent usage** (post-0.7.0): architect spawns `task(Explore, ...)` for codebase patterns, `task(Research, ...)` for external API research, potentially 2-3 in parallel. Each returns a compact summary to the architect; architect synthesises into the plan file.
+- **Incremental writing**: model uses `write_file` for initial scaffold then `edit_file` for refinement across multiple small turns. No single Write with the whole document as `content`.
+- **Completion signal**: `plan_exit` tool with empty params — same pattern as claude-vaz `ExitPlanMode` and Kilo Code `plan_exit`. Plan content lives in the file; never crosses the stream as tool_use args.
+- **Hand-off**: when user approves, the coder agent receives a synthetic message ("execute the plan at `<path>`") on the next turn — same pattern as Kilo Code's auto-injection on agent transition.
+
+### E.3 — Non-goals (when designed)
+
+- **Replacing `/plan`**. They coexist:
+  - `/plan` for application architecture (greenfield, FULLSTACK template, Cloudflare publish constraints, 14 sections).
+  - `/plan-feature` for feature-level changes inside an existing project. Sections appear organically based on the work.
+- **The 14-section template**. `/plan-feature` plans follow the user's idea, not a fixed shape.
+- **Forcing reasoning ON** via `X-Request-Type` header. The user's thinking-mode preference applies normally.
+- **`update_tasks` mirror**. Optional; off by default (the tracker is overkill for a 3-task feature plan).
+- **Approval card on the top-level file tree**. Plans live in `.tmcode/plans/`, not at project root; the IDE renders the approval card inline in chat from the chosen plan file path.
+
+### E.4 — Dependencies
+
+1. Sub-agents (Sections 1–14) shipping in 0.7.0.
+2. The current `/plan` first refactored to multi-write+edit shape — otherwise the cut symptom carries over to `/plan-feature` and the new command inherits the same brittleness.
+3. Permission-ruleset enforcement in the ToolExecutor (the current `planMode` flag is prompt-level only; `/plan-feature` needs a hard gate that allows writes ONLY to the chosen plan file).
+
+### E.5 — Open questions (to resolve at design time)
+
+- Reuse existing `PlanApprovalCard` UI or new one? Probably new — `/plan-feature` plans are smaller and the approval UX can be lighter (Approve / Request changes, no Reject-to-restart since the file is incremental).
+- File-watcher integration: should the IDE show plan files in the sidebar under `.tmcode/plans/`? Yes — makes them discoverable and editable.
+- Resume semantics: typing `/plan-feature` while an unfinished plan exists in `.tmcode/plans/` should resume editing it (same pattern as Kilo Code's "plan already exists at X" branch), not start a new file.
+
+Full design lands as `docs/PLAN-FEATURE-COMMAND.md` once 0.7.0 ships and we know the actual sub-agent surface to build against.
+
+---
+
+## F. Release checklist (0.7.0 cut)
+
+Before the 0.7.0 tag:
+
+- [ ] Sections 1–14 (sub-agents) — implementation complete through Phase 5.
+- [ ] Section A (hooks) — implementation through Phase A5; docs published.
+- [ ] Section B (custom commands) — implementation through Phase B5; docs published.
+- [ ] Section C — already in working tree; bundle into the release commit(s).
+- [ ] `package.json` + `tauri.conf.json` version bump 0.6.2 → 0.7.0.
+- [ ] CHANGELOG entry consolidating C.1–C.9 (visible behaviour changes only — drop the polish items).
+- [ ] Manual smoke test: chat-mode scaffold flow + verifier, terminal-mode `/init` + `/plan`, sub-agent spawn from architect prompt.
+- [ ] BugHunter `/plan` 2026-05-16 scenario re-run to verify the ≥30K token savings claim from Section 9.
