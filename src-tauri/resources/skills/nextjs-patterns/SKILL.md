@@ -2,6 +2,23 @@
 
 You are working in a Next.js project. App Router (`app/`) is the default for new code. The `pages/` router still works but is legacy. The rules below cover non-obvious decisions and footguns.
 
+## CRITICAL — App Router is the default; the model has a strong Pages Router prior
+
+Next.js's old Pages Router (`pages/`, `getServerSideProps`, `getStaticProps`, `_app.tsx`, `_document.tsx`, `next/router`) was the dominant API from 2016 to early 2023 and **is heavily over-represented in your training data**. The App Router (`app/`, `'use client'` opt-in, Server Components, `<Link>` from `next/link`, `useRouter` from `next/navigation`, Server Actions) is the canonical default since Next.js 13.4 — but the model still reaches for Pages Router patterns under generation pressure.
+
+**Defense — three concrete checks before writing any Next.js code**:
+
+1. **Look at the project layout first.** If you see `app/page.tsx` → App Router (write App Router code). If you see `pages/index.tsx` → Pages Router (write Pages Router code). **Never mix.** If both exist, App Router wins for new code; ask the developer if migrating.
+2. **`'use client'` is opt-IN, not opt-OUT.** Server Component is the default — write a regular function. Only add `'use client'` when the component needs `onClick`/`onChange`/`useState`/`useEffect`/`useRef`/browser APIs. Each `'use client'` boundary opts out of streaming + zero-JS rendering for everything below it.
+3. **Router import**: `from 'next/navigation'` (App Router) — NOT `from 'next/router'` (Pages Router). `useRouter`, `usePathname`, `useSearchParams` are all in `next/navigation` for App Router.
+
+**Anti-pattern symptoms — these mean you defaulted to Pages Router**:
+- Writing `getServerSideProps` or `getStaticProps` → wrong, App Router fetches in `async` Server Components with `await`.
+- Importing `useRouter` from `next/router` → wrong, App Router uses `next/navigation`.
+- Creating `_app.tsx` or `_document.tsx` → wrong, App Router uses `app/layout.tsx`.
+- Routes under `pages/api/*.ts` → wrong, App Router uses `app/.../route.ts` Route Handlers.
+- `import Head from 'next/head'` → wrong, App Router uses `metadata` export from `page.tsx`/`layout.tsx`.
+
 ## Decision points (non-obvious)
 
 - **Server Component is the default**: do NOT add `'use client'` unless you need interactivity (`onClick`, `onChange`, hooks like `useState`/`useEffect`/`useRef`, browser APIs). Each `'use client'` boundary opts out of streaming + zero-JS rendering for everything below it.

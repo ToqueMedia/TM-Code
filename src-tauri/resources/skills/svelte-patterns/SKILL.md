@@ -2,6 +2,47 @@
 
 You are working in a Svelte project. Check `package.json` for the Svelte version BEFORE writing reactive code — Svelte 5 (runes) and Svelte 4 (`let` + `$:`) have incompatible syntaxes.
 
+## CRITICAL — Svelte 5 runes are the default; the model has a strong Svelte 3/4 prior
+
+Svelte 3 and 4 ruled training data from 2019-2024 with `let x = 0; $: doubled = x * 2; <button on:click={() => x++}>`. Svelte 5 (released late 2024) introduced **runes** (`$state`, `$derived`, `$effect`, `$props`, `$bindable`) as the canonical API. The model has thousands of training samples of the old syntax and far fewer of runes — under generation pressure it reaches for `let` + `$:` even on Svelte 5 projects.
+
+**Defense — one mandatory check before writing any reactive code**:
+
+1. **Read `package.json`'s svelte version FIRST**:
+   ```bash
+   cat package.json | grep '"svelte"'
+   ```
+   - `"svelte": "^5"` or `"svelte": "5.x.y"` → **use runes** (`$state`, `$derived`, `$effect`).
+   - `"svelte": "^4"` or earlier → use legacy syntax (`let` + `$:`).
+   - **Never mix in the same file.** A `.svelte` file with `$state()` cannot also use `$:` reactive declarations — Svelte 5 explicitly rejects that combination.
+
+2. **Svelte 5 component template**:
+   ```svelte
+   <script lang="ts">
+     let count = $state(0)
+     let doubled = $derived(count * 2)
+     $effect(() => { console.log('count changed:', count) })
+     let { name = 'world' } = $props()
+   </script>
+
+   <button onclick={() => count++}>{count} → {doubled}</button>
+   ```
+   Note: `onclick` (lowercase, like standard HTML), NOT `on:click` (Svelte 3/4).
+
+3. **Cross-component state in `.svelte.ts` files using runes**, NOT `writable()`:
+   ```ts
+   // src/stores/counter.svelte.ts
+   export const counter = $state({ count: 0 })
+   // imports get reactive access — no $store / .subscribe needed
+   ```
+
+**Anti-pattern symptoms — these mean you defaulted to Svelte 3/4 on a Svelte 5 project**:
+- `let count = 0` declared at top of `<script>` and mutated → wrong on Svelte 5, use `$state(0)`.
+- `$: doubled = count * 2` → wrong on Svelte 5, use `$derived(count * 2)`.
+- `on:click={...}` → wrong on Svelte 5, use `onclick={...}` (Svelte 5 prefers standard HTML event attributes).
+- `import { writable } from 'svelte/store'` in new code → use `$state` rune in a `.svelte.ts` file.
+- `$count` syntax for store auto-subscribe in components → ranges from awkward to broken in Svelte 5; rune-based state is read directly (`counter.count`).
+
 ## Svelte 5 (runes — preferred for new code)
 
 - `$state()` — reactive state declarations.

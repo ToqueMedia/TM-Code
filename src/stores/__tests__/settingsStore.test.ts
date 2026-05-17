@@ -54,7 +54,6 @@ function seedPersistedSettings(ollamaUrl: string) {
       hasCompletedOnboarding: true,
       sandboxEnabled: false,
       flaggedCommands: [],
-      thinkingEnabled: true,
     },
     version: 0,
   }))

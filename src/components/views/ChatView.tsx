@@ -43,16 +43,12 @@ function ChatView() {
   const cycleEnd = useBillingStore(s => s.cycleEnd)
   const billingStatus = useBillingStore(s => s.status)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
-  // Thinking + BYOK state — both via shared hooks (eliminates the 5-site
-  // duplication that previously drifted: see hooks/useByokState.ts +
-  // hooks/useThinkingToggle.ts). The hooks subscribe to the same stores
-  // we used to read here inline; behaviour is identical, the wiring is
-  // not the source-of-truth anymore.
-  const {
-    toggleable: thinkingSupported,
-    enabled: thinkingEnabled,
-    setEnabled: setThinkingEnabled,
-  } = useThinkingToggle()
+  // Thinking is no longer user-toggleable (claude-vaz parity). The
+  // mandatory badge below renders when the backend reports the active
+  // model is mandatory-thinking; otherwise nothing surfaces here and
+  // reasoning is decided by the request type (forced ON by slash
+  // commands /plan, /debug, /review, /te2e; OFF otherwise).
+  const { mandatory: thinkingMandatory } = useThinkingToggle()
   const { byokInPlay: showModelIndicator } = useByokState()
   // Last terminal error from the agent loop. The ServiceError thrown for 402
   // (NO_CREDITS), 429 (BUDGET_EXHAUSTED / RATE_LIMIT), 5xx, AUTH_EXPIRED, etc.
@@ -195,30 +191,24 @@ function ChatView() {
         {/* Credits + Isolation + MCP indicators */}
         <HStack gap={1.5}>
           <ContextWindowIndicator />
-          {/* Thinking toggle — only for paid plans */}
-          {thinkingSupported && (
+          {/* Mandatory-thinking badge — static, only when model thinks
+              unconditionally. The interactive toggle was removed (claude-vaz
+              parity) — thinking now follows the model's default and is
+              forced ON only by slash commands via X-Request-Type. */}
+          {thinkingMandatory && (
             <Flex
-              as="button"
               align="center"
               gap="4px"
               px="6px"
               py="3px"
               borderRadius="5px"
-              cursor="pointer"
-              bg={thinkingEnabled ? 'rgba(163, 113, 247, 0.1)' : 'transparent'}
-              border="1px solid"
-              borderColor={thinkingEnabled ? 'rgba(163, 113, 247, 0.25)' : tokens.colors.border.default}
-              color={thinkingEnabled ? tokens.colors.accent.purple : tokens.colors.text.disabled}
-              transition={`all ${tokens.transition.fast}`}
-              _hover={{
-                bg: thinkingEnabled ? 'rgba(163, 113, 247, 0.15)' : tokens.colors.bg.hoverSubtle,
-                borderColor: thinkingEnabled ? 'rgba(163, 113, 247, 0.35)' : tokens.colors.border.subtle,
-              }}
-              onClick={() => setThinkingEnabled(!thinkingEnabled)}
-              title={thinkingEnabled ? 'Thinking ON — click to disable for faster responses' : 'Thinking OFF — click to enable deep reasoning'}
+              bg="rgba(163, 113, 247, 0.1)"
+              border="1px solid rgba(163, 113, 247, 0.25)"
+              color={tokens.colors.accent.purple}
+              title="Thinking is always-on for this model"
             >
               <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
-                {thinkingEnabled ? '⚡ Thinking' : 'Thinking'}
+                ⚡ Thinking
               </Text>
             </Flex>
           )}

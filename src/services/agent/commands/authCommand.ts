@@ -1,8 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
+import { useProjectStore } from '../../../stores/projectStore'
 import { useChatStore } from '../../../stores/chatStore'
+import { useAgentStore } from '../../../stores/agentStore'
 import { runAgentWithCallbacks } from '../agentRunner'
 import SkillService from '../skillService'
 import { logger } from '../../../utils/logger'
+import { runAuthFlowVerification, buildAuthFixPrompt } from './verifyAuthFlow'
 
 /**
  * GIP auth scaffolding flow. Triggered by hashtag tokens dropped into the
@@ -195,12 +198,146 @@ export async function runAuthFlow(
 
   const prompt = buildPrompt(providers, instructions, authProxySkill, googleSigninSkill, designSkill)
 
-  await runAgentWithCallbacks(prompt, {
-    addUserMessage: true,
-    userMessageText,
-    useConversationHistory: true,
-    cmdOnlyMode,
-  })
+  // Track Stop across the whole scaffold+verify+fix sequence. The user's
+  // Stop button dispatches 'agent-stop-requested'; each individual
+  // sub-agent and the main runAgentWithCallbacks already wire their own
+  // AbortControllers to it, but this flag tells THIS function whether to
+  // continue into the next iteration of the loop or bail out cleanly.
+  // Without it the scaffold-then-verify-then-fix loop would keep firing
+  // new turns after a Stop, each one then aborting immediately — wasted
+  // tokens and a confusing UX (the user sees "stopped" then watches more
+  // turns spawn). The listener lives for the whole runAuthFlow body and
+  // is torn down in the outer finally so re-entry behaves cleanly.
+  let userAborted = false
+  const abortListener = () => { userAborted = true }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('agent-stop-requested', abortListener)
+  }
+
+  try {
+    // Scaffold turn — main agent reads the skill bundle inline and writes the
+    // proxy backend + frontend wiring.
+    await runAgentWithCallbacks(prompt, {
+      addUserMessage: true,
+      userMessageText,
+      useConversationHistory: true,
+      cmdOnlyMode,
+    })
+
+    // Skip verification if the scaffold turn errored or was aborted —
+    // verifying a half-scaffolded project would FAIL → fix → loop with
+    // nothing to fix, wasting tokens and burying the real error under
+    // misleading verification output. agentStore.status === 'error'
+    // covers API/network failures and the error-exhaustion paths in
+    // agentService; userAborted covers Stop.
+    if (userAborted) {
+      logger.info('auth', 'Scaffold turn aborted by user — skipping verification.')
+      return
+    }
+    if (useAgentStore.getState().status === 'error') {
+      logger.warn('auth', 'Scaffold turn ended in error — skipping verification.')
+      return
+    }
+
+    // Verification gate — claude-vaz "verification specialist" pattern adapted
+    // to auth scaffolding. Runs an adversarial sub-agent against the just-
+    // written endpoint to catch the documented failure modes (MISSING_REQUEST_URI,
+    // INVALID_CREDENTIAL_OR_PROVIDER_ID, /v2 path slip, Vite proxy missing,
+    // type errors) BEFORE the developer hits them. On FAIL the diagnostic
+    // feeds back to the main agent for a focused fix turn, then re-verify.
+    //
+    // Capped at MAX_FIX_ATTEMPTS so a stuck model can't loop forever — when
+    // the cap is hit, we surface the last verifier report to the developer
+    // so they have actionable context (which probe failed, which CRITICAL
+    // block in the skill maps to the fix).
+    const projectPath =
+      useProjectStore.getState().currentProject?.path
+      || useProjectStore.getState().cmdModeProjectPath
+      || ''
+    if (!projectPath) {
+      logger.warn('auth', 'Skipping verification — no project path resolvable')
+      return
+    }
+
+    const MAX_FIX_ATTEMPTS = 2
+    for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS + 1; attempt++) {
+      if (userAborted) {
+        logger.info('auth', 'User aborted before verification iteration — exiting loop.')
+        return
+      }
+
+      const { verdict, report } = await runAuthFlowVerification({
+        projectPath,
+        providers,
+        authProxySkill,
+        googleSigninSkill,
+        cmdMode: cmdOnlyMode,
+      })
+
+      // Stop may have fired during the verifier; the verifier itself
+      // aborts cleanly, but we must NOT continue into another iteration.
+      if (userAborted) {
+        logger.info('auth', 'User aborted during verifier — exiting loop.')
+        return
+      }
+
+      if (verdict === 'PASS') {
+        chatStore.addSystemMessage('Auth flow verified end-to-end.')
+        return
+      }
+
+      if (verdict === 'PARTIAL') {
+        // Environmental limitation (server can't start, ITK unreachable).
+        // No retry — the developer needs to resolve the environment first.
+        chatStore.addSystemMessage(
+          'Auth verification could not run to completion (environmental issue). '
+          + 'Read the verifier output above for what was checked and what was skipped.',
+          'warn',
+        )
+        return
+      }
+
+      // FAIL path. If we still have attempts left, feed the diagnostic to the
+      // main agent for a focused fix turn. Otherwise surface and stop.
+      if (attempt > MAX_FIX_ATTEMPTS) {
+        chatStore.addSystemMessage(
+          `Auth verification failed after ${MAX_FIX_ATTEMPTS} fix attempts. `
+          + `Last verifier report is in the chat above — it names the exact probe `
+          + `and error code so you (or the next /debug) can target the fix.`,
+          'error',
+        )
+        return
+      }
+
+      chatStore.addSystemMessage(
+        `Auth verification failed (attempt ${attempt}/${MAX_FIX_ATTEMPTS}). Sending the diagnostic back to the agent for a fix pass…`,
+      )
+      await runAgentWithCallbacks(buildAuthFixPrompt(report, attempt), {
+        addUserMessage: false,
+        useConversationHistory: true,
+        cmdOnlyMode,
+      })
+
+      // Stop or unrecoverable error during the fix turn — bail before the
+      // next verification iteration so we don't loop on stale state.
+      if (userAborted) {
+        logger.info('auth', 'User aborted during fix turn — exiting loop.')
+        return
+      }
+      if (useAgentStore.getState().status === 'error') {
+        logger.warn('auth', 'Fix turn ended in error — surfacing and stopping.')
+        chatStore.addSystemMessage(
+          'Fix attempt errored. Stopping the verification loop — see the chat above for what went wrong.',
+          'error',
+        )
+        return
+      }
+    }
+  } finally {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('agent-stop-requested', abortListener)
+    }
+  }
 }
 
 /**

@@ -81,6 +81,10 @@ export async function executePlan(
       // Same PLAN.md template + completion rules in both branches — only
       // the stack-choice constraints change.
       systemPromptOverride: buildArchitectSystemPrompt(mode),
+      // CMD mode requires the tool executor to be aware of the cwd; without
+      // cmdOnlyMode it falls back to useProjectStore.currentProject (empty
+      // in CMD) and every file tool fails with "No project is open."
+      cmdOnlyMode: mode === 'terminal',
     })
   } finally {
     agentService.setRequestType(null)

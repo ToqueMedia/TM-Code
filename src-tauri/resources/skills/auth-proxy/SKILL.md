@@ -331,6 +331,68 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 - Expected: **401** with JSON body `{ "error": ... }`
 - If you get **502** with HTML body: the upstream URL is wrong (`/v2` is the most-common typo — see the "USE `/v1`" CRITICAL above for the failure rate). Fix the constant.
 
+### CRITICAL — `signInWithIdp` requires `postBody` + `requestUri`, NEVER `idToken` at the top level
+
+The `accounts:signInWithIdp` endpoint takes the Google ID token wrapped in a **form-encoded `postBody` string**, alongside a **`requestUri`** field. It does NOT accept `idToken` as a top-level JSON key. If you pass `{ idToken, providerId, returnSecureToken }` directly, Identity Toolkit responds **400 / `MISSING_REQUEST_URI`** because there is no `requestUri` field — and your proxy maps that to 401 at the client.
+
+**Correct (sole accepted shape)**:
+```ts
+const body = {
+  postBody: `id_token=${idToken}&providerId=google.com`,
+  requestUri: "http://localhost",
+  returnSecureToken: true,
+  returnIdpCredential: true,
+  tenantId: process.env.GIP_TENANT_ID,
+}
+// then: POST {ITK}/accounts:signInWithIdp?key={API_KEY}  body: JSON.stringify(body)
+```
+
+**Wrong (rejected with `MISSING_REQUEST_URI`)**:
+```ts
+const body = { idToken, providerId: 'google.com', returnSecureToken: true }
+// no postBody, no requestUri → Identity Toolkit refuses.
+```
+
+**Why this rule has a CRITICAL block of its own**: every other auth endpoint in this skill (`signUp`, `signInWithPassword`) accepts top-level JSON keys like `email` / `password` / `idToken`. The model generalises from those — under generation pressure it writes the same shape for `signInWithIdp` and silently drops the `postBody`/`requestUri` indirection that Identity Toolkit's OAuth-flow endpoint specifically requires. Observed failure: BugHunter project May 2026, frontend posted `{ idToken }` to `/api/auth/proxy/google`; the proxy forwarded `{ idToken, providerId, returnSecureToken }` to Identity Toolkit; Google returned `MISSING_REQUEST_URI`; client console showed `Google sign-in failed: MISSING_REQUEST_URI`.
+
+**Defense**: when you write the proxy route for Google sign-in, write the full request body literal with `postBody`, `requestUri`, `returnSecureToken`, `returnIdpCredential`, and `tenantId`. Do NOT pass `idToken` directly into `authProxy(...)` — wrap it in `postBody` first. Test BEFORE handing the feature to the user.
+
+**Verification** — bogus-token curl (same pattern as the `/v1` and `providerId` rules):
+```bash
+curl -s -o /tmp/r.json -w "%{http_code}\n" -X POST http://localhost:5173/api/auth/proxy/google \
+  -H "Content-Type: application/json" \
+  -d '{"idToken":"bogus"}' && cat /tmp/r.json
+```
+- Expected: **401** with JSON `{ "error": "INVALID_IDP_RESPONSE" }` or similar (Identity Toolkit reached the endpoint and rejected the fake token — proxy shape is correct).
+- If you get **401** with body containing `MISSING_REQUEST_URI`: you forgot `requestUri` and `postBody`. Rewrite the proxy body using the "Correct" shape above.
+- If you get **502** with HTML: wrong upstream URL (see `/v1` rule).
+
+### CRITICAL — `postBody` uses `providerId` (camelCase), NEVER `provider_id` (snake_case)
+
+Inside the `signInWithIdp` request body, the `postBody` field is a form-encoded string whose `providerId` key **MUST be camelCase**. Identity Toolkit's `/v1` API rejects snake_case `provider_id` with `INVALID_CREDENTIAL_OR_PROVIDER_ID` — and the error message echoes the wrong key back verbatim, which is the only way you'll know what went wrong.
+
+**Correct**:
+```ts
+postBody: `id_token=${idToken}&providerId=google.com`
+//                              ^^^^^^^^^^ camelCase
+```
+
+**Wrong (rejected by Identity Toolkit)**:
+```ts
+postBody: `provider_id=google.com&id_token=${idToken}`
+//        ^^^^^^^^^^^ snake_case → INVALID_CREDENTIAL_OR_PROVIDER_ID
+```
+
+**Why this rule has a CRITICAL block of its own**: the legacy Google Identity Toolkit REST API (deprecated years ago) used `provider_id` (snake_case). The current Identity Toolkit at `identitytoolkit.googleapis.com/v1` uses `providerId` (camelCase). The model's training data contains BOTH forms because the legacy API was widely documented and copy-pasted across blog posts, gists, and SDK examples that pre-date the migration. Under generation pressure the model collapses to the snake_case version it has seen more often in raw training data, even though THIS skill (the canonical reference) shows camelCase. Observed failure: BugHunter session 2026-05-16, Google response was `INVALID_CREDENTIAL_OR_PROVIDER_ID : Invalid IdP response/credential: http://localhost?provider_id=google.com&id_token=...` — the upstream literally echoed the wrong key.
+
+**Defense**: when you write the `postBody` line, write the FULL string with `providerId` inline. Do NOT abstract the key as a constant or read it from anywhere — every layer of indirection is another opportunity for the model to switch to snake_case.
+
+**Verification**: same bogus-token curl as the `/v1` rule above:
+- Expected: **401** with JSON body `{ "error": ... }` (Identity Toolkit rejected the bogus credential)
+- If you get **401** with body containing `INVALID_CREDENTIAL_OR_PROVIDER_ID` AND the response message includes the literal string `provider_id=`: you wrote snake_case. Find the `postBody` line, change to `providerId=`.
+
+The same camelCase rule applies to OTHER Identity Toolkit body fields you may add later: `idToken` (not `id_token` at the JSON body level — but DOES stay `id_token` inside `postBody` because postBody is form-encoded, not JSON), `displayName` (not `display_name`), `returnSecureToken` (not `return_secure_token`), `tenantId` (not `tenant_id`). The pattern: **JSON body fields are camelCase; the form-encoded `postBody` string preserves `id_token` (snake_case is part of OAuth standard for that one specific key) but everything else inside it is camelCase — including `providerId`.**
+
 ```
 POST {ITK}/accounts:signUp?key={API_KEY}
   body: { email, password, displayName, tenantId, returnSecureToken: true }
@@ -646,10 +708,12 @@ Adapt the storage layer (sessionStorage vs cookies) to the project's needs — e
 
 ---
 
-## FINAL REMINDER — the two rules that cost the most when broken
+## FINAL REMINDER — the three rules that cost the most when broken
 
-The full rule list is above. These two are repeated here at the end because **a single violation of either burns the entire feature**, and the failures look like generic auth issues that send the developer chasing the wrong cause for hours. Re-read these before submitting any auth-related change:
+The full rule list is above. These three are repeated here at the end because **a single violation of any of them burns the entire feature**, and the failures look like generic auth issues that send the developer chasing the wrong cause for hours. Re-read these before submitting any auth-related change:
 
 1. **`/v1`, never `/v2`** on `identitytoolkit.googleapis.com/accounts:*`. The `/v2` namespace covers passkeys / MFA only. A `/v2` typo returns HTML errors that generic `catch` blocks map to 401 — the developer sees "auth not working" with zero hint that the URL is wrong. The harness rejects writes containing `/v2/accounts:*` to fail-fast at edit time, but you're expected to write `/v1` first try, not lean on the harness. **Symptom of failure**: every protected endpoint 401s with a fresh token that just signed in successfully.
 
-2. **Persist the session AND call `init()` BEFORE first render.** Login alone doesn't keep the user logged in across refresh — it's two halves of one feature. Call `setAuthToken` after every proxy response, and wrap `createRoot(...).render(<App/>)` in `useAuthStore.getState().init().finally(...)`. Calling `init()` from a `useEffect` is too late: the first paint already redirected to `/login` ~50ms before `/me` returns. **Symptom of failure**: user signs in, sees the dashboard for a second, refreshes, lands on the login screen as if they never authenticated.
+2. **`providerId`, never `provider_id`** inside the `signInWithIdp` postBody. CamelCase. The legacy Identity Toolkit (deprecated) used snake_case and is over-represented in training data; the current `/v1` API rejects snake_case with `INVALID_CREDENTIAL_OR_PROVIDER_ID`. Write the postBody line inline with `providerId=google.com` — no abstractions, no constants. **Symptom of failure**: Google's response echoes back `Invalid IdP response/credential: http://localhost?provider_id=google.com&id_token=...` — the literal `provider_id=` in the error message confirms the snake_case slip.
+
+3. **Persist the session AND call `init()` BEFORE first render.** Login alone doesn't keep the user logged in across refresh — it's two halves of one feature. Call `setAuthToken` after every proxy response, and wrap `createRoot(...).render(<App/>)` in `useAuthStore.getState().init().finally(...)`. Calling `init()` from a `useEffect` is too late: the first paint already redirected to `/login` ~50ms before `/me` returns. **Symptom of failure**: user signs in, sees the dashboard for a second, refreshes, lands on the login screen as if they never authenticated.

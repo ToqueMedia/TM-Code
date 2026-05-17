@@ -4,6 +4,7 @@ import { devServerManager } from '../devServerManager'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { ServiceError } from '../../utils/errors'
 import { parseSSEStream, parseOpenAISSEStream, createThinkingDetector } from './streamParser'
+import { getProfileForPlan } from './modelProfiles'
 import { resolveThinkingHint } from './thinkingShapeDetection'
 import { streamLocalChat } from './byokLocalStream'
 import { anthropicToOpenAIBody } from './anthropicToOpenai'
@@ -11,8 +12,6 @@ import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore
 import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useByokStore } from '../../stores/byokStore'
-import { useSettingsStore } from '../../stores/settingsStore'
-import { getByokStateSnapshot } from '../../hooks/useByokState'
 import { invoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
 import { resolveWorkerUrl } from '../../utils/devUrls'
@@ -29,6 +28,7 @@ import { StreamingSafeToolPool } from './safeToolPool'
 import type { PoolToolResult } from './safeToolPool'
 import type { ContentPart } from '../../types/chat'
 import type { StreamEvent } from './streamParser'
+import { getAutoCompactThreshold } from '../../utils/contextWindow'
 
 // === Types ===
 
@@ -68,9 +68,10 @@ const MAX_CONTINUATIONS = 3
 // failing fast enough that a real outage doesn't keep the user waiting.
 const MAX_INTERRUPT_RETRIES = 2
 
-// Context compression: percentage-based threshold (like Claude Code's ~83.5%).
-// Model context windows vary (128K, 200K, 1M) — percentage adapts automatically.
-const COMPRESSION_THRESHOLD_PCT = 0.835 // 83.5% of context window
+// Context compression threshold is now token-absolute (claude-vaz pattern):
+// effective window = raw − 20K (summary headroom)
+// trigger          = effective − 13K (AUTOCOMPACT_BUFFER_TOKENS)
+// See utils/contextWindow.ts and ContextWindowIndicator for the same math.
 const DEFAULT_CONTEXT_WINDOW = 131_072  // Conservative fallback (128K)
 
 // === BYOK thinking-param translation ===
@@ -152,17 +153,13 @@ function buildByokThinkingParam(
 
 
 // Context window is reported by the backend via X-Model-Context-Window header.
-// This map is ONLY used as a static fallback if the header is missing (e.g., backend not updated).
-// The backend's MODEL_CONTEXT_WINDOWS in proxy.ts is the source of truth.
-const MODEL_CONTEXT_WINDOWS_FALLBACK: Record<string, number> = {
-  'openrouter/hunter-alpha': 1_000_000,
-  'qwen3-coder-plus': 256_000,
-  'gpt-4o': 128_000,
-  'claude-opus-4': 200_000,
-  'claude-sonnet-4': 200_000,
-  'gemini-2.5-flash': 1_048_576,
-  'deepseek-chat': 131_072,
-}
+// The backend's MODEL_CONTEXT_WINDOWS in proxy.ts is the source of truth;
+// a per-profile fallback is also set in callAPI() from profile.contextWindow.
+// We previously kept a name→size table here for inference when neither was
+// available, but it went stale fast (referenced legacy models like
+// openrouter/hunter-alpha that the May 2026 routing doesn't serve) and no
+// caller actually used it. DEFAULT_CONTEXT_WINDOW is now the only emergency
+// fallback if both the header and the profile are absent.
 // Minimum recent turns to preserve in full (not compressed).
 // Actual value is adaptive: scales with conversation length (min 4, max 12).
 const MIN_KEEP_RECENT_TURNS = 4
@@ -322,15 +319,26 @@ class AgentService {
    * reasoning even when the disable param is honoured).
    */
   isThinkingRequestedForNextTurn(): boolean {
-    const forceThinking =
-      this.requestType === 'plan'
-      || this.requestType === 'debug'
-      || this.requestType === 'review'
-      || this.requestType === 'e2e'
-    if (forceThinking) return true
-    // BYOK in play → manual toggle ignored, no force command → no thinking.
-    if (getByokStateSnapshot().byokInPlay) return false
-    return useSettingsStore.getState().thinkingEnabled
+    // Reasoning is always ON when the active model supports it (claude-vaz
+    // parity: thinking follows the model's default; the user has no toggle).
+    // Slash commands no longer "force" reasoning via this path — both
+    // GLM-5.1 (paid) and DeepSeek V4-Flash (free) already think every turn.
+    // For models without thinking capability (profile.supportsThinking=false)
+    // this returns false and the chat UI hides reasoning blocks accordingly.
+    //
+    // Reads the active plan's profile synchronously — no await/dynamic
+    // import — because this is called by the chat UI to stamp the
+    // assistant message at turn start (before the async buildRequestBody
+    // path runs). Falls back to false if the billing/profile stores
+    // haven't hydrated yet — the worst case is one turn of reasoning
+    // blocks rendered without the "thinking" framing.
+    try {
+      const plan = useBillingStore.getState().plan
+      const profile = getProfileForPlan(plan)
+      return profile.supportsThinking === true
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -340,38 +348,15 @@ class AgentService {
     this.tools = this.toolExecutor.getToolDefinitions()
   }
 
-  /**
-   * Set the context window size explicitly (e.g., from backend API response).
-   * If not called, the service infers from MODEL_CONTEXT_WINDOWS or uses DEFAULT_CONTEXT_WINDOW.
-   */
-  setContextWindowSize(tokens: number) {
-    this.contextWindowSize = tokens
-  }
-
-  /**
-   * Static fallback: infer context window from model name when backend doesn't report it.
-   * The primary mechanism is the X-Model-Context-Window header read in callAPI().
-   */
-  setContextWindowFromModel(modelName: string) {
-    const entries = Object.entries(MODEL_CONTEXT_WINDOWS_FALLBACK)
-      .sort((a, b) => b[0].length - a[0].length)
-
-    for (const [prefix, windowSize] of entries) {
-      if (modelName.startsWith(prefix)) {
-        this.contextWindowSize = windowSize
-        return
-      }
-    }
-    this.contextWindowSize = DEFAULT_CONTEXT_WINDOW
-  }
-
-  // thinkingEnabledForLoop and currentTurnInLoop removed — thinking is now
-  // user-controlled via useSettingsStore.thinkingEnabled, not agent-controlled.
-  /** Whether reasoning_content should be preserved in conversation history between turns.
-   *  Set per-loop from the model profile. Default: false (strip reasoning). */
-  private preserveReasoningBetweenTurns = false
-
-  // enableThinkingForLoop removed — thinking is user-controlled via Settings.
+  /** Whether reasoning_content should be preserved in conversation history
+   *  between turns. claude-vaz parity: ALWAYS true. Models that can't
+   *  accept reasoning_content back (DeepSeek V3.2 historically returned
+   *  400) are handled server-side — the proxy strips the field for the
+   *  upstreams that reject it. The frontend's job is to keep the chain
+   *  of thought intact in conversation history so multi-turn reasoning
+   *  doesn't lose context. Hard-coded true (was profile-driven, but both
+   *  active profiles set it true anyway). */
+  private preserveReasoningBetweenTurns = true
 
 
   /**
@@ -389,35 +374,22 @@ class AgentService {
   private async buildRequestBody(
     messages: AnthropicMessage[],
     byokThinkingHint: { supportsThinking: boolean; thinkingShape?: ByokThinkingShape } | null = null,
-    forceThinking: boolean = false,
   ): Promise<Record<string, unknown>> {
     try {
-      const { getProfileForPlan, buildSamplingParams, buildThinkingParam } = await import('./modelProfiles')
+      const { buildSamplingParams, buildThinkingParam } = await import('./modelProfiles')
       const { useBillingStore } = await import('../../stores/billingStore')
-      const { useSettingsStore } = await import('../../stores/settingsStore')
       const plan = useBillingStore.getState().plan
       const profile = getProfileForPlan(plan)
 
-      // Thinking is controlled by the user in Settings — not by the agent —
-      // EXCEPT for /plan, /debug, /review and /te2e, which force it ON for
-      // the turn (those commands rely on hypothesis-driven reasoning and
-      // collapse to generic chat without it). The forced-on path matters
-      // most for BYOK, where the backend can't override the body the way
-      // it does for plan-managed models.
-      //
-      // BYOK rule: when the developer is using their own key, the manual
-      // Settings toggle is ignored — thinking is ON only for the known
-      // reasoning commands above. The matching toggle button is hidden in
-      // the UI via the same shared selector. Rationale: BYOK is per-token
-      // billing on the developer's wallet; a manual toggle is an easy way
-      // to accidentally burn budget on a code-edit turn where reasoning
-      // has zero marginal value.
-      const { getByokStateSnapshot } = await import('../../hooks/useByokState')
-      const { byokInPlay } = getByokStateSnapshot()
-      const userTogglesThinking = byokInPlay
-        ? false
-        : useSettingsStore.getState().thinkingEnabled
-      const isThinking = forceThinking || userTogglesThinking
+      // Reasoning is always ON when the active model supports it
+      // (claude-vaz parity). The previous request-type-driven forcing
+      // (/plan, /debug, /review, /te2e setting `forceThinking` via
+      // X-Request-Type) was made redundant by this rule — every active
+      // coder profile (DeepSeek V4-Flash, GLM-5.1) sets supportsThinking
+      // true, so reasoning is on by default for every turn. The header is
+      // still sent for the backend's analytics/routing purposes; it just
+      // no longer changes the thinking decision here.
+      const isThinking = profile.supportsThinking === true
 
       // Filter tools based on model capabilities.
       // web_search is exposed to the model when profile.supportsSearch is true.
@@ -563,11 +535,10 @@ class AgentService {
         const plan = useBillingStore.getState().plan
         const profile = getProfileForPlan(plan)
         this.contextWindowSize = profile.contextWindow
-        // Currently false for all active models:
-        //   Qwen3 official: "store only final output, not thinking, in history"
-        //   DeepSeek: rejects reasoning_content with 400
-        // The field + checks remain for potential future models that require it.
-        this.preserveReasoningBetweenTurns = profile.preserveReasoning
+        // preserveReasoningBetweenTurns is hard-coded true at the class
+        // field (claude-vaz parity). The proxy strips reasoning_content
+        // for upstreams that reject it; we keep it intact in conversation
+        // history regardless.
       } catch { /* keep default */ }
 
     } else {
@@ -608,8 +579,12 @@ class AgentService {
         turnCount++
         // turnCount tracked for telemetry and max-turns enforcement
 
-        // Layer 2: Compress context if approaching token limit (percentage-based)
-        const compressionThreshold = Math.floor(this.contextWindowSize * COMPRESSION_THRESHOLD_PCT)
+        // Layer 2: Compress context if approaching token limit.
+        // Token-absolute (claude-vaz pattern): threshold = effective − 13K,
+        // effective = raw − 20K (summary headroom). Same math the ctx
+        // indicator displays so the pill's red zone and compression fire
+        // together — no drift between UI and behaviour.
+        const compressionThreshold = getAutoCompactThreshold(this.contextWindowSize)
         if (this.lastPromptTokens > compressionThreshold) {
           const before = this.lastPromptTokens
           callbacks.onContextCompression?.(before, 0) // signal start
@@ -743,6 +718,14 @@ class AgentService {
             })
             logger.info('agent', `[stream] retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES}: appended partial (${(turnResult.textContent || '').length} chars text, reasoning=${!!turnResult.reasoningContent})`)
           }
+          // Visible feedback so the user knows the retry is firing.
+          try {
+            useChatStore.getState().addSystemMessage(
+              `Retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES} — resuming from where the stream dropped.`,
+              undefined,
+              { ephemeral: true },
+            )
+          } catch { /* chatStore may be torn down */ }
           callbacks.onTurnComplete(turnCount)
           continue
         }
@@ -752,7 +735,7 @@ class AgentService {
           // type a new prompt or click Stop.
           logger.error('agent', `[stream] exhausted ${MAX_INTERRUPT_RETRIES} retries — surfacing to user`)
           callbacks.onError(new ServiceError(
-            `Conexão com o modelo interrompida ${MAX_INTERRUPT_RETRIES + 1} vezes seguidas. Verifica a tua ligação e tenta novamente.`,
+            `Model stream was interrupted ${MAX_INTERRUPT_RETRIES + 1} times in a row. Check your connection and try again.`,
             'STREAM_INTERRUPTED_EXHAUSTED',
             false,
           ))
@@ -1806,29 +1789,25 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
       headers['X-Conversation-Id'] = activeSession.id
     }
 
-    // Request type override (e.g. 'plan' for /plan command → reasoning model).
-    // Auto-cleared after the first call for short-lived types (plan, debug)
-    // so subsequent turns (tool results, follow-ups) use the normal model.
+    // Request type — forwarded as X-Request-Type for the backend's
+    // analytics / model-routing / billing visibility. Auto-cleared for
+    // short-lived types (plan, debug) after the first call so subsequent
+    // turns (tool results, follow-ups) revert to the normal request shape.
     //
-    // 'e2e' and 'review' are STICKY across all turns:
-    //   - /te2e cycles snapshot → reason → click → snapshot dozens of times;
-    //     every turn must keep reasoning ON or it collapses to smoke.
-    //   - /review reads many files and judges each finding against source —
-    //     same multi-turn reasoning need.
-    // Both commands' `finally` blocks clear it explicitly via setRequestType(null).
-    // Capture before the per-request clearing below — buildRequestBody needs
-    // it to force the thinking parameter ON even when the user has the toggle
-    // OFF. For non-BYOK the backend ALSO forces reasoning server-side via
-    // the header, but for BYOK the backend is a passthrough; so the body's
-    // thinking param is the only lever, and these commands collapse to
-    // generic chat without it (defeats the purpose of /plan, /debug,
-    // /review and /te2e).
-    const forceThinking =
-      this.requestType === 'plan'
-      || this.requestType === 'debug'
-      || this.requestType === 'review'
-      || this.requestType === 'e2e'
-
+    // 'e2e' and 'review' are STICKY across all turns: those flows span
+    // many turns (snapshot → reason → click for /te2e; multi-file reading
+    // for /review) and the backend tags every turn for the same flow
+    // identity. The commands' `finally` blocks clear it via
+    // setRequestType(null) when the flow finishes.
+    //
+    // NOTE: previously this code also derived `forceThinking` from the
+    // request type to flip `enable_thinking=true` for /plan, /debug,
+    // /review, /te2e even when the user had thinking OFF. That dependency
+    // is gone — reasoning is always ON for supportsThinking profiles
+    // (handled in buildRequestBody), so the request type no longer
+    // changes the thinking decision client-side. The backend still
+    // belt-and-braces forces enable_thinking=true on these types
+    // (proxy.ts) which is harmless redundancy.
     if (this.requestType) {
       headers['X-Request-Type'] = this.requestType
       if (this.requestType !== 'e2e' && this.requestType !== 'review') {
@@ -1974,7 +1953,7 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
         catalogShape,
       })
     }
-    const requestBody = JSON.stringify(await this.buildRequestBody(messages, byokThinkingHint, forceThinking))
+    const requestBody = JSON.stringify(await this.buildRequestBody(messages, byokThinkingHint))
 
     // Local BYOK route: Rust SSE bridge → OpenAI-shape /v1/chat/completions.
     // Bypasses the worker entirely (proxy refuses local URLs) and bypasses
@@ -2319,6 +2298,15 @@ Target length: 2000–4000 words. Shorter conversations may produce shorter summ
             if (event.errorType === 'upstream_stream_interrupted') {
               finishReason = 'stream_interrupted'
               logger.warn('agent', `[stream] interrupted mid-stream — will auto-retry: ${event.message}`)
+              // Visible feedback in chat so the user sees the retry happening
+              // without needing dev tools. Ephemeral — auto-removes ~8s.
+              try {
+                useChatStore.getState().addSystemMessage(
+                  'Response interrupted by the network. Retrying automatically…',
+                  undefined,
+                  { ephemeral: true },
+                )
+              } catch { /* chatStore may be torn down */ }
               break
             }
             callbacks.onError(new ServiceError(event.message, 'STREAM_ERROR', false))

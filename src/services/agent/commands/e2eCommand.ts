@@ -10,6 +10,7 @@ import { trackEvent } from '../../analytics'
 import { logger } from '../../../utils/logger'
 import { t } from '../../../i18n'
 import { languageDirective } from './_languageInstruction'
+import type { SlashCommandMode } from '../slashCommandRegistry'
 
 /**
  * `/te2e <what to validate>` — agent drives a real browser to validate
@@ -20,7 +21,11 @@ import { languageDirective } from './_languageInstruction'
  * No spec files written, no CI artifacts — exploratory validation only.
  * For regression in CI, the user writes specs by hand.
  */
-export async function executeE2E(args: string, projectPath: string): Promise<void> {
+export async function executeE2E(
+  args: string,
+  projectPath: string,
+  mode: SlashCommandMode = 'chat',
+): Promise<void> {
   const chatStore = useChatStore.getState()
 
   // Pre-condition: don't fire while another agent turn is in progress.
@@ -111,6 +116,9 @@ export async function executeE2E(args: string, projectPath: string): Promise<voi
       // Bubbles already created above — don't duplicate.
       addUserMessage: false,
       skipStartAssistantMessage: true,
+      // CMD mode → cwd-scoped tool executor so read_dev_server_logs /
+      // browser controls / project reads resolve against the CMD project.
+      cmdOnlyMode: mode === 'terminal',
     })
   } finally {
     agentService.setRequestType(null)

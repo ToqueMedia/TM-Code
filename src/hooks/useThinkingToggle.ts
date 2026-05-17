@@ -1,61 +1,42 @@
 /**
- * Unified thinking-toggle state — collapses three rules into one hook:
+ * Thinking-mode UI state — collapsed to a single fact: "does this model
+ * think unconditionally?". Previously this hook also exposed an interactive
+ * toggle so the user could flip thinking on/off mid-session, but that was
+ * pulled (claude-vaz parity) — thinking now follows the model's default
+ * and is forced ON only by slash commands (/plan, /debug, /review, /te2e)
+ * via the backend's X-Request-Type header.
  *
- *   1. What does the model support? (`toggleable` / `mandatory` / `none`)
- *      Read from the backend's authoritative X-Model-Thinking-Mode header
- *      via agentStore, with a per-plan fallback for the pre-first-response
- *      window.
+ * What remains: the "⚡ Thinking" status badge that renders when the
+ * backend reports `X-Model-Thinking-Mode: mandatory` (model thinks every
+ * turn, can't be disabled). The chat surfaces just need to know whether
+ * to paint that badge — no setter, no boolean state.
  *
- *   2. Is BYOK in play? If yes, hide the manual toggle entirely — the
- *      developer's per-token wallet shouldn't have a one-click "burn
- *      tokens on a code-edit turn" UI. Thinking is auto-managed (ON only
- *      for /plan, /debug, /review, /te2e).
- *
- *   3. What's the current state + toggle action? Sourced from
- *      settingsStore.thinkingEnabled + setThinkingEnabled.
- *
- * Three callsites (AgentStatusBar, TerminalTitleBar, ChatView) had this
- * same logic inline with slight drift between them — a real "I missed
- * one" bug shipped because of that. Hook removes the drift; each
- * callsite renders its own visual using the returned flags.
+ * Sources of truth (in order):
+ *   1. agentStore.thinkingMode — set from the backend's X-Model-Thinking-Mode
+ *      header on the first response of a turn.
+ *   2. profile.thinkingMandatory — per-plan fallback used pre-handshake
+ *      so the badge doesn't pop in after the first response.
  */
 import { useAgentStore } from '../stores/agentStore'
 import { useBillingStore } from '../stores/billingStore'
-import { useSettingsStore } from '../stores/settingsStore'
 import { getProfileForPlan } from '../services/agent/modelProfiles'
-import { useByokState } from './useByokState'
 
 export interface ThinkingToggleState {
-  /** True iff the model supports an on/off toggle AND BYOK is not in play.
-   *  The manual button should render only when this is true. */
-  toggleable: boolean
-  /** True iff the model thinks unconditionally (always-on). Render a
-   *  static badge instead of a button. */
+  /** True iff the active model is mandatory-thinking (always-on, can't be
+   *  disabled). UI renders a static badge; no toggle. */
   mandatory: boolean
-  /** Current user setting. Only meaningful when `toggleable` is true. */
-  enabled: boolean
-  /** Setter — call with the new boolean value. */
-  setEnabled: (next: boolean) => void
 }
 
 export function useThinkingToggle(): ThinkingToggleState {
-  const enabled = useSettingsStore((s) => s.thinkingEnabled)
-  const setEnabled = useSettingsStore((s) => s.setThinkingEnabled)
   const backendThinkingMode = useAgentStore((s) => s.thinkingMode)
   const billingPlan = useBillingStore((s) => s.plan)
-  const { byokInPlay } = useByokState()
 
   const fallbackProfile = getProfileForPlan(billingPlan)
   const effectiveMode =
     backendThinkingMode
-    ?? (fallbackProfile.supportsThinking
-        ? (fallbackProfile.thinkingMode === 'mandatory' ? 'mandatory' : 'toggleable')
-        : 'none')
+    ?? (fallbackProfile.thinkingMandatory ? 'mandatory' : 'none')
 
   return {
-    toggleable: effectiveMode === 'toggleable' && !byokInPlay,
     mandatory: effectiveMode === 'mandatory',
-    enabled,
-    setEnabled,
   }
 }

@@ -6,6 +6,8 @@ import { useChatStore } from '../../stores/chatStore'
 import { useByokState } from '../../hooks/useByokState'
 import { useThinkingToggle } from '../../hooks/useThinkingToggle'
 import { CreditIndicator } from '../ui/CreditIndicator'
+// Thinking toggle removed (claude-vaz parity). The "thk" pill below renders
+// only as a static badge when the backend reports mandatory-thinking models.
 import { McpIndicator } from '../ui/StatusIndicators'
 import ModelIndicator from '../chat/ModelIndicator'
 import { tokens } from '@/theme/tokens'
@@ -28,16 +30,14 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
   const isStreaming = useChatStore(s => s.isStreaming)
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
-  // BYOK state + thinking-toggle state — both via shared hooks so this
-  // component never drifts from AgentStatusBar / ChatView. CMD mode uses
-  // the same AgentService singleton, so BYOK + thinking rules apply
-  // identically here.
+  // BYOK state via shared hook so this component never drifts from
+  // AgentStatusBar / ChatView. CMD mode uses the same AgentService
+  // singleton, so BYOK rules apply identically here.
   const { byokInPlay: showModelIndicator } = useByokState()
-  const {
-    toggleable: thinkingSupported,
-    enabled: thinkingEnabled,
-    setEnabled: setThinkingEnabled,
-  } = useThinkingToggle()
+  // Mandatory-thinking badge only — interactive toggle was removed
+  // (claude-vaz parity). Slash commands force reasoning ON via server-side
+  // X-Request-Type header; the user does not flip thinking mid-session.
+  const { mandatory: thinkingMandatory } = useThinkingToggle()
 
   // Show basename prominently, full path dimmed (cross-platform: handles \ and /)
   const projectName = basename(projectPath) || projectPath
@@ -97,32 +97,26 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
 
       {/* Right: controls */}
       <HStack gap={1.5} flexShrink={0}>
-        {/* Thinking toggle */}
-        {thinkingSupported && (
+        {/* Mandatory-thinking badge — static, not interactive. Renders only
+            when the backend reports the active model thinks unconditionally. */}
+        {thinkingMandatory && (
           <Box
-            as="button"
-            aria-label={thinkingEnabled ? 'Disable extended thinking' : 'Enable extended thinking'}
-            aria-pressed={thinkingEnabled}
             px="6px"
             py="2px"
             borderRadius="3px"
-            bg={thinkingEnabled ? 'rgba(163,113,247,0.1)' : 'transparent'}
-            border="1px solid"
-            borderColor={thinkingEnabled ? 'rgba(163,113,247,0.2)' : 'rgba(255,255,255,0.07)'}
-            onClick={() => setThinkingEnabled(!thinkingEnabled)}
-            cursor="pointer"
-            transition="all 0.12s"
-            _hover={{ bg: thinkingEnabled ? 'rgba(163,113,247,0.15)' : 'rgba(255,255,255,0.04)' }}
+            bg="rgba(163,113,247,0.1)"
+            border="1px solid rgba(163,113,247,0.2)"
+            title="Thinking is always-on for this model"
           >
             <Text
               fontSize="9px"
-              color={thinkingEnabled ? tokens.colors.accent.purple : tokens.colors.text.disabled}
+              color={tokens.colors.accent.purple}
               fontWeight="700"
               textTransform="uppercase"
               fontFamily={tokens.fontFamily.mono}
               letterSpacing="0.08em"
             >
-              {thinkingEnabled ? '⚡ thk' : 'thk'}
+              ⚡ thk
             </Text>
           </Box>
         )}

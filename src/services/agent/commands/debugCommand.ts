@@ -1,6 +1,7 @@
 import { useChatStore } from '../../../stores/chatStore'
 import { runAgentWithCallbacks } from '../agentRunner'
 import AgentService from '../agentService'
+import type { SlashCommandMode } from '../slashCommandRegistry'
 
 /**
  * `/debug <symptom>` — debugging command.
@@ -15,7 +16,11 @@ import AgentService from '../agentService'
  * investigation rather than blind code edits — read first, hypothesize,
  * verify, then minimum-impact fix.
  */
-export async function executeDebug(args: string, projectPath: string): Promise<void> {
+export async function executeDebug(
+  args: string,
+  projectPath: string,
+  mode: SlashCommandMode = 'chat',
+): Promise<void> {
   const chatStore = useChatStore.getState()
 
   if (!args.trim()) {
@@ -35,6 +40,10 @@ export async function executeDebug(args: string, projectPath: string): Promise<v
     await runAgentWithCallbacks(buildDebugPrompt(args, projectPath), {
       addUserMessage: true,
       userMessageText: `/debug ${args}`,
+      // CMD mode requires explicit cmdOnlyMode so the tool executor uses the
+      // cwd instead of falling back to useProjectStore.currentProject (which
+      // CMD never populates).
+      cmdOnlyMode: mode === 'terminal',
     })
   } finally {
     agentService.setRequestType(null)

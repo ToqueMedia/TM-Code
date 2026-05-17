@@ -1,6 +1,7 @@
 import { useChatStore } from '../../../stores/chatStore'
 import { runAgentWithCallbacks } from '../agentRunner'
 import { logger } from '../../../utils/logger'
+import type { SlashCommandMode } from '../slashCommandRegistry'
 
 const SKILLS_BASE = 'https://raw.githubusercontent.com/ithustle/momenu-skills/main/skills'
 
@@ -40,7 +41,11 @@ async function fetchAllSkills(): Promise<string> {
   return parts.join('\n\n')
 }
 
-export async function executePayments(args: string, _projectPath: string): Promise<void> {
+export async function executePayments(
+  args: string,
+  _projectPath: string,
+  mode: SlashCommandMode = 'chat',
+): Promise<void> {
   const chatStore = useChatStore.getState()
 
   if (!args.trim()) {
@@ -90,5 +95,9 @@ Implement this following the exact API contracts in the skills. Use the project'
     addUserMessage: true,
     userMessageText: `/payments ${args}`,
     useConversationHistory: true,
+    // CMD mode → enable cwd-scoped tool executor; otherwise file writes
+    // fail with "No project is open" because useProjectStore.currentProject
+    // is never set in CMD.
+    cmdOnlyMode: mode === 'terminal',
   })
 }

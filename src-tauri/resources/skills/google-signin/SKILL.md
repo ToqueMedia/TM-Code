@@ -297,3 +297,19 @@ For routers other than React Router (TanStack, Wouter, Next App Router), substit
 - **ALWAYS** wire navigation via `onSuccess` so the user lands on the post-auth route — without it, `setUser` updates the store but the page stays on `/login` (route guards only redirect *to* login, not *from* it). Use the same target route as the email/password form's `navigate(...)` call
 - Do NOT add notices/comments about iframe limitations — the IDE shows a friendly toast when the developer clicks the GIS button in preview. Just implement the flow.
 - Only implement Google Sign-In if the user explicitly requests it
+
+## FINAL REMINDER — the four rules whose violation costs the entire flow
+
+Re-read these before submitting any Google Sign-In change. Each one breaks the flow in a different way that looks like a generic auth issue but isn't:
+
+1. **GIS inline button, NEVER `signInWithPopup`.** Popups are silently no-op'd in the IDE preview webview. The user sees "the button does nothing" and nothing in the console. Forbidden imports from `firebase/auth`: `signInWithPopup`, `GoogleAuthProvider`, `signInWithRedirect`, `signInWithCustomToken`. Only `onAuthStateChanged` is allowed AS AN IMPORT (note: won't fire in proxy flow; use bootstrap pattern from `auth-proxy` skill).
+2. **Execute ALL FOUR post-token steps in order**: `setAuthToken(idToken, refreshToken)` → `await authFetch('/api/auth/sync', ...)` → `setUser(syncedUser)` → `options?.onSuccess?.(user)`. Skipping any step breaks differently — 401 on next request, redirect loop, or stranded on `/login` after successful sign-in. The hook in Step 2 has all four — do not improvise.
+3. **Google avatar `<img>` MUST set `referrerPolicy="no-referrer"`.** `lh3.googleusercontent.com` returns 403 when `Referer` is `localhost`. Avatar appears broken with no console error. Apply to every `<img>` displaying a Google profile photo.
+4. **Vite dev proxy MUST forward `/api`** to the backend (one-line `server.proxy['/api']` in `vite.config.ts`). Without it, `POST /api/auth/proxy/google` hits port 5173 and returns 404 HTML — the request never reaches the backend. CORS on the backend is NOT a substitute. Verify with `curl http://localhost:5173/api/auth/me` returning JSON, not HTML.
+
+**Symptom-to-rule map for fast debugging**:
+- "Button does nothing on click" → rule 1 (popup blocked, switch to GIS).
+- "Sign-in succeeds but next request is 401" → rule 2 step 1 (setAuthToken not called).
+- "Sign-in succeeds, refresh lands on /login" → rule 2 (init() before render — see auth-proxy skill).
+- "Avatar broken / empty image" → rule 3 (referrerPolicy="no-referrer").
+- "POST /api/auth/proxy/google → 404 HTML" → rule 4 (Vite proxy missing).

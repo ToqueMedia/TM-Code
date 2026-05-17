@@ -77,15 +77,6 @@ interface SettingsState {
   /** Commands that require explicit developer approval every time the agent uses them.
    *  Empty by default (nothing blocked). User selects which commands to flag in Settings. */
   flaggedCommands: string[]
-  /**
-   * Thinking/reasoning mode for the AI agent.
-   * When ON: model uses deep reasoning (param varies by model — GLM-5.1
-   * uses OpenRouter `reasoning`, Qwen3 uses `enable_thinking`).
-   * When OFF: model responds directly without reasoning.
-   * Default: ON. Ignored for free plan (DeepSeek has no thinking mode).
-   * Toggled by user in Settings or via the chat status bar indicator.
-   */
-  thinkingEnabled: boolean
 }
 
 interface SettingsActions {
@@ -104,7 +95,6 @@ interface SettingsActions {
   setShortcut: (id: ShortcutId, binding: KeyBinding) => void
   resetShortcuts: () => void
   completeOnboarding: () => void
-  setThinkingEnabled: (enabled: boolean) => void
 }
 
 const DEFAULTS: SettingsState = {
@@ -125,10 +115,6 @@ const DEFAULTS: SettingsState = {
   hasCompletedOnboarding: false,
   sandboxEnabled: false,
   flaggedCommands: [],
-  // Reasoning OFF by default in Code mode (all plans). User toggles per turn.
-  // /plan and /debug commands force reasoning ON via X-Request-Type header,
-  // bypassing this setting for the duration of the command.
-  thinkingEnabled: false,
 }
 
 export const useSettingsStore = create<SettingsState & SettingsActions>()(
@@ -248,15 +234,11 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
       completeOnboarding: () => {
         set(() => ({ hasCompletedOnboarding: true }))
       },
-
-      setThinkingEnabled: (enabled: boolean) => {
-        set(() => ({ thinkingEnabled: enabled }))
-      },
     }),
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands, thinkingEnabled: state.thinkingEnabled }
+        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -280,7 +262,6 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           hasCompletedOnboarding: p.hasCompletedOnboarding ?? DEFAULTS.hasCompletedOnboarding,
           sandboxEnabled: p.sandboxEnabled ?? DEFAULTS.sandboxEnabled,
           flaggedCommands: Array.isArray(p.flaggedCommands) ? p.flaggedCommands : DEFAULTS.flaggedCommands,
-          thinkingEnabled: p.thinkingEnabled ?? DEFAULTS.thinkingEnabled,
           // Merge shortcuts: defaults for new keys, but preserve null (cleared by conflict)
           shortcuts: Object.fromEntries(
             Object.keys(DEFAULT_SHORTCUTS).map(k => [

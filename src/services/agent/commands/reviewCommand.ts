@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useChatStore } from '../../../stores/chatStore'
 import { useAgentStore } from '../../../stores/agentStore'
-import { useProjectStore } from '../../../stores/projectStore'
 import { useBillingStore } from '../../../stores/billingStore'
 import AgentService from '../agentService'
 import ToolExecutor from '../toolExecutor'
@@ -9,6 +8,7 @@ import CheckpointService from '../checkpointService'
 import { getQueryGuard } from '../queryGuard'
 import { languageDirective } from './_languageInstruction'
 import { logger } from '../../../utils/logger'
+import type { SlashCommandMode } from '../slashCommandRegistry'
 
 /**
  * Cap on how many files we ask the sub-agent to review when scope is
@@ -69,16 +69,21 @@ interface ResolvedScope {
   originalCount: number
 }
 
-export async function executeReview(args: string, projectPath: string): Promise<void> {
+export async function executeReview(
+  args: string,
+  projectPath: string,
+  mode: SlashCommandMode = 'chat',
+): Promise<void> {
   const chatStore = useChatStore.getState()
   const agentStore = useAgentStore.getState()
   const trimmed = args.trim()
 
-  // Pre-condition: a project must be open. The toolExecutor's project root
-  // is otherwise undefined and read-only tools error out cryptically inside
-  // the sub-agent.
-  const currentProject = useProjectStore.getState().currentProject
-  if (!currentProject?.path) {
+  // Pre-condition: a project must be open. We trust the projectPath the
+  // dispatcher passed in (resolved from currentProject?.path ||
+  // cmdModeProjectPath) so the check works in both chat and CMD modes —
+  // previously this read useProjectStore.currentProject directly and
+  // failed in CMD mode where currentProject is never populated.
+  if (!projectPath) {
     chatStore.addSystemMessage('No project open. Open a project before running /review.')
     return
   }
@@ -161,6 +166,18 @@ export async function executeReview(args: string, projectPath: string): Promise<
   }
 
   const toolExecutor = ToolExecutor.getInstance()
+  // /review's read-only tools resolve paths via toolExecutor.getProjectRoot()
+  // which checks cmdModeCwd first, then falls back to currentProject.path.
+  // /review goes through createLightweight + runAgentLoop directly (not
+  // through runAgentWithCallbacks), so the standard cmdOnlyMode wiring in
+  // agentRunner.ts doesn't apply — we enable cmdMode ourselves here when
+  // dispatched from CMD, and the finally block below clears it. Matches
+  // chat-mode behaviour exactly: in chat the fallback to currentProject is
+  // enough; in CMD currentProject is empty and we need the cwd.
+  const enabledCmdModeHere = mode === 'terminal'
+  if (enabledCmdModeHere) {
+    toolExecutor.enableCmdMode(projectPath)
+  }
   // Read-only tool palette. Crucially excludes write/edit/create/delete/
   // execute_command — the sub-agent must reason about the code, not change
   // it. Includes diagnostics so it can spot type errors as evidence, and
@@ -305,6 +322,9 @@ export async function executeReview(args: string, projectPath: string): Promise<
     agentStore.setStatus('error')
   } finally {
     subAgent.setRequestType(null)
+    if (enabledCmdModeHere) {
+      toolExecutor.disableCmdMode()
+    }
     if (typeof window !== 'undefined') {
       window.removeEventListener('agent-stop-requested', stopHandler)
     }

@@ -89,17 +89,13 @@ function AgentStatusBar() {
   const { elapsedMs, isPaused } = useAgentElapsed('phase')
   const isBusy = status !== 'idle' && status !== 'error'
   const showElapsed = isBusy && elapsedMs >= 5000
-  // Thinking toggle — unified via useThinkingToggle. The hook fuses
-  // (a) the backend's X-Model-Thinking-Mode answer with the per-plan
-  // fallback for the pre-handshake window, and (b) the BYOK gate (manual
-  // toggle hidden when BYOK is in play; thinking is auto-managed for the
-  // reasoning commands only). See src/hooks/useThinkingToggle.ts.
-  const {
-    toggleable: thinkingSupported,
-    mandatory: thinkingMandatory,
-    enabled: thinkingEnabled,
-    setEnabled: toggleThinking,
-  } = useThinkingToggle()
+  // Thinking is no longer user-toggleable mid-session (claude-vaz parity).
+  // The mandatory badge below renders only when the backend reports the
+  // active model is mandatory-thinking. Slash commands (/plan, /debug,
+  // /review, /te2e) still force reasoning ON for the turn via the
+  // X-Request-Type header — that path is server-side and doesn't surface
+  // here. See src/hooks/useThinkingToggle.ts.
+  const { mandatory: thinkingMandatory } = useThinkingToggle()
   const autoApproveDiffs = usePermissionStore(s => s.autoApproveDiffs)
 
   // Build info segments — derive counts from raw store data (avoids infinite re-render loop)
@@ -205,29 +201,8 @@ function AgentStatusBar() {
       </Flex>
 
       <Flex align="center" gap={3}>
-        {/* Thinking — interactive toggle when the model supports on/off,
-            static badge when it's always-on (mandatory). */}
-        {thinkingSupported && (
-          <Flex
-            as="button"
-            align="center"
-            gap="4px"
-            px="6px"
-            py="2px"
-            borderRadius="4px"
-            cursor="pointer"
-            bg={thinkingEnabled ? 'rgba(163, 113, 247, 0.1)' : 'transparent'}
-            color={thinkingEnabled ? tokens.colors.accent.purple : tokens.colors.text.disabled}
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: thinkingEnabled ? 'rgba(163, 113, 247, 0.15)' : tokens.colors.bg.hoverSubtle }}
-            onClick={() => toggleThinking(!thinkingEnabled)}
-            title={thinkingEnabled ? 'Thinking ON (click to disable)' : 'Thinking OFF (click to enable)'}
-          >
-            <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
-              {thinkingEnabled ? '⚡ Thinking' : 'Thinking OFF'}
-            </Text>
-          </Flex>
-        )}
+        {/* Thinking badge — only when the active model is mandatory-thinking
+            (always-on). Toggleable models no longer surface a button. */}
         {thinkingMandatory && (
           <Flex
             align="center"

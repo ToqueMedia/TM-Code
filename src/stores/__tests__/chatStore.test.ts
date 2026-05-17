@@ -259,19 +259,28 @@ describe('chatStore', () => {
   })
 
   describe('token usage tracking', () => {
-    it('totalTokensUsed sums both input and output across calls', () => {
-      // `totalTokensUsed` is the cumulative WIRE COST across turns of the
-      // current user message — both input and output sum because each turn
-      // literally re-transmits the prior conversation as new input bytes.
-      // The window-pressure pill uses `currentPromptTokens` (the per-turn
-      // value, replaced not summed) so it doesn't double-count there.
-      // See addTokenUsage's comment block for the full rationale.
+    it('totalTokensUsed tracks MAX input + SUM output across calls', () => {
+      // `totalTokensUsed.input` is MAX, not SUM. Summing input gave the
+      // visible "↑ 904k" symptom across 60+ tool-loop turns while the actual
+      // context-pressure pill read 15 % of 256 K = 38 K — each turn already
+      // contains the previous turns' input as history echo, so summing
+      // double-counts. MAX is the high-water mark of wire-side input across
+      // the request.
+      //
+      // `totalTokensUsed.output` is SUM — each turn emits NEW output tokens
+      // (not history echo), so summing them is "how much we generated
+      // this request" which is the meaningful aggregate.
+      //
+      // See addTokenUsage's comment block (chatStore.ts ~line 2020) for the
+      // full rationale and the bug that drove the 2026-05-02 refactor from
+      // SUM to MAX. The window-pressure pill uses `currentPromptTokens`
+      // (per-turn, REPLACED) for its denominator so the metrics don't drift.
       useChatStore.getState().addTokenUsage(100, 50)
       useChatStore.getState().addTokenUsage(200, 75)
 
       const { totalTokensUsed, currentPromptTokens, currentResponseTokens } = useChatStore.getState()
-      expect(totalTokensUsed.input).toBe(300)
-      expect(totalTokensUsed.output).toBe(125)
+      expect(totalTokensUsed.input).toBe(200)   // MAX(100, 200)
+      expect(totalTokensUsed.output).toBe(125)  // 50 + 75
       // Per-turn fields: input is replaced (last positive value wins);
       // output is always overwritten with the latest call.
       expect(currentPromptTokens).toBe(200)

@@ -2771,8 +2771,10 @@ Project root: ${projectRoot}`
       }
     })
 
-    // request_thinking tool REMOVED — thinking is now user-controlled via
-    // Settings → thinkingEnabled toggle. The agent no longer decides thinking mode.
+    // request_thinking tool REMOVED — reasoning is always ON when the
+    // active model supports it (claude-vaz parity). The agent does not
+    // request thinking on demand; profile.supportsThinking is the single
+    // switch and it's evaluated in agentService.buildRequestBody.
 
     // === update_tasks ===
     this.tools.set('update_tasks', {

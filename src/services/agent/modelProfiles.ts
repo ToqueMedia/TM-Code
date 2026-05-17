@@ -14,10 +14,13 @@ export interface ModelPersona {
 
 /**
  * Thinking mode classification:
- * - 'toggleable': Model supports on/off via API param. User controls via
- *   Settings → thinkingEnabled. The agent does NOT decide thinking mode.
- * - 'mandatory': Model always thinks. Cannot be disabled.
- * - 'none': Model has no thinking/reasoning capability.
+ * - 'toggleable': Model accepts an on/off param. We always send ON when
+ *   the profile's `supportsThinking` is true — the user toggle was
+ *   removed (claude-vaz parity). Reasoning is preserved between turns.
+ * - 'mandatory': Model always thinks regardless of the param. We surface
+ *   a static "⚡ Thinking" badge in the chat chrome so the user knows.
+ * - 'none': Model has no thinking/reasoning capability — reasoning blocks
+ *   never render in the chat UI.
  */
 export type ThinkingMode = 'toggleable' | 'mandatory' | 'none'
 

@@ -2,6 +2,39 @@
 
 You are working in a Vue 3+ project. Composition API + `<script setup>`, Pinia for shared state, TypeScript strict — these are the defaults assumed throughout. The rules below cover non-obvious decisions and footguns.
 
+## CRITICAL — Composition API + `<script setup>` ONLY; the model has a strong Options API + Vuex prior
+
+Vue 2's Options API (`export default { data() { return {...} }, methods: {...}, computed: {...} }`) and Vuex (`createStore({ state, mutations, actions, getters })`) dominated training data from 2018-2022. Vue 3's Composition API + `<script setup>` + Pinia is the canonical path since 2022 — but the model still collapses to Options API + Vuex under generation pressure, especially for "simple" components where Options API looks shorter.
+
+**Defense — three concrete checks before writing any Vue component**:
+
+1. **Use `<script setup>` for every SFC.** Top of file:
+   ```vue
+   <script setup lang="ts">
+   import { ref, computed, onMounted } from 'vue'
+   const count = ref(0)
+   const doubled = computed(() => count.value * 2)
+   </script>
+   ```
+   NOT:
+   ```vue
+   <script>
+   export default {
+     data() { return { count: 0 } },
+     computed: { doubled() { return this.count * 2 } }
+   }
+   </script>
+   ```
+2. **Pinia for state, NEVER Vuex.** `defineStore('id', () => { const x = ref(0); return { x } })` — setup syntax, not options syntax. Vuex is in maintenance mode and `createStore`/`mutations`/`commit` patterns should not appear in new code.
+3. **`ref()` over `reactive()` by default** — see decision point below. The `reactive()` API exists but is a footgun in 80% of cases.
+
+**Anti-pattern symptoms — these mean you defaulted to Options API / Vue 2**:
+- Writing `data() { return {...} }`, `methods: {...}`, or `created()` / `mounted()` hooks → wrong, Composition API uses `ref`/`computed`/`onMounted`.
+- Importing from `vuex` → wrong, use `pinia`.
+- `this.someValue` inside a component → wrong, you're not in an Options API class context — variables live as top-level `ref`/`reactive`.
+- `Vue.use(...)` or `new Vue({...})` → wrong, Vue 3 uses `createApp(...)`.
+- `.sync` modifier on props (Vue 2) → wrong, Vue 3 uses `v-model:propName`.
+
 ## Decision points (non-obvious)
 
 - **`ref()` vs `reactive()`**: prefer `ref()` for everything by default — primitives AND objects. `reactive()` loses reactivity when destructured (`const { user } = useUserStore()` breaks); `ref()` doesn't. Only reach for `reactive()` when you specifically need a single root object that won't be destructured.

@@ -21,6 +21,7 @@ import { getCommandQueueSnapshot, subscribeToCommandQueue } from '../../services
 import { usePreflightStatus } from '../../hooks/usePreflightStatus'
 import { countAvailable } from '../../services/preflightService'
 import { getProfileForPlan } from '../../services/agent/modelProfiles'
+import { getAutoCompactThreshold, getEffectiveContextWindowSize } from '../../utils/contextWindow'
 import { tokens } from '@/theme/tokens'
 import { formatElapsed, formatTokens } from './terminalHelpers'
 
@@ -29,6 +30,11 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   const error = useAgentStore(s => s.error)
   const isStreaming = useChatStore(s => s.isStreaming)
   const totalTokensUsed = useChatStore(s => s.totalTokensUsed)
+  // currentPromptTokens is the per-turn input on the wire (input +
+  // cache_read + cache_creation). Same value the ContextWindowIndicator
+  // reads — keeps the terminal ctx % in lockstep with the chat-mode pill.
+  const currentPromptTokens = useChatStore(s => s.currentPromptTokens)
+  const headerContextWindow = useAgentStore(s => s.modelContextWindow)
   const agentTasks = useAgentStore(s => s.tasks)
   const skillCount = useSkillStore(s => s.skills.length)
   const mcpServers = useMcpStore(s => s.servers)
@@ -74,17 +80,31 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   // Context-window percentage for the active model. Same telemetry as the
   // ContextWindowIndicator in ChatView, rendered terminal-style (text only,
   // no progress bar) to fit CMD mode's monospace aesthetic.
+  //
+  // Source of truth matches the chat-mode pill:
+  //   • currentPromptTokens (replaced per turn) — NOT totalTokensUsed.input,
+  //     which is MAX across turns of the current request and inflates after
+  //     compaction shrinks the prompt mid-loop.
+  //   • headerContextWindow (X-Model-Context-Window) — falls back to the
+  //     plan profile only pre-handshake.
+  //   • Denominator is EFFECTIVE window (raw − 20K summary headroom),
+  //     matching claude-vaz's calculateContextPercentages.
   const billingPlan = useBillingStore((s) => s.plan)
   const activeProfile = useMemo(() => getProfileForPlan(billingPlan), [billingPlan])
-  const ctxPct = activeProfile.contextWindow > 0 && inputTok > 0
-    ? Math.min(100, (inputTok / activeProfile.contextWindow) * 100)
+  const rawContextWindow = headerContextWindow ?? activeProfile.contextWindow ?? 0
+  const effectiveWindow = getEffectiveContextWindowSize(rawContextWindow)
+  const compactThreshold = getAutoCompactThreshold(rawContextWindow)
+  const ctxPct = effectiveWindow > 0 && currentPromptTokens > 0
+    ? Math.min(100, (currentPromptTokens / effectiveWindow) * 100)
     : 0
+  const compactImminent = currentPromptTokens >= compactThreshold && currentPromptTokens > 0
   const ctxColor =
-    ctxPct < 70 ? tokens.colors.text.disabled
+    compactImminent ? tokens.colors.accent.red
+    : ctxPct < 70 ? tokens.colors.text.disabled
     : ctxPct < 90 ? tokens.colors.accent.orange
     : tokens.colors.accent.red
   const ctxTooltip = ctxPct > 0
-    ? `Context: ${inputTok.toLocaleString()} / ${activeProfile.contextWindow.toLocaleString()} tokens (${ctxPct.toFixed(1)}%) — ${activeProfile.name}`
+    ? `Context: ${currentPromptTokens.toLocaleString()} / ${effectiveWindow.toLocaleString()} effective (${ctxPct.toFixed(1)}%) — ${activeProfile.name}${compactImminent ? ' · auto-compact next turn' : ''}`
     : undefined
 
   // Toolkit preflight — small "tk 3/3" indicator. Tooltip lists missing pieces.

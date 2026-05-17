@@ -2,6 +2,46 @@
 
 You are working in a React project. The following are non-obvious rules and footguns. Functional components, hooks, TypeScript, and basic dependency arrays are assumed knowledge — not repeated here.
 
+## CRITICAL — Function components + hooks only; the model has class components and Redux boilerplate in training
+
+Class components (`class extends Component`, `this.state`, `this.setState`, lifecycle methods `componentDidMount`/`componentDidUpdate`/`componentWillUnmount`) and Redux with `mapStateToProps`/`mapDispatchToProps`/`connect()` ruled React training data from 2015 to 2019. Hooks landed in React 16.8 (Feb 2019) and have been the canonical API ever since — but the class component idiom is still over-represented in training samples. The model occasionally collapses to class components, lifecycle methods, or boilerplate Redux even on modern projects.
+
+**Defense — three checks before writing any React component**:
+
+1. **Function components ALWAYS for new code**:
+   ```tsx
+   // ✅ modern — function + hooks
+   export function Counter() {
+     const [count, setCount] = useState(0)
+     return <button onClick={() => setCount(c => c + 1)}>{count}</button>
+   }
+
+   // ❌ legacy — never write this for new code
+   class Counter extends Component {
+     state = { count: 0 }
+     render() {
+       return <button onClick={() => this.setState({ count: this.state.count + 1 })}>{this.state.count}</button>
+     }
+   }
+   ```
+
+2. **No lifecycle methods — use hooks**:
+   - `componentDidMount` → `useEffect(() => { ... }, [])`
+   - `componentDidUpdate` → `useEffect(() => { ... }, [deps])`
+   - `componentWillUnmount` → `useEffect` cleanup return function
+   - `shouldComponentUpdate` → wrap in `React.memo` (rarely needed; profile first)
+
+3. **State management**: `useState` / `useReducer` for component state, Zustand or similar for global state. **Do NOT generate Redux boilerplate** (`mapStateToProps`, `connect(mapStateToProps)(Component)`, action types as constants, switch-statement reducers) for new projects unless the existing codebase is already on Redux Toolkit AND you can see RTK in `package.json`.
+
+**Anti-pattern symptoms — these mean you defaulted to class-era React**:
+- `class XXX extends React.Component` → use a function.
+- `this.state` / `this.setState({})` → use `useState`.
+- `componentDidMount() {...}` → use `useEffect(() => { ... }, [])`.
+- `connect(mapStateToProps, mapDispatchToProps)(...)` → use `useSelector`/`useDispatch` (RTK) or replace with Zustand store.
+- `propTypes` declarations → use TypeScript props interface.
+- `createRef()` for refs → use `useRef`.
+- `withRouter(Component)` HOCs → use `useNavigate`/`useLocation` hooks (react-router v6).
+
 ## Patterns to Avoid
 
 - **Don't use `useEffect` for state synchronization.** Compute the value during render from existing state. `useEffect` is for side effects (subscribe, fetch, DOM measurement) — using it to keep one piece of state in sync with another doubles the renders and creates ordering bugs.

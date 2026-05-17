@@ -98,14 +98,21 @@ export interface CriticalExtractionResult {
 }
 
 /**
- * Pull every "CRITICAL" block from a skill's markdown body. Captures both
- * H2 ("## CRITICAL: ...") and H3 ("### CRITICAL — ...") sections, plus the
- * explicit "## Hard rules" block when present, since these are the rules
- * the model most commonly forgets across long sessions.
+ * Pull every "CRITICAL" block from a skill's markdown body. Captures three
+ * shapes — H2 ("## CRITICAL: ..."), H3 nested inside an H2 critical block,
+ * AND orphan H3 ("### CRITICAL — ...") that lives under a non-critical H2 —
+ * plus the explicit "## Hard rules" block when present.
  *
- * Tolerated variants for the H2 trigger:
+ * The orphan-H3 case is the common one for the auth-proxy skill, which
+ * documents its endpoints in an "## the auth API REST endpoints you'll call"
+ * H2 with `### CRITICAL — postBody/requestUri` H3s underneath. Without
+ * orphan-H3 capture those rules silently vanish from any critical-only
+ * slice, which is exactly what the verifier needs to look at.
+ *
+ * Tolerated variants for the H2/H3 trigger:
  *   ## CRITICAL: ...        ## Critical — ...      ## **CRITICAL** ...
  *   ## ⚠️ CRITICAL ...      ## Hard rules           ## Hard Rules
+ *   ### CRITICAL — ...      ### CRITICAL: ...
  *
  * On truncation, prepends a NAMED warning (not a silent suffix) so the
  * model knows content was dropped and the SKILL author sees the cap.
@@ -120,7 +127,13 @@ export function extractCriticalSections(content: string): string {
 export function extractCriticalSectionsWithStats(content: string): CriticalExtractionResult {
   const lines = content.split('\n')
   const out: string[] = []
-  let inBlock = false
+  // Two independent in-block states. inH2Critical owns an entire H2 block
+  // including its H3 children; inH3CriticalOrphan owns a single H3 block
+  // that lives under a non-critical H2. They are never both true at once
+  // because an H3 boundary resets inH3CriticalOrphan and an H2 boundary
+  // resets BOTH.
+  let inH2Critical = false
+  let inH3CriticalOrphan = false
   let h2Count = 0
   let h3Count = 0
 
@@ -144,12 +157,26 @@ export function extractCriticalSectionsWithStats(content: string): CriticalExtra
 
   for (const line of lines) {
     if (/^##\s/.test(line) && !line.startsWith('###')) {
-      inBlock = isCriticalH2(line)
-      if (inBlock) h2Count++
+      // H2 boundary — closes any open orphan H3 block AND decides whether
+      // the new H2 itself is a critical container.
+      inH3CriticalOrphan = false
+      inH2Critical = isCriticalH2(line)
+      if (inH2Critical) h2Count++
+    } else if (/^###\s/.test(line)) {
+      // H3 boundary. If we are inside a critical H2, the H3 just inherits
+      // the parent's "we're in a critical block" state — we only need to
+      // count it for stats. If we are under a NON-critical H2, decide
+      // independently whether to open an orphan critical block.
+      const h3IsCritical = isCriticalH3(line)
+      if (inH2Critical) {
+        if (h3IsCritical) h3Count++
+      } else {
+        inH3CriticalOrphan = h3IsCritical
+        if (h3IsCritical) h3Count++
+      }
     }
-    if (inBlock) {
+    if (inH2Critical || inH3CriticalOrphan) {
       out.push(line)
-      if (isCriticalH3(line)) h3Count++
     }
   }
 

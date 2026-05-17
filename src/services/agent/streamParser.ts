@@ -284,9 +284,28 @@ function processAnthropicEvent(
     }
 
     case 'error': {
+      // Anthropic-shape error event from the worker's adapter conversion of
+      // our typed upstream error envelopes (proxy.ts → anthropicAdapter.ts).
+      // Pass the typed `error.type` through as `errorType` so the agent's
+      // processStreamedTurn maps `upstream_stream_interrupted` to the
+      // auto-retry path instead of treating it as a hard error.
+      const errObj = data.error
+      const errType = typeof errObj?.type === 'string' ? errObj.type : undefined
+      let msg: string
+      if (errType === 'upstream_stream_interrupted') {
+        msg = `The model's response was interrupted mid-stream (upstream: ${errObj?.provider || 'unknown'}). ` +
+              `This is usually a transient network issue — retrying.`
+      } else if (errType === 'upstream_fetch_failed') {
+        msg = `Could not reach the model after multiple retries: ${errObj?.message || 'unknown error'}`
+      } else if (errType === 'upstream_http_error') {
+        msg = `Upstream returned HTTP ${errObj?.status || '?'}: ${errObj?.message || ''}`
+      } else {
+        msg = errObj?.message ?? JSON.stringify(data)
+      }
       callbacks.onEvent({
         type: 'error',
-        message: data.error?.message ?? JSON.stringify(data),
+        message: msg,
+        errorType: errType,
       })
       break
     }

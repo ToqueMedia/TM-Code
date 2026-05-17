@@ -1,8 +1,13 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useChatStore } from '../../../stores/chatStore'
 import { runAgentWithCallbacks } from '../agentRunner'
+import type { SlashCommandMode } from '../slashCommandRegistry'
 
-export async function executeInit(_args: string, projectPath: string): Promise<void> {
+export async function executeInit(
+  _args: string,
+  projectPath: string,
+  mode: SlashCommandMode = 'chat',
+): Promise<void> {
   const chatStore = useChatStore.getState()
 
   // Check if TMS.md already exists
@@ -30,6 +35,10 @@ export async function executeInit(_args: string, projectPath: string): Promise<v
   await runAgentWithCallbacks(initPrompt, {
     addUserMessage: true,
     userMessageText: '/init',
+    // CMD mode never populates useProjectStore.currentProject; without this,
+    // the tool executor's getProjectRoot falls back to that store and every
+    // file tool fails with "No project is open." See agentRunner.ts:179.
+    cmdOnlyMode: mode === 'terminal',
   })
 }
 
