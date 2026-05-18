@@ -3165,6 +3165,136 @@ Project root: ${projectRoot}`
       },
     })
 
+    // === provision_database ===
+    // Reserves a per-app SQLite/libSQL database on the platform's Turso fleet
+    // and writes the two credentials user code needs (`TMDB_URL` +
+    // `TMDB_TOKEN`) to .env. The Turso platform token and the database's
+    // own JWT stay on the TM Code Worker — user code only sees the
+    // app-scoped TMDB token, which the worker validates per request.
+    //
+    // The endpoint is idempotent (worker reuses an existing record when
+    // present), so re-running on an already-provisioned project just
+    // returns the existing credentials. Same shape as provision_auth.
+    this.tools.set('provision_database', {
+      definition: {
+        name: 'provision_database',
+        description:
+          "Set up TM Code Database (per-app SQLite/libSQL on Turso) for the current project. Reserves the app's database on the platform, mints an app-scoped TMDB token, and writes TMDB_URL + TMDB_TOKEN to .env. The Turso platform token and per-DB JWT stay on the TM Code Worker — user code talks to the worker via HTTPS using the TMDB_TOKEN. Use ONCE when the project needs persistence in production (an auth user record, app state, etc.). Local dev does not need this — db.ts switches between a local SQLite file and TMDB_* based on NODE_ENV. After it returns, generate `server/db.ts` with the dev/prod connection switch from read_skill(\"publish-backend\") and `server/schema.ts` for Drizzle. The endpoint is idempotent — calling again returns the same credentials and is safe.",
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+      execute: async () => {
+        const project = useProjectStore.getState().currentProject
+        if (!project) {
+          return 'No project is open. Open a project before provisioning the database.'
+        }
+
+        const firebaseAuth = FirebaseAuthService.getInstance()
+        const idToken = await firebaseAuth.getIdToken()
+        if (!idToken) {
+          return 'Not authenticated to TM Code. Sign in first, then retry.'
+        }
+
+        const workerUrl = resolveWorkerUrl()
+        let provisionRes: Awaited<ReturnType<typeof tauriFetch>>
+        try {
+          provisionRes = await tauriFetch(
+            `${workerUrl}/v1/apps/${encodeURIComponent(project.id)}/database/provision`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${idToken}`,
+              },
+              body: JSON.stringify({}),
+            },
+          )
+        } catch (err) {
+          // Same hard-stop posture as provision_auth: network failure must
+          // not become "let me ask the developer for the DB URL", because
+          // the developer doesn't own those credentials. Wait for the user.
+          return (
+            `PROVISION_DATABASE FAILED — STOP DATA-LAYER WORK.\n\n` +
+            `Network error reaching the database provisioning endpoint: ${err instanceof Error ? err.message : String(err)}\n\n` +
+            `Do NOT fall back to request_credentials for TMDB_URL, TMDB_TOKEN, DATABASE_URL — those credentials are minted by the platform and do not exist until provision_database succeeds.\n\n` +
+            `Required recovery: report the network error to the developer in chat, suggest checking their connection, and wait for them to decide whether to retry. Do not auto-retry.`
+          )
+        }
+
+        if (!provisionRes.ok) {
+          const body = await provisionRes.text().catch(() => '')
+          return (
+            `PROVISION_DATABASE FAILED — STOP DATA-LAYER WORK.\n\n` +
+            `Error from worker (HTTP ${provisionRes.status}): ${body.slice(0, 300)}\n\n` +
+            `What this means: the platform could not provision a per-app database. ` +
+            `Without it, TMDB_URL / TMDB_TOKEN do not exist and production persistence cannot be wired up.\n\n` +
+            `Wrong recovery paths (DO NOT TAKE):\n` +
+            `  ✗ request_credentials for TMDB_URL / TMDB_TOKEN / DATABASE_URL — the developer does not own these.\n` +
+            `  ✗ swap to a different ORM/driver hoping it bypasses the platform — the harness rejects Prisma, mysql2, pg, sqlite3, better-sqlite3 on write to package.json.\n\n` +
+            `Required recovery:\n` +
+            `  1. STOP the data-layer task. Do not write db.ts / schema.ts / migrations.\n` +
+            `  2. Tell the developer what happened — quote the error above verbatim.\n` +
+            `  3. Suggest one of: (a) retry provision_database in a new chat turn if transient, (b) report to TM Code support if it persists, (c) keep persistence local-dev-only by using DATABASE_URL=file:./dev.db without the prod branch.\n` +
+            `  4. Wait for the developer's decision. Do not auto-retry.`
+          )
+        }
+
+        const data = (await provisionRes.json()) as {
+          tmdbUrl?: string
+          tmdbToken?: string
+          dbName?: string
+          reused?: boolean
+        }
+
+        if (!data.tmdbUrl || !data.tmdbToken || !data.dbName) {
+          return `Provisioning returned incomplete data: ${JSON.stringify(data)}`
+        }
+
+        const envVars: Array<{ key: string; value: string }> = [
+          { key: 'TMDB_URL', value: data.tmdbUrl },
+          { key: 'TMDB_TOKEN', value: data.tmdbToken },
+        ]
+
+        try {
+          await invoke('write_env_vars', { projectPath: project.path, vars: envVars })
+        } catch (err) {
+          return `Database provisioned (${data.dbName}) but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
+        }
+
+        const reusedSuffix = data.reused ? ' (reused existing)' : ''
+        const lines: string[] = []
+        lines.push(`Database ready: ${data.dbName}${reusedSuffix}.`)
+        lines.push(`.env written: TMDB_URL, TMDB_TOKEN.`)
+        lines.push('')
+        lines.push('## Database contract (do not improvise)')
+        lines.push('')
+        lines.push('### Connection switch (server/db.ts)')
+        lines.push('  - Dev (`NODE_ENV !== "production"`): `drizzle-orm/libsql/node` with `createClient({ url: process.env.DATABASE_URL ?? "file:./dev.db" })`.')
+        lines.push('  - Prod (`NODE_ENV === "production"`): `drizzle-orm/sqlite-proxy` driver, forwarding queries to `${TMDB_URL}` over HTTPS with `Authorization: Bearer ${TMDB_TOKEN}`. The worker accepts `POST { sql, params, method }` for single queries and `POST { batch: [...] }` for transactions.')
+        lines.push('  - The user code MUST NOT import `@libsql/client` directly in production — the worker is the only path to Turso. Direct libsql connections from Cloud Run will fail (no platform token in user env).')
+        lines.push('')
+        lines.push('### Schema (server/schema.ts)')
+        lines.push('  - Drizzle table definitions in TypeScript. Add `index().on(field)` for query hot paths.')
+        lines.push('  - Generate migrations with `drizzle-kit generate --config=drizzle.config.ts` after schema changes.')
+        lines.push('  - The deploy pipeline reapplies migration SQL against the app\'s TMDB on publish. Local dev runs `drizzle-kit push` or `drizzle-kit migrate` against the file:./dev.db, never against TMDB.')
+        lines.push('')
+        lines.push('### Forbidden')
+        lines.push('  - `@prisma/client`, `prisma`, `better-sqlite3`, `sqlite3`, `mysql2`, `pg` — the write_file harness rejects these on package.json edits. The reason: Prisma needs a persistent connection (incompatible with Cloud Run scale-to-zero + worker HTTPS proxy); native-bound SQLite drivers and non-SQLite dialects don\'t round-trip through the worker.')
+        lines.push('  - Hard-coding TMDB_URL or TMDB_TOKEN in any committed file. They live ONLY in .env.')
+        lines.push('')
+        lines.push('### Next steps')
+        lines.push('  1. read_skill("publish-backend") for the full db.ts template + sqlite-proxy fetcher.')
+        lines.push('  2. Write server/schema.ts with the tables you need (start small — add columns later).')
+        lines.push('  3. Write server/db.ts using the dev/prod switch from the skill.')
+        lines.push('  4. Generate the first migration with drizzle-kit.')
+
+        return lines.join('\n')
+      },
+    })
+
     // === provision_deploy ===
     // Mirrors provision_auth for the backend deploy side. With the Firestore
     // data model there's no per-app database to provision — the app's data

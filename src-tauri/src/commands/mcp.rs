@@ -97,6 +97,48 @@ pub async fn mcp_start_server(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
+    // Tauri apps launched from Finder inherit a stripped PATH (typically just
+    // /usr/bin:/bin:/usr/sbin:/sbin), so `npx`, `node`, `bun` and similar
+    // commonly-installed-via-nvm/Homebrew binaries can't be found. A user
+    // reported "Failed to start MCP server 'Chakra-UI V3': No such file or
+    // directory" — root cause was that npx (the entry the MCP config used)
+    // wasn't on the inherited PATH. Use the same PATH augmentation as the
+    // terminal command: prefer the extracted user-login PATH, fall back to
+    // a curated prefix that covers nvm, pnpm, bun, cargo, and Homebrew.
+    #[cfg(unix)]
+    {
+        if let Some(path) = crate::commands::terminal::get_user_path() {
+            cmd.env("PATH", path);
+        } else {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+            let inherited = std::env::var("PATH").unwrap_or_default();
+            let nvm_bin = std::fs::read_dir(format!("{}/.nvm/versions/node", home))
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                        .max_by_key(|e| e.file_name())
+                        .map(|e| format!("{}/bin", e.path().display()))
+                })
+                .unwrap_or_default();
+            let prepend = [
+                nvm_bin.as_str(),
+                &format!("{}/.local/share/pnpm", home),
+                &format!("{}/.bun/bin", home),
+                &format!("{}/.cargo/bin", home),
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+            ]
+            .iter()
+            .filter(|d| !d.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(":");
+            cmd.env("PATH", format!("{}:{}", prepend, inherited));
+        }
+    }
+
     for env_var in &env {
         cmd.env(&env_var.key, &env_var.value);
     }
