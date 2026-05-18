@@ -319,7 +319,10 @@
       "Bash(xargs ls -lt)",
       "WebFetch(domain:docs.turso.tech)",
       "WebFetch(domain:turso.tech)",
-      "WebFetch(domain:orm.drizzle.team)"
+      "WebFetch(domain:orm.drizzle.team)",
+      "Bash(echo \"---BUILD STATUS: $?\")",
+      "Bash(echo \"---IDE BUILD: $?\")",
+      "Bash(echo \"---WORKER TSC: $?\")"
     ]
   }
 }

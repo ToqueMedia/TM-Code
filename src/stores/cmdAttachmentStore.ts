@@ -5,7 +5,7 @@ import type { Attachment } from '../types/chat'
  * Shared CMD-mode attachment state.
  *
  * Lives in its own store (instead of inside `useAttachments` as local React state)
- * so that BOTH CmdModeView's outer drag-zone AND CmdModePromptInput's overlay
+ * so that BOTH TerminalView's outer drag-zone AND CmdModePromptInput's overlay
  * read/write the same attachments without a ref-dance or event delegation.
  *
  * Scoped separately from chatStore.draftAttachments so chat-mode and CMD-mode

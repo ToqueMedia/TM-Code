@@ -142,10 +142,19 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
     return out
   }, [autoApproveDiffs, queueLength, skillCount, mcpIsInitializing, mcpServers, totalMcpTools, devServer])
 
+  // Same auto-hide rule the chat-mode AgentTasksPanel uses: once the agent
+  // finishes AND every task is completed, stop rendering the strip. This
+  // also stops the chat-mode task list from leaking into CMD mode when the
+  // user toggles modes mid-session — both surfaces share the same
+  // agentStore.tasks slice but neither should render a stale "all done"
+  // recap unprompted.
+  const hasOngoingTasks = agentTasks.some((t: AgentTask) => t.status !== 'completed') || isStreaming
+  const showTasks = agentTasks.length > 0 && hasOngoingTasks
+
   return (
     <>
-      {/* Agent task list — shown above status bar when tasks exist */}
-      {agentTasks.length > 0 && (
+      {/* Agent task list — shown above status bar while there's meaningful progress */}
+      {showTasks && (
         <Box
           px={3}
           pt={1.5}

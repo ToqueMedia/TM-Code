@@ -1164,7 +1164,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
 
       set(state => {
-        const { activeSessionId, sessions } = state
+        const { activeSessionId, sessions, streamingMessageId } = state
         if (!activeSessionId) {
           // No active session: still zero out the counter so the indicator
           // doesn't stay pinned at the pre-compression peak in stray UI.
@@ -1176,9 +1176,32 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           return { totalTokensUsed: { input: 0, output: state.totalTokensUsed.output }, currentPromptTokens: 0, currentResponseTokens: 0 }
         }
 
+        // Compaction can fire MID-LOOP — agentRunner creates the assistant
+        // message once at request start (agentRunner.ts:157) and the same
+        // `streamingMessageId` persists across every internal turn. If
+        // compression triggers on turn 2+, the in-flight assistant bubble
+        // already sits in `session.messages`; appending the boundary at the
+        // end would put the bubble BEFORE the marker, and ChatView slices
+        // on the latest boundary (chat/views/ChatView.tsx) — so the bubble
+        // (and every subsequent delta written to it) would vanish from the
+        // transcript. Insert the boundary IMMEDIATELY BEFORE the streaming
+        // assistant when one exists so the bubble lives in the post-
+        // boundary slice and stays visible. No streaming bubble → append
+        // at the tail like before.
+        let newMessages: ChatMessage[]
+        const streamingIdx = streamingMessageId
+          ? session.messages.findIndex(m => m.id === streamingMessageId)
+          : -1
+        if (streamingIdx >= 0) {
+          newMessages = session.messages.slice()
+          newMessages.splice(streamingIdx, 0, message)
+        } else {
+          newMessages = [...session.messages, message]
+        }
+
         const updatedSession: ChatSession = {
           ...session,
-          messages: [...session.messages, message],
+          messages: newMessages,
           // Compaction is the ONLY legitimate path that drops the session
           // peak. `addTokenUsage` now takes Math.max(previousPeak, newPrompt)
           // so the pill never decreases on its own (microcompaction shrinks
@@ -2251,8 +2274,17 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (!session) return
 
         // Strip ephemeral system messages (e.g. "Installing dependencies...")
-        // but KEEP card messages (plan_approval, todo_list) which carry actionable state.
-        session.messages = session.messages.filter(m => m.role !== 'system' || m.card)
+        // but KEEP card messages (plan_approval, todo_list) which carry
+        // actionable state, AND KEEP compact_boundary markers — those are
+        // the slice point ChatView uses to hide pre-compression history
+        // (ChatView.tsx:73-82). Dropping them on reload makes the
+        // pre-compression turns reappear in the transcript as if the
+        // compaction never happened, which is precisely the regression
+        // claude-vaz solved by persisting `isCompactBoundaryMessage` with
+        // a dedicated `isCompaction: true` flag.
+        session.messages = session.messages.filter(m =>
+          m.role !== 'system' || m.card || m.kind === 'compact_boundary'
+        )
 
         // Rebuild contentBlocks for legacy messages that don't have them
         for (const msg of session.messages) {
@@ -2365,8 +2397,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
         if (session.messages.length === 0) return false
 
-        // Strip ephemeral system messages but keep card messages
-        session.messages = session.messages.filter(m => m.role !== 'system' || m.card)
+        // Strip ephemeral system messages but keep card messages AND
+        // compact_boundary markers (slice point used by ChatView to hide
+        // pre-compression turns). Mirrors the same predicate in
+        // loadSessionFromDisk.
+        session.messages = session.messages.filter(m =>
+          m.role !== 'system' || m.card || m.kind === 'compact_boundary'
+        )
         if (session.messages.length === 0) return false
 
         const conversationHistory = rebuildConversationHistory(session.messages)
@@ -2376,20 +2413,48 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (isStale()) return false
         useCheckpointStore.getState().syncFromService()
 
+        // Mirror loadSessionFromDisk: pull token counters + model identity
+        // out of the persisted snapshot so the ContextWindowIndicator
+        // doesn't flash 0% on the boot path (which goes through
+        // restoreLastSession from App.tsx, NOT loadSessionFromDisk).
+        const bootSnapshot = (session as ChatSession & { lastTurnSnapshot?: import('../types/chat').SessionTurnSnapshot }).lastTurnSnapshot ?? null
+
+        const restoredSession: ChatSession =
+          bootSnapshot
+            ? {
+                ...session,
+                lastPromptTokens: bootSnapshot.promptTokens,
+                lastResponseTokens: bootSnapshot.responseTokens,
+              }
+            : session
+
         set(() => {
           const sessions = new Map<string, ChatSession>()
-          sessions.set(session.id, session)
+          sessions.set(restoredSession.id, restoredSession)
           return {
             sessions,
-            activeSessionId: session.id,
+            activeSessionId: restoredSession.id,
             conversationHistory,
             currentTurnCount: 0,
             totalTokensUsed: { input: 0, output: 0 },
-            currentPromptTokens: 0,
-          currentResponseTokens: 0,
+            currentPromptTokens: bootSnapshot?.promptTokens ?? 0,
+            currentResponseTokens: bootSnapshot?.responseTokens ?? 0,
             pendingDiffs: [],
           }
         })
+
+        // Restore model identity + context window so the ctx pill renders
+        // its real % from the very first paint. Identical wiring to
+        // loadSessionFromDisk so both entry paths converge on the same
+        // post-load shape.
+        if (bootSnapshot && (bootSnapshot.contextWindow != null || bootSnapshot.modelName != null)) {
+          useAgentStore.getState().setModelInfo(
+            bootSnapshot.modelName ?? null,
+            null,
+            undefined,
+            bootSnapshot.contextWindow,
+          )
+        }
 
         sessionService.startAutoSave(30000)
         return true

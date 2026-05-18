@@ -636,6 +636,105 @@ pub async fn write_env_vars(project_path: String, vars: Vec<EnvVar>) -> Result<(
     Ok(())
 }
 
+/// Read selected env vars from a project's `.env`. Returns a map containing
+/// only the requested `keys` that are present in the file; missing keys are
+/// simply absent from the result. Whitespace and surrounding quotes are
+/// stripped from values; `\"` and `\\` escapes inside double-quoted values
+/// are decoded. Comment lines (`#...`) and blank lines are ignored.
+///
+/// This is a *read* counterpart to `write_env_vars` — used by the data viewer
+/// to fetch `TMDB_URL` + `TMDB_TOKEN` without exposing the rest of `.env`.
+#[tauri::command]
+pub async fn read_env_vars(
+    project_path: String,
+    keys: Vec<String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    if keys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let project = Path::new(&project_path);
+    if !project.exists() || !project.is_dir() {
+        return Err(format!("Project path does not exist: {}", project_path));
+    }
+    let canonical_project =
+        canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
+
+    let env_path = canonical_project.join(".env");
+    if !env_path.starts_with(&canonical_project) {
+        return Err("Resolved .env path escapes project root".to_string());
+    }
+    if !env_path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    for k in &keys {
+        validate_env_key(k)?;
+    }
+    let wanted: HashSet<&str> = keys.iter().map(|s| s.as_str()).collect();
+
+    let content =
+        std::fs::read_to_string(&env_path).map_err(|e| format!("Failed to read .env: {}", e))?;
+
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(eq_idx) = trimmed.find('=') else { continue };
+        let key = trimmed[..eq_idx].trim();
+        if !wanted.contains(key) {
+            continue;
+        }
+        let raw = trimmed[eq_idx + 1..].trim();
+        let value = parse_env_value(raw);
+        out.insert(key.to_string(), value);
+    }
+    Ok(out)
+}
+
+/// Decode a `.env` value: strip a matched pair of surrounding double-quotes
+/// (and unescape `\"` / `\\` inside) or single-quotes (kept literal), and
+/// otherwise return the trimmed input. Inline comments after an unquoted value
+/// are dropped at the first ` #`.
+fn parse_env_value(raw: &str) -> String {
+    if raw.len() >= 2 {
+        let bytes = raw.as_bytes();
+        if bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
+            let inner = &raw[1..raw.len() - 1];
+            let mut out = String::with_capacity(inner.len());
+            let mut chars = inner.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    match chars.next() {
+                        Some('"') => out.push('"'),
+                        Some('\\') => out.push('\\'),
+                        Some('n') => out.push('\n'),
+                        Some('r') => out.push('\r'),
+                        Some('t') => out.push('\t'),
+                        Some(other) => {
+                            out.push('\\');
+                            out.push(other);
+                        }
+                        None => out.push('\\'),
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            return out;
+        }
+        if bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'' {
+            return raw[1..raw.len() - 1].to_string();
+        }
+    }
+    if let Some(idx) = raw.find(" #") {
+        return raw[..idx].trim_end().to_string();
+    }
+    raw.to_string()
+}
+
 /// Reads the content of a skill directory (SKILL.md + optional references/*.md).
 #[tauri::command]
 pub async fn read_skill_content(skill_path: String) -> Result<SkillContent, String> {

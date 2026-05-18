@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiCheck, FiLoader, FiChevronDown, FiChevronUp, FiCheckSquare } from 'react-icons/fi'
 import { useAgentStore, type AgentTask } from '../../stores/agentStore'
+import { useChatStore } from '../../stores/chatStore'
 import { computeSlidingWindow } from '../../utils/taskWindow'
 import { tokens } from '@/theme/tokens'
 
@@ -21,6 +22,7 @@ import { tokens } from '@/theme/tokens'
  */
 function AgentTasksPanel() {
   const tasks = useAgentStore(s => s.tasks)
+  const isStreaming = useChatStore(s => s.isStreaming)
   const [collapsed, setCollapsed] = useState(false)
 
   if (tasks.length === 0) return null
@@ -28,6 +30,13 @@ function AgentTasksPanel() {
   const completed = tasks.filter(t => t.status === 'completed').length
   const total = tasks.length
   const allDone = completed === total
+
+  // Auto-hide once the agent has finished AND every task is completed.
+  // The list isn't cleared from the store on purpose — the next agent
+  // turn starts by calling `clearTasks()` (agentService.ts), so the
+  // record stays available for export/inspection until that point. We
+  // just stop occupying vertical real estate above the prompt.
+  if (allDone && !isStreaming) return null
 
   return (
     <Box

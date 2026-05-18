@@ -2,6 +2,7 @@ pub mod ai_completion;
 pub mod byok;
 pub mod checkpoint;
 pub mod container;
+pub mod data_viewer;
 pub mod debugger;
 pub mod device;
 pub mod e2e;

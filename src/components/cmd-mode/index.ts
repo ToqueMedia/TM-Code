@@ -1,4 +1,4 @@
-export { default as CmdModeView } from './CmdModeView'
+export { default as TerminalView } from './TerminalView'
 export { default as CmdModePromptInput } from './CmdModePromptInput'
 export { TerminalTitleBar } from './TerminalTitleBar'
 export { TerminalStatusLine } from './TerminalStatusLine'

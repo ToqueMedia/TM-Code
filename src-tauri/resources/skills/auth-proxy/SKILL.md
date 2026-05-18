@@ -102,6 +102,30 @@ Mechanical contract (all three steps required):
 2. **Rehydrate on every load**. The auth store **MUST** expose an `init()` that reads `getAuthToken()`, calls `GET /api/auth/me`, and sets `user` from the response (or `null` when the token is missing/expired and refresh fails). See "Session bootstrap" for the canonical Zustand example.
 3. **Call `init()` BEFORE first render** from the entry file (`main.ts(x)` / `app.ts`) — wrap `createRoot(...).render(<App/>)` in `useAuthStore.getState().init().finally(...)`. Typical resolve time is ≤300ms (one `GET /api/auth/me` round-trip on warm connection). Calling `init()` from a component `useEffect` is too late: the first paint already happened with `user: null` ~50ms in, and AuthGuard has already redirected to `/login` before `/me` returns.
 
+**Minimum viable bootstrap — copy verbatim, do not improvise:**
+
+```typescript
+// src/store/authStore.ts
+init: async () => {
+  const token = getAuthToken()
+  if (!token) { set({ user: null, loading: false }); return }
+  try {
+    const res = await authFetch('/api/auth/me')
+    if (res.ok) set({ user: await res.json(), loading: false })
+    else { setAuthToken(null, null); set({ user: null, loading: false }) }
+  } catch { set({ user: null, loading: false }) }
+}
+```
+
+```typescript
+// src/main.tsx — init() MUST run before render()
+useAuthStore.getState().init().finally(() => {
+  createRoot(document.getElementById('root')!).render(<App />)
+})
+```
+
+Skipping either snippet = refresh after login lands on `/login`. The full reference with the auth helper (`getAuthToken`, `authFetch`, `setAuthToken`, refresh-on-401) is in "Frontend — auth helper" below.
+
 Why this matters more than it looks: in this proxy flow `onAuthStateChanged` never fires (no client-side method ever updates `auth.currentUser`), so the listener-based pattern Firebase tutorials teach is silently a no-op here. The bootstrap `init()` + `/api/auth/me` call IS the persistence mechanism — there is no fallback.
 
 Verify after wiring:

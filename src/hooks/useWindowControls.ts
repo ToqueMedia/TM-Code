@@ -3,7 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 
 /**
  * Shared window control handlers — eliminates duplication across
- * WelcomeScreen, CmdModeView, and any other view needing them.
+ * WelcomeScreen, TerminalView, and any other view needing them.
  */
 export function useWindowControls() {
   const handleClose = useCallback(async () => {

@@ -21,6 +21,7 @@ import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
 // RequirementsDialog removed — templates disabled
 import SettingsView from './views/SettingsView'
+import DataViewerView from './views/DataViewerView'
 import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
 import { devServerManager } from '../services/devServerManager'
@@ -263,11 +264,16 @@ function MainLayout() {
                 <SettingsView />
               </ErrorBoundary>
             )}
+            {viewMode === 'data' && (
+              <ErrorBoundary>
+                <DataViewerView />
+              </ErrorBoundary>
+            )}
           </Flex>
 
           {/* Permission dialog - shown above PromptBar when agent needs approval */}
           {/* In preview mode, PermissionDialog is rendered inside PreviewView */}
-          {pendingPermission && viewMode !== 'editor' && viewMode !== 'preview' && (
+          {pendingPermission && viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'data' && (
             <PermissionDialog
               toolName={pendingPermission.toolName}
               args={pendingPermission.args}
@@ -278,8 +284,8 @@ function MainLayout() {
             />
           )}
 
-          {/* PromptBar - hidden in editor, preview, and settings */}
-          {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && <PromptBar />}
+          {/* PromptBar - hidden in editor, preview, settings, and data viewer */}
+          {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && viewMode !== 'data' && <PromptBar />}
         </Flex>
       </Flex>
 

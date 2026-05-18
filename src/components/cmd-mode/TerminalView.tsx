@@ -19,12 +19,12 @@ import { useCmdScrollFollow } from '../../hooks/useCmdScrollFollow'
 import { useAttachments } from '../../hooks/useAttachments'
 import { tokens } from '@/theme/tokens'
 
-interface CmdModeViewProps {
+interface TerminalViewProps {
   projectPath: string
   onBack: () => void
 }
 
-const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
+const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
@@ -343,4 +343,4 @@ const CmdModeView: React.FC<CmdModeViewProps> = ({ projectPath, onBack }) => {
   )
 }
 
-export default CmdModeView
+export default TerminalView

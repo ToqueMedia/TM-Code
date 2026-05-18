@@ -123,10 +123,16 @@ function AgentStatusBar() {
 
   return (
     <Box borderTop="1px solid rgba(255, 255, 255, 0.04)" bg="rgba(255, 255, 255, 0.02)">
-      {/* Agent task list — shows when agent has active tasks. Defensive
-          Array.isArray guard: store should always hold an array, but a
-          rogue setTasks(undefined) elsewhere shouldn't crash the chrome. */}
+      {/* Agent task list — shows while the agent is actively working OR
+          has tasks that aren't all done yet. Once the agent finishes AND
+          every task is completed, hide the strip so the chrome stops
+          occupying vertical space with stale state (same rule as
+          AgentTasksPanel and TerminalStatusLine — single source of truth
+          for "is there meaningful task progress to surface").
+          Defensive Array.isArray guard kept against a rogue setTasks(undefined). */}
       {Array.isArray(agentTasks) && agentTasks.length > 0 && (
+        agentTasks.some(t => t.status !== 'completed') || isStreaming
+      ) && (
         <Box px={3} pt="6px" pb="4px" borderBottom="1px solid rgba(255, 255, 255, 0.04)">
           <Flex align="center" gap="6px" mb="4px">
             <FiCheckSquare size={10} color={tokens.colors.accent.purple} />

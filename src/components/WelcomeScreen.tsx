@@ -9,7 +9,7 @@ import { WelcomeSidebar, WelcomeHero, CloneDialog, StartupRequirementsBanner } f
 import SettingsView from './views/SettingsView'
 import WindowControls from './ui/WindowControls'
 import { IS_MAC } from '@/utils/platform'
-import { CmdModeView } from './cmd-mode'
+import { TerminalView } from './cmd-mode'
 import { useWindowControls } from '../hooks/useWindowControls'
 import { WindowTitleManager } from '../utils/windowTitleManager'
 
@@ -147,7 +147,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
 
       {cmdModeProjectPath ? (
         <Box flex="1" minH={0} display="flex" flexDirection="column">
-          <CmdModeView
+          <TerminalView
             projectPath={cmdModeProjectPath}
             onBack={() => setCmdModeProjectPath(null)}
           />

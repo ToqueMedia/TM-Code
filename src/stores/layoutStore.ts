@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings'
+export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings' | 'data'
 /** UI surface in the preview area. Derived from `devServer.projectKind` + static preview state. */
 export type PreviewMode = 'server' | 'static' | 'api'
 export type DevLogLevel = 'info' | 'warn' | 'error'

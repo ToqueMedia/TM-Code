@@ -149,7 +149,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx 
 
     // Spawn the shell. `cwd` is clamped to the project on the Rust side when
     // an active project is set (it is — `open_project` was invoked by the
-    // parent CmdModeView).
+    // parent TerminalView).
     invoke<string>('start_pty_shell', { sessionId, cwd: projectPath })
       .then(() => {
         if (disposed) return

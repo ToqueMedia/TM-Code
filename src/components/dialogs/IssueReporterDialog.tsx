@@ -119,15 +119,17 @@ interface IssueReporterDialogProps {
 }
 
 /**
- * Two-phase dialog:
- * 1. `capturing` — shows a small loader while capturing the IDE screenshot
- *    (no backdrop, so html2canvas sees the real IDE; loader excluded via ignoreElements)
- * 2. `ready` — full dialog visible with the captured screenshot attached
+ * The dialog renders straight to the `ready` state with an empty screenshot
+ * list. Users attach screenshots explicitly via the "Capture Window" button
+ * or the drop zone. The previous auto-capture-on-open path was removed
+ * because html2canvas runs synchronously on the main thread for ~hundreds of
+ * ms and stalled the agent's streaming counters; also, the developer didn't
+ * always want a screenshot of the moment they opened the dialog.
  */
 function IssueReporterDialog({ isOpen, onClose }: IssueReporterDialogProps) {
   const t = useTranslation()
   const user = useAuthStore(s => s.user)
-  const [phase, setPhase] = useState<'idle' | 'capturing' | 'ready'>('idle')
+  const [phase, setPhase] = useState<'idle' | 'ready'>('idle')
   const [description, setDescription] = useState('')
   const [email, setEmail] = useState(user?.email || '')
   const [screenshots, setScreenshots] = useState<string[]>([])
@@ -138,7 +140,7 @@ function IssueReporterDialog({ isOpen, onClose }: IssueReporterDialogProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const templateRef = useRef('')
 
-  // Phase 1: when isOpen becomes true, capture screenshot BEFORE showing dialog
+  // Reset on open/close. No auto screenshot — the user decides.
   useEffect(() => {
     if (!isOpen) {
       setPhase('idle')
@@ -152,23 +154,8 @@ function IssueReporterDialog({ isOpen, onClose }: IssueReporterDialogProps) {
     templateRef.current = tpl
     setDescription(tpl)
     setEmail(user?.email || '')
-    setPhase('capturing')
-
-    // Capture now — dialog is invisible during this phase
-    let cancelled = false
-    ;(async () => {
-      const shot = await captureScreenshot()
-      if (cancelled) return
-      if (shot) {
-        setScreenshots([shot])
-      } else {
-        setScreenshots([])
-      }
-      // Phase 2: now show the dialog
-      setPhase('ready')
-    })()
-
-    return () => { cancelled = true }
+    setScreenshots([])
+    setPhase('ready')
   }, [isOpen, user?.email])
 
   // Escape to close
@@ -274,47 +261,6 @@ function IssueReporterDialog({ isOpen, onClose }: IssueReporterDialogProps) {
   }, [descriptionModified, description, email, screenshots, includeSystemInfo, isSending, onClose])
 
   if (phase === 'idle') return null
-
-  // Show a subtle centered loader while capturing the screenshot
-  if (phase === 'capturing') {
-    return (
-      <Portal>
-        <Flex
-          data-issue-reporter-overlay=""
-          position="fixed"
-          inset={0}
-          zIndex={tokens.zIndex.modal}
-          align="center"
-          justify="center"
-          onMouseDown={(e: React.MouseEvent) => e.stopPropagation()}
-          // No backdrop bg — keeps IDE visible for the html2canvas capture
-        >
-          <Flex
-            align="center"
-            gap={2}
-            px={4}
-            py={2.5}
-            bg={tokens.colors.bg.overlay}
-            border={`1px solid ${tokens.colors.border.default}`}
-            borderRadius="10px"
-            boxShadow="0 8px 24px rgba(0,0,0,0.5)"
-          >
-            <Box
-              w="14px"
-              h="14px"
-              borderRadius="full"
-              border={`2px solid ${tokens.colors.accent.primaryMuted}`}
-              borderTopColor={tokens.colors.accent.primary}
-              css={{ animation: 'spin 0.8s linear infinite', '@keyframes spin': { to: { transform: 'rotate(360deg)' } } }}
-            />
-            <Text fontSize="12px" color={tokens.colors.text.secondary}>
-              {t('issueReporter.capturing')}
-            </Text>
-          </Flex>
-        </Flex>
-      </Portal>
-    )
-  }
 
   return (
     <Portal>
@@ -493,7 +439,7 @@ function IssueReporterDialog({ isOpen, onClose }: IssueReporterDialogProps) {
                         textAlign="center"
                         mt={0.5}
                       >
-                        {i === 0 ? t('issueReporter.currentWindow') : `Image ${i + 1}`}
+                        {`Image ${i + 1}`}
                       </Text>
                     </Box>
                   ))}

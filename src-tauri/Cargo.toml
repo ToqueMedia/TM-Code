@@ -60,6 +60,11 @@ screenshots = "0.8"
 # Linux fallback to encrypted file is a known follow-up if libsecret friction
 # becomes a real issue in the field.
 keyring = "3"
+# SQLite for the in-IDE Data Viewer (read-only access to the project's
+# local `dev.db`). The `bundled` feature compiles SQLite from C source so
+# we don't depend on a system libsqlite3 — matches our preference for
+# self-contained Tauri binaries on all platforms.
+rusqlite = { version = "0.32", features = ["bundled"] }
 # Note: hostname intentionally NOT included in the fingerprint inputs (see
 # device.rs). machine-uid alone gives the stability we want without the
 # user-mutable bypass vector.

@@ -292,7 +292,7 @@ export function useCmdPromptLogic() {
       // cmdOnlyMode=true so runAgentWithCallbacks calls toolExecutor.enableCmdMode(cwd).
       // Without this, hashtag flows in CMD mode fail every tool call with
       // "No project is open" — the executor falls back to useProjectStore.currentProject,
-      // which CmdModeView never populates (it invokes Rust open_project directly
+      // which TerminalView never populates (it invokes Rust open_project directly
       // instead of going through useProjectStore.openProject).
       if (pre.authProviders.length > 0) {
         await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign, true)

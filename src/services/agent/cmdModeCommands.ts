@@ -142,7 +142,7 @@ async function executeSave(args: string, _projectPath: string): Promise<void> {
 //
 // The previous version of this command dumped the list as a system message,
 // which forced the user to type `/resume <n>` afterwards. The picker owns
-// Escape while open (see CmdModeView) so it can be cancelled without
+// Escape while open (see TerminalView) so it can be cancelled without
 // exiting CMD Mode.
 
 async function executeResume(_args: string, projectPath: string): Promise<void> {

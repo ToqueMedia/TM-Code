@@ -3,6 +3,7 @@ use commands::ai_completion::*;
 use commands::byok::*;
 use commands::checkpoint::*;
 use commands::container::*;
+use commands::data_viewer::*;
 use commands::debugger::*;
 use commands::device::*;
 use commands::e2e::*;
@@ -1220,6 +1221,8 @@ pub fn run() {
             scaffold_template,
             glob_files,
             write_env_vars,
+            read_env_vars,
+            data_viewer_dev_query,
             collect_deploy_bundle,
             collect_backend_tarball,
             list_skills_bundled,

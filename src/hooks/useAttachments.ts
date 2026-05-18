@@ -42,7 +42,7 @@ export function useAttachments(options: UseAttachmentsOptions = {}) {
 
   // ─── Store subscriptions ───
   // When localState=true, we read from useCmdAttachmentStore (shared across
-  // CmdModeView and CmdModePromptInput so drops on the outer frame end up in
+  // TerminalView and CmdModePromptInput so drops on the outer frame end up in
   // the same list as pastes in the input). Otherwise we go through chatStore.
   const cmdAttachments = useCmdAttachmentStore(s => s.attachments)
   const cmdAddAttachment = useCmdAttachmentStore(s => s.addAttachment)

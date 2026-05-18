@@ -97,7 +97,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     handleKeyDown,
     handleFocus,
     handleBlur,
-    // Attachments — drag handlers live on CmdModeView (whole-area drop zone);
+    // Attachments — drag handlers live on TerminalView (whole-area drop zone);
     // this component only owns paste (input-focused) and the visual overlay.
     draftAttachments,
     removeAttachment,

@@ -83,6 +83,22 @@ After the GIS callback exchanges the Google credential for session tokens via `P
 
 Skipping any step breaks the flow in a different observable way: 401 on next request, redirect loop, stranded on login. ALL FOUR are mandatory.
 
+## CRITICAL: Wire session persistence (init()) in main.tsx
+
+The four post-token steps above cover *login*. They do NOT cover *staying logged in across a refresh*. The model consistently scaffolds the hook + the four post-token steps perfectly, ships, and then the user reports "I sign in but a hard refresh sends me back to /login". That symptom is always the same omission: `useAuthStore.getState().init()` was never called from `main.tsx` before `createRoot(...).render(<App />)`.
+
+**MUST**, in the same scaffold pass that wires this Google hook:
+
+1. The auth store exports an `init()` that reads `getAuthToken()`, calls `GET /api/auth/me`, and sets `user` from the response (or `null` on failure).
+2. `main.tsx` wraps the render in `useAuthStore.getState().init().finally(...)`.
+
+The full snippet (auth store `init` + `main.tsx` wiring) lives in the `auth-proxy` skill's `### CRITICAL — Persist the session on app load` section. **Read it** before you finish this scaffold — the Google flow ships broken without it, even when this hook is perfect.
+
+Symptom-to-rule for fast debugging:
+- "Sign-in works, refresh sends me to /login" → `init()` not called before render.
+- "Sign-in works, refresh shows infinite spinner" → `init()` called but never sets `loading: false`.
+- "I see /login for a flash then dashboard" → `init()` called from a `useEffect` instead of before render.
+
 ## CRITICAL: The Vite proxy must exist
 
 `/api/auth/proxy/google` is a **same-origin** path. Without `vite.config.ts` proxying `/api` to the backend, the request hits port 5173 and returns **404**. See `auth-proxy` skill, hard rule #8 — the snippet is one line and **MUST** be present in `vite.config.ts` before this hook can possibly work.

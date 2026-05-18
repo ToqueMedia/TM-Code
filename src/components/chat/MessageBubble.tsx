@@ -459,7 +459,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
               letterSpacing="0.05em"
               textTransform="uppercase"
             >
-              ✻ Conversa comprimida{beforeK !== null ? ` · ${beforeK}K tokens` : ''}
+              ✻ Conversa comprimida
             </Text>
             <Box flex="1" h="1px" bg={tokens.colors.border.panel} opacity={0.5} />
           </Flex>
@@ -470,7 +470,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             textAlign="center"
             lineHeight="1.5"
           >
-            Mensagens anteriores foram resumidas. Skills invocados re-injectados — o agente continua com as regras CRITICAL intactas.
+            Mensagens anteriores foram resumidas{beforeK != null ? ` (${beforeK}K tokens)` : ''}. Skills invocados re-injectados — o agente continua com as regras CRITICAL intactas.
           </Text>
         </Box>
       )

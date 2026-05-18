@@ -28,7 +28,7 @@ function formatRelativeTime(ts: number): string {
 /**
  * Keyboard-driven picker for CMD-mode `/resume`. Arrow keys navigate,
  * Enter loads, Esc closes without exiting CMD Mode. Owns Escape in the
- * CmdModeView priority chain (registered via a `data-session-picker`
+ * TerminalView priority chain (registered via a `data-session-picker`
  * marker the outer handler checks).
  */
 export const TerminalSessionPicker = memo(function TerminalSessionPicker({
