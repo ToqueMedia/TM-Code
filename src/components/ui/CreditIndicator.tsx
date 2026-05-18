@@ -259,7 +259,7 @@ export function CreditIndicator(props: CreditIndicatorProps) {
                 _hover={{ opacity: 0.8 }}
                 onClick={() => {
                   import('@tauri-apps/plugin-opener').then(opener => {
-                    opener.openUrl('https://studio.toquemedia.net').catch(() => {})
+                    opener.openUrl('https://code.toquemedia.net').catch(() => {})
                   })
                 }}
               >

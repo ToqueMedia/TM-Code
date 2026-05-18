@@ -8,19 +8,15 @@ import { tokens } from '@/theme/tokens'
 
 // ── ModelIndicator ──
 //
-// Shown in the chat header when BYOK is in effect — either CONFIGURED locally
-// (active provider/model selected and master toggle on) or CONFIRMED by the
-// server (X-BYOK-Active response header on the most recent reply).
+// Always shown in the chat header once the backend has reported a model name
+// (via the X-Model-Name response header). Three visual states:
+//   - byok confirmed (X-BYOK-Active=true): full pink, key icon, "Model (BYOK)"
+//   - byok configured (local toggle on, no reply yet): muted pink preview
+//   - cloud (default): neutral grey-on-glass, model name only — no key icon
 //
-// Two states with subtle visual difference:
-//   - configured (no response yet): muted pink, border = 0.25 alpha
-//   - confirmed (server replied with X-BYOK-Active=true): full pink, border = 0.4 alpha
-//
-// Without the configured-state preview, the user has no visual feedback that
-// BYOK will route their next request — the CreditIndicator stays visible and
-// it looks like nothing changed.
-//
-// Click opens Settings → API Keys.
+// User feedback: "Só revela o modelo se usar o BYOK" — the developer wants to
+// know which model the IDE is talking to regardless of routing, so this no
+// longer gates on BYOK state alone.
 
 export default function ModelIndicator() {
   // Server-confirmed state — authoritative for what the LAST response used
@@ -52,34 +48,77 @@ export default function ModelIndicator() {
     return null
   })()
 
-  if (!byokActive && !configured) return null
+  // Render nothing only when the backend hasn't replied yet AND nothing is
+  // configured locally. The cloud branch needs at least `modelName` from the
+  // most recent response header to have something to display.
+  if (!byokActive && !configured && !modelName) return null
 
-  // Prefer server-reported model when available, fall back to local config.
-  // Display format is `Model (BYOK)` — provider name moves to the tooltip
-  // (it's redundant in the pill since the user knows which provider their
-  // active model belongs to, and shorter labels fit more chat headers).
+  // Pick the active mode. Order matters: BYOK confirmed > BYOK configured (preview)
+  // > cloud. `byokActive` is server-authoritative; `configured` is local intent
+  // before any reply has been seen.
+  const mode: 'byok-confirmed' | 'byok-configured' | 'cloud' =
+    byokActive ? 'byok-confirmed' : configured ? 'byok-configured' : 'cloud'
+
   let labelModel: string | null = null
   let labelProvider: string | null = null
-  if (byokActive) {
+  if (mode === 'byok-confirmed') {
     labelModel = modelName
     labelProvider = modelProvider
-  } else if (configured) {
+  } else if (mode === 'byok-configured' && configured) {
     const providerEntry = providers.find(p => p.id === configured.providerId)
     labelProvider = providerEntry?.name ?? configured.providerId
     labelModel = configured.modelId
+  } else {
+    labelModel = modelName
+    labelProvider = modelProvider
   }
-  const label = labelModel ? `${labelModel} (BYOK)` : 'BYOK'
 
-  // Subtle distinction: pending preview vs server-confirmed.
-  const isConfirmed = byokActive
-  const bg = isConfirmed ? 'rgba(254, 16, 99, 0.14)' : 'rgba(254, 16, 99, 0.06)'
-  const borderColor = isConfirmed ? 'rgba(254, 16, 99, 0.4)' : 'rgba(254, 16, 99, 0.2)'
-  const hoverBg = isConfirmed ? 'rgba(254, 16, 99, 0.2)' : 'rgba(254, 16, 99, 0.12)'
-  const hoverBorder = isConfirmed ? 'rgba(254, 16, 99, 0.55)' : 'rgba(254, 16, 99, 0.35)'
+  // BYOK pills append "(BYOK)"; cloud pill is just the model name.
+  const label = mode === 'cloud'
+    ? (labelModel ?? '')
+    : (labelModel ? `${labelModel} (BYOK)` : 'BYOK')
+
+  // Per-mode palette. Cloud uses a neutral glass look so it doesn't compete
+  // with the pink BYOK pill — the developer can tell at a glance which path
+  // the IDE is on.
+  const palette = mode === 'cloud'
+    ? {
+        bg: tokens.colors.bg.glass,
+        borderColor: tokens.colors.border.glass,
+        hoverBg: tokens.colors.bg.hoverSubtle,
+        hoverBorder: tokens.colors.border.panel,
+        textColor: tokens.colors.text.secondary,
+        textOpacity: 1,
+        icon: null as null | typeof FiKey,
+        iconOpacity: 1,
+      }
+    : mode === 'byok-confirmed'
+      ? {
+          bg: 'rgba(254, 16, 99, 0.14)',
+          borderColor: 'rgba(254, 16, 99, 0.4)',
+          hoverBg: 'rgba(254, 16, 99, 0.2)',
+          hoverBorder: 'rgba(254, 16, 99, 0.55)',
+          textColor: tokens.colors.accent.primary,
+          textOpacity: 1,
+          icon: FiKey,
+          iconOpacity: 1,
+        }
+      : {
+          bg: 'rgba(254, 16, 99, 0.06)',
+          borderColor: 'rgba(254, 16, 99, 0.2)',
+          hoverBg: 'rgba(254, 16, 99, 0.12)',
+          hoverBorder: 'rgba(254, 16, 99, 0.35)',
+          textColor: tokens.colors.accent.primary,
+          textOpacity: 0.85,
+          icon: FiKey,
+          iconOpacity: 0.7,
+        }
+
   const providerSuffix = labelProvider ? ` · ${labelProvider}` : ''
-  const titleText = isConfirmed
-    ? `BYOK active${providerSuffix} — click to manage in Settings`
-    : `BYOK configured${providerSuffix} — your next request will use this provider. Click to manage.`
+  const titleText =
+    mode === 'byok-confirmed' ? `BYOK active${providerSuffix} — click to manage in Settings`
+    : mode === 'byok-configured' ? `BYOK configured${providerSuffix} — your next request will use this provider. Click to manage.`
+    : `Model in use${providerSuffix}`
 
   return (
     <HStack
@@ -88,24 +127,26 @@ export default function ModelIndicator() {
       px={2}
       py="3px"
       borderRadius={tokens.radius.full}
-      bg={bg}
+      bg={palette.bg}
       border="1px solid"
-      borderColor={borderColor}
+      borderColor={palette.borderColor}
       cursor="pointer"
       transition={tokens.transition.fast}
-      _hover={{ bg: hoverBg, borderColor: hoverBorder }}
+      _hover={{ bg: palette.hoverBg, borderColor: palette.hoverBorder }}
       onClick={() => useLayoutStore.getState().setViewMode('settings')}
       title={titleText}
     >
-      <Box color={tokens.colors.accent.primary} opacity={isConfirmed ? 1 : 0.7}>
-        <FiKey size={10} />
-      </Box>
+      {palette.icon && (
+        <Box color={tokens.colors.accent.primary} opacity={palette.iconOpacity}>
+          <palette.icon size={10} />
+        </Box>
+      )}
       <Text
         fontSize="10px"
         fontWeight="600"
-        color={tokens.colors.accent.primary}
+        color={palette.textColor}
         fontFamily={tokens.fontFamily.mono}
-        opacity={isConfirmed ? 1 : 0.85}
+        opacity={palette.textOpacity}
         maxW="180px"
         overflow="hidden"
         textOverflow="ellipsis"

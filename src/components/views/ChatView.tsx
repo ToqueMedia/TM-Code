@@ -212,9 +212,12 @@ function ChatView() {
               </Text>
             </Flex>
           )}
-          {showModelIndicator ? (
-            <ModelIndicator />
-          ) : (
+          {/* ModelIndicator always renders once the backend has reported a
+              model name — the developer wants to know which model the IDE is
+              talking to regardless of BYOK state. CreditIndicator stays
+              hidden when BYOK is in effect because billing differs. */}
+          <ModelIndicator />
+          {!showModelIndicator && (
             <CreditIndicator
               plan={billingPlan}
               noCredits={noCredits}
@@ -734,7 +737,7 @@ function CreditIndicator(props: {
                 _hover={{ opacity: 0.8 }}
                 onClick={() => {
                   import('@tauri-apps/plugin-opener').then(opener => {
-                    opener.openUrl('https://studio.toquemedia.net').catch(() => {})
+                    opener.openUrl('https://code.toquemedia.net').catch(() => {})
                   })
                 }}
               >

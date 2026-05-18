@@ -313,7 +313,13 @@
       "Bash(git -C /Users/ithustle/dev/deskotp/toquemedia-studio-api diff src/anthropicAdapter.ts)",
       "Bash(echo \"---exit=$?---\")",
       "Bash(git -C /Users/ithustle/dev/deskotp/toquemedia-studio-api add src/anthropicAdapter.ts)",
-      "Bash(git -C /Users/ithustle/dev/deskotp/toquemedia-studio-api commit -m ' *)"
+      "Bash(git -C /Users/ithustle/dev/deskotp/toquemedia-studio-api commit -m ' *)",
+      "Bash(git *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(xargs ls -lt)",
+      "WebFetch(domain:docs.turso.tech)",
+      "WebFetch(domain:turso.tech)",
+      "WebFetch(domain:orm.drizzle.team)"
     ]
   }
 }

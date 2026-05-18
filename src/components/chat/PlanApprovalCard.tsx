@@ -31,8 +31,8 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
 
   const handleChanges = useCallback(() => {
     useChatStore.getState().updateCardStatus(messageId, 'changes_requested')
-    handlePlanRequestChanges()
-  }, [messageId])
+    handlePlanRequestChanges(projectPath)
+  }, [messageId, projectPath])
 
   const handleReject = useCallback(() => {
     useChatStore.getState().updateCardStatus(messageId, 'rejected')

@@ -337,6 +337,17 @@ export async function runAuthFlow(
     if (typeof window !== 'undefined') {
       window.removeEventListener('agent-stop-requested', abortListener)
     }
+    // Belt-and-braces: each sub-step (scaffold turn, verifier, fix turn)
+    // resets its own status in its finally, but the chain has enough
+    // moving parts (loop returns, abort listener races, sub-agent crash
+    // paths) that a stray non-idle status can slip through and pin the
+    // top-bar activity indicator on "Reasoning…" after the flow ended.
+    // A user reported exactly that — header read "A raciocinar…" after
+    // the "Auth flow verified end-to-end" system message had already
+    // landed. Single explicit reset here covers every exit path.
+    if (useAgentStore.getState().status !== 'idle') {
+      useAgentStore.getState().setStatus('idle')
+    }
   }
 }
 

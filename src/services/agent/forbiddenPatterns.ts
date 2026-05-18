@@ -23,15 +23,26 @@
 export const FORBIDDEN_FIREBASE_AUTH_NAMES = /\b(signInWithPopup|signInWithRedirect|signInWithCustomToken|signInWithEmailAndPassword|createUserWithEmailAndPassword|GoogleAuthProvider|GithubAuthProvider|FacebookAuthProvider|TwitterAuthProvider|OAuthProvider|EmailAuthProvider|signOut)\b/
 
 /** Packages that scaffold the wrong data-layer shape for the platform's
- *  Publish flow (Firestore via firebase-admin). Adding any of these to a
- *  package.json `dependencies` / `devDependencies` block on a project that
- *  didn't already have them is rejected at write time. */
+ *  Publish flow. TM Code Database is libSQL accessed via Drizzle ORM +
+ *  drizzle-orm/sqlite-proxy in production (so `drizzle-orm`, `drizzle-kit`
+ *  and `@libsql/client` are ALLOWED — they're the platform's data-layer
+ *  stack). The packages below are still forbidden because they either:
+ *
+ *  - Bring an incompatible query engine (Prisma uses a Rust binary that
+ *    needs a persistent connection — incompatible with Cloud Run
+ *    scale-to-zero + worker-mediated HTTPS proxy).
+ *  - Bring a non-SQLite dialect that can't run against the platform DB
+ *    (mysql2 / pg).
+ *  - Bring a native-bound SQLite driver that doesn't talk HTTP
+ *    (better-sqlite3 / sqlite3 — these only work as a process-local
+ *    driver, so they break the prod proxy path entirely).
+ *
+ *  Adding any of these to a package.json `dependencies` / `devDependencies`
+ *  block on a project that didn't already have them is rejected at write
+ *  time. */
 export const FORBIDDEN_DATA_LAYER_DEPS = [
   '@prisma/client',
   'prisma',
-  'drizzle-orm',
-  'drizzle-kit',
-  '@libsql/client',
   'better-sqlite3',
   'sqlite3',
   'mysql2',

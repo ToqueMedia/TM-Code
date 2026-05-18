@@ -127,6 +127,17 @@ export async function runAuthFlowVerification(args: {
 
   const readOnlyId = toolExecutor.enterReadOnlyMode()
 
+  // Frame the next assistant bubble so the user understands the verifier is
+  // an automatic post-scaffold step, not a new turn that started by itself.
+  // A user reported the previous behaviour as "the agent auto-started a new
+  // turn with 'Running auth-flow verification…'" — adding an explicit system
+  // line here moves the cue from inside the assistant bubble (italicised
+  // text that reads like a tool log) to a system frame that clearly belongs
+  // to the IDE.
+  chatStore.addSystemMessage(
+    'Running an automated check on the auth flow before handing it back to you.',
+  )
+
   // The main agent's scaffold bubble is already finalized at this point —
   // appendTextDelta would no-op. Open a fresh assistant bubble dedicated
   // to the verifier so its tool calls and verdict text stream into a

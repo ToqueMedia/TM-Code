@@ -67,6 +67,20 @@ interface ChatState {
   draftInput: string
   /** Draft attachments for the current message */
   draftAttachments: Attachment[]
+  /**
+   * Project path when the agent is awaiting plan-revision feedback (user
+   * clicked "Request changes" on the PlanApprovalCard). Until cleared, the
+   * NEXT user message routes to `executePlanRevision(prompt, projectPath)`
+   * instead of the normal chat path — re-enters architect mode with the
+   * existing PLAN.md as context, edits it, and emits a fresh approval card.
+   * `null` = not in revision mode.
+   *
+   * Without this flag, the user's revision feedback ("add OAuth") gets
+   * treated as a normal coding prompt, the default IDE system prompt
+   * loads, and the agent starts IMPLEMENTING the original PLAN.md plus
+   * the new request — the exact bug reported 2026-05-18.
+   */
+  planRevisionPending: string | null
 }
 
 interface ChatActions {
@@ -191,6 +205,8 @@ interface ChatActions {
   initPersistence: (projectPath: string) => Promise<void>
   cleanupOnExit: (projectPath: string) => Promise<void>
   setDraftInput: (value: string) => void
+  /** Flip the plan-revision flag — null clears it. */
+  setPlanRevisionPending: (projectPath: string | null) => void
   addDraftAttachment: (attachment: Attachment) => void
   removeDraftAttachment: (id: string) => void
   clearDraftAttachments: () => void
@@ -834,8 +850,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     pendingDiffs: [],
     draftInput: '',
     draftAttachments: [],
+    planRevisionPending: null,
 
     setDraftInput: (value: string) => set({ draftInput: value }),
+
+    setPlanRevisionPending: (projectPath: string | null) => set({ planRevisionPending: projectPath }),
 
     addDraftAttachment: (attachment: Attachment) => set(state => {
       if (state.draftAttachments.length >= 10) return state
@@ -1160,6 +1179,16 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const updatedSession: ChatSession = {
           ...session,
           messages: [...session.messages, message],
+          // Compaction is the ONLY legitimate path that drops the session
+          // peak. `addTokenUsage` now takes Math.max(previousPeak, newPrompt)
+          // so the pill never decreases on its own (microcompaction shrinks
+          // the wire prompt but the user's mental model is conversation-
+          // scoped — see the comment in addTokenUsage). The explicit reset
+          // here tells the pill the conversation footprint has genuinely
+          // shrunk; without it the ctx indicator would stay pinned at the
+          // pre-compaction peak forever.
+          lastPromptTokens: 0,
+          lastResponseTokens: 0,
           updatedAt: Date.now(),
         }
 
@@ -2079,9 +2108,22 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           const active = state.sessions.get(state.activeSessionId)
           if (active) {
             nextSessions = new Map(state.sessions)
+            // Session-level peak: take the MAX of the new per-turn prompt
+            // and whatever was already persisted. This is the value the
+            // ctx pill falls back to when `currentPromptTokens` is 0
+            // between turns. Without the MAX guard, a new turn whose
+            // wire-input is smaller than the previous (microcompaction
+            // dropped old tool results, or a sub-agent ran with a
+            // smaller prompt) would overwrite the session peak — which
+            // produced the visible "34 % → 7 % → 33 %" regression a
+            // user reported during a #auth-* flow with a sub-agent
+            // verifier in the middle. The peak is reset explicitly
+            // ONLY by the compaction marker handler (~line 1188 above).
+            const previousPeak = active.lastPromptTokens ?? 0
+            const nextPeak = Math.max(previousPeak, nextPrompt)
             nextSessions.set(state.activeSessionId, {
               ...active,
-              lastPromptTokens: nextPrompt,
+              lastPromptTokens: nextPeak,
               lastResponseTokens: nextResponse,
               updatedAt: Date.now(),
             })

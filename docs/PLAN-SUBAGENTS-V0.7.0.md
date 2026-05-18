@@ -479,9 +479,10 @@ The 0.7.0 release groups four buckets:
 | Sub-agents (`task` tool) | PLANNED | Sections 1–14 |
 | Hooks via `settings.json` | PLANNED | A |
 | Custom commands via `.claude/commands/*.md` | PLANNED | B |
-| Already implemented in working tree | DONE — needs commit + release | C |
-| Audit items considered but deprioritized | DEFERRED to 0.7.1+ | D |
-| `/plan-feature` command (sibling to `/plan`) | DEFERRED — design to follow | E |
+| Auto-detected user skills via `.claude/skills/*/SKILL.md` | PLANNED | C |
+| Already implemented in working tree | DONE — needs commit + release | D |
+| Audit items considered but deprioritized | DEFERRED to 0.7.1+ | E |
+| `/plan-feature` command (sibling to `/plan`) | DEFERRED — design to follow | F |
 
 ---
 
@@ -705,13 +706,169 @@ interface CustomCommandFile {
 
 ---
 
-## C. Already implemented in working tree (queued for 0.7.0 release)
+## C. Auto-detected user skills via `.claude/skills/*/SKILL.md`
+
+> Source of truth: claude-vaz `skills/loadSkillsDir.ts:78-94` (`getSkillsPath` for the three discovery roots) + `claude-vaz/skills/bundled/skillify.ts:68-69` (user-facing convention). Mirrors the [Anthropic / Claude Code promise](https://chakra-ui.com/docs/get-started/ai/skills): "Claude Code automatically discovers the installed skills in your project. No configuration or registration is needed."
+
+### C.1 — Context
+
+Today TM Code ships skills bundled at build time (`src-tauri/resources/skills/{auth-proxy,google-signin,publish-backend}/SKILL.md`). To add a skill, a team member edits the IDE source and rebuilds. The community pattern Anthropic established with Claude Code is the opposite: users `npx skills add <github-url>` from any project and the skill lights up automatically with no IDE-side change. Chakra-UI ships their official skills this way today:
+
+```bash
+# Install all three Chakra skills at once
+npx skills add https://github.com/chakra-ui/chakra-ui/tree/main/skills
+
+# Or pick one
+npx skills add https://github.com/chakra-ui/chakra-ui/tree/main/skills/chakra-ui-builder
+```
+
+The `npx skills add` command clones into `<projectRoot>/.claude/skills/<name>/SKILL.md` (project-scoped) or `~/.claude/skills/<name>/SKILL.md` (user-global). Claude Code, openclaude, Kilo Code, and Cursor's recent emulation all discover them at session start with zero configuration.
+
+Gap in TM Code: the model only knows about bundled skills. A user who runs `npx skills add` and gets `.claude/skills/foo/SKILL.md` on disk sees ZERO effect on the agent — the skill never appears in the index, never gets loaded into context. This effectively excludes TM Code from the growing ecosystem of community-shipped skills (Chakra, shadcn, future framework partners) and forces every "I want skill X" request through a TM Code repo PR.
+
+### C.2 — Goals
+
+1. The IDE discovers `~/.claude/skills/<name>/SKILL.md` (user-global) AND `<projectRoot>/.claude/skills/<name>/SKILL.md` (project-scoped) at session start.
+2. Discovery re-runs on file-watcher events so adding/removing skills mid-session lights up without a restart.
+3. Discovered skills appear in the standard skill index alongside bundled ones — the agent invokes them via `read_skill('<name>')` with no special-cased path. Same tool surface.
+4. Precedence on name collision: **project > user > bundled**. The skill index UI labels each entry with `[project]` / `[user]` / `[built-in]` so the user sees which file wins.
+5. Frontmatter parsing matches the claude-vaz / `npx skills` convention so a skill installed via `npx skills add` "just works" in TM Code without rewriting.
+
+### C.3 — Non-goals (0.7.0)
+
+- **No `npx skills add` integration on the IDE side.** Users run the npx command themselves in their terminal (or a future menu item adds it). The IDE only DISCOVERS; it does not INSTALL.
+- **No remote skill marketplace UI inside the IDE.** Defer to 0.8.0+.
+- **No skill signing / verification.** Discovered skills are trusted by virtue of being on disk — same trust model as `.claude/commands/` (Section B). Defense-in-depth lives at the prompt-injection layer (the agent already treats tool results as untrusted external input).
+- **No execution permissions for skills.** Skills remain prompt content, not shell hooks. Per-skill `hooks:` frontmatter is reserved for 0.7.1+ when hooks (Section A) have stabilised.
+- **No skill-level model overrides.** A skill cannot say "always use Opus for me" — model selection stays with the user's plan.
+
+### C.4 — Skill file convention (matches claude-vaz / npx skills)
+
+Same shape that openclaude / Chakra-UI / the community ecosystem already ships:
+
+```markdown
+---
+name: chakra-ui-builder
+description: Build accessible UIs with Chakra UI v3 components and tokens.
+whenToUse: User asks to build a UI, dashboard, form, or layout with Chakra UI / says #chakra.
+license: MIT
+metadata:
+  author: chakra-ui
+  version: 3.0.0
+  language: en
+---
+
+# Chakra UI Builder
+
+<full skill content here — loaded on `read_skill('chakra-ui-builder')`>
+```
+
+Required fields:
+- `name` — slug, must match the directory name; used as the `read_skill` argument.
+- `description` — one-line listed in the index (token-counted into the system prompt).
+
+Optional fields:
+- `whenToUse` — model uses this to decide whether to invoke the skill autonomously. Without it, the skill is invocation-only (user / agent must explicitly `read_skill`).
+- `paths` — glob list scoping when the skill activates (e.g. `["**/*.tsx"]` to only surface for React work).
+- `metadata` — author / version / language for the skill index UI.
+- `hooks` — DEFERRED (0.7.1+). Parser must NOT crash on unknown fields; preserves forward compatibility with skills that ship hooks for newer Claude Code versions.
+
+### C.5 — Discovery roots (mirrors claude-vaz)
+
+| Root | Source label | Precedence | Path |
+|---|---|---|---|
+| Project | `projectSettings` | HIGHEST | `<projectRoot>/.claude/skills/<name>/SKILL.md` |
+| User | `userSettings` | MIDDLE | `~/.claude/skills/<name>/SKILL.md` |
+| Bundled | `bundled` | LOWEST | `src-tauri/resources/skills/<name>/SKILL.md` (existing) |
+
+Higher precedence wins on name collision. Skills with the same `name` field in two roots: project shadows user shadows bundled. The skill index UI labels each entry with the source so the user understands which file the model is reading.
+
+### C.6 — Domain schema
+
+```ts
+// src/services/agent/userSkills/types.ts
+export interface UserSkillFile {
+  /** Absolute path to SKILL.md */
+  filePath: string
+  /** Discovery root (bundled stays separate; this type covers user-installed only) */
+  source: 'user' | 'project'
+  /** Parsed YAML frontmatter */
+  meta: {
+    name: string
+    description: string
+    whenToUse?: string
+    paths?: string[]
+    metadata?: { author?: string; version?: string; language?: string }
+  }
+  /** Estimated tokens from frontmatter (description + whenToUse) for index sizing */
+  estimatedTokens: number
+}
+```
+
+### C.7 — File structure
+
+| File | Action | Purpose |
+|---|---|---|
+| `src/services/agent/userSkills/types.ts` | CREATE | `UserSkillFile` interface + helper types |
+| `src/services/agent/userSkills/parser.ts` | CREATE | Frontmatter + body parsing — reuse the `customCommands/parser.ts` parser shape (Section B Phase B1) |
+| `src/services/agent/userSkills/discover.ts` | CREATE | `discoverUserSkills(projectRoot) → UserSkillFile[]` — walks `~/.claude/skills/` + `<projectRoot>/.claude/skills/` |
+| `src/services/agent/userSkills/__tests__/parser.test.ts` | CREATE | Pure unit tests for frontmatter shapes (incl. real Chakra-UI / openclaude / claude-vaz examples) |
+| `src/services/agent/userSkills/__tests__/discover.test.ts` | CREATE | Discovery scope (`.claude/skills/` only, not nested `node_modules/`), precedence on collision, frontmatter errors surfaced |
+| `src/services/agent/skillService.ts` | UPDATE | Merge bundled + user + project skills with precedence resolution; `loadSkills()` returns unified list with `source` label |
+| `src/services/agent/contextBuilder.ts` | UPDATE | `getSkillsSection` lists discovered skills with `[project]`/`[user]`/`[built-in]` badge in the index |
+| `src/services/fileWatcherService.ts` | UPDATE | Watch `~/.claude/skills/` + `<projectRoot>/.claude/skills/`; debounced re-discovery on add/change/delete (debounce 500 ms) |
+| `docs/USER-SKILLS.md` | CREATE | User-facing docs: `npx skills add` flow, frontmatter convention, precedence rules, troubleshooting |
+
+### C.8 — Implementation phases
+
+- **Phase C1** — Types + parser. Pure unit tests for SKILL.md frontmatter shapes including real-world examples from Chakra-UI, openclaude, claude-vaz bundled skills.
+- **Phase C2** — `discoverUserSkills(projectRoot)` reads both roots, returns merged list with precedence semantics. No file watcher yet.
+- **Phase C3** — Integration into `skillService.loadSkills()` — bundled + user + project sources unified behind the existing API. Skill index in `getSkillsSection` lists them all with source labels.
+- **Phase C4** — File-watcher integration: `~/.claude/skills/**/SKILL.md` + `<projectRoot>/.claude/skills/**/SKILL.md` watched, debounced re-discovery on add/change/delete. Survives the depth-3 guard added for the home-dir freeze fix (`feedback_file_watcher_broad_path.md`).
+- **Phase C5** — `docs/USER-SKILLS.md` + a one-line note in the welcome screen / settings UI ("Skills you install via `npx skills add` show up here automatically").
+
+Critical path: C1 → C2 → C3 → C4 → C5. Can run in parallel with Section A (hooks) and Section B (custom commands) — different files, different surfaces.
+
+### C.9 — Decisions
+
+| Decision | Chosen | Rationale |
+|---|---|---|
+| Discovery roots | `~/.claude/skills/` + `<projectRoot>/.claude/skills/` (+ keep bundled) | claude-vaz convention; matches `npx skills add` default install path; Chakra/openclaude/Kilo already ship skills targeting this. |
+| Name collision | project > user > bundled | Project context is most specific; bundled is the fallback. Same precedence as claude-vaz (`loadSkillsDir.ts` source-order). |
+| Frontmatter schema | Identical to bundled skills + `whenToUse` field | Bundled skills already have `name`, `description` in YAML frontmatter; adding `whenToUse` aligns with claude-vaz convention. Backward-compatible — bundled skills without `whenToUse` keep working. |
+| Hot-reload | File-watcher debounce 500 ms | `npx skills add` writes files; the discovery should pick up within the next user prompt, not require an IDE restart. 500 ms matches the existing debounce for project file changes. |
+| Skill execution model | Same as bundled — prompt content loaded on `read_skill()` | No new tool surface needed; the existing `READ_SKILL` tool works against the discovered file paths. |
+| Unknown frontmatter fields | Preserve, don't reject | Forward-compatible with skills that ship `hooks:` for newer Claude Code; we ignore unknown fields in 0.7.0 and consume them in 0.7.1+ when hooks ship. |
+| Skill name validation | `[a-z][a-z0-9-]*` slug, must equal directory name | Same as `npx skills`; rejects skills with mismatched directory ↔ frontmatter name (clear error in tooltip). |
+
+### C.10 — Risks
+
+| Risk | Mitigation |
+|---|---|
+| Malicious `.claude/skills/` in a cloned repo runs arbitrary content in the model's context | Skills are CONTENT, not code execution. The risk is prompt injection, not RCE. The agent already treats tool results as untrusted external input (see the `<system-reminder>` framing in `getSystemSection`). Acceptable — same trust model as `.claude/commands/`. **Defense-in-depth: do NOT auto-activate `whenToUse` skills until the user has opened the project at least once and the IDE has surfaced "this repo ships N user-defined skills — review them before continuing".** |
+| Skill name collision between bundled and user (e.g., `auth-proxy` in both) silently shadows | Skill index labels the source. The user sees `[project]` badge next to a shadowed bundled skill. Defense-in-depth at the UI layer — and the `skillService.loadSkills()` log line records the collision for debug. |
+| Frontmatter malformed YAML | Parser returns parse error; skill is listed in the index with an error badge in tooltip rather than silently skipped. Loud failure, not silent. |
+| Skill files outside `.claude/skills/` (e.g., `node_modules/somepkg/.claude/skills/`) get discovered | Discovery walker scoped to immediate `<root>/.claude/skills/<name>/SKILL.md` — does NOT recurse into `node_modules/`, `dist/`, `.git/`, or any gitignored directory. claude-vaz has the same scope (`loadSkillsDir.ts:887`). Test case in C.7 covers this. |
+| File watcher on `~/.claude/skills/` triggers on every system-wide HOME write | Glob narrowed to `~/.claude/skills/*/SKILL.md` only — single-depth subdirectory, not recursive. Same shape that survives the depth-3 home-dir guard from `feedback_file_watcher_broad_path.md`. |
+| User installs Chakra skill in a Next.js repo where they actually use Vue | The `whenToUse` field's trigger phrasing is the only auto-activation gate; explicit `read_skill('chakra-ui-builder')` calls work regardless of stack. If the model auto-activates an off-topic skill, that's a prompt-tuning issue with the skill's own `whenToUse`, not the discovery mechanism. |
+
+### C.11 — Future scope (post-0.7.0, NOT 0.7.0)
+
+- IDE menu item: "Install skill from URL…" wrapping `npx skills add` with a confirmation dialog showing the SKILL.md content before install.
+- Skill marketplace UI inside the IDE (browse community-curated skills).
+- Per-skill hooks (when bundled hooks ship in Section A, user skills can declare hooks in their frontmatter following the same schema).
+- Skill activation via path-glob matching (`paths` field already in the schema — runtime gating not implemented in 0.7.0).
+- Skill telemetry: track `read_skill('<name>')` invocations to surface "most-used skills" suggestions.
+
+---
+
+## D. Already implemented in working tree (queued for 0.7.0 release)
 
 > Status: DONE — code in working tree, not yet committed. Listed here so the 0.7.0 changelog has a single source of truth.
 
 These were built across multiple sessions of claude-vaz-parity work and are technically "feature changes" that warrant the 0.7.0 minor bump rather than a 0.6.2 patch.
 
-### C.1 — Thinking model rationalization
+### D.1 — Thinking model rationalization
 
 - **Removed** the mid-session "⚡ Thinking" toggle UI from `AgentStatusBar.tsx`, `TerminalTitleBar.tsx`, `ChatView.tsx`.
 - **Hard-coded** `preserveReasoningBetweenTurns = true` in `agentService.ts:354`.
@@ -721,7 +878,7 @@ These were built across multiple sessions of claude-vaz-parity work and are tech
 
 claude-vaz parity: their thinking config is global / launch-flag based, no mid-session UI. We match.
 
-### C.2 — Verification gate for `#auth-*` scaffold flow (`verifyAuthFlow`)
+### D.2 — Verification gate for `#auth-*` scaffold flow (`verifyAuthFlow`)
 
 - **New** `src/services/agent/commands/verifyAuthFlow.ts` + `authVerdict.ts` (pure parseVerdict).
 - **Wired** into `authCommand.runAuthFlow` AFTER the scaffold turn. Adversarial sub-agent runs auth-specific probes (bogus-token curl, MISSING_REQUEST_URI / INVALID_CREDENTIAL_OR_PROVIDER_ID / `/v2` slip / Vite proxy missing detection). On FAIL, diagnostic feeds back to main agent for up to 2 fix passes, then re-verifies. Caps prevent infinite loops.
@@ -731,19 +888,19 @@ claude-vaz parity: their thinking config is global / launch-flag based, no mid-s
 
 claude-vaz parity: their `verificationAgent.ts` adversarial pattern, adapted to auth specifically.
 
-### C.3 — Slash command `cmdOnlyMode` propagation
+### D.3 — Slash command `cmdOnlyMode` propagation
 
 - `/init`, `/plan`, `/debug`, `/payments`, `/te2e`, `/review` now accept `mode: SlashCommandMode` and propagate `cmdOnlyMode: mode === 'terminal'` to `runAgentWithCallbacks`.
 - `/review` additionally wraps its sub-agent run with `enableCmdMode` / `disableCmdMode` because it goes through `createLightweight` instead of `runAgentWithCallbacks`.
 
 Without this fix every slash command was broken in CMD mode — tool calls fell back to `useProjectStore.currentProject` which is empty in CMD.
 
-### C.4 — Skill section extraction — orphan H3 support
+### D.4 — Skill section extraction — orphan H3 support
 
 - `extractCriticalSections` (`contextBuilder.ts`) now captures `### CRITICAL —` H3 blocks living under non-critical H2 parents, not just H2-nested ones. This unblocks the verifier's slice-only prompt (the `MISSING_REQUEST_URI` rule lives at H3 under "## the auth API REST endpoints", which the old extractor silently dropped).
 - 3 new test cases cover orphan H3, H3→H3 boundary, H3→H2 boundary.
 
-### C.5 — Compact summary structure (9-section template)
+### D.5 — Compact summary structure (9-section template)
 
 - New `compactPrompt.ts` (zero-deps, testable): `buildCompactPrompt()` + `formatCompactSummary()`. 9-section claude-vaz template + `<analysis>` drafting wrapper stripped post-hoc.
 - 13 unit tests.
@@ -751,27 +908,27 @@ Without this fix every slash command was broken in CMD mode — tool calls fell 
 
 NB: technically committed against the 0.6.2 line because the user picked it as a chat-mode quality item. Listed here for completeness.
 
-### C.6 — Prompt cache_control markers
+### D.6 — Prompt cache_control markers
 
 - `system` block serialized as `[{type:'text', text, cache_control:{type:'ephemeral'}}]` array form.
 - Last tool definition carries `cache_control: { type: 'ephemeral' }`.
 - IDE-side only — full upstream effect requires backend hook to forward the markers (0.7.x backlog).
 
-NB: same as C.5, committed into 0.6.2. Listed for changelog completeness.
+NB: same as D.5, committed into 0.6.2. Listed for changelog completeness.
 
-### C.7 — System reminder injection in `read_file`
+### D.7 — System reminder injection in `read_file`
 
 - `read_file` injects `<system-reminder>` inside the tool result for empty files + externally-modified files (hash mismatch detected without going through our write tools).
 - claude-vaz parity: `FileReadTool.ts:706-730`.
 
-### C.8 — Time-based microcompaction
+### D.8 — Time-based microcompaction
 
 - `lastAssistantMessageAt` tracks wall-clock of last completed turn.
 - When gap > 60min (matches upstream cache TTL), aggressive `keepRecent=5` (vs default 8) — cache is guaranteed expired anyway.
 
 NB: shipped as 0.6.2 item; documented here for traceability.
 
-### C.9 — Miscellaneous polish
+### D.9 — Miscellaneous polish
 
 - Adaptive warn buffer on context window (`utils/contextWindow.ts`) — was 20K flat, now `max(20K, effective × 7%)` so orange fires earlier on 1M-context models.
 - Overrun icon (`FiAlertOctagon`) distinct from compact-imminent (`FiArchive`).
@@ -779,7 +936,7 @@ NB: shipped as 0.6.2 item; documented here for traceability.
 - Dead `setContextWindowSize` method removed.
 - Language consistency: all retry / exhausted messages converted PT → EN to match the chat surface.
 
-### C.10 — `/plan` multi-write+edit refactor (resilience fix)
+### D.10 — `/plan` multi-write+edit refactor (resilience fix)
 
 - **Problem fixed**: the architect was emitting PLAN.md as a single `${WRITE_FILE}`({ path, content: "<full document>" }). The whole markdown body crossed the stream as JSON-escaped `input_json_delta` events. On long sessions (DashScope GLM-5.1 direct AND Xiaomi Mimo via OpenRouter both observed), the upstream socket dropped mid-stream → `content_block_stop` for the tool_use never arrived → the tool was silently dropped from `turnResult.toolCalls`. The retry path (`agentService.ts:789-823`) re-issued the turn with the same `X-Request-Type=plan` header (forcing reasoning ON again) plus the architect prompt (~10K chars) plus the same monolithic Write expectation → re-cut at the same point → exhaust `MAX_INTERRUPT_RETRIES` → surface to user. Symptom: PLAN.md never landed. Workaround: user typed "Continue" and got a degraded plan (default IDE prompt, no architect template).
 
@@ -797,43 +954,43 @@ NB: shipped as 0.6.2 item; documented here for traceability.
 - **Files changed**:
   - `src/services/agent/commands/planCommand.ts` — `getChannelRuleSection`, `getCompletionRule`, `getAllowedToolsSection`, `getApprovalFlowSection`, `getTaskListSection`, `getWorkedExample`, `getReminder`, `getPlanMdTemplate` (frontmatter note); `executePlan` end-of-flow readiness gate; new `readPlanReadiness` helper.
 
-- **Not yet refactored**: `buildTodoPrompt` (TODO generation after plan approval) still uses a single `${WRITE_FILE}` for TODO.md. TODO is smaller than PLAN.md (table + checklist, not 14 prose sections) so the cut risk is lower, but for consistency it should follow the same pattern in a follow-up. Tracked under D.7.
+- **Not yet refactored**: `buildTodoPrompt` (TODO generation after plan approval) still uses a single `${WRITE_FILE}` for TODO.md. TODO is smaller than PLAN.md (table + checklist, not 14 prose sections) so the cut risk is lower, but for consistency it should follow the same pattern in a follow-up. Tracked under E.7.
 
-- **Paired follow-up**: the auto-retry path in `agentService.ts:789-823` still re-sends `X-Request-Type: plan` on each interrupt retry, re-forcing reasoning ON and re-inflating the stream that just cut. With C.10 the surface is smaller per Edit, so the cut is unlikely to recur — but the retry path should still be hardened. Tracked under D.7.
+- **Paired follow-up**: the auto-retry path in `agentService.ts:789-823` still re-sends `X-Request-Type: plan` on each interrupt retry, re-forcing reasoning ON and re-inflating the stream that just cut. With D.10 the surface is smaller per Edit, so the cut is unlikely to recur — but the retry path should still be hardened. Tracked under E.7.
 
 - **claude-vaz / Kilo Code parity**: matches the spirit of both. claude-vaz writes its plan file across multiple turns under the `plan` permission mode; Kilo Code's plan-mode reminder explicitly says "build your plan incrementally by writing to or editing this file". Neither uses a single monolithic Write. We're now aligned.
 
 ---
 
-## D. Considered but deferred (audit items not picked for 0.7.0)
+## E. Considered but deferred (audit items not picked for 0.7.0)
 
 > Listed for memory. Each was flagged in the claude-vaz divergence audits but pushed past 0.7.0 in favour of the items above.
 
 | # | Item | Reason for deferral |
 |---|---|---|
-| D.1 | **Cost tracking per-model** (audit 2 #1) — `/cost` command, per-model breakdown, cache hit stats, session-scoped cost persistence | Requires changes in the billing pipeline (worker → IDE) — bigger than 0.7.0 wants to absorb. Standalone 0.7.1 item. |
-| D.2 | **File staleness with mtime** (audit 1 #3) — current hash-only check misses byte-preserving touches (formatter, sort-imports) | Real bug but rare. C.7 (system-reminder injection) partially mitigates by surfacing hash mismatch loudly when it does fire. Full fix in 0.7.1. |
-| D.3 | **Read tool `cat -n` line numbering** (audit 1 #4) | Mostly affects long-file references. The IDE's offset/limit + tooling around line refs already covers most cases. Defer; pick up if eval shows the model wasting turns on line counting. |
-| D.4 | **TodoWrite one-in-progress discipline + turn-since-write reminder** (audit 1 #5) | Quality-of-life. The `update_tasks` tool works; users haven't reported the chaos pattern observed in claude-vaz dogfood. Defer; revisit if user-reported. |
-| D.5 | **Background agents follow-up** (audit 1 #6) — make `spawn_background_agent` accept SendMessage continuations | Power-user feature. Current one-shot covers 95% of use cases. Defer behind sub-agents (Sections 1–14) which is the higher-leverage piece. |
-| D.6 | **Worker-side prompt-cache key from `cache_control` hints** | C.6 markers are emitted by the IDE but the worker doesn't yet translate them into upstream cache-key/Anthropic cache_control on the forward path. Plan-managed users (DashScope/OpenRouter) currently get no token savings from the markers. Backend work for 0.7.1+. |
-| D.7 | **Retry path clears `X-Request-Type` + `buildTodoPrompt` multi-write+edit** (paired with C.10) | Two small follow-ups to the /plan resilience fix. (a) When the stream-interrupted retry re-issues a turn, the singleton `agentService.requestType` is still `'plan'` so reasoning is forced ON again — should be temporarily cleared for the retry only, then restored. Touches `agentService.ts:789-823`. (b) `buildTodoPrompt` should mirror C.10's scaffold + edits shape for TODO.md so a long task list doesn't regress to the same cut symptom. Both small enough to land mid-0.7.0 but split from C.10 for separate test coverage. |
-| D.8 | **Resume `/plan` when user types "Continue" with DRAFT plan on disk** (gap in C.10) | C.10 added a tailored "Plan generation was cut off — PLAN.md is still in DRAFT. Type 'Continue' to resume from the next unfilled section" message when the architect's auto-retries exhaust. But "Continue" goes through the default chat path — the architect `systemPromptOverride` is gone by then (it was scoped to the single `runAgentWithCallbacks` call in `executePlan`, and the `finally` block reset `requestType` and `planMode`). So the model recovering on user-typed "Continue" sees the default IDE prompt, NOT the architect role, and may improvise a degraded plan — the exact failure mode C.10 was trying to fix. Fix: in `usePromptBar` (or `PromptInput.handleSend`), before dispatching a normal chat turn, check if PLAN.md exists in `<projectRoot>` with `Status: DRAFT` (reuse `readPlanReadiness`). If yes AND the user message is a short continuation cue ("continue", "continua", "go on", etc.), re-dispatch through `executePlan` instead of the default chat path. Recovers the architect role with the same plan-mode permissions and prompt. Small but touches prompt-dispatch routing — wants its own integration test. |
+| E.1 | **Cost tracking per-model** (audit 2 #1) — `/cost` command, per-model breakdown, cache hit stats, session-scoped cost persistence | Requires changes in the billing pipeline (worker → IDE) — bigger than 0.7.0 wants to absorb. Standalone 0.7.1 item. |
+| E.2 | **File staleness with mtime** (audit 1 #3) — current hash-only check misses byte-preserving touches (formatter, sort-imports) | Real bug but rare. D.7 (system-reminder injection) partially mitigates by surfacing hash mismatch loudly when it does fire. Full fix in 0.7.1. |
+| E.3 | **Read tool `cat -n` line numbering** (audit 1 #4) | Mostly affects long-file references. The IDE's offset/limit + tooling around line refs already covers most cases. Defer; pick up if eval shows the model wasting turns on line counting. |
+| E.4 | **TodoWrite one-in-progress discipline + turn-since-write reminder** (audit 1 #5) | Quality-of-life. The `update_tasks` tool works; users haven't reported the chaos pattern observed in claude-vaz dogfood. Defer; revisit if user-reported. |
+| E.5 | **Background agents follow-up** (audit 1 #6) — make `spawn_background_agent` accept SendMessage continuations | Power-user feature. Current one-shot covers 95% of use cases. Defer behind sub-agents (Sections 1–14) which is the higher-leverage piece. |
+| E.6 | **Worker-side prompt-cache key from `cache_control` hints** | D.6 markers are emitted by the IDE but the worker doesn't yet translate them into upstream cache-key/Anthropic cache_control on the forward path. Plan-managed users (DashScope/OpenRouter) currently get no token savings from the markers. Backend work for 0.7.1+. |
+| E.7 | **Retry path clears `X-Request-Type` + `buildTodoPrompt` multi-write+edit** (paired with D.10) | Two small follow-ups to the /plan resilience fix. (a) When the stream-interrupted retry re-issues a turn, the singleton `agentService.requestType` is still `'plan'` so reasoning is forced ON again — should be temporarily cleared for the retry only, then restored. Touches `agentService.ts:789-823`. (b) `buildTodoPrompt` should mirror D.10's scaffold + edits shape for TODO.md so a long task list doesn't regress to the same cut symptom. Both small enough to land mid-0.7.0 but split from D.10 for separate test coverage. |
+| E.8 | **Resume `/plan` when user types "Continue" with DRAFT plan on disk** (gap in D.10) | D.10 added a tailored "Plan generation was cut off — PLAN.md is still in DRAFT. Type 'Continue' to resume from the next unfilled section" message when the architect's auto-retries exhaust. But "Continue" goes through the default chat path — the architect `systemPromptOverride` is gone by then (it was scoped to the single `runAgentWithCallbacks` call in `executePlan`, and the `finally` block reset `requestType` and `planMode`). So the model recovering on user-typed "Continue" sees the default IDE prompt, NOT the architect role, and may improvise a degraded plan — the exact failure mode D.10 was trying to fix. Fix: in `usePromptBar` (or `PromptInput.handleSend`), before dispatching a normal chat turn, check if PLAN.md exists in `<projectRoot>` with `Status: DRAFT` (reuse `readPlanReadiness`). If yes AND the user message is a short continuation cue ("continue", "continua", "go on", etc.), re-dispatch through `executePlan` instead of the default chat path. Recovers the architect role with the same plan-mode permissions and prompt. Small but touches prompt-dispatch routing — wants its own integration test. |
 
 ---
 
-## E. `/plan-feature` command (deferred — post-0.7.0)
+## F. `/plan-feature` command (deferred — post-0.7.0)
 
 > Status: NOT STARTED. Full design to be authored separately when 0.7.0 sub-agents (Sections 1–14) ship.
 > Source-of-truth references: claude-vaz `EnterPlanModeTool` / `ExitPlanModeTool` pair (`tools/EnterPlanModeTool/`, `tools/ExitPlanModeTool/`); Kilo Code Plan mode (`packages/opencode/src/session/prompt.ts`, `src/tool/plan.ts`, `src/session/session.ts:328` for plan-file path resolution).
 
-### E.1 — Context
+### F.1 — Context
 
 Today's `/plan` produces full-application architecture: 14-section FULLSTACK template, platform-publish constraints, file structure tabulated by phase, alternatives + risks + quality attributes. Appropriate for greenfield apps. **Overkill for feature-level changes** inside an existing project — "add OAuth", "refactor the search bar", "introduce dark mode". The model spends most of its budget filling sections that are N/A for a feature-scoped change, and the user gets a document that doesn't match the granularity of the work.
 
 `/plan-feature` is a sibling command for feature-level planning, modelled on Kilo Code's Plan mode and claude-vaz's plan mode. Short, incremental, written to a `.tmcode/plans/` directory rather than top-level `PLAN.md`, multiple Write+Edit turns instead of one giant tool_use, and (once 0.7.0 sub-agents land) parallel exploration via `task`.
 
-### E.2 — Shape (sketch only — full design deferred)
+### F.2 — Shape (sketch only — full design deferred)
 
 - **Plan file path**: `<projectRoot>/.tmcode/plans/<timestamp>-<slug>.md` (mirrors Kilo Code's `.kilo/plans/<ts>-<slug>.md`). Multiple plans coexist; old plans stay in disk for reference.
 - **Activation**: slash command flips a per-session `planFeatureMode` flag — no `systemPromptOverride`. Default system prompt stays; a per-turn `<system-reminder>` is injected describing the mode + the plan file path.
@@ -843,7 +1000,7 @@ Today's `/plan` produces full-application architecture: 14-section FULLSTACK tem
 - **Completion signal**: `plan_exit` tool with empty params — same pattern as claude-vaz `ExitPlanMode` and Kilo Code `plan_exit`. Plan content lives in the file; never crosses the stream as tool_use args.
 - **Hand-off**: when user approves, the coder agent receives a synthetic message ("execute the plan at `<path>`") on the next turn — same pattern as Kilo Code's auto-injection on agent transition.
 
-### E.3 — Non-goals (when designed)
+### F.3 — Non-goals (when designed)
 
 - **Replacing `/plan`**. They coexist:
   - `/plan` for application architecture (greenfield, FULLSTACK template, Cloudflare publish constraints, 14 sections).
@@ -853,13 +1010,13 @@ Today's `/plan` produces full-application architecture: 14-section FULLSTACK tem
 - **`update_tasks` mirror**. Optional; off by default (the tracker is overkill for a 3-task feature plan).
 - **Approval card on the top-level file tree**. Plans live in `.tmcode/plans/`, not at project root; the IDE renders the approval card inline in chat from the chosen plan file path.
 
-### E.4 — Dependencies
+### F.4 — Dependencies
 
 1. Sub-agents (Sections 1–14) shipping in 0.7.0.
 2. The current `/plan` first refactored to multi-write+edit shape — otherwise the cut symptom carries over to `/plan-feature` and the new command inherits the same brittleness.
 3. Permission-ruleset enforcement in the ToolExecutor (the current `planMode` flag is prompt-level only; `/plan-feature` needs a hard gate that allows writes ONLY to the chosen plan file).
 
-### E.5 — Open questions (to resolve at design time)
+### F.5 — Open questions (to resolve at design time)
 
 - Reuse existing `PlanApprovalCard` UI or new one? Probably new — `/plan-feature` plans are smaller and the approval UX can be lighter (Approve / Request changes, no Reject-to-restart since the file is incremental).
 - File-watcher integration: should the IDE show plan files in the sidebar under `.tmcode/plans/`? Yes — makes them discoverable and editable.
@@ -869,15 +1026,16 @@ Full design lands as `docs/PLAN-FEATURE-COMMAND.md` once 0.7.0 ships and we know
 
 ---
 
-## F. Release checklist (0.7.0 cut)
+## G. Release checklist (0.7.0 cut)
 
 Before the 0.7.0 tag:
 
 - [ ] Sections 1–14 (sub-agents) — implementation complete through Phase 5.
 - [ ] Section A (hooks) — implementation through Phase A5; docs published.
 - [ ] Section B (custom commands) — implementation through Phase B5; docs published.
-- [ ] Section C — already in working tree; bundle into the release commit(s).
+- [ ] Section C (auto-detected user skills) — implementation through Phase C5; docs published.
+- [ ] Section D — already in working tree; bundle into the release commit(s).
 - [ ] `package.json` + `tauri.conf.json` version bump 0.6.2 → 0.7.0.
-- [ ] CHANGELOG entry consolidating C.1–C.9 (visible behaviour changes only — drop the polish items).
+- [ ] CHANGELOG entry consolidating D.1–D.9 (visible behaviour changes only — drop the polish items).
 - [ ] Manual smoke test: chat-mode scaffold flow + verifier, terminal-mode `/init` + `/plan`, sub-agent spawn from architect prompt.
 - [ ] BugHunter `/plan` 2026-05-16 scenario re-run to verify the ≥30K token savings claim from Section 9.

@@ -820,6 +820,34 @@ export function usePromptBar() {
     setShowCommandMenu(false)
     hashtagMenu.close()
 
+    // === Plan-revision branch ===
+    // When the user clicked "Request changes" on a PlanApprovalCard, the
+    // architect flag is set. The NEXT user message is revision feedback,
+    // NOT a normal prompt — route through executePlanRevision which
+    // re-enters architect mode with the existing PLAN.md as context.
+    // Slash commands (e.g. user types `/plan ...` to start over) win
+    // over revision — handled below in the slash-command branch. Plain
+    // prompts route here.
+    const revisionProjectPath = useChatStore.getState().planRevisionPending
+    if (revisionProjectPath && prompt && !slashCommandRegistry.isSlashCommand(prompt)) {
+      // Clear the flag BEFORE dispatch so a subsequent message after the
+      // revision turn falls back to the normal path. If revision fails,
+      // the user can request changes again from the new card.
+      useChatStore.getState().setPlanRevisionPending(null)
+      useChatStore.getState().setDraftInput('')
+      clearDraftAttachments()
+      try {
+        const { executePlanRevision } = await import('../../services/agent/commands/planCommand')
+        await executePlanRevision(prompt, revisionProjectPath)
+      } catch (err) {
+        logger.error('prompt', 'executePlanRevision failed:', err)
+        useChatStore.getState().addSystemMessage(
+          `Plan revision failed: ${(err as Error).message}. Try again or run /plan to restart.`,
+        )
+      }
+      return
+    }
+
     // === Slash commands: execute directly (never queued) ===
     // Slash commands take precedence over hashtag flows. A prompt that
     // STARTS with `/plan ...` is, by construction, asking the architect

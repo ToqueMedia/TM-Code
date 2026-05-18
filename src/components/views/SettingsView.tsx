@@ -250,7 +250,7 @@ function ProfileSection() {
   async function openStudio() {
     try {
       const opener = await import('@tauri-apps/plugin-opener')
-      await opener.openUrl('https://studio.toquemedia.net/upgrade')
+      await opener.openUrl('https://code.toquemedia.net/upgrade')
     } catch {}
   }
 

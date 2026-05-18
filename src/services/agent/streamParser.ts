@@ -116,6 +116,7 @@ const STREAM_IDLE_TIMEOUT_MS = getStreamIdleTimeoutMs()
 type ReadOrTimeout =
   | { kind: 'chunk'; done: boolean; value?: Uint8Array }
   | { kind: 'timeout' }
+  | { kind: 'error'; error: Error }
 
 async function readChunkOrTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -125,11 +126,21 @@ async function readChunkOrTimeout(
   const timeoutPromise = new Promise<ReadOrTimeout>(resolve => {
     timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs)
   })
+  // WebKit (Tauri webview) rejects reader.read() with `TypeError: Load failed`
+  // when the underlying connection drops mid-stream — typical when the user
+  // switches Wi-Fi networks. Without this catch the rejection bubbles past
+  // parseSSEStream's try/finally (no catch) and hits the agent loop's outer
+  // catch as a plain Error → `ServiceError('Load failed', 'UNKNOWN_ERROR',
+  // false)`, which is non-retryable AND surfaces the raw browser message to
+  // the user. Catching here lets us route the failure through the same
+  // upstream_stream_interrupted typed event the watchdog uses, which already
+  // has an auto-retry path + friendly ephemeral message.
+  const readPromise = reader.read().then(
+    r => ({ kind: 'chunk' as const, done: r.done, value: r.value }),
+    err => ({ kind: 'error' as const, error: err instanceof Error ? err : new Error(String(err)) }),
+  )
   try {
-    return await Promise.race([
-      reader.read().then(r => ({ kind: 'chunk' as const, done: r.done, value: r.value })),
-      timeoutPromise,
-    ])
+    return await Promise.race([readPromise, timeoutPromise])
   } finally {
     if (timer) clearTimeout(timer)
   }
@@ -157,6 +168,16 @@ export async function parseSSEStream(
           errorType: 'upstream_stream_interrupted',
         })
         reader.cancel().catch(() => { /* best-effort, the read may stay pending */ })
+        return
+      }
+      if (r.kind === 'error') {
+        logger.warn('agent', `[stream] anthropic SSE — reader.read() rejected mid-stream: ${r.error.message}`)
+        callbacks.onEvent({
+          type: 'error',
+          message: `Connection dropped mid-stream (${r.error.message}). Treating as interrupted; the agent loop will retry.`,
+          errorType: 'upstream_stream_interrupted',
+        })
+        reader.cancel().catch(() => { /* best-effort */ })
         return
       }
       if (r.done) break
@@ -656,6 +677,16 @@ export async function parseOpenAISSEStream(
         callbacks.onEvent({
           type: 'error',
           message: `Stream idle timeout — no bytes from upstream for ${STREAM_IDLE_TIMEOUT_MS / 1000}s. Treating as interrupted; the agent loop will retry.`,
+          errorType: 'upstream_stream_interrupted',
+        })
+        reader.cancel().catch(() => { /* best-effort */ })
+        return
+      }
+      if (r.kind === 'error') {
+        logger.warn('agent', `[stream] openai SSE — reader.read() rejected mid-stream: ${r.error.message}`)
+        callbacks.onEvent({
+          type: 'error',
+          message: `Connection dropped mid-stream (${r.error.message}). Treating as interrupted; the agent loop will retry.`,
           errorType: 'upstream_stream_interrupted',
         })
         reader.cancel().catch(() => { /* best-effort */ })

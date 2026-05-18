@@ -1,438 +1,384 @@
 ---
 name: publish-backend
-description: Prepare a fullstack project (Vite/React/Vue/Svelte frontend + Express/Fastify/NestJS backend) for TM Code's Publish flow. The platform manages hosting + database; your job on the project side is to use the platform admin SDK on the server with the read-once + in-memory cache pattern as the default, scope every collection under the per-app namespace, and ship the Dockerfile + build config. Skip any service-account credential file — the platform runtime authenticates natively. Skip onSnapshot for static or infrequently-changing data. Keep the in-memory cache pattern in place — the platform DB bills per read.
+description: Prepare a fullstack project (Vite/React/Vue/Svelte frontend + Express/Fastify/NestJS/Hono backend) for TM Code's Publish flow. The platform manages hosting + database; your job on the project side is to define the schema in TypeScript via Drizzle, wire the dev/prod connection switch (local SQLite file vs platform HTTPS proxy), run migrations, and ship the Dockerfile + build config. The database token never enters your code — the TM Code worker holds it. Use full SQL semantics — no composite-index limitations, no per-document read billing, no client-side DB SDK.
 license: MIT
 metadata:
   author: tm-code
-  version: 1.0
+  version: 2.0
   language: en
 ---
 
 # Publish-backend prep — recipe
 
-This skill describes the **protocol** for making a fullstack project deployable via TM Code's Publish flow with the platform DB as the user's data layer. The platform:
+This skill describes the **protocol** for making a fullstack project deployable via TM Code's Publish flow with **TM Code Database** (libSQL/SQLite, accessed via Drizzle ORM) as the data layer. The platform:
 
 - Hosts the **frontend** on the platform edge — automatic.
-- Hosts the **backend** as a managed container, named after the project, on the platform runtime.
-- Provides **the platform database** access via the runtime's native auth — **no API tokens, no service account JSON files, no credentials of any kind in .env**. The database is reached via `firebase-admin` initialised with the project id only; the platform service account carries the necessary IAM role.
+- Hosts the **backend** as a managed container on Cloud Run, named after the project.
+- Provides **TM Code Database** access via an HTTPS proxy on the TM Code Worker — your code only sees `TMDB_URL` + `TMDB_TOKEN`; the underlying libSQL endpoint and Turso credentials stay server-side.
 - Proxies `/api/*` from `<slug>.toquemedia.net` to the backend service URL.
 
 `provision_deploy` has already (when called by the dispatching flow):
 - Reserved the slug on toquemedia.net.
-- Reserved an `appId` (= `projectId`) for the user's data namespace.
-- Written `TM_PROJECT_ID`, `APP_ID`, plus the legacy `GCP_PROJECT_ID`/`GIP_*` mirrors into `.env`.
+- Reserved an `appId` for the user's data namespace.
+- Created a dedicated database `app-{appId}` on the TM Code Database.
+- Minted an app-scoped `TMDB_TOKEN` and registered the proxy URL.
+- Will inject `TMDB_URL`, `TMDB_TOKEN`, plus the existing `TM_*`/`GIP_*` auth env vars into Cloud Run at deploy time.
 
-Your job: swap the existing DB layer to the platform DB, design the data with the cost-conscious patterns below, write the container build, and wire env reads.
+Your job: define the schema, wire the dev/prod connection, generate migrations, write SQL queries, write the container build.
 
 ## CRITICAL: Read these before writing any code
 
-### CRITICAL — Read-once + in-memory cache is the DEFAULT pattern
+### CRITICAL — Use Drizzle ORM with sqlite-proxy in production, libsql/node in dev
 
-The platform DB charges per document read. The standard React/Vue/Node pattern of "useQuery + refetch on focus" produces 100x more reads than necessary. The required pattern for every collection that isn't genuinely real-time:
+The data layer is libSQL (SQLite-compatible distributed DB). You write the schema and queries once in Drizzle; the **connection** swaps between local SQLite file (dev) and the TM Code Database HTTPS proxy (prod). Both targets are SQLite — same SQL semantics, same indexes, same constraints.
 
-1. **App boot**: one bulk read of each critical collection → store in memory (Zustand / Pinia / module-level Map / Redux).
-2. **Reads**: every subsequent component-level access reads from the in-memory store, NOT from the platform DB.
-3. **Writes**: write to the platform DB AND update the in-memory store in the same transaction (write-through). No read-before-write — the cache already has the current state.
-4. **Cache invalidation**: rare. Mutations the user made come from the local cache. Mutations from OTHER users on collaborative data should use onSnapshot scoped to that one collection.
-
-Bill impact: typical app with 1k DAU and the default React-Query "refetch on focus" pattern bills ~50-100 reads/user/session. Same app with read-once + cache bills 5-10 reads/user/session. 10x reduction.
-
-### CRITICAL — Use onSnapshot ONLY for genuinely real-time data
-
-`onSnapshot` is appropriate for:
-- Chat messages, collaborative documents, presence indicators
-- Live counters where the user is watching the number tick
-- Notification feeds where new items appear without a refresh
-
-`onSnapshot` is WRONG for:
-- User profile data (load once on app boot, cache forever — invalidate on profile-edit)
-- Settings / preferences (one read, write-through on change)
-- Catalogues / product lists (load once + refresh button OR scheduled stale-while-revalidate)
-- Historical data (orders, audit logs, anything append-only the user reviews)
-- Counts / aggregates (use `count()` aggregation queries, not listeners)
-
-Wrong-pattern penalty: an `onSnapshot` on a 100-doc collection bills 100 reads on subscribe + N reads per change ever after, even if the user never looks at the result.
-
-### CRITICAL — Never embed serviceAccountKey.json or use credential files
-
-The platform runtime runs as a platform service account. The platform admin SDK auto-detects this when initialised with **no credential argument** — it picks up the platform service account's identity via the runtime metadata server. This is more secure than shipping a JSON key (no secret to rotate, no leak risk) and zero config.
-
-```ts
-// CORRECT — runtime credentials auto-detected
-import { initializeApp, getApps } from 'firebase-admin/app'
-import { getFirestore } from 'firebase-admin/firestore'
-
-if (getApps().length === 0) {
-  initializeApp({
-    projectId: process.env.TM_PROJECT_ID,
-  })
-}
-export const db = getFirestore()
-```
-
-```ts
-// WRONG — never do this
-import serviceAccount from './serviceAccountKey.json' // ← no such file exists
-initializeApp({ credential: cert(serviceAccount as any) })
-```
-
-### CRITICAL — Multi-tenant data layout is `apps/{appId}/...`
-
-Every user-app shares the platform DB `(default)` database (the named-database model would bill us per-app from read #1). Isolation is enforced by **path scope + Security Rules**, not by physical separation. The platform service account can read/write anywhere but the application code MUST scope every operation under `apps/{APP_ID}/...`.
-
-```ts
-// Production: APP_ID is injected by the platform. Local dev: fall back to a
-// stable per-project namespace so `npm run dev` works without ceremony.
-const APP_ID =
-  process.env.APP_ID ||
-  `local-dev-${(process.env.npm_package_name || 'app').replace(/[^a-z0-9]/gi, '-').toLowerCase()}`
-
-const appRoot = db.collection('apps').doc(APP_ID)
-const users = appRoot.collection('users')
-const posts = appRoot.collection('posts')
-```
-
-A query against `db.collection('users')` (without the `apps/{APP_ID}` prefix) is a tenant-leak bug — it would return users from EVERY user-app. Never write a query that doesn't start at the `appRoot`.
-
-### CRITICAL — Never ship a query that requires a composite index
-
-The platform DB rejects compound queries without a composite index — but it does so **at runtime, not build time**, and the runtime error link is to the platform's internal Firestore console, which the user CANNOT access (it's a shared internal service). If your code reaches production with an un-indexed query, the user receives an opaque "FAILED_PRECONDITION: the query requires an index" error with no way to act on it.
-
-**Index management is platform-side, not per-project.** Indexes for the shared database live in `toquemedia-studio-api/firestore/indexes.json` and deploy from there. The user's project does NOT get to add a `firestore.indexes.json` and `firebase deploy` it — that deploy would either be ignored or overwrite another tenant's manifest.
-
-**Therefore, design queries that do NOT require a composite index. Period.** Composite indexes are needed when ANY of these is true:
-- Two or more `.where()` clauses on different fields with at least one inequality operator
-- One `.where(field, '==')` plus `.orderBy(differentField)`
-- Any `.where(... 'array-contains' ...)` combined with `.where()` or `.orderBy()` on another field
-
-Acceptable query shapes (no composite index required):
-
-| Pattern | Allowed |
-|---|---|
-| `.doc(id).get()` — direct key read | ✅ |
-| `.where('field', '==', x).get()` — single-field equality | ✅ |
-| `.where('field', '==', x).limit(N).get()` — same field + limit | ✅ |
-| `.orderBy('field').get()` — single-field sort | ✅ |
-| `.where('field', '==', x).orderBy('field')` — same field | ✅ |
-| `.where('a', '==', x).where('b', '==', y)` — multiple equalities, single-field index suffices on Firestore today | ✅ |
-| `.where('a', '==', x).where('createdAt', '>', t)` — equality + inequality on different fields | ❌ needs composite |
-| `.where('a', '==', x).orderBy('b')` — equality + orderBy on different field | ❌ needs composite |
-| `.where('tags', 'array-contains', t).orderBy('createdAt')` | ❌ needs composite |
-
-**Workarounds for the ❌ rows (use these instead of asking for an index):**
-
-1. **Denormalise**: store a precomputed sort key. `users_byRoleAndDate/{role}_{yyyymmdd}` collection where the doc id encodes the compound key — reads become `.doc(...)`.
-
-2. **In-memory sort on small result sets**: if the result set is bounded (e.g. ≤ 200 docs), fetch with a single equality `where()` and sort/filter in Node. The 50k/day platform quota covers this for most app traffic; the platform actively prefers this shape over composite indexes.
-   ```ts
-   const docs = (await appCollection('todos')
-     .where('userId', '==', uid)   // single-field, no composite index
-     .get()).docs.map(d => d.data())
-   docs.sort((a, b) => b.createdAt - a.createdAt)  // sort in memory
-   ```
-
-3. **Aggregate documents**: instead of `where(a).orderBy(b)`, maintain a per-user "feed" document at `apps/{appId}/users/{uid}/_feed/latest` that the writer updates atomically. Readers do a single `.get()`.
-
-4. **Bucketing**: instead of `where(category).orderBy(createdAt)`, write each item to `apps/{appId}/category/{cat}/items/{itemId}` and list with `.orderBy(documentId)` — no composite needed.
-
-**If — after exhausting workarounds 1–4 — a composite index is genuinely the right answer**, do NOT silently ship the code. Instead:
-- Surface the requirement to the user in chat BEFORE writing the query: "this query needs a composite index on (`field_a`, `field_b`); the platform's index manifest must be updated. Do you want me to denormalise instead, or proceed and request the index from platform support?"
-- If proceeding, write the index requirement into a `INDEX-REQUEST.md` at the project root with the exact composite shape the platform engineer needs to add. The platform deploy pipeline reads this file and refuses the deploy until the manifest has been updated, so the dev never reaches a runtime "requires an index" surprise.
-
-Pre-flight check before completing the task — grep your own code:
-```bash
-# Catch the two most common composite-index-requiring patterns:
-grep -rE "\.where\([^)]+\)\.where\([^)]+\)" server/ --include='*.ts'   # multi-where
-grep -rE "\.where\([^)]+\)\.orderBy\(" server/ --include='*.ts'        # where + orderBy
-```
-If either grep returns hits, audit each one against the table above. Do not mark the task done until every multi-where / where+orderBy is either (a) on the same field, (b) refactored to one of the four workarounds, or (c) documented in `INDEX-REQUEST.md`.
-
-### CRITICAL — Client never touches the platform DB directly in v1
-
-The `firebase/firestore` package is **NOT** imported in the user's frontend. All reads/writes go through the user's platform-managed backend, which authenticates via the runtime's native credentials and bypasses Security Rules entirely.
-
-This is enforced by the platform's deny-all Security Rules on the shared database. If you add `import { collection } from 'firebase/firestore'` to client code, every request is rejected — there is no claim configuration the user can apply to fix it.
-
-If the app needs real-time, expose an SSE endpoint from the platform-managed backend that wraps a server-side `onSnapshot` and pushes deltas to the client. Do not work around the deny-all by trying to mint custom claims.
-
-## Step-by-step protocol
-
-### 1. Server: platform admin SDK setup
+The packages you install:
 
 ```bash
-npm install firebase-admin
+npm install drizzle-orm @libsql/client
+npm install -D drizzle-kit
 # If migrating from prisma, drop:
 npm uninstall @prisma/client prisma
+# If migrating from firebase-admin (DB usage only — auth stays):
+# Keep firebase-admin for GIP auth; remove the firestore import only.
 ```
 
-Create `server/lib/db.ts`:
-```ts
-import { initializeApp, getApps } from 'firebase-admin/app'
-import { getFirestore, FieldValue } from 'firebase-admin/firestore'
+### CRITICAL — Never embed Turso URLs, libSQL connection strings, or DB tokens in user code
 
-if (getApps().length === 0) {
-  initializeApp({
-    projectId: process.env.TM_PROJECT_ID,
-  })
-}
+Your project's `.env` must contain ONLY:
 
-/**
- * Data namespace for this app. In production the platform injects
- * `APP_ID` (set when the project is registered for publishing). In local
- * dev there's no publish yet and no APP_ID — fall back to a stable
- * `local-dev-<pkg>` namespace so `npm run dev` works without ceremony.
- * Crashing on missing APP_ID would break login locally for no reason.
- */
-const APP_ID =
-  process.env.APP_ID ||
-  `local-dev-${(process.env.npm_package_name || 'app').replace(/[^a-z0-9]/gi, '-').toLowerCase()}`
+```env
+# Local development — SQLite file alongside the project
+DATABASE_URL=file:./dev.db
 
-export const db = getFirestore()
-export const appRoot = db.collection('apps').doc(APP_ID)
-export { FieldValue }
+# Production — injected by the deploy pipeline (DO NOT hardcode in source)
+TMDB_URL=https://api-agents.toquemedia.net/v1/apps/{appId}/db
+TMDB_TOKEN=<32-byte app-scoped token>
 
-/** Convenience helper: typed reference to a collection under this app's root. */
-export function appCollection<T = FirebaseFirestore.DocumentData>(name: string) {
-  return appRoot.collection(name) as FirebaseFirestore.CollectionReference<T>
-}
+# Auth (unchanged from previous projects)
+TM_AUTH_KEY=...
+TM_TENANT_ID=...
+TM_PROJECT_ID=...
 ```
 
-### 2. Translate the existing schema to platform DB documents
+Zero references to `turso.io`, `libsql://`, or any Turso platform token. Those live exclusively in the TM Code Worker's secrets and KV store. If you find yourself writing `libsql://...turso.io` anywhere in the user's project, **stop and re-check this rule**.
 
-The platform DB is schema-less but consistent shape per collection is what makes queries possible. Translate each table to a collection; each row to a document; the row's PK becomes the document ID.
+### CRITICAL — Multi-tenant isolation is the database, not the schema
 
-```ts
-// server/db/types.ts
-export interface User {
-  uid: string                  // doc id; do NOT duplicate as a field
-  email: string                // unique — enforced application-side (the platform DB doesn't have unique constraints; see step 3)
-  name?: string
-  avatarUrl?: string
-  role: 'user' | 'admin'
-  phone?: string
-  bio?: string
-  location?: string
-  createdAt: FirebaseFirestore.Timestamp
-  updatedAt: FirebaseFirestore.Timestamp
-}
+Each app gets its own database `app-{appId}` on the TM Code Database. Two apps are physically separated DBs — no possibility of cross-tenant data leak at the platform level.
 
-export interface Post {
-  id: string                   // doc id
-  authorUid: string
-  title: string
-  body: string
-  publishedAt: FirebaseFirestore.Timestamp | null
-  createdAt: FirebaseFirestore.Timestamp
-  updatedAt: FirebaseFirestore.Timestamp
-}
-```
+You do **NOT** need:
+- Per-app namespace prefixes on tables (`apps/{appId}/users/...`)
+- App-scoping in every query (`WHERE appId = ?`)
+- Row-level isolation tied to appId
 
-Conventions:
-- **Document ID = natural key** when one exists (uid for users, slug for posts). Otherwise use the platform DB's auto-id.
-- **Timestamps** use `FieldValue.serverTimestamp()` on create + update; never new `Date()` from the client (clock drift).
-- **No foreign-key types** — store the related doc's ID as a string field (`authorUid` above). Joins happen via Pipeline operations or in-app code.
-- **Don't store the document ID as a field** — `doc.id` is always available.
+What you DO scope: rows by **end-user identity**, via a `userUid` column populated from the GIP JWT. Same as any auth'd SQL backend — index it, filter by it on every read.
 
-### 3. Translate every Prisma/ORM call
+### CRITICAL — Full SQL semantics; no composite-index trap
 
-Pattern map (Prisma → platform admin SDK):
+Unlike the previous Firestore platform, there is **no composite-index limitation**. Every query you can write in standard SQL works:
 
-| Prisma | Platform DB (admin SDK) |
-|---|---|
-| `prisma.user.findUnique({ where: { uid } })` | `(await appCollection('users').doc(uid).get()).data()` |
-| `prisma.user.upsert({ where: { uid }, create, update })` | `appCollection('users').doc(uid).set(payload, { merge: true })` |
-| `prisma.user.update({ where: { uid }, data })` | `appCollection('users').doc(uid).update(data)` |
-| `prisma.user.delete({ where: { uid } })` | `appCollection('users').doc(uid).delete()` |
-| `prisma.user.findMany({ where: { role: 'admin' } })` | `(await appCollection('users').where('role', '==', 'admin').get()).docs.map(d => d.data())` |
-| `prisma.$transaction([a, b])` | `db.runTransaction(async (tx) => { tx.update(...); tx.update(...) })` |
-| Atomic increment | `update({ count: FieldValue.increment(1) })` |
-| Array append | `update({ tags: FieldValue.arrayUnion('x') })` |
+- `where(...).orderBy(differentField)` ✅
+- `where(a).where(b).where(c)` with inequalities ✅
+- `where('tags', 'in', [...]).orderBy('createdAt')` ✅
+- JOINs across tables via Drizzle relations ✅
+- Aggregations (`count()`, `sum()`, `group by`) ✅
+- Transactions (atomic multi-statement writes) ✅
 
-**Unique-constraint emulation** (the platform DB has no unique constraints — email collision detection is application-side):
-```ts
-const exists = await appCollection('users').where('email', '==', email).limit(1).get()
-if (!exists.empty) throw new Error('Email already in use')
-// Then create. Race condition window exists — use a transaction for stricter guarantees.
-```
-
-For true uniqueness use a transaction OR an index document at `apps/{appId}/_index/email_{normalizedEmail}` that the create path writes atomically.
-
-### 4. In-memory cache pattern — CLIENT-side (Zustand example)
-
-The frontend bootstraps critical collections into a Zustand store on app start. Every component reads from the store; mutations write through to the platform DB + the store simultaneously.
+For performance on large tables, add explicit indexes via Drizzle schema — they're created as part of migrations:
 
 ```ts
-// client/src/stores/userStore.ts
-import { create } from 'zustand'
+import { sqliteTable, integer, text, index } from 'drizzle-orm/sqlite-core'
 
-interface User { uid: string; email: string; name?: string; role: 'user' | 'admin' }
-
-interface UserState {
-  current: User | null
-  cache: Map<string, User>        // shared cache for any user the app has loaded
-  bootstrapped: boolean
-
-  /** Called once after sign-in. Loads the current user + initial peer list. */
-  bootstrap: (authUid: string) => Promise<void>
-  /** Get a user from cache; falls back to a one-shot fetch if cold. */
-  getUser: (uid: string) => Promise<User | null>
-  /** Mutation: writes through to the platform DB + updates cache. No read-before-write. */
-  updateProfile: (patch: Partial<Pick<User, 'name' | 'avatarUrl'>>) => Promise<void>
-}
-
-export const useUserStore = create<UserState>((set, get) => ({
-  current: null,
-  cache: new Map(),
-  bootstrapped: false,
-
-  bootstrap: async (authUid) => {
-    if (get().bootstrapped) return
-    // Single fetch — populates store. Subsequent component reads hit memory, not the platform DB.
-    const res = await authFetch('/api/users/me')
-    const me: User = await res.json()
-    const cache = new Map(get().cache)
-    cache.set(me.uid, me)
-    set({ current: me, cache, bootstrapped: true })
-  },
-
-  getUser: async (uid) => {
-    const cached = get().cache.get(uid)
-    if (cached) return cached
-    const res = await authFetch(`/api/users/${uid}`)
-    if (!res.ok) return null
-    const user: User = await res.json()
-    const cache = new Map(get().cache)
-    cache.set(uid, user)
-    set({ cache })
-    return user
-  },
-
-  updateProfile: async (patch) => {
-    const current = get().current
-    if (!current) throw new Error('Not signed in')
-    // Write-through: optimistic local update FIRST so UI feels instant,
-    // then persist to the platform DB. On failure, revert.
-    const next = { ...current, ...patch }
-    const cache = new Map(get().cache)
-    cache.set(current.uid, next)
-    set({ current: next, cache })
-    try {
-      await authFetch(`/api/users/${current.uid}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      })
-    } catch (err) {
-      // Revert.
-      cache.set(current.uid, current)
-      set({ current, cache })
-      throw err
-    }
-  },
+export const bugs = sqliteTable('bugs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  reporterUid: text('reporter_uid').notNull(),
+  status: text('status', { enum: ['open', 'closed', 'duplicate'] }).default('open'),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+}, (table) => ({
+  byReporter: index('bugs_reporter_idx').on(table.reporterUid, table.createdAt),
+  byStatus: index('bugs_status_idx').on(table.status, table.createdAt),
 }))
 ```
 
-Key points:
-- `bootstrap` runs once after auth — N reads upfront, zero subsequent reads for cached data.
-- `getUser` is the lazy variant — peer profiles load on demand, then stay cached.
-- `updateProfile` is optimistic: UI updates instantly, network write happens in the background, revert on failure.
-- Same pattern for posts, settings, notifications, anything not real-time.
+The migration generated by `drizzle-kit generate` creates these indexes in SQLite. No INDEX-REQUEST.md flow, no platform-side index manifest, no waiting for a platform engineer.
 
-### 5. In-memory cache pattern — SERVER-side (Express + node-cache)
+### CRITICAL — Client never imports `@libsql/client` or `drizzle-orm`
 
-The backend is generally stateless — every request is a fresh process from the load balancer's POV — but **within a single backend instance**, an in-memory cache survives across requests and meaningfully reduces the platform DB reads for hot data.
+The user's frontend (`src/`, `client/src/`) imports NEITHER `@libsql/client` NOR any Drizzle package. All reads/writes go through the backend's REST/RPC endpoints. The backend authenticates against the TM Code Worker using `TMDB_TOKEN` (server-only secret).
+
+If you find `import { drizzle } from 'drizzle-orm/...'` in any frontend file → **wrong file**. Drizzle lives in `server/`.
+
+## Step-by-step protocol
+
+### 1. Server: TM Code Database client setup
+
+Single `server/db.ts` works in both dev and prod. The branch is by `NODE_ENV`:
 
 ```ts
-// server/lib/cache.ts
-import NodeCache from 'node-cache'
+// server/db.ts
+import { drizzle as drizzleNative } from 'drizzle-orm/libsql/node'
+import { drizzle as drizzleProxy } from 'drizzle-orm/sqlite-proxy'
+import * as schema from './schema'
 
-// 60s TTL is a sane default for read-mostly data. Adjust per-collection.
-export const cache = new NodeCache({ stdTTL: 60, checkperiod: 120 })
-
-export async function withCache<T>(key: string, ttl: number, loader: () => Promise<T>): Promise<T> {
-  const hit = cache.get<T>(key)
-  if (hit !== undefined) return hit
-  const fresh = await loader()
-  cache.set(key, fresh, ttl)
-  return fresh
+function createProxyDb() {
+  const url = process.env.TMDB_URL
+  const token = process.env.TMDB_TOKEN
+  if (!url || !token) {
+    throw new Error(
+      'TMDB_URL and TMDB_TOKEN must be set in production. ' +
+      'These are injected by the deploy pipeline — check that the project has been published.'
+    )
+  }
+  return drizzleProxy(
+    // Single-query callback
+    async (sql, params, method) => {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ sql, params, method }),
+      })
+      if (!res.ok) throw new Error(`TMDB ${res.status}: ${await res.text()}`)
+      const data = await res.json()
+      return { rows: data.rows }
+    },
+    // Batch callback (Drizzle uses for multiple statements in one round-trip)
+    async (queries) => {
+      const res = await fetch(`${url}/batch`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ queries }),
+      })
+      if (!res.ok) throw new Error(`TMDB batch ${res.status}: ${await res.text()}`)
+      const data = await res.json()
+      return data.results
+    },
+    { schema },
+  )
 }
-```
 
-```ts
-// server/routes/users.ts
-import { withCache } from '../lib/cache.js'
-import { appCollection } from '../lib/db.js'
+const isProd = process.env.NODE_ENV === 'production'
 
-router.get('/api/users/:uid', async (req, res) => {
-  const user = await withCache(`user:${req.params.uid}`, 60, async () => {
-    const snap = await appCollection('users').doc(req.params.uid).get()
-    return snap.exists ? snap.data() : null
-  })
-  if (!user) return res.status(404).json({ error: 'Not found' })
-  res.json(user)
-})
-```
-
-**Invalidation on writes**:
-```ts
-router.patch('/api/users/:uid', async (req, res) => {
-  await appCollection('users').doc(req.params.uid).update({
-    ...req.body,
-    updatedAt: FieldValue.serverTimestamp(),
-  })
-  cache.del(`user:${req.params.uid}`)
-  res.json({ ok: true })
-})
-```
-
-### 6. Real-time path — server-side onSnapshot + SSE
-
-When the user's app needs live updates (chat, presence, collaborative cursors), the listener runs **on the backend**, not in the browser. The backend opens a server-side `onSnapshot` (which works on the server and is not subject to Security Rules), and pushes deltas to the client over SSE.
-
-```ts
-// server/routes/chat.ts
-import { appCollection } from '../lib/db.js'
-
-router.get('/api/conversations/:id/stream', async (req, res) => {
-  // SSE headers — keep the connection open.
-  res.setHeader('Content-Type', 'text/event-stream')
-  res.setHeader('Cache-Control', 'no-cache')
-  res.setHeader('Connection', 'keep-alive')
-  res.flushHeaders()
-
-  const unsub = appCollection('conversations')
-    .doc(req.params.id)
-    .collection('messages')
-    .orderBy('createdAt', 'desc')
-    .limit(50)
-    .onSnapshot((snap) => {
-      const messages = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      res.write(`data: ${JSON.stringify(messages)}\n\n`)
+export const db = isProd
+  ? createProxyDb()
+  : drizzleNative({
+      connection: { url: process.env.DATABASE_URL || 'file:./dev.db' },
+      schema,
     })
 
-  req.on('close', () => unsub())
-})
+export { schema }
 ```
 
-The client consumes it with `EventSource('/api/conversations/abc/stream')` — same-origin, no client SDK needed.
+The dev path uses `drizzle-orm/libsql/node` (which supports `file:` URLs directly). The prod path uses `drizzle-orm/sqlite-proxy` (HTTP query-per-request, no persistent connection — ideal for Cloud Run's scale-to-zero).
 
-Bill math: only one listener per active conversation regardless of how many clients are reading. The backend fans out the delta to all SSE subscribers in-process, so 100 clients in the same room cost 1 DB read per new message instead of 100.
+### 2. Schema in TypeScript via Drizzle
 
-### 7. Security Rules — platform-owned, deny-all
+```ts
+// server/schema.ts
+import { sqliteTable, integer, text, index, primaryKey } from 'drizzle-orm/sqlite-core'
+import { relations } from 'drizzle-orm'
 
-The shared platform database is locked down by platform-owned rules that deny all client access:
+export const users = sqliteTable('users', {
+  uid: text('uid').primaryKey(),                       // From GIP JWT `sub`
+  email: text('email').notNull().unique(),
+  name: text('name'),
+  avatarUrl: text('avatar_url'),
+  role: text('role', { enum: ['user', 'admin'] }).notNull().default('user'),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+})
 
-```javascript
-// platform-side: toquemedia-studio-api/firestore/rules.firestore (do not edit from user projects)
-match /apps/{appId}/{document=**} {
-  allow read, write: if false;
+export const bugs = sqliteTable('bugs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  reporterUid: text('reporter_uid').notNull().references(() => users.uid),
+  description: text('description').notNull(),
+  status: text('status', { enum: ['open', 'closed', 'duplicate'] }).notNull().default('open'),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+}, (table) => ({
+  byReporter: index('bugs_reporter_idx').on(table.reporterUid, table.createdAt),
+}))
+
+// Drizzle relations — enables type-safe joins via the relational query API.
+export const usersRelations = relations(users, ({ many }) => ({
+  bugs: many(bugs),
+}))
+
+export const bugsRelations = relations(bugs, ({ one }) => ({
+  reporter: one(users, { fields: [bugs.reporterUid], references: [users.uid] }),
+}))
+```
+
+Conventions:
+- **`uid TEXT PRIMARY KEY`** for the users table — derive from GIP JWT `sub`. Don't use auto-increment for users; the JWT-issued UID is the natural key.
+- **Timestamps** as `integer` with `mode: 'timestamp_ms'` — SQLite has no native datetime, Drizzle converts to JS Date. Set them in code with `new Date()` on insert/update.
+- **References** for foreign keys — Drizzle generates `FOREIGN KEY (...) REFERENCES ...` in the migration. Enables JOIN type-safety via `relations()`.
+- **`unique()`** for natural-key columns (email, slug) — real DB-level constraint, no app-side race window.
+
+### 3. Drizzle config + initial migration
+
+```ts
+// drizzle.config.ts
+import type { Config } from 'drizzle-kit'
+
+export default {
+  schema: './server/schema.ts',
+  out: './migrations',
+  dialect: 'sqlite',
+  dbCredentials: {
+    url: process.env.DATABASE_URL || 'file:./dev.db',
+  },
+  verbose: true,
+  strict: true,
+} satisfies Config
+```
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  }
 }
 ```
 
-This is intentional. The trust model is:
-- **Backend (the platform runtime)** authenticates via the runtime's native credentials → Security Rules don't apply → full access to `apps/{APP_ID}/...`.
-- **Client (browser)** has only a auth JWT → Security Rules apply → access denied.
+Generate the initial migration:
 
-**Do not write `firestore.rules` in the user's project.** Per-project rule files would either be ignored (the platform rules are authoritative on the shared DB) or overwrite another user's deploy if pushed via a direct deploy. If a future feature needs direct client access, request it from platform support — it is not a per-project decision.
+```bash
+npm run db:generate
+# → creates migrations/0000_initial.sql
+npm run db:migrate
+# → applies to dev.db
+```
+
+On deploy, the TM Code Worker reads `migrations/*.sql` from the project bundle and applies them in sequence against the app's TMDB database via the libSQL HTTP API. **No manual migration step in production** — the same `migrations/` folder is the source of truth for dev and prod.
+
+### 4. Queries — full SQL ergonomics
+
+```ts
+// server/routes/bugs.ts
+import { db, schema } from '../db'
+import { eq, desc, and, sql } from 'drizzle-orm'
+
+// Read: where + orderBy on different fields (just works — no composite index)
+const myBugs = await db
+  .select()
+  .from(schema.bugs)
+  .where(eq(schema.bugs.reporterUid, jwt.sub))
+  .orderBy(desc(schema.bugs.createdAt))
+  .limit(50)
+
+// Aggregation: count by status
+const counts = await db
+  .select({
+    status: schema.bugs.status,
+    count: sql<number>`count(*)`.as('count'),
+  })
+  .from(schema.bugs)
+  .groupBy(schema.bugs.status)
+
+// JOIN via relational query API (uses the `relations` definitions in schema.ts)
+const recentBugsWithReporter = await db.query.bugs.findMany({
+  with: { reporter: true },
+  orderBy: [desc(schema.bugs.createdAt)],
+  limit: 20,
+})
+
+// Write
+await db.insert(schema.bugs).values({
+  reporterUid: jwt.sub,
+  description,
+  createdAt: new Date(),
+})
+
+// Transaction (atomic multi-statement write)
+await db.transaction(async (tx) => {
+  const [bug] = await tx
+    .insert(schema.bugs)
+    .values({ reporterUid: jwt.sub, description, createdAt: new Date() })
+    .returning()
+  await tx
+    .update(schema.users)
+    .set({ updatedAt: new Date() })
+    .where(eq(schema.users.uid, jwt.sub))
+  return bug
+})
+```
+
+Drizzle's relational query API (`db.query.X.findMany`) is the recommended path for any READ that needs related data — type-safe, no manual JOIN, single round-trip.
+
+### 5. Caching is optional (not a default requirement)
+
+Unlike the previous platform where every read was billed per-document, libSQL has flat per-database pricing (free tier covers 1B reads/month). You CAN add server-side cache for hot paths (e.g., `node-cache` for a 60s TTL on a catalog query) but it's a per-route optimization, not a global requirement.
+
+For the typical CRUD app: query directly, no cache layer. Reach for cache only when profiling shows a specific hot path costing latency.
+
+### 6. Real-time: SSE pattern (optional; libSQL is not real-time native)
+
+libSQL does not have native change subscriptions like Firestore's `onSnapshot`. Three patterns for "live" data:
+
+1. **Polling** — simplest, fine for most cases. `useEffect` + interval, query every N seconds. Acceptable when N is 5-30 seconds and the data isn't latency-critical.
+2. **SSE (Server-Sent Events)** — the backend opens a long-lived response, polls the DB on its side, pushes deltas to the client. Same pattern that was used with Firestore-wrapped SSE, but the server-side trigger is "on POST/PATCH to this route, broadcast to all SSE subscribers".
+3. **WebSocket** — for collaborative editing / cursors. Implement at the app level (e.g., `ws` or `socket.io` on the Hono/Express server). Out of scope for most apps.
+
+For typical CRUD with occasional updates, polling is the right answer. For chat/collaborative cursors, choose SSE or WS at app design time.
+
+### 7. Authentication: GIP JWT verification
+
+Unchanged from the previous platform. GIP (Google Identity Platform / Firebase Identity) handles signup/signin/refresh; the backend verifies the JWT on every request.
+
+```ts
+// server/lib/auth.ts
+import { createRemoteJWKSet, jwtVerify } from 'jose'
+
+const JWKS = createRemoteJWKSet(
+  new URL(`https://identitytoolkit.googleapis.com/v1/projects/${process.env.GCP_PROJECT_ID}/jwks`)
+)
+
+export async function verifyGipJwt(token: string) {
+  const { payload } = await jwtVerify(token, JWKS, {
+    issuer: `https://securetoken.google.com/${process.env.GCP_PROJECT_ID}`,
+    audience: process.env.GCP_PROJECT_ID,
+  })
+  return payload as { sub: string; email?: string; tenant?: string }
+}
+```
+
+In each route:
+
+```ts
+import { verifyGipJwt } from '../lib/auth'
+
+router.get('/api/bugs', async (req, res) => {
+  const auth = req.headers.authorization?.replace('Bearer ', '')
+  if (!auth) return res.status(401).json({ error: 'missing token' })
+
+  let jwt: Awaited<ReturnType<typeof verifyGipJwt>>
+  try {
+    jwt = await verifyGipJwt(auth)
+  } catch {
+    return res.status(401).json({ error: 'invalid token' })
+  }
+
+  const myBugs = await db
+    .select()
+    .from(schema.bugs)
+    .where(eq(schema.bugs.reporterUid, jwt.sub))
+    .orderBy(desc(schema.bugs.createdAt))
+
+  res.json(myBugs)
+})
+```
+
+The `auth-proxy` skill covers the full GIP flow (signup, signin, refresh, tenant headers). Read it if the project needs auth and you haven't seen the GIP REST shape before.
 
 ### 8. Dockerfile
 
@@ -442,11 +388,11 @@ The platform runtime IS Cloud Run. Your Dockerfile must satisfy the Cloud Run co
 >
 > *"By default, requests are sent to `8080`, but you can configure Cloud Run to send requests to the port of your choice."*
 
-Three rules that flow from the contract and are violated repeatedly:
+Three rules that flow from the contract:
 
 1. **Bind `0.0.0.0`, not `127.0.0.1` / `localhost`** — Cloud Run drops the request otherwise.
 2. **Read `process.env.PORT` (default 8080)** — Cloud Run injects this; ignoring it is a startup probe failure.
-3. **No `.env` file inside the image** — secrets reach the container via Cloud Run env vars (the platform reads them from `.env` and forwards them at deploy time via `readBackendEnvVars`). Putting `.env` in the image is a credential leak AND `.dockerignore` excludes it anyway, so a `--env-file=.env` CMD silently breaks at runtime.
+3. **No `.env` file inside the image** — secrets reach the container via Cloud Run env vars at deploy time (`TMDB_URL`, `TMDB_TOKEN`, `TM_AUTH_KEY`, etc. — set by `readBackendEnvVars`). Putting `.env` in the image is a leak AND `.dockerignore` excludes it anyway.
 
 #### Step 0 — Classify the layout BEFORE writing the Dockerfile
 
@@ -454,61 +400,64 @@ Look at `package.json` at the project root:
 
 | Signal | Layout |
 |---|---|
-| `scripts.build === "vite build"` (or `next build`, `nuxt build`, `astro build`, `ng build`) | **Frontend-only build script.** The backend has no build script — the project is FLAT (root `package.json` shared by frontend and backend). Use the FLAT-layout template. |
-| `workspaces` defined + `client/` + `server/` siblings, each with own `package.json` | **Monorepo.** Use the SUBPACKAGE template (build context = `server/`). |
-| Single `package.json` with `scripts.build === "tsc -p server/tsconfig.json"` (or similar server-only build) | **Server-subdir layout.** Use the SUBDIR template. |
+| `scripts.build === "vite build"` (or `next build`, `nuxt build`, `astro build`, `ng build`) | **Frontend-only build script.** The project is FLAT (root `package.json` shared by frontend and backend). Use Template A. |
+| `workspaces` defined + `client/` + `server/` siblings, each with own `package.json` | **Monorepo.** Use Template B (build context = `server/`). |
+| Single `package.json` with `scripts.build === "tsc -p server/tsconfig.json"` (or similar server-only build) | **Server-subdir layout.** Use Template B. |
 
 #### Template A — FLAT layout (root `package.json` shared, backend in `server/`)
 
-This is the most common case for `react-express-*` style projects. Server source is `.ts`; runs via `tsx` in dev. **Two valid Dockerfile shapes:**
+Most common case for `react-express-*` / `react-hono-*` style projects. Server source is `.ts`. **Two valid shapes:**
 
 **A.1 — Compile-to-JS (recommended, smallest image):**
 
 ```dockerfile
-# Stage 1 — compile server TS to JS using devDeps
+# Stage 1 — compile server TS to JS using devDeps + apply migrations
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY tsconfig*.json ./
 COPY server ./server
-# Compile server only. The frontend is built and uploaded separately by the
-# platform — never call `npm run build` here, that's `vite build`.
+COPY migrations ./migrations
+COPY drizzle.config.ts ./
+# Compile server only. Frontend is built and uploaded separately by the platform.
 RUN npx tsc --project server/tsconfig.json --outDir server/dist
 
-# Stage 2 — runtime: prod deps only + compiled JS
+# Stage 2 — runtime: prod deps only + compiled JS + migrations
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/server/dist ./server/dist
-# Cloud Run injects PORT (default 8080); the server MUST read it and bind 0.0.0.0
+COPY --from=build /app/migrations ./migrations
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "server/dist/index.js"]
 ```
 
-Requires a `server/tsconfig.json` whose `compilerOptions.outDir` is `dist` (or matches `--outDir` above) and `module: "NodeNext"` / `target: "ES2022"`. Generate it in the same scaffold turn if absent.
+Requires a `server/tsconfig.json` with `compilerOptions.outDir: "dist"` and `module: "NodeNext"` / `target: "ES2022"`. Generate it in the scaffold turn if absent.
 
-**A.2 — Run-with-tsx (no compile step; tsx as prod dep):**
+The `migrations/` folder is copied into the image. The TM Code Worker reads it during deploy to apply pending migrations against the app's TMDB — your container doesn't run migrations itself.
+
+**A.2 — Run-with-tsx (no compile step):**
 
 ```dockerfile
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./
-# tsx runs .ts directly — promote it from devDeps to deps in package.json
-# BEFORE building this image, otherwise `npm ci --omit=dev` strips it.
+# tsx runs .ts directly — promote it from devDeps to deps BEFORE building.
 RUN npm ci --omit=dev
 COPY server ./server
+COPY migrations ./migrations
 COPY tsconfig*.json ./
 ENV PORT=8080
 EXPOSE 8080
 CMD ["npx", "tsx", "server/index.ts"]
 ```
 
-Trade-off: tsx parses TS at startup (~150ms cold start cost) but skips the build stage. Pick A.1 unless cold start time isn't a concern.
+Pick A.1 unless cold-start time isn't a concern.
 
 #### Template B — SUBDIR layout (server/ has its own package.json)
 
@@ -519,6 +468,7 @@ COPY server/package*.json ./
 RUN npm ci
 COPY server/tsconfig.json ./
 COPY server/src ./src
+COPY server/migrations ./migrations
 RUN npx tsc
 
 FROM node:22-alpine AS runtime
@@ -527,12 +477,11 @@ ENV NODE_ENV=production
 COPY server/package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/migrations ./migrations
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "dist/index.js"]
 ```
-
-Requires the Cloud Build context to include `server/` only — handled by the IDE's `collect_backend_tarball`, which already excludes `src/` / `public/` / `vite.config.*` at the project root.
 
 #### Template C — Python 3.12 (FastAPI / Flask)
 
@@ -543,30 +492,28 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server ./server
+COPY migrations ./migrations
 ENV PORT=8080
 EXPOSE 8080
-# FastAPI via uvicorn; for Flask: `gunicorn -b 0.0.0.0:8080 server.app:app`
+# FastAPI: bind 0.0.0.0:${PORT}
 CMD ["sh", "-c", "uvicorn server.main:app --host 0.0.0.0 --port ${PORT}"]
 ```
 
 Python contract:
-- Admin SDK init is `firebase_admin.initialize_app()` (no creds — runtime auto-detects).
-- `APP_ID` via `os.environ['APP_ID']`; same shape as Node.
-- Framework MUST bind on `0.0.0.0:${PORT}`. Hard-coding the port fails Cloud Run's startup probe.
-
-Other languages (Go, Rust, Ruby, Java) follow the same pattern: read `APP_ID` from env, bind `0.0.0.0:${PORT}`, use the native platform admin client. Ask before shipping a non-Node / non-Python Dockerfile.
+- Use `sqlalchemy` + libSQL HTTP via `requests`/`httpx` to hit `TMDB_URL` (no native Python Drizzle-equivalent). OR consider `sqlite-utils` for dev + a thin HTTPS wrapper for prod.
+- `TMDB_URL`/`TMDB_TOKEN` from env; same dev/prod split as Node.
+- Framework MUST bind `0.0.0.0:${PORT}`.
 
 #### Anti-patterns — DO NOT do any of these
 
-Each line below failed in production. The harness rejects writes that match these patterns; the rejection message points back to this section.
-
-1. **`RUN npm run build` when the project's `build` script is `vite build` / `next build` / `nuxt build` / `astro build` / `ng build`.** That's the FRONTEND build. The frontend goes to R2 separately via the upload phase. Running it in the container produces nothing the runtime needs and almost always fails because the `--omit=dev` step before stripped vite/next/etc.
-2. **`npm ci --omit=dev` BEFORE compiling TypeScript.** Strips tsc/tsx/vite/etc. — the compile step that follows fails with `tsc: not found` or `vite: not found`. Either install deps fully in a build stage (Template A.1 / B), or promote the runtime-needed devDeps to `dependencies` (Template A.2).
-3. **`CMD ["node", "server/index.ts"]`.** Node cannot execute `.ts` directly. Either compile to `.js` first (Template A.1 / B) or use `tsx` (Template A.2).
-4. **`CMD ["node", "--env-file=.env", "server/index.ts"]`.** `.env` is in `.dockerignore` (next section), so `--env-file=.env` reads a non-existent file and either crashes or silently sets nothing. Cloud Run env vars are injected at deploy time by `readBackendEnvVars`; the runtime sees `process.env.X` directly.
-5. **Hard-coded port: `app.listen(3000, ...)` or `EXPOSE 3000` mismatched with `PORT`.** Cloud Run injects `PORT=8080` (or whatever the service is configured for); a hard-coded port fails the startup probe and the deploy hangs at "waiting for backend to come online" until the 45s timeout in `waitForBackendReady`. Always: `app.listen(Number(process.env.PORT) || 8080, '0.0.0.0', ...)`.
-6. **Listening on `127.0.0.1` / `localhost`.** Cloud Run docs (verbatim): *"the ingress container should not listen on 127.0.0.1"*. Bind `0.0.0.0` explicitly.
-7. **`COPY serviceAccountKey.json` or any credential JSON.** The platform runtime authenticates natively via the metadata server. Shipping a key in the image is a leak AND mismatches the IAM identity Cloud Run actually has. The harness blocks this — see the parallel CRITICAL block above.
+1. **`RUN npm run build` when the project's `build` script is `vite build` / `next build` / `nuxt build` / `astro build` / `ng build`.** That's the FRONTEND build. The harness rejects this write.
+2. **`npm ci --omit=dev` BEFORE compiling TypeScript.** Strips tsc/tsx/drizzle-kit. Either install fully in a build stage (Template A.1 / B) or promote runtime-needed devDeps to `dependencies` (Template A.2).
+3. **`CMD ["node", "server/index.ts"]`.** Node cannot execute `.ts` directly. Compile (A.1/B) or use `tsx` (A.2).
+4. **`CMD ["node", "--env-file=.env", "server/index.ts"]`.** `.env` is in `.dockerignore`; this reads a non-existent file. Cloud Run env vars are injected at deploy time.
+5. **Hard-coded port: `app.listen(3000, ...)` or `EXPOSE 3000` mismatched with `PORT`.** Cloud Run sets `PORT=8080`. Always: `app.listen(Number(process.env.PORT) || 8080, '0.0.0.0', ...)`.
+6. **Listening on `127.0.0.1` / `localhost`.** Cloud Run docs: *"the ingress container should not listen on 127.0.0.1"*. Bind `0.0.0.0`.
+7. **Embedding any `*.json` credential file or hardcoding `TMDB_TOKEN`.** Tokens come from Cloud Run env at deploy time. The harness rejects writes that match credential-file patterns.
+8. **`firebase-admin/firestore` anywhere.** The data layer is libSQL/Drizzle. `firebase-admin/auth` is fine (GIP token verification), but `getFirestore()` is the wrong API entirely now.
 
 ### 9. `.dockerignore`
 
@@ -582,19 +529,33 @@ src
 public
 index.html
 vite.config.ts
+dev.db
+dev.db-*
 ```
 
-The frontend (`src/`, `public/`, etc.) is built separately by the platform. The platform DB rules and indexes are platform-owned (managed in `toquemedia-studio-api`), not bundled into the user's container.
+The frontend (`src/`, `public/`) is built separately by the platform. `dev.db` (the local SQLite file) is excluded — production uses TMDB.
 
 ### 10. Build pipeline
 
-The platform builds the image server-side. Your project ships the Dockerfile + .dockerignore only. Skip any build-config file at the project root — the platform's build pipeline runs an inline spec against your Dockerfile.
+The platform builds the image server-side. Your project ships the Dockerfile + .dockerignore + `migrations/`. Skip any build-config file at the project root — the platform's build pipeline runs an inline spec against your Dockerfile.
 
-### 11. Update package.json scripts
+### 11. package.json scripts
 
-No the platform DB-specific scripts are needed in the user's `package.json`. There are no local migrations (the platform DB is schemaless), no per-project rules deploy (rules are platform-owned), and no per-project index deploy (indexes are platform-owned).
+```json
+{
+  "scripts": {
+    "dev": "tsx watch --env-file=.env server/index.ts",
+    "build": "vite build",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  }
+}
+```
 
-Local dev: the local emulator is available but optional. The simplest path is to point dev at the same the platform DB database the prod backend uses — every read counts towards the 50k/day free tier, which covers typical dev usage easily.
+Local dev: `npm run db:migrate` applies any pending migrations against `./dev.db`. Then `npm run dev` boots the server.
+
+Production: no `db:migrate` runs in the container. The TM Code Worker applies migrations to the app's TMDB during deploy, before traffic is routed.
 
 ### 12. Server env reads
 
@@ -602,61 +563,106 @@ Only env vars the server actually needs:
 
 | Var | Source | Purpose |
 |---|---|---|
-| `TM_PROJECT_ID` | provision_auth → .env | Platform project id for admin SDK initApp |
-| `APP_ID` | provision_deploy → .env | Multi-tenant data namespace |
-| `PORT` | platform runtime injects | Bind address |
-| `TM_AUTH_KEY` | provision_auth → .env | Auth-API REST calls (public client key) |
-| `TM_TENANT_ID` | provision_auth → .env | Per-app tenant scope |
+| `TMDB_URL` | provision_deploy → Cloud Run env | TM Code Database HTTPS proxy endpoint (per-app) |
+| `TMDB_TOKEN` | provision_deploy → Cloud Run env | App-scoped bearer token for TMDB |
+| `DATABASE_URL` | local `.env` only | Dev SQLite file path (e.g. `file:./dev.db`) |
+| `TM_AUTH_KEY` | provision_auth → .env | GIP REST calls (public client key) |
+| `TM_TENANT_ID` | provision_auth → .env | Per-app tenant scope for GIP |
+| `GCP_PROJECT_ID` | provision_auth → .env | JWT issuer for GIP token verification |
+| `PORT` | Cloud Run injects | Bind address (default 8080) |
 
-(Legacy names `GCP_PROJECT_ID` / `GIP_FIREBASE_API_KEY` / `GIP_TENANT_ID` are also in .env for backward compat with already-scaffolded projects — new code reads the `TM_*` names.)
+(Legacy names `GIP_FIREBASE_API_KEY` / `GIP_TENANT_ID` are accepted as fallbacks for already-scaffolded projects — new code reads the `TM_*` names where available.)
 
-NOT needed:
-- `GOOGLE_APPLICATION_CREDENTIALS` — the platform service account is detected automatically.
-- `serviceAccountKey.json` — never bundled into the container.
-- Any database-specific API token — IAM handles auth.
+NOT needed (anymore):
+- `GOOGLE_APPLICATION_CREDENTIALS` — auth via JWT verification, no service-account-key file.
+- `serviceAccountKey.json` — never bundled.
+- Any Turso platform token, libSQL URL, or DB API key — handled exclusively by the TM Code Worker.
 
-## Pipeline operations — when you actually need joins or full-text search
+Wire the reads with a runtime schema check:
 
-Most app code doesn't need this. The 4 cases where it's worth reaching for:
+```ts
+// server/env.ts
+import { z } from 'zod'
 
-1. **JOIN-style queries**: "give me posts AND their authors in one round-trip". Without Pipeline operations you'd do N+1 reads. With Pipelines you can subquery the authors collection inline.
-2. **Full-text search** on user-generated content (post bodies, comments). Don't roll your own — use the platform DB full-text feature.
-3. **Geospatial**: "stores within 5km". Use `$near` on a geospatial-indexed field.
-4. **Server-side aggregations**: `count()`, `sum()`, `avg()` over a filtered collection. These are dedicated aggregation queries that bill 1 read per aggregation, not per scanned document.
+const envSchema = z.object({
+  // Auth
+  TM_AUTH_KEY: z.string().min(1),
+  TM_TENANT_ID: z.string().min(1),
+  GCP_PROJECT_ID: z.string().min(1),
 
-For these, lean on the platform DB's pipeline operations (subquery, aggregate, full-text, geospatial). The MongoDB-compatibility shim is the easier API surface if the dev already knows MongoDB.
+  // Database (one or the other depending on env)
+  DATABASE_URL: z.string().optional(),
+  TMDB_URL: z.string().url().optional(),
+  TMDB_TOKEN: z.string().optional(),
+
+  // Runtime
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  PORT: z.coerce.number().default(8080),
+}).refine(
+  (env) => env.NODE_ENV !== 'production' || (env.TMDB_URL && env.TMDB_TOKEN),
+  { message: 'TMDB_URL and TMDB_TOKEN must be set in production' },
+)
+
+export const env = envSchema.parse(process.env)
+```
+
+`refine` enforces "in production, TMDB_* must be present" with a clear error rather than a runtime null-pointer when the first query fires.
 
 ## Verification
 
 Before reporting done:
 
-1. **Server boots locally**:
+1. **Local dev boots without TMDB env vars:**
    ```bash
-   docker build -t test-backend .
-   docker run --rm -p 8080:8080 --env-file .env test-backend
+   rm -rf dev.db
+   npm run db:migrate         # applies migrations to fresh dev.db
+   npm run dev                # server boots, hits dev.db
+   curl http://localhost:3001/api/health
+   # → {"status":"ok"}
    ```
-   The `--env-file .env` passes every credential the server reads (TM_PROJECT_ID, APP_ID, TM_AUTH_KEY, TM_TENANT_ID, plus legacy mirrors). The server should boot. `curl http://localhost:8080/api/health` → `{"status":"ok"}`.
 
-   Note: local Docker won't have the platform service account → the platform DB reads/writes will 401. That's expected; verify the boot, deploy to the platform runtime for full e2e.
-
-2. **No firebase/firestore import in client code**:
+2. **A test CRUD round-trip works in dev:**
    ```bash
-   grep -rn "from 'firebase/firestore'" src/ client/src/ 2>/dev/null
+   # Use the auth flow to sign in, get a JWT, then:
+   curl -X POST http://localhost:3001/api/bugs \
+     -H "Authorization: Bearer $JWT" \
+     -H "Content-Type: application/json" \
+     -d '{"description": "test bug"}'
+   curl http://localhost:3001/api/bugs -H "Authorization: Bearer $JWT"
+   # → [{"id":1,"reporterUid":"...","description":"test bug",...}]
    ```
-   Should return nothing. Direct client access is denied at the platform rules level.
 
-3. **Cache behaviour**: open DevTools Network tab → reload the app → confirm **1 fetch per critical collection on boot**, **zero fetches** when navigating between cached views. Mutations should produce exactly 1 PATCH/POST + the local UI updates instantly without a follow-up GET.
+3. **No prohibited imports:**
+   ```bash
+   grep -rn "from '@libsql/client'" src/ client/src/ 2>/dev/null
+   # → empty (frontend never imports libSQL directly)
+   grep -rn "from 'firebase-admin/firestore'" server/ 2>/dev/null
+   # → empty (data layer is Drizzle, not firebase-admin/firestore)
+   grep -rn "libsql://" . --include='*.ts' --include='*.env*' 2>/dev/null
+   # → empty (libsql:// URLs never appear in user code or env)
+   ```
 
-Report what was implemented + skip the parts already complete. If the project was using Prisma + SQLite, the port to Admin SDK + cache + Dockerfile are the bulk of the work.
+4. **`.env.example` lists only the env vars the user controls:**
+   ```env
+   DATABASE_URL=file:./dev.db
+   TM_AUTH_KEY=
+   TM_TENANT_ID=
+   GCP_PROJECT_ID=
+   ```
+   Notably: NOT `TMDB_URL` and NOT `TMDB_TOKEN` — those come from deploy, not the user.
+
+5. **Dockerfile copies `migrations/`** and includes the SQL files in the image so the worker can apply them at deploy time.
+
+Report what was implemented + skip the parts already complete. If the project was using Prisma + SQLite, most of the schema shape and queries port directly — Drizzle is intentionally close to Prisma's mental model with type-safe SQL underneath.
 
 ---
 
 ## FINAL REMINDER — the three rules that cost the most when broken
 
-The full rule list is above. These three are repeated here at the end because **a single violation burns either the deploy turn or a customer's trust** — two leak data / credentials, the third produces a 7-minute Cloud Build failure with an opaque "vite: not found" stack trace. Both modes look like generic infra problems until someone traces the cause to the SKILL rule that was missed. Re-read these before submitting any publish-backend change:
+The full rule list is above. These three are repeated at the end because a single violation either leaks data/credentials or burns the deploy turn with an opaque error:
 
-1. **Never embed `serviceAccountKey.json` or use credential files.** The platform runtime auto-detects credentials via the metadata server. Initialize with `{ projectId: process.env.TM_PROJECT_ID }` and **no second argument**. The harness rejects writes that import any `serviceAccountKey.json`, but you're expected to write the no-credential form first try. **Symptom of failure**: the deploy ships a JSON key in the bundle, the IAM mismatch produces 403s on every read, and now there's a leaked credential to rotate.
+1. **Never put `TMDB_TOKEN`, libSQL URLs, or Turso platform tokens in user code.** Those live in the TM Code Worker. User code knows only `TMDB_URL` (the proxy endpoint) + `TMDB_TOKEN` (app-scoped), and both come from Cloud Run env at deploy. If you write `libsql://...turso.io` anywhere in the user's project, **that's a leak path** — the worker no longer mediates the request, and the user's app now has direct DB access bypassing the audit/rate-limit layer.
 
-2. **Every collection access starts at `apps/{APP_ID}/...`.** A query against `db.collection('users')` (without the prefix) returns rows from EVERY user-app sharing the database — that's a multi-tenant data leak with no way to undo. The local-dev fallback `local-dev-<pkg-name>` keeps `npm run dev` working without ceremony; production gets the real `APP_ID` injected by the platform. **Symptom of failure**: user A logs in and sees user B's data — the platform service account can read everything, so the queries succeed and the bug is invisible until a customer notices.
+2. **Use `drizzle-orm/sqlite-proxy` in prod, `drizzle-orm/libsql/node` in dev — never `@libsql/client` directly in user code.** The proxy driver is what makes the dev/prod connection swap clean; using `@libsql/client` directly to call `libsql://...turso.io` means the prod connection is hardcoded in the user's runtime, bypassing the worker. **Symptom of failure**: the deploy ships a libsql URL in the bundle, the worker proxy never sees the traffic, and you've lost audit-log + rate-limit + token-rotation visibility for that app.
 
-3. **NEVER `RUN npm run build` in the backend Dockerfile when the project's `build` script is `vite build` / `next build` / `nuxt build` / `astro build` / `ng build`.** That's the FRONTEND build — frontend assets go to R2 separately via the upload phase. Calling it in the container is dead code AND fails Cloud Build because the typical preceding `RUN npm ci --omit=dev` strips vite/next/etc. Pick §8 Template A.1 (multi-stage compile-to-JS) or A.2 (run-with-tsx) based on layout. The harness rejects this write, but the recovery wastes a turn — write the right Dockerfile first try. **Symptom of failure**: Cloud Build dies at step 6/8 with `sh: vite: not found` after 5-7 min of pulling images; the deploy modal flips to "container/build failed" and the user must apagar the orphan deploy before retrying.
+3. **NEVER `RUN npm run build` in the backend Dockerfile when the project's `build` script is `vite build` / `next build` / `nuxt build` / `astro build` / `ng build`.** That's the FRONTEND build — frontend assets go to R2 separately via the upload phase. Calling it in the container is dead code AND fails Cloud Build because `RUN npm ci --omit=dev` strips vite/next/etc. Pick §8 Template A.1 (multi-stage compile-to-JS) or A.2 (run-with-tsx). **Symptom of failure**: Cloud Build dies at step 6/8 with `sh: vite: not found` after 5-7 min; the deploy modal flips to "container/build failed"; the user must delete the orphan deploy before retrying.

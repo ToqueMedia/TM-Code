@@ -191,11 +191,123 @@ export async function handlePlanApprove(projectPath: string): Promise<void> {
   chatStore.addCardMessage('todo_list', projectPath)
 }
 
-export function handlePlanRequestChanges(): void {
+export function handlePlanRequestChanges(projectPath: string): void {
   const chatStore = useChatStore.getState()
+  // Flip the revision flag. The NEXT user message routes to
+  // `executePlanRevision` (via usePromptBar) instead of the normal chat
+  // path. Without this, the revision feedback gets treated as a normal
+  // coding prompt — the default IDE system prompt loads, the agent starts
+  // IMPLEMENTING the original PLAN.md, and the user's feedback gets
+  // bolted onto the implementation. The flag is the routing signal.
+  chatStore.setPlanRevisionPending(projectPath)
   chatStore.addSystemMessage(
     'What changes would you like? Describe in the chat and the architect will revise the plan.'
   )
+}
+
+/**
+ * Plan-revision flow — re-enters the architect role with the existing
+ * PLAN.md as context plus the developer's revision feedback. The architect
+ * edits PLAN.md (NOT implements it) and emits a fresh approval card.
+ *
+ * Routed from `usePromptBar.handleSend` when `chatStore.planRevisionPending`
+ * is set. The flag is cleared by the caller (PromptBar) before this runs
+ * so a subsequent message after the revision-turn falls back to the
+ * normal path.
+ */
+export async function executePlanRevision(
+  feedback: string,
+  projectPath: string,
+  mode: 'chat' | 'terminal' = 'chat',
+): Promise<void> {
+  const chatStore = useChatStore.getState()
+
+  // Read the current plan so the architect sees what to modify. If it's
+  // gone (deleted, corrupted), fall back to re-running /plan from scratch
+  // with the feedback as the new idea.
+  let currentPlan: string | null = null
+  try {
+    currentPlan = await FileService.readFile(`${projectPath}/PLAN.md`)
+  } catch {
+    chatStore.addSystemMessage(
+      'PLAN.md is missing — restarting plan from your feedback as a new idea.',
+    )
+    await executePlan(feedback, projectPath, mode)
+    return
+  }
+
+  // Same architect-mode setup as /plan: forced reasoning, plan-mode tools,
+  // auto-approve diffs (the approval card is the human gate, not the
+  // per-diff prompt).
+  const permStore = usePermissionStore.getState()
+  const prevAutoApprove = permStore.autoApproveDiffs
+  permStore.setAutoApproveDiffs(true)
+  const agentService = AgentService.getInstance()
+  agentService.setRequestType('plan')
+  const toolExecutor = ToolExecutor.getInstance()
+  toolExecutor.enablePlanMode()
+
+  try {
+    const revisionPrompt = buildArchitectRevisionMessage(feedback, projectPath, currentPlan)
+    await runAgentWithCallbacks(revisionPrompt, {
+      addUserMessage: true,
+      userMessageText: feedback,
+      systemPromptOverride: buildArchitectSystemPrompt(mode),
+      cmdOnlyMode: mode === 'terminal',
+    })
+  } finally {
+    agentService.setRequestType(null)
+    toolExecutor.disablePlanMode()
+    permStore.setAutoApproveDiffs(prevAutoApprove)
+  }
+
+  // Same readiness check as /plan. If the architect didn't flip Status
+  // back to PENDING APPROVAL after the edits, surface that — the model
+  // may have hit the stream cut mid-revision.
+  if (useAgentStore.getState().status === 'error') return
+  const readiness = await readPlanReadiness(`${projectPath}/PLAN.md`)
+  if (!readiness.ready) {
+    chatStore.addSystemMessage(
+      readiness.reason === 'draft'
+        ? 'Revision cut off — PLAN.md is back in DRAFT. Type "Continue" to resume.'
+        : 'Revision did not complete. Type "Continue" or describe further changes to retry.',
+    )
+    return
+  }
+  chatStore.addCardMessage('plan_approval', projectPath)
+}
+
+function buildArchitectRevisionMessage(
+  feedback: string,
+  projectPath: string,
+  currentPlan: string,
+): string {
+  return `The developer reviewed the plan you wrote and is requesting changes.
+
+Their feedback:
+"${feedback}"
+
+Project root: ${projectPath}
+
+The current PLAN.md (your previous version) is below. Your job this turn is to:
+
+1. Read the feedback and identify what specific sections of PLAN.md need to change.
+2. Edit PLAN.md to incorporate the feedback. Use \`${EDIT_FILE}\` for surgical changes (single section, a few tasks, one decision row). Use \`${WRITE_FILE}\` only if the feedback requires restructuring the document end-to-end.
+3. If the implementation phases shift, update the task tracker via \`${UPDATE_TASKS}\` to mirror the new structure (same task-id convention: "1.1", "1.2", etc.).
+4. Flip frontmatter \`Status:\` back to \`PENDING APPROVAL\` (or leave as-is if it's already there) — the IDE waits for this marker before re-rendering the approval card.
+5. Post a 3-sentence chat summary of what you changed, then STOP. The developer will re-approve / re-request changes / reject from the new card.
+
+**DO NOT implement the plan.** This is a revision turn, not an execution turn. Edits to PLAN.md only — no source files, no \`provision_auth\`, no \`start_dev_server\`, no \`execute_command\`. The tool executor enforces this mechanically; ignoring this rule produces tool blocks.
+
+**DO NOT re-write PLAN.md from scratch unless the feedback explicitly asks for restructuring.** Targeted Edits preserve the parts the developer was happy with and keep the diff reviewable.
+
+---
+
+Current PLAN.md content:
+
+\`\`\`markdown
+${currentPlan}
+\`\`\``
 }
 
 export function handlePlanReject(): void {
