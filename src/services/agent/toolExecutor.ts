@@ -448,7 +448,12 @@ class ToolExecutor {
       ? `${(result.length / 1024).toFixed(1)}KB`
       : `${result.length} chars`
 
-    return `Output too large (${totalSize}). Full output stored as: ${refId}\n\nPreview (first ${previewSize} chars):\n${preview}\n...\n\nUse read_large_result("${refId}") to read a specific portion of the full output.`
+    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the first ${previewSize} chars are shown below. Do not reason about content past byte ${previewSize} from this preview alone — call read_large_result("${refId}") to read any specific slice of the full output before acting on it.</system-reminder>
+
+Preview (first ${previewSize} chars):
+${preview}
+...
+`
   }
 
   /**

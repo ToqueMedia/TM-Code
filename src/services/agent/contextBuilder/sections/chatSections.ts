@@ -704,3 +704,30 @@ export function getReminderSection(ctx: PromptContext): string {
 6. ${sharedUiBaselineReminder()}
 7. ${sharedIdentityReminder()}${mcpReminder}${skillReminder}`
 }
+
+// ── 15a. Critical reminder (mid-conversation re-injection) ─────────────────
+/**
+ * Compact restatement of the highest-violation-cost rules from getReminderSection
+ * for periodic re-injection into tool_result user messages. Lives at the top
+ * of the system prompt — but after many turns of tool results, the tail (the
+ * latest user message the model attends to most) drifts far from it and these
+ * rules start getting dropped. AgentService re-injects this block every
+ * REMINDER_REINJECT_INTERVAL_TURNS turns inside the same user message that
+ * carries the turn's tool_results (no extra round-trip, no consecutive-user
+ * violation).
+ *
+ * Wording is deliberately neutral ("Active constraints (recap)") — not "you
+ * forgot" — so the model doesn't infer it's being corrected when it isn't.
+ *
+ * Text is intentionally deterministic (no turn_index, no counters interpolated)
+ * so identical re-injections preserve prompt-cache parity across turns. If you
+ * need to change the rule set, update the static system-prompt reminder too —
+ * the two should agree on which rules matter most.
+ */
+export function getCriticalReinjectionReminder(): string {
+  return `<system-reminder>Active constraints (recap):
+1. COMPLETE every file you write. Output goes to disk as-is — omitted code is deleted code.
+2. AFTER file changes with a dev server running: call read_dev_server_logs and fix errors before continuing. Track the next_since cursor across calls — without it you re-read stale entries.
+3. DEVELOPER-OWNED env vars (LLM, payments, email, SMTP, analytics, webhooks): call request_credentials in the SAME turn you write process.env.X. For PLATFORM-MANAGED vars (TM_AUTH_*, TMDB_*, TM_FILES_*, APP_ID) use the matching provision_* tool instead.
+</system-reminder>`
+}

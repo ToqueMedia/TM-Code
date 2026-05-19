@@ -663,8 +663,15 @@ export function flushBufferedDeltas() {
   }
 }
 
-// Per-result truncation for very large tool outputs (e.g. read_file on huge files)
-const MAX_TOOL_RESULT_CHARS = 4000
+// Per-result truncation when rebuilding the conversation history sent to the
+// API. The toolExecutor already caps results at 30K via truncateResult (with a
+// large_result reference for the model to recover full content); this second
+// pass trims further to keep cumulative bytes manageable on long sessions.
+// 4K was the original value but it dropped content the model had legitimately
+// seen in the original turn (notably the `read_large_result` reference line at
+// the tail of long results). 8K keeps the reference suffix intact for ~99% of
+// the cases we saw in practice while still bounding session growth.
+const MAX_TOOL_RESULT_CHARS = 8000
 
 /** One-shot warning so we don't spam the log on every reload. */
 let _warnedAboutMissingBase64 = false
@@ -834,9 +841,16 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
             }
           } catch { /* not JSON */ }
 
-          // Truncate large results
+          // Truncate large results. Surface the original size and an explicit
+          // recovery hint so the model knows the tail it saw in the original
+          // turn is gone from THIS rebuild — it can re-read the source or ask
+          // the user for the relevant slice instead of silently making things
+          // up about content it can no longer see.
           if (resultContent.length > MAX_TOOL_RESULT_CHARS) {
-            resultContent = resultContent.slice(0, MAX_TOOL_RESULT_CHARS) + '\n[... truncated]'
+            const origLen = resultContent.length
+            resultContent =
+              resultContent.slice(0, MAX_TOOL_RESULT_CHARS)
+              + `\n\n<system-reminder>This tool result was ${origLen} chars in the original turn but only the first ${MAX_TOOL_RESULT_CHARS} are kept in this rebuilt history (~${origLen - MAX_TOOL_RESULT_CHARS} chars dropped). If reasoning about content past byte ${MAX_TOOL_RESULT_CHARS} matters for the current task, re-read the source (read_file / re-run the search) rather than guessing.</system-reminder>`
           }
 
           toolResultBlocks.push({

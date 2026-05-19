@@ -73,6 +73,21 @@ const MAX_CONTINUATIONS = 3
 // the watchdog made the per-attempt cap reliable.
 const MAX_INTERRUPT_RETRIES = 1
 
+// Re-inject the top-violation-cost reminders into the tool_result user
+// message every N tool-bearing turns. The full reminder lives at the top of
+// the system prompt; after many turns of tool results, the tail is far
+// from it and high-cost rules (complete files, dev-server logs, request_credentials)
+// start drifting. Re-injection rebookmarks them without an extra round-trip.
+//
+// 5 is provisional — chosen as a midpoint between "noise" (every turn) and
+// "useless" (every 15+ turns, where the dev_server_logs_skipped signal
+// already fires). Calibrate against tool_call_per_turn / rule_drop_signal /
+// critical_reminder_reinjected telemetry once dogfood data is in.
+const REMINDER_REINJECT_INTERVAL_TURNS = 5
+// Don't reinject until the session has accumulated enough tool calls to be
+// "long". A 4-tool-call session doesn't need a recap.
+const REMINDER_REINJECT_MIN_TOOLS = 10
+
 // Context compression threshold is now token-absolute (claude-vaz pattern):
 // effective window = raw − 20K (summary headroom)
 // trigger          = effective − 13K (AUTOCOMPACT_BUFFER_TOKENS)
@@ -301,6 +316,20 @@ class AgentService {
    *  an in-flight non-concurrency-safe sibling. The "would-have-been-a-race"
    *  metric, surfaced in Settings → Experimental telemetry. Reset per session. */
   private poolConcurrencyConflictsAvoided = 0
+  // ── Phase A tool-call pattern telemetry ──────────────────────────────────
+  // These counters answer: "how many tool calls before the model drops rule X?".
+  // They're additive (no behaviour change) — the data feeds Phase C's decision
+  // on the right re-injection interval for critical reminders.
+  /** Per-run cumulative tool-call count across all turns. Reset on new session. */
+  private cumulativeToolCalls = 0
+  /** Monotonically incremented per tool-result-bearing turn. */
+  private turnIndex = 0
+  /** Writes (write/edit/create_file) since the last read_dev_server_logs while
+   *  a dev server is active. Resets to 0 on a read_dev_server_logs call. */
+  private writesWithoutDevServerLogs = 0
+  /** Tool-bearing turns since the last critical-reminder re-injection.
+   *  Counter advances per turn; reaches REMINDER_REINJECT_INTERVAL_TURNS → fire + reset. */
+  private turnsSinceLastReminder = 0
 
   private constructor(options?: LightweightAgentOptions) {
     this.toolExecutor = ToolExecutor.getInstance()
@@ -583,6 +612,10 @@ class AgentService {
       this.fileAccessLog = []
       this.summarizationFailures = 0
       this.poolConcurrencyConflictsAvoided = 0
+      this.cumulativeToolCalls = 0
+      this.turnIndex = 0
+      this.writesWithoutDevServerLogs = 0
+      this.turnsSinceLastReminder = 0
       this.toolExecutor.resetSessionState()
     }
     if (isMainAgentNewSession) {
@@ -591,6 +624,7 @@ class AgentService {
       try {
         const { useAgentStore } = await import('../../stores/agentStore')
         useAgentStore.getState().resetPoolConflictsAvoided()
+        useAgentStore.getState().resetToolCallCounters()
       } catch { /* non-critical */ }
     }
 
@@ -959,6 +993,87 @@ class AgentService {
           }
         }
 
+        // ── Phase A: tool-call pattern telemetry ────────────────────────────
+        // Measure per-turn shape so Phase C can pick a calibrated re-injection
+        // interval instead of an arbitrary one. Additive — no behaviour change.
+        if (!this.lightweightOptions) {
+          this.turnIndex += 1
+          const validResults = toolResults.filter((e): e is DrainEntry => e !== null)
+          const namesThisTurn = validResults.map(e => e.toolCall.name)
+          const writesThisTurn = namesThisTurn.filter(n =>
+            n === 'write_file' || n === 'edit_file' || n === 'create_file'
+          ).length
+          const hasReadDevLogs = namesThisTurn.includes('read_dev_server_logs')
+          const hasReads = namesThisTurn.some(n =>
+            n === 'read_file' || n === 'list_directory' || n === 'search_files'
+            || n === 'glob' || n === 'get_diagnostics' || n === 'read_large_result'
+          )
+          this.cumulativeToolCalls += validResults.length
+          if (hasReadDevLogs) this.writesWithoutDevServerLogs = 0
+          else this.writesWithoutDevServerLogs += writesThisTurn
+
+          // Mirror to agentStore for status-bar / debug-overlay visibility.
+          try {
+            const { useAgentStore } = await import('../../stores/agentStore')
+            const store = useAgentStore.getState()
+            store.bumpCumulativeToolCalls(validResults.length)
+            store.setWritesWithoutDevServerLogs(this.writesWithoutDevServerLogs)
+          } catch { /* non-critical */ }
+
+          // Per-turn event — answers "how many tool calls per turn typically?"
+          import('../../services/analytics').then(({ trackEvent }) => {
+            void trackEvent('tool_call_per_turn', {
+              turn_index: this.turnIndex,
+              tools_in_turn: validResults.length,
+              cumulative_tools: this.cumulativeToolCalls,
+              writes_in_turn: writesThisTurn,
+              has_reads: hasReads,
+              has_read_dev_server_logs: hasReadDevLogs,
+              writes_without_dev_server_logs: this.writesWithoutDevServerLogs,
+              tool_names: namesThisTurn.slice(0, 20).join(','),
+            })
+          }).catch(() => {})
+
+          // Signal: ≥3 file writes without a dev-server-log read while a dev
+          // server is active — the model is drifting past Reminder #2 of the
+          // system prompt. Emit once per crossing so the data stays tractable.
+          if (
+            this.writesWithoutDevServerLogs >= 3
+            && writesThisTurn > 0
+            && devServerManager.isActive()
+          ) {
+            import('../../services/analytics').then(({ trackEvent }) => {
+              void trackEvent('rule_drop_signal', {
+                rule: 'dev_server_logs_skipped',
+                writes_count: this.writesWithoutDevServerLogs,
+                cumulative_tools: this.cumulativeToolCalls,
+                turn_index: this.turnIndex,
+              })
+            }).catch(() => {})
+          }
+
+          // Signal: short file overwrites (< 100 chars). High-confidence
+          // proxy for "model omitted the rest of the file" — Reminder #1.
+          for (const entry of validResults) {
+            const name = entry.toolCall.name
+            if (name !== 'write_file' && name !== 'create_file') continue
+            const args = entry.toolCall.args as { content?: unknown; path?: unknown }
+            const content = typeof args.content === 'string' ? args.content : null
+            if (content && content.length > 0 && content.length < 100) {
+              import('../../services/analytics').then(({ trackEvent }) => {
+                void trackEvent('rule_drop_signal', {
+                  rule: 'short_overwrite',
+                  tool: name,
+                  path: typeof args.path === 'string' ? args.path : 'unknown',
+                  content_length: content.length,
+                  cumulative_tools: this.cumulativeToolCalls,
+                  turn_index: this.turnIndex,
+                })
+              }).catch(() => {})
+            }
+          }
+        }
+
         // Add all tool results to messages in Anthropic format.
         // Anthropic uses role:'user' with tool_result content blocks (NOT role:'tool').
         // Multiple tool_results from the same turn are merged into ONE user message.
@@ -992,6 +1107,40 @@ class AgentService {
                 } as AnthropicContentBlock)
               }
             }
+          }
+        }
+
+        // ── Phase C: critical reminder re-injection ─────────────────────────
+        // After many turns of tool results, the static reminder at the top of
+        // the system prompt drifts far from the tail the model attends to most.
+        // Re-inject the top-violation-cost rules into THIS user message (same
+        // envelope as the tool_results — no extra round-trip, no consecutive-
+        // user violation) every REMINDER_REINJECT_INTERVAL_TURNS turns, but
+        // only once the session is past REMINDER_REINJECT_MIN_TOOLS so short
+        // sessions don't get spammed.
+        if (
+          !this.lightweightOptions
+          && this.cumulativeToolCalls >= REMINDER_REINJECT_MIN_TOOLS
+        ) {
+          this.turnsSinceLastReminder += 1
+          if (this.turnsSinceLastReminder >= REMINDER_REINJECT_INTERVAL_TURNS) {
+            const { getCriticalReinjectionReminder } = await import(
+              './contextBuilder/sections/chatSections'
+            )
+            toolResultBlocks.push({
+              type: 'text',
+              text: getCriticalReinjectionReminder(),
+            } as AnthropicContentBlock)
+            const turnsBeforeReset = this.turnsSinceLastReminder
+            this.turnsSinceLastReminder = 0
+            import('../../services/analytics').then(({ trackEvent }) => {
+              void trackEvent('critical_reminder_reinjected', {
+                turn_index: this.turnIndex,
+                cumulative_tools: this.cumulativeToolCalls,
+                turns_since_last: turnsBeforeReset,
+                writes_without_dev_server_logs: this.writesWithoutDevServerLogs,
+              })
+            }).catch(() => {})
           }
         }
 

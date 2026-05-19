@@ -51,6 +51,19 @@ interface AgentState {
    * for dogfood validation. Reset on session start.
    */
   poolConcurrencyConflictsAvoided: number
+  /**
+   * Cumulative tool calls across the current agent run. Used by the Phase A
+   * tool-call-pattern telemetry to calibrate when critical reminders should
+   * be re-injected (Phase C). Reset on session start.
+   */
+  cumulativeToolCalls: number
+  /**
+   * Number of write_file / edit_file / create_file calls since the agent
+   * last invoked read_dev_server_logs while a dev server is active.
+   * Surfaced so the status bar / debug overlay can flag the agent drifting
+   * past the "check logs after writes" rule before it becomes a failure.
+   */
+  writesWithoutDevServerLogs: number
 }
 
 interface AgentActions {
@@ -66,6 +79,10 @@ interface AgentActions {
   // Phase A telemetry mirror
   bumpPoolConflictsAvoided: (delta: number) => void
   resetPoolConflictsAvoided: () => void
+  // Tool-call pattern counters (Phase A)
+  bumpCumulativeToolCalls: (delta: number) => void
+  setWritesWithoutDevServerLogs: (n: number) => void
+  resetToolCallCounters: () => void
   reset: () => void
 }
 
@@ -79,6 +96,8 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   modelContextWindow: null,
   byokActive: false,
   poolConcurrencyConflictsAvoided: 0,
+  cumulativeToolCalls: 0,
+  writesWithoutDevServerLogs: 0,
 
   setStatus: (status: AgentStatus) => {
     set({ status })
@@ -134,6 +153,19 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
     set({ poolConcurrencyConflictsAvoided: 0 })
   },
 
+  bumpCumulativeToolCalls: (delta: number) => {
+    if (delta <= 0) return
+    set(state => ({ cumulativeToolCalls: state.cumulativeToolCalls + delta }))
+  },
+
+  setWritesWithoutDevServerLogs: (n: number) => {
+    set({ writesWithoutDevServerLogs: Math.max(0, n) })
+  },
+
+  resetToolCallCounters: () => {
+    set({ cumulativeToolCalls: 0, writesWithoutDevServerLogs: 0 })
+  },
+
   reset: () => {
     set({
       status: 'idle',
@@ -145,6 +177,8 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       modelContextWindow: null,
       byokActive: false,
       poolConcurrencyConflictsAvoided: 0,
+      cumulativeToolCalls: 0,
+      writesWithoutDevServerLogs: 0,
     })
   },
 }))
