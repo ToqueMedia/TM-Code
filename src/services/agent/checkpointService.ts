@@ -1,6 +1,10 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '../../utils/logger'
-import { hashProjectPath, hashFilePath } from '../../utils/crypto'
+import { hashFilePath } from '../../utils/crypto'
+// `hashProjectPath` is no longer used: checkpoints moved into the project's
+// own `.toquemedia/checkpoints/` directory (2026-05 migration), so the path
+// is the natural key — no hash needed for filesystem-safety. Per-file paths
+// are still hashed (filename-length / character safety on disk).
 
 const MAX_CHECKPOINTS_PER_SESSION = 100
 const PERSIST_DEBOUNCE_MS = 500
@@ -57,7 +61,10 @@ class CheckpointService {
   private static instance: CheckpointService
   private checkpoints: Checkpoint[] = []
   private currentSessionId: string | null = null
-  private currentProjectHash: string | null = null
+  /** Absolute project path — used as the checkpoint storage key. Replaces
+   *  the legacy `currentProjectHash` (the home-dir hash-based path retired
+   *  when checkpoints moved INSIDE the project at .toquemedia/checkpoints/). */
+  private currentProjectPath: string | null = null
   /** Tracks which file paths were touched during this session (for session diff). */
   private sessionBaseline: Set<string> = new Set()
   /** Maps filePath → { checkpointId, filePathHash } for baseline persistence */
@@ -76,7 +83,7 @@ class CheckpointService {
 
   async initSession(projectPath: string, sessionId: string): Promise<void> {
     await this.flushPersist()
-    this.currentProjectHash = await hashProjectPath(projectPath)
+    this.currentProjectPath = projectPath
     this.currentSessionId = sessionId
     this.sessionBaseline.clear()
     this.baselineIndex.clear()
@@ -84,7 +91,7 @@ class CheckpointService {
     // Load existing checkpoints for this session
     try {
       const indexJson = await invoke<string>('load_checkpoint_index', {
-        projectHash: this.currentProjectHash,
+        projectPath: this.currentProjectPath,
         sessionId,
       })
       const index: CheckpointIndex = JSON.parse(indexJson)
@@ -116,7 +123,7 @@ class CheckpointService {
     await this.flushPersist()
     this.checkpoints = []
     this.currentSessionId = null
-    this.currentProjectHash = null
+    this.currentProjectPath = null
     this.sessionBaseline.clear()
     this.baselineIndex.clear()
   }
@@ -134,7 +141,7 @@ class CheckpointService {
     toolCallId: string,
     toolName: string,
   ): Promise<void> {
-    if (!this.currentProjectHash || !this.currentSessionId) return
+    if (!this.currentProjectPath || !this.currentSessionId) return
 
     const filePathHash = await hashFilePath(filePath)
     const checkpointId = `cp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
@@ -149,14 +156,14 @@ class CheckpointService {
     // Store file content on disk
     if (isNewFile) {
       await invoke('save_checkpoint_new_marker', {
-        projectHash: this.currentProjectHash,
+        projectPath: this.currentProjectPath,
         sessionId: this.currentSessionId,
         checkpointId,
         filePathHash,
       })
     } else {
       await invoke('save_checkpoint_file', {
-        projectHash: this.currentProjectHash,
+        projectPath: this.currentProjectPath,
         sessionId: this.currentSessionId,
         checkpointId,
         filePathHash,
@@ -193,7 +200,7 @@ class CheckpointService {
     content: string,
     toolCallId: string,
   ): Promise<void> {
-    if (!this.currentProjectHash || !this.currentSessionId) return
+    if (!this.currentProjectPath || !this.currentSessionId) return
 
     const filePathHash = await hashFilePath(filePath)
     const checkpointId = `cp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
@@ -205,7 +212,7 @@ class CheckpointService {
     }
 
     await invoke('save_checkpoint_file', {
-      projectHash: this.currentProjectHash,
+      projectPath: this.currentProjectPath,
       sessionId: this.currentSessionId,
       checkpointId,
       filePathHash,
@@ -241,7 +248,7 @@ class CheckpointService {
     content: string,
     toolCallId: string,
   ): Promise<void> {
-    if (!this.currentProjectHash || !this.currentSessionId) return
+    if (!this.currentProjectPath || !this.currentSessionId) return
 
     const filePathHash = await hashFilePath(oldPath)
     const checkpointId = `cp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
@@ -257,7 +264,7 @@ class CheckpointService {
     }
 
     await invoke('save_checkpoint_file', {
-      projectHash: this.currentProjectHash,
+      projectPath: this.currentProjectPath,
       sessionId: this.currentSessionId,
       checkpointId,
       filePathHash,
@@ -292,7 +299,7 @@ class CheckpointService {
    * Returns the list of restored file paths.
    */
   async revertToCheckpoint(checkpointId: string): Promise<string[]> {
-    if (!this.currentProjectHash || !this.currentSessionId) {
+    if (!this.currentProjectPath || !this.currentSessionId) {
       throw new Error('No active session')
     }
 
@@ -469,8 +476,7 @@ class CheckpointService {
 
   async deleteSessionCheckpoints(projectPath: string, sessionId: string): Promise<void> {
     try {
-      const projectHash = await hashProjectPath(projectPath)
-      await invoke('delete_checkpoint_session', { projectHash, sessionId })
+      await invoke('delete_checkpoint_session', { projectPath, sessionId })
     } catch (err) {
       logger.error('checkpoint', 'Failed to delete session checkpoints:', err)
     }
@@ -488,17 +494,21 @@ class CheckpointService {
    * Called from projectStore.deleteProject so checkpoints don't outlive the
    * project they reference. Also clears in-memory state if the project being
    * deleted happens to be the one this service is currently scoped to.
+   *
+   * Post-migration note: when the project directory itself is being deleted,
+   * its `.toquemedia/checkpoints/` folder goes with it — this command then
+   * becomes a no-op-with-cleanup. It's still useful for "Clear checkpoints"
+   * surfaces that wipe snapshots without deleting the project.
    */
   async deleteAllProjectCheckpoints(projectPath: string): Promise<void> {
     try {
-      const projectHash = await hashProjectPath(projectPath)
-      await invoke('delete_checkpoint_project', { projectHash })
+      await invoke('delete_checkpoint_project', { projectPath })
       // Drop in-memory caches if we're deleting the project we're scoped to.
-      if (this.currentProjectHash === projectHash) {
+      if (this.currentProjectPath === projectPath) {
         this.checkpoints = []
         this.sessionBaseline.clear()
         this.baselineIndex.clear()
-        this.currentProjectHash = null
+        this.currentProjectPath = null
         this.currentSessionId = null
       }
     } catch (err) {
@@ -510,7 +520,7 @@ class CheckpointService {
 
   private async loadContentFromDisk(checkpointId: string, filePathHash: string): Promise<string> {
     return invoke<string>('load_checkpoint_file', {
-      projectHash: this.currentProjectHash,
+      projectPath: this.currentProjectPath,
       sessionId: this.currentSessionId,
       checkpointId,
       filePathHash,
@@ -539,12 +549,12 @@ class CheckpointService {
 
   /** Delete snapshot directories for a list of removed checkpoints. */
   private async cleanupSnapshotFiles(removed: Checkpoint[]): Promise<void> {
-    if (!this.currentProjectHash || !this.currentSessionId) return
+    if (!this.currentProjectPath || !this.currentSessionId) return
     for (const cp of removed) {
       try {
         // Each checkpoint stores files under files/{checkpointId}/
         await invoke('delete_checkpoint_files', {
-          projectHash: this.currentProjectHash,
+          projectPath: this.currentProjectPath,
           sessionId: this.currentSessionId,
           checkpointId: cp.id,
         })
@@ -585,7 +595,7 @@ class CheckpointService {
   }
 
   private async persistIndex(): Promise<void> {
-    if (!this.currentProjectHash || !this.currentSessionId) return
+    if (!this.currentProjectPath || !this.currentSessionId) return
 
     // Build baseline for persistence
     const baseline: Record<string, { checkpointId: string; filePathHash: string; wasNew: boolean }> = {}
@@ -613,7 +623,7 @@ class CheckpointService {
     }
 
     await invoke('save_checkpoint_index', {
-      projectHash: this.currentProjectHash,
+      projectPath: this.currentProjectPath,
       sessionId: this.currentSessionId,
       indexJson: JSON.stringify(index),
     })

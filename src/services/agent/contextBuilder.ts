@@ -24,10 +24,12 @@ import {
   CRITICAL_SECTIONS_MAX_BYTES,
   PROMPT_CACHE_TTL_MS,
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+  dynamicSection,
   extractCriticalSections,
   extractCriticalSectionsWithStats,
   sanitizeProjectContent as _sanitizeProjectContent,
   skillsFromHashtags,
+  splitOnBoundary,
 } from './contextBuilder/helpers'
 import type {
   CmdPromptContext,
@@ -76,6 +78,7 @@ import {
   getTaskListSection,
   getTemplateContextSection,
   getToolsSection,
+  getTrackerStateSection,
 } from './contextBuilder/sections/chatSections'
 import {
   getCmdAppliedScaffoldingSection,
@@ -173,7 +176,23 @@ class ContextBuilder {
 
     const now = Date.now()
     const cached = this.promptCache.get(cacheKey)
-    if (cached && cached.expiresAt > now) return cached.prompt
+    if (cached && cached.expiresAt > now) {
+      // Cache-hit telemetry — cheap, lets us measure hit rate. The bytes
+      // metric is still useful even when cached because the value matches
+      // the original miss's bytes; the proxy uses these to monitor the
+      // static/dynamic split health over time.
+      emitPromptBuiltTelemetry({
+        mode: 'chat',
+        cacheHit: true,
+        prompt: cached.prompt,
+        plan: planKey,
+        agentLang: agentLangKey,
+        fsVersion,
+        mcpToolCount: (mcpTools ?? []).length,
+        loadedSkillNames: [],
+      })
+      return cached.prompt
+    }
     // Gather context in parallel for speed
     const { detectScaffolding } = await import('../scaffoldingDetector')
     const [treeString, pkgSummary, readme, templateManifest, tmsContent, planContent, todoContent, toquemediaIdRaw, appliedScaffolding] = await Promise.all([
@@ -230,6 +249,21 @@ class ContextBuilder {
       loadedSkills = await SkillService.getInstance().loadSkills(projectPath, detectedType, 'chat')
     } catch { /* non-critical */ }
 
+    // Snapshot the live task tracker so the prompt has a deterministic
+    // "what's done / what's next" view. This is the fix for the post-budget-
+    // interrupt failure where the agent inferred completion from the
+    // filesystem and batch-completed N tasks with one write — see
+    // `getTrackerStateSection` for the steering rules attached.
+    let currentTasks: PromptContext['currentTasks'] = []
+    try {
+      const { useAgentStore } = await import('../../stores/agentStore')
+      currentTasks = useAgentStore.getState().tasks.map(t => ({
+        id: t.id,
+        description: t.description,
+        status: t.status,
+      }))
+    } catch { /* non-critical */ }
+
     const ctx: PromptContext = {
       projectPath,
       normalizedProjectPath: projectPath.replace(/\\/g, '/'),
@@ -251,7 +285,13 @@ class ContextBuilder {
       loadedSkillNames: loadedSkills.map(s => s.name),
       appliedScaffolding,
       hashtagSkills: stickyHashtagSkills,
+      currentTasks,
     }
+
+    // Resolve the async background-agents section once so dynamicSection()
+    // can stay synchronous below — the wrapper exists to enforce a
+    // declarative `(name, body, reason)` shape, not to host the async I/O.
+    const bgAgentsSection = await getBackgroundAgentsSection()
 
     const sections = [
       // ── Static block (cacheable cross-session) ──────────────────
@@ -272,25 +312,64 @@ class ContextBuilder {
       // ── Boundary: everything below varies per session / per turn ──
       SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
       // ── Dynamic block (per-session / per-turn) ──────────────────
-      sharedMcpBlock(ctx.mcpTools, 'developer'),
-      await getBackgroundAgentsSection(),
-      getTemplateContextSection(ctx),
-      getEnvironmentSection(ctx),
-      getAppliedScaffoldingSection(ctx),
-      getProjectStructureSection(ctx),
-      getReadmeSection(ctx),
-      getProjectMemorySection(ctx),
-      getActivePlanSection(ctx),
-      getTaskListSection(ctx),
-      getMemoryGuidanceSection(ctx),
-      getSkillsSection(loadedSkills),
+      // Each section below is wrapped with dynamicSection() and a written
+      // reason — cache invalidation is a deliberate architectural choice,
+      // not a default. Adding a new section here without a real reason is
+      // a regression; if it can be static, move it above the boundary.
+      dynamicSection('mcp', () => sharedMcpBlock(ctx.mcpTools, 'developer'),
+        'MCP server list changes when developer connects/disconnects servers'),
+      dynamicSection('background_agents', () => bgAgentsSection,
+        'in-flight background agent list changes per turn'),
+      dynamicSection('template_context', () => getTemplateContextSection(ctx),
+        '.toquemedia-template manifest changes when scaffold is re-run'),
+      dynamicSection('environment', () => getEnvironmentSection(ctx),
+        'project path / package manager / language detected per session'),
+      dynamicSection('applied_scaffolding', () => getAppliedScaffoldingSection(ctx),
+        'one-shot flow markers (auth, payments) appear after scaffold writes'),
+      dynamicSection('project_structure', () => getProjectStructureSection(ctx),
+        'file tree shifts on every write — fsVersion drives cache key'),
+      dynamicSection('readme', () => getReadmeSection(ctx),
+        'README.md is developer-editable and used as primary intent signal'),
+      dynamicSection('project_memory', () => getProjectMemorySection(ctx),
+        'TMS.md/PLAN.md/TODO.md churn during normal IDE work'),
+      dynamicSection('active_plan', () => getActivePlanSection(ctx),
+        'PLAN.md status flips DRAFT → PENDING APPROVAL → APPROVED mid-session'),
+      // Live tracker BEFORE the static TODO.md because the live state is
+      // authoritative for "where am I / what's next" — the TODO.md
+      // markdown carries the task DECOMPOSITION (which tasks exist, what
+      // each requires) but its statuses are stale by design (it's the
+      // architect's snapshot, not the implementer's progress). With the
+      // live block first the model anchors on the actual state and reads
+      // TODO.md as the supporting plan, not the other way around.
+      dynamicSection('task_tracker_live', () => getTrackerStateSection(ctx),
+        'live in-memory tracker mutated by every update_tasks call'),
+      dynamicSection('task_list', () => getTaskListSection(ctx),
+        'TODO.md task statuses flip as the implementation agent progresses'),
+      dynamicSection('memory_guidance', () => getMemoryGuidanceSection(ctx),
+        'guidance is conditional on the presence of project memory files'),
+      dynamicSection('skills', () => getSkillsSection(loadedSkills),
+        'skill set depends on project-type detection + hashtag triggers'),
       // Reminder stays at the very end — U-Curve recency outweighs cache
       // alignment here (the bookend rule depends on being last seen).
-      getReminderSection(ctx),
+      dynamicSection('reminder', () => getReminderSection(ctx),
+        'cites MCP + skill names captured from current session state'),
     ].filter((s): s is string => s !== null && s !== undefined && s !== '')
 
     const full = sections.join('\n\n')
     this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS })
+    // Cache-miss telemetry — includes the boundary split bytes so we can
+    // see the prompt shape over time (regressions in cache discipline
+    // surface as the static byte share shrinking).
+    emitPromptBuiltTelemetry({
+      mode: 'chat',
+      cacheHit: false,
+      prompt: full,
+      plan: planKey,
+      agentLang: agentLangKey,
+      fsVersion,
+      mcpToolCount: (mcpTools ?? []).length,
+      loadedSkillNames: ctx.loadedSkillNames,
+    })
     return full
   }
 
@@ -363,25 +442,90 @@ class ContextBuilder {
       // ── Boundary: everything below varies per session / per turn ──
       SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
       // ── Dynamic block (per-session / per-turn) ──────────────────
-      sharedMcpBlock(ctx.mcpTools, 'user'),
-      getCmdEnvironmentSection(ctx),
+      // Wrapped with dynamicSection() — see the chat-mode block for the
+      // contract: every section below must declare a non-empty reason or
+      // the wrapper throws at build time.
+      dynamicSection('mcp', () => sharedMcpBlock(ctx.mcpTools, 'user'),
+        'MCP server list changes when user connects/disconnects servers'),
+      dynamicSection('environment', () => getCmdEnvironmentSection(ctx),
+        'cwd / homeDir / platform detected per session'),
       // Scaffolding-aware framing + hashtag-triggered sticky CRITICAL rules.
       // Placed BEFORE the generic skills index so the matched skill rules
       // are read by the model before it sees the generic "skills available"
       // listing — same ordering chat mode uses. Re-cited by name in the
       // reminder section below to defeat the U-Curve middle-dip.
-      scaffoldingSection,
-      skillsSection,
-      getCmdGlobalMemorySection(ctx),
-      getCmdClaudeMdSection(ctx),
-      getCmdLanguageReinforcementSection(ctx),
+      dynamicSection('scaffolding', () => scaffoldingSection,
+        'scaffolding markers + sticky hashtag rules depend on user message'),
+      dynamicSection('skills', () => skillsSection,
+        'skill set depends on project-type detection'),
+      dynamicSection('global_memory', () => getCmdGlobalMemorySection(ctx),
+        '~/.toquemedia-studio/TMS.md is user-editable'),
+      dynamicSection('claude_md', () => getCmdClaudeMdSection(ctx),
+        'CLAUDE.md is per-project and edited by the user'),
+      dynamicSection('language_reinforcement', () => getCmdLanguageReinforcementSection(ctx),
+        'reinforcement is conditional on detected agent language'),
       // Reminder stays at the very end — U-Curve recency outweighs cache
       // alignment here (the bookend rule depends on being last seen).
-      getCmdReminderSection(loadedSkillNames),
+      dynamicSection('reminder', () => getCmdReminderSection(loadedSkillNames),
+        'cites loaded skill names captured from current session state'),
     ].filter((s): s is string => s !== null && s !== undefined && s !== '')
 
-    return sections.join('\n\n')
+    const fullCmd = sections.join('\n\n')
+    // CMD mode doesn't have a billing-plan or fsVersion concept (no project
+    // is open at the harness level), so we emit "n/a" for the dimensions
+    // that don't apply rather than forcing dummy values into the schema.
+    emitPromptBuiltTelemetry({
+      mode: 'cmd',
+      cacheHit: false,
+      prompt: fullCmd,
+      plan: 'n/a',
+      agentLang: ctx.langInstruction ? 'detected' : 'en',
+      fsVersion: 0,
+      mcpToolCount: (mcpTools ?? []).length,
+      loadedSkillNames,
+    })
+    return fullCmd
   }
+}
+
+/**
+ * Fire-and-forget telemetry for assembled system prompts (technique #22).
+ * Emits one event per `buildSystemPrompt` / `buildCmdModeSystemPrompt` call
+ * — including cache hits — so we can compute hit-rate and watch the
+ * static/dynamic byte split over time. Never throws, never blocks.
+ *
+ * Why aggregate (not per-section): firing 30 events per turn is expensive
+ * in analytics ingest without a specific question to answer. The aggregate
+ * `prompt_built` event answers the practical questions (regression cohort,
+ * cache health, MCP/skill load shape) with one event.
+ */
+function emitPromptBuiltTelemetry(args: {
+  mode: 'chat' | 'cmd'
+  cacheHit: boolean
+  prompt: string
+  plan: string
+  agentLang: string
+  fsVersion: number
+  mcpToolCount: number
+  loadedSkillNames: string[]
+}): void {
+  const stats = splitOnBoundary(args.prompt)
+  import('../../services/analytics').then(({ trackEvent }) =>
+    trackEvent('prompt_built', {
+      mode: args.mode,
+      plan: args.plan,
+      agent_lang: args.agentLang,
+      cache_hit: args.cacheHit,
+      total_bytes: args.prompt.length,
+      static_bytes: stats.stats.staticBytes,
+      dynamic_bytes: stats.stats.dynamicBytes,
+      boundary_found: stats.stats.found,
+      fs_version: args.fsVersion,
+      mcp_tool_count: args.mcpToolCount,
+      skill_count: args.loadedSkillNames.length,
+      skill_names: args.loadedSkillNames.slice(0, 8).join(','),
+    }),
+  ).catch(() => { /* analytics failures never block prompt build */ })
 }
 
 // Suppress "unused" tree-shaker warning — the symbol is exported via the

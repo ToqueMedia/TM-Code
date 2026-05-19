@@ -27,6 +27,14 @@ When you scaffold or write any backend code for a fullstack project (presence of
 
 **Step 2** — When the project needs production persistence (auth user record, app data, anything that must survive container restarts), call \`provision_database()\`. It mints a per-app SQLite/libSQL database on the platform's Turso fleet, generates an app-scoped TMDB token, and writes \`TMDB_URL\` + \`TMDB_TOKEN\` to \`.env\`. Idempotent — safe to re-call. **The Turso platform token and per-database JWT stay exclusively on the TM Code Worker; user code only ever sees the worker proxy URL (\`TMDB_URL\`) and the app-scoped token (\`TMDB_TOKEN\`).**
 
+**Pre-call mechanical check (before any \`write_file\` / \`edit_file\` on \`db.ts\`)** — do not infer from the user's prompt whether persistence is already provisioned. Walk this exact sequence:
+
+  1. Read the project's \`.env\` (via the env-read tool or \`grep\`). Search for \`TMDB_URL=\` and \`TMDB_TOKEN=\`.
+  2. If **both** are present and non-empty → skip provisioning. Already done; \`db.ts\` can be written referencing \`process.env.TMDB_URL\` / \`process.env.TMDB_TOKEN\` safely.
+  3. If **either** is missing or empty → call \`provision_database()\` NOW. The tool is idempotent — calling on an already-provisioned project returns the same credentials with zero side-effect; calling when missing is the only way the prod path will work. Cost of redundant call: zero. Cost of skipping when missing: the project crashes with \`TMDB_URL must be set\` on first request and the failure is invisible until the deploy smoke test.
+
+**Negative space — when NOT to call \`provision_database()\`**: pure static landing pages, client-state-only apps (localStorage, sessionStorage, in-memory React state), demo/sandbox features the developer explicitly scoped as throwaway, and projects deliberately staying file-only (db.ts uses \`drizzle-orm/libsql/node\` against \`DATABASE_URL=file:./dev.db\` with no prod branch at all — no TMDB references anywhere). For these, persistence either does not exist or never crosses container boundaries, and the platform DB would be unused infrastructure burning a per-app slot.
+
 **Step 3** — Generate \`server/db.ts\` with the dev/prod connection switch. Local dev uses a SQLite file (\`file:./dev.db\`) via \`drizzle-orm/libsql/node\`; production uses \`drizzle-orm/sqlite-proxy\` pointing at \`process.env.TMDB_URL\` with \`Authorization: Bearer \${TMDB_TOKEN}\`. If you find yourself writing \`libsql://...turso.io\` or hardcoding any token in the project's source, **stop** — that's the leak path that bypasses the worker boundary.
 
 **Step 4** — Define the schema in TypeScript via Drizzle (\`server/schema.ts\`), generate the initial migration with \`npx drizzle-kit generate\`, apply locally with \`npx drizzle-kit migrate\`. The TM Code Worker reapplies the bundled \`migrations/*.sql\` against the app's TMDB at deploy time — no manual prod migration step.

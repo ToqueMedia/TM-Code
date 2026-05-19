@@ -118,9 +118,9 @@ TM Code uses **two coder models** plus one multimodal handler. Per-plan model is
 | Plan | Token cap/cycle | Coder |
 |---|---|---|
 | `explorer` (free) | 1.5M | DeepSeek V4-Flash (DashScope) |
-| `vibe` | 5.88M | GLM-5.1 (DashScope) |
-| `pro` | 11.76M | GLM-5.1 (DashScope) |
-| `max` | 72.55M | GLM-5.1 (DashScope) |
+| `vibe` | 10.82M | GLM-5.1 (DashScope) |
+| `pro` | 20.91M | GLM-5.1 (DashScope) |
+| `max` | 129.81M | GLM-5.1 (DashScope) |
 
 **Multimodal**: server-side preprocessing in `toquemedia-studio-api/src/multimodal.ts`. When a paid-plan request contains `image_url` blocks, the worker calls Qwen 3.6 Plus in parallel for each image, replaces the blocks with text descriptions, then forwards the now-text-only request to the user's plan model. Free tier blocks attachments at the UI level (`useAttachments.ts:81`). The frontend never swaps profiles for image messages — `getProfileForPlan(plan)` is the single profile selector.
 
@@ -131,7 +131,7 @@ TM Code uses **two coder models** plus one multimodal handler. Per-plan model is
 
 **Frontend rule (do not break)**: `getProfileForPlan(plan)` in `src/services/agent/modelProfiles.ts` returns sampling-shape defaults only — never trust `profile.id` as the model the upstream will see. The backend (`toquemedia-studio-api/src/proxy.ts`) is the source of truth for model resolution; clamps for upstream-specific quirks live there.
 
-**Pricing analytics**: `BLENDED_TOKEN_PRICE_USD_PER_M = $1.785` (70/30 input/output mix), `PLAN_MARGIN_RATIO = 0.35`. Subscription prices are Firestore-driven; the constants in `src/types.ts` are local fallbacks only.
+**Pricing analytics**: `BLENDED_TOKEN_PRICE_USD_PER_M = $0.97` (80/20 input/output mix — coder-agent workloads are input-heavy), `PLAN_MARGIN_RATIO = 0.30` (platform retains 30% of monthly revenue; 70% funds the token cap). Subscription prices are Firestore-driven; the constants in `toquemedia-studio-api/src/types.ts` are local fallbacks only. Formula: `tokenCap = monthlyUsd × 0.70 / 0.97` (≈$15→10.82M, $29→20.91M, $180→129.81M).
 
 ## Project Templates
 

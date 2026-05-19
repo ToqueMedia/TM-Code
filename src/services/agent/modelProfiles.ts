@@ -13,6 +13,34 @@ export interface ModelPersona {
 }
 
 /**
+ * A model-specific counterweight rule (technique #6 — counterweight bullets
+ * gated by model). Each entry documents WHY it exists (which fine-tune drift
+ * it counters), WHEN it was added, and WHEN to review it for removal.
+ *
+ * Without `reviewAfter`, counterweights accumulate forever — every model
+ * launch is a regression, and every rule that no longer applies becomes
+ * dead text in the prompt budget. The date is a hard prompt to revisit:
+ * when the upstream model rolls forward, walk the list and either un-gate
+ * (if the drift is gone in the new version) or extend the review date
+ * after re-validating against the new version.
+ */
+export interface Counterweight {
+  /** The rule itself — what the model should DO. Positive framing preferred
+   *  (see feedback_positive_prompts memory): "Always identify yourself as X"
+   *  beats "Don't claim to be Y". */
+  rule: string
+  /** Which fine-tune drift this counters. Cite the model + version
+   *  (e.g. "GLM-5.1 identity contamination from upstream Claude data"). */
+  addedFor: string
+  /** ISO date (YYYY-MM-DD) when this was added. Surfaces stale rules. */
+  addedOn: string
+  /** ISO date (YYYY-MM-DD) when this should be reviewed for un-gating.
+   *  Typically `addedOn + 90 days`. The review is a prompt to either
+   *  drop the rule, extend the date, or escalate for A/B validation. */
+  reviewAfter: string
+}
+
+/**
  * Thinking mode classification:
  * - 'toggleable': Model accepts an on/off param. We always send ON when
  *   the profile's `supportsThinking` is true — the user toggle was
@@ -76,8 +104,32 @@ export interface ModelProfile {
   supportsAttachments: boolean
   /** Whether the model supports native web_search via the provider (DashScope Qwen only) */
   supportsSearch: boolean
-  /** Model-specific instructions appended to system prompt */
-  modelSpecificPrompt: string
+  /**
+   * Model-specific counterweight rules. Rendered into the system prompt by
+   * `renderCounterweights(profile)` so call sites can stay agnostic of the
+   * shape. Empty array means the model has no observed drift requiring
+   * counter-bullets — that is the goal state, NOT a missing feature.
+   */
+  counterweights: Counterweight[]
+}
+
+/**
+ * Render a profile's counterweights as a system-prompt section. Returns an
+ * empty string when there are none, so call sites can concat without a
+ * conditional. Stale rules (where `reviewAfter` is in the past) are still
+ * included — the review date is a prompt for human attention, not a kill
+ * switch. The reviewing engineer either extends the date or removes the
+ * rule, but we never silently drop a rule the prompt is depending on.
+ *
+ * The rendered shape is plain bullets so it slots cleanly into the existing
+ * `getModelSpecificSection(ctx)` call site:
+ *
+ *     - <rule 1>
+ *     - <rule 2>
+ */
+export function renderCounterweights(profile: ModelProfile): string {
+  if (!profile.counterweights || profile.counterweights.length === 0) return ''
+  return profile.counterweights.map(c => `- ${c.rule}`).join('\n')
 }
 
 import type { UserPlanName } from '../../stores/billingStore'
@@ -124,7 +176,9 @@ const DEEPSEEK_V4_FLASH: ModelProfile = {
   preserveReasoning: true,
   supportsAttachments: false,
   supportsSearch: true,  // DashScope DeepSeek native web_search via enable_search
-  modelSpecificPrompt: '',
+  // V4-Flash has no observed identity-contamination or behaviour-drift
+  // regressions against its upstream baseline. Goal state — keep this empty.
+  counterweights: [],
 }
 
 const GLM_5_1: ModelProfile = {
@@ -169,7 +223,14 @@ const GLM_5_1: ModelProfile = {
   // the query to Qwen 3.6 Plus via a side-car sub-request (X-Request-Type: web_search),
   // and returns the result back to GLM-5.1 as the tool output.
   supportsSearch: true,
-  modelSpecificPrompt: `You are TM Code Agent, a coding assistant built into TM Code IDE by Toque Media. You are NOT Claude, NOT ChatGPT, NOT any other assistant. Always identify yourself as TM Code Agent when asked.`,
+  counterweights: [
+    {
+      rule: 'You are the coding agent inside TM Code, built by Toque Media. Identify yourself as such when asked — never as Claude, ChatGPT, GPT, Gemini, or any other model or provider.',
+      addedFor: 'GLM-5.1 occasionally hallucinates "I am Claude" / "I am GPT-4" from upstream model-output contamination in its training data',
+      addedOn: '2026-05-02',
+      reviewAfter: '2026-08-02',
+    },
+  ],
 }
 
 // ─────────────────────────────────────────────────

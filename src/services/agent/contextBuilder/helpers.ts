@@ -205,13 +205,104 @@ export const PROMPT_CACHE_TTL_MS = 30_000
  * sections of the system prompt that are stable across sessions (role,
  * tools, doing-tasks rules) and the sections that vary per-session
  * (project memory, scaffolding, environment, MCP). The model harmlessly
- * ignores the literal string; future prompt-cache infrastructure can
- * split the prompt on this marker to maximise cache reuse.
+ * ignores the literal string; the proxy (`toquemedia-studio-api/src/proxy.ts`)
+ * splits the prompt on this marker and emits two `system` blocks with
+ * `cache_control: { type: 'ephemeral' }` on the static prefix to maximise
+ * prompt-cache reuse across turns.
  *
- * Same pattern as planCommand.ts:345 and claude-vaz's
- * `services/api/claude.ts` cache layering. Until D.3 (DANGEROUS_uncached
- * API) ships, this marker is documentation: it labels the intended split
- * point so subsequent edits keep static content above and dynamic content
- * below.
+ * Each bit of dynamic content placed BEFORE the boundary multiplies the
+ * cache-key surface by 2 (one variant per turn it changes), so anything
+ * that can be static should be — see `dynamicSection()` below for the
+ * controlled escape hatch when a section legitimately must invalidate
+ * cache mid-prompt.
  */
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = '__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'
+
+/**
+ * Metadata about a static/dynamic boundary split, returned by
+ * `splitOnBoundary()`. Consumed by `prompt_built` telemetry and by the
+ * proxy when emitting two `system` blocks.
+ */
+export interface BoundaryStats {
+  /** Bytes of the static (above-boundary) prefix. */
+  staticBytes: number
+  /** Bytes of the dynamic (below-boundary) suffix. */
+  dynamicBytes: number
+  /** True when the marker was found and the split was applied. */
+  found: boolean
+}
+
+/**
+ * Split an assembled system prompt on the boundary marker. Returns the
+ * prefix (cacheable), suffix (per-session), and byte stats. When the
+ * marker is missing (older callers, tests), returns the whole prompt as
+ * static with `found: false` so cache hit-rate telemetry can flag the
+ * regression.
+ */
+export function splitOnBoundary(prompt: string): {
+  staticPrefix: string
+  dynamicSuffix: string
+  stats: BoundaryStats
+} {
+  const idx = prompt.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+  if (idx === -1) {
+    return {
+      staticPrefix: prompt,
+      dynamicSuffix: '',
+      stats: { staticBytes: prompt.length, dynamicBytes: 0, found: false },
+    }
+  }
+  const staticPrefix = prompt.slice(0, idx).trimEnd()
+  const dynamicSuffix = prompt.slice(idx + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.length).trimStart()
+  return {
+    staticPrefix,
+    dynamicSuffix,
+    stats: {
+      staticBytes: staticPrefix.length,
+      dynamicBytes: dynamicSuffix.length,
+      found: true,
+    },
+  }
+}
+
+/**
+ * Inverse of static-section composition: a controlled escape hatch for
+ * marking a section as legitimately per-turn / per-session, with a written
+ * reason explaining why cache invalidation is acceptable. The name is
+ * deliberately alarmist — cache-busting is a deliberate architectural
+ * decision, not a default. Same idea as Claude Code's
+ * `DANGEROUS_uncachedSystemPromptSection` API in claude-vaz
+ * (`constants/systemPromptSections.ts`).
+ *
+ * The body() callback is invoked once per call (no memoisation). The
+ * `reason` is required and is currently surfaced only as a code comment —
+ * future work can pipe it into `prompt_built` telemetry so we can audit
+ * which dynamic sections actually drive cache misses.
+ *
+ * Usage:
+ *
+ *     dynamicSection(
+ *       'project_memory',
+ *       () => getProjectMemorySection(ctx),
+ *       'TMS.md / PLAN.md / TODO.md change every commit',
+ *     )
+ *
+ * Returns the section body as `string | null` (compatible with the
+ * `.filter()` pipeline in `contextBuilder.ts`). The `reason` is asserted
+ * non-empty at call time so authors cannot silently bypass the contract.
+ */
+export function dynamicSection(
+  name: string,
+  body: () => string | null,
+  reason: string,
+): string | null {
+  if (!reason || reason.trim().length === 0) {
+    throw new Error(
+      `dynamicSection("${name}") requires a non-empty reason — ` +
+      `cache-busting must be a deliberate decision. Add a one-line ` +
+      `justification (e.g. "TMS.md changes every commit") or move ` +
+      `the section above SYSTEM_PROMPT_DYNAMIC_BOUNDARY.`,
+    )
+  }
+  return body()
+}

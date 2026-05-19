@@ -326,7 +326,14 @@
       "WebFetch(domain:www.anthropic.com)",
       "Bash(firebase --version)",
       "Bash(yarn build:web)",
-      "Bash(cargo test *)"
+      "Bash(cargo test *)",
+      "Read(//Users/ithustle/dev/deskotp/toquemedia-studio-api/**)",
+      "Read(//Users/ithustle/dev/**)",
+      "Bash(echo \"ide_exit=$?\")",
+      "Bash(echo \"rust_exit=$?\")",
+      "Bash(echo \"ts_exit=$?\")",
+      "Bash(echo \"rust=$?\")",
+      "Bash(echo \"ts=$?\")"
     ]
   }
 }

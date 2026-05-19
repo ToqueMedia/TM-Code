@@ -2,6 +2,40 @@ import { create } from 'zustand'
 import { invoke } from '@/utils/invokeMetrics'
 import { useLayoutStore, selectBackendUrl } from './layoutStore'
 
+/**
+ * Debounced write-through to `.toquemedia/http-client.json`. Subscribes to
+ * the store's `(tabs, activeTabId, history)` triple at module init time
+ * (see bottom of file) and queues a single save 800ms after the last
+ * mutation lands. The store remains the live view; disk is just the
+ * canonical snapshot for restart survival.
+ *
+ * 800ms picked empirically: long enough to coalesce a header-edit burst
+ * (the user types a token char-by-char into an auth field) into one
+ * write, short enough that closing the IDE after an edit still captures
+ * it (the IDE's "are you sure you want to quit" path takes >1s anyway).
+ */
+const PERSIST_DEBOUNCE_MS = 800
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+function schedulePersist(): void {
+  if (persistTimer) return
+  persistTimer = setTimeout(() => {
+    persistTimer = null
+    void Promise.all([
+      import('./projectStore'),
+      import('../services/httpClientPersistence'),
+    ]).then(([{ useProjectStore }, { saveHttpClientToDisk }]) => {
+      const path = useProjectStore.getState().currentProject?.path
+      if (!path) return
+      const s = useHttpClientStore.getState()
+      void saveHttpClientToDisk(path, {
+        tabs: s.tabs,
+        activeTabId: s.activeTabId,
+        history: s.history,
+      })
+    }).catch(() => { /* persistence failure must not affect runtime */ })
+  }, PERSIST_DEBOUNCE_MS)
+}
+
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS'
 
 export interface KeyValuePair {
@@ -514,4 +548,43 @@ export const useHttpClientStore = create<HttpClientState & HttpClientActions>()(
       }))
     },
   }
+})
+
+/**
+ * Replace the live store with state loaded from disk. Called from
+ * `projectStore.openProject` after the project path is set, so the user's
+ * tabs/history from the previous session reappear on reopen. Exported as
+ * a module function (not a store action) so the projectStore hook can
+ * call it with a single import.
+ */
+export function hydrateHttpClientFromDisk(loaded: {
+  tabs: RequestState[]
+  activeTabId: string
+  history: HistoryEntry[]
+}): void {
+  useHttpClientStore.setState(flattenState({
+    tabs: loaded.tabs,
+    activeTabId: loaded.activeTabId,
+    history: loaded.history,
+    isHistoryOpen: false,
+  }))
+}
+
+// ── Persistence subscribe ────────────────────────────────────────────
+//
+// Watch `(tabs, activeTabId, history)` and trigger a debounced save on any
+// change. We skip the `response`/`isLoading`/`error` fields explicitly
+// because they fire on every send and would burn writes without changing
+// the persisted shape (those fields are stripped by `saveHttpClientToDisk`).
+//
+// Module-scope subscribe runs once at import time — every store instance
+// uses the same singleton, so this is fine. If the store is ever made
+// per-project (it isn't today), this hook would need to move.
+let _lastSig = ''
+useHttpClientStore.subscribe((state) => {
+  // Cheap signature — counts + IDs. Avoids deep-equal on large bodies.
+  const sig = `${state.tabs.length}:${state.activeTabId}:${state.history.length}:${state.tabs.map(t => `${t.id}.${t.method}.${t.url.length}.${t.body.length}`).join('|')}`
+  if (sig === _lastSig) return
+  _lastSig = sig
+  schedulePersist()
 })

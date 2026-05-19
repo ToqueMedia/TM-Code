@@ -2,11 +2,12 @@ import { create } from 'zustand'
 
 // ── Types (mirrored from backend types.ts) ──
 
-// Four plans (caps in tokens/cycle):
+// Four plans (caps in tokens/cycle — derived from `monthly_usd × (1 − 0.30) / 0.97`,
+// where $0.97/M is the blended provider rate with an 80/20 input/output mix):
 //   - 'explorer' (free): 1.5M
-//   - 'vibe':            5.88M
-//   - 'pro':             11.76M
-//   - 'max':             72.55M
+//   - 'vibe':            10.82M
+//   - 'pro':             20.91M
+//   - 'max':             129.81M
 // Pricing is admin-controlled in toquemedia-studio; the IDE only consumes the
 // plan name + token budget reported by the backend. The per-plan model is
 // also admin-managed (Settings → Live Model) — the frontend never picks one.

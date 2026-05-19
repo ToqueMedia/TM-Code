@@ -33,12 +33,17 @@ Default to **restraint over decoration**. When the developer hasn't named a visu
 This is the FLOOR. The \`frontend-design\` skill, when invoked, layers more on top — motion, micro-interactions, advanced typography. These rules apply regardless: with or without the skill, a generated UI must clear this baseline AND the taste defaults above.`
 }
 
-// Verbatim from claude-vaz (constants/prompts.ts: getSimpleToneAndStyleSection).
+// Verbatim from claude-vaz (constants/prompts.ts: getSimpleToneAndStyleSection)
+// with numeric length anchors layered on top (technique #7). The qualitative
+// "short and concise" leaves the model to guess the target length; the numeric
+// caps below give it a measurable goal and remove ~1-2% of output tokens
+// without measurable quality loss. The anchors apply to USER-FACING TEXT only —
+// code blocks, diffs and tool arguments are exempt, write them at full length.
 export function sharedToneAndStyle(): string {
   return `# Tone and style
 
  - Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.
- - Your responses should be short and concise.
+ - **Length anchors (text output, not code)**: status updates between tool calls ≤80 words. Final reply at end of turn ≤200 words unless the task genuinely requires more detail (post-mortems, architecture explanations, multi-file walkthroughs). One sentence beats three; lead with the answer.
  - When referencing specific functions or pieces of code include the pattern file_path:line_number to allow the user to easily navigate to the source code location.
  - When referencing GitHub issues or pull requests, use the owner/repo#123 format (e.g. ithustle/exodus-ide#100) so they render as clickable links.
  - Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.`

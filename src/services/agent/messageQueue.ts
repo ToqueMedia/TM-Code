@@ -20,9 +20,8 @@
  *   Image attachments live in `pastedContents` as `Attachment[]` and are
  *   resolved at execution time.
  * - Logging goes through `recordQueueOperation` from `./queueOperationLog.ts`
- *   (writes JSONL to ~/.toquemedia-studio/sessions/{projectHash}/
- *   queue-operations.jsonl) instead of Claude Code's SQLite-backed
- *   sessionStorage.
+ *   (writes JSONL to <project>/.toquemedia/sessions/queue-operations.jsonl —
+ *   gitignored) instead of Claude Code's SQLite-backed sessionStorage.
  */
 
 import {

@@ -38,13 +38,41 @@ async function logPermission(message: string, level: 'info' | 'warn' | 'error' |
   } catch { /* chatStore not ready — drop the log line silently */ }
 }
 
-/** Persist/reload autoApproveDiffs from localStorage */
+/** Persist/reload autoApproveDiffs from localStorage.
+ *  This is a CROSS-PROJECT user preference (the toggle is in chat chrome),
+ *  so it stays in localStorage. The per-project `approvedScopes` set is a
+ *  trust grant and lives in `<project>/.toquemedia/permissions.json` via
+ *  `permissionPersistence.ts` — see that file for the rationale. */
 const STORAGE_KEY = 'chat_autoApproveDiffs'
 function loadAutoApproveDiffs(): boolean {
   try { return localStorage.getItem(STORAGE_KEY) === 'true' } catch { return false }
 }
 function saveAutoApproveDiffs(value: boolean) {
   try { localStorage.setItem(STORAGE_KEY, String(value)) } catch { /* storage unavailable */ }
+}
+
+/** Fire-and-forget write of `approvedScopes` to the current project's
+ *  `.toquemedia/permissions.json`. Resolves the project path lazily so
+ *  this module doesn't pull the project store into its module graph at
+ *  load time. */
+function persistApprovedScopes(scopes: Set<'core' | 'mcp'>): void {
+  void Promise.all([
+    import('./projectStore'),
+    import('../services/agent/permissionPersistence'),
+  ]).then(([{ useProjectStore }, { savePermissionsToDisk }]) => {
+    const path = useProjectStore.getState().currentProject?.path
+    if (path) void savePermissionsToDisk(path, scopes)
+  }).catch(() => { /* persistence failure must not break the permission flow */ })
+}
+
+/** Replace the live `approvedScopes` set — used at project-open time to
+ *  hydrate from disk. Exposed as a module function rather than a store
+ *  action so the projectStore hook can call it without round-tripping
+ *  through React's update queue. */
+export function hydrateApprovedScopes(scopes: Set<'core' | 'mcp'>): void {
+  // Set directly — no persistence write here: this IS the load step. The
+  // disk file is already canonical; writing back would be a no-op.
+  usePermissionStore.setState({ approvedScopes: scopes })
 }
 
 const SAFE_TOOLS = new Set([
@@ -283,6 +311,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       }
 
       set({ pendingPermission: null, approvedScopes: scopes, autoApproveDiffs, permissionQueue: remaining })
+      persistApprovedScopes(scopes)
       advanceQueue(set, get)
     }
   },
@@ -331,7 +360,9 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
 
   resetAutoApprove: () => {
     saveAutoApproveDiffs(false)
-    set({ approvedScopes: new Set(), autoApproveDiffs: false })
+    const empty = new Set<'core' | 'mcp'>()
+    set({ approvedScopes: empty, autoApproveDiffs: false })
+    persistApprovedScopes(empty)
   },
 
   clearPending: () => {

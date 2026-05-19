@@ -2130,7 +2130,12 @@ class ToolExecutor {
           type: 'object',
           properties: {
             question: { type: 'string', description: 'The task or question for the sub-agent' },
-            context: { type: 'string', description: 'Optional context to help the sub-agent (e.g., relevant file paths, what you already know)' }
+            context: { type: 'string', description: 'Optional context to help the sub-agent (e.g., relevant file paths, what you already know)' },
+            thoroughness: {
+              type: 'string',
+              enum: ['quick', 'medium', 'thorough'],
+              description: 'How much effort the sub-agent should spend. "quick" = single targeted lookup (1-3 tool calls, one location); "medium" = moderate exploration (3-8 tool calls, a few related locations); "thorough" = comprehensive search across multiple locations and naming conventions. You have the context to pick — choose the smallest that will answer the question. Defaults to "medium" when omitted.'
+            }
           },
           required: ['question']
         }
@@ -2138,6 +2143,7 @@ class ToolExecutor {
       execute: async (input) => {
         const question = input.question as string
         const context = (input.context as string) || ''
+        const thoroughness = (input.thoroughness as 'quick' | 'medium' | 'thorough' | undefined) ?? 'medium'
 
         // Lazy import to avoid circular dependency
         const { default: AgentService } = await import('./agentService')
@@ -2162,7 +2168,20 @@ class ToolExecutor {
         })
 
         const projectRoot = this.getProjectRoot()
+        // Caller-parameterized verbosity (technique #17). The parent agent
+        // knows whether this is a quick "where is X defined" probe or a
+        // deep refactor investigation — pass it through so the sub-agent
+        // calibrates effort accordingly. Wrong-sized effort is the most
+        // expensive failure mode: "thorough" on a 1-file question wastes
+        // turns; "quick" on a refactor question misses the bug.
+        const effortDirective = thoroughness === 'quick'
+          ? '**Effort: QUICK** — single targeted lookup. Stop after 1-3 tool calls. Do not branch into related questions — answer the literal question and return.'
+          : thoroughness === 'thorough'
+            ? '**Effort: THOROUGH** — comprehensive search. Cover multiple locations and naming conventions, follow related references, read full files (not snippets) when relevant. Report what you searched, not just what you found.'
+            : '**Effort: MEDIUM** — moderate exploration. Check 2-3 likely locations, follow references one hop deep, then synthesise. Do not exhaustively enumerate; do not stop at the first plausible match.'
         const systemPrompt = `You are a sub-agent inside TM Code. Complete the task using the available tools. You can read, create, edit, and search files, AND search the internet for information.
+
+${effortDirective}
 
 Available tools:
 - File operations: read_file, write_file, create_file, edit_file
@@ -2172,8 +2191,6 @@ Available tools:
   - web_fetch — takes one complete target URL you already know and returns the contents of that single page. This is how you read the body of a specific article, doc, or API reference.
   - Typical flow: start with web_search to find relevant URLs, then web_fetch on the most promising result to read its full content.
 - Diagnostics: get_diagnostics
-
-Be thorough but concise.
 
 Project root: ${projectRoot}`
 
@@ -2278,6 +2295,11 @@ Project root: ${projectRoot}`
           properties: {
             question: { type: 'string', description: 'The task or question for the background agent' },
             context: { type: 'string', description: 'Optional context (file paths, prior knowledge)' },
+            thoroughness: {
+              type: 'string',
+              enum: ['quick', 'medium', 'thorough'],
+              description: 'How much effort the background agent should spend. "quick" = single targeted probe; "medium" = moderate exploration; "thorough" = comprehensive multi-location search. Background agents have a 30-turn cap, so "thorough" may still be bounded. Defaults to "medium" when omitted.'
+            },
           },
           required: ['question']
         }
@@ -2285,6 +2307,7 @@ Project root: ${projectRoot}`
       execute: async (input) => {
         const question = input.question as string
         const context = (input.context as string) || ''
+        const thoroughness = (input.thoroughness as 'quick' | 'medium' | 'thorough' | undefined) ?? 'medium'
 
         const { useBackgroundAgentStore } = await import('../../stores/backgroundAgentStore')
         const bgStore = useBackgroundAgentStore.getState()
@@ -2315,8 +2338,16 @@ Project root: ${projectRoot}`
         })
 
         const projectRoot = this.getProjectRoot()
+        // Caller-parameterized verbosity (technique #17). Parent picks the
+        // effort level based on what they actually need; the background
+        // agent calibrates rather than always running at full thoroughness.
+        const effortDirective = thoroughness === 'quick'
+          ? '**Effort: QUICK** — single targeted probe. Stop after 1-3 tool calls.'
+          : thoroughness === 'thorough'
+            ? '**Effort: THOROUGH** — comprehensive multi-location search (bounded by the 30-turn cap). Cover alternative naming conventions and follow related references.'
+            : '**Effort: MEDIUM** — moderate exploration. 2-3 likely locations, references one hop deep, then synthesise.'
         subAgent.setSystemPrompt(
-          `You are a background research agent inside TM Code. Investigate the task using read-only tools. Be thorough and produce a clear summary.\n\nProject root: ${projectRoot}`
+          `You are a background research agent inside TM Code. Investigate the task using read-only tools and produce a clear summary.\n\n${effortDirective}\n\nProject root: ${projectRoot}`
         )
 
         const agentId = `bg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -2429,7 +2460,7 @@ Project root: ${projectRoot}`
     this.tools.set('update_tasks', {
       definition: {
         name: 'update_tasks',
-        description: 'Create or update a task list visible to the developer in the chat UI. Use at the start of complex work to show what you plan to do, and update task statuses as you complete each step. The developer sees checkboxes with real-time progress.',
+        description: 'Create or update a task list visible to the developer in the chat UI. Use at the start of complex work to show what you plan to do, and update task statuses as you complete each step. The developer sees checkboxes with real-time progress.\n\n**Completion contract — each `completed` flip is a claim that THAT specific task\'s acceptance was verified** (test passed, endpoint smoked successfully, diff approved AND behaviour confirmed). Filesystem existence is not completion: a scaffold file written in a previous turn does NOT mean the task that creates it is done.\n\n**One transition per call is the norm.** When resuming after an interruption, do NOT flip multiple pending tasks to completed in a single call by inferring from the filesystem — the tool returns a warning in that case so the call can be reconsidered. Legitimate batch transitions only happen at seed time (all `pending`) or at the very end of a flow (every task already verified one-by-one in prior calls).',
         input_schema: {
           type: 'object',
           properties: {
@@ -2458,14 +2489,79 @@ Project root: ${projectRoot}`
         const tasks = Array.isArray(raw)
           ? (raw as Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>)
           : []
+
+        // Capture the previous tracker BEFORE applying the new state so we
+        // can detect batch-completion jumps. Snapshot is shallow {id, status}
+        // so iteration is cheap on large trackers.
+        const prev = useAgentStore.getState().tasks
+        const prevCompletedIds = new Set(prev.filter(t => t.status === 'completed').map(t => t.id))
+
         useAgentStore.getState().setTasks(tasks)
+
+        // Persist to `<project>/.toquemedia/tasks.json` so the tracker
+        // survives app restarts, budget interrupts, and chat-session
+        // boundaries. The agent reading the prompt next turn sees the same
+        // state regardless of zustand re-init. Fire-and-forget on the IO —
+        // failures only warn; the in-memory store is still live and the
+        // next mutation will retry the persist.
+        const project = useProjectStore.getState().currentProject
+        if (project?.path) {
+          void import('./taskPersistence').then(({ saveTasksToDisk }) =>
+            saveTasksToDisk(project.path, tasks),
+          )
+        }
+
+        // Invalidate the prompt cache. `getTrackerStateSection` is part of
+        // the dynamic block but the cache key does NOT include a tracker
+        // signature — without this bump, the next turn within the 30s TTL
+        // would serve a stale prompt rendering the PRE-update tracker.
+        // That's exactly the failure this fix was meant to prevent. Using
+        // `bumpFsVersion` (not the regex-based invalidatePromptCache path)
+        // because `fsVersion` is the live key the cache reads on every
+        // build — see fsVersion.ts for why it's the safer hook.
+        import('../fsVersion').then(m => m.bumpFsVersion('update_tasks')).catch(() => { /* non-critical */ })
+
         // Plan-mode progress: a successful update_tasks after PLAN.md is the
         // signal that the architect has finished. Combined with planFileWritten
         // this trips the strict-STOP guard in execute() on any subsequent call.
         if (this.planMode && this.planFileWritten) {
           this.planTasksSeeded = true
         }
+
         const completed = tasks.filter(t => t.status === 'completed').length
+        const newlyCompletedIds = tasks
+          .filter(t => t.status === 'completed' && !prevCompletedIds.has(t.id))
+          .map(t => t.id)
+
+        // Batch-completion guard — soft warning, not a block. Returns the
+        // standard success message PLUS a structured warning when more than
+        // one task transitioned to completed since the previous call (and
+        // it's not the seed state where prev was empty). The agent reads
+        // the warning in its tool result and either confirms the jump (if
+        // each task was genuinely verified in this same turn) or reverts
+        // the over-claim on the next call.
+        //
+        // This is the exact failure mode observed in the post-budget-interrupt
+        // session: 12 → 19 completed in one call, then 20 → 23 with a single
+        // file write — both based on filesystem inference rather than per-task
+        // verification. The warning surfaces the jump as a question, not a
+        // rule violation, so legitimate sequenced work is unaffected.
+        const wasSeed = prev.length === 0
+        const jumpSize = newlyCompletedIds.length
+        if (!wasSeed && jumpSize > 1) {
+          return (
+            `Task list updated: ${completed}/${tasks.length} completed.\n\n` +
+            `⚠️ Batch-completion warning: ${jumpSize} tasks flipped to \`completed\` in this single call ` +
+            `(IDs: ${newlyCompletedIds.join(', ')}). Each \`completed\` is a claim that THAT task's ` +
+            `acceptance was verified — test passed, endpoint smoked, diff approved AND behaviour confirmed. ` +
+            `If you batch-marked them by inferring "files exist → tasks done", revert the over-claim now: ` +
+            `keep only the one you actually verified this turn as \`completed\`, return the rest to \`pending\`, ` +
+            `and pick one to set \`in_progress\`. If every task in the batch WAS verified one-by-one earlier in ` +
+            `this turn (separate tool calls per task), confirm by ignoring this warning — but the developer ` +
+            `sees the warning too, so the bar is "I can defend each completion".`
+          )
+        }
+
         return `Task list updated: ${completed}/${tasks.length} completed.`
       }
     })
@@ -2794,7 +2890,7 @@ Project root: ${projectRoot}`
       definition: {
         name: 'provision_database',
         description:
-          "Set up TM Code Database (per-app SQLite/libSQL on Turso) for the current project. Reserves the app's database on the platform, mints an app-scoped TMDB token, and writes TMDB_URL + TMDB_TOKEN to .env. The Turso platform token and per-DB JWT stay on the TM Code Worker — user code talks to the worker via HTTPS using the TMDB_TOKEN. Use ONCE when the project needs persistence in production (an auth user record, app state, etc.). Local dev does not need this — db.ts switches between a local SQLite file and TMDB_* based on NODE_ENV. After it returns, generate `server/db.ts` with the dev/prod connection switch from read_skill(\"publish-backend\") and `server/schema.ts` for Drizzle. The endpoint is idempotent — calling again returns the same credentials and is safe.",
+          "Set up TM Code Database (per-app SQLite/libSQL on Turso) for the current project. Reserves the app's database on the platform, mints an app-scoped TMDB token, and writes TMDB_URL + TMDB_TOKEN to .env. The Turso platform token and per-DB JWT stay on the TM Code Worker — user code talks to the worker via HTTPS using the TMDB_TOKEN. Call when the project needs persistence in production (an auth user record, app state, anything that must survive container restarts). Local dev alone does not need this — db.ts can stay on `DATABASE_URL=file:./dev.db`. The endpoint is fully idempotent: calling on an already-provisioned project returns the same credentials with zero side-effect, so call it whenever the .env mechanical check (look for TMDB_URL and TMDB_TOKEN) shows either is missing — including after a transient failure where you're retrying. After a successful return, generate `server/db.ts` with the dev/prod connection switch from read_skill(\"publish-backend\") and `server/schema.ts` for Drizzle.",
         input_schema: {
           type: 'object',
           properties: {},
@@ -2852,8 +2948,9 @@ Project root: ${projectRoot}`
             `Required recovery:\n` +
             `  1. STOP the data-layer task. Do not write db.ts / schema.ts / migrations.\n` +
             `  2. Tell the developer what happened — quote the error above verbatim.\n` +
-            `  3. Suggest one of: (a) retry provision_database in a new chat turn if transient, (b) report to TM Code support if it persists, (c) keep persistence local-dev-only by using DATABASE_URL=file:./dev.db without the prod branch.\n` +
-            `  4. Wait for the developer's decision. Do not auto-retry.`
+            `  3. If the error says "group not found" / "HTTP 400" / "Turso ..." (any platform-side rejection): ask the developer to share the line that starts with \`[turso] createDatabase:\` from the TM Code Worker logs (\`wrangler tail\` or the dev terminal). That line shows the org + group + db-name the worker actually sent, which pinpoints whether it's a config issue (wrong group), a stale build (wrangler dev not restarted), or a true upstream outage.\n` +
+            `  4. Suggest one of: (a) retry provision_database in a new chat turn if transient, (b) report to TM Code support if it persists, (c) keep persistence local-dev-only by using DATABASE_URL=file:./dev.db without the prod branch.\n` +
+            `  5. Wait for the developer's decision. Do not auto-retry.`
           )
         }
 

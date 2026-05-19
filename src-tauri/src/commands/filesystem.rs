@@ -557,3 +557,107 @@ pub async fn read_skill_content(skill_path: String) -> Result<SkillContent, Stri
     })
 }
 
+
+
+// ── Agent state persistence (.toquemedia/) ─────────────────────────────
+//
+// Per-project hidden folder for agent state that must survive across:
+//   - app restarts (battery dies, crash, IDE quit + reopen),
+//   - session boundaries (budget interrupt, then resume hours later),
+//   - filesystem-as-snapshot views (the folder is committable so the
+//     state can travel with the project to another machine / agent).
+//
+// The folder lives at `<project>/.toquemedia/`. Only files whose name
+// matches `[a-zA-Z0-9_.-]+` are read or written — no path traversal,
+// no nested directories, no symlinks followed. The whole API is
+// project-rooted: the caller passes the project path; the resolved
+// `.toquemedia/<filename>` MUST live underneath after canonicalisation
+// or the call refuses.
+//
+// Pattern matches `write_env_vars` defense-in-depth: canonicalise the
+// project root, join, then `starts_with(project_root)` check before
+// any I/O.
+
+fn validate_agent_state_filename(filename: &str) -> Result<(), String> {
+    if filename.is_empty() {
+        return Err("Agent state filename cannot be empty".to_string());
+    }
+    if filename.len() > 64 {
+        return Err(format!("Agent state filename too long ({} chars)", filename.len()));
+    }
+    if !filename
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err(format!("Invalid agent state filename: {}", filename));
+    }
+    if filename.starts_with('.') || filename.contains("..") {
+        return Err(format!("Agent state filename cannot start with . or contain .. ({})", filename));
+    }
+    Ok(())
+}
+
+fn agent_state_path(project_path: &str, filename: &str) -> Result<PathBuf, String> {
+    validate_agent_state_filename(filename)?;
+    let project = Path::new(project_path);
+    if !project.exists() || !project.is_dir() {
+        return Err(format!("Project path does not exist: {}", project_path));
+    }
+    let canonical_project =
+        canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
+    let dir = canonical_project.join(".toquemedia");
+    let file = dir.join(filename);
+    // Defense-in-depth: resolved file path must still be inside the project.
+    if !file.starts_with(&canonical_project) {
+        return Err("Resolved .toquemedia path escapes project root".to_string());
+    }
+    Ok(file)
+}
+
+/// Read a JSON state blob from `<project>/.toquemedia/<filename>`.
+///
+/// Returns `Ok(None)` when the file does not exist — distinguishes
+/// "never written" from "read failure" so the TS layer can hydrate from
+/// scratch on first open without surfacing a misleading error.
+#[tauri::command]
+pub async fn read_agent_state(
+    project_path: String,
+    filename: String,
+) -> Result<Option<String>, String> {
+    let path = agent_state_path(&project_path, &filename)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    std::fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|e| format!("Failed to read {}: {}", filename, e))
+}
+
+/// Write a JSON state blob to `<project>/.toquemedia/<filename>`.
+///
+/// Creates the `.toquemedia/` directory on first call. Writes are
+/// atomic-ish: write to `<filename>.tmp` then rename, so a crash mid-
+/// write does not leave a half-file the next read would parse as
+/// corrupted JSON.
+#[tauri::command]
+pub async fn write_agent_state(
+    project_path: String,
+    filename: String,
+    content: String,
+) -> Result<(), String> {
+    let path = agent_state_path(&project_path, &filename)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create .toquemedia/: {}", e))?;
+    }
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|s| s.to_str()).unwrap_or("")
+    ));
+    std::fs::write(&tmp, content)
+        .map_err(|e| format!("Failed to write {}: {}", filename, e))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("Failed to commit {}: {}", filename, e))?;
+    Ok(())
+}
+

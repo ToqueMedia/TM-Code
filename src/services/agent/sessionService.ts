@@ -37,7 +37,11 @@ export function captureByokSnapshot(): ByokSessionSnapshot | null {
 
 const MAX_SESSIONS_PER_PROJECT = 50
 const MAX_TOOL_RESULT_LENGTH = 2000
-const BASE_DIR_NAME = '.toquemedia-studio'
+/** Legacy home-dir root for sessions written before the 2026-05 migration
+ *  to `<project>/.toquemedia/sessions/`. Kept only as the SOURCE side of
+ *  the one-shot migration in `migrateLegacySessions`; nothing else reads
+ *  from here. */
+const LEGACY_BASE_DIR_NAME = '.toquemedia-studio'
 
 class SessionService {
   private static instance: SessionService
@@ -81,16 +85,29 @@ class SessionService {
     this.getTurnSnapshotFn = fn
   }
 
-  private async getBasePath(): Promise<string> {
+  /** Legacy home-dir base — used ONLY by `migrateLegacySessions` to locate
+   *  the pre-migration data on first init. New writes never touch this. */
+  private async getLegacyBasePath(): Promise<string> {
     if (this.basePath) return this.basePath
     const home = await invoke<string>('get_home_directory')
     const normalized = home.endsWith('/') || home.endsWith('\\') ? home.slice(0, -1) : home
-    this.basePath = `${normalized}/${BASE_DIR_NAME}`
+    this.basePath = `${normalized}/${LEGACY_BASE_DIR_NAME}`
     return this.basePath
   }
 
+  /** Sessions live INSIDE the project at `<project>/.toquemedia/sessions/`
+   *  (migrated 2026-05 from `~/.toquemedia-studio/sessions/{projectHash}/`).
+   *  Project-rooted so the conversation history travels with the project:
+   *  move the folder to another machine, the agent picks up where it left
+   *  off without an opaque hash key going stale on the new machine. */
   private async getSessionsDir(projectPath: string): Promise<string> {
-    const base = await this.getBasePath()
+    const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
+    return `${normalized}/.toquemedia/sessions`
+  }
+
+  /** Path under the LEGACY home-dir scheme. Used only during migration. */
+  private async getLegacySessionsDir(projectPath: string): Promise<string> {
+    const base = await this.getLegacyBasePath()
     const hash = await hashProjectPath(projectPath)
     return `${base}/sessions/${hash}`
   }
@@ -120,12 +137,113 @@ class SessionService {
       logger.error('session', 'Failed to create sessions directory:', error)
     }
 
+    // One-shot migration from the legacy home-dir layout. Runs every init
+    // but is cheap (`list_directory` + a marker check) and short-circuits
+    // when there's nothing to migrate. After it succeeds the marker stops
+    // future runs from doing anything.
+    try {
+      await this.migrateLegacySessions(projectPath)
+    } catch (error) {
+      // Migration failure is non-fatal — sessions in the legacy location
+      // remain readable via manual rescue if ever needed. New writes go
+      // to the project regardless.
+      logger.warn('session', 'Legacy session migration failed (non-fatal):', error)
+    }
+
+    // Ensure `.toquemedia/.gitignore` carries the sessions/ + queue
+    // entries. The Rust helper is idempotent — adds only what's missing.
+    try {
+      await invoke('ensure_toquemedia_gitignore_cmd', { projectPath })
+    } catch (error) {
+      logger.warn('session', 'Failed to write .toquemedia/.gitignore:', error)
+    }
+
     // Clean up stale empty sessions from previous runs (e.g. if app crashed before cleanup)
     try {
       await this.cleanupEmptySessions(projectPath)
     } catch {
       // Ignore — index may not exist yet on first run
     }
+  }
+
+  /**
+   * One-shot best-effort migration of the legacy session tree from
+   * `~/.toquemedia-studio/sessions/{projectHash}/` into the project's
+   * own `.toquemedia/sessions/`. Idempotent via a `.migrated` marker
+   * file in the new directory — after the first successful run, every
+   * subsequent init returns immediately.
+   *
+   * The migration is intentionally simple: copy every file from legacy
+   * to new (encryption is keyed on `projectPath`, which is unchanged,
+   * so encrypted files keep decrypting fine), then write the marker.
+   * The legacy tree is LEFT in place — we don't risk data loss if the
+   * user rolls back, and the orphan can be cleaned by an admin command
+   * later. The legacy dir won't appear in the IDE again because nothing
+   * reads from it post-migration.
+   */
+  private async migrateLegacySessions(projectPath: string): Promise<void> {
+    const newDir = await this.getSessionsDir(projectPath)
+    const markerPath = `${newDir}/.migrated`
+
+    // Marker check — already migrated.
+    try {
+      await invoke<string>('read_file', { path: markerPath })
+      return
+    } catch { /* not migrated yet — continue */ }
+
+    const legacyDir = await this.getLegacySessionsDir(projectPath)
+    // Probe the legacy dir. If it doesn't exist or is empty, write the
+    // marker and exit — there's nothing to migrate, but we still drop
+    // the marker so future inits don't re-probe.
+    let legacyEntries: string[] = []
+    try {
+      legacyEntries = await invoke<string[]>('list_directory', { path: legacyDir })
+    } catch {
+      // Legacy dir missing — fresh install, no migration needed.
+      try {
+        await invoke('write_file', { path: markerPath, content: 'no-legacy' })
+      } catch { /* marker write best-effort */ }
+      return
+    }
+    if (legacyEntries.length === 0) {
+      try {
+        await invoke('write_file', { path: markerPath, content: 'empty-legacy' })
+      } catch { /* best-effort */ }
+      return
+    }
+
+    // Copy every file. The legacy dir is flat (session_*.json, active_session.json,
+    // sessions_index.json, queue-operations.jsonl) — no nested traversal needed.
+    let migrated = 0
+    for (const entry of legacyEntries) {
+      // `list_directory` returns full paths or basenames depending on impl;
+      // be tolerant of both by computing the basename ourselves.
+      const basename = entry.split('/').pop() ?? entry
+      const srcPath = entry.includes('/') ? entry : `${legacyDir}/${basename}`
+      const destPath = `${newDir}/${basename}`
+      try {
+        const content = await invoke<string>('read_file', { path: srcPath })
+        await invoke('write_file', { path: destPath, content })
+        migrated++
+      } catch (err) {
+        logger.warn('session', `Failed to migrate ${basename}:`, err)
+      }
+    }
+    logger.info('session', `Migrated ${migrated}/${legacyEntries.length} legacy session files for ${projectPath}`)
+
+    // Marker written last so partial migrations (process killed mid-loop)
+    // re-attempt next init and finish copying. The copy step is idempotent
+    // — write_file overwrites — so re-running is safe.
+    try {
+      await invoke('write_file', {
+        path: markerPath,
+        content: JSON.stringify({
+          migratedAt: new Date().toISOString(),
+          fileCount: migrated,
+          legacyDir,
+        }, null, 2),
+      })
+    } catch { /* marker write best-effort */ }
   }
 
   // === Session CRUD ===

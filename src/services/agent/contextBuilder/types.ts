@@ -77,6 +77,14 @@ export interface PromptContext {
    *  (#auth-google, #auth-email-password, #design). Used to inline CRITICAL
    *  rules at turn 1 — before scaffoldingDetector has anything to find. */
   hashtagSkills: string[]
+  /** Live snapshot of the in-memory task tracker (the one `update_tasks`
+   *  writes to via agentStore). Distinct from `todoContent` (which is the
+   *  static TODO.md markdown — stale statuses by design): this array carries
+   *  the live status of every task as the agent has marked it. Injected as a
+   *  dynamic section so the agent reading "what's done / what's next" has a
+   *  single deterministic source rather than inferring from the filesystem.
+   *  Empty array means no tracker has been seeded (single-task work, no plan). */
+  currentTasks: Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>
 }
 
 export interface PromptCacheEntry {

@@ -285,6 +285,59 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'Failed to load project state:', error);
           }
 
+          // Hydrate the agent task tracker from disk. The tracker lives at
+          // `<project>/.toquemedia/tasks.json` — committable so it travels
+          // with the project, and the canonical source so a budget interrupt
+          // / app restart / new chat session in the same project doesn't
+          // make the agent re-infer progress from the filesystem (the
+          // failure mode behind the 2026-05-19 batch-completion bug).
+          try {
+            const [{ loadTasksFromDisk }, { useAgentStore }] = await Promise.all([
+              import('../services/agent/taskPersistence'),
+              import('./agentStore'),
+            ]);
+            const tasks = await loadTasksFromDisk(path);
+            useAgentStore.getState().setTasks(tasks);
+          } catch (error) {
+            // Tracker hydration is non-critical — fall back to an empty
+            // tracker rather than block project open. The agent will seed
+            // a fresh one on its next /plan or update_tasks call.
+            logger.warn('project', 'Failed to hydrate task tracker:', error);
+          }
+
+          // Hydrate per-project permission grants. Trust is project-scoped:
+          // if the user approved "all core tools" the last time they worked
+          // on this project, that grant is restored on reopen. New projects
+          // start with an empty set — the prompts re-fire and the user
+          // re-approves explicitly. Failure path is fail-open (empty set =
+          // re-prompt), which preserves the safety default.
+          try {
+            const [{ loadPermissionsFromDisk }, { hydrateApprovedScopes }] = await Promise.all([
+              import('../services/agent/permissionPersistence'),
+              import('./permissionStore'),
+            ]);
+            const scopes = await loadPermissionsFromDisk(path);
+            hydrateApprovedScopes(scopes);
+          } catch (error) {
+            logger.warn('project', 'Failed to hydrate permission grants:', error);
+          }
+
+          // Hydrate per-project HTTP Client tabs + history. The Postman-like
+          // panel is expected to remember what you were testing; without this
+          // the user's request bodies, auth tokens, and 50-entry history
+          // vanish on every reopen. Failure path leaves the default single
+          // empty tab.
+          try {
+            const [{ loadHttpClientFromDisk }, { hydrateHttpClientFromDisk }] = await Promise.all([
+              import('../services/httpClientPersistence'),
+              import('./httpClientStore'),
+            ]);
+            const loaded = await loadHttpClientFromDisk(path);
+            if (loaded) hydrateHttpClientFromDisk(loaded);
+          } catch (error) {
+            logger.warn('project', 'Failed to hydrate HTTP Client state:', error);
+          }
+
           // Check for TMS.md — suggest /init only when (a) it's missing AND
           // (b) the project actually has content to analyze. Suggesting it on
           // a freshly-opened empty folder is noise: there is nothing to
@@ -467,11 +520,13 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'remove_from_recent_projects failed:', err);
           }
 
-          // Async cleanup: delete every per-project artefact under
-          // ~/.toquemedia-studio/. Sessions live at sessions/{hash}/,
-          // checkpoints at checkpoints/{hash}/. Both must go — leaving
-          // checkpoints behind would orphan snapshot files that can never
-          // be loaded again (their parent project is gone).
+          // Async cleanup: delete every per-project artefact. Sessions
+          // and checkpoints both live inside the project at
+          // `<project>/.toquemedia/{sessions,checkpoints}/` (2026-05
+          // migration — previously in `~/.toquemedia-studio/`). Deleting
+          // the project directory itself would also wipe them, but the
+          // explicit calls below ensure cleanup runs even when the
+          // project folder removal fails or is partial.
           await sessionService.deleteAllProjectSessions(projectPath);
           await CheckpointService.getInstance().deleteAllProjectCheckpoints(projectPath);
           await invoke('delete_project', { projectId, projectPath });

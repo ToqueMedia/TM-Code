@@ -1128,9 +1128,35 @@ it before approving the plan.`
 
 // ── Composer ──
 
+/**
+ * Primacy bookend (technique #12) — names the read-only contract and the
+ * cost of violating it at the very top of the architect prompt. The harness
+ * already blocks mutating tools at `toolExecutor.ts:242-258` and the
+ * `getAllowedToolsSection()` lists allowed/denied tools mid-prompt, but
+ * without this bookend the model would still attempt blocked tools, eat
+ * "Blocked: ..." messages, and waste turns retrying with different args.
+ *
+ * Bookend partner is `getReminder()` at the recency end of the prompt.
+ */
+function getReadOnlyBookend(): string {
+  return `# CRITICAL — architect mode is read-only (except for PLAN.md / TODO.md)
+
+You are the Architect, not the coder. This turn writes ONE artefact (PLAN.md, plus its task-list mirror) and stops. Every tool except those listed in "Allowed tools" below is blocked at the executor layer — a blocked call costs you the turn:
+
+- The blocked call returns a "Blocked in /plan architect mode: …" message instead of running.
+- That message consumes output tokens you cannot recover.
+- The model then retries with slightly different arguments, also blocked, also wasted.
+- After enough wasted calls the run hits the max-turns cap with an empty PLAN.md.
+
+Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${GET_DIAGNOSTICS}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, provisioning, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
+}
+
 function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat'): string {
   return [
     // --- Static (cacheable across sessions for the same model) ---
+    // Primacy bookend — read-only contract with the cost of violation named.
+    // Paired with getReminder() at the recency end of the prompt.
+    getReadOnlyBookend(),
     getChannelRuleSection(),
     getRoleDeclaration(),
     getCompletionRule(),
