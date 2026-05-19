@@ -1127,6 +1127,18 @@ Developer message: ${displayText}
             }
           }
 
+          // Post-turn memory extraction. Fire-and-forget on the main
+          // agent only — sub-agents share their parent's session and
+          // shouldn't trigger their own extraction passes (would duplicate
+          // proposals for the same exchange). Skip when the user message
+          // wasn't a plain string (image attachments, structured input)
+          // because the extractor expects text. Failures are silent;
+          // proposals are nice-to-have, not load-bearing.
+          if (!this.lightweightOptions && typeof userMessage === 'string') {
+            void this.runMemoryExtractor(userMessage, turnResult.textContent || '')
+              .catch(() => { /* non-fatal */ })
+          }
+
           callbacks.onDone(turnResult.textContent || '')
           return
         }
@@ -1422,6 +1434,80 @@ Developer message: ${displayText}
    * (c) `<analysis>` drafting block — the model thinks before writing the
    *     summary. Stripped post-hoc by formatCompactSummary().
    */
+  /**
+   * Fire-and-forget post-turn memory extraction. Reads the (userMessage,
+   * assistantText) tuple plus the current memdir names, asks the per-plan
+   * extractor model for proposals, persists them as pending proposals so
+   * the NEXT turn's prompt builder surfaces them to the agent.
+   *
+   * Errors are swallowed deliberately — extraction is opportunistic; if
+   * the side-car call fails for any reason the agent loop carries on
+   * with the existing "agent saves what it noticed" discipline.
+   */
+  private async runMemoryExtractor(
+    userMessage: string,
+    assistantText: string,
+  ): Promise<void> {
+    try {
+      const [
+        { extractMemoriesFromTurn },
+        { recordProposals },
+        { invalidateMemorySelectorCache },
+        { loadMemoryIndex, parseIndexEntries },
+        { useProjectStore },
+      ] = await Promise.all([
+        import('./memoryExtractor'),
+        import('./memoryProposalsStore'),
+        import('./memorySelector'),
+        import('./memdir'),
+        import('../../stores/projectStore'),
+      ])
+
+      const projectPath = useProjectStore.getState().currentProject?.path ?? null
+
+      // Collect existing memory names so the extractor doesn't re-propose
+      // entries the developer (or a previous turn) already saved.
+      const [userResult, projectResult] = await Promise.all([
+        loadMemoryIndex('user'),
+        projectPath
+          ? loadMemoryIndex('project', projectPath)
+          : Promise.resolve({ content: null } as { content: string | null }),
+      ])
+      const existingNames: string[] = []
+      if (userResult.content) {
+        for (const e of parseIndexEntries(userResult.content)) existingNames.push(e.name)
+      }
+      if (projectResult.content) {
+        for (const e of parseIndexEntries(projectResult.content)) existingNames.push(e.name)
+      }
+
+      const result = await extractMemoriesFromTurn({
+        userMessage,
+        assistantText,
+        existingNames,
+      })
+
+      if (result.proposals.length > 0) {
+        await recordProposals(projectPath, result.proposals)
+        // Bust the selector cache — the next prompt build's MEMORY.md
+        // hasn't changed yet but the proposals reminder is part of the
+        // dynamic block; clearing keeps cache state predictable.
+        invalidateMemorySelectorCache()
+      }
+
+      // Telemetry — measure extractor yield vs cost in aggregate.
+      void import('../../services/analytics').then(({ trackEvent }) =>
+        trackEvent('memory_extractor_run', {
+          proposals: result.proposals.length,
+          latency_ms: result.latencyMs,
+          existing_count: existingNames.length,
+        }),
+      ).catch(() => { /* analytics never blocks */ })
+    } catch (err) {
+      logger.debug('agent', '[memory-extractor] post-turn run failed:', err)
+    }
+  }
+
   private async callSummarizationAPI(messages: AnthropicMessage[]): Promise<string> {
     const serialized = this.serializeMessagesForSummary(messages)
 

@@ -2671,10 +2671,18 @@ Project root: ${projectRoot}`
           console.warn('[save_memory] index update failed:', err)
         }
 
-        // Invalidate the system-prompt cache so the next turn sees the
-        // new memory injected. fsVersion is the right hook — see
-        // contextBuilder.ts:175 for the cache key.
+        // Invalidate caches so the next turn sees the new memory:
+        //   - fsVersion bump invalidates the prompt cache (contextBuilder).
+        //   - memory-selector cache clear forces a fresh relevance pass on
+        //     the new catalog instead of serving a stale name list.
         import('../fsVersion').then(m => m.bumpFsVersion(`save_memory:${name}`)).catch(() => {})
+        import('./memorySelector').then(m => m.invalidateMemorySelectorCache()).catch(() => {})
+        // If this save corresponded to an auto-extracted proposal, mark
+        // the proposal `saved` in the audit log and drop it from the
+        // active working set so it doesn't re-fire on the next prompt.
+        import('./memoryProposalsStore').then(m =>
+          m.markProposalSaved(projectPath ?? null, name, type),
+        ).catch(() => { /* noop */ })
 
         return `Memory saved: ${scope}/${filename} (${type}). It will appear in the persistent-memory section of every future prompt for this ${scope === 'project' ? 'project' : 'IDE installation'}.`
       },
@@ -2748,6 +2756,7 @@ Project root: ${projectRoot}`
         }
 
         import('../fsVersion').then(m => m.bumpFsVersion(`forget_memory:${name}`)).catch(() => {})
+        import('./memorySelector').then(m => m.invalidateMemorySelectorCache()).catch(() => {})
         return `Memory forgotten: ${scope}/${filename}.`
       },
     })
@@ -2798,6 +2807,128 @@ Project root: ${projectRoot}`
         // Return the body only (not the frontmatter — the model has the
         // metadata from MEMORY.md already).
         return file.body || `[Memory ${filename} is empty]`
+      },
+    })
+
+    // === distill_memory ===
+    // Periodic memdir hygiene — reviews ALL saved entries and proposes
+    // merges, deletes, and rewrites. Returns a structured proposal list
+    // for the AGENT to act on (via subsequent save_memory / forget_memory
+    // calls) after the developer reviews. Never mutates memdir itself.
+    this.tools.set('distill_memory', {
+      definition: {
+        name: 'distill_memory',
+        description:
+          'Review the full persistent memory (user + project scopes) and propose hygiene actions: merge near-duplicates, delete stale/superseded entries, rewrite imprecise bodies. Returns proposals for review — does NOT apply them. Use periodically when the developer asks for memory cleanup, or when you notice contradictions / duplicates while reading the catalog. After this returns, surface the proposals to the developer in plain language, get explicit approval for each one, then call `save_memory` (for merges and rewrites) or `forget_memory` (for deletes) to apply.',
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+      execute: async () => {
+        // The TS memdir layer doesn't expose a list helper today —
+        // enumerating via the MEMORY.md index is enough (every saved
+        // entry lives in the index by contract). A future enhancement
+        // could surface the Rust `list_memory_files` command directly
+        // for cases where MEMORY.md drifts from the on-disk file set.
+        const [
+          { distillMemories },
+          { loadMemoryFile, loadMemoryIndex, parseIndexEntries, memoryFilenameFor },
+        ] = await Promise.all([
+          import('./memoryDistiller'),
+          import('./memdir'),
+        ])
+
+        const projectPath = useProjectStore.getState().currentProject?.path
+
+        // Load both indexes, parse entries, load each body.
+        const [userIdx, projectIdx] = await Promise.all([
+          loadMemoryIndex('user'),
+          projectPath
+            ? loadMemoryIndex('project', projectPath)
+            : Promise.resolve({ content: null } as { content: string | null }),
+        ])
+
+        const userEntries = userIdx.content ? parseIndexEntries(userIdx.content) : []
+        const projectEntries = projectIdx.content ? parseIndexEntries(projectIdx.content) : []
+
+        // Load every body in parallel — small files, OK to batch.
+        const files: import('./memdir').MemoryFile[] = []
+        const loadOps: Promise<unknown>[] = []
+        for (const e of userEntries) {
+          loadOps.push(
+            loadMemoryFile('user', memoryFilenameFor(e.type, e.name)).then(f => {
+              if (f) files.push(f)
+            }),
+          )
+        }
+        for (const e of projectEntries) {
+          loadOps.push(
+            loadMemoryFile('project', memoryFilenameFor(e.type, e.name), projectPath).then(f => {
+              if (f) files.push(f)
+            }),
+          )
+        }
+        await Promise.all(loadOps)
+
+        if (files.length === 0) {
+          return 'No memories saved yet — nothing to distill. Run `save_memory` first when you learn facts worth persisting; come back here once the catalog has accumulated.'
+        }
+
+        if (files.length < 3) {
+          return `Only ${files.length} memory entries exist — too few to meaningfully distill. Distillation pays off once the catalog has 8+ entries with overlap. Skipping for now.`
+        }
+
+        const result = await distillMemories({ files })
+        if (!result) {
+          return 'Distillation failed (network / side-car model unavailable). Try again later — the memdir is unchanged.'
+        }
+
+        // Telemetry — measure distiller yield over time.
+        void import('../../services/analytics').then(({ trackEvent }) =>
+          trackEvent('memory_distiller_run', {
+            input_files: files.length,
+            input_bytes: result.inputBytes,
+            input_truncated: result.inputTruncated,
+            proposals: result.proposals.length,
+            latency_ms: result.latencyMs,
+          }),
+        ).catch(() => { /* noop */ })
+
+        if (result.proposals.length === 0) {
+          return `Distilled ${files.length} memory entries — no hygiene actions needed. The catalog looks clean (no obvious duplicates, contradictions, or stale entries).`
+        }
+
+        // Format proposals for the agent to surface to the developer.
+        const lines: string[] = [
+          `Distilled ${files.length} memory entries — ${result.proposals.length} hygiene proposal${result.proposals.length === 1 ? '' : 's'} below.`,
+          '',
+          'Review each with the developer, get explicit approval, then apply:',
+          '- **merge** / **rewrite** → call `save_memory(name, type, description, body)` with the proposed name/description/body. Then `forget_memory` any obsolete original names.',
+          '- **delete** → call `forget_memory(name, type)` for each target.',
+          '',
+          '---',
+          '',
+        ]
+        for (const [i, p] of result.proposals.entries()) {
+          lines.push(`### Proposal ${i + 1}: \`${p.action}\``)
+          lines.push(`**Targets:** ${p.targets.map(t => `\`${t}\``).join(', ')}`)
+          lines.push(`**Why:** ${p.rationale}`)
+          if (p.action !== 'delete') {
+            lines.push(`**Proposed name:** \`${p.newName ?? p.targets[0]}\``)
+            lines.push(`**Proposed description:** ${p.newDescription ?? ''}`)
+            lines.push('**Proposed body:**')
+            lines.push('```')
+            lines.push(p.newBody ?? '')
+            lines.push('```')
+          }
+          lines.push('')
+        }
+        if (result.inputTruncated) {
+          lines.push(`> Note: the input was truncated to fit the model's window. Re-run distill_memory after applying a first batch — the remaining entries will be considered next time.`)
+        }
+        return lines.join('\n')
       },
     })
 

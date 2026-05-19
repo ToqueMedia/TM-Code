@@ -60,6 +60,7 @@ export const VERIFY = 'verify'
 export const SAVE_MEMORY = 'save_memory'
 export const FORGET_MEMORY = 'forget_memory'
 export const READ_MEMORY = 'read_memory'
+export const DISTILL_MEMORY = 'distill_memory'
 
 /**
  * Every tool name registered by ToolExecutor. Walked by
@@ -80,7 +81,7 @@ export const TOOL_NAMES = [
   UPDATE_TASKS, CHECK_BACKGROUND_AGENTS, SPAWN_BACKGROUND_AGENT,
   PROVISION_AUTH, PROVISION_DEPLOY, REQUEST_CREDENTIALS,
   VERIFY,
-  SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY,
+  SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
 ] as const
 
 export type ToolName = (typeof TOOL_NAMES)[number]

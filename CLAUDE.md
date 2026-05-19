@@ -158,6 +158,32 @@ The agent persists memories via three tools: `save_memory(name, type, descriptio
 
 **Why memdir is the floor of "model never goes blind"**: tasks survive restarts, sessions encrypt and persist, but those are per-conversation. The memory directory is the only mechanism by which the model carries lessons learned forward across totally unrelated sessions — without it, every new conversation starts from the same zero. The trade-off (extra prompt bytes per turn) is bounded by the 25KB cap and the on-demand-load pattern for full bodies.
 
+#### Memory auto-extraction (catches what the agent missed)
+
+After every assistant turn the main agent fires `runMemoryExtractor` fire-and-forget (`agentService.ts`). It feeds the (user message, assistant reply, existing memory names) tuple to the per-plan side-car model and asks for memorable facts the agent should have saved but didn't. Proposals are appended to `<scope>/memory/_proposed.jsonl` (audit) and the active working set lives in `_proposed-active.json` (≤8 entries, 30-min TTL). On the next turn the prompt builder injects `getPendingMemoryProposalsSection` so the agent sees the proposals and decides: convert via `save_memory` (auto-clears the active entry via `markProposalSaved`) or ignore (entries expire silently).
+
+Failure path falls through to silence — the extractor is opportunistic, not load-bearing. Telemetry: `memory_extractor_run` event with `{ proposals, latency_ms, existing_count }`. Same `memory-extractor` request type on the proxy; same per-plan model routing as the selector.
+
+#### Memory distillation (memdir hygiene on demand)
+
+`distill_memory` tool: reads the full memdir (frontmatter + body), asks the per-plan side-car for proposals to **merge** duplicates, **delete** stale entries, or **rewrite** imprecise bodies. **Never mutates memdir itself** — returns proposals for the agent to surface to the developer for approval. The agent then applies decisions via `save_memory` (merges/rewrites) and `forget_memory` (deletes).
+
+Triggered manually (developer asks for cleanup, or the agent notices duplicates while reading the catalog). Future enhancement: auto-trigger on project open after >7 days since last distillation. Skipped automatically when < 3 entries exist (no value below that threshold). Input capped at 50KB combined — larger memdirs get oldest entries dropped with a warning. Telemetry: `memory_distiller_run` event with `{ input_files, input_bytes, input_truncated, proposals, latency_ms }`.
+
+#### Memory relevance selector
+
+When the combined `MEMORY.md` content exceeds `MEMORY_SELECTOR_THRESHOLD_BYTES` (4KB ≈ ~1K tokens), the prompt builder calls a small per-plan selector model with `(user request, memory catalog)` and asks for a JSON name list of entries actually relevant to this turn. Only the picked entries' lines survive in the injected section; everything else is gone for this turn. Below the threshold the selector is skipped — small memdirs don't pay for the ~300-600ms round-trip.
+
+Per-plan selector routing (`toquemedia-studio-api/src/proxy.ts` under `requestType === 'memory-selector'`):
+
+| Plan-configured coder | Selector model | Provider |
+|---|---|---|
+| `mimo-v2.5-pro` / `mimo-v2.5-pro-1m` | `mimo-v2.5` | mimo (OpenRouter via Orbit) |
+| `glm-5.1` | `qwen3.6-plus` | dashscope |
+| Anything else (incl. `deepseek-v4-flash`) | `qwen3.6-plus` | dashscope |
+
+Failure modes ALL fall back to injecting the full indexes (the pre-selector default behaviour) — a broken selector should never block the agent loop. Caching: per-`(sessionId, userMessage, memory-name-set)` with 30s TTL; `save_memory`/`forget_memory` invalidate the cache via `invalidateMemorySelectorCache()`. Telemetry: `memory_selector_run` event with `{ cache_hit, latency_ms, items_total, items_selected, combined_bytes_before }` lets us measure the selector's value (token reduction) vs cost (latency).
+
 #### Scope 3 — Backend-canonical (NOT persisted locally)
 
 State whose source of truth is the worker / Firebase. The IDE hydrates these from `/v1/me` responses or SSE billing events; persisting locally would just create drift.

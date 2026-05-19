@@ -417,6 +417,20 @@ export function getMemorySection(ctx: PromptContext): string | null {
   return parts.join('\n\n')
 }
 
+/**
+ * Pending auto-extracted memory proposals. Surfaced as a system reminder
+ * the agent reads on the next turn after the extractor produces them.
+ * The agent decides whether to convert each proposal into a real
+ * `save_memory` call or let it expire. Returns null when there are no
+ * pending proposals — the common case.
+ *
+ * Placed in the dynamic block (per-turn) because the set mutates as
+ * proposals are saved / discarded / time out.
+ */
+export function getPendingMemoryProposalsSection(ctx: PromptContext): string | null {
+  return ctx.pendingMemoryProposals
+}
+
 export function getActivePlanSection(ctx: PromptContext): string | null {
   if (!ctx.planContent) return null
   const truncated = ctx.planContent.length > 4000

@@ -77,6 +77,96 @@ export interface MemoryIndexResult {
 }
 
 /**
+ * Parsed view of a single MEMORY.md index entry — the markdown line
+ * `- [name](file.md) — description` decomposed into structured fields
+ * the relevance selector can reason about.
+ *
+ * The `type` is inferred from the filename prefix (`user_*` → `user`,
+ * `feedback_*` → `feedback`, etc.) because the index file itself doesn't
+ * carry the type explicitly. Filenames not matching the convention get
+ * the catch-all type `project` (the most common default) and a warning
+ * is logged once at parse time.
+ */
+export interface MemoryIndexEntry {
+  name: string
+  type: MemoryType
+  description: string
+  /** Original line in MEMORY.md, preserved verbatim for re-emission when
+   *  the selector picks this entry. */
+  rawLine: string
+}
+
+const INDEX_LINE_REGEX = /^-\s+\[([^\]]+)\]\(([^)]+\.md)\)\s+—\s+(.+)$/
+
+function inferTypeFromFilename(filename: string): MemoryType {
+  if (filename.startsWith('user_')) return 'user'
+  if (filename.startsWith('feedback_')) return 'feedback'
+  if (filename.startsWith('reference_')) return 'reference'
+  return 'project'
+}
+
+/**
+ * Parse the bullet lines of MEMORY.md into a structured entry array.
+ * Tolerates leading header lines (`#`, blanks) and any truncation
+ * warning footer appended by `loadMemoryIndex`. Lines that don't match
+ * the canonical `- [name](file.md) — description` shape are silently
+ * skipped — they're either headers or future format extensions, neither
+ * is the selector's job to validate.
+ */
+export function parseIndexEntries(indexContent: string): MemoryIndexEntry[] {
+  const entries: MemoryIndexEntry[] = []
+  for (const line of indexContent.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('>')) continue
+    const m = trimmed.match(INDEX_LINE_REGEX)
+    if (!m) continue
+    const [, name, filename, description] = m
+    entries.push({
+      name,
+      type: inferTypeFromFilename(filename),
+      description: description.trim(),
+      rawLine: line,
+    })
+  }
+  return entries
+}
+
+/**
+ * Reconstruct an index slice containing only the entries whose names are
+ * in `keepNames`. Preserves the header (everything before the first
+ * bullet line) and the truncation warning (if present) so the section
+ * still reads as a valid MEMORY.md to the model.
+ */
+export function projectIndexEntries(
+  indexContent: string,
+  keepNames: Set<string>,
+): string {
+  const lines = indexContent.split('\n')
+  const out: string[] = []
+  let pastHeader = false
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('>')) {
+      // Truncation warning — always keep at the end.
+      out.push(line)
+      continue
+    }
+    const m = trimmed.match(INDEX_LINE_REGEX)
+    if (m) {
+      pastHeader = true
+      if (keepNames.has(m[1])) {
+        out.push(line)
+      }
+      continue
+    }
+    // Headers + blank lines: keep until the first bullet line is seen,
+    // skip after (avoids re-emitting trailing blanks between dropped entries).
+    if (!pastHeader) out.push(line)
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()
+}
+
+/**
  * Read a scope's index file. Returns the post-truncation content + stats.
  * When the file doesn't exist, returns `content: null` — caller skips the
  * section rather than emitting an empty block in the prompt.

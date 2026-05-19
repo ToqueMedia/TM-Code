@@ -97,6 +97,10 @@ const SAFE_TOOLS = new Set([
   'save_memory',
   'forget_memory',
   'read_memory',
+  // distill_memory is read-only — it analyses the memdir and returns
+  // proposals; the actual mutations happen via save_memory / forget_memory
+  // which already auto-approve. Prompting per-call would be noise.
+  'distill_memory',
 ])
 
 // Tools that already have their own user approval flow (InlineDiff)

@@ -93,6 +93,11 @@ export interface PromptContext {
    *  (`<project>/.toquemedia/memory/`). Project-bound facts: initiatives,
    *  references, repo conventions. Null when none exists yet. */
   projectMemoryIndex: string | null
+  /** Auto-extracted proposals from the previous turn — surfaced to the
+   *  agent as a system reminder so it can decide whether to convert each
+   *  into a real `save_memory` call. Null when there are no pending
+   *  proposals (the common case). */
+  pendingMemoryProposals: string | null
 }
 
 export interface PromptCacheEntry {
