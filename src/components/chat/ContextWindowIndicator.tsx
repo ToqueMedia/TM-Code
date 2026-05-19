@@ -48,15 +48,15 @@ import { tokens } from '@/theme/tokens'
 // friendlier value via `X-Model-Name` (preferred); this table is a
 // fallback for legacy / unknown ids that come back as raw provider slugs.
 const FRIENDLY_MODEL_NAMES: Record<string, string> = {
-  'deepseek-v4-flash': 'DeepSeek V4-Flash',
-  'glm-5.1': 'GLM-5.1',
-  'glm-5.1-thinking': 'GLM-5.1 (thinking)',
-  'mimo-v2-flash': 'MiMo V2-Flash',
-  'mimo-v2.5': 'MiMo V2.5',
-  'mimo-v2.5-pro': 'MiMo V2.5 Pro',
-  'mimo-v2.5-1m': 'MiMo V2.5 (1M)',
-  'qwen3-coder-flash': 'Qwen3-Coder Flash',
-  'step-3.5-flash-2603': 'Step 3.5-Flash',
+  'deepseek-v4-flash': 'TM Model',
+  'glm-5.1': 'TM Model',
+  'glm-5.1-thinking': 'TM Model',
+  'mimo-v2-flash': 'TM Model',
+  'mimo-v2.5': 'mimo-v2.5',
+  'mimo-v2.5-pro': 'mimo-v2.5-pro',
+  'mimo-v2.5-1m': 'mimo-v2.5-1m',
+  'qwen3-coder-flash': 'TM Model',
+  'step-3.5-flash-2603': 'TM Model',
 }
 
 function friendlyModelLabel(modelId: string | null | undefined): string {

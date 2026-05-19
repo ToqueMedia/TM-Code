@@ -60,8 +60,32 @@ interface SettingsViewProps {
   onBack?: () => void
 }
 
+// All SectionId values that callers outside SettingsView can request via
+// `layoutStore.settingsInitialSection`. Keep aligned with the SectionId union
+// above — TS will flag any drift because we cast through `SectionId` below.
+const ALLOWED_INITIAL_SECTIONS: ReadonlyArray<SectionId> = [
+  'profile', 'editor', 'shortcuts', 'skills', 'mcp', 'apiKeys', 'sandbox', 'admin', 'deploys',
+]
+
 function SettingsView({ onBack }: SettingsViewProps = {}) {
-  const [activeSection, setActiveSection] = useState<SectionId>('profile')
+  // Honour any pending `settingsInitialSection` set by the caller (e.g. the
+  // ModelIndicator wants Chave API, not Profile). Consume-once: clear the
+  // pending value as soon as we read it so the next Settings open from a
+  // generic entry point defaults to Profile again. The validation step
+  // narrows the unknown string from the store back to our local SectionId
+  // union — anything outside the allow-list falls back to 'profile'.
+  const [activeSection, setActiveSection] = useState<SectionId>(() => {
+    const requested = useLayoutStore.getState().settingsInitialSection
+    if (requested && (ALLOWED_INITIAL_SECTIONS as readonly string[]).includes(requested)) {
+      return requested as SectionId
+    }
+    return 'profile'
+  })
+  useEffect(function clearPendingInitialSection() {
+    // Fire after mount so we don't race the initializer above. Idempotent —
+    // clearing twice is fine because the store ignores no-op writes.
+    useLayoutStore.getState().clearSettingsInitialSection()
+  }, [])
   const t = useTranslation()
   const isAdmin = useAuthStore(function (s) { return s.user?.isAdmin === true })
   // `isAdmin` is populated by /v1/me. Before that fetch lands (first login,

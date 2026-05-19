@@ -446,13 +446,14 @@ export function getReminderSection(ctx: PromptContext): string {
   // request_credentials. The full surface lives in earlier sections;
   // this restates only what models routinely drop after a long prompt.
   const skillReminder = ctx.loadedSkillNames.length > 0
-    ? `\n6. Skills loaded: ${ctx.loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
+    ? `\n7. Skills loaded: ${ctx.loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
     : ''
   return `# Reminder
 
 1. **COMPLETE** every file. Output goes to disk as-is — omitted code is deleted code.
 2. **AFTER** file changes with a dev server running: \`${READ_DEV_SERVER_LOGS}\` and fix errors before continuing. Track the \`next_since\` cursor — without it you re-read stale entries.
-3. **WHEN** your code reads \`process.env.X\` / \`import.meta.env.X\` for a third-party service (LLM, payments, email, etc.): call \`${REQUEST_CREDENTIALS}\` for X in the SAME turn. The developer cannot fill \`.env\` without the form.
-4. ${sharedUiBaselineReminder()}
-5. ${sharedIdentityReminder()}${skillReminder}`
+3. **REPORT** faithfully and stop. When a check passes (clean dev-server logs, no diagnostics, build OK), state it plainly and move on — don't re-verify what you already checked. If verification isn't possible (no test exists, can't run the code), say so explicitly rather than looping until you find something to do. The goal is an accurate report, not a defensive one.
+4. **WHEN** your code reads \`process.env.X\` / \`import.meta.env.X\` for a third-party service (LLM, payments, email, etc.): call \`${REQUEST_CREDENTIALS}\` for X in the SAME turn. The developer cannot fill \`.env\` without the form.
+5. ${sharedUiBaselineReminder()}
+6. ${sharedIdentityReminder()}${skillReminder}`
 }

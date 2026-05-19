@@ -24,7 +24,17 @@ export function sanitizeProjectContent(content: string): string {
  * leaves headroom while staying within a reasonable per-skill prompt budget.
  * Exported for tests.
  */
-export const CRITICAL_SECTIONS_MAX_BYTES = 8_000
+// Per-skill byte cap for inlined CRITICAL sections. Raised from 8K → 12K
+// in 2026-05 after measurements showed `auth-proxy/SKILL.md` was emitting
+// ~21K of CRITICAL content and the truncation was dropping the "Port 5173
+// must hold" rule + the entire tactical libSQL/signInWithIdp protocol
+// (`USE /v1`, `postBody/requestUri`, `providerId vs provider_id`) —
+// regressions in those rules cost the most when broken (silent 400s,
+// snake-case body bugs). +4K per turn when auth-proxy is sticky-inlined;
+// no other bundled skill currently exceeds 8K, so other skills are
+// unaffected. If a new skill blows past 12K, prefer trimming inside the
+// skill before raising this further.
+export const CRITICAL_SECTIONS_MAX_BYTES = 12_000
 
 /**
  * Detect skill-trigger hashtags in a user message. Returns the list of skill

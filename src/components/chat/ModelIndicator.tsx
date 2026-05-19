@@ -1,22 +1,39 @@
 import { Box, HStack, Text } from '@chakra-ui/react'
 import { FiKey } from 'react-icons/fi'
 import { useAgentStore } from '../../stores/agentStore'
+import { useBillingStore } from '../../stores/billingStore'
 import { useByokStore } from '../../stores/byokStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { tokens } from '@/theme/tokens'
 
+/**
+ * Plans that surface the cloud model name in the pill. Today only the
+ * future `mimo-orbit` plan (still to be created) qualifies — its whole
+ * value proposition is "you're talking to a specific MiMo SKU via the
+ * Orbit Program", so the developer wants the model identity visible. The
+ * other plans (`explorer`, `vibe`, `pro`, `max`) route through a
+ * platform-managed model that the user did not choose and does not
+ * benefit from seeing in the header. Cast to `string` so this compiles
+ * before `UserPlanName` is extended to include the new plan id —
+ * remove the cast once `'mimo-orbit'` is part of the union.
+ */
+function planShowsCloudModel(plan: string | null | undefined): boolean {
+  return plan === 'mimo-orbit'
+}
+
 // ── ModelIndicator ──
 //
-// Always shown in the chat header once the backend has reported a model name
-// (via the X-Model-Name response header). Three visual states:
-//   - byok confirmed (X-BYOK-Active=true): full pink, key icon, "Model (BYOK)"
-//   - byok configured (local toggle on, no reply yet): muted pink preview
-//   - cloud (default): neutral grey-on-glass, model name only — no key icon
+// Renders when EITHER:
+//  - the user is on the BYOK path — confirmed (server set
+//    X-BYOK-Active=true) or configured (local toggle on, awaiting confirm), OR
+//  - the plan opts in to surfacing the cloud model name (see
+//    `planShowsCloudModel`). Today that's `mimo-orbit` only.
 //
-// User feedback: "Só revela o modelo se usar o BYOK" — the developer wants to
-// know which model the IDE is talking to regardless of routing, so this no
-// longer gates on BYOK state alone.
+// All other plans (`explorer`, `vibe`, `pro`, `max`) hide the pill —
+// per user feedback the cloud model name added chrome without value when
+// the routing is the platform default. The model identity is still
+// inspectable via the ContextWindowIndicator tooltip and Settings → Profile.
 
 export default function ModelIndicator() {
   // Server-confirmed state — authoritative for what the LAST response used
@@ -48,14 +65,21 @@ export default function ModelIndicator() {
     return null
   })()
 
-  // Render nothing only when the backend hasn't replied yet AND nothing is
-  // configured locally. The cloud branch needs at least `modelName` from the
-  // most recent response header to have something to display.
-  if (!byokActive && !configured && !modelName) return null
+  // Plan-opt-in for cloud model surfacing — currently only `mimo-orbit`.
+  // Subscribed AT the component (not inside the early-return) so the pill
+  // appears/disappears reactively when the plan handshake completes.
+  const plan = useBillingStore((s) => s.plan)
+  const cloudVisible = planShowsCloudModel(plan)
 
-  // Pick the active mode. Order matters: BYOK confirmed > BYOK configured (preview)
-  // > cloud. `byokActive` is server-authoritative; `configured` is local intent
-  // before any reply has been seen.
+  // Hide the pill entirely when:
+  //   - not on BYOK (neither confirmed nor configured), AND
+  //   - the plan doesn't opt in to cloud surfacing, OR
+  //   - we still don't have a model name from the backend (pre-handshake).
+  if (!byokActive && !configured && !cloudVisible) return null
+  if (!byokActive && !configured && cloudVisible && !modelName) return null
+
+  // Pick the active mode. Order matters: BYOK confirmed (server-authoritative)
+  // > BYOK configured (local intent only) > cloud (opt-in plan).
   const mode: 'byok-confirmed' | 'byok-configured' | 'cloud' =
     byokActive ? 'byok-confirmed' : configured ? 'byok-configured' : 'cloud'
 
@@ -133,7 +157,16 @@ export default function ModelIndicator() {
       cursor="pointer"
       transition={tokens.transition.fast}
       _hover={{ bg: palette.hoverBg, borderColor: palette.hoverBorder }}
-      onClick={() => useLayoutStore.getState().setViewMode('settings')}
+      onClick={() => {
+        // Land on Chave API (BYOK), not Profile & Plan — clicking the
+        // model pill is always BYOK-shaped intent: "manage which provider
+        // serves my requests". Seed the pending section BEFORE switching
+        // view mode so SettingsView's useState initializer picks it up on
+        // first render. The flag is consumed-once and cleared on mount.
+        const layout = useLayoutStore.getState()
+        layout.setSettingsInitialSection('apiKeys')
+        layout.setViewMode('settings')
+      }}
       title={titleText}
     >
       {palette.icon && (

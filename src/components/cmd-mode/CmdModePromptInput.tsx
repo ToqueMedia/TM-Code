@@ -7,6 +7,7 @@ import HashtagMenu from '../prompt/HashtagMenu'
 import { TerminalMentionMenu } from './TerminalMentionMenu'
 import CmdAttachmentBar from './CmdAttachmentBar'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
+import { resolveInlineArgHint } from '../prompt/slashArgHint'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import type { QueuedCommand } from '../../types/messageQueueTypes'
@@ -260,6 +261,25 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             }}
           >
             {renderHighlightedPrompt(input)}
+            {(() => {
+              // Inline argument hint for slash commands \u2014 same UX as
+              // chat mode's PromptTextarea via the shared
+              // resolveInlineArgHint helper. Pure visual; the textarea
+              // value is unchanged. Cheap enough to compute inline (one
+              // startsWith + Map lookup per render).
+              const hint = resolveInlineArgHint(input)
+              if (!hint) return null
+              return (
+                <Box
+                  as="span"
+                  color={tokens.colors.text.disabled}
+                  opacity={0.7}
+                  userSelect="none"
+                >
+                  {input.endsWith(' ') ? hint : ` ${hint}`}
+                </Box>
+              )
+            })()}
             {input.endsWith('\n') ? '\u200b' : null}
           </Box>
 

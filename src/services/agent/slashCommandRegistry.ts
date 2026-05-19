@@ -38,6 +38,15 @@ export interface SlashCommand {
    */
   argSuggestions?: SlashCommandArg[]
   /**
+   * Inline placeholder hint rendered as ghost text in the prompt after the
+   * command name, e.g. `/plan [feature to architect]`. Shown while the
+   * input is just the command (with or without trailing space) and no
+   * argument has been typed yet; disappears as soon as the user starts
+   * typing args. Uses bracket syntax so the user can read it as a slot
+   * rather than literal content to copy.
+   */
+  argHint?: string
+  /**
    * When true, the command is unavailable on the free (Explorer) plan.
    * The slash menu marks it with a "Pro" badge and disables the row;
    * the execute function still surfaces the upgrade message if reached
@@ -64,6 +73,7 @@ class SlashCommandRegistry {
       description: 'Initialize project — analyze structure, detect framework, generate TMS.md',
       enabled: true,
       execute: executeInit,
+      argHint: '[optional: extra context for the analysis]',
     })
 
     this.register({
@@ -71,6 +81,7 @@ class SlashCommandRegistry {
       description: 'Architect a feature — generate specs, get approval, create dev todo list',
       enabled: true,
       execute: executePlan,
+      argHint: '[feature or change to plan]',
     })
 
     this.register({
@@ -78,6 +89,7 @@ class SlashCommandRegistry {
       description: 'Debug an error or symptom — hypothesis-driven investigation with reasoning ON',
       enabled: true,
       execute: executeDebug,
+      argHint: '[error message or symptom]',
     })
 
     this.register({
@@ -85,6 +97,7 @@ class SlashCommandRegistry {
       description: 'Integrate MoMenu Payments — fetches API skills and implements (MCX, E-kwanza, Referencia)',
       enabled: true,
       execute: executePayments,
+      argHint: '[provider: mcx | e-kwanza | referencia]',
     })
 
     this.register({
@@ -93,6 +106,7 @@ class SlashCommandRegistry {
       enabled: true,
       execute: executeE2E,
       requiresPaidPlan: true,
+      argHint: '[what to validate]',
     })
 
     this.register({
@@ -100,6 +114,7 @@ class SlashCommandRegistry {
       description: 'Critical code review by a fresh sub-agent — bugs, anti-patterns, fragile workarounds, ranked by severity. Read-only.',
       enabled: true,
       execute: executeReview,
+      argHint: '[optional: focus area or path]',
     })
 
     // Note: `/auth` was removed in favour of the `#auth-email-password` and

@@ -111,6 +111,20 @@ function MainLayout() {
           layout.setViewMode('editor')
         }
       }
+
+      // Cmd+Shift+B: Toggle Data Viewer ("B for Browse"). Mirrors the
+      // editor toggle's shape — entering when not in `data`, going back
+      // when already there. Keeps the existing chat-header FiDatabase
+      // button as the discoverable entry; this is the power-user path.
+      if (isMeta && e.shiftKey && e.key === 'B') {
+        e.preventDefault()
+        const layout = useLayoutStore.getState()
+        if (layout.viewMode === 'data') {
+          layout.goBack()
+        } else {
+          layout.setViewMode('data')
+        }
+      }
     }
 
     window.addEventListener('keydown', handleKeyDown)

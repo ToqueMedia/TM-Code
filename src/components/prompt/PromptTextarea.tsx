@@ -1,8 +1,9 @@
-import React, { memo, useCallback, useLayoutEffect, useRef } from 'react'
+import React, { memo, useCallback, useLayoutEffect, useMemo, useRef } from 'react'
 import { Box } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { renderHighlightedPrompt } from './promptHighlight'
+import { resolveInlineArgHint } from './slashArgHint'
 
 interface PromptTextareaProps {
   textareaRef: React.RefObject<HTMLTextAreaElement | null>
@@ -127,6 +128,7 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPas
           style={TEXT_STYLE}
         >
           {renderHighlightedPrompt(value)}
+          <InlineArgHint value={value} />
           {/* Trailing space so a value ending in newline reserves a final
               line — keeps the overlay height matching the textarea's. */}
           {value.endsWith('\n') ? '\u200b' : null}
@@ -170,5 +172,33 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPas
     </Box>
   )
 }
+
+/**
+ * Ghost-text hint rendered after a slash command name when the command
+ * declares an `argHint` and the user has no args typed yet. Memoised so
+ * keystrokes inside args (or in unrelated text) don't re-render the
+ * span. Pure visual — the textarea value is untouched.
+ *
+ * Mirrors the `/loop [interval] [prompt]` CLI placeholder pattern from
+ * the screenshot in the user feedback. Replicated in `CmdModePromptInput`
+ * via the same `resolveInlineArgHint` helper so chat and CMD parity is
+ * mechanical, not duplicated.
+ */
+const InlineArgHint = memo(function InlineArgHint({ value }: { value: string }) {
+  // useMemo so resolving the hint runs once per `value` change, not on
+  // every keystroke + every other state push that re-renders the parent.
+  const hint = useMemo(() => resolveInlineArgHint(value), [value])
+  if (!hint) return null
+  return (
+    <Box
+      as="span"
+      color={tokens.colors.text.disabled}
+      opacity={0.7}
+      userSelect="none"
+    >
+      {value.endsWith(' ') ? hint : ` ${hint}`}
+    </Box>
+  )
+})
 
 export default memo(PromptTextarea)

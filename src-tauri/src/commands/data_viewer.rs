@@ -5,8 +5,15 @@ use std::path::Path;
 use super::canonicalize_path;
 
 /// Cell value as the frontend will receive it. JSON-friendly subset of SQLite
-/// types; BLOBs are reported as a placeholder string instead of the raw bytes
-/// (the data viewer renders them as `<binary, N bytes>` — see PLAN-DATA-VIEWER.md §9).
+/// types; BLOBs surface as a tagged object `{ __binary: N }` instead of being
+/// stuffed into the Text variant — the previous design used a string sentinel
+/// (`<binary, N bytes>`) and JS detected it by substring, which would also
+/// match a legitimate TEXT row that happened to use the same shape. The
+/// tagged variant lets the renderer key off the discriminator instead.
+///
+/// The non-Blob variants stay `untagged` so they serialize as bare JSON
+/// primitives (`42`, `"hello"`, `null`) — the front-end keeps the same
+/// `Cell = null | number | string | boolean` union for them.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum CellValue {
@@ -14,8 +21,14 @@ pub enum CellValue {
     Integer(i64),
     Real(f64),
     Text(String),
-    /// `<binary, N bytes>` placeholder.
-    BlobPlaceholder(String),
+    /// Tagged BLOB placeholder: `{ "__binary": <byteCount> }`.
+    Blob(BlobMarker),
+}
+
+#[derive(Debug, Serialize)]
+pub struct BlobMarker {
+    #[serde(rename = "__binary")]
+    pub binary: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,9 +109,9 @@ fn value_ref_to_cell(v: ValueRef) -> CellValue {
         ValueRef::Text(bytes) => {
             CellValue::Text(String::from_utf8_lossy(bytes).into_owned())
         }
-        ValueRef::Blob(bytes) => {
-            CellValue::BlobPlaceholder(format!("<binary, {} bytes>", bytes.len()))
-        }
+        ValueRef::Blob(bytes) => CellValue::Blob(BlobMarker {
+            binary: bytes.len() as u64,
+        }),
     }
 }
 

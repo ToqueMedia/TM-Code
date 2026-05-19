@@ -15,7 +15,26 @@ import { invoke } from '@tauri-apps/api/core'
 import { tauriFetch } from './tauriFetch'
 import { resolveWorkerUrl } from '../utils/devUrls'
 
-export type Cell = null | number | string | boolean
+/** Discriminated BLOB marker emitted by the Rust dev path — the prod path
+ *  doesn't surface BLOBs structurally yet (worker returns raw rows), but
+ *  the renderer treats both paths uniformly via the type guard below. */
+export interface BlobMarker {
+  __binary: number
+}
+
+export type Cell = null | number | string | boolean | BlobMarker
+
+/** Narrow check for the BLOB sentinel — used by the table renderer to pick
+ *  the `<binary, N bytes>` muted-pill style without resorting to substring
+ *  detection on stringified values (the previous shape was fragile against
+ *  legitimate TEXT rows that happened to match the sentinel format). */
+export function isBlobMarker(cell: Cell): cell is BlobMarker {
+  return (
+    typeof cell === 'object' &&
+    cell !== null &&
+    typeof (cell as { __binary?: unknown }).__binary === 'number'
+  )
+}
 
 export interface QueryResult {
   columns: string[]
@@ -244,6 +263,32 @@ export async function listTables(
   return filtered
 }
 
+/**
+ * Sentinel thrown when libSQL/Turso returns an empty result for
+ * `PRAGMA table_info(...)`. The libSQL fork is supposed to support
+ * PRAGMA verbatim (it's SQLite under the hood), but some pipeline
+ * versions and some hrana protocol revisions have refused PRAGMA in the
+ * past; if that surfaces in production, the viewer needs to give the
+ * user a non-cryptic error instead of silently rendering "No columns".
+ *
+ * Empty result on the DEV path is genuinely "the table has no columns"
+ * (impossible in well-formed SQLite, but treat as no-data for safety) —
+ * we only escalate to this error on the PROD path where the libSQL
+ * driver is the unknown variable.
+ */
+export class PragmaUnsupportedError extends Error {
+  constructor(table: string) {
+    super(
+      `PRAGMA table_info("${table}") returned no rows from the worker. ` +
+      `This is the symptom of a libSQL pipeline that doesn't accept ` +
+      `PRAGMA on the /v2/pipeline endpoint. Switch the source to DEV to ` +
+      `inspect a local snapshot, or report this so the worker can be ` +
+      `updated to expose column metadata directly.`,
+    )
+    this.name = 'PragmaUnsupportedError'
+  }
+}
+
 export async function getTableInfo(
   source: 'dev' | 'prod',
   project: ProjectContext,
@@ -262,6 +307,13 @@ export async function getTableInfo(
   } else {
     const { rows } = await prodQuery(project, sql)
     info = rows.map(rowToColumnInfo)
+    if (info.length === 0) {
+      // Don't cache: another retry against the same table might land
+      // on a different worker instance / libSQL revision that returns
+      // proper data. Caching the empty result would lock the user out
+      // until the IDE restart.
+      throw new PragmaUnsupportedError(table)
+    }
   }
   schemaCache.set(key, info)
   return info

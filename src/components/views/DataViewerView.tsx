@@ -85,10 +85,11 @@ function DataViewerView() {
     }
   }, [project?.id, project?.path, hydrate])
 
-  // Load tables when the project or source changes.
-  const loadTables = useCallback(
-    async (forceRefresh: boolean = false) => {
-      if (!project || !detectReady) return
+  // Pure fetch — independent of the auto-select decision so its deps
+  // stay narrow. The effect below composes the fetch with auto-select.
+  const fetchTablesOnce = useCallback(
+    async (forceRefresh: boolean): Promise<string[] | null> => {
+      if (!project || !detectReady) return null
       requestEpoch.current += 1
       const epoch = requestEpoch.current
       setTablesLoading(true)
@@ -96,29 +97,49 @@ function DataViewerView() {
       try {
         if (forceRefresh) dataViewerService.invalidateCache(source, project.id)
         const result = await dataViewerService.listTables(source, project)
-        if (epoch !== requestEpoch.current) return
+        if (epoch !== requestEpoch.current) return null
         setTables(result)
-        // Auto-select the first table when none is active or the active one
-        // disappeared after switching sources.
-        const next = activeTable && result.includes(activeTable) ? activeTable : result[0] ?? null
-        if (next !== activeTable) setActiveTable(next)
+        return result
       } catch (err) {
-        if (epoch !== requestEpoch.current) return
+        if (epoch !== requestEpoch.current) return null
         const message = err instanceof Error ? err.message : String(err)
         setError(message)
         setTables([])
         void trackEvent('data_viewer_query_failed', { stage: 'list_tables', source })
+        return null
       } finally {
         if (epoch === requestEpoch.current) setTablesLoading(false)
       }
     },
-    [project, source, detectReady, activeTable, setActiveTable],
+    [project, source, detectReady],
   )
 
+  // Manual refresh path (the sidebar button) — re-fetch and re-apply the
+  // same auto-select rule the effect uses, so the table list and active
+  // selection stay in sync after a force refresh.
+  const refreshTables = useCallback(async () => {
+    const result = await fetchTablesOnce(true)
+    if (!result) return
+    const next = activeTable && result.includes(activeTable) ? activeTable : result[0] ?? null
+    if (next !== activeTable) setActiveTable(next)
+  }, [fetchTablesOnce, activeTable, setActiveTable])
+
+  // Effect-driven path — fires when the project/source/detect-ready
+  // tuple changes. Reads `activeTable` from the store at execution time
+  // rather than carrying it in the dep array, so re-runs don't fire
+  // every time the user picks a different table (which would re-fetch
+  // the table list unnecessarily). Without this split, the previous
+  // shape needed `eslint-disable-next-line` to suppress the missing dep.
   useEffect(() => {
-    loadTables()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.id, source, detectReady])
+    let cancelled = false
+    void fetchTablesOnce(false).then(result => {
+      if (cancelled || !result) return
+      const current = useDataViewerStore.getState().activeTable
+      const next = current && result.includes(current) ? current : result[0] ?? null
+      if (next !== current) setActiveTable(next)
+    })
+    return () => { cancelled = true }
+  }, [fetchTablesOnce, setActiveTable])
 
   // Load rows when the active table, page, page size, or source changes.
   // Extracted so the manual "Refresh rows" button can replay the same call
@@ -148,7 +169,13 @@ function DataViewerView() {
         setColumns([])
         setRows([])
         setTotalRows(0)
-        void trackEvent('data_viewer_query_failed', { stage: 'get_rows', source })
+        const isPragmaUnsupported =
+          err instanceof Error && err.name === 'PragmaUnsupportedError'
+        void trackEvent('data_viewer_query_failed', {
+          stage: 'get_rows',
+          source,
+          kind: isPragmaUnsupported ? 'pragma_unsupported' : 'generic',
+        })
       } finally {
         setRowsLoading(false)
       }
@@ -185,7 +212,16 @@ function DataViewerView() {
         setColumns([])
         setRows([])
         setTotalRows(0)
-        void trackEvent('data_viewer_query_failed', { stage: 'get_rows', source })
+        const isPragmaUnsupported =
+          err instanceof Error && err.name === 'PragmaUnsupportedError'
+        void trackEvent('data_viewer_query_failed', {
+          stage: 'get_rows',
+          source,
+          // Separate counter for the libSQL/PRAGMA failure shape so we
+          // notice if the worker drifts and the prod path stops working
+          // — distinct from generic query failures (network, auth, etc.).
+          kind: isPragmaUnsupported ? 'pragma_unsupported' : 'generic',
+        })
       })
       .finally(() => {
         if (!cancelled) setRowsLoading(false)
@@ -276,7 +312,7 @@ function DataViewerView() {
           activeTable={activeTable}
           loading={tablesLoading}
           onSelect={setActiveTable}
-          onRefresh={() => loadTables(true)}
+          onRefresh={refreshTables}
         />
 
         {/* Main area */}

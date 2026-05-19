@@ -87,6 +87,16 @@ interface LayoutState {
   /** Current phase of the post-scaffold pipeline */
   scaffoldPhase: ScaffoldPhase
   scaffoldMessage: string
+  /**
+   * Preferred section to open when SettingsView next mounts. Set by callers
+   * that route into Settings with intent (e.g. ModelIndicator → 'apiKeys' so
+   * the BYOK pill lands on Chave API, not the default Profile tab). Consumed
+   * once by SettingsView's `useState` initializer and then cleared via
+   * `setViewMode('settings')` → `clearSettingsInitialSection()`, so the next
+   * Settings open from elsewhere defaults to Profile again. Plain string —
+   * SettingsView narrows it back to its local SectionId union at read time.
+   */
+  settingsInitialSection: string | null
 }
 
 interface LayoutActions {
@@ -121,6 +131,10 @@ interface LayoutActions {
   setPublishModalOpen: (open: boolean) => void
   goBack: () => void
   setScaffoldPhase: (phase: ScaffoldPhase, message?: string) => void
+  /** Set the section SettingsView should open on. Pair with setViewMode('settings'). */
+  setSettingsInitialSection: (section: string | null) => void
+  /** Drop the pending section so a subsequent Settings open defaults to Profile. */
+  clearSettingsInitialSection: () => void
 }
 
 /** Derive preview mode from project kind. */
@@ -149,6 +163,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   overlayCount: 0,
   scaffoldPhase: null,
   scaffoldMessage: '',
+  settingsInitialSection: null,
 
   setViewMode: (mode: ViewMode) => {
     const current = get().viewMode
@@ -360,6 +375,14 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
         }
       }, 3000)
     }
+  },
+
+  setSettingsInitialSection: (section: string | null) => {
+    set({ settingsInitialSection: section })
+  },
+
+  clearSettingsInitialSection: () => {
+    set({ settingsInitialSection: null })
   },
 }))
 

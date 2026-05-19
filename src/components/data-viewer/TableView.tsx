@@ -3,7 +3,7 @@ import { Box, Flex, NativeSelect, Text } from '@chakra-ui/react'
 import { FiRefreshCw } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
-import type { Cell } from '../../services/dataViewerService'
+import { isBlobMarker, type Cell } from '../../services/dataViewerService'
 import type { PageSize } from '../../stores/dataViewerStore'
 
 const PAGE_SIZE_OPTIONS: PageSize[] = [10, 20, 50, 100]
@@ -194,6 +194,16 @@ function CellRender({ value }: { value: Cell }) {
       </Box>
     )
   }
+  // BLOBs come in as a discriminated `{ __binary: <byteCount> }` from the
+  // dev path. Check this BEFORE the typeof checks below — `typeof object`
+  // would otherwise fall through into the generic text branch.
+  if (isBlobMarker(value)) {
+    return (
+      <Box as="td" {...baseStyles} color={tokens.colors.text.disabled} fontStyle="italic">
+        {`<binary, ${value.__binary} bytes>`}
+      </Box>
+    )
+  }
   if (typeof value === 'boolean') {
     return (
       <Box as="td" {...baseStyles} color={tokens.colors.text.primary}>
@@ -210,15 +220,6 @@ function CellRender({ value }: { value: Cell }) {
   }
 
   const text = String(value)
-
-  // The dev path emits `<binary, N bytes>` for BLOBs; render those as a muted pill.
-  if (text.startsWith('<binary,') && text.endsWith('>')) {
-    return (
-      <Box as="td" {...baseStyles} color={tokens.colors.text.disabled} fontStyle="italic">
-        {text}
-      </Box>
-    )
-  }
 
   const needsTruncate = text.length > CELL_TRUNCATE
   const display = !needsTruncate || expanded ? text : text.slice(0, CELL_TRUNCATE) + '…'

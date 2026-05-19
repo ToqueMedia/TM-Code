@@ -267,16 +267,17 @@ export function getCmdReminderSection(loadedSkillNames: string[] = []): string {
   // their CRITICAL blocks before improvising. Same mechanism chat mode
   // uses via `ctx.loadedSkillNames` in `getReminderSection`.
   const skillReminder = loadedSkillNames.length > 0
-    ? `\n9. Skills loaded: ${loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
+    ? `\n10. Skills loaded: ${loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
     : ''
   return `# Reminder
 
 1. **COMPLETE** every task and **VERIFY** before reporting done. Say so when verification is not possible.
 2. File writes go to disk immediately — **DOUBLE-CHECK** paths and content.
 3. **AFTER** execute_command: **READ** full output. Exit code ≠ 0 → **FIX** before continuing.
-4. **CONFIRM** dependencies are installed before importing. **INSTALL** first when missing.
-5. For destructive or shared-state actions: **CONFIRM** with the user first.
-6. **REPORT** outcomes faithfully. Claim success only when output is clean.
-7. ${sharedUiBaselineReminder()}
-8. ${sharedIdentityReminder()}${skillReminder}`
+4. **REPORT** faithfully and stop. When a check passes (exit code 0, clean output, build OK), state it plainly and move on — don't re-verify what you already checked. If verification isn't possible, say so explicitly rather than looping until you find something to do. The goal is an accurate report, not a defensive one.
+5. **CONFIRM** dependencies are installed before importing. **INSTALL** first when missing.
+6. For destructive or shared-state actions: **CONFIRM** with the user first.
+7. **REPORT** outcomes faithfully. Claim success only when output is clean.
+8. ${sharedUiBaselineReminder()}
+9. ${sharedIdentityReminder()}${skillReminder}`
 }

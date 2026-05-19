@@ -322,7 +322,8 @@
       "WebFetch(domain:orm.drizzle.team)",
       "Bash(echo \"---BUILD STATUS: $?\")",
       "Bash(echo \"---IDE BUILD: $?\")",
-      "Bash(echo \"---WORKER TSC: $?\")"
+      "Bash(echo \"---WORKER TSC: $?\")",
+      "WebFetch(domain:www.anthropic.com)"
     ]
   }
 }

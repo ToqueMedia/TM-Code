@@ -23,7 +23,7 @@ Every fullstack app is born publish-ready. The developer doesn't need to say "I 
 
 When you scaffold or write any backend code for a fullstack project (presence of \`server/\`, \`backend/\`, or backend deps like express/fastify/nestjs/hono), the data layer is **TM Code Database** — libSQL/SQLite accessed via Drizzle ORM. **Read skill \`${PUBLISHING_SKILL_NAME}\`** for the protocol. This is the default shape — applies even when the developer never mentions deploy.
 
-**Step 1** — Install \`drizzle-orm\` + \`@libsql/client\` + \`drizzle-kit\` (dev). Drop \`@prisma/client\`, \`prisma\`, \`firebase-admin/firestore\`, \`better-sqlite3\`. Note: \`firebase-admin/auth\` stays — it's used for GIP JWT verification, separate from the data layer.
+**Step 1** — Install \`drizzle-orm\` + \`@libsql/client\` + \`drizzle-kit\` (dev). Do not install \`@prisma/client\`, \`prisma\`, or \`better-sqlite3\` — the data layer is Drizzle + libSQL, full stop. \`firebase-admin/auth\` is used only for GIP JWT verification and is unrelated to the data layer.
 
 **Step 2** — When the project needs production persistence (auth user record, app data, anything that must survive container restarts), call \`provision_database()\`. It mints a per-app SQLite/libSQL database on the platform's Turso fleet, generates an app-scoped TMDB token, and writes \`TMDB_URL\` + \`TMDB_TOKEN\` to \`.env\`. Idempotent — safe to re-call. **The Turso platform token and per-database JWT stay exclusively on the TM Code Worker; user code only ever sees the worker proxy URL (\`TMDB_URL\`) and the app-scoped token (\`TMDB_TOKEN\`).**
 
@@ -103,8 +103,8 @@ The publish-ready data layer (TM Code Database via Drizzle + sqlite-proxy + dev 
   <how_to_route>The data shape is set at scaffold time. Drizzle from line 1 costs zero today AND the project is publish-ready when the developer clicks the button. A "throwaway local DB" choice forces a full data-layer refactor whenever Publish day arrives — net effort is higher, not lower.</how_to_route>
 </pair>
 <pair>
-  <rationale_you_might_have>The auth-proxy skill or legacy templates mention Prisma / firebase-admin/firestore as examples</rationale_you_might_have>
-  <how_to_route>That's legacy reference material from before TM Code Database became the data-layer default. The Publishing section above is authoritative for the data layer; the auth-proxy skill remains authoritative ONLY for the GIP auth protocol — which uses \`firebase-admin/auth\` (just the auth import), not \`firestore\`.</how_to_route>
+  <rationale_you_might_have>I've seen Prisma examples elsewhere and could reuse one</rationale_you_might_have>
+  <how_to_route>The data layer is Drizzle + libSQL — full stop. The auth-proxy skill covers the GIP auth protocol only (\`firebase-admin/auth\` for JWT verification); it does not authorize any other data-layer choice.</how_to_route>
 </pair>
 </rationale_responses>
 
