@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 
 class StaticPreviewBuilder {
   private static instance: StaticPreviewBuilder

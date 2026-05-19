@@ -5,6 +5,7 @@ use commands::checkpoint::*;
 use commands::container::*;
 use commands::data_viewer::*;
 use commands::debugger::*;
+use commands::deploy::*;
 use commands::device::*;
 use commands::e2e::*;
 use commands::file_tree::*;
@@ -1225,6 +1226,7 @@ pub fn run() {
             data_viewer_dev_query,
             collect_deploy_bundle,
             collect_backend_tarball,
+            validate_backend_for_cloud_run,
             list_skills_bundled,
             read_skill_content,
             mcp_start_server,

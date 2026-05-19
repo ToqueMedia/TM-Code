@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react'
+import { memo, useEffect, useState, useRef } from 'react'
 import { Box, Flex, Text, HStack, VStack } from '@chakra-ui/react'
 import { FiChevronDown } from 'react-icons/fi'
 import { tokens } from '../../theme/tokens'
@@ -25,7 +25,7 @@ interface CreditIndicatorProps {
   tmsRemaining: number
 }
 
-export function CreditIndicator(props: CreditIndicatorProps) {
+function CreditIndicatorInner(props: CreditIndicatorProps) {
   const [showDetail, setShowDetail] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const prevPctRef = useRef(0)
@@ -290,3 +290,9 @@ export function CreditIndicator(props: CreditIndicatorProps) {
     </Box>
   )
 }
+
+// Header pill — eight billingStore-derived props arrive from a parent that
+// re-renders frequently (status bar). Memo means the component skips work
+// when the parent re-renders without prop changes; when billingStore really
+// did update, shallow prop comparison still passes and the component runs.
+export const CreditIndicator = memo(CreditIndicatorInner)

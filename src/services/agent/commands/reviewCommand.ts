@@ -1,5 +1,5 @@
-import { invoke } from '@tauri-apps/api/core'
-import { useChatStore } from '../../../stores/chatStore'
+import { invoke } from '@/utils/invokeMetrics'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered } from '../../../stores/chatStore'
 import { useAgentStore } from '../../../stores/agentStore'
 import { useBillingStore } from '../../../stores/billingStore'
 import AgentService from '../agentService'
@@ -232,8 +232,11 @@ export async function executeReview(
     parentToolCallId: undefined, // /review isn't nested inside a tool call
     reasoningLabel: '/review',
     hooks: {
-      appendTextDelta: chatStore.appendTextDelta,
-      appendReasoningDelta: chatStore.appendReasoningDelta,
+      // Buffered — /review sub-agent produces long-form output and goes
+      // through the same 50ms coalescer used everywhere else for SSE deltas,
+      // instead of one streamingVersion bump per token.
+      appendTextDelta: appendTextDeltaBuffered,
+      appendReasoningDelta: appendReasoningDeltaBuffered,
       addPendingToolCall: chatStore.addPendingToolCall,
       updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
       updateToolCallWithResult: chatStore.updateToolCallWithResult,

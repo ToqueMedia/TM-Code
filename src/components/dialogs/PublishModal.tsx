@@ -263,25 +263,26 @@ function Header({ phase, isUpdate, onClose }: { phase: Phase; isUpdate: boolean;
           </Text>
         </Box>
       </Flex>
-      <Box
-        as="button"
-        w="28px"
-        h="28px"
-        display="flex"
-        alignItems="center"
-        justifyContent="center"
-        bg="transparent"
-        border="none"
-        borderRadius="6px"
-        cursor={phase === 'publishing' ? 'not-allowed' : 'pointer'}
-        opacity={phase === 'publishing' ? 0.4 : 1}
-        color={tokens.colors.text.muted}
-        _hover={phase === 'publishing' ? {} : { bg: 'rgba(255,255,255,0.05)', color: tokens.colors.text.primary }}
-        onClick={onClose}
-        aria-label="Close"
-      >
-        <FiX size={14} />
-      </Box>
+      {phase !== 'publishing' && (
+        <Box
+          as="button"
+          w="28px"
+          h="28px"
+          display="flex"
+          alignItems="center"
+          justifyContent="center"
+          bg="transparent"
+          border="none"
+          borderRadius="6px"
+          cursor="pointer"
+          color={tokens.colors.text.muted}
+          _hover={{ bg: 'rgba(255,255,255,0.05)', color: tokens.colors.text.primary }}
+          onClick={onClose}
+          aria-label="Close"
+        >
+          <FiX size={14} />
+        </Box>
+      )}
     </Flex>
   )
 }

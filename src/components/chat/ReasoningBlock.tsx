@@ -8,12 +8,19 @@ interface ReasoningBlockProps {
   isVisible: boolean
   isStreaming: boolean
   durationMs?: number
+  /** Identity payload echoed back via `onToggle` so the parent can route the
+   *  click to the right reducer (per-block vs. message-level) using a single
+   *  stable callback — instead of one inline closure per render that breaks
+   *  this component's memo and forces a re-render on every parent paint. */
+  messageId?: string
+  blockIndex?: number
   /** Called when the user clicks the header. The anchor element is the
    *  header element itself — passed so the caller can snapshot its
    *  bounding-rect.top BEFORE the toggle and restore the same visual
    *  position AFTER, instead of trying to restore raw scrollTop (which
-   *  fails when content above the block changes height). */
-  onToggle: (anchor: HTMLElement) => void
+   *  fails when content above the block changes height). `messageId` and
+   *  `blockIndex` are forwarded verbatim from the props above. */
+  onToggle: (anchor: HTMLElement, messageId?: string, blockIndex?: number) => void
 }
 
 /**
@@ -68,7 +75,7 @@ function useLiveElapsed(isRunning: boolean): number {
 /** Streaming-window height — fixed so text scrolls up like film credits. */
 const CREDITS_HEIGHT_PX = 140
 
-function ReasoningBlock({ content, isVisible, isStreaming, durationMs, onToggle }: ReasoningBlockProps) {
+function ReasoningBlock({ content, isVisible, isStreaming, durationMs, messageId, blockIndex, onToggle }: ReasoningBlockProps) {
   const isExpanded = isStreaming || isVisible
 
   // Auto-scroll: stick to the bottom while content grows so the latest line
@@ -110,7 +117,7 @@ function ReasoningBlock({ content, isVisible, isStreaming, durationMs, onToggle 
         align="center"
         gap={1.5}
         cursor="pointer"
-        onClick={(e) => onToggle(e.currentTarget as HTMLElement)}
+        onClick={(e) => onToggle(e.currentTarget as HTMLElement, messageId, blockIndex)}
         py="5px"
         px="8px"
         borderRadius="6px"

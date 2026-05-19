@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '../utils/logger'
 
 export type PackageManager = 'bun' | 'pnpm' | 'npm'

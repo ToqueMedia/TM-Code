@@ -19,7 +19,7 @@ import {
   LuTerminal,
   LuEraser,
 } from 'react-icons/lu'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 

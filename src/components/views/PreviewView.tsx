@@ -1,10 +1,10 @@
 import { memo, useRef, useEffect, useCallback, useMemo, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Flex, Box, Text, IconButton, HStack, Button } from '@chakra-ui/react'
 import { IS_MAC } from '@/utils/platform'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap, FiSend, FiUpload, FiCamera } from 'react-icons/fi'
+import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap, FiSend, FiUpload, FiCamera, FiDatabase } from 'react-icons/fi'
 import { useChatStore, generateId } from '../../stores/chatStore'
 import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
@@ -18,6 +18,8 @@ import MessageBubble from '../chat/MessageBubble'
 import PromptBar from '../PromptBar'
 import PermissionDialog from '../chat/PermissionDialog'
 import HttpClientPanel from '../http-client/HttpClientPanel'
+import DataViewerView from './DataViewerView'
+import { useMessageWindow } from '../../hooks/useMessageWindow'
 import TauriWebview, { closePreviewWebview } from '../ui/TauriWebview'
 import AgentLogo from '../ui/AgentLogo'
 import { tokens } from '@/theme/tokens'
@@ -25,17 +27,18 @@ import { t } from '@/i18n'
 
 const STORAGE_KEY = 'preview-chat-width'
 const CONSOLE_STORAGE_KEY = 'preview-console-height'
-const HTTP_DRAWER_HEIGHT_KEY = 'preview-http-drawer-height'
 const HTTP_DRAWER_OPEN_KEY = 'preview-http-drawer-open'
+const DATA_DRAWER_HEIGHT_KEY = 'preview-data-drawer-height'
+const DATA_DRAWER_OPEN_KEY = 'preview-data-drawer-open'
+const MIN_DATA_DRAWER_HEIGHT = 260
+const MAX_DATA_DRAWER_HEIGHT = 720
+const DEFAULT_DATA_DRAWER_HEIGHT = 420
 const MIN_WIDTH = 280
 const MAX_WIDTH = 640
 const DEFAULT_WIDTH = 380
 const MIN_CONSOLE_HEIGHT = 80
 const MAX_CONSOLE_HEIGHT = 400
 const DEFAULT_CONSOLE_HEIGHT = 180
-const MIN_DRAWER_HEIGHT = 200
-const MAX_DRAWER_HEIGHT = 600
-const DEFAULT_DRAWER_HEIGHT = 340
 
 const LOG_COLORS: Record<string, string> = {
   info: tokens.colors.text.secondary,
@@ -74,6 +77,31 @@ function PreviewView() {
   const isHttpDrawerOpen = useLayoutStore(s => s.isHttpDrawerOpen)
   const previewServerTimedOut = useLayoutStore(s => s.previewServerTimedOut)
   const isPreviewServerLoading = useLayoutStore(s => s.isPreviewServerLoading)
+  // PreviewView is sticky-mounted by MainLayout, so it keeps rendering even
+  // when the user switches to Chat/Editor/Settings. While not the active view
+  // we park the native macOS webview off-screen (via `frozen` below) —
+  // otherwise the NSView keeps painting on top of whatever surface IS
+  // active and the user sees a phantom webview sitting over their chat.
+  const isPreviewActiveView = useLayoutStore(s => s.viewMode === 'preview')
+  // Activation overlay — covers the iframe region for a short window after
+  // the user switches BACK to Preview, while the native webview takes a
+  // frame or two to reposition itself from its parked spot. Without this,
+  // the user briefly sees the iframe Box's white background (or the right-
+  // pane's dark background depending on layout) before the webview paints
+  // over it, which previously came across as a "tudo escuro" flash on
+  // every toggle. The overlay matches the iframe's white background so the
+  // gap reads as a clean fade rather than a colour shift.
+  const [showActivationOverlay, setShowActivationOverlay] = useState(false)
+  const prevPreviewActiveRef = useRef(isPreviewActiveView)
+  useEffect(() => {
+    const wasActive = prevPreviewActiveRef.current
+    prevPreviewActiveRef.current = isPreviewActiveView
+    if (isPreviewActiveView && !wasActive) {
+      setShowActivationOverlay(true)
+      const timer = setTimeout(() => setShowActivationOverlay(false), 250)
+      return () => clearTimeout(timer)
+    }
+  }, [isPreviewActiveView])
 
   // Main surface selection:
   //   - backend project → HttpClientPanel (no iframe)
@@ -85,6 +113,32 @@ function PreviewView() {
   const previewUrl = showHttpClientMain ? backendUrl : frontendUrl
 
   const [isChatCollapsed, setIsChatCollapsed] = useState(false)
+  // True while the chat sidebar's width is animating (CSS transition 0.25s).
+  // During that window the ResizeObserver on the iframe container fires every
+  // animation frame, each one moves the macOS native wry webview a few pixels,
+  // and the user sees a visible tremor as the NSView chases the DOM rect frame
+  // by frame. Parking the webview off-screen while the animation runs and
+  // restoring its position at the end produces a clean "snap to new size"
+  // instead of frame-by-frame jitter.
+  const [isChatAnimating, setIsChatAnimating] = useState(false)
+  const chatSidebarRef = useRef<HTMLDivElement>(null)
+  const toggleChatCollapsed = useCallback(() => {
+    setIsChatAnimating(true)
+    setIsChatCollapsed(v => !v)
+  }, [])
+  // React's `onTransitionEnd` fires per CSS property — width, min-width,
+  // max-width and opacity all transition on the sidebar. We only care about
+  // `width` (the one that drives the ResizeObserver and the webview rect
+  // recalc), so we filter to that property and unfreeze precisely when the
+  // browser confirms it's done. No fallback timer: the event is reliable
+  // in practice and if it's ever dropped the worst case is the webview
+  // stays parked until the next toggle (one extra click), which is better
+  // than the timer prematurely unfreezing during a long animation.
+  const handleSidebarTransitionEnd = useCallback((e: React.TransitionEvent<HTMLDivElement>) => {
+    if (e.propertyName !== 'width') return
+    if (e.target !== chatSidebarRef.current) return
+    setIsChatAnimating(false)
+  }, [])
 
   const chatScrollRef = useRef<HTMLDivElement>(null)
   const handleRef = useRef<HTMLDivElement>(null)
@@ -113,18 +167,28 @@ function PreviewView() {
   })
   const [isResizing, setIsResizing] = useState(false)
   const [isResizingConsole, setIsResizingConsole] = useState(false)
-  const [drawerHeight, setDrawerHeight] = useState<number>(() => {
+
+  // Data Viewer drawer — local state (not in layoutStore) because it's
+  // strictly a Preview-view affordance, unlike HTTP Client which is shared
+  // with the standalone backend layout. Persisted via localStorage so the
+  // user's "I want the data drawer open by default" preference survives reloads.
+  const [isDataDrawerOpen, setIsDataDrawerOpen] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem(HTTP_DRAWER_HEIGHT_KEY)
+      return localStorage.getItem(DATA_DRAWER_OPEN_KEY) === '1'
+    } catch { return false }
+  })
+  const [dataDrawerHeight, setDataDrawerHeight] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(DATA_DRAWER_HEIGHT_KEY)
       if (saved) {
         const parsed = parseInt(saved, 10)
-        if (parsed >= MIN_DRAWER_HEIGHT && parsed <= MAX_DRAWER_HEIGHT) return parsed
+        if (parsed >= MIN_DATA_DRAWER_HEIGHT && parsed <= MAX_DATA_DRAWER_HEIGHT) return parsed
       }
     } catch { /* ignore */ }
-    return DEFAULT_DRAWER_HEIGHT
+    return DEFAULT_DATA_DRAWER_HEIGHT
   })
-  const [isResizingDrawer, setIsResizingDrawer] = useState(false)
-  const drawerHandleRef = useRef<HTMLDivElement>(null)
+  const [isResizingDataDrawer, setIsResizingDataDrawer] = useState(false)
+  const dataDrawerHandleRef = useRef<HTMLDivElement>(null)
 
   // Restore drawer-open state on mount (fullstack only).
   useEffect(() => {
@@ -138,6 +202,13 @@ function PreviewView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectKind])
 
+  // Persist Data Viewer drawer open state.
+  useEffect(() => {
+    try {
+      localStorage.setItem(DATA_DRAWER_OPEN_KEY, isDataDrawerOpen ? '1' : '0')
+    } catch { /* ignore */ }
+  }, [isDataDrawerOpen])
+
   // Persist drawer-open state whenever it changes.
   useEffect(() => {
     try {
@@ -147,6 +218,45 @@ function PreviewView() {
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
+
+  // Pagination — same shape used by ChatView / ChatPanel / TerminalView.
+  // Render the last 30 messages; expand the window when the user scrolls
+  // the chat sidebar toward the top. Reset on session switch so a new
+  // conversation starts at the bottom.
+  const { visibleItems: visibleChatItems, canLoadMore: chatCanLoadMore, loadMore: chatLoadMore, hiddenCount: chatHiddenCount } = useMessageWindow(messages, {
+    resetKey: activeSessionId,
+    pageSize: 2,
+  })
+  const chatLoadMoreSentinelRef = useRef<HTMLDivElement>(null)
+  const isChatLoadingMoreRef = useRef(false)
+  useEffect(() => {
+    if (!chatCanLoadMore) return
+    const sentinel = chatLoadMoreSentinelRef.current
+    const scrollEl = chatScrollRef.current
+    if (!sentinel || !scrollEl) return
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return
+        if (isChatLoadingMoreRef.current) return
+        isChatLoadingMoreRef.current = true
+        const beforeHeight = scrollEl.scrollHeight
+        const beforeTop = scrollEl.scrollTop
+        chatLoadMore()
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const delta = scrollEl.scrollHeight - beforeHeight
+            if (delta > 0) scrollEl.scrollTop = beforeTop + delta
+            setTimeout(() => { isChatLoadingMoreRef.current = false }, 200)
+          })
+        })
+      },
+      { root: scrollEl, rootMargin: '120px 0px 0px 0px', threshold: 0 },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+    // chatScrollRef is a stable useRef; reading .current inside the effect
+    // doesn't need it in the dep array.
+  }, [chatCanLoadMore, chatLoadMore])
 
   // Single pass over logs; memoized so subscribers that re-render the
   // wrapping component (e.g. on unrelated layoutStore changes) don't
@@ -505,52 +615,52 @@ function PreviewView() {
       ? (previewUrl || 'HTTP Client')
       : (previewUrl || 'Loading...')
 
-  // Drawer resize (vertical, drag up from the top of the drawer)
-  const handleDrawerResizeStart = useCallback((e: React.PointerEvent) => {
+  // Data Viewer drawer resize (vertical, drag up from the top of the drawer)
+  const handleDataDrawerResizeStart = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
-    const handleEl = drawerHandleRef.current
+    const handleEl = dataDrawerHandleRef.current
     if (!handleEl) return
 
     const pid = e.pointerId
     try { handleEl.setPointerCapture(pid) } catch { /* ignore */ }
 
     const startY = e.clientY
-    const startH = drawerHeight
-    let current = drawerHeight
+    const startH = dataDrawerHeight
+    let current = dataDrawerHeight
     const body = document.body
     const prevCursor = body.style.cursor
     const prevUserSelect = body.style.userSelect
     body.style.cursor = 'row-resize'
     body.style.userSelect = 'none'
-    setIsResizingDrawer(true)
+    setIsResizingDataDrawer(true)
 
     function onPointerMove(pe: PointerEvent) {
-      // Dragging up = increasing height
       let next = startH + (startY - pe.clientY)
-      if (next < MIN_DRAWER_HEIGHT) next = MIN_DRAWER_HEIGHT
-      if (next > MAX_DRAWER_HEIGHT) next = MAX_DRAWER_HEIGHT
+      if (next < MIN_DATA_DRAWER_HEIGHT) next = MIN_DATA_DRAWER_HEIGHT
+      if (next > MAX_DATA_DRAWER_HEIGHT) next = MAX_DATA_DRAWER_HEIGHT
       current = next
-      setDrawerHeight(next)
+      setDataDrawerHeight(next)
     }
 
     function onPointerUp() {
-      try { localStorage.setItem(HTTP_DRAWER_HEIGHT_KEY, String(current)) } catch { /* ignore */ }
+      try { localStorage.setItem(DATA_DRAWER_HEIGHT_KEY, String(current)) } catch { /* ignore */ }
       try { handleEl?.releasePointerCapture(pid) } catch { /* ignore */ }
       handleEl?.removeEventListener('pointermove', onPointerMove)
       handleEl?.removeEventListener('pointerup', onPointerUp)
       body.style.cursor = prevCursor
       body.style.userSelect = prevUserSelect
-      setIsResizingDrawer(false)
+      setIsResizingDataDrawer(false)
     }
 
     handleEl.addEventListener('pointermove', onPointerMove)
     handleEl.addEventListener('pointerup', onPointerUp)
-  }, [drawerHeight])
+  }, [dataDrawerHeight])
 
   return (
     <Flex flex="1" overflow="hidden">
       {/* Left: Full chat sidebar (messages + prompt) — collapsible with animation */}
       <Flex
+        ref={chatSidebarRef}
         direction="column"
         w={isChatCollapsed ? '0px' : `${chatWidth}px`}
         minW={isChatCollapsed ? '0px' : `${MIN_WIDTH}px`}
@@ -561,6 +671,7 @@ function PreviewView() {
         transition="width 0.25s ease, min-width 0.25s ease, max-width 0.25s ease"
         opacity={isChatCollapsed ? 0 : 1}
         css={{ transition: 'width 0.25s ease, min-width 0.25s ease, max-width 0.25s ease, opacity 0.2s ease' }}
+        onTransitionEnd={handleSidebarTransitionEnd}
       >
         {/* Chat messages */}
         <Flex
@@ -599,7 +710,34 @@ function PreviewView() {
             </Flex>
           ) : (
             <Box maxW="600px" mx="auto" w="100%">
-              {messages.map(msg => (
+              {chatCanLoadMore && (
+                <Box
+                  as="button"
+                  ref={chatLoadMoreSentinelRef}
+                  w="100%"
+                  textAlign="center"
+                  fontSize={tokens.fontSize.xs}
+                  fontWeight="500"
+                  color={tokens.colors.text.muted}
+                  py={2}
+                  px={3}
+                  mb={2}
+                  borderRadius="6px"
+                  bg={tokens.colors.bg.hoverSubtle}
+                  border={`1px solid ${tokens.colors.border.panel}`}
+                  cursor="pointer"
+                  transition={`all ${tokens.transition.fast}`}
+                  _hover={{
+                    color: tokens.colors.text.primary,
+                    borderColor: tokens.colors.border.glass,
+                    bg: tokens.colors.bg.overlay,
+                  }}
+                  onClick={() => chatLoadMore()}
+                >
+                  ↑ Load earlier — {chatHiddenCount} hidden
+                </Box>
+              )}
+              {visibleChatItems.map(msg => (
                 <MessageBubble
                   key={msg.id}
                   message={msg}
@@ -714,7 +852,7 @@ function PreviewView() {
               color={isChatCollapsed ? tokens.colors.accent.primary : tokens.colors.text.secondary}
               _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
               borderRadius="6px"
-              onClick={() => setIsChatCollapsed(!isChatCollapsed)}
+              onClick={toggleChatCollapsed}
             >
               {isChatCollapsed ? <FiMinimize2 size={13} /> : <FiMaximize2 size={13} />}
             </IconButton>
@@ -829,6 +967,24 @@ function PreviewView() {
               </IconButton>
             )}
 
+            {/* Data Viewer — toggles a bottom slide-up drawer rather than
+                navigating to the standalone Data Viewer view, so the user
+                inspects tables without losing the preview iframe. The full
+                view is still reachable via Cmd/Ctrl+Shift+B or the chat-
+                header button. */}
+            <IconButton
+              aria-label={t('dataViewer.title')}
+              title={t('dataViewer.title')}
+              size="xs"
+              variant="ghost"
+              color={isDataDrawerOpen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+              borderRadius="6px"
+              onClick={() => setIsDataDrawerOpen(v => !v)}
+            >
+              <FiDatabase size={13} />
+            </IconButton>
+
             {/* Publish — opens the deploy modal. Free plan sees an upgrade
                 CTA inside the modal rather than the deploy flow. */}
             <Button
@@ -861,14 +1017,84 @@ function PreviewView() {
             <HttpClientPanel />
           </Flex>
         ) : (
-          <Box flex="1" bg={tokens.colors.text.inverse} position="relative" overflow="hidden">
+          // Preview region — `position: relative` so the HTTP and Data
+          // drawers can be `position: absolute` overlays on top of the iframe
+          // instead of siblings in the column-flex layout. That earlier
+          // setup made opening/closing a drawer reflow the iframe area:
+          //   - HTTP drawer animating `flex: 1` from 0 → 1 yanked the
+          //     iframe to display:none mid-transition, the drawer faded in,
+          //     and on close the iframe popped back BEFORE the drawer
+          //     finished fading out — the user saw a half-rendered drawer
+          //     during the close.
+          //   - Data drawer growing `height` pushed the iframe upward each
+          //     frame, retriggering ResizeObserver → webview reposition →
+          //     visible tremor.
+          // Overlays make the iframe stationary; drawers fade in/out on top.
+          // The native macOS wry webview still needs `frozen` to be parked
+          // off-screen when the HTTP drawer is fully visible (NSView paints
+          // above the DOM, no z-index trick fixes that), so the opacity
+          // animation alone isn't enough there.
+          <Box
+            flex="1"
+            bg={tokens.colors.text.inverse}
+            position="relative"
+            overflow="hidden"
+          >
+            {/* Activation overlay — same colour as the iframe Box, fades in
+                instantly when the user re-activates Preview and fades out
+                250 ms later. Covers the brief window during which the macOS
+                native wry webview is moving from its parked spot to the
+                real rect. Without it the user would see the iframe Box's
+                background flash through before the webview paints over.
+                Sits ABOVE the iframe Box but BELOW the drawers (z-index 5
+                vs 10/11). Pointer-events none so it doesn't block clicks
+                landing on the page once the webview has painted. */}
+            {showActivationOverlay && (
+              <Box
+                position="absolute"
+                inset={0}
+                bg={tokens.colors.text.inverse}
+                zIndex={5}
+                pointerEvents="none"
+                css={{
+                  animation: 'activationOverlay 0.25s ease-out forwards',
+                  '@keyframes activationOverlay': {
+                    '0%': { opacity: 1 },
+                    '70%': { opacity: 1 },
+                    '100%': { opacity: 0 },
+                  },
+                }}
+              />
+            )}
             {hasPreview && showIframe ? (
               <Box ref={previewContainerRef} position="relative" w="100%" h="100%">
                 <TauriWebview
                   url={previewMode === 'static' ? undefined : previewUrl!}
                   html={previewMode === 'static' ? previewHtmlContent! : undefined}
                   reloadKey={previewReloadKey}
-                  frozen={isResizing || isResizingConsole}
+                  // The macOS native wry webview is an NSView painted ABOVE
+                  // the DOM — z-index can't keep an absolute-positioned
+                  // overlay above it. Whenever a drawer overlay is open we
+                  // park the webview off-screen so the overlay is actually
+                  // visible. Trade-off: the Data drawer is a bottom slide,
+                  // so freezing hides the still-visible top half of the
+                  // preview. A future iteration could shrink the webview to
+                  // (height - drawerHeight) instead of parking, preserving
+                  // the upper iframe while the bottom shows the table viewer.
+                  frozen={
+                    !isPreviewActiveView
+                    || isResizing
+                    || isResizingConsole
+                    || isChatAnimating
+                    || (isFullstack && isHttpDrawerOpen)
+                  }
+                  // Data Viewer drawer takes the lower portion of the preview
+                  // region — shrink the native webview by the drawer height
+                  // instead of parking it off-screen. The user keeps seeing
+                  // the upper part of the preview while inspecting tables
+                  // below, which matches the original "preview + data
+                  // simultaneously visible" intent the drawer was added for.
+                  bottomReserveHeight={isDataDrawerOpen ? dataDrawerHeight + 4 : 0}
                 />
                 {(isResizing || isResizingConsole) && (
                   <Box
@@ -947,33 +1173,44 @@ function PreviewView() {
                 )}
               </Flex>
             )}
-          </Box>
-        )}
 
-        {/* Fullstack HTTP Client drawer — resizable bottom slide-up panel */}
-        <AnimatePresence>
-          {isFullstack && isHttpDrawerOpen && (
-            <motion.div
-              key="http-drawer"
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: drawerHeight + 4, opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={isResizingDrawer
-                ? { duration: 0 }
-                : { type: 'spring', stiffness: 420, damping: 36, mass: 0.9 }
-              }
-              style={{ flexShrink: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
-            >
-              {/* Resize handle — drag up/down */}
+            {/* Data Viewer drawer — absolute overlay anchored to the bottom
+                of the preview region. Doesn't push the iframe upward when
+                opening/closing; the iframe stays still and the drawer
+                animates its own height. Iframe remains visible behind /
+                above the drawer area. */}
+            <AnimatePresence>
+              {isDataDrawerOpen && (
+                <motion.div
+                  key="data-drawer"
+                  initial={{ y: '100%', opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  exit={{ y: '100%', opacity: 0 }}
+                  transition={isResizingDataDrawer
+                    ? { duration: 0 }
+                    : { type: 'spring', stiffness: 420, damping: 36, mass: 0.9 }
+                  }
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: dataDrawerHeight + 4,
+                    zIndex: 10,
+                    overflow: 'hidden',
+                    display: 'flex',
+                    flexDirection: 'column',
+                  }}
+                >
               <Box
-                ref={drawerHandleRef}
+                ref={dataDrawerHandleRef}
                 h="4px"
                 cursor="row-resize"
                 flexShrink={0}
-                bg={isResizingDrawer ? tokens.colors.accent.primary : 'transparent'}
-                transition={isResizingDrawer ? 'none' : `background ${tokens.transition.fast}`}
+                bg={isResizingDataDrawer ? tokens.colors.accent.primary : 'transparent'}
+                transition={isResizingDataDrawer ? 'none' : `background ${tokens.transition.fast}`}
                 _hover={{ bg: tokens.colors.accent.primary }}
-                onPointerDown={handleDrawerResizeStart}
+                onPointerDown={handleDataDrawerResizeStart}
                 zIndex={2}
               />
               <Flex
@@ -983,6 +1220,64 @@ function PreviewView() {
                 py="6px"
                 bg={tokens.colors.bg.panel}
                 borderTop={`1px solid ${tokens.colors.border.sidebarPanel}`}
+                borderBottom={`1px solid ${tokens.colors.border.glass}`}
+                flexShrink={0}
+              >
+                <HStack gap={2}>
+                  <FiDatabase size={11} color={tokens.colors.accent.primary} />
+                  <Text fontSize="11px" fontWeight={600} color={tokens.colors.text.secondary} textTransform="uppercase" letterSpacing="0.5px">
+                    {t('dataViewer.title')}
+                  </Text>
+                </HStack>
+                <IconButton
+                  aria-label="Close Data Viewer"
+                  size="xs"
+                  variant="ghost"
+                  color={tokens.colors.text.disabled}
+                  _hover={{ color: tokens.colors.text.secondary, bg: tokens.colors.bg.hoverSubtle }}
+                  borderRadius="4px"
+                  onClick={() => setIsDataDrawerOpen(false)}
+                >
+                  <FiChevronDown size={12} />
+                </IconButton>
+              </Flex>
+              <Box flex="1" overflow="hidden" bg={tokens.colors.bg.mainLayout} display="flex" flexDirection="column">
+                <DataViewerView embedded />
+              </Box>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Fullstack HTTP Client — fullscreen overlay over the preview region
+            (z-index above the data drawer so opening HTTP while data is open
+            still wins). The iframe stays mounted behind. The macOS native
+            wry webview is parked off-screen via `frozen={isHttpDrawerOpen}`
+            because z-index can't move an NSView; without that the webview
+            keeps painting on top. */}
+        <AnimatePresence>
+          {isFullstack && isHttpDrawerOpen && (
+            <motion.div
+              key="http-drawer"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                zIndex: 11,
+                overflow: 'hidden',
+                display: 'flex',
+                flexDirection: 'column',
+                background: tokens.colors.bg.mainLayout,
+              }}
+            >
+              <Flex
+                align="center"
+                justify="space-between"
+                px={3}
+                py="6px"
+                bg={tokens.colors.bg.panel}
                 borderBottom={`1px solid ${tokens.colors.border.glass}`}
                 flexShrink={0}
               >
@@ -1015,6 +1310,8 @@ function PreviewView() {
             </motion.div>
           )}
         </AnimatePresence>
+          </Box>
+        )}
 
         {/* Console panel (DevTools-style) with slide animation */}
         <AnimatePresence>

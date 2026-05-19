@@ -445,8 +445,14 @@ export function getReminderSection(ctx: PromptContext): string {
   // incomplete files, missing deps, missed dev-server errors, missed
   // request_credentials. The full surface lives in earlier sections;
   // this restates only what models routinely drop after a long prompt.
+  const mcpReminder = ctx.mcpTools.length > 0
+    ? `\n7. **MCP available**: ${ctx.mcpTools.map(t => `\`mcp__${t.serverName}__${t.name}\``).slice(0, 8).join(', ')}${ctx.mcpTools.length > 8 ? `, +${ctx.mcpTools.length - 8} more` : ''}. Before writing code against a library/service covered by an MCP, or when the task needs live external data or a side-effect in an external system, call the matching MCP — your training data is stale and these tools are the authoritative path.`
+    : ''
+  // Skills bullet is 7 when no MCP, 8 when MCP block is present. Numbering
+  // stays sequential so the model reads it as a list, not a digest.
+  const skillIndex = ctx.mcpTools.length > 0 ? 8 : 7
   const skillReminder = ctx.loadedSkillNames.length > 0
-    ? `\n7. Skills loaded: ${ctx.loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
+    ? `\n${skillIndex}. Skills loaded: ${ctx.loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
     : ''
   return `# Reminder
 
@@ -455,5 +461,5 @@ export function getReminderSection(ctx: PromptContext): string {
 3. **REPORT** faithfully and stop. When a check passes (clean dev-server logs, no diagnostics, build OK), state it plainly and move on — don't re-verify what you already checked. If verification isn't possible (no test exists, can't run the code), say so explicitly rather than looping until you find something to do. The goal is an accurate report, not a defensive one.
 4. **WHEN** your code reads \`process.env.X\` / \`import.meta.env.X\` for a third-party service (LLM, payments, email, etc.): call \`${REQUEST_CREDENTIALS}\` for X in the SAME turn. The developer cannot fill \`.env\` without the form.
 5. ${sharedUiBaselineReminder()}
-6. ${sharedIdentityReminder()}${skillReminder}`
+6. ${sharedIdentityReminder()}${mcpReminder}${skillReminder}`
 }

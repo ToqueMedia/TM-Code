@@ -17,7 +17,13 @@ import EmptyState from '../data-viewer/EmptyState'
 import { logger } from '../../utils/logger'
 import { trackEvent } from '../../services/analytics'
 
-function DataViewerView() {
+interface DataViewerViewProps {
+  /** When true, hides the full-screen header (back arrow + title). Used when
+   *  the component is rendered inside a drawer that brings its own chrome. */
+  embedded?: boolean
+}
+
+function DataViewerView({ embedded = false }: DataViewerViewProps) {
   const t = useTranslation()
   const currentProject = useCurrentProject()
   const source = useDataViewerStore((s) => s.source)
@@ -264,46 +270,66 @@ function DataViewerView() {
 
   return (
     <Flex flex="1" overflow="hidden" direction="column">
-      {/* Header */}
-      <Flex
-        align="center"
-        justify="space-between"
-        px={4}
-        h="48px"
-        flexShrink={0}
-        borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
-      >
-        <Flex align="center" gap={3}>
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            gap={2}
-            color={tokens.colors.text.secondary}
-            cursor="pointer"
-            px={2}
-            py="6px"
-            borderRadius={tokens.radius.md}
-            transition={tokens.transition.fast}
-            _hover={{ color: tokens.colors.text.primary, bg: tokens.colors.bg.hoverSubtle }}
-            onClick={() => useLayoutStore.getState().goBack()}
-          >
-            <FiArrowLeft size={14} />
-            <Text fontSize="13px" fontWeight="500">{t('dataViewer.title')}</Text>
-          </Box>
-          <Box w="1px" h="16px" bg={tokens.colors.border.sidebarPanel} />
-          <Text fontSize="12px" color={tokens.colors.text.muted}>
-            {project.name}
-          </Text>
-        </Flex>
+      {/* Header — hidden in embedded mode (the host drawer supplies its own
+          chrome and close affordance). The source toggle still needs to be
+          reachable in embedded mode, so it gets a lighter inline strip. */}
+      {!embedded ? (
+        <Flex
+          align="center"
+          justify="space-between"
+          px={4}
+          h="48px"
+          flexShrink={0}
+          borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
+        >
+          <Flex align="center" gap={3}>
+            <Box
+              as="button"
+              display="flex"
+              alignItems="center"
+              gap={2}
+              color={tokens.colors.text.secondary}
+              cursor="pointer"
+              px={2}
+              py="6px"
+              borderRadius={tokens.radius.md}
+              transition={tokens.transition.fast}
+              _hover={{ color: tokens.colors.text.primary, bg: tokens.colors.bg.hoverSubtle }}
+              onClick={() => useLayoutStore.getState().goBack()}
+            >
+              <FiArrowLeft size={14} />
+              <Text fontSize="13px" fontWeight="500">{t('dataViewer.title')}</Text>
+            </Box>
+            <Box w="1px" h="16px" bg={tokens.colors.border.sidebarPanel} />
+            <Text fontSize="12px" color={tokens.colors.text.muted}>
+              {project.name}
+            </Text>
+          </Flex>
 
-        <SourceToggle
-          source={source}
-          hasDev={hasDev}
-          hasProd={hasProd}
-          onChange={handleSourceChange}
-        />
-      </Flex>
+          <SourceToggle
+            source={source}
+            hasDev={hasDev}
+            hasProd={hasProd}
+            onChange={handleSourceChange}
+          />
+        </Flex>
+      ) : (
+        <Flex
+          align="center"
+          justify="flex-end"
+          px={3}
+          py="6px"
+          flexShrink={0}
+          borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
+        >
+          <SourceToggle
+            source={source}
+            hasDev={hasDev}
+            hasProd={hasProd}
+            onChange={handleSourceChange}
+          />
+        </Flex>
+      )}
 
       <Flex flex="1" overflow="hidden">
         {/* Tables sidebar */}

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { tauriFetch } from '../services/tauriFetch'
 import { resolveWorkerUrl } from '../utils/devUrls'
 import FirebaseAuthService from '../services/auth/firebaseAuth'

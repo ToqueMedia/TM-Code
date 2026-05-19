@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDisplay, ByokSessionSnapshot, SessionTurnSnapshot } from '../../types/chat'
 import { logger } from '../../utils/logger'
 import { hashProjectPath, encryptSession, decryptSession } from '../../utils/crypto'

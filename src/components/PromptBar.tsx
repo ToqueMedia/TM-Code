@@ -16,7 +16,7 @@ import KeyBindingDisplay from './ui/KeyBindingDisplay'
 
 function PromptBar() {
   const {
-    input,
+    hasInputContent,
     setInput,
     textareaRef,
     isStreaming,
@@ -126,7 +126,6 @@ function PromptBar() {
         >
           <PromptTextarea
             textareaRef={textareaRef}
-            value={input}
             onChange={setInput}
             onKeyDown={handleKeyDown}
             onBlur={handleBlur}
@@ -145,7 +144,7 @@ function PromptBar() {
           <PromptActions
             viewMode={viewMode}
             isStreaming={isStreaming}
-            hasInput={!!(input.trim() || draftAttachments.length > 0) && !isSendBlocked}
+            hasInput={(hasInputContent || draftAttachments.length > 0) && !isSendBlocked}
             hasPreview={hasPreview}
             onToggleEditor={toggleEditor}
             onTogglePreview={togglePreview}

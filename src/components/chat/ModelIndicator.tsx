@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { Box, HStack, Text } from '@chakra-ui/react'
 import { FiKey } from 'react-icons/fi'
 import { useAgentStore } from '../../stores/agentStore'
@@ -35,7 +36,7 @@ function planShowsCloudModel(plan: string | null | undefined): boolean {
 // the routing is the platform default. The model identity is still
 // inspectable via the ContextWindowIndicator tooltip and Settings → Profile.
 
-export default function ModelIndicator() {
+function ModelIndicator() {
   // Server-confirmed state — authoritative for what the LAST response used
   const byokActive = useAgentStore(s => s.byokActive)
   const modelName = useAgentStore(s => s.modelName)
@@ -190,3 +191,8 @@ export default function ModelIndicator() {
     </HStack>
   )
 }
+
+// Header pill — re-renders on every streaming-token write because the parent
+// (ChatView header) does. Memo lets the component skip those re-renders since
+// it has no props; only its own store selectors trigger work.
+export default memo(ModelIndicator)

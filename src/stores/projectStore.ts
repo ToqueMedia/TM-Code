@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { ProjectInfo, RecentProject, ProjectState, WindowState } from '../types/project';
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '@/utils/invokeMetrics';
 import { ProjectStatusMonitor } from '../utils/projectStatusMonitor';
 import { ProjectFileWatcher } from '../utils/projectFileWatcher';
 import { WindowTitleManager } from '../utils/windowTitleManager';
@@ -225,13 +225,29 @@ export const useProjectStore = create<ProjectStore>()(
 
         try {
           const projectInfo: ProjectInfo = await invoke('open_project', { path, initGit: options?.initGit });
-          // Reload recent projects so sidebar updates in real-time
-          const recentProjects = await invoke<RecentProject[]>('get_recent_projects').catch(() => get().recentProjects);
-          set({
+          // Avoid a redundant second IPC: Rust's `open_project` already wrote
+          // the recents file, and we have all four fields RecentProject needs
+          // in `projectInfo`. Constructing the entry locally + prepending +
+          // deduping by path produces an identical sidebar result without the
+          // extra `get_recent_projects` round-trip. The persisted file on disk
+          // remains the source of truth and is re-read by `loadRecentProjects`
+          // on mount, so eventual consistency is preserved across restarts.
+          const freshEntry: RecentProject = {
+            id: projectInfo.id,
+            name: projectInfo.name,
+            path: projectInfo.path,
+            lastOpened: projectInfo.lastOpened,
+          };
+          // Most-recent-mode wins: opening in chat/IDE removes the path from the
+          // CMD-mode list. Without this, a folder once opened in CMD stays
+          // tagged as "Terminal" in WelcomeSidebar forever — even after it's
+          // re-opened via "Open Folder" / "New Project" for chat use.
+          set(state => ({
             currentProject: projectInfo,
-            recentProjects: dedupeRecentProjects(recentProjects),
-            loading: false
-          });
+            recentProjects: dedupeRecentProjects([freshEntry, ...state.recentProjects]),
+            cmdModeProjectPaths: state.cmdModeProjectPaths.filter(p => p !== path),
+            loading: false,
+          }));
 
           // Clear editor open files and diagnostics when opening a new project
           try { useEditorRepository.getState().closeAllFiles() } catch (e) {

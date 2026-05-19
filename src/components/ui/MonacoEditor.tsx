@@ -188,7 +188,12 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     links: true,
     colorDecorators: true,
     codeLens: false,
-    contextmenu: false,
+    // Monaco's built-in context menu — cut/copy/paste, Go to Definition,
+    // Find References, Format Document, etc. Disabling it was a leftover
+    // from a phase where we mounted a custom overlay; the overlay never
+    // shipped, so users were left with no right-click affordance in the
+    // editor. Re-enable.
+    contextmenu: true,
     accessibilitySupport: 'auto',
     find: { addExtraSpaceOnTop: false, autoFindInSelection: 'multiline', seedSearchStringFromSelection: 'selection' },
     largeFileOptimizations: true,

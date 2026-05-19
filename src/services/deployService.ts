@@ -20,7 +20,7 @@
  *   - The deployStore phase flips to 'error' with the message; the modal's
  *     ErrorStep offers Retry which restarts from init.
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import FirebaseAuthService from './auth/firebaseAuth'
 import { resolveDeployUrl } from '../utils/devUrls'
 import { useDeployStore, type DeployStep } from '../stores/deployStore'
@@ -273,6 +273,20 @@ class DeployService {
       if (isComposite) {
         stepIdx++
         reportStep('container/build', 'in_progress', 'preparing source')
+        // Pre-deploy lint — catches the Express 5 wildcard crash and
+        // `express@^5` pins before we pay for a Cloud Build that's
+        // destined to fail at the Cloud Run TCP probe. Findings come back
+        // as `file:line — explanation` strings; surface them verbatim so
+        // the agent can act on the same content the user sees.
+        const lintFindings = await invoke<string[]>('validate_backend_for_cloud_run', {
+          projectPath,
+        })
+        if (lintFindings.length > 0) {
+          throw new Error(
+            'Backend has issues that would crash on Cloud Run:\n' +
+              lintFindings.map((f) => `  • ${f}`).join('\n'),
+          )
+        }
         const sourceTarballBase64 = await invoke<string>('collect_backend_tarball', {
           projectPath,
         })

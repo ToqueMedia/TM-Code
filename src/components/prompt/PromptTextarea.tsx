@@ -2,12 +2,20 @@ import React, { memo, useCallback, useLayoutEffect, useMemo, useRef } from 'reac
 import { Box } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import { useChatStore } from '@/stores/chatStore'
 import { renderHighlightedPrompt } from './promptHighlight'
 import { resolveInlineArgHint } from './slashArgHint'
 
 interface PromptTextareaProps {
   textareaRef: React.RefObject<HTMLTextAreaElement | null>
-  value: string
+  // `value` is intentionally NOT a prop — we used to pass `useChatStore.draftInput`
+  // down here, which forced every consumer of `usePromptBar` (PromptBar itself,
+  // AgentTasksPanel, QueuedMessagesPreview, AttachmentChips, PromptActions, the
+  // hint row, …) to re-render on every keystroke. The textarea now subscribes
+  // to the store directly so only this component re-renders per character.
+  // `onChange` still fires up so the parent can keep doing slash/hashtag/mention
+  // detection — but the parent reads the live value via store.getState() instead
+  // of holding it as reactive state.
   onChange: (value: string) => void
   onKeyDown: (e: React.KeyboardEvent) => void
   onBlur?: () => void
@@ -31,7 +39,12 @@ const TEXT_STYLE: React.CSSProperties = {
   tabSize: 2,
 }
 
-function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPaste, disabled, isAgentBusy }: PromptTextareaProps) {
+function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, disabled, isAgentBusy }: PromptTextareaProps) {
+  // Live value source. Subscribing here (instead of at usePromptBar level)
+  // localises the per-keystroke re-render to this component. The textarea
+  // + highlight overlay genuinely need the value on every change; the rest
+  // of PromptBar's tree does not.
+  const value = useChatStore(s => s.draftInput)
   // Mirror the textarea's scrollTop onto the overlay so multi-line content
   // (>6 visible rows, when the textarea starts scrolling internally) keeps
   // the coloured highlight aligned with the real glyphs underneath.
@@ -50,15 +63,21 @@ function PromptTextarea({ textareaRef, value, onChange, onKeyDown, onBlur, onPas
     }
   }, [textareaRef])
 
-  // After every value change, re-sync the transform: typing past the visible
-  // window auto-scrolls the textarea (browser keeps the caret in view) but
-  // doesn't always fire a scroll event in time, and value-driven re-renders
-  // wipe inline styles set by handleScroll. useLayoutEffect runs synchronously
-  // after DOM commit so the user never sees a frame with the transform stale.
+  // After every value change, re-sync the transform AND re-measure the
+  // textarea height. Auto-resize used to live in usePromptBar with `input`
+  // as its dep; moving it here keeps the resize work co-located with the
+  // value subscription, and stops the parent hook from needing the
+  // reactive input read in the first place.
   useLayoutEffect(() => {
     const ta = textareaRef.current
     const ov = overlayRef.current
-    if (ta && ov) {
+    if (!ta) return
+    // Height first — auto + scrollHeight measure, then transform sync so the
+    // overlay tracks any new scrollTop the browser set after the height change.
+    ta.style.height = 'auto'
+    const maxHeight = 6 * 24
+    ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`
+    if (ov) {
       ov.style.transform = `translateY(-${ta.scrollTop}px)`
     }
   }, [value, textareaRef])

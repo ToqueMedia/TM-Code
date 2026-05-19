@@ -12,7 +12,7 @@
  * method; the class now imports and delegates.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import {
   FORBIDDEN_FIREBASE_AUTH_NAMES,
   FORBIDDEN_DATA_LAYER_DEPS,

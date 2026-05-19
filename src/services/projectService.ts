@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '@/utils/invokeMetrics';
 import type { ProjectInfo, RecentProject, ProjectState, ProjectTemplate } from '../types/project';
 import { logger } from '../utils/logger';
 

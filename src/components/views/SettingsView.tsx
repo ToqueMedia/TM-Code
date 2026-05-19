@@ -25,7 +25,7 @@ import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { installUpdate, checkForUpdate } from '../../services/updateService'
 import { IS_WINDOWS } from '@/utils/platform'
 import { tokens } from '@/theme/tokens'
@@ -1347,68 +1347,219 @@ function McpSection() {
 
 // ━━━ Add Server Form ━━━
 
+// Canonical MCP entry shape — matches Claude Desktop / `mcp.json`.
+interface McpEntry {
+  command: string
+  args?: string[]
+  env?: Record<string, string>
+}
+
+const MCP_JSON_EXAMPLE = `{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..." }
+    },
+    "linear": {
+      "command": "npx",
+      "args": ["-y", "@linear/mcp-server"]
+    }
+  }
+}`
+
+/**
+ * Parse any of the three input shapes and produce a normalized
+ * `{ name → entry }` map. Errors are thrown with user-facing messages.
+ *
+ *   A) Full config:  { "mcpServers": { name: { command, args?, env? } } }
+ *   B) Named entry:  { name: { command, args?, env? } }
+ *   C) Bare entry:   { command, args?, env? }  ← requires `fallbackName`
+ */
+function parseMcpJson(raw: string, fallbackName: string): Record<string, McpEntry> {
+  const trimmed = raw.trim()
+  if (!trimmed) throw new Error('Empty JSON')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch (err) {
+    throw new Error(err instanceof Error ? err.message : 'Invalid JSON')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Top-level value must be an object')
+  }
+  const obj = parsed as Record<string, unknown>
+
+  // Shape A — has `mcpServers` wrapper.
+  if ('mcpServers' in obj && obj.mcpServers && typeof obj.mcpServers === 'object') {
+    const inner = obj.mcpServers as Record<string, unknown>
+    const out: Record<string, McpEntry> = {}
+    for (const [name, raw] of Object.entries(inner)) {
+      out[name] = validateEntry(name, raw)
+    }
+    return out
+  }
+
+  // Shape C — looks like a bare entry (top-level has `command`).
+  if ('command' in obj && typeof obj.command === 'string') {
+    const name = fallbackName.trim()
+    if (!name) throw new Error('Set the Name field when pasting a bare entry')
+    return { [name]: validateEntry(name, obj) }
+  }
+
+  // Shape B — every top-level key is a server name pointing at an entry.
+  const out: Record<string, McpEntry> = {}
+  for (const [name, raw] of Object.entries(obj)) {
+    out[name] = validateEntry(name, raw)
+  }
+  return out
+}
+
+function validateEntry(name: string, raw: unknown): McpEntry {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`Entry "${name}" must be an object`)
+  }
+  const e = raw as Record<string, unknown>
+  if (typeof e.command !== 'string' || !e.command.trim()) {
+    throw new Error(`Entry "${name}" is missing required "command"`)
+  }
+  const out: McpEntry = { command: e.command.trim() }
+  if (e.args !== undefined) {
+    if (!Array.isArray(e.args) || !e.args.every((a) => typeof a === 'string')) {
+      throw new Error(`Entry "${name}" — "args" must be an array of strings`)
+    }
+    out.args = e.args as string[]
+  }
+  if (e.env !== undefined) {
+    if (!e.env || typeof e.env !== 'object' || Array.isArray(e.env)) {
+      throw new Error(`Entry "${name}" — "env" must be an object`)
+    }
+    const env: Record<string, string> = {}
+    for (const [k, v] of Object.entries(e.env as Record<string, unknown>)) {
+      if (typeof v !== 'string') {
+        throw new Error(`Entry "${name}" — env "${k}" must be a string`)
+      }
+      env[k] = v
+    }
+    out.env = env
+  }
+  return out
+}
+
+async function writeMcpEntries(entries: Record<string, McpEntry>): Promise<void> {
+  const homeDir = await invoke<string>('get_home_directory')
+  const configDir = `${homeDir}/.toquemedia-studio`
+  const configPath = `${configDir}/mcp.json`
+  let config: { mcpServers: Record<string, unknown> } = { mcpServers: {} }
+  try {
+    const existing = await invoke<string>('read_file', { path: configPath })
+    config = JSON.parse(existing)
+    if (!config.mcpServers) config.mcpServers = {}
+  } catch {
+    /* no existing config */
+  }
+  for (const [name, entry] of Object.entries(entries)) {
+    config.mcpServers[name] = entry
+  }
+  await invoke('create_directories_all', { path: configDir })
+  await invoke('write_file', {
+    path: configPath,
+    content: JSON.stringify(config, null, 2),
+  })
+  for (const name of Object.keys(entries)) {
+    await MCPService.getInstance().addSingleServer(undefined, name)
+  }
+}
+
 function AddServerForm(props: { projectPath: string; onDone: () => void; onCancel: () => void }) {
   const t = useTranslation()
+  const [mode, setMode] = useState<'form' | 'json'>('form')
+
+  // Form-mode fields. `name` is also reused by JSON mode for the bare-entry
+  // (shape C) fallback — paste raw `{ command, args }` and the Name field
+  // resolves which key to write it under.
   const [name, setName] = useState('')
   const [command, setCommand] = useState('')
   const [args, setArgs] = useState('')
   const [envPairs, setEnvPairs] = useState('')
+
+  // JSON-mode state. `jsonPreview` is a derived count of valid entries +
+  // first-error message; recomputed inline so we don't need useMemo.
+  const [jsonText, setJsonText] = useState('')
+  const [jsonValidation, setJsonValidation] = useState<
+    | { kind: 'idle' }
+    | { kind: 'ok'; count: number; names: string[] }
+    | { kind: 'error'; message: string }
+  >({ kind: 'idle' })
+
   const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState('')
 
-  async function handleSave() {
+  // Live JSON validation — debounced via the input cadence (React batches
+  // setState within the same event). A separate timer would only matter for
+  // very large pastes; an MCP config is ≤ a few KB.
+  function updateJson(value: string) {
+    setJsonText(value)
+    setError('')
+    if (!value.trim()) {
+      setJsonValidation({ kind: 'idle' })
+      return
+    }
+    try {
+      const parsed = parseMcpJson(value, name)
+      const names = Object.keys(parsed)
+      setJsonValidation({ kind: 'ok', count: names.length, names })
+    } catch (err) {
+      setJsonValidation({
+        kind: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  function formatJson() {
+    try {
+      const parsed = JSON.parse(jsonText)
+      const formatted = JSON.stringify(parsed, null, 2)
+      setJsonText(formatted)
+      updateJson(formatted)
+    } catch {
+      // Leave as-is; the validation message already tells the user it's invalid.
+    }
+  }
+
+  function insertExample() {
+    setJsonText(MCP_JSON_EXAMPLE)
+    updateJson(MCP_JSON_EXAMPLE)
+  }
+
+  async function handleSaveForm() {
     if (!name.trim()) { setError(t('settings.serverNameRequired')); return }
     if (!command.trim()) { setError(t('settings.commandRequired')); return }
-
     setIsSaving(true)
     setError('')
-
     try {
-      // Write to global config so MCP servers persist across projects
-      const homeDir = await invoke<string>('get_home_directory')
-      const configDir = `${homeDir}/.toquemedia-studio`
-      const configPath = `${configDir}/mcp.json`
-      let config: { mcpServers: Record<string, unknown> } = { mcpServers: {} }
-      try {
-        const raw = await invoke<string>('read_file', { path: configPath })
-        config = JSON.parse(raw)
-        if (!config.mcpServers) config.mcpServers = {}
-      } catch {
-        // No existing config
-      }
-
-      // Standard MCP format: { command, args?, env? }
-      const serverEntry: Record<string, unknown> = {
-        command: command.trim(),
-      }
-
-      // Shell-style split: respects "quoted strings" as single args
+      // Shell-style split: respects "quoted strings" as single args.
       const argsList: string[] = []
       const argRegex = /(?:"([^"]*)")|(?:'([^']*)')|(\S+)/g
       let match: RegExpExecArray | null
-      const trimmed = args.trim()
-      if (trimmed) {
-        while ((match = argRegex.exec(trimmed)) !== null) {
+      const trimmedArgs = args.trim()
+      if (trimmedArgs) {
+        while ((match = argRegex.exec(trimmedArgs)) !== null) {
           argsList.push(match[1] ?? match[2] ?? match[3])
         }
       }
-      if (argsList.length > 0) serverEntry.args = argsList
-
-      // Parse env pairs (KEY=VALUE per line)
+      const entry: McpEntry = { command: command.trim() }
+      if (argsList.length > 0) entry.args = argsList
       if (envPairs.trim()) {
         const env: Record<string, string> = {}
         for (const line of envPairs.split('\n')) {
           const eq = line.indexOf('=')
           if (eq > 0) env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim()
         }
-        if (Object.keys(env).length > 0) serverEntry.env = env
+        if (Object.keys(env).length > 0) entry.env = env
       }
-
-      config.mcpServers[name.trim()] = serverEntry
-      await invoke('create_directories_all', { path: configDir })
-      await invoke('write_file', { path: configPath, content: JSON.stringify(config, null, 2) })
-
-      await MCPService.getInstance().addSingleServer(undefined, name.trim())
+      await writeMcpEntries({ [name.trim()]: entry })
       props.onDone()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -1417,58 +1568,265 @@ function AddServerForm(props: { projectPath: string; onDone: () => void; onCance
     }
   }
 
+  async function handleSaveJson() {
+    setError('')
+    let entries: Record<string, McpEntry>
+    try {
+      entries = parseMcpJson(jsonText, name)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      return
+    }
+    if (Object.keys(entries).length === 0) {
+      setError(t('settings.mcpJsonEmptyConfig'))
+      return
+    }
+    setIsSaving(true)
+    try {
+      await writeMcpEntries(entries)
+      props.onDone()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const isJsonSubmittable = jsonValidation.kind === 'ok'
+
   return (
-    <Box p={4} borderRadius={tokens.radius.xl} border="1px solid" borderColor={tokens.colors.accent.primaryBorder} bg={tokens.colors.bg.overlay}>
-      <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary} mb={3}>{t('settings.addMcpServer')}</Text>
-      <VStack align="stretch" gap={3}>
-        <Box>
-          <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>{t("settings.name")}</Text>
-          <Input size="sm" value={name} onChange={function (e) { setName(e.target.value) }}
-            placeholder="chakra-ui" bg={tokens.colors.bg.input} borderColor={tokens.colors.border.input}
-            color={tokens.colors.text.primary} _placeholder={{ color: tokens.colors.text.placeholder }} />
-        </Box>
+    <Box
+      p={4}
+      borderRadius={tokens.radius.xl}
+      border="1px solid"
+      borderColor={tokens.colors.accent.primaryBorder}
+      bg={tokens.colors.bg.overlay}
+    >
+      <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary} mb={3}>
+        {t('settings.addMcpServer')}
+      </Text>
 
-        <Box>
-          <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>{t("settings.command")}</Text>
-          <Input size="sm" value={command} onChange={function (e) { setCommand(e.target.value) }}
-            placeholder="npx" bg={tokens.colors.bg.input} borderColor={tokens.colors.border.input}
-            color={tokens.colors.text.primary} _placeholder={{ color: tokens.colors.text.placeholder }}
-            fontFamily={tokens.fontFamily.mono} fontSize="12px" />
-        </Box>
+      {/* Tab strip — slim segmented control, no shadcn/Chakra tabs dep */}
+      <HStack
+        gap={0}
+        mb={4}
+        p="2px"
+        bg={tokens.colors.bg.input}
+        borderRadius="8px"
+        border={`1px solid ${tokens.colors.border.input}`}
+        w="fit-content"
+      >
+        {(['form', 'json'] as const).map((m) => {
+          const active = mode === m
+          return (
+            <Box
+              key={m}
+              as="button"
+              px={3}
+              py="6px"
+              borderRadius="6px"
+              fontSize="12px"
+              fontWeight="500"
+              cursor="pointer"
+              transition={`all ${tokens.transition.fast}`}
+              bg={active ? tokens.colors.bg.overlay : 'transparent'}
+              color={active ? tokens.colors.text.primary : tokens.colors.text.muted}
+              border={active ? `1px solid ${tokens.colors.border.default}` : '1px solid transparent'}
+              _hover={active ? {} : { color: tokens.colors.text.secondary }}
+              onClick={() => { setMode(m); setError('') }}
+            >
+              {m === 'form' ? t('settings.mcpTabForm') : t('settings.mcpTabJson')}
+            </Box>
+          )
+        })}
+      </HStack>
 
-        <Box>
-          <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>{t("settings.arguments")}</Text>
-          <Input size="sm" value={args} onChange={function (e) { setArgs(e.target.value) }}
-            placeholder="-y @chakra-ui/react-mcp"
-            bg={tokens.colors.bg.input} borderColor={tokens.colors.border.input}
-            color={tokens.colors.text.primary} _placeholder={{ color: tokens.colors.text.placeholder }}
-            fontFamily={tokens.fontFamily.mono} fontSize="12px" />
-        </Box>
-
-        <Box>
-          <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>
-            {t('settings.envVars')}
-            <Text as="span" color={tokens.colors.text.disabled}> {t('settings.envOptional')}</Text>
+      {mode === 'form' ? (
+        <VStack align="stretch" gap={3}>
+          <Box>
+            <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>{t('settings.name')}</Text>
+            <Input
+              size="sm"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="chakra-ui"
+              bg={tokens.colors.bg.input}
+              borderColor={tokens.colors.border.input}
+              color={tokens.colors.text.primary}
+              _placeholder={{ color: tokens.colors.text.placeholder }}
+            />
+          </Box>
+          <Box>
+            <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>{t('settings.command')}</Text>
+            <Input
+              size="sm"
+              value={command}
+              onChange={(e) => setCommand(e.target.value)}
+              placeholder="npx"
+              bg={tokens.colors.bg.input}
+              borderColor={tokens.colors.border.input}
+              color={tokens.colors.text.primary}
+              _placeholder={{ color: tokens.colors.text.placeholder }}
+              fontFamily={tokens.fontFamily.mono}
+              fontSize="12px"
+            />
+          </Box>
+          <Box>
+            <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>{t('settings.arguments')}</Text>
+            <Input
+              size="sm"
+              value={args}
+              onChange={(e) => setArgs(e.target.value)}
+              placeholder="-y @chakra-ui/react-mcp"
+              bg={tokens.colors.bg.input}
+              borderColor={tokens.colors.border.input}
+              color={tokens.colors.text.primary}
+              _placeholder={{ color: tokens.colors.text.placeholder }}
+              fontFamily={tokens.fontFamily.mono}
+              fontSize="12px"
+            />
+          </Box>
+          <Box>
+            <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>
+              {t('settings.envVars')}
+              <Text as="span" color={tokens.colors.text.disabled}> {t('settings.envOptional')}</Text>
+            </Text>
+            <Textarea
+              size="sm"
+              value={envPairs}
+              onChange={(e) => setEnvPairs(e.target.value)}
+              placeholder={'GITHUB_TOKEN=ghp_...\nAPI_KEY=sk-...'}
+              bg={tokens.colors.bg.input}
+              borderColor={tokens.colors.border.input}
+              color={tokens.colors.text.primary}
+              _placeholder={{ color: tokens.colors.text.placeholder }}
+              rows={2}
+              fontFamily={tokens.fontFamily.mono}
+              fontSize="12px"
+            />
+          </Box>
+        </VStack>
+      ) : (
+        <VStack align="stretch" gap={3}>
+          <Text fontSize="11.5px" color={tokens.colors.text.muted} lineHeight="1.5">
+            {t('settings.mcpJsonHelp')}
           </Text>
-          <Textarea size="sm" value={envPairs} onChange={function (e) { setEnvPairs(e.target.value) }}
-            placeholder={"GITHUB_TOKEN=ghp_...\nAPI_KEY=sk-..."}
-            bg={tokens.colors.bg.input} borderColor={tokens.colors.border.input}
-            color={tokens.colors.text.primary} _placeholder={{ color: tokens.colors.text.placeholder }}
-            rows={2} fontFamily={tokens.fontFamily.mono} fontSize="12px" />
-        </Box>
+          <Box position="relative">
+            <Textarea
+              value={jsonText}
+              onChange={(e) => updateJson(e.target.value)}
+              placeholder={MCP_JSON_EXAMPLE}
+              bg={tokens.colors.bg.input}
+              borderColor={
+                jsonValidation.kind === 'error'
+                  ? tokens.colors.accent.red
+                  : jsonValidation.kind === 'ok'
+                    ? tokens.colors.accent.green
+                    : tokens.colors.border.input
+              }
+              color={tokens.colors.text.primary}
+              _placeholder={{ color: tokens.colors.text.disabled }}
+              rows={12}
+              fontFamily={tokens.fontFamily.mono}
+              fontSize="12px"
+              lineHeight="1.5"
+              spellCheck={false}
+              resize="vertical"
+            />
+            <HStack
+              position="absolute"
+              top="6px"
+              right="6px"
+              gap={1}
+            >
+              <Box
+                as="button"
+                onClick={insertExample}
+                px={2}
+                py="3px"
+                fontSize="10.5px"
+                fontWeight="500"
+                borderRadius="4px"
+                cursor="pointer"
+                bg={tokens.colors.bg.overlay}
+                color={tokens.colors.text.muted}
+                border={`1px solid ${tokens.colors.border.default}`}
+                _hover={{ color: tokens.colors.text.primary }}
+              >
+                {t('settings.mcpJsonExample')}
+              </Box>
+              <Box
+                as="button"
+                onClick={() => {
+                  if (!jsonText.trim() || jsonValidation.kind === 'error') return
+                  formatJson()
+                }}
+                px={2}
+                py="3px"
+                fontSize="10.5px"
+                fontWeight="500"
+                borderRadius="4px"
+                cursor={!jsonText.trim() || jsonValidation.kind === 'error' ? 'not-allowed' : 'pointer'}
+                opacity={!jsonText.trim() || jsonValidation.kind === 'error' ? 0.4 : 1}
+                bg={tokens.colors.bg.overlay}
+                color={tokens.colors.text.muted}
+                border={`1px solid ${tokens.colors.border.default}`}
+                _hover={!jsonText.trim() || jsonValidation.kind === 'error' ? {} : { color: tokens.colors.text.primary }}
+              >
+                {t('settings.mcpJsonFormat')}
+              </Box>
+            </HStack>
+          </Box>
+          {jsonValidation.kind === 'ok' && (
+            <HStack gap={2} align="center">
+              <Box w="6px" h="6px" borderRadius="50%" bg={tokens.colors.accent.green} />
+              <Text fontSize="11px" color={tokens.colors.text.secondary}>
+                {jsonValidation.count === 1
+                  ? `1 server: ${jsonValidation.names[0]}`
+                  : `${jsonValidation.count} servers: ${jsonValidation.names.slice(0, 3).join(', ')}${jsonValidation.count > 3 ? `, +${jsonValidation.count - 3}` : ''}`}
+              </Text>
+            </HStack>
+          )}
+          {jsonValidation.kind === 'error' && (
+            <HStack gap={2} align="flex-start">
+              <Box w="6px" h="6px" borderRadius="50%" bg={tokens.colors.accent.red} mt="6px" flexShrink={0} />
+              <Text fontSize="11px" color={tokens.colors.accent.red} lineHeight="1.5">
+                {jsonValidation.message}
+              </Text>
+            </HStack>
+          )}
+        </VStack>
+      )}
 
-        {error && <Text fontSize="11px" color={tokens.colors.accent.red}>{error}</Text>}
+      {error && (
+        <Text fontSize="11px" color={tokens.colors.accent.red} mt={3}>
+          {error}
+        </Text>
+      )}
 
-        <HStack justify="flex-end" gap={2}>
-          <Button size="sm" variant="outline" onClick={props.onCancel}
-            color={tokens.colors.text.secondary} borderColor={tokens.colors.border.default}
-            _hover={{ bg: tokens.colors.bg.hoverSubtle }}>{t('settings.cancel')}</Button>
-          <Button size="sm" onClick={handleSave} disabled={isSaving}
-            bg={tokens.colors.accent.primary} color="white"
-            _hover={{ bg: tokens.colors.accent.primaryDark }} _disabled={{ opacity: 0.5 }}>
-            {isSaving ? t('settings.adding') : t('settings.addServer')}</Button>
-        </HStack>
-      </VStack>
+      <HStack justify="flex-end" gap={2} mt={4}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={props.onCancel}
+          color={tokens.colors.text.secondary}
+          borderColor={tokens.colors.border.default}
+          _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+        >
+          {t('settings.cancel')}
+        </Button>
+        <Button
+          size="sm"
+          onClick={mode === 'form' ? handleSaveForm : handleSaveJson}
+          disabled={isSaving || (mode === 'json' && !isJsonSubmittable)}
+          bg={tokens.colors.accent.primary}
+          color="white"
+          _hover={{ bg: tokens.colors.accent.primaryDark }}
+          _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
+        >
+          {isSaving ? t('settings.adding') : t('settings.addServer')}
+        </Button>
+      </HStack>
     </Box>
   )
 }

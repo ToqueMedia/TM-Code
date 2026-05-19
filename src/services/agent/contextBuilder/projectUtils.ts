@@ -8,17 +8,20 @@
  * The orchestrator class now calls these directly.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { cachedBuildFileTree, cachedSafeReadFile } from '../ipcCache'
 import { detectSystemPackageManager } from '../../packageManagerDetector'
 import type { TemplateManifest } from '../../templateService'
 import type { PackageSummary } from './types'
 
+// Goes through `ipcCache.cachedSafeReadFile` so the dozen-or-so calls a
+// single context-build kicks off (README, TMS, PLAN, TODO, .toquemedia-id,
+// package.json, lockfiles, project-type markers, …) dedupe with each
+// other and with anything the attachment resolver reads in the same turn.
+// Cache keys carry fsVersion, so any write path that calls bumpFsVersion()
+// invalidates these entries automatically; a 5 s wall-clock TTL protects
+// against external-editor mutations that don't bump.
 export async function safeReadFile(path: string): Promise<string | null> {
-  try {
-    return await invoke<string>('read_file', { path })
-  } catch {
-    return null
-  }
+  return cachedSafeReadFile(path)
 }
 
 export function formatFileTree(node: Record<string, unknown>, indent: string = ''): string {
@@ -44,7 +47,7 @@ export function formatFileTree(node: Record<string, unknown>, indent: string = '
 
 export async function buildFileTree(projectPath: string): Promise<string> {
   try {
-    const fileTree = await invoke('build_file_tree', {
+    const fileTree = await cachedBuildFileTree({
       rootPath: projectPath,
       filter: { showHidden: false, maxDepth: 2 }
     })

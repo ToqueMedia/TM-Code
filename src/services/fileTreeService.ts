@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '@/utils/invokeMetrics';
 import type { FileTreeNode, FileTreeFilter, FileOperationResult } from '../types/fileTree';
 
 export class FileTreeService {

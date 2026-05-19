@@ -18,9 +18,9 @@
  * webview's DNS resolver (Chromium Happy Eyeballs handles localhost), and
  * respects z-index like any other element.
  */
-import { memo, useEffect, useRef, useCallback } from 'react'
+import { memo, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { Box } from '@chakra-ui/react'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { useLayoutStore } from '@/stores/layoutStore'
 import { IS_MAC } from '@/utils/platform'
 import { logger } from '@/utils/logger'
@@ -30,6 +30,14 @@ interface TauriWebviewProps {
   html?: string
   reloadKey?: number
   frozen?: boolean
+  /**
+   * Pixels to subtract from the webview's bottom edge. Used when an overlay
+   * (e.g. the Data Viewer drawer) takes the lower portion of the preview
+   * region — instead of parking the whole webview off-screen we shrink it,
+   * so the upper part of the preview stays visible above the drawer.
+   * Defaults to 0 (no shrink).
+   */
+  bottomReserveHeight?: number
 }
 
 function htmlToDataUri(html: string): string {
@@ -76,28 +84,67 @@ const IframePreview = memo(function IframePreview({ url, html, reloadKey = 0 }: 
 // Module-level state for the native webview — survives component unmount/remount
 let nativePreviewUrl = ''
 
-function MacWebview({ url, html, reloadKey = 0, frozen = false }: TauriWebviewProps) {
+function MacWebview({ url, html, reloadKey = 0, frozen = false, bottomReserveHeight = 0 }: TauriWebviewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number>(0)
+  // Last rect actually sent to the Rust side. Skipping IPCs when the rect
+  // matches the last one drops the "ResizeObserver fired but nothing actually
+  // moved" cases (parent re-rendered without geometry change, scroll-induced
+  // layouts, …) without losing the per-frame responsiveness drag needs.
+  // Doubles as the off-screen-park guard: the frozen branch writes the
+  // (-9999,-9999) rect here too, so the next syncPosition rebroadcasts the
+  // real rect instead of being skipped as "same as before".
+  const lastSentRectRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null)
   const overlayCount = useLayoutStore(s => s.overlayCount)
   const maskedByOverlay = overlayCount > 0
 
   const resolvedUrl = url || (html ? htmlToDataUri(html) : '')
+
+  // Capturing in a ref so `getRect` (a stable callback) reads the current
+  // value without invalidating the useCallback dep array — the function
+  // identity stays the same, listeners stay attached, but the reserve is
+  // always fresh.
+  const bottomReserveRef = useRef(bottomReserveHeight)
+  bottomReserveRef.current = bottomReserveHeight
 
   const getRect = () => {
     const el = containerRef.current
     if (!el) return null
     const r = el.getBoundingClientRect()
     if (r.width <= 0 || r.height <= 0) return null
-    return { x: r.left, y: r.top, width: r.width, height: r.height }
+    // Shrink the height when an in-region overlay occupies the bottom (e.g.
+    // Data Viewer drawer). `Math.max(1, …)` keeps the rect minimally valid
+    // when the reserve momentarily exceeds the container — the webview
+    // becomes 1px instead of receiving an invalid (negative) height.
+    const shrink = bottomReserveRef.current
+    const height = shrink > 0 ? Math.max(1, r.height - shrink) : r.height
+    return { x: r.left, y: r.top, width: r.width, height }
   }
 
   const syncPosition = useCallback(() => {
     if (!nativePreviewUrl) return
     const rect = getRect()
     if (!rect) return
+    const last = lastSentRectRef.current
+    if (last
+      && last.x === rect.x
+      && last.y === rect.y
+      && last.width === rect.width
+      && last.height === rect.height
+    ) return
+    lastSentRectRef.current = rect
     invoke('resize_preview_webview', rect).catch(() => {})
   }, [])
+
+  // RAF-coalesced syncPosition for window-level events. The ResizeObserver
+  // already runs through RAF; window resize / panelResize fired straight at
+  // `syncPosition` which means N listener invocations → N IPCs in the same
+  // frame even though the rect only landed on one final value. Routing them
+  // through the same RAF cancellation keeps them at ≤1 call per frame.
+  const scheduleSync = useCallback(() => {
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(syncPosition)
+  }, [syncPosition])
 
   useEffect(() => {
     if (!resolvedUrl) return
@@ -132,19 +179,26 @@ function MacWebview({ url, html, reloadKey = 0, frozen = false }: TauriWebviewPr
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(rafRef.current)
-      rafRef.current = requestAnimationFrame(syncPosition)
-    })
+    const observer = new ResizeObserver(scheduleSync)
     observer.observe(el)
-    window.addEventListener('resize', syncPosition)
-    window.addEventListener('panelResize', syncPosition)
+    window.addEventListener('resize', scheduleSync)
+    window.addEventListener('panelResize', scheduleSync)
     return () => {
       observer.disconnect()
-      window.removeEventListener('resize', syncPosition)
-      window.removeEventListener('panelResize', syncPosition)
+      window.removeEventListener('resize', scheduleSync)
+      window.removeEventListener('panelResize', scheduleSync)
+      cancelAnimationFrame(rafRef.current)
     }
-  }, [syncPosition])
+  }, [scheduleSync])
+
+  // Re-sync when the reserve changes — the container's `getBoundingClientRect`
+  // hasn't moved, so the ResizeObserver won't fire on its own. Without this,
+  // toggling the Data Viewer drawer wouldn't actually shrink/expand the
+  // native webview until the next unrelated layout change.
+  useLayoutEffect(() => {
+    if (!nativePreviewUrl) return
+    syncPosition()
+  }, [bottomReserveHeight, syncPosition])
 
   useEffect(() => {
     syncPosition()
@@ -155,10 +209,21 @@ function MacWebview({ url, html, reloadKey = 0, frozen = false }: TauriWebviewPr
     }
   }, [syncPosition])
 
-  useEffect(() => {
+  // useLayoutEffect — fires synchronously after DOM commit but BEFORE the
+  // browser paints. When `frozen` flips from true → false (user opens the
+  // preview), this gets the `resize_preview_webview` IPC out the door before
+  // the new view becomes visible. With a plain `useEffect` the IPC fires
+  // one frame later — long enough for the user to see the iframe background
+  // (the dark `text.inverse`) without the webview painted on top of it. The
+  // result was a visible "dark flash" right when the view changes.
+  useLayoutEffect(() => {
     if (!nativePreviewUrl) return
     if (frozen || maskedByOverlay) {
-      invoke('resize_preview_webview', { x: -9999, y: -9999, width: 1, height: 1 }).catch(() => {})
+      const parked = { x: -9999, y: -9999, width: 1, height: 1 }
+      // Record the parked rect so the next syncPosition doesn't dedupe
+      // against a stale on-screen rect and skip restoration.
+      lastSentRectRef.current = parked
+      invoke('resize_preview_webview', parked).catch(() => {})
     } else {
       syncPosition()
     }

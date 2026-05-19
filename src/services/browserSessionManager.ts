@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import MCPService, { type MCPServerConfig } from './mcp/mcpService'
 import { useMcpStore } from '../stores/mcpStore'
 import { useLayoutStore, type ViewMode } from '../stores/layoutStore'

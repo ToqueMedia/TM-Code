@@ -33,7 +33,7 @@
  * read-only tool palette + createSubAgentVisibility wiring + parse
  * `VERDICT:` line at the end of the assistant text.
  */
-import { useChatStore } from '../../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered } from '../../../stores/chatStore'
 import { useAgentStore } from '../../../stores/agentStore'
 import AgentService from '../agentService'
 import ToolExecutor from '../toolExecutor'
@@ -172,8 +172,11 @@ export async function runAuthFlowVerification(args: {
     parentToolCallId: undefined,
     reasoningLabel: 'auth verify',
     hooks: {
-      appendTextDelta: chatStore.appendTextDelta,
-      appendReasoningDelta: chatStore.appendReasoningDelta,
+      // Buffered — sub-agent SSE goes through the same 50ms coalescer the
+      // parent agent uses, so a verifier streaming at 100 tok/s lands as
+      // ~20 batched renders/s instead of 100 individual streamingVersion bumps.
+      appendTextDelta: appendTextDeltaBuffered,
+      appendReasoningDelta: appendReasoningDeltaBuffered,
       addPendingToolCall: chatStore.addPendingToolCall,
       updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
       updateToolCallWithResult: chatStore.updateToolCallWithResult,
@@ -304,6 +307,28 @@ curl -s -o /dev/null -w "%{http_code} %{content_type}\\n" http://localhost:5173/
 \`\`\`
 
 Pass: \`401 application/json\`. Fail: anything else (404 HTML = route missing or Vite proxy gone; 500 = JWKS misconfigured).
+
+**Probe E3 — Session persistence wiring (catches the recurring "refresh logs out" bug):**
+
+Login working is half the scaffold. The other half is rehydration: after a hard refresh, the auth store must re-read the saved token and call \`/api/auth/me\` BEFORE the first paint, or AuthGuard sees \`user: null\` and redirects to /login. This probe is **static analysis** — search the project for the three things that must coexist. Any one missing = FAIL.
+
+Steps (all three required):
+
+1. Find the auth store (search for \`signin\` / \`signup\` action with proxy fetch — typically \`src/stores/authStore.ts\`, \`src/lib/authStore.ts\`, or similar). Confirm:
+   - On successful proxy response, it calls \`setAuthToken(...)\` (any name — the helper that writes \`sessionStorage\` / \`localStorage\` / cookie). \`grep -rn "setAuthToken\\|sessionStorage.setItem\\|localStorage.setItem.*token" src/\` should show writes inside login/signup actions.
+   - It exposes an \`init\` (or \`bootstrap\` / \`rehydrate\`) action that calls \`/api/auth/me\` and sets the user from the response. \`grep -rn "/api/auth/me" src/\` plus reading the store should confirm.
+
+2. Open \`src/main.tsx\` (or \`src/main.ts\`, \`src/index.tsx\` — whichever holds \`createRoot(...).render(...)\`). Confirm \`useAuthStore.getState().init()\` (or the store's bootstrap action — name varies) is called **before** \`render(<App/>)\`. The canonical shape is:
+   \`\`\`
+   useAuthStore.getState().init().finally(() => {
+     createRoot(document.getElementById('root')!).render(<App />)
+   })
+   \`\`\`
+   A bare \`createRoot(...).render(<App/>)\` with init in a component \`useEffect\` is FAIL — the first paint happens with empty user and AuthGuard already redirected to /login.
+
+3. Spot-check: the persistence helper actually reads from storage at module load. \`grep -n "getItem.*token\\|getItem.*idToken" src/\` should find at least one read, in the same file as \`setAuthToken\`.
+
+Pass criteria: all three present. Fail criteria: any one missing — name the missing piece in the verdict (e.g. "FAIL: main.tsx renders without calling init(); refresh will land on /login").
 
 ` : ''}=== OUTPUT FORMAT ===
 Every check MUST follow this structure. A check without a Command run block is not a PASS — it's a skip.

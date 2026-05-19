@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiAlertOctagon, FiAlertTriangle, FiArchive } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
@@ -334,4 +334,8 @@ function ContextWindowIndicator() {
   )
 }
 
-export default ContextWindowIndicator
+// Wrapped in memo because this lives in the chat-view header, which
+// re-renders on any streaming-token write. The component takes no props,
+// so memo bails out on every parent re-render and only repaints when one
+// of its own store selectors actually changes.
+export default memo(ContextWindowIndicator)

@@ -4,6 +4,7 @@ pub mod checkpoint;
 pub mod container;
 pub mod data_viewer;
 pub mod debugger;
+pub mod deploy;
 pub mod device;
 pub mod e2e;
 pub mod file_tree;

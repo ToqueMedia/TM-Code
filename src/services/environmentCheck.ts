@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { Requirement } from './templateService'
 import { IS_WINDOWS } from '@/utils/platform'
 

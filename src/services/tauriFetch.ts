@@ -9,7 +9,7 @@
  * Only for non-streaming requests — SSE/streaming still uses native fetch().
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 
 interface TauriFetchOptions {
   method?: string

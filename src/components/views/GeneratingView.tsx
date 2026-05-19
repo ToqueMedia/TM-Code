@@ -4,6 +4,7 @@ import { useChatStore, resolveDiffApprovalByResultId, resolveAllPendingDiffAppro
 import { useAgentStore } from '../../stores/agentStore'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
 import MessageBubble from '../chat/MessageBubble'
+import { useMessageWindow } from '../../hooks/useMessageWindow'
 import DiffPreview from '../chat/DiffPreview'
 import DiffService from '../../services/agent/diffService'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
@@ -35,6 +36,45 @@ function GeneratingView() {
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
   const activeDiffs = pendingDiffs.filter(d => d.status === 'pending')
+
+  // Pagination — match the other chat surfaces (ChatView / ChatPanel /
+  // PreviewView's sidebar / TerminalView). Render the last 30 messages,
+  // expand on scroll up. Less critical here since GeneratingView is
+  // transient (visible only while the scaffold is in flight), but a single
+  // long scaffold can still produce hundreds of tool-call cards by the end,
+  // and the consistency across surfaces is worth the small overhead.
+  const { visibleItems, canLoadMore, loadMore, hiddenCount } = useMessageWindow(messages, {
+    resetKey: activeSessionId,
+    pageSize: 2,
+  })
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null)
+  const isLoadingMoreRef = useRef(false)
+  useEffect(() => {
+    if (!canLoadMore) return
+    const sentinel = loadMoreSentinelRef.current
+    const scrollEl = chatScrollRef.current
+    if (!sentinel || !scrollEl) return
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return
+        if (isLoadingMoreRef.current) return
+        isLoadingMoreRef.current = true
+        const beforeHeight = scrollEl.scrollHeight
+        const beforeTop = scrollEl.scrollTop
+        loadMore()
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const delta = scrollEl.scrollHeight - beforeHeight
+            if (delta > 0) scrollEl.scrollTop = beforeTop + delta
+            setTimeout(() => { isLoadingMoreRef.current = false }, 200)
+          })
+        })
+      },
+      { root: scrollEl, rootMargin: '120px 0px 0px 0px', threshold: 0 },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [canLoadMore, loadMore])
 
   useEffect(() => {
     const el = chatScrollRef.current
@@ -123,7 +163,33 @@ function GeneratingView() {
       <Flex direction="column" w="35%" minW="300px"
         borderRight={`1px solid ${tokens.colors.border.sidebarPanel}`} overflow="hidden">
         <Box ref={chatScrollRef} flex="1" overflowY="auto" py={3} px={3} css={scrollbarCss('4px')}>
-          {messages.map(msg => (
+          {canLoadMore && (
+            <Box
+              as="button"
+              ref={loadMoreSentinelRef}
+              w="100%"
+              textAlign="center"
+              fontSize={tokens.fontSize.xs}
+              fontWeight="500"
+              color={tokens.colors.text.muted}
+              py={2}
+              px={3}
+              mb={2}
+              borderRadius="6px"
+              bg={tokens.colors.bg.hoverSubtle}
+              border={`1px solid ${tokens.colors.border.panel}`}
+              cursor="pointer"
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{
+                color: tokens.colors.text.primary,
+                borderColor: tokens.colors.border.glass,
+              }}
+              onClick={() => loadMore()}
+            >
+              ↑ Load earlier — {hiddenCount} hidden
+            </Box>
+          )}
+          {visibleItems.map(msg => (
             <MessageBubble key={msg.id} message={msg} isStreaming={msg.id === streamingMessageId} />
           ))}
         </Box>

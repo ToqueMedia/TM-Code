@@ -11,7 +11,7 @@ import {
   VStack,
 } from '@chakra-ui/react'
 import { LuGitBranch, LuFolderOpen, LuLoader, LuCheck, LuCircleAlert } from 'react-icons/lu'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 

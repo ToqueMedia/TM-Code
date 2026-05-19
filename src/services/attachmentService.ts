@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { cachedBuildFileTree, cachedReadFile } from './agent/ipcCache'
 import { Attachment, AttachmentType } from '../types/chat'
 import type { FileTreeNode } from '../types/fileTree'
 import { extractMentions } from '../utils/mentionParser'
@@ -188,7 +188,7 @@ export async function extractAndResolveMentions(text: string, projectPath: strin
 
     if (isDirectory) {
       try {
-        const tree = await invoke<FileTreeNode>('build_file_tree', {
+        const tree = await cachedBuildFileTree<FileTreeNode>({
           rootPath: fullPath,
           filter: { showHidden: false },
         })
@@ -207,7 +207,7 @@ export async function extractAndResolveMentions(text: string, projectPath: strin
     }
 
     try {
-      const content = await invoke<string>('read_file', { path: fullPath })
+      const content = await cachedReadFile(fullPath)
       const truncated = content.length > MAX_FILE_CHARS
         ? content.slice(0, MAX_FILE_CHARS) + '\n[... truncated]'
         : content
@@ -229,13 +229,13 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
   const parts = await Promise.all(attachments.map(async (att): Promise<string> => {
     try {
       if (att.type === 'file') {
-        const content = await invoke<string>('read_file', { path: att.path })
+        const content = await cachedReadFile(att.path)
         const truncated = content.length > MAX_FILE_CHARS
           ? content.slice(0, MAX_FILE_CHARS) + '\n[... truncated]'
           : content
         return `<attached_file path="${att.path}">\n${truncated}\n</attached_file>`
       } else if (att.type === 'folder') {
-        const tree = await invoke<FileTreeNode>('build_file_tree', {
+        const tree = await cachedBuildFileTree<FileTreeNode>({
           rootPath: att.path,
           filter: { showHidden: false },
         })

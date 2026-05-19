@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
+import { useMessageWindow } from '../../hooks/useMessageWindow'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import { useTerminalPanelStore, TERMINAL_PANEL_MIN_WIDTH } from '../../stores/terminalPanelStore'
@@ -80,6 +81,54 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     streamingVersion,
     messageCount: messages.length,
   })
+
+  // Pagination — same shape used by chat. Render the latest 30 messages,
+  // expand the window as the user scrolls back through history. Reset on
+  // session switch so the new session starts at the bottom.
+  // pageSize=2 — CMD turns include similar tool-call density.
+  const { visibleItems, canLoadMore, loadMore, hiddenCount } = useMessageWindow(messages, {
+    resetKey: activeSessionId,
+    pageSize: 2,
+  })
+
+  // Top sentinel — IntersectionObserver fires when the user scrolls up
+  // close to the start of the visible window. Capture scrollHeight before
+  // React commits the larger list, then offset scrollTop by the delta so
+  // the viewport stays anchored on the same line instead of being pushed
+  // upward by the height of the freshly-prepended messages. `isLoadingMoreRef`
+  // guards against cascade triggers when the sentinel briefly re-intersects
+  // the rootMargin band before the scroll restore lands.
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null)
+  const isLoadingMoreRef = useRef(false)
+  useEffect(() => {
+    if (!canLoadMore) return
+    const sentinel = loadMoreSentinelRef.current
+    const scrollEl = scrollRef.current
+    if (!sentinel || !scrollEl) return
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return
+        if (isLoadingMoreRef.current) return
+        isLoadingMoreRef.current = true
+        const beforeHeight = scrollEl.scrollHeight
+        const beforeTop = scrollEl.scrollTop
+        loadMore()
+        // Double rAF — see ChatView. CMD mode uses `useCmdScrollFollow`
+        // (not `useStickToBottom`) but the principle is the same: let the
+        // follow logic settle before our manual scrollTop write.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const delta = scrollEl.scrollHeight - beforeHeight
+            if (delta > 0) scrollEl.scrollTop = beforeTop + delta
+            setTimeout(() => { isLoadingMoreRef.current = false }, 200)
+          })
+        })
+      },
+      { root: scrollEl, rootMargin: '120px 0px 0px 0px', threshold: 0 },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [canLoadMore, loadMore, scrollRef])
 
   // Window-wide drop support — any area of CMD mode (header, banners, scroll
   // area) becomes a drop target. The visual overlay still lives in the prompt
@@ -279,7 +328,34 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
             <TerminalGreeting projectPath={projectPath} />
           ) : (
             <Box pb={1} data-selectable="true">
-              {messages.map(msg => (
+              {canLoadMore && (
+                <Box
+                  as="button"
+                  ref={loadMoreSentinelRef}
+                  w="100%"
+                  textAlign="left"
+                  fontFamily={tokens.fontFamily.mono}
+                  fontSize="11px"
+                  fontWeight="500"
+                  color={tokens.colors.text.muted}
+                  py={2}
+                  px={2}
+                  mb={1}
+                  borderRadius="4px"
+                  bg={tokens.colors.bg.hoverSubtle}
+                  border={`1px solid ${tokens.colors.border.panel}`}
+                  cursor="pointer"
+                  transition={`all ${tokens.transition.fast}`}
+                  _hover={{
+                    color: tokens.colors.text.primary,
+                    borderColor: tokens.colors.border.glass,
+                  }}
+                  onClick={() => loadMore()}
+                >
+                  ⟳ load earlier — {hiddenCount} hidden
+                </Box>
+              )}
+              {visibleItems.map(msg => (
                 <ErrorBoundary key={msg.id}>
                   <TerminalMessageRenderer
                     message={msg}

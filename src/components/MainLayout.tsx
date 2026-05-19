@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { Flex, Box } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -37,6 +37,18 @@ function MainLayout() {
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const currentProject = useCurrentProject()
   const { handleFileSelect } = useCodeEditorState()
+
+  // Sticky-mount the Preview view from the first time it's opened. After
+  // that toggling views is a CSS display flip, not unmount/remount — the
+  // mount cost (1400-LOC component + Tauri webview boot) happens once per
+  // session. The "tudo escuro" regression from a previous attempt is now
+  // masked by an explicit activation overlay inside PreviewView itself
+  // (see `showActivationOverlay` over the iframe region) so the NSView's
+  // few-frame reposition gap is no longer visible.
+  const [previewMounted, setPreviewMounted] = useState(viewMode === 'preview')
+  useEffect(() => {
+    if (viewMode === 'preview' && !previewMounted) setPreviewMounted(true)
+  }, [viewMode, previewMounted])
 
   // Initialize services
   const lspServiceRef = useMemo(() => TypeScriptLspService.getInstance(), [])
@@ -263,10 +275,12 @@ function MainLayout() {
                 <GeneratingView />
               </ErrorBoundary>
             )}
-            {viewMode === 'preview' && (
-              <ErrorBoundary>
-                <PreviewView />
-              </ErrorBoundary>
+            {previewMounted && (
+              <Box display={viewMode === 'preview' ? 'flex' : 'none'} flex="1" overflow="hidden">
+                <ErrorBoundary>
+                  <PreviewView />
+                </ErrorBoundary>
+              </Box>
             )}
             {viewMode === 'editor' && (
               <ErrorBoundary>

@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiPlay, FiFileText, FiCheckSquare, FiSquare } from 'react-icons/fi'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { handleStartExecution } from '../../services/agent/commands/planCommand'

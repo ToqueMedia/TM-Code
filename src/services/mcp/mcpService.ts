@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { useMcpStore, McpToolInfo } from '../../stores/mcpStore'
 import { discoverRemoteTools as discoverRemote, callRemoteTool as callRemote } from './remoteTransport'
 

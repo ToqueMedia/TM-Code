@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '../utils/logger'
 
 const DEFAULT_WIDTH_PX = 480

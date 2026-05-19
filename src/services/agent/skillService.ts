@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { parseSkillFrontmatter } from './skillFrontmatter'
 
 // Re-export so existing imports (`import { parseSkillFrontmatter } from './skillService'`) keep working.
@@ -496,15 +496,19 @@ ${lines.join('\n')}`
       return mode === 'cmd'
     }
 
-    // frontend-design: opt-in via `#design` hashtag. Mirrors claude-vaz's
-    // pattern (frontend-design is a plugin the user installs, not bundled).
-    // Auto-indexing leads to read_skill misfires — the model sees it in the
-    // index but doesn't decide it's relevant for "build a tiny app", and
-    // the result is generic AI aesthetics. Force-loading via hashtag is the
-    // explicit signal the model needs to commit to a deliberate aesthetic.
-    // The IDE surfaces a tip suggesting #design when a frontend project is
-    // detected (see App.tsx).
-    if (skillName === 'frontend-design') return false
+    // frontend-design: bundled skill, always indexed. Earlier this was gated
+    // behind `#design` (force-load only) because we assumed the model wouldn't
+    // discover it spontaneously. Empirical evidence showed otherwise — when
+    // taste-defaults / read_skill descriptions mention `frontend-design` by
+    // name, the model calls `read_skill('frontend-design')` on its own for
+    // "polished UI", "Chakra UI", landing/dashboard prompts. The gate caused
+    // read_skill misfires (skill exists in bundle, hidden from index → tool
+    // returns "not available" → model falls back to react-patterns and
+    // generic AI aesthetics). Removing the gate lets discovery succeed.
+    // Overuse is bounded by the taste-defaults block in sharedSections.ts
+    // which instructs restraint unless the task calls for motion / typography.
+    // `#design` is still the strongest signal: authCommand inlines the skill
+    // body verbatim, planCommand pins it in Platform Requirements.
 
     // Auth-scaffolding skills (auth-proxy, google-signin) — chat-only
     // (CMD has no dev-server preview, the recipe doesn't apply there). No

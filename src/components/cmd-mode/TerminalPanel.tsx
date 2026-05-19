@@ -16,7 +16,7 @@
 import { memo, useEffect, useRef } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiX } from 'react-icons/fi'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -161,13 +161,26 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx 
       })
 
     // ResizeObserver: keep xterm sized to its container, and inform the PTY.
+    // `fit()` is cheap and we want xterm to react every observer tick (no
+    // visual lag during drag). `resize_pty` is the expensive call — debounce
+    // it to one IPC per 120 ms drag burst, and skip the IPC entirely when
+    // cols/rows are unchanged (e.g. layout reflow without a real size change).
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null
+    let lastCols = -1
+    let lastRows = -1
     const ro = new ResizeObserver(() => {
       if (!fitRef.current || !termRef.current) return
       try {
         fitRef.current.fit()
         const cols = termRef.current.cols
         const rows = termRef.current.rows
-        invoke('resize_pty', { sessionId, cols, rows }).catch(() => {})
+        if (cols === lastCols && rows === lastRows) return
+        if (resizeTimer) clearTimeout(resizeTimer)
+        resizeTimer = setTimeout(() => {
+          lastCols = cols
+          lastRows = rows
+          invoke('resize_pty', { sessionId, cols, rows }).catch(() => {})
+        }, 120)
       } catch {
         // ignored — fit can throw during mount/unmount transitions
       }
@@ -177,6 +190,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx 
     return () => {
       disposed = true
       ro.disconnect()
+      if (resizeTimer) clearTimeout(resizeTimer)
       onDataDisposable.dispose()
       if (unlistenOutput) unlistenOutput()
       if (unlistenExit) unlistenExit()

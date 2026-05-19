@@ -1,7 +1,7 @@
 import { memo, useState, useEffect, useCallback, useRef } from 'react'
 import { Box, Flex, Text, Portal, Textarea, Input, HStack } from '@chakra-ui/react'
 import { FiX, FiCamera, FiSend, FiCheck, FiAlertCircle, FiMonitor } from 'react-icons/fi'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { tokens } from '@/theme/tokens'
 import { useAuthStore } from '@/stores/authStore'
 import { useTranslation } from '@/i18n'

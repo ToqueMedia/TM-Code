@@ -78,10 +78,10 @@ class SlashCommandRegistry {
 
     this.register({
       name: '/plan',
-      description: 'Architect a feature — generate specs, get approval, create dev todo list',
+      description: 'Architect a feature or full app — research the codebase, produce PLAN.md with approval card and seeded task list',
       enabled: true,
       execute: executePlan,
-      argHint: '[feature or change to plan]',
+      argHint: '[feature or full app to plan]',
     })
 
     this.register({

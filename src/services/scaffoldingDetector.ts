@@ -19,7 +19,7 @@
  * are NOT in this detector — they are idempotent or per-invocation and don't
  * need the "already applied" guard.
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 
 export type ScaffoldKey = 'auth.email-password' | 'auth.google' | 'payments.momenu'
 

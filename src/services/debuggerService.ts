@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '../utils/logger'
 
 // TypeScript interfaces matching the Rust types

@@ -14,7 +14,7 @@
 // .body.getReader(). Mirroring that contract means parseOpenAISSEStream can
 // be written symmetric to parseSSEStream — no special Tauri-event awareness.
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 interface StreamEventPayload {

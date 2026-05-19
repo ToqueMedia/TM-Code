@@ -1,5 +1,5 @@
 import type { SlashCommand } from './slashCommandRegistry'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { useChatStore, clearMessageQueue } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useMcpStore } from '../../stores/mcpStore'

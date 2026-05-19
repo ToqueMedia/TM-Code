@@ -11,7 +11,7 @@
  * records the scaffold provenance) so manual overrides and re-runs survive
  * the same way as for the template manifest.
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '../../utils/logger'
 
 export const DEPLOY_FILE_NAME = '.toquemedia-deploy.json'

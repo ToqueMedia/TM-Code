@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { useProjectStore } from '../../../stores/projectStore'
 import { useChatStore } from '../../../stores/chatStore'
 import { useAgentStore } from '../../../stores/agentStore'
@@ -103,10 +103,11 @@ function buildPrompt(
     ``,
     `5. Implement the frontend per the skill recipe:`,
     `   - src/lib/firebase.ts (init only — only onAuthStateChanged is allowed from firebase/auth)`,
-    `   - Auth store (Zustand if React, Pinia if Vue, etc.) with signup/login/logout${wantsGoogle ? '/setUser' : ''}`,
+    `   - Auth store (Zustand if React, Pinia if Vue, etc.) with signup/login/logout${wantsGoogle ? '/setUser' : ''}, AND an \`init()\` action that reads \`getAuthToken()\`, calls \`GET /api/auth/me\`, sets user from the response (or \`null\` when token missing/expired and refresh fails). This is the SESSION-PERSISTENCE mechanism — without it, a hard refresh after login lands the user back on /login because the store starts empty.`,
     `   - AuthGuard component for protected routes`,
-    `   - Login/Signup screens that call the proxy endpoints`,
+    `   - Login/Signup screens that call the proxy endpoints. After every successful proxy response: \`setAuthToken(idToken, refreshToken)\` → \`authFetch('/api/auth/sync', ...)\` → \`setUser(synced)\`. Skipping setAuthToken means the next authFetch has no Authorization header.`,
     `   - src/lib/authClient.ts (or equivalent) with setAuthToken + authFetch helpers — pattern in the skill`,
+    `   - **Bootstrap in main.tsx**: wrap \`createRoot(...).render(<App/>)\` in \`useAuthStore.getState().init().finally(() => createRoot(...).render(...))\`. Calling \`init()\` from a component \`useEffect\` is too late — the first paint already happened with \`user: null\` and AuthGuard has already redirected to /login. This is non-negotiable; tests for it run in the verification step below.`,
     ...(wantsGoogle
       ? [
           ``,
@@ -135,6 +136,7 @@ function buildPrompt(
     `- Client-side: only \`onAuthStateChanged\` is imported from \`firebase/auth\`. signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, signOut go through the proxy instead — the popup family is silently blocked in the IDE's preview webview.`,
     `- After a successful proxy signup or signin, call /api/auth/sync to upsert the user record via the platform data layer.`,
     `- Use authFetch (or the project's equivalent) for protected API calls.`,
+    `- Session persistence is half the scaffold, not a follow-up: the auth store MUST expose \`init()\` AND \`main.tsx\` MUST call it before the first render. The skill's "Session bootstrap" section has the canonical Zustand + main.tsx example — follow it verbatim. Skipping this means refresh-after-login lands on /login or an infinite spinner, every single time.`,
   ].join('\n')
 }
 

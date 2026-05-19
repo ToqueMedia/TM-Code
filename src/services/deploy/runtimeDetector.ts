@@ -356,7 +356,7 @@ function scopedFs(fs: FsView, prefix: string): FsView {
 
 // ── Tauri-backed FsView + entry helper ───────────────────────
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 
 class TauriFsView implements FsView {
   private cache = new Map<string, string | null>()

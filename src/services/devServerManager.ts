@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { useLayoutStore, type ProjectKind } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'

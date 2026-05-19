@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { listen } from '@tauri-apps/api/event'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
@@ -35,7 +35,7 @@ import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
 import type { AgentCallbacks } from './agentService'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered } from '../../stores/chatStore'
 
 // === Types ===
 
@@ -2209,8 +2209,13 @@ Project root: ${projectRoot}`
           parentToolCallId: toolCallId,
           reasoningLabel: 'research sub-agent',
           hooks: {
-            appendTextDelta: chatStore.appendTextDelta,
-            appendReasoningDelta: chatStore.appendReasoningDelta,
+            // Buffered variants — sub-agent SSE bumps streamingVersion at
+            // the same 50ms cadence as the parent agent loop. Without the
+            // swap, every sub-agent token was a fresh re-render of the
+            // streaming bubble even though the parent had already batched
+            // its own.
+            appendTextDelta: appendTextDeltaBuffered,
+            appendReasoningDelta: appendReasoningDeltaBuffered,
             addPendingToolCall: chatStore.addPendingToolCall,
             updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
             updateToolCallWithResult: chatStore.updateToolCallWithResult,
@@ -2354,8 +2359,13 @@ Project root: ${projectRoot}`
           reasoningLabel: 'background sub-agent',
           targetMessageId,
           hooks: {
-            appendTextDelta: chatStore.appendTextDelta,
-            appendReasoningDelta: chatStore.appendReasoningDelta,
+            // Buffered variants — sub-agent SSE bumps streamingVersion at
+            // the same 50ms cadence as the parent agent loop. Without the
+            // swap, every sub-agent token was a fresh re-render of the
+            // streaming bubble even though the parent had already batched
+            // its own.
+            appendTextDelta: appendTextDeltaBuffered,
+            appendReasoningDelta: appendReasoningDeltaBuffered,
             addPendingToolCall: chatStore.addPendingToolCall,
             updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
             updateToolCallWithResult: chatStore.updateToolCallWithResult,
@@ -3341,8 +3351,13 @@ Verify this implementation. Run tests, type checks, and any other relevant valid
           parentToolCallId: toolCallId,
           reasoningLabel: 'verify sub-agent',
           hooks: {
-            appendTextDelta: chatStore.appendTextDelta,
-            appendReasoningDelta: chatStore.appendReasoningDelta,
+            // Buffered variants — sub-agent SSE bumps streamingVersion at
+            // the same 50ms cadence as the parent agent loop. Without the
+            // swap, every sub-agent token was a fresh re-render of the
+            // streaming bubble even though the parent had already batched
+            // its own.
+            appendTextDelta: appendTextDeltaBuffered,
+            appendReasoningDelta: appendReasoningDeltaBuffered,
             addPendingToolCall: chatStore.addPendingToolCall,
             updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
             updateToolCallWithResult: chatStore.updateToolCallWithResult,

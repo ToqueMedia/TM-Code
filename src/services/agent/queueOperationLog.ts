@@ -15,7 +15,7 @@
  * Tauri command, which avoids opening a connection per call.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { hashProjectPath } from '../../utils/crypto'
 import { logger } from '../../utils/logger'
 import type { QueueOperationMessage } from '../../types/messageQueueTypes'

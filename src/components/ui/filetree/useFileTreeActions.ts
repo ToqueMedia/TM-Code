@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useCallback, useState, useRef } from 'react';
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
 import { useFileTreeRepository } from '@/stores/fileTreeStore';
 import { useProjectStore } from '@/stores/projectStore';
@@ -27,12 +27,20 @@ export function useFileTreeActions(
   const [copyName, setCopyName] = useState('');
   const copyInputRef = useRef<HTMLInputElement>(null);
 
-  function openContextMenu(node: FileTreeNode, pos: { x: number; y: number }): void {
-    selectNode(node.path);
-    setMenuNode(node);
-    setMenuPos(pos);
-    setMenuOpen(true);
-  }
+  // Stable reference — MemoTreeNode receives this as its single action prop,
+  // so a fresh function each render would invalidate the memo on every node
+  // (100+ in a typical project). Store actions (`selectNode`) and React's
+  // setState setters are guaranteed stable, so the dep array stays empty
+  // beyond `selectNode`.
+  const openContextMenu = useCallback(
+    (node: FileTreeNode, pos: { x: number; y: number }): void => {
+      selectNode(node.path);
+      setMenuNode(node);
+      setMenuPos(pos);
+      setMenuOpen(true);
+    },
+    [selectNode],
+  );
 
   function closeContextMenu(): void {
     setMenuOpen(false);

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -90,7 +90,13 @@ async function detectDevCommand(projectPath: string): Promise<string | null> {
 import { logger } from '../../utils/logger'
 
 export function usePromptBar() {
-  const input = useChatStore(s => s.draftInput)
+  // Boolean-only selector. The full string used to live here (`s.draftInput`)
+  // which forced PromptBar + every sibling rendered by this hook to
+  // re-render per keystroke. We only need to know whether there IS input for
+  // the send-button gate; the actual text lives inside PromptTextarea, which
+  // subscribes to `draftInput` itself. Boolean re-render fires once when
+  // the user types the first char and once when they clear the buffer.
+  const hasInputContent = useChatStore(s => s.draftInput.trim().length > 0)
   const setInput = useChatStore(s => s.setDraftInput)
   const [devCommand, setDevCommand] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -207,18 +213,11 @@ export function usePromptBar() {
     return () => { cancelled = true }
   }, [currentProject?.path, isAgentBusy])
 
-  // Auto-resize textarea on input change (and on mount, since `input` is in
-  // the initial render). Previously this had no deps array and ran on every
-  // render — including renders triggered by unrelated store updates — which
-  // measured scrollHeight repeatedly for no reason and contributed to the
-  // editing jitter the textarea overlay design is sensitive to.
-  useEffect(() => {
-    const textarea = textareaRef.current
-    if (!textarea) return
-    textarea.style.height = 'auto'
-    const maxHeight = 6 * 24
-    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`
-  }, [input, textareaRef])
+  // Auto-resize lived here when `input` was a reactive read on this hook.
+  // Now that PromptTextarea owns the live subscription, it also owns the
+  // height measurement (useLayoutEffect inside PromptTextarea). Leaving the
+  // useEffect here would force the hook back into reactive-input territory
+  // and reintroduce the per-keystroke re-render of every consumer.
 
   // Preserve focus across view switches (e.g. chat → preview).
   // When the PromptBar remounts with draft text, the user was typing — refocus.
@@ -243,7 +242,17 @@ export function usePromptBar() {
     // Slash commands: /command (no space → suggest command names)
     if (value.startsWith('/') && !value.includes(' ')) {
       const commands = slashCommandRegistry.filterCommands(value.split(' ')[0])
-      setFilteredCommands(commands)
+      // Skip the setState when the suggestion list is content-identical to
+      // the current one. Each `filterCommands` call returns a fresh array,
+      // so `useState`'s default Object.is would always fire a re-render
+      // even when nothing visually changes (user types another char inside
+      // the same prefix — `/in` → `/ini` both surface the same single-row
+      // list). Returning `prev` from the updater is React's signal to bail.
+      setFilteredCommands(prev =>
+        prev.length === commands.length && prev.every((c, i) => c.name === commands[i].name)
+          ? prev
+          : commands,
+      )
       setShowCommandMenu(commands.length > 0)
       setSelectedCommandIndex(0)
       setShowMentionMenu(false)
@@ -262,7 +271,13 @@ export function usePromptBar() {
         enabled: true,
         execute: async () => {},
       }))
-      setFilteredCommands(argItems)
+      // Same dedupe rationale as the previous branch — same partial typed,
+      // same arg suggestions, no re-render needed.
+      setFilteredCommands(prev =>
+        prev.length === argItems.length && prev.every((c, i) => c.name === argItems[i].name)
+          ? prev
+          : argItems,
+      )
       setShowCommandMenu(true)
       setSelectedCommandIndex(0)
       setShowMentionMenu(false)
@@ -307,7 +322,14 @@ export function usePromptBar() {
         : qs.search(mention.query, 30, true)
 
       if (results.length > 0) {
-        setFilteredMentions(results)
+        // Same content-dedupe as the slash branches above — `QuickOpenService`
+        // builds a fresh results array on every call even when the visible
+        // list is unchanged (user typing through an unambiguous prefix).
+        setFilteredMentions(prev =>
+          prev.length === results.length && prev.every((r, i) => r.path === results[i].path)
+            ? prev
+            : results,
+        )
         setShowMentionMenu(true)
         setSelectedMentionIndex(0)
         mentionStartRef.current = mention.atIndex
@@ -1317,7 +1339,7 @@ export function usePromptBar() {
   }, [devCommand, currentProject?.path])
 
   return {
-    input,
+    hasInputContent,
     setInput: handleInputChange,
     textareaRef,
     isStreaming,

@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { useE2EStore } from '../stores/e2eStore'
 
 export interface BrowserInfo {

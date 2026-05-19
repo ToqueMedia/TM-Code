@@ -11,7 +11,7 @@
  *            call provides the column metadata.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { tauriFetch } from './tauriFetch'
 import { resolveWorkerUrl } from '../utils/devUrls'
 

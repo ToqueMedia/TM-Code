@@ -532,6 +532,22 @@ Python contract:
 6. **Listening on `127.0.0.1` / `localhost`.** Cloud Run docs: *"the ingress container should not listen on 127.0.0.1"*. Bind `0.0.0.0`.
 7. **Embedding any `*.json` credential file or hardcoding `TMDB_TOKEN`.** Tokens come from Cloud Run env at deploy time. The harness rejects writes that match credential-file patterns.
 
+8. **`app.get('*', ...)` / `app.use('*', ...)` / `app.all('*', ...)` in Express.** Express 5 ships with `path-to-regexp@8`, which rejects bare `*` as a route — the container crashes on startup with `PathError: Missing parameter name at index 1: *`. Cloud Run shows it as `The user-provided container failed to start and listen on the port` because the process died before binding. **Pin Express to `^4.21.2` AND use middleware-without-path for catch-alls:**
+
+   ```ts
+   // ✅ Correct — works in Express 4 and 5
+   app.use((_req, res) => {
+     res.sendFile(path.join(__dirname, '../dist/index.html'))
+   })
+
+   // ❌ Wrong — crashes under Express 5
+   app.get('*', (req, res) => res.sendFile(...))
+   app.use('*', router)
+   app.all('*', handler)
+   ```
+
+   If Express 5 is genuinely required, named wildcards work (`app.get('/*splat', ...)`), but stay on v4 unless there's a specific reason. The template `react-express-*` pins `^4.21.2`; do not let `npm install express` upgrade it to v5 silently. When writing `package.json` from scratch (no template), pin Express explicitly: `"express": "^4.21.2"`.
+
 ### 9. `.dockerignore`
 
 ```

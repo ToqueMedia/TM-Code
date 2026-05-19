@@ -323,7 +323,9 @@
       "Bash(echo \"---BUILD STATUS: $?\")",
       "Bash(echo \"---IDE BUILD: $?\")",
       "Bash(echo \"---WORKER TSC: $?\")",
-      "WebFetch(domain:www.anthropic.com)"
+      "WebFetch(domain:www.anthropic.com)",
+      "Bash(firebase --version)",
+      "Bash(yarn build:web)"
     ]
   }
 }

@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import CheckpointService from './checkpointService'

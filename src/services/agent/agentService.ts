@@ -13,7 +13,7 @@ import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore
 import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useByokStore } from '../../stores/byokStore'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '../../utils/logger'
 import { resolveWorkerUrl } from '../../utils/devUrls'
 import { getQueryGuard } from './queryGuard'
@@ -2188,7 +2188,7 @@ Developer message: ${displayText}
             m.default.getInstance().fetchBillingInfo().catch(() => {})
           })
           throw new ServiceError(
-            'Sem créditos disponíveis. Aguarda o reset do ciclo ou compra créditos extra.',
+            'Sem créditos disponíveis. Aguarda o reset do ciclo ou compra consumo extra.',
             'BUDGET_EXHAUSTED',
             false  // No retry — user must wait for cycle reset or buy credits
           )

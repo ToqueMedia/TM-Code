@@ -13,6 +13,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useByokState } from '../../hooks/useByokState'
 import { useThinkingToggle } from '../../hooks/useThinkingToggle'
 import MessageBubble from '../chat/MessageBubble'
+import { useMessageWindow } from '../../hooks/useMessageWindow'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import ChatSkeleton from '../chat/ChatSkeleton'
@@ -70,16 +71,30 @@ function ChatView() {
   // still see it) but the transcript shows only the boundary marker plus
   // anything that came after. Tracks the LAST boundary (not the first) so
   // repeated compressions over a long-lived session keep collapsing.
-  const messages = (() => {
-    let lastBoundary = -1
+  //
+  // `revealPreBoundary` overrides this filter when the user explicitly
+  // clicks the "Show earlier history" affordance — without it, the
+  // pagination ceiling at the boundary is invisible (the load-more sentinel
+  // disappears at the boundary and the user has no UI to access history
+  // that's still on disk). Resets on session switch so a new conversation
+  // doesn't inherit the prior session's "show all" choice.
+  const [revealPreBoundary, setRevealPreBoundary] = useState(false)
+  useEffect(() => {
+    setRevealPreBoundary(false)
+  }, [activeSessionId])
+  const lastBoundaryIndex = (() => {
     for (let i = rawMessages.length - 1; i >= 0; i--) {
       if (rawMessages[i].role === 'system' && rawMessages[i].kind === 'compact_boundary') {
-        lastBoundary = i
-        break
+        return i
       }
     }
-    return lastBoundary === -1 ? rawMessages : rawMessages.slice(lastBoundary)
+    return -1
   })()
+  const messages = (lastBoundaryIndex === -1 || revealPreBoundary)
+    ? rawMessages
+    : rawMessages.slice(lastBoundaryIndex)
+  const preBoundaryCount = lastBoundaryIndex === -1 ? 0 : lastBoundaryIndex
+  const hasHiddenPreBoundary = preBoundaryCount > 0 && !revealPreBoundary
   const projectPath = currentProject?.path || ''
 
 // use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
@@ -88,6 +103,62 @@ function ChatView() {
     resize: 'smooth',
     initial: 'instant',
   })
+
+  // Pagination over the post-compaction-boundary slice — render the most
+  // recent 30 messages, expand the window when the user scrolls toward the
+  // top. Reset key is the session id so opening another conversation starts
+  // at the bottom instead of inheriting an expanded window.
+  // pageSize=2: a single assistant turn can render 50+ blocks (tool calls,
+  // reasoning, text). 2 turns ≈ a comfortable screenful for tool-heavy
+  // sessions; the user explicitly asked for this size after observing that
+  // larger pages buried the load-more affordance under too much content.
+  const { visibleItems, canLoadMore, loadMore, hiddenCount } = useMessageWindow(messages, {
+    resetKey: activeSessionId,
+    pageSize: 2,
+  })
+
+  // Top sentinel observed via IntersectionObserver. When the sentinel
+  // enters the viewport we pull the next page in, then offset the scroll
+  // container's scrollTop by the height delta so the user stays anchored
+  // on the same message instead of being pushed up. The `isLoadingMoreRef`
+  // guard prevents cascading loads — between fire and the post-paint
+  // scroll-restore the sentinel can briefly remain inside the rootMargin
+  // band and trigger again, pulling two or three pages from one gesture.
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null)
+  const isLoadingMoreRef = useRef(false)
+  useEffect(() => {
+    if (!canLoadMore) return
+    const sentinel = loadMoreSentinelRef.current
+    const scrollEl = scrollRef.current
+    if (!sentinel || !scrollEl) return
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return
+        if (isLoadingMoreRef.current) return
+        isLoadingMoreRef.current = true
+        const beforeHeight = scrollEl.scrollHeight
+        const beforeTop = scrollEl.scrollTop
+        loadMore()
+        // Double rAF — wait one frame for React to commit, a second for the
+        // browser to paint AND for `useStickToBottom`'s ResizeObserver
+        // callback to land. Without the second frame, our manual scrollTop
+        // can race with the library's own scroll-tracking writes and either
+        // get clobbered (preview jumps to bottom) or trick the library into
+        // thinking the user just scrolled (sticky pause). Two frames is
+        // enough buffer empirically.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const delta = scrollEl.scrollHeight - beforeHeight
+            if (delta > 0) scrollEl.scrollTop = beforeTop + delta
+            setTimeout(() => { isLoadingMoreRef.current = false }, 200)
+          })
+        })
+      },
+      { root: scrollEl, rootMargin: '120px 0px 0px 0px', threshold: 0 },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [canLoadMore, loadMore, scrollRef])
 
   // Track whether user was at bottom before streaming started.
   // Once the user scrolls away, we stop forcing scroll until they return.
@@ -457,7 +528,67 @@ function ChatView() {
                 py={4}
                 data-selectable="true"
               >
-                {messages.map(msg => (
+                {/* Reveal-earlier-history affordance — only visible when:
+                    (a) the agent has compressed the conversation at least
+                    once (so there ARE pre-boundary messages on disk), AND
+                    (b) the current window has already been fully expanded
+                    via the load-more sentinel below (otherwise the sentinel
+                    is doing its job and the button would be premature).
+                    Click flips `revealPreBoundary`, which removes the
+                    boundary filter so pagination operates on the full
+                    rawMessages array. */}
+                {hasHiddenPreBoundary && !canLoadMore && (
+                  <Box
+                    as="button"
+                    w="100%"
+                    textAlign="center"
+                    fontSize={tokens.fontSize.xs}
+                    fontWeight="500"
+                    color={tokens.colors.text.muted}
+                    py={2}
+                    px={4}
+                    borderRadius="6px"
+                    bg={tokens.colors.bg.hoverSubtle}
+                    border={`1px solid ${tokens.colors.border.panel}`}
+                    cursor="pointer"
+                    transition={`all ${tokens.transition.fast}`}
+                    _hover={{
+                      color: tokens.colors.text.primary,
+                      borderColor: tokens.colors.border.glass,
+                    }}
+                    onClick={() => setRevealPreBoundary(true)}
+                  >
+                    Show earlier history ({preBoundaryCount} message{preBoundaryCount === 1 ? '' : 's'} before the last compaction)
+                  </Box>
+                )}
+                {canLoadMore && (
+                  <Box
+                    as="button"
+                    ref={loadMoreSentinelRef}
+                    w="100%"
+                    textAlign="center"
+                    fontSize={tokens.fontSize.xs}
+                    fontWeight="500"
+                    color={tokens.colors.text.muted}
+                    py={2.5}
+                    px={4}
+                    mb={2}
+                    borderRadius="6px"
+                    bg={tokens.colors.bg.hoverSubtle}
+                    border={`1px solid ${tokens.colors.border.panel}`}
+                    cursor="pointer"
+                    transition={`all ${tokens.transition.fast}`}
+                    _hover={{
+                      color: tokens.colors.text.primary,
+                      borderColor: tokens.colors.border.glass,
+                      bg: tokens.colors.bg.overlay,
+                    }}
+                    onClick={() => loadMore()}
+                  >
+                    ↑ Load earlier messages — {hiddenCount} hidden
+                  </Box>
+                )}
+                {visibleItems.map(msg => (
                   <MessageBubble
                     key={msg.id}
                     message={msg}

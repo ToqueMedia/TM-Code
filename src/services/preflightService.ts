@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/utils/invokeMetrics'
 
 /**
  * Pre-flight availability check for CMD-mode toolkit dependencies.

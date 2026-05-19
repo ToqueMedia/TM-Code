@@ -302,6 +302,23 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const toggleReasoningBlock = useChatStore(s => s.toggleReasoningBlock)
   const [messageCopied, setMessageCopied] = useState(false)
 
+  // Single stable handler for both reasoning surfaces (legacy message-level
+  // and per-block). MessageBubble used to build a fresh inline lambda inside
+  // every `.map` iteration, which forced ReasoningBlock to re-render even
+  // though it's memoized. The block now echoes its `messageId` + optional
+  // `blockIndex` back to us through the callback, so we can route to the
+  // right reducer without per-render closures.
+  const handleReasoningToggle = useCallback(
+    (anchor: HTMLElement, msgId?: string, blockIdx?: number) => {
+      if (!msgId) return
+      toggleReasoningPreservingScroll(anchor, () => {
+        if (blockIdx !== undefined) toggleReasoningBlock(msgId, blockIdx)
+        else toggleReasoning(msgId)
+      })
+    },
+    [toggleReasoning, toggleReasoningBlock],
+  )
+
   // Build plain-text representation of this assistant message for copying.
   // Walks contentBlocks IN ORDER so reasoning passes interleave with text in
   // the correct positions (matching what the user sees in the chat).
@@ -603,9 +620,8 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
               isVisible={message.isReasoningVisible || false}
               isStreaming={isStreaming === true && message.reasoningDurationMs == null}
               durationMs={message.reasoningDurationMs}
-              onToggle={(anchor) => {
-                toggleReasoningPreservingScroll(anchor, () => toggleReasoning(message.id))
-              }}
+              messageId={message.id}
+              onToggle={handleReasoningToggle}
             />
           )}
 
@@ -643,11 +659,9 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                     isVisible={blockIsVisible}
                     isStreaming={blockIsStreaming}
                     durationMs={block.durationMs}
-                    onToggle={(anchor) => {
-                      toggleReasoningPreservingScroll(anchor, () =>
-                        toggleReasoningBlock(message.id, idx),
-                      )
-                    }}
+                    messageId={message.id}
+                    blockIndex={idx}
+                    onToggle={handleReasoningToggle}
                   />
                 )
               }
