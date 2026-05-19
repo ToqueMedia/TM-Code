@@ -90,6 +90,13 @@ const SAFE_TOOLS = new Set([
   // skills mid-session triggers a permission prompt per skill (the agent
   // typically reads several), which is hostile UX.
   'read_skill',
+  // Memory persistence tools — confined to the validated `.toquemedia/memory/`
+  // and `~/.toquemedia-studio/memory/` directories by the Rust layer.
+  // Prompting per-call would train the user to click through, which
+  // defeats the point of a memory system that exists to reduce friction.
+  'save_memory',
+  'forget_memory',
+  'read_memory',
 ])
 
 // Tools that already have their own user approval flow (InlineDiff)

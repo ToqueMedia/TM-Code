@@ -274,6 +274,11 @@ interface ByokState {
    *  have a key, so `hasKey` is meaningless — `configured` is what gates
    *  whether resolveActive returns them. Cloud providers should ignore this. */
   markConfigured: (providerId: string, configured: boolean) => void
+  /** Read every local-provider's catalog from the cross-project disk
+   *  cache (~/.toquemedia-studio/byok-dynamic-cache.json) and seed the
+   *  in-memory `perProviderConfig.{provider}.dynamicCatalog` entries.
+   *  Idempotent — only overwrites entries older than the cached one. */
+  hydrateLocalModelsFromCache: () => Promise<void>
   /** Hit the local provider's discovery endpoint and populate dynamicCatalog.
    *  Returns the resolved model list (or null on failure with the error
    *  surfaced via toast/UI by the caller). */
@@ -561,11 +566,42 @@ export const useByokStore = create<ByokState>()(
             dynamicCatalog: { fetchedAt: Date.now(), models },
           }
           set({ perProviderConfig: config })
+          // Write through to the cross-project disk cache (TTL 30min).
+          // Lets the NEXT IDE launch skip the discovery round-trip and
+          // hit the cache while the in-memory state is empty. Fire-and-
+          // forget — the network refresh already succeeded.
+          void import('../services/byokDynamicCachePersistence').then(({ saveByokDynamicCache }) =>
+            saveByokDynamicCache(providerId, models),
+          ).catch(() => { /* persistence best-effort */ })
           return models
         } catch (err) {
           console.warn(`[byok] refreshLocalModels(${providerId}) failed:`, err)
           return null
         }
+      },
+
+      hydrateLocalModelsFromCache: async () => {
+        // Called at module init time AND on Settings open. Reads the
+        // disk cache (entries within 30min TTL) and seeds the in-memory
+        // store. Doesn't replace `refreshLocalModels` — callers are
+        // expected to schedule a background refresh anyway to catch any
+        // model the user pulled since the cache was last written.
+        const { loadByokDynamicCache } = await import('../services/byokDynamicCachePersistence')
+        const cache = await loadByokDynamicCache()
+        const entries = Object.entries(cache)
+        if (entries.length === 0) return
+        const config = { ...get().perProviderConfig }
+        let touched = false
+        for (const [providerId, entry] of entries) {
+          const existing = config[providerId] || { hasKey: false }
+          // Only seed if the in-memory store has nothing fresher. Avoids
+          // overwriting a refresh that already landed since boot.
+          if (!existing.dynamicCatalog || existing.dynamicCatalog.fetchedAt < entry.fetchedAt) {
+            config[providerId] = { ...existing, dynamicCatalog: entry }
+            touched = true
+          }
+        }
+        if (touched) set({ perProviderConfig: config })
       },
 
       setUserDefinedModel: (providerId, model) => {

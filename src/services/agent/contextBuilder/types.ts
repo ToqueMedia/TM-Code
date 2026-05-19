@@ -85,6 +85,14 @@ export interface PromptContext {
    *  single deterministic source rather than inferring from the filesystem.
    *  Empty array means no tracker has been seeded (single-task work, no plan). */
   currentTasks: Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>
+  /** Pre-loaded user-scope MEMORY.md index content (`~/.toquemedia-studio/memory/`).
+   *  Cross-project facts about the developer: role, preferences, validated
+   *  approaches. Null when no user memory exists yet. */
+  userMemoryIndex: string | null
+  /** Pre-loaded project-scope MEMORY.md index content
+   *  (`<project>/.toquemedia/memory/`). Project-bound facts: initiatives,
+   *  references, repo conventions. Null when none exists yet. */
+  projectMemoryIndex: string | null
 }
 
 export interface PromptCacheEntry {

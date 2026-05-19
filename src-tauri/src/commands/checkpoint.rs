@@ -161,6 +161,10 @@ async fn ensure_toquemedia_gitignore(project_path: &str) -> Result<(), String> {
             "queue-operations.jsonl",
             "# Per-turn queue operation log — debug-only, not portable.",
         ),
+        (
+            "editor-state.json",
+            "# Unsaved editor buffers — recovery state, never source of truth.",
+        ),
     ];
 
     let project = Path::new(project_path);

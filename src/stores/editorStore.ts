@@ -157,6 +157,78 @@ const getLanguageFromExtension = (filePath: string): string => {
 
 const unsavedChangesService = UnsavedChangesService.getInstance();
 const autoSaveQueue = AutoSaveQueue.getInstance();
+
+/**
+ * Apply dirty-buffer overrides loaded from `<project>/.toquemedia/editor-state.json`.
+ * Called from `projectStore.openProject` AFTER the editor has rehydrated its
+ * tabs from localStorage (paths + cursor). For each path with a dirty entry,
+ * overwrite the in-memory content with the unsaved version and flip
+ * `isDirty` back to true so the user sees the dot indicator and Save acts.
+ *
+ * Paths not currently in `openFiles` are ignored — if the user closed the
+ * tab the unsaved buffer is gone with it (consistent with the legacy
+ * tab-close-discards behaviour). We could re-open them, but that risks
+ * surprising the user with files they thought they closed.
+ */
+export function applyDirtyOverrides(dirty: Record<string, string>): void {
+  if (Object.keys(dirty).length === 0) return
+  useEditorRepository.setState(state => {
+    let touched = false
+    const openFiles = state.openFiles.map(f => {
+      const overrideContent = dirty[f.path]
+      if (typeof overrideContent !== 'string') return f
+      if (f.content === overrideContent) return f // No-op — disk matches dirty buffer somehow.
+      touched = true
+      return { ...f, content: overrideContent, isDirty: true }
+    })
+    if (!touched) return state
+    // Also re-mark each restored file as dirty in the UnsavedChangesService
+    // so the close-tab confirmation reappears.
+    for (const f of openFiles) {
+      if (f.isDirty) unsavedChangesService.markFileAsDirty(f.path)
+    }
+    return { openFiles }
+  })
+}
+
+// === Dirty-buffer disk persistence ===
+//
+// The Zustand localStorage persist middleware only captures tab + cursor
+// state (see `partialize` near the bottom of this file). Dirty buffer
+// content — the unsaved edits the user has typed into Monaco — is the
+// catastrophic data-loss path on crash/reload, so it goes to per-project
+// disk at `.toquemedia/editor-state.json` via `editorStatePersistence`.
+//
+// Debounced 800ms: long enough to coalesce a typing burst into one write,
+// short enough to capture before a graceful quit. The autoSaveQueue
+// already handles persisting the buffer to its REAL file on disk (when
+// autosave is enabled) — this is the belt-and-braces fallback for the
+// off-autosave path AND for the window between dirty-flag-set and
+// autosave-fire.
+let editorPersistTimeout: ReturnType<typeof setTimeout> | null = null
+const EDITOR_PERSIST_DEBOUNCE_MS = 800
+
+function scheduleEditorStatePersist(): void {
+  if (editorPersistTimeout) clearTimeout(editorPersistTimeout)
+  editorPersistTimeout = setTimeout(() => {
+    editorPersistTimeout = null
+    void persistEditorStateNow()
+  }, EDITOR_PERSIST_DEBOUNCE_MS)
+}
+
+async function persistEditorStateNow(): Promise<void> {
+  const { useProjectStore } = await import('./projectStore')
+  const projectPath = useProjectStore.getState().currentProject?.path
+  if (!projectPath) return
+  const { saveEditorStateToDisk } = await import('../services/editorStatePersistence')
+  const dirty: Record<string, string> = {}
+  for (const f of useEditorRepository.getState().openFiles) {
+    if (f.isDirty) {
+      dirty[f.path] = f.content
+    }
+  }
+  await saveEditorStateToDisk(projectPath, dirty)
+}
 // Concurrency guard for openFile with per-entry timeout (handles hung promises)
 const openingFiles = new Set<string>();
 function markOpening(path: string) {
@@ -431,8 +503,14 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           
           // Adiciona à queue de auto-save (apenas se realmente mudou)
           autoSaveQueue.addToQueue(path, content);
-          
-          return { 
+
+          // Persist dirty buffer to disk — protects against data loss on
+          // crash/reload when autosave is off or hasn't fired yet. The
+          // `editor-state.json` write is debounced separately from the
+          // file-itself autosave (which writes to the REAL path on disk).
+          scheduleEditorStatePersist();
+
+          return {
             openFiles: updatedFiles,
             undoStack,
             redoStack
@@ -566,18 +644,24 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           set(state => {
             const fileIndex = state.openFiles.findIndex(f => f.path === path);
             if (fileIndex === -1) return state;
-            
+
             const updatedFiles = [...state.openFiles];
             updatedFiles[fileIndex] = {
               ...updatedFiles[fileIndex],
               isDirty: false
             };
-            
+
             return { openFiles: updatedFiles };
           });
-          
+
           // Mark file as clean
           unsavedChangesService.markFileAsClean(path);
+
+          // The dirty-buffer file on disk should drop this path now that
+          // the real file has been saved. Schedule a persist — the writer
+          // recomputes the dirty map and naturally omits this path (or
+          // deletes the whole file if nothing else is dirty).
+          scheduleEditorStatePersist();
         } catch (error) {
           logger.error('editor', `Failed to save file ${path}:`, error);
           throw error;
@@ -637,6 +721,11 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
               unsavedChangesService.markFileAsClean(file.path);
             }
           });
+
+          // Sync the dirty-buffer file on disk — paths that just got
+          // cleaned should drop out of `editor-state.json`, and if every
+          // dirty file was saved the file itself gets deleted.
+          scheduleEditorStatePersist();
         } catch (error) {
           logger.error('editor', 'Failed to save all files:', error);
           throw error;

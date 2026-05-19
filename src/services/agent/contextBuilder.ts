@@ -67,6 +67,8 @@ import {
   getEnvironmentSection,
   getExecutingActionsSection,
   getMemoryGuidanceSection,
+  getMemorySection,
+  getMemoryToolsGuidanceSection,
   getModelSpecificSection,
   getProjectMemorySection,
   getProjectStructureSection,
@@ -264,6 +266,21 @@ class ContextBuilder {
       }))
     } catch { /* non-critical */ }
 
+    // Persistent memory — user-scope and project-scope MEMORY.md indexes.
+    // Loaded in parallel to keep the prompt build cheap; failures fall
+    // through to `null` which simply drops the section.
+    let userMemoryIndex: string | null = null
+    let projectMemoryIndex: string | null = null
+    try {
+      const { loadMemoryIndex } = await import('./memdir')
+      const [userResult, projectResult] = await Promise.all([
+        loadMemoryIndex('user'),
+        loadMemoryIndex('project', projectPath),
+      ])
+      userMemoryIndex = userResult.content
+      projectMemoryIndex = projectResult.content
+    } catch { /* memdir is best-effort, prompt builds fine without it */ }
+
     const ctx: PromptContext = {
       projectPath,
       normalizedProjectPath: projectPath.replace(/\\/g, '/'),
@@ -286,6 +303,8 @@ class ContextBuilder {
       appliedScaffolding,
       hashtagSkills: stickyHashtagSkills,
       currentTasks,
+      userMemoryIndex,
+      projectMemoryIndex,
     }
 
     // Resolve the async background-agents section once so dynamicSection()
@@ -309,8 +328,21 @@ class ContextBuilder {
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
       sharedContextPreservation(),
+      // Memory taxonomy + save/forget discipline. The rules of the
+      // memory system are stable across sessions (the data on disk
+      // mutates, but the schema/contract is fixed), so this guidance
+      // lives in the static block. The actual memory CONTENT is injected
+      // below the boundary via getMemorySection.
+      getMemoryToolsGuidanceSection(),
       // ── Boundary: everything below varies per session / per turn ──
       SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+      // Persistent memory — placed first in the dynamic block because it's
+      // the most authoritative per-session context (cross-session facts the
+      // developer established). Below the cache boundary because the indexes
+      // mutate when the model saves/forgets memories mid-session, so static-
+      // caching them would serve stale content.
+      dynamicSection('memory', () => getMemorySection(ctx),
+        'MEMORY.md indexes mutate as save_memory / forget_memory run'),
       // ── Dynamic block (per-session / per-turn) ──────────────────
       // Each section below is wrapped with dynamicSection() and a written
       // reason — cache invalidation is a deliberate architectural choice,

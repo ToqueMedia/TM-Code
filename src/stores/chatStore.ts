@@ -342,6 +342,60 @@ function debouncedSave() {
   }, 2000)
 }
 
+// === Draft persistence ===
+//
+// Per-session prompt drafts go to `.toquemedia/sessions/<sessionId>.draft.json`
+// so a reload / crash / OS update never wipes a half-typed message. Save is
+// debounced 600ms — short enough to capture before the user switches windows
+// or quits the IDE, long enough to coalesce char-by-char typing into one
+// write. On submit, `clearDraftOnDisk` is called explicitly to delete the
+// file (separate from the empty-save-deletes path; reads cleaner at the
+// call site, same end state).
+//
+// Resolves the project path and session id lazily — at schedule time we
+// don't yet know the active session/project (chatStore hasn't been queried),
+// so the actual save reads them inside the timer callback. If either is
+// null at fire time the persist is a no-op (no project → no destination).
+let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null
+const DRAFT_PERSIST_DEBOUNCE_MS = 600
+
+function persistDraftNow(): void {
+  if (draftSaveTimeout) {
+    clearTimeout(draftSaveTimeout)
+    draftSaveTimeout = null
+  }
+  const state = useChatStore.getState()
+  const sessionId = state.activeSessionId
+  if (!sessionId) return
+  const session = state.sessions.get(sessionId)
+  if (!session?.projectPath) return
+  void import('../services/draftPersistence').then(({ saveDraftToDisk }) =>
+    saveDraftToDisk(session.projectPath, sessionId, {
+      input: state.draftInput,
+      attachments: state.draftAttachments,
+    }),
+  ).catch(() => { /* persistence is best-effort */ })
+}
+
+function scheduleDraftPersist(): void {
+  // Empty drafts (the typical submit-cleared state) bypass the debounce
+  // and persist immediately — otherwise a reload within the 600ms window
+  // after submit would leave the OLD draft on disk and "resurrect" on
+  // next open. For non-empty drafts the debounce coalesces char-by-char
+  // typing into a single write.
+  const state = useChatStore.getState()
+  const isEmpty = !state.draftInput.trim() && state.draftAttachments.length === 0
+  if (isEmpty) {
+    persistDraftNow()
+    return
+  }
+  if (draftSaveTimeout) clearTimeout(draftSaveTimeout)
+  draftSaveTimeout = setTimeout(() => {
+    draftSaveTimeout = null
+    persistDraftNow()
+  }, DRAFT_PERSIST_DEBOUNCE_MS)
+}
+
 // Throttled save during streaming — persists partial content every 5s
 // so interrupted/crashed sessions don't lose the assistant's work.
 let streamingSaveInterval: ReturnType<typeof setInterval> | null = null
@@ -852,22 +906,34 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     draftAttachments: [],
     planRevisionPending: null,
 
-    setDraftInput: (value: string) => set({ draftInput: value }),
+    setDraftInput: (value: string) => {
+      set({ draftInput: value })
+      scheduleDraftPersist()
+    },
 
     setPlanRevisionPending: (projectPath: string | null) => set({ planRevisionPending: projectPath }),
 
-    addDraftAttachment: (attachment: Attachment) => set(state => {
-      if (state.draftAttachments.length >= 10) return state
-      // Deduplicate by path (skip for pasted images which have no path)
-      if (attachment.path && state.draftAttachments.some(a => a.path === attachment.path)) return state
-      return { draftAttachments: [...state.draftAttachments, attachment] }
-    }),
+    addDraftAttachment: (attachment: Attachment) => {
+      set(state => {
+        if (state.draftAttachments.length >= 10) return state
+        // Deduplicate by path (skip for pasted images which have no path)
+        if (attachment.path && state.draftAttachments.some(a => a.path === attachment.path)) return state
+        return { draftAttachments: [...state.draftAttachments, attachment] }
+      })
+      scheduleDraftPersist()
+    },
 
-    removeDraftAttachment: (id: string) => set(state => ({
-      draftAttachments: state.draftAttachments.filter(a => a.id !== id)
-    })),
+    removeDraftAttachment: (id: string) => {
+      set(state => ({
+        draftAttachments: state.draftAttachments.filter(a => a.id !== id)
+      }))
+      scheduleDraftPersist()
+    },
 
-    clearDraftAttachments: () => set({ draftAttachments: [] }),
+    clearDraftAttachments: () => {
+      set({ draftAttachments: [] })
+      scheduleDraftPersist()
+    },
 
     createSession: (projectPath: string) => {
       const sessionId = generateId('session')
@@ -922,9 +988,69 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         activeSessionId: sessionId,
         currentPromptTokens: hydrated?.promptTokens ?? 0,
         currentResponseTokens: hydrated?.responseTokens ?? 0,
+        // Reset draft to empty before async load — prevents the previous
+        // session's draft from briefly flashing in the prompt bar while the
+        // disk read is in flight. The hydration below replaces these if a
+        // draft is found; otherwise the user sees the correct "no draft"
+        // state immediately.
+        draftInput: '',
+        draftAttachments: [],
       })
       // Re-scope the queue log to the newly-active session.
       if (session) setQueueLogContext(session.projectPath, sessionId)
+      // Rehydrate any queued prompts that survived a previous crash/quit.
+      // Loaded AFTER setQueueLogContext so a subsequent enqueue (e.g. from
+      // a buffered user input) lands with the right (project, session)
+      // stamped on every operation log line. The hydrate itself bypasses
+      // the operation log to avoid replaying 100 fake "enqueue" entries
+      // every IDE reopen.
+      if (session?.projectPath) {
+        void (async () => {
+          const [{ loadQueueSnapshot }, { hydrateCommandQueue }] = await Promise.all([
+            import('../services/agent/queueSnapshotPersistence'),
+            import('../services/agent/messageQueue'),
+          ])
+          const items = await loadQueueSnapshot(session.projectPath, sessionId)
+          if (items.length === 0) return
+          // Re-check the session is still active — the user might have
+          // switched again during the async I/O. If they did, the new
+          // setActiveSession will fire its own hydrate; we don't want
+          // ours to overwrite it.
+          if (useChatStore.getState().activeSessionId !== sessionId) return
+          hydrateCommandQueue(items)
+        })().catch(() => { /* non-fatal */ })
+
+        // Rehydrate invokedSkills — the post-compaction recovery payload
+        // that survives across an IDE reload. Without this, a long
+        // multi-skill session that reloads loses authoritative skill
+        // content for re-injection on the next turn after compaction.
+        void (async () => {
+          const [{ loadInvokedSkillsFromDisk }, { hydrateInvokedSkills }] = await Promise.all([
+            import('../services/agent/invokedSkillsPersistence'),
+            import('../services/agent/skillService'),
+          ])
+          const skills = await loadInvokedSkillsFromDisk(session.projectPath, sessionId)
+          if (skills.length === 0) return
+          if (useChatStore.getState().activeSessionId !== sessionId) return
+          hydrateInvokedSkills(skills)
+        })().catch(() => { /* non-fatal */ })
+      }
+      // Hydrate the draft for this session from disk. Async — if the user
+      // started typing in the new session before this resolves, their
+      // typing wins (the disk draft was from a previous run anyway, less
+      // recent than the live input). We guard against that by checking
+      // the still-active session id AND that the live draft is still empty.
+      if (session?.projectPath) {
+        void import('../services/draftPersistence').then(async ({ loadDraftFromDisk }) => {
+          const loaded = await loadDraftFromDisk(session.projectPath, sessionId)
+          if (!loaded) return
+          const stillActive = useChatStore.getState().activeSessionId === sessionId
+          if (!stillActive) return
+          const live = useChatStore.getState()
+          if (live.draftInput || live.draftAttachments.length > 0) return
+          set({ draftInput: loaded.input, draftAttachments: loaded.attachments })
+        }).catch(() => { /* non-fatal */ })
+      }
     },
 
     addUserMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => {

@@ -14,6 +14,7 @@ use commands::git::*;
 use commands::http_client::*;
 use commands::issue_reporter::*;
 use commands::mcp::*;
+use commands::memory::*;
 use commands::project::*;
 use commands::sandbox::*;
 use commands::screenshot::*;
@@ -1226,6 +1227,10 @@ pub fn run() {
             read_agent_state,
             write_agent_state,
             ensure_toquemedia_gitignore_cmd,
+            read_memory_file,
+            write_memory_file,
+            delete_memory_file,
+            list_memory_files,
             data_viewer_dev_query,
             collect_deploy_bundle,
             collect_backend_tarball,

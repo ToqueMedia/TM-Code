@@ -6,7 +6,8 @@ import { ServiceError } from '../../utils/errors'
 import { parseSSEStream, parseOpenAISSEStream, createThinkingDetector } from './streamParser'
 import { getProfileForPlan } from './modelProfiles'
 import { resolveThinkingHint } from './thinkingShapeDetection'
-import { buildCompactPrompt, formatCompactSummary } from './compactPrompt'
+import { buildCompactPrompt, buildPostCompactionSummaryMessage, formatCompactSummary } from './compactPrompt'
+import { archivePreCompactTranscript } from './compactTranscriptArchive'
 import { streamLocalChat } from './byokLocalStream'
 import { anthropicToOpenAIBody } from './anthropicToOpenai'
 import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
@@ -1312,11 +1313,41 @@ Developer message: ${displayText}
       }
     }
 
+    // Archive the pre-compact transcript to disk so the model can recover
+    // exact details (code snippets, verbatim user phrasing, full error
+    // messages) the summary lossily dropped. Fire-and-forget read of
+    // active session+project; archive failure falls through to a null
+    // path which the summary message handles gracefully.
+    let transcriptPath: string | null = null
+    try {
+      const [{ useChatStore }, { useProjectStore }] = await Promise.all([
+        import('../../stores/chatStore'),
+        import('../../stores/projectStore'),
+      ])
+      const sessionId = useChatStore.getState().activeSessionId
+      const projectPath = useProjectStore.getState().currentProject?.path
+      if (sessionId && projectPath) {
+        transcriptPath = await archivePreCompactTranscript(
+          projectPath,
+          sessionId,
+          oldMessages as unknown as Array<{ role: string; content: string | Array<Record<string, unknown>> | null }>,
+        )
+        if (transcriptPath) {
+          logger.info('agent', `[compaction] archived ${oldMessages.length} pre-compact messages to ${transcriptPath}`)
+        }
+      }
+    } catch (err) {
+      logger.warn('agent', '[compaction] transcript archive failed (non-fatal):', err)
+    }
+
     return [
       systemMsg,
       {
         role: 'user' as const,
-        content: `[Compressed context — earlier conversation summary]\n\n${summary}\n\n[End of summary — the messages below are the most recent and are in full.]`,
+        content: buildPostCompactionSummaryMessage(summary, {
+          transcriptPath,
+          recentMessagesPreserved: recentMessages.length > 0,
+        }),
       },
       ...recentMessages,
     ]

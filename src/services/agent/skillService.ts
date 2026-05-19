@@ -78,6 +78,12 @@ export function trackInvokedSkill(name: string, content: string): void {
     ? content.slice(0, INVOKED_SKILL_MAX_CHARS) + '\n\n[... skill truncated for post-compaction recovery]'
     : content
   invokedSkills.set(name, { name, content: trimmed, invokedAt: Date.now() })
+  // Persist to disk so a reload mid-session doesn't lose the post-compaction
+  // recovery payload. Otherwise the next turn after a microcompaction
+  // (which collapses tool-results) would have NO record of which skills
+  // were authoritative for this session, and the agent would fall back to
+  // its training prior — exactly what `invokedSkills` exists to prevent.
+  schedulePersistInvokedSkills()
 }
 
 export function getInvokedSkills(): InvokedSkill[] {
@@ -87,6 +93,52 @@ export function getInvokedSkills(): InvokedSkill[] {
 
 export function clearInvokedSkills(): void {
   invokedSkills.clear()
+  schedulePersistInvokedSkills()
+}
+
+/**
+ * Re-seed the in-memory map from a previously-persisted set. Called at
+ * session-load time so the post-compaction recovery payload survives an
+ * IDE restart in the middle of a long multi-skill session.
+ */
+export function hydrateInvokedSkills(entries: InvokedSkill[]): void {
+  invokedSkills.clear()
+  for (const entry of entries) {
+    invokedSkills.set(entry.name, entry)
+  }
+}
+
+// === Persistence ===
+//
+// Per-session disk file at `.toquemedia/sessions/<sessionId>.invoked-skills.json`.
+// Debounced 500ms — track/clear are infrequent (only fire on `read_skill`
+// tool calls) so the debounce mostly serves to coalesce a burst at the
+// start of a turn where the agent reads several skills back-to-back.
+let invokedSkillsPersistTimeout: ReturnType<typeof setTimeout> | null = null
+const INVOKED_SKILLS_PERSIST_DEBOUNCE_MS = 500
+
+function schedulePersistInvokedSkills(): void {
+  if (invokedSkillsPersistTimeout) clearTimeout(invokedSkillsPersistTimeout)
+  invokedSkillsPersistTimeout = setTimeout(() => {
+    invokedSkillsPersistTimeout = null
+    void persistInvokedSkillsNow()
+  }, INVOKED_SKILLS_PERSIST_DEBOUNCE_MS)
+}
+
+async function persistInvokedSkillsNow(): Promise<void> {
+  // Lazy imports — skillService is loaded by the prompt builder and we
+  // don't want to drag chatStore + queueOperationLog into its eager
+  // module graph.
+  const [{ useChatStore }, { saveInvokedSkillsToDisk }] = await Promise.all([
+    import('../../stores/chatStore'),
+    import('./invokedSkillsPersistence'),
+  ])
+  const state = useChatStore.getState()
+  const sessionId = state.activeSessionId
+  if (!sessionId) return
+  const session = state.sessions.get(sessionId)
+  if (!session?.projectPath) return
+  await saveInvokedSkillsToDisk(session.projectPath, sessionId, getInvokedSkills())
 }
 
 /**

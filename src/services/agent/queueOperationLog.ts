@@ -44,6 +44,13 @@ export function getQueueLogSessionId(): string {
   return activeSessionId ?? 'unknown'
 }
 
+/** Read-only accessor — used by the queue snapshot persistence to route
+ *  the disk write to the right project. Returns null when no project is
+ *  open (boot, between-project state). */
+export function getQueueLogProjectPath(): string | null {
+  return activeProjectPath
+}
+
 function resolveLogPath(projectPath: string): string {
   const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
   return `${normalized}/.toquemedia/sessions/queue-operations.jsonl`

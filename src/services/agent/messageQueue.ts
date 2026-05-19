@@ -60,9 +60,76 @@ const commandQueue: QueuedCommand[] = []
 let snapshot: readonly QueuedCommand[] = Object.freeze([])
 const queueChanged = createSignal()
 
+// === Snapshot persistence ===
+//
+// Every queue mutation triggers a debounced write to
+// `<project>/.toquemedia/sessions/<sessionId>.queue-snapshot.json` so a
+// crash mid-batch doesn't silently lose user prompts. 200ms debounce —
+// queue mutations are rare; the cost of waiting longer outweighs the cost
+// of duplicate writes.
+let snapshotPersistTimeout: ReturnType<typeof setTimeout> | null = null
+const SNAPSHOT_PERSIST_DEBOUNCE_MS = 200
+
+function scheduleSnapshotPersist(): void {
+  // Use the queueLogContext (set by chatStore on createSession /
+  // setActiveSession) to find the right destination. If no context is
+  // set yet (very early app boot, no project), the persist is skipped —
+  // there's nothing to snapshot to anyway.
+  if (snapshotPersistTimeout) clearTimeout(snapshotPersistTimeout)
+  snapshotPersistTimeout = setTimeout(() => {
+    snapshotPersistTimeout = null
+    void persistSnapshotNow()
+  }, SNAPSHOT_PERSIST_DEBOUNCE_MS)
+}
+
+async function persistSnapshotNow(): Promise<void> {
+  // Lazy import to avoid a cycle: queueOperationLog imports from this
+  // module too. Resolving inside the timer callback keeps the module
+  // graph clean.
+  const { activeProjectPath, activeSessionId } = await getQueueContext()
+  if (!activeProjectPath || !activeSessionId) return
+  const { saveQueueSnapshot } = await import('./queueSnapshotPersistence')
+  await saveQueueSnapshot(activeProjectPath, activeSessionId, snapshot)
+}
+
+async function getQueueContext(): Promise<{
+  activeProjectPath: string | null
+  activeSessionId: string | null
+}> {
+  const mod = await import('./queueOperationLog')
+  // queueOperationLog already tracks the active (project, session) pair
+  // for its own JSONL writes. Re-using it keeps the source-of-truth
+  // single — no second context var to keep in sync.
+  return {
+    activeProjectPath: mod.getQueueLogProjectPath(),
+    activeSessionId: mod.getQueueLogSessionId() === 'unknown'
+      ? null
+      : mod.getQueueLogSessionId(),
+  }
+}
+
 function notifySubscribers(): void {
   snapshot = Object.freeze([...commandQueue])
   queueChanged.emit()
+  scheduleSnapshotPersist()
+}
+
+/**
+ * Replace the queue with `items` and notify subscribers. Used by the
+ * snapshot rehydrate path on chat-session load — restores pending
+ * prompts a previous crash/quit left unprocessed.
+ *
+ * NOT exposed as a general-purpose API — callers that want to mutate
+ * the queue should go through enqueue/dequeue/etc. This one bypasses
+ * the per-operation log on purpose: we don't want a "100 enqueue
+ * operations" burst in the log every time the IDE reopens.
+ */
+export function hydrateCommandQueue(items: QueuedCommand[]): void {
+  commandQueue.length = 0
+  commandQueue.push(...items)
+  snapshot = Object.freeze([...commandQueue])
+  queueChanged.emit()
+  // Don't trigger a write here — the items came FROM disk, no new state.
 }
 
 // ============================================================================

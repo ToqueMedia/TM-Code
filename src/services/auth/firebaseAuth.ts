@@ -610,6 +610,14 @@ class FirebaseAuthService {
         // and briefly flip `hasKey` while in flight.
         if (!useByokStore.getState().catalogLoaded) {
           useByokStore.getState().loadProviders().catch(() => {})
+          // Seed local-provider model lists from the disk cache while the
+          // network discovery is in flight. The Settings panel can render
+          // models from the cache immediately instead of waiting for the
+          // Ollama / LM Studio probe to round-trip on every IDE launch.
+          // Stale-then-refresh: if the cache is within its 30min TTL
+          // we use it; the Settings panel's own refresh button (or
+          // refreshLocalModels-from-mount) catches new pulls.
+          useByokStore.getState().hydrateLocalModelsFromCache().catch(() => {})
         }
 
         // /v1/me only returns 200 after all signup gates pass — flip the

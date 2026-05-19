@@ -74,6 +74,57 @@ function blank(projectId: string): DeployRecord {
   }
 }
 
+// === Deploy-state persistence ===
+//
+// One file per project at `<project>/.toquemedia/deploy-state.json`. Captures
+// the latest DeployRecord so a reload during an in-flight deploy doesn't
+// blank the panel. Debounced 300ms — deploys emit many small progress
+// updates and we want to coalesce.
+//
+// Resolves the active project path lazily because:
+//   - The deploy store mutation point doesn't know the path directly (it's
+//     keyed by projectId, which differs from path)
+//   - projectStore exposes the current project lazily — importing eagerly
+//     would create a circular module graph
+//
+// If no project is open at persist time we no-op silently — the user
+// can't be deploying without an open project anyway.
+let deployPersistTimeout: ReturnType<typeof setTimeout> | null = null
+const DEPLOY_PERSIST_DEBOUNCE_MS = 300
+
+function scheduleDeployPersist(projectId: string): void {
+  if (deployPersistTimeout) clearTimeout(deployPersistTimeout)
+  deployPersistTimeout = setTimeout(() => {
+    deployPersistTimeout = null
+    void persistDeployNow(projectId)
+  }, DEPLOY_PERSIST_DEBOUNCE_MS)
+}
+
+async function persistDeployNow(projectId: string): Promise<void> {
+  const { useProjectStore } = await import('./projectStore')
+  const project = useProjectStore.getState().currentProject
+  // Persist only if the project being deployed IS the currently-open one.
+  // Cross-project deploy isn't a thing today; this guard prevents writing
+  // a stale record to disk if the user closes the project mid-deploy.
+  if (!project || project.id !== projectId) return
+  const record = useDeployStore.getState().records.get(projectId)
+  if (!record) return
+  const { saveDeployStateToDisk } = await import('../services/deployPersistence')
+  await saveDeployStateToDisk(project.path, record)
+}
+
+/**
+ * Restore a previously-persisted deploy record. Called from
+ * `projectStore.openProject` after the project becomes active.
+ */
+export function hydrateDeployRecord(record: DeployRecord): void {
+  useDeployStore.setState(state => {
+    const next = new Map(state.records)
+    next.set(record.projectId, record)
+    return { records: next }
+  })
+}
+
 export const useDeployStore = create<DeployState & DeployActions>((set, get) => ({
   records: new Map(),
 
@@ -91,6 +142,7 @@ export const useDeployStore = create<DeployState & DeployActions>((set, get) => 
       })
       return { records: next }
     })
+    scheduleDeployPersist(projectId)
   },
 
   updateProgress: (projectId, step) => {
@@ -114,6 +166,7 @@ export const useDeployStore = create<DeployState & DeployActions>((set, get) => 
       })
       return { records: next }
     })
+    scheduleDeployPersist(projectId)
   },
 
   addWarning: (projectId, message) => {
@@ -126,6 +179,7 @@ export const useDeployStore = create<DeployState & DeployActions>((set, get) => 
       })
       return { records: next }
     })
+    scheduleDeployPersist(projectId)
   },
 
   completeDeploy: (projectId, result) => {
@@ -142,6 +196,7 @@ export const useDeployStore = create<DeployState & DeployActions>((set, get) => 
       })
       return { records: next }
     })
+    scheduleDeployPersist(projectId)
   },
 
   failDeploy: (projectId, error) => {
@@ -156,6 +211,7 @@ export const useDeployStore = create<DeployState & DeployActions>((set, get) => 
       })
       return { records: next }
     })
+    scheduleDeployPersist(projectId)
   },
 
   getRecord: (projectId) => {
@@ -168,5 +224,13 @@ export const useDeployStore = create<DeployState & DeployActions>((set, get) => 
       next.delete(projectId)
       return { records: next }
     })
+    // Delete the on-disk file too — the user explicitly cleared the
+    // record, presumably from a "Dismiss" UI affordance.
+    void import('./projectStore').then(async ({ useProjectStore }) => {
+      const project = useProjectStore.getState().currentProject
+      if (!project || project.id !== projectId) return
+      const { clearDeployStateOnDisk } = await import('../services/deployPersistence')
+      await clearDeployStateOnDisk(project.path)
+    }).catch(() => { /* non-fatal */ })
   },
 }))

@@ -56,6 +56,11 @@ export const REQUEST_CREDENTIALS = 'request_credentials'
 // Verification sub-agent
 export const VERIFY = 'verify'
 
+// Persistent memory (memdir) — see services/agent/memdir.ts
+export const SAVE_MEMORY = 'save_memory'
+export const FORGET_MEMORY = 'forget_memory'
+export const READ_MEMORY = 'read_memory'
+
 /**
  * Every tool name registered by ToolExecutor. Walked by
  * `scripts/verify-skills.ts` to assert that every `provision_auth`-style
@@ -75,6 +80,7 @@ export const TOOL_NAMES = [
   UPDATE_TASKS, CHECK_BACKGROUND_AGENTS, SPAWN_BACKGROUND_AGENT,
   PROVISION_AUTH, PROVISION_DEPLOY, REQUEST_CREDENTIALS,
   VERIFY,
+  SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY,
 ] as const
 
 export type ToolName = (typeof TOOL_NAMES)[number]

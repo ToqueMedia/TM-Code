@@ -115,6 +115,68 @@ export function buildCompactPrompt(): string {
 }
 
 /**
+ * Build the user-message that re-injects the post-compaction summary into
+ * the next turn's history. Ported from claude-vaz's
+ * `getCompactUserSummaryMessage`. Adds three signals on top of the raw
+ * summary:
+ *
+ *   1. **Transcript path**: when the pre-compact transcript was archived
+ *      to disk, the path is named so the model can `read_file` it for
+ *      details the summary lossily dropped (exact code snippets, verbatim
+ *      error messages, the user's literal phrasing).
+ *
+ *   2. **Recent-preserved hint**: when the compaction kept the most
+ *      recent N turns in full alongside the summary, this is stated so
+ *      the model doesn't ask the user to re-state things that ARE in the
+ *      context already.
+ *
+ *   3. **Resume protocol**: explicit "do not preface, do not recap, pick
+ *      up where the work was". Belt-and-braces over the chatSections
+ *      System block — without this here, the model frequently spends a
+ *      turn apologising / re-introducing itself after compaction.
+ *
+ * Output goes into the live history as a single user message — the worker
+ * never sees the boundary as system content (which would confuse upstream
+ * caching). The session UI can still surface a "context compacted" marker
+ * separately via `addSystemMessage`.
+ */
+export function buildPostCompactionSummaryMessage(
+  summary: string,
+  options: {
+    transcriptPath?: string | null
+    recentMessagesPreserved?: boolean
+  } = {},
+): string {
+  const formatted = formatCompactSummary(summary)
+  const parts: string[] = [
+    'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.',
+    '',
+    formatted,
+  ]
+
+  if (options.transcriptPath) {
+    parts.push(
+      '',
+      `If you need specific details from before compaction (exact code snippets, verbatim error messages, the developer's literal wording), use \`read_file\` on the pre-compaction transcript at:`,
+      options.transcriptPath,
+      '',
+      'The transcript is a JSONL file — one Anthropic-shape message per line, with full tool_use and tool_result blocks intact. Grep it for the symbol or phrase you need; do not page through the whole file.',
+    )
+  }
+
+  if (options.recentMessagesPreserved) {
+    parts.push('', 'The most recent turns are preserved verbatim BELOW this summary — read them before deciding the next action so you don\'t re-ask the developer for context that\'s already there.')
+  }
+
+  parts.push(
+    '',
+    'Continue the conversation from where it left off without asking the developer any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with "I\'ll continue" or similar. Pick up the last task as if the break never happened.',
+  )
+
+  return parts.join('\n')
+}
+
+/**
  * Post-process the summarizer's response. Strips the `<analysis>` drafting
  * scratchpad and unwraps the `<summary>` tag, leaving readable section
  * content ready to inject into the next turn's context. Tolerant of
