@@ -130,8 +130,18 @@ function PublishModal({ isOpen, onClose }: PublishModalProps) {
     }
   }, [project, submitting, subdomain, userPlan])
 
+  // `shakeNonce` increments each time the user tries to close mid-deploy
+  // (ESC, backdrop click, or — historically — the X button). The header
+  // listens for changes and runs a brief shake animation so the user gets
+  // visible feedback that the attempt registered AND was rejected, instead
+  // of "I pressed ESC and nothing happened".
+  const [shakeNonce, setShakeNonce] = useState(0)
+
   const handleClose = useCallback(() => {
-    if (phase === 'publishing') return // can't close mid-deploy
+    if (phase === 'publishing') {
+      setShakeNonce((n) => n + 1)
+      return // can't close mid-deploy
+    }
     // Closing from a terminal phase (success / error) must clear the
     // store record. Without this, reopening the modal jumps straight back
     // to SuccessStep / ErrorStep with stale data — the user sees yesterday's
@@ -186,7 +196,12 @@ function PublishModal({ isOpen, onClose }: PublishModalProps) {
             overflow="hidden"
             style={{ pointerEvents: 'auto' }}
           >
-            <Header phase={phase} isUpdate={isUpdate} onClose={handleClose} />
+            <Header
+              phase={phase}
+              isUpdate={isUpdate}
+              onClose={handleClose}
+              shakeNonce={shakeNonce}
+            />
 
             <Box px={6} py={5}>
               {phase === 'upgrade' && <UpgradeStep onClose={handleClose} />}
@@ -222,16 +237,43 @@ function PublishModal({ isOpen, onClose }: PublishModalProps) {
   )
 }
 
-function Header({ phase, isUpdate, onClose }: { phase: Phase; isUpdate: boolean; onClose: () => void }) {
+function Header({
+  phase,
+  isUpdate,
+  onClose,
+  shakeNonce,
+}: {
+  phase: Phase
+  isUpdate: boolean
+  onClose: () => void
+  shakeNonce: number
+}) {
+  // Trigger a brief shake + "can't close yet" hint whenever the parent
+  // bumps `shakeNonce` (ESC / backdrop attempt during publish). Cleared on
+  // animation end so the next attempt re-fires.
+  const [isShaking, setIsShaking] = useState(false)
+  useEffect(() => {
+    if (shakeNonce === 0) return
+    setIsShaking(true)
+    const t = window.setTimeout(() => setIsShaking(false), 600)
+    return () => window.clearTimeout(t)
+  }, [shakeNonce])
+
   const title = phase === 'success'
     ? t(isUpdate ? 'publish.headerTitleUpdateSuccess' : 'publish.headerTitleSuccess')
     : phase === 'upgrade'
       ? t('publish.headerTitleUpgrade')
       : t(isUpdate ? 'publish.headerTitleUpdate' : 'publish.headerTitle')
 
-  const subtitle = isUpdate
+  const defaultSubtitle = isUpdate
     ? t('publish.headerSubtitleUpdate')
     : t('publish.headerSubtitle')
+  // During shake, swap the subtitle for the "can't close yet" hint AND tint
+  // the text accent-red — same line, no layout shift. After the shake finishes
+  // (600ms) we return to the default subtitle.
+  const subtitle = isShaking
+    ? t('publish.cantCloseWhilePublishing')
+    : defaultSubtitle
 
   return (
     <Flex
@@ -241,6 +283,14 @@ function Header({ phase, isUpdate, onClose }: { phase: Phase; isUpdate: boolean;
       py={4}
       borderBottom={`1px solid ${tokens.colors.border.default}`}
       bg="rgba(255, 255, 255, 0.02)"
+      animation={isShaking ? 'tm-publish-shake 600ms cubic-bezier(.36,.07,.19,.97)' : undefined}
+      css={{
+        '@keyframes tm-publish-shake': {
+          '0%, 100%': { transform: 'translateX(0)' },
+          '10%, 30%, 50%, 70%, 90%': { transform: 'translateX(-4px)' },
+          '20%, 40%, 60%, 80%': { transform: 'translateX(4px)' },
+        },
+      }}
     >
       <Flex align="center" gap={2}>
         <Flex
@@ -258,7 +308,13 @@ function Header({ phase, isUpdate, onClose }: { phase: Phase; isUpdate: boolean;
           <Text fontSize="14px" fontWeight="600" color={tokens.colors.text.primary} lineHeight="1.2">
             {title}
           </Text>
-          <Text fontSize="11.5px" color={tokens.colors.text.muted} lineHeight="1.2" mt="2px">
+          <Text
+            fontSize="11.5px"
+            color={isShaking ? tokens.colors.accent.red : tokens.colors.text.muted}
+            lineHeight="1.2"
+            mt="2px"
+            transition="color 200ms ease"
+          >
             {subtitle}
           </Text>
         </Box>

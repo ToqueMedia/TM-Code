@@ -1,11 +1,11 @@
 ---
 name: frontend-design
-description: Polished, production-grade UIs with bold aesthetic direction, design tokens, distinctive typography, asymmetric layouts. Call when the user asks to build a page, component, landing, dashboard, or "make it look good".
+description: Polished, production-grade UIs with bold aesthetic direction, design tokens, distinctive typography, asymmetric layouts. Call when the user asks to build a page, component, landing, dashboard, or "make it look good" AND the project does NOT use Chakra UI v3. When `@chakra-ui/react` v3 is in package.json, defer to `chakra-ui-builder` instead — it owns the v3 component API surface, recipes, and tokens.
 ---
 
 # Frontend Design
 
-Create distinctive, production-grade frontend interfaces. Reject generic AI aesthetics. This skill applies whenever the user asks for UI, a page, a component, a landing, a dashboard, or "make it look good".
+Create distinctive, production-grade frontend interfaces. Reject generic AI aesthetics. This skill applies whenever the user asks for UI, a page, a component, a landing, a dashboard, or "make it look good" — **except** when the project uses Chakra UI v3 (`@chakra-ui/react@^3`), in which case `chakra-ui-builder` is the right skill: it has the component-decision-tree, theming recipes, and v3-specific patterns this skill doesn't cover.
 
 ## Completion contract
 

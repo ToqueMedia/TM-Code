@@ -1,0 +1,8 @@
+{
+  "source": "https://github.com/chakra-ui/chakra-ui/tree/main/skills/chakra-ui-migrate",
+  "commit": "ff3f083e9261796102e9db5b3fa267f89fd4e9a5",
+  "vendored_at": "2026-05-19",
+  "license": "MIT",
+  "license_source": "https://github.com/chakra-ui/chakra-ui/blob/main/LICENSE",
+  "update_cmd": "curl -fsSL https://raw.githubusercontent.com/chakra-ui/chakra-ui/main/skills/chakra-ui-migrate/SKILL.md -o SKILL.md"
+}

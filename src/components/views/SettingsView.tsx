@@ -1347,6 +1347,37 @@ function McpSection() {
 
 // ━━━ Add Server Form ━━━
 
+function McpJsonActionButton({
+  onClick,
+  label,
+  disabled,
+}: {
+  onClick: () => void
+  label: string
+  disabled?: boolean
+}) {
+  return (
+    <Box
+      as="button"
+      onClick={() => { if (!disabled) onClick() }}
+      px={2}
+      py="3px"
+      fontSize="10.5px"
+      fontWeight="500"
+      borderRadius="4px"
+      cursor={disabled ? 'not-allowed' : 'pointer'}
+      opacity={disabled ? 0.4 : 1}
+      bg={tokens.colors.bg.overlay}
+      color={tokens.colors.text.muted}
+      border={`1px solid ${tokens.colors.border.default}`}
+      _hover={disabled ? {} : { color: tokens.colors.text.primary }}
+      transition={`color ${tokens.transition.fast}`}
+    >
+      {label}
+    </Box>
+  )
+}
+
 // Canonical MCP entry shape — matches Claude Desktop / `mcp.json`.
 interface McpEntry {
   command: string
@@ -1517,6 +1548,28 @@ function AddServerForm(props: { projectPath: string; onDone: () => void; onCance
     }
   }
 
+  // Detect a JSON-shape paste (`{...}` after trim) and pretty-print it
+  // automatically. Most users paste minified or differently-indented JSON
+  // copied from Anthropic docs / GitHub READMEs; auto-formatting removes the
+  // friction of clicking "Format" right after. Falls through silently for
+  // invalid input — validation feedback below handles that case.
+  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const pasted = e.clipboardData.getData('text')
+    const trimmed = pasted.trim()
+    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return
+    try {
+      const parsed = JSON.parse(trimmed)
+      e.preventDefault()
+      const formatted = JSON.stringify(parsed, null, 2)
+      // Replace the entire textarea content. Mixing paste with existing
+      // text rarely yields valid JSON anyway.
+      updateJson(formatted)
+    } catch {
+      // Not valid JSON — let the default paste through and the live validator
+      // surface the error to the user.
+    }
+  }
+
   function formatJson() {
     try {
       const parsed = JSON.parse(jsonText)
@@ -1531,6 +1584,34 @@ function AddServerForm(props: { projectPath: string; onDone: () => void; onCance
   function insertExample() {
     setJsonText(MCP_JSON_EXAMPLE)
     updateJson(MCP_JSON_EXAMPLE)
+  }
+
+  // Read clipboard via the navigator API (Tauri's WebView exposes it). On
+  // platforms / OS-permission combinations where it's denied, fall back to
+  // a clear inline error instead of silently doing nothing.
+  async function pasteFromClipboard() {
+    if (!navigator.clipboard?.readText) {
+      setError(t('settings.mcpJsonClipboardDenied'))
+      return
+    }
+    try {
+      const text = await navigator.clipboard.readText()
+      if (!text.trim()) {
+        setError(t('settings.mcpJsonClipboardEmpty'))
+        return
+      }
+      // Pretty-print when valid JSON; otherwise inject raw and let live
+      // validation flag the issue.
+      try {
+        const parsed = JSON.parse(text.trim())
+        updateJson(JSON.stringify(parsed, null, 2))
+      } catch {
+        updateJson(text)
+      }
+      setError('')
+    } catch {
+      setError(t('settings.mcpJsonClipboardDenied'))
+    }
   }
 
   async function handleSaveForm() {
@@ -1711,72 +1792,46 @@ function AddServerForm(props: { projectPath: string; onDone: () => void; onCance
           <Text fontSize="11.5px" color={tokens.colors.text.muted} lineHeight="1.5">
             {t('settings.mcpJsonHelp')}
           </Text>
-          <Box position="relative">
-            <Textarea
-              value={jsonText}
-              onChange={(e) => updateJson(e.target.value)}
-              placeholder={MCP_JSON_EXAMPLE}
-              bg={tokens.colors.bg.input}
-              borderColor={
-                jsonValidation.kind === 'error'
-                  ? tokens.colors.accent.red
-                  : jsonValidation.kind === 'ok'
-                    ? tokens.colors.accent.green
-                    : tokens.colors.border.input
-              }
-              color={tokens.colors.text.primary}
-              _placeholder={{ color: tokens.colors.text.disabled }}
-              rows={12}
-              fontFamily={tokens.fontFamily.mono}
-              fontSize="12px"
-              lineHeight="1.5"
-              spellCheck={false}
-              resize="vertical"
+          {/* Action bar sits ABOVE the textarea, not floating on top, so the
+              buttons never overlap the scrollbar when content wraps and stay
+              tabbable in source order. */}
+          <HStack gap={1} justify="flex-end">
+            <McpJsonActionButton
+              onClick={pasteFromClipboard}
+              label={t('settings.mcpJsonPaste')}
             />
-            <HStack
-              position="absolute"
-              top="6px"
-              right="6px"
-              gap={1}
-            >
-              <Box
-                as="button"
-                onClick={insertExample}
-                px={2}
-                py="3px"
-                fontSize="10.5px"
-                fontWeight="500"
-                borderRadius="4px"
-                cursor="pointer"
-                bg={tokens.colors.bg.overlay}
-                color={tokens.colors.text.muted}
-                border={`1px solid ${tokens.colors.border.default}`}
-                _hover={{ color: tokens.colors.text.primary }}
-              >
-                {t('settings.mcpJsonExample')}
-              </Box>
-              <Box
-                as="button"
-                onClick={() => {
-                  if (!jsonText.trim() || jsonValidation.kind === 'error') return
-                  formatJson()
-                }}
-                px={2}
-                py="3px"
-                fontSize="10.5px"
-                fontWeight="500"
-                borderRadius="4px"
-                cursor={!jsonText.trim() || jsonValidation.kind === 'error' ? 'not-allowed' : 'pointer'}
-                opacity={!jsonText.trim() || jsonValidation.kind === 'error' ? 0.4 : 1}
-                bg={tokens.colors.bg.overlay}
-                color={tokens.colors.text.muted}
-                border={`1px solid ${tokens.colors.border.default}`}
-                _hover={!jsonText.trim() || jsonValidation.kind === 'error' ? {} : { color: tokens.colors.text.primary }}
-              >
-                {t('settings.mcpJsonFormat')}
-              </Box>
-            </HStack>
-          </Box>
+            <McpJsonActionButton
+              onClick={insertExample}
+              label={t('settings.mcpJsonExample')}
+            />
+            <McpJsonActionButton
+              onClick={formatJson}
+              label={t('settings.mcpJsonFormat')}
+              disabled={!jsonText.trim() || jsonValidation.kind === 'error'}
+            />
+          </HStack>
+          <Textarea
+            value={jsonText}
+            onChange={(e) => updateJson(e.target.value)}
+            onPaste={handlePaste}
+            placeholder={MCP_JSON_EXAMPLE}
+            bg={tokens.colors.bg.input}
+            borderColor={
+              jsonValidation.kind === 'error'
+                ? tokens.colors.accent.red
+                : jsonValidation.kind === 'ok'
+                  ? tokens.colors.accent.green
+                  : tokens.colors.border.input
+            }
+            color={tokens.colors.text.primary}
+            _placeholder={{ color: tokens.colors.text.disabled }}
+            rows={12}
+            fontFamily={tokens.fontFamily.mono}
+            fontSize="12px"
+            lineHeight="1.5"
+            spellCheck={false}
+            resize="vertical"
+          />
           {jsonValidation.kind === 'ok' && (
             <HStack gap={2} align="center">
               <Box w="6px" h="6px" borderRadius="50%" bg={tokens.colors.accent.green} />

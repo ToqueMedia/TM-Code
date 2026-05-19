@@ -419,7 +419,12 @@ export function getConstraintsSection(ctx: PromptContext): string {
  - **TRIGGER — call \`request_credentials\` in the SAME turn**: whenever you write code that reads \`process.env.X\`, \`import.meta.env.X\`, \`Deno.env.get('X')\`, or any equivalent for a **third-party service the developer is integrating** (LLM provider like Mercury/OpenAI/Anthropic, payment processor, email API, analytics, webhook secrets, DB connection strings, etc.), you MUST call \`request_credentials\` for that key in the same agent turn. Do NOT generate the code first and "leave .env for the developer to fill later" — they cannot fill it without the form. Skipping this leaves the project broken at runtime even though every file looks correct.
  - \`.env.example\` is supplementary documentation, NOT a collection mechanism. Writing \`.env.example\` without also calling \`request_credentials\` for every key it documents is incomplete work — finish by collecting the values.
  - For NON-sensitive configuration (region, plan tier, project name, feature toggles) **PREFER** \`ask_user_question\` — those don't belong in \`.env\`.
- - **SKIP \`request_credentials\` for platform-managed credentials** — \`provision_auth\` writes every auth credential the project needs to \`.env\` automatically. Asking via the form for keys the platform already owns is incorrect.
+ - **SKIP \`request_credentials\` for platform-managed credentials.** The platform mints these via dedicated \`provision_*\` tools, not via developer-supplied values. Mapping:
+   - \`TM_AUTH_*\` / \`VITE_TM_*\` / \`GIP_*\` / \`GCP_*\` → \`provision_auth\` (writes them).
+   - \`TMDB_URL\` / \`TMDB_TOKEN\` / \`DATABASE_URL\` → \`provision_database\` (writes them).
+   - \`TM_FILES_URL\` / \`TM_FILES_TOKEN\` / \`TM_FILES_PUBLIC_BASE\` → \`provision_files\` (writes them).
+   - \`APP_ID\` → \`provision_deploy\` (writes it; reserved for the Publish flow).
+   Calling \`request_credentials\` for any of these is incorrect — the developer doesn't own those tokens, the form will block on platform-managed field IDs anyway, and you'll waste a turn.
  - \`.pem\`, \`.key\`, \`credentials.json\`, \`.npmrc\`, \`*_secret*\` files require explicit developer authorization.
  - **KEEP** secrets out of text output and tool arguments.
 
@@ -443,14 +448,15 @@ ${vanillaWebRule}
 export function getReminderSection(ctx: PromptContext): string {
   // Recency-window bookend for the rules whose violation costs the most:
   // incomplete files, missing deps, missed dev-server errors, missed
-  // request_credentials. The full surface lives in earlier sections;
-  // this restates only what models routinely drop after a long prompt.
+  // request_credentials, base64-in-DB. The full surface lives in earlier
+  // sections; this restates only what models routinely drop after a long
+  // prompt.
   const mcpReminder = ctx.mcpTools.length > 0
-    ? `\n7. **MCP available**: ${ctx.mcpTools.map(t => `\`mcp__${t.serverName}__${t.name}\``).slice(0, 8).join(', ')}${ctx.mcpTools.length > 8 ? `, +${ctx.mcpTools.length - 8} more` : ''}. Before writing code against a library/service covered by an MCP, or when the task needs live external data or a side-effect in an external system, call the matching MCP — your training data is stale and these tools are the authoritative path.`
+    ? `\n8. **MCP available**: ${ctx.mcpTools.map(t => `\`mcp__${t.serverName}__${t.name}\``).slice(0, 8).join(', ')}${ctx.mcpTools.length > 8 ? `, +${ctx.mcpTools.length - 8} more` : ''}. Before writing code against a library/service covered by an MCP, or when the task needs live external data or a side-effect in an external system, call the matching MCP — your training data is stale and these tools are the authoritative path.`
     : ''
-  // Skills bullet is 7 when no MCP, 8 when MCP block is present. Numbering
+  // Skills bullet is 8 when no MCP, 9 when MCP block is present. Numbering
   // stays sequential so the model reads it as a list, not a digest.
-  const skillIndex = ctx.mcpTools.length > 0 ? 8 : 7
+  const skillIndex = ctx.mcpTools.length > 0 ? 9 : 8
   const skillReminder = ctx.loadedSkillNames.length > 0
     ? `\n${skillIndex}. Skills loaded: ${ctx.loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
     : ''
@@ -459,7 +465,8 @@ export function getReminderSection(ctx: PromptContext): string {
 1. **COMPLETE** every file. Output goes to disk as-is — omitted code is deleted code.
 2. **AFTER** file changes with a dev server running: \`${READ_DEV_SERVER_LOGS}\` and fix errors before continuing. Track the \`next_since\` cursor — without it you re-read stale entries.
 3. **REPORT** faithfully and stop. When a check passes (clean dev-server logs, no diagnostics, build OK), state it plainly and move on — don't re-verify what you already checked. If verification isn't possible (no test exists, can't run the code), say so explicitly rather than looping until you find something to do. The goal is an accurate report, not a defensive one.
-4. **WHEN** your code reads \`process.env.X\` / \`import.meta.env.X\` for a third-party service (LLM, payments, email, etc.): call \`${REQUEST_CREDENTIALS}\` for X in the SAME turn. The developer cannot fill \`.env\` without the form.
-5. ${sharedUiBaselineReminder()}
-6. ${sharedIdentityReminder()}${mcpReminder}${skillReminder}`
+4. **DEVELOPER-OWNED env vars** (third-party services the developer integrates — LLM, payments, email, SMTP, analytics, webhooks): call \`${REQUEST_CREDENTIALS}\` in the SAME turn you write \`process.env.X\`. For **PLATFORM-MANAGED** vars (\`TM_AUTH_*\`, \`TMDB_*\`, \`TM_FILES_*\`, \`APP_ID\`) use the matching \`provision_*\` tool instead — \`request_credentials\` is the wrong path.
+5. **FILE UPLOADS** use TM Files, never base64-in-DB. When uploading user content (avatars, images, attachments, documents): call \`provision_files\` if \`TM_FILES_URL\` is missing from .env, generate \`backend/src/files.ts\` (or \`server/src/files.ts\` if the project uses the \`server/\` convention) from the publish-backend skill recipe, and call \`uploadFile()\` from your upload routes. Store the returned \`publicUrl\` in DB columns — never the bytes. The pre-deploy lint catches the common base64-in-DB shape (Drizzle \`db.insert().values({...toString('base64')...})\` and data-URI literals) but the discipline is the goal: never base64 user content into the DB even when the lint wouldn't catch it.
+6. ${sharedUiBaselineReminder()}
+7. ${sharedIdentityReminder()}${mcpReminder}${skillReminder}`
 }

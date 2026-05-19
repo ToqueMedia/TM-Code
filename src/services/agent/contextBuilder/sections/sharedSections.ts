@@ -80,20 +80,16 @@ export function sharedMcpBlock(mcpTools: MCPToolSummary[], actor: string): strin
     : ''
   return `# MCP tools (Model Context Protocol)
 
-External capabilities exposed by MCP servers — documentation lookups, third-party APIs (GitHub, Linear, Slack, Notion), data access (Firestore, Sheets), design tools (Canva), and anything else the ${actor} chose to wire in. Each tool below extends what you can do beyond your training cutoff.
+External capabilities the ${actor} wired in — docs, third-party APIs, live data, design tools. Tool names follow \`mcp__<server>__<tool>\`; the server name is your routing hint.
 
 ${list}
 
-IMPORTANT — When to reach for an MCP tool:
- - **Documentation / API shape lookups**: BEFORE writing code against a library, framework, or service whose MCP is listed above, call the relevant lookup tool to get the CURRENT API. Your training data may be stale — the MCP is the authoritative source.
- - **Live data / external state**: when the task needs information you cannot derive from the project (issue tracker state, calendar events, repo metadata, sheet values), the matching MCP is the correct path — do not guess or fabricate.
- - **Side-effects in external systems**: when the task asks for an action in a third-party system (create a Linear ticket, post to Slack, comment on a GitHub PR, generate a Canva design), use the MCP tool rather than describing what the ${actor} should click. Always confirm intent first when the action is destructive or publishes content.
- - **On errors**: when a stack trace involves a library covered by an MCP, consult the MCP before attempting fixes blindly.
- - **Match server names to intent**: tool names follow \`mcp__<serverName>__<toolName>\`. The serverName is your hint — \`mcp__github__*\` for GitHub work, \`mcp__firebase__*\` for Firestore reads, etc. Don't call \`firebase\` tools to look up GitHub state.
+When to call:
+ - **Library code or stack trace**: covered library → call the matching MCP for the current API shape. Training data is stale.
+ - **Live external state** (issues, calendar, repo metadata, sheet values): read via MCP — don't fabricate.
+ - **Side-effects in external systems** (create ticket, post message, comment, generate design): use the MCP instead of telling the ${actor} what to click. Confirm intent first when destructive or publishing.
 
-Process notes:
- - MCP tools require ${actor} approval per call. If denied, fall back to non-MCP paths and note the limitation in your reply.
- - Treat MCP results as source of truth for that specific system, but apply normal judgement when integrating them — the MCP returns facts, you decide how they fit the task.${canvaGuidance}`
+Calls require ${actor} approval. If denied, fall back and note the limitation.${canvaGuidance}`
 }
 
 // Verbatim from claude-vaz (SUMMARIZE_TOOL_RESULTS_SECTION).

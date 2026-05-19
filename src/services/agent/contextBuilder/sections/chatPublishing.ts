@@ -31,6 +31,8 @@ When you scaffold or write any backend code for a fullstack project (presence of
 
 **Step 4** — Define the schema in TypeScript via Drizzle (\`server/schema.ts\`), generate the initial migration with \`npx drizzle-kit generate\`, apply locally with \`npx drizzle-kit migrate\`. The TM Code Worker reapplies the bundled \`migrations/*.sql\` against the app's TMDB at deploy time — no manual prod migration step.
 
+**Step 4.5 (only when the project handles file uploads)** — Call \`provision_files()\`. It mints an app-scoped \`TM_FILES_TOKEN\` and writes \`TM_FILES_URL\` + \`TM_FILES_TOKEN\` + \`TM_FILES_PUBLIC_BASE\` to \`.env\`. Then generate the helper at \`backend/src/files.ts\` (or \`server/src/files.ts\` if the project uses that layout — the bundle detects both) with the recipe from publish-backend §9.5. Storage layout: \`{slug}/_files/{key}\` on the platform's R2 bucket; public read URL is \`https://{slug}.toquemedia.net/_files/{key}\` — same origin as the frontend, zero CORS, no Worker hop on read. **DB columns store the returned \`publicUrl\` string, never the bytes.** Base64-in-DB is the anti-pattern: 33% row bloat, no CDN, kills query latency, fails at multi-MB. The pre-deploy lint catches the common Drizzle shape but the discipline is "never put bytes in TMDB columns" — not "rely on the lint".
+
 **SQL discipline (zero composite-index trap, unlike the legacy Firestore platform):** Every standard SQL pattern works — \`where + orderBy\` on different fields, multi-\`where\`, \`array-contains\` / IN clauses, JOINs via Drizzle relations, aggregations, transactions. For performance on large tables, add explicit indexes via Drizzle schema (\`index('name').on(table.col1, table.col2)\`) — they become \`CREATE INDEX\` in the generated migration. No platform-side index manifest, no INDEX-REQUEST.md flow, no FAILED_PRECONDITION runtime errors.
 
 **Multi-tenant isolation is the database itself**: each app gets its own \`app-{appId}\` libSQL database, physically separated. No need to prefix tables with \`apps/{appId}/...\` or scope queries by appId — the connection IS the tenant boundary. What you DO scope per row: \`userUid\` from the GIP JWT \`sub\` claim. Standard auth'd-SQL-backend pattern.
@@ -112,10 +114,11 @@ The publish-ready data layer (TM Code Database via Drizzle + sqlite-proxy + dev 
 
 ---
 
-**REMINDER (bookend)** — Three non-negotiable invariants for fullstack projects:
+**REMINDER (bookend)** — Four non-negotiable invariants for fullstack projects:
 1. **No Turso URL or token in user code or \`.env\`.** Production uses \`TMDB_URL\` + \`TMDB_TOKEN\` injected by Cloud Run at deploy time; dev uses \`DATABASE_URL=file:./dev.db\`. If \`libsql://...turso.io\` appears anywhere in the project, the worker boundary has been broken.
 2. **\`server/db.ts\` uses \`drizzle-orm/sqlite-proxy\` in prod and \`drizzle-orm/libsql/node\` in dev** — the same Drizzle schema works in both. Do not import \`@libsql/client\` directly into user code.
-3. **\`Dockerfile\` at the project root is generated in the SAME scaffold turn as the backend.** Without it, Publish ships only the frontend and the backend never comes online — the silent-failure mode that costs the most user trust. Treat the Dockerfile as load-bearing as \`server/index.ts\` itself. **\`migrations/\` folder is also copied into the image** so the worker can apply pending migrations against the app's TMDB at deploy time.`
+3. **\`Dockerfile\` at the project root is generated in the SAME scaffold turn as the backend.** Without it, Publish ships only the frontend and the backend never comes online — the silent-failure mode that costs the most user trust. Treat the Dockerfile as load-bearing as \`server/index.ts\` itself. **\`migrations/\` folder is also copied into the image** so the worker can apply pending migrations against the app's TMDB at deploy time.
+4. **User-uploaded bytes never go into TMDB columns.** When uploads are part of the feature, call \`provision_files()\` and use \`uploadFile()\` from the \`files.ts\` helper — store the returned \`publicUrl\` in the row. base64-in-DB / data-URIs / blob columns are forbidden; the pre-deploy lint catches the common Drizzle shape, but the rule applies even where the lint can't reach.`
 
   // Fire-and-forget telemetry. Lets future eval / A-B work attribute
   // model behaviour regressions to specific edits of this section.

@@ -2910,6 +2910,154 @@ Project root: ${projectRoot}`
       },
     })
 
+    // === provision_files ===
+    // Reserves the per-app file storage credentials on the platform and
+    // writes TM_FILES_URL / TM_FILES_TOKEN / TM_FILES_PUBLIC_BASE to .env.
+    //
+    // Storage layout on R2: `{slug}/_files/{userKey}`. Reads are served
+    // directly by the slug's subdomain (`https://{slug}.toquemedia.net/_files/key`)
+    // — no Worker hop, no CORS for same-origin frontend fetches. Writes
+    // go through this Worker (PUT /v1/apps/{appId}/files/{key}) with
+    // TM_FILES_TOKEN as a bearer.
+    //
+    // Same idempotency semantics as provision_database / provision_auth:
+    // second call reuses the existing record.
+    this.tools.set('provision_files', {
+      definition: {
+        name: 'provision_files',
+        description:
+          "Set up TM Code File Storage (per-app R2 prefix) for the current project. Reserves the app's storage slot on the platform, mints a TM_FILES_TOKEN, and writes TM_FILES_URL + TM_FILES_TOKEN + TM_FILES_PUBLIC_BASE to .env. Use ONCE when the project needs to handle user uploads (avatars, images, attachments, documents) in production. **Required before writing any upload route** — the alternative (base64 in DB) is forbidden by the publish-backend skill: it bloats the DB, kills query latency, and has no CDN. After provisioning, generate the files helper from read_skill(\"publish-backend\") §9.5 at `backend/src/files.ts` (or `server/src/files.ts` if the project uses the `server/` layout — the deploy bundle detects either). Call uploadFile() from your upload routes. Idempotent: second call returns the same credentials.",
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+      execute: async () => {
+        const project = useProjectStore.getState().currentProject
+        if (!project) {
+          return 'No project is open. Open a project before provisioning file storage.'
+        }
+
+        const firebaseAuth = FirebaseAuthService.getInstance()
+        const idToken = await firebaseAuth.getIdToken()
+        if (!idToken) {
+          return 'Not authenticated to TM Code. Sign in first, then retry.'
+        }
+
+        // Compute a candidate slug from the project name. The worker accepts
+        // this as a fallback when no deploy record exists yet — most agent
+        // calls to provision_files happen pre-publish (during scaffolding of
+        // upload routes), so the deploy record doesn't exist. After the first
+        // publish, the worker will pin to the actual deploy slug regardless
+        // of what we send here.
+        const candidateSlug = project.name
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[̀-ͯ]/g, '')
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 63) || project.id.slice(0, 32)
+
+        const workerUrl = resolveWorkerUrl()
+        let provisionRes: Awaited<ReturnType<typeof tauriFetch>>
+        try {
+          provisionRes = await tauriFetch(
+            `${workerUrl}/v1/apps/${encodeURIComponent(project.id)}/files/provision`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${idToken}`,
+              },
+              body: JSON.stringify({ slug: candidateSlug }),
+            },
+          )
+        } catch (err) {
+          return (
+            `PROVISION_FILES FAILED — STOP UPLOAD-RELATED WORK.\n\n` +
+            `Network error reaching the file storage provisioning endpoint: ${err instanceof Error ? err.message : String(err)}\n\n` +
+            `Do NOT fall back to base64-in-DB or to request_credentials for TM_FILES_URL/TM_FILES_TOKEN — those credentials are minted by the platform and don't exist until provision_files succeeds.\n\n` +
+            `Required recovery: report the network error to the developer, suggest checking their connection, and wait for them to decide whether to retry. Do not auto-retry.`
+          )
+        }
+
+        if (!provisionRes.ok) {
+          const body = await provisionRes.text().catch(() => '')
+          return (
+            `PROVISION_FILES FAILED — STOP UPLOAD-RELATED WORK.\n\n` +
+            `Error from worker (HTTP ${provisionRes.status}): ${body.slice(0, 300)}\n\n` +
+            `Wrong recovery paths (DO NOT TAKE):\n` +
+            `  ✗ base64-in-DB — bloats the DB, kills query latency. Forbidden by publish-backend skill §9.5.\n` +
+            `  ✗ request_credentials for TM_FILES_URL / TM_FILES_TOKEN — the developer does not own these.\n` +
+            `  ✗ switch to S3/Firebase Storage — only valid as an explicit user choice, not a silent fallback.\n\n` +
+            `Required recovery:\n` +
+            `  1. STOP the upload route work. Do not write files.ts or upload handlers.\n` +
+            `  2. Tell the developer what happened — quote the error above verbatim.\n` +
+            `  3. Suggest one of: (a) retry provision_files in a new chat turn if transient, (b) report to TM Code support if it persists.\n` +
+            `  4. Wait for the developer's decision. Do not auto-retry.`
+          )
+        }
+
+        const data = (await provisionRes.json()) as {
+          url?: string
+          token?: string
+          publicBase?: string
+          reused?: boolean
+        }
+
+        if (!data.url || !data.token || !data.publicBase) {
+          return `Provisioning returned incomplete data: ${JSON.stringify(data)}`
+        }
+
+        const envVars: Array<{ key: string; value: string }> = [
+          { key: 'TM_FILES_URL', value: data.url },
+          { key: 'TM_FILES_TOKEN', value: data.token },
+          { key: 'TM_FILES_PUBLIC_BASE', value: data.publicBase },
+        ]
+
+        try {
+          await invoke('write_env_vars', { projectPath: project.path, vars: envVars })
+        } catch (err) {
+          return `File storage provisioned but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
+        }
+
+        const reusedSuffix = data.reused ? ' (reused existing)' : ''
+        const lines: string[] = []
+        lines.push(`File storage ready${reusedSuffix}.`)
+        lines.push(`.env written: TM_FILES_URL, TM_FILES_TOKEN, TM_FILES_PUBLIC_BASE.`)
+        lines.push('')
+        lines.push('## Storage contract (do not improvise)')
+        lines.push('')
+        lines.push('### Write path (server/files.ts)')
+        lines.push('  - PUT to `${TM_FILES_URL}/{key}` with `Authorization: Bearer ${TM_FILES_TOKEN}` and the file body as the request body.')
+        lines.push('  - Response: `{ publicUrl, key, size, contentType }`. Store the `publicUrl` in your DB row — never the bytes themselves.')
+        lines.push('  - Max 10 MB per upload. The Worker enforces this — your route should also pre-validate to reject early.')
+        lines.push('  - Keys allow nested paths (`posts/cover.jpg`). Forbidden: `..`, leading `/`, control chars.')
+        lines.push('')
+        lines.push('### Read path')
+        lines.push('  - Public URL is `${TM_FILES_PUBLIC_BASE}/_files/{key}` — same origin as your frontend, no CORS. Cloudflare serves it directly from R2, zero Worker invocations on the read path.')
+        lines.push('  - Embed in `<img src=...>` / `<video src=...>` etc. with normal browser caching.')
+        lines.push('')
+        lines.push('### Delete path')
+        lines.push('  - DELETE on `${TM_FILES_URL}/{key}` with the same bearer. Returns `{ deleted: key }`.')
+        lines.push('  - When the app itself is deleted, the platform cleans up the whole prefix — you do not need to delete files manually unless the user explicitly removes them.')
+        lines.push('')
+        lines.push('### Forbidden')
+        lines.push('  - base64-in-DB columns (`avatarData`, `imageBase64`, `dataUrl: "data:image/..."`). Use the publicUrl returned by the upload instead.')
+        lines.push('  - Storing TM_FILES_TOKEN anywhere in committed code. It lives ONLY in .env.')
+        lines.push('  - Direct R2 SDK calls (`@aws-sdk/client-s3`, `wrangler-r2`) — the Worker is the only authorized write path.')
+        lines.push('')
+        lines.push('### Next steps')
+        lines.push('  1. read_skill("publish-backend") §9.5 for the full files.ts helper.')
+        lines.push('  2. Write `backend/src/files.ts` exporting `uploadFile(key, body, contentType)` and `deleteFile(key)`.')
+        lines.push('  3. Wire upload routes that accept multipart/form-data, validate type+size, then call uploadFile.')
+        lines.push('  4. Store the returned publicUrl in the relevant DB row.')
+
+        return lines.join('\n')
+      },
+    })
+
     // === provision_deploy ===
     // Mirrors provision_auth for the backend deploy side. With the Firestore
     // data model there's no per-app database to provision — the app's data
@@ -3051,7 +3199,7 @@ Project root: ${projectRoot}`
       definition: {
         name: 'request_credentials',
         description:
-          'Request API keys, tokens, or other secrets from the developer via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by the agent). Never instruct the developer to create or edit .env manually, and never ask them to paste secrets into the chat.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nSKIP FOR: anything the platform manages — authentication, the platform database, the runtime, the build pipeline. provision_auth writes the auth credentials automatically; the developer does not have (and will never have) admin SDK keys, service-account files, or infrastructure tokens for the platform side. Those live only on the platform worker. Requesting them through this form is incorrect and will confuse the developer.',
+          'Request API keys, tokens, or other secrets from the developer via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by the agent). Never instruct the developer to create or edit .env manually, and never ask them to paste secrets into the chat.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nSKIP FOR: platform-managed credentials. The platform mints these via dedicated provision_* tools — the developer doesn\'t have the values and never will. Mapping: TM_AUTH_*/VITE_TM_*/GIP_*/GCP_* → provision_auth; TMDB_URL/TMDB_TOKEN/DATABASE_URL → provision_database; TM_FILES_URL/TM_FILES_TOKEN/TM_FILES_PUBLIC_BASE → provision_files; APP_ID → provision_deploy. Calling this form for any of those is incorrect.',
         input_schema: {
           type: 'object',
           properties: {

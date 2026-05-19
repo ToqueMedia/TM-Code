@@ -24,12 +24,16 @@ export interface BrandTerm {
 }
 
 /** Term count — exposed for prompt-section telemetry. */
-export const BRAND_VOCABULARY_LENGTH = 6 as const
+export const BRAND_VOCABULARY_LENGTH = 7 as const
 
 export const BRAND_VOCABULARY: readonly BrandTerm[] = [
   {
     userFacing: "TM Code Database / your project's database",
     internal: ['Firestore', 'Cloud Firestore', 'Firebase Database'],
+  },
+  {
+    userFacing: "TM Code File Storage / your project's file storage",
+    internal: ['Cloudflare R2', 'R2 bucket', 'S3', 'object storage', 'blob storage', 'Firebase Storage'],
   },
   {
     userFacing: "TM Code Authentication / your project's login",

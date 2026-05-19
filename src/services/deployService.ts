@@ -43,6 +43,7 @@ interface DeployBundle {
   files: DeployBundleFile[]
   has_database: boolean
   has_api_routes: boolean
+  has_file_storage: boolean
   migration_sql?: string
 }
 
@@ -58,6 +59,12 @@ interface InitResponse {
   authConfig: AuthConfig
   databaseId: string | null
   databaseName: string | null
+  /** TM Code File Storage credentials — present only when the bundle ships
+   *  `backend/src/files.ts`. Injected into the Cloud Run env so user-app
+   *  code can fetch them via `process.env.TM_FILES_URL` / `TM_FILES_TOKEN`. */
+  filesUrl: string | null
+  filesToken: string | null
+  filesPublicBase: string | null
   warnings: string[]
 }
 
@@ -223,6 +230,7 @@ class DeployService {
         customSubdomain: opts.customSubdomain,
         hasDatabase: bundle.has_database,
         hasApiRoutes: bundle.has_api_routes,
+        hasFileStorage: bundle.has_file_storage,
         migrationSql: bundle.migration_sql,
         schemaFileContent: bundle.files.find(
           (f) => f.path === 'src/lib/schema.ts' || f.path.endsWith('/schema.ts'),
@@ -233,6 +241,31 @@ class DeployService {
       needsCleanup = true
       for (const w of initResult.warnings) store.addWarning(opts.projectId, w)
       reportStep('init', 'complete', `Subdomain: ${initResult.slug}`)
+
+      // Persist the authoritative TM_FILES_* values to .env so local dev
+      // (`npm run dev` reading via dotenv) uses the SAME slug the deploy
+      // pinned. Without this, the developer's local backend keeps the
+      // candidate slug from the IDE-side `provision_files` call — and
+      // `publicUrlFor()` in dev builds URLs against a slug that no longer
+      // matches the real R2 prefix. The deploy already overrides Cloud Run
+      // env with these values; this line closes the dev gap.
+      if (initResult.filesUrl && initResult.filesToken && initResult.filesPublicBase) {
+        try {
+          await invoke('write_env_vars', {
+            projectPath,
+            vars: [
+              { key: 'TM_FILES_URL', value: initResult.filesUrl },
+              { key: 'TM_FILES_TOKEN', value: initResult.filesToken },
+              { key: 'TM_FILES_PUBLIC_BASE', value: initResult.filesPublicBase },
+            ],
+          })
+        } catch {
+          // .env write failures are non-fatal — Cloud Run env still got the
+          // correct values via the injection in container/deploy. Local dev
+          // staying on the stale slug is annoying but recoverable (run
+          // provision_files again, or edit .env manually).
+        }
+      }
 
       // ── Phase 4: assets (chunked, parallelized) ───────────
       const isFreeTier = !opts.userPlan || opts.userPlan === 'explorer'
@@ -341,6 +374,21 @@ class DeployService {
         // Read .env so we can pass the runtime vars (GIP_*, APP_ID, etc.)
         // through to the Cloud Run service.
         const envVars = await this.readBackendEnvVars(projectPath)
+        // Inject TM Files credentials returned by `init`. We override (rather
+        // than merge) any .env-supplied values so the deploy is always the
+        // source of truth — local .env may be stale if the user copied the
+        // project, .env may be missing on a CI deploy, etc.
+        if (initResult.filesUrl && initResult.filesToken && initResult.filesPublicBase) {
+          const filesVars = new Map([
+            ['TM_FILES_URL', initResult.filesUrl],
+            ['TM_FILES_TOKEN', initResult.filesToken],
+            ['TM_FILES_PUBLIC_BASE', initResult.filesPublicBase],
+          ])
+          for (let i = envVars.length - 1; i >= 0; i--) {
+            if (filesVars.has(envVars[i].name)) envVars.splice(i, 1)
+          }
+          for (const [name, value] of filesVars) envVars.push({ name, value })
+        }
         const deployRes = await this.callPhase<{ serviceUrl: string }>(
           'container/deploy',
           idToken,

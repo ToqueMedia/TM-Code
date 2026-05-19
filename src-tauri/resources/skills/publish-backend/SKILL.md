@@ -1,10 +1,10 @@
 ---
 name: publish-backend
-description: Prepare a fullstack project (Vite/React/Vue/Svelte frontend + Express/Fastify/NestJS/Hono backend) for TM Code's Publish flow. The platform manages hosting + database; your job on the project side is to define the schema in TypeScript via Drizzle, wire the dev/prod connection switch (local SQLite file vs platform HTTPS proxy), run migrations, and ship the Dockerfile + build config. The database token never enters your code — the TM Code worker holds it. Use full SQL semantics — no composite-index limitations, no per-document read billing, no client-side DB SDK.
+description: Prepare a fullstack project (Vite/React/Vue/Svelte frontend + Express/Fastify/NestJS/Hono backend) for TM Code's Publish flow. Covers the data layer (Drizzle ORM + sqlite-proxy in prod, local SQLite file in dev), schema and migrations, file uploads / image / avatar / attachment / document storage via TM Code File Storage (R2-backed, never base64-in-DB), and the Dockerfile + build config. The platform mints all credentials (TMDB_*, TM_FILES_*, TM_AUTH_*) via provision_* tools — they never enter user code. Use full SQL semantics — no composite-index limitations, no per-document read billing, no client-side DB SDK.
 license: MIT
 metadata:
   author: tm-code
-  version: 2.0
+  version: 2.1
   language: en
 ---
 
@@ -532,7 +532,7 @@ Python contract:
 6. **Listening on `127.0.0.1` / `localhost`.** Cloud Run docs: *"the ingress container should not listen on 127.0.0.1"*. Bind `0.0.0.0`.
 7. **Embedding any `*.json` credential file or hardcoding `TMDB_TOKEN`.** Tokens come from Cloud Run env at deploy time. The harness rejects writes that match credential-file patterns.
 
-8. **`app.get('*', ...)` / `app.use('*', ...)` / `app.all('*', ...)` in Express.** Express 5 ships with `path-to-regexp@8`, which rejects bare `*` as a route — the container crashes on startup with `PathError: Missing parameter name at index 1: *`. Cloud Run shows it as `The user-provided container failed to start and listen on the port` because the process died before binding. **Pin Express to `^4.21.2` AND use middleware-without-path for catch-alls:**
+8. **`app.get('*', ...)` / `app.use('*', ...)` / `app.all('*', ...)` in Express.** Express 5 ships with `path-to-regexp@8`, which rejects bare `*` as a route — the container crashes on startup with `PathError: Missing parameter name at index 1: *`. Cloud Run shows it as `The user-provided container failed to start and listen on the port` because the process died before binding.
 
    ```ts
    // ✅ Correct — works in Express 4 and 5
@@ -546,7 +546,24 @@ Python contract:
    app.all('*', handler)
    ```
 
-   If Express 5 is genuinely required, named wildcards work (`app.get('/*splat', ...)`), but stay on v4 unless there's a specific reason. The template `react-express-*` pins `^4.21.2`; do not let `npm install express` upgrade it to v5 silently. When writing `package.json` from scratch (no template), pin Express explicitly: `"express": "^4.21.2"`.
+   If Express 5 is genuinely required, named wildcards work (`app.get('/*splat', ...)`).
+
+9. **Don't rewrite `package.json` dependencies without reading them first — the real root cause of the Express 5 crash above.** The template `react-express-*` pins `"express": "^4.21.2"`. When the agent regenerates `package.json` from scratch (or runs `npm install express` to "make sure it's there"), the pin gets clobbered to whatever `latest` resolves to today — currently v5.x — and the wildcard routes that worked in dev silently break the production container. The pre-flight lint (`validate_backend_for_cloud_run`) catches it before deploy, but the right discipline is upstream:
+
+   ```ts
+   // ✅ Mechanical check before touching package.json
+   //   1. read_file package.json
+   //   2. parse, modify ONLY the keys you need to change
+   //   3. preserve all existing pins (express, prisma, drizzle-*, etc.)
+   //   4. write_file the merged result
+   ```
+
+   Avoid these specifically:
+   - `Write` a full new `package.json` when one already exists — overwrites every pin.
+   - `npm install <pkg>` without a version range on a package that's already pinned in the template — re-resolves to `latest`.
+   - "Upgrading" deps as a side-effect of unrelated work — express stays where the template put it unless the user asked to upgrade.
+
+   When in doubt: read first, diff in your head, write the smallest change.
 
 ### 9. `.dockerignore`
 
@@ -567,6 +584,186 @@ dev.db-*
 ```
 
 The frontend (`src/`, `public/`) is built separately by the platform. `dev.db` (the local SQLite file) is excluded — production uses TMDB.
+
+### 9.5. File storage — TM Code File Storage (R2-backed)
+
+TM Code provides per-app blob storage backed by Cloudflare R2 under the project's own slug subdomain. The data layer (TMDB) is for relational data; **TM Files** is for everything else — avatars, images, attachments, documents.
+
+**Critical rule**: NEVER write user-uploaded bytes to TMDB columns. No `avatarData TEXT`, no `imageBase64`, no `data:image/...` URLs in the DB. Base64-in-DB bloats rows 33%, kills query latency, has no CDN, and breaks at multi-MB. The pre-deploy lint catches the most common shape (Drizzle `db.insert/.update` within ~600 chars of `.toString('base64')` / `btoa(` / `data:image/`), but it's a safety net, not a fence — write code that never goes there.
+
+**Directory convention**: this skill assumes the `backend/src/...` layout. If the project uses the legacy `server/src/...` layout (templates `react-express-*`), put the file at `server/src/files.ts` instead. The Rust bundle detection checks both paths, so `has_file_storage` fires either way.
+
+**Dev-vs-prod constraint (read this BEFORE testing uploads locally)**: TM Files writes go through the production Worker (TM_FILES_URL points at `https://api-agents.toquemedia.net/...` in both environments). The Worker resolves the R2 prefix from the project's published slug — which means **uploads fail with `404 No deploy record yet — publish the project first` until the project has been published at least once**. This is by design: pre-publish, there's no slug to write under. The local dev story: scaffold the upload route + files.ts together with the rest of the feature, then click Publish. The deploy refreshes `.env` with the authoritative slug, and from that point local dev uploads work against the same prefix the prod app uses (single shared storage in dev + prod — intentional, so testing locally exercises real R2). If you absolutely need to demo uploads pre-publish, use a local-only fallback (write to `/tmp/`-like path) gated by `NODE_ENV !== 'production'`, and document it as throwaway.
+
+#### Provision once (mechanical check)
+
+Before writing any upload route, search `.env` for `TM_FILES_URL=`:
+1. If present and non-empty → skip. Already provisioned.
+2. If missing/empty → call `provision_files` NOW. Idempotent; calling when already provisioned returns the same credentials.
+
+`provision_files` writes three env vars: `TM_FILES_URL`, `TM_FILES_TOKEN`, `TM_FILES_PUBLIC_BASE`.
+
+#### Server: client helper (`backend/src/files.ts`)
+
+The file's presence is also how `collect_deploy_bundle` detects `has_file_storage=true` and triggers env injection on Cloud Run. Drop this verbatim:
+
+```ts
+// backend/src/files.ts
+const FILES_URL = process.env.TM_FILES_URL
+const FILES_TOKEN = process.env.TM_FILES_TOKEN
+const FILES_PUBLIC_BASE = process.env.TM_FILES_PUBLIC_BASE
+
+function assertConfigured() {
+  if (!FILES_URL || !FILES_TOKEN || !FILES_PUBLIC_BASE) {
+    throw new Error(
+      'TM_FILES_URL / TM_FILES_TOKEN / TM_FILES_PUBLIC_BASE must be set — call provision_files in the IDE before deploying.'
+    )
+  }
+}
+
+export interface UploadResult {
+  publicUrl: string
+  key: string
+  size: number
+  contentType: string
+}
+
+/** Encode each path segment individually, preserving `/` separators.
+ *  `posts/cover.jpg` → `posts/cover.jpg` (alphanum segments unchanged)
+ *  `my folder/file v2.jpg` → `my%20folder/file%20v2.jpg`
+ *  This keeps R2 keys readable in the console AND tolerates spaces/specials. */
+function encodeKey(key: string): string {
+  return key.split('/').map(encodeURIComponent).join('/')
+}
+
+/**
+ * Upload bytes to the app's R2 prefix and return the public URL.
+ * `key` is the path under `_files/`; supports nesting like `posts/cover.jpg`.
+ * Max 10 MB per call — enforced by the Worker, validate client-side too.
+ */
+export async function uploadFile(
+  key: string,
+  body: ArrayBuffer | Uint8Array | Buffer,
+  contentType: string,
+): Promise<UploadResult> {
+  assertConfigured()
+  const r = await fetch(`${FILES_URL}/${encodeKey(key)}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${FILES_TOKEN}`,
+      'Content-Type': contentType,
+    },
+    body: body as BodyInit,
+  })
+  if (!r.ok) {
+    const errText = await r.text().catch(() => '')
+    throw new Error(`TM Files upload failed (HTTP ${r.status}): ${errText.slice(0, 200)}`)
+  }
+  return (await r.json()) as UploadResult
+}
+
+/** Delete a file from the app's R2 prefix. */
+export async function deleteFile(key: string): Promise<void> {
+  assertConfigured()
+  const r = await fetch(`${FILES_URL}/${encodeKey(key)}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${FILES_TOKEN}` },
+  })
+  if (!r.ok) {
+    const errText = await r.text().catch(() => '')
+    throw new Error(`TM Files delete failed (HTTP ${r.status}): ${errText.slice(0, 200)}`)
+  }
+}
+
+/** Build a stable public URL for a key. The Worker is NOT in the read path — Cloudflare serves R2 directly. */
+export function publicUrlFor(key: string): string {
+  assertConfigured()
+  return `${FILES_PUBLIC_BASE}/_files/${encodeKey(key)}`
+}
+```
+
+#### Upload route example (Express, multer)
+
+```ts
+// backend/src/routes/avatars.ts
+import { Router } from 'express'
+import multer from 'multer'
+import { uploadFile } from '../files'
+import { db } from '../db'
+import { eq } from 'drizzle-orm'
+import { users } from '../db/schema'
+import { verifyGipJwt } from '../lib/auth'
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB — match Worker cap
+  fileFilter: (_req, file, cb) => {
+    if (!/^image\/(png|jpe?g|webp|gif)$/.test(file.mimetype)) {
+      return cb(new Error('Only image/png|jpeg|webp|gif allowed'))
+    }
+    cb(null, true)
+  },
+})
+
+export const avatars = Router()
+
+avatars.post('/api/me/avatar', upload.single('avatar'), async (req, res) => {
+  const jwt = await verifyGipJwt(req.headers.authorization?.slice(7) ?? '')
+  if (!jwt) return res.status(401).json({ error: 'unauthenticated' })
+  if (!req.file) return res.status(400).json({ error: 'avatar field required' })
+
+  const ext = req.file.mimetype.split('/')[1].replace('jpeg', 'jpg')
+  const key = `avatars/${jwt.sub}.${ext}`
+
+  const { publicUrl } = await uploadFile(key, req.file.buffer, req.file.mimetype)
+
+  // Store the URL on the user row — NOT the bytes.
+  await db.update(users).set({ avatarUrl: publicUrl }).where(eq(users.uid, jwt.sub))
+
+  res.json({ avatarUrl: publicUrl })
+})
+```
+
+#### Schema column shape
+
+```ts
+// ✅ Right: store the URL, not the bytes.
+export const users = sqliteTable('users', {
+  uid: text('uid').primaryKey(),
+  avatarUrl: text('avatar_url'),   // ← https://my-app.toquemedia.net/_files/avatars/abc.jpg
+})
+
+// ❌ Wrong: blob column. Forbidden.
+// export const users = sqliteTable('users', {
+//   avatarData: text('avatar_data'),  // base64 string — bloat
+// })
+```
+
+#### Forbidden patterns
+
+```ts
+// ❌ NEVER — bloats DB, kills query latency, no CDN cache, fails at multi-MB.
+await db.insert(files).values({
+  data: await readFileAsBase64(req.body),
+  mime: req.body.type,
+})
+
+// ❌ NEVER — same anti-pattern, hidden behind a column rename.
+const dataUrl = `data:image/png;base64,${b64}`
+await db.insert(posts).values({ coverImage: dataUrl })
+
+// ❌ NEVER — direct R2 SDK from user code. The Worker is the only authorized write path.
+import { S3Client } from '@aws-sdk/client-s3'  // ✗
+```
+
+#### When the user prompt mentions "upload" / "avatar" / "image" / "attachment"
+
+1. Read `.env` — if `TM_FILES_URL` missing, call `provision_files`.
+2. Generate `backend/src/files.ts` (verbatim recipe above).
+3. Wire the upload route using `uploadFile()`.
+4. Store the returned `publicUrl` in the DB row.
+
+Do **not** ask the developer for R2/S3/Firebase credentials. TM Files is provisioned by the platform; no developer-supplied keys.
 
 ### 10. Build pipeline
 
