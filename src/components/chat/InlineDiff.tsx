@@ -222,8 +222,6 @@ function InlineDiff({
 
       {/* Diff content — only changed lines (+/-) grouped into hunks */}
       <Box
-        maxH="320px"
-        overflowY="auto"
         overflowX="auto"
         fontSize="12px"
         fontFamily={tokens.fontFamily.mono}

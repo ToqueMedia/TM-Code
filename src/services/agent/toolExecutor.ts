@@ -3609,7 +3609,7 @@ Project root: ${projectRoot}`
       definition: {
         name: 'provision_files',
         description:
-          "Set up TM Code File Storage (per-app R2 prefix) for the current project. Reserves the app's storage slot on the platform, mints a TM_FILES_TOKEN, and writes TM_FILES_URL + TM_FILES_TOKEN + TM_FILES_PUBLIC_BASE to .env. Use ONCE when the project needs to handle user uploads (avatars, images, attachments, documents) in production. **Required before writing any upload route** — the alternative (base64 in DB) is forbidden by the publish-backend skill: it bloats the DB, kills query latency, and has no CDN. After provisioning, generate the files helper from read_skill(\"publish-backend\") §9.5 at `backend/src/files.ts` (or `server/src/files.ts` if the project uses the `server/` layout — the deploy bundle detects either). Call uploadFile() from your upload routes. Idempotent: second call returns the same credentials.",
+          "Set up TM Code File Storage for the current project. Tries R2 via the platform Worker first; on failure, falls back to LOCAL filesystem (.toquemedia/uploads/). Writes TM_FILES_URL + TM_FILES_TOKEN + TM_FILES_PUBLIC_BASE to .env (R2 mode) or TM_FILES_MODE=local (local mode). Use ONCE when the project needs to handle user uploads (avatars, images, attachments, documents). **Required before writing any upload route** — the alternative (base64 in DB) is forbidden: it bloats the DB, kills query latency, and has no CDN. After provisioning, generate the files helper from read_skill(\"publish-backend\") §9.5 at `backend/src/files.ts` (or `server/src/files.ts`). In your files.ts, check `process.env.TM_FILES_MODE === 'local'` to switch between R2 (Worker PUT) and local (fs.writeFile). Idempotent: second call returns the same credentials.",
         input_schema: {
           type: 'object',
           properties: {},
@@ -3657,28 +3657,51 @@ Project root: ${projectRoot}`
             },
           )
         } catch (err) {
+          // Network error — fall back to local filesystem storage
+          const uploadsDir = `${project.path}/.toquemedia/uploads`
+          try { await invoke('create_directories_all', { path: uploadsDir }) } catch {}
+          try {
+            await invoke('write_env_vars', {
+              projectPath: project.path,
+              vars: [{ key: 'TM_FILES_MODE', value: 'local' }],
+            })
+          } catch {}
           return (
-            `PROVISION_FILES FAILED — STOP UPLOAD-RELATED WORK.\n\n` +
-            `Network error reaching the file storage provisioning endpoint: ${err instanceof Error ? err.message : String(err)}\n\n` +
-            `Do NOT fall back to base64-in-DB or to request_credentials for TM_FILES_URL/TM_FILES_TOKEN — those credentials are minted by the platform and don't exist until provision_files succeeds.\n\n` +
-            `Required recovery: report the network error to the developer, suggest checking their connection, and wait for them to decide whether to retry. Do not auto-retry.`
+            `PROVISION_FILES: platform unreachable — falling back to LOCAL file storage.\n\n` +
+            `Network error: ${err instanceof Error ? err.message : String(err)}\n\n` +
+            `Local fallback active:\n` +
+            `  - Uploads go to .toquemedia/uploads/ (gitignored)\n` +
+            `  - TM_FILES_MODE=local written to .env\n` +
+            `  - Serve via static middleware: app.use('/uploads', express.static('.toquemedia/uploads'))\n` +
+            `  - writeFile() saves to disk, readFile() reads from disk, deleteFile() removes from disk\n\n` +
+            `In your files.ts, check process.env.TM_FILES_MODE === 'local' to switch between R2 (Worker PUT) and local (fs.writeFile). ` +
+            `The public URL for local files is /uploads/{key} on the dev server.\n\n` +
+            `base64-in-DB is still FORBIDDEN.`
           )
         }
 
         if (!provisionRes.ok) {
           const body = await provisionRes.text().catch(() => '')
+          // Non-OK response — fall back to local filesystem storage
+          const uploadsDir = `${project.path}/.toquemedia/uploads`
+          try { await invoke('create_directories_all', { path: uploadsDir }) } catch {}
+          try {
+            await invoke('write_env_vars', {
+              projectPath: project.path,
+              vars: [{ key: 'TM_FILES_MODE', value: 'local' }],
+            })
+          } catch {}
           return (
-            `PROVISION_FILES FAILED — STOP UPLOAD-RELATED WORK.\n\n` +
-            `Error from worker (HTTP ${provisionRes.status}): ${body.slice(0, 300)}\n\n` +
-            `Wrong recovery paths (DO NOT TAKE):\n` +
-            `  ✗ base64-in-DB — bloats the DB, kills query latency. Forbidden by publish-backend skill §9.5.\n` +
-            `  ✗ request_credentials for TM_FILES_URL / TM_FILES_TOKEN — the developer does not own these.\n` +
-            `  ✗ switch to S3/Firebase Storage — only valid as an explicit user choice, not a silent fallback.\n\n` +
-            `Required recovery:\n` +
-            `  1. STOP the upload route work. Do not write files.ts or upload handlers.\n` +
-            `  2. Tell the developer what happened — quote the error above verbatim.\n` +
-            `  3. Suggest one of: (a) retry provision_files in a new chat turn if transient, (b) report to TM Code support if it persists.\n` +
-            `  4. Wait for the developer's decision. Do not auto-retry.`
+            `PROVISION_FILES: platform returned HTTP ${provisionRes.status} — falling back to LOCAL file storage.\n\n` +
+            `Error body: ${body.slice(0, 300)}\n\n` +
+            `Local fallback active:\n` +
+            `  - Uploads go to .toquemedia/uploads/ (gitignored)\n` +
+            `  - TM_FILES_MODE=local written to .env\n` +
+            `  - Serve via static middleware: app.use('/uploads', express.static('.toquemedia/uploads'))\n` +
+            `  - writeFile() saves to disk, readFile() reads from disk, deleteFile() removes from disk\n\n` +
+            `In your files.ts, check process.env.TM_FILES_MODE === 'local' to switch between R2 (Worker PUT) and local (fs.writeFile). ` +
+            `The public URL for local files is /uploads/{key} on the dev server.\n\n` +
+            `base64-in-DB is still FORBIDDEN.`
           )
         }
 

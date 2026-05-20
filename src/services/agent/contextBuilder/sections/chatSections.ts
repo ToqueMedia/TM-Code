@@ -96,6 +96,7 @@ Every import **MUST** point to a package already listed in the dependency manife
  - **CHECK** command output (exit codes, stderr). Failure → **STOP and fix** before continuing.
  - **CHECK** dev server logs for build and runtime errors. New errors after your change → **fix them**.
  - For TS/JS files: **RUN** \`${GET_DIAGNOSTICS}\` on files you modified.
+ - **TEST every endpoint you create.** After writing a route (GET, POST, PUT, DELETE), **curl it** via \`${EXECUTE_COMMAND}\` and verify the response is NOT a 5xx error. A route that compiles but returns 500 on first call is NOT done — fix it before moving on.
  - When verification is impossible (no dev server, no test), **SAY SO EXPLICITLY**. Do NOT claim success without evidence.
  - **REPORT** outcomes as they are. A passing check is stated plainly. A failing check is stated plainly with the failing output. Surface broken work as broken so the developer can act.`
 }
@@ -149,7 +150,7 @@ export function getToolsSection(ctx: PromptContext): string {
 
 ${totalTools} tools available. Key behaviors not obvious from tool schemas:
  - \`${EXECUTE_COMMAND}\` blocks until the process exits. \`${START_DEV_SERVER}\` returns immediately (background process).
- - **Background processes inside \`${EXECUTE_COMMAND}\`**: when you need to start a server, smoke-test it, then kill it (e.g. \`curl /api/health\` against a freshly-launched dev server), capture the PID with \`$!\` and kill it explicitly. **Do NOT use \`%1\` / \`%2\` job control** — \`${EXECUTE_COMMAND}\` runs in a non-interactive shell where job control is OFF, so \`%1\` does not resolve and \`kill %1\` silently fails. The background process keeps writing to stdout/stderr, the tool waits for EOF, and you hit the 300 s timeout. Correct shape: \`cd …/server && npx tsx src/index.ts & BGPID=$!; sleep 2; curl -s http://localhost:3000/api/health; kill $BGPID 2>/dev/null\`. For actually-running-the-dev-server (not smoke-test), prefer \`${START_DEV_SERVER}\` which the IDE supervises.
+ - **NEVER** start a background server inside \`${EXECUTE_COMMAND}\` (no \`& BGPID=$!\`, no \`sleep\`, no backgrounded \`npx tsx\` / \`node\` / \`npm run dev\`). Orphaned child processes keep stdout open → 120 s timeout. To verify a server endpoint: use \`${START_DEV_SERVER}\` → \`${READ_DEV_SERVER_LOGS}\` to confirm startup → plain \`curl\` via \`${EXECUTE_COMMAND}\`.
  - \`${WRITE_FILE}\` replaces the entire file — omitted code is deleted. Use \`${EDIT_FILE}\` for small changes (~20 lines).
  - \`${WRITE_FILE}\` and \`${EDIT_FILE}\` require you to \`${READ_FILE}\` first. The system will block writes to files you haven't read.
  - \`${READ_DEV_SERVER_LOGS}\` reads output from the running dev server AND runtime errors from the live preview (browser console). Entries prefixed [runtime] are from the browser. Use after file changes or when asked about preview/browser errors. The buffer is CUMULATIVE — old errors persist after a fix; pass the response's \`next_since\` cursor as \`since_timestamp\` on the follow-up call to verify whether your fix landed (otherwise you keep seeing the same stale entry).

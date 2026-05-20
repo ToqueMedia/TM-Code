@@ -608,12 +608,6 @@ class AgentService {
         if (sessionId) markTurnStart(sessionId)
       } catch { /* non-critical */ }
     }
-    // Clear agent tasks from previous message
-    try {
-      const { useAgentStore } = await import('../../stores/agentStore')
-      useAgentStore.getState().clearTasks()
-    } catch { /* non-critical */ }
-
     // Reset stale compression state for fresh conversations (new session).
     // Sub-agents always pass conversationHistory=[] (createLightweight
     // callsites in toolExecutor.ts), but they do NOT represent a "new
@@ -622,6 +616,15 @@ class AgentService {
     // when the MAIN agent starts a new chat.
     const isMainAgentNewSession = !this.lightweightOptions && conversationHistory.length === 0
     if (conversationHistory.length === 0) {
+      // Clear agent tasks only on new conversations — not when continuing
+      // an existing one. When the user resumes after a stop, preserving
+      // the task list keeps the AgentTasksPanel visible until the agent
+      // calls update_tasks with fresh state.
+      try {
+        const { useAgentStore } = await import('../../stores/agentStore')
+        useAgentStore.getState().clearTasks()
+      } catch { /* non-critical */ }
+
       this.lastPromptTokens = 0
       this.fileAccessLog = []
       this.summarizationFailures = 0
@@ -2171,9 +2174,11 @@ Developer message: ${displayText}
 
         if (!isRetryable || isLastAttempt) throw err
 
-        // Wait before retrying — 20s for rate limits, normal backoff for others
+        // Wait before retrying — 20s for rate limits, 10/20/30s for Cloudflare 520, normal backoff for others
         const isRateLimit = err instanceof ServiceError && err.code === 'RATE_LIMIT'
-        const delay = isRateLimit ? 20000 : (RETRY_DELAYS[attempt] || 10000)
+        const CF_520_DELAYS = [10000, 20000, 30000]
+        const isCf520 = err instanceof ServiceError && err.code === 'CLOUDFLARE_520'
+        const delay = isRateLimit ? 20000 : isCf520 ? (CF_520_DELAYS[attempt] || 30000) : (RETRY_DELAYS[attempt] || 10000)
         logger.warn('agent', `API call failed (${(err as ServiceError).code}), retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`)
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(resolve, delay)
@@ -2497,6 +2502,16 @@ Developer message: ${displayText}
           'Limite de requests atingido. Tenta daqui a pouco.',
           'RATE_LIMIT',
           true  // Frontend retries — backend does NOT retry rate limits
+        )
+      }
+      // Cloudflare 520 (Web Server Returned an Unknown Error) — transient,
+      // retryable with backoff. Separate from generic 5xx because the backend
+      // is healthy; Cloudflare just dropped the response.
+      if (response.status === 520) {
+        throw new ServiceError(
+          'Cloudflare retornou erro 520. A tentar novamente…',
+          'CLOUDFLARE_520',
+          true
         )
       }
       if (response.status >= 500) {

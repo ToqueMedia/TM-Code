@@ -100,7 +100,7 @@ function ChatView() {
 // use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
   // streaming content, expanding diffs, and dynamic height changes.
   const { scrollRef, contentRef, scrollToBottom, isAtBottom } = useStickToBottom({
-    resize: 'smooth',
+    resize: 'instant',
     initial: 'instant',
   })
 
