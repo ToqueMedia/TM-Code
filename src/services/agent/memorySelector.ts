@@ -51,6 +51,12 @@ const SELECTOR_TIMEOUT_MS = 8_000
  *  in lockstep with project state changes. */
 const SELECTOR_CACHE_TTL_MS = 30_000
 
+/** Hard cap on cache entries. Sessions can produce many distinct user
+ *  messages over hours of use; without a cap the Map grows unbounded
+ *  (small entries each, but it's a slow leak). LRU via insertion-order
+ *  iteration on Map — re-set on hit refreshes position. */
+const SELECTOR_CACHE_MAX_ENTRIES = 200
+
 interface CacheEntry {
   selectedNames: Set<string>
   expiresAt: number
@@ -86,6 +92,11 @@ export interface SelectorEntry {
   name: string
   type: 'user' | 'feedback' | 'project' | 'reference'
   description: string
+  /** Epoch-ms mtime of the memory file. 0 when unknown (selector treats
+   *  unknown as fresh). Lets the selector prefer recent entries when two
+   *  are otherwise equally relevant — e.g. two `feedback_*` rules about
+   *  the same surface, keep the newer one. */
+  mtimeMs?: number
 }
 
 interface SelectorResult {
@@ -121,6 +132,11 @@ export async function selectRelevantMemories(args: {
   const key = cacheKey(sessionId, userMessage, allNames)
   const cached = selectorCache.get(key)
   if (cached && cached.expiresAt > Date.now()) {
+    // Refresh insertion order — Map iteration order is insertion order,
+    // so re-setting promotes this entry to most-recently-used for the
+    // LRU eviction below.
+    selectorCache.delete(key)
+    selectorCache.set(key, cached)
     return { selectedNames: cached.selectedNames, cacheHit: true, latencyMs: 0 }
   }
 
@@ -138,8 +154,18 @@ export async function selectRelevantMemories(args: {
     // the user message dumps the catalog + request. Temperature 0 so the
     // selector is deterministic for a given (catalog, request) pair —
     // any non-determinism would defeat the cache.
+    // Catalog lines include age in days when known so the model can prefer
+    // recent entries on a tie. Age is appended in parentheses; "fresh" (0
+    // mtime or <2 days) entries get no annotation to keep lines short.
+    const nowMs = Date.now()
     const catalogText = entries
-      .map(e => `- name="${e.name}" type=${e.type} → ${e.description}`)
+      .map(e => {
+        const ageDays = e.mtimeMs && e.mtimeMs > 0
+          ? Math.max(0, Math.floor((nowMs - e.mtimeMs) / 86_400_000))
+          : 0
+        const ageSuffix = ageDays >= 2 ? ` (${ageDays}d old)` : ''
+        return `- name="${e.name}" type=${e.type}${ageSuffix} → ${e.description}`
+      })
       .join('\n')
 
     const selectorSystem = `You filter a memory catalog down to the entries relevant to a given developer request.
@@ -153,6 +179,7 @@ Rules:
   * It's a \`project\` entry whose context is in the same area as the request.
   * It's a \`reference\` entry pointing to a system the request would naturally consult.
 - Skip entries that are clearly off-topic. When in doubt INCLUDE — false negatives lose useful context; false positives just cost a few tokens.
+- When two entries cover the same topic, prefer the more recent one (lower age = fresher). Old entries can still be relevant — don't drop based on age alone — but on tie, recent wins.
 - Use the entry name verbatim. Do not invent names.`
 
     const selectorUser = `Developer request:
@@ -233,6 +260,21 @@ ${catalogText}`
       if (validNames.has(raw)) selectedNames.add(raw)
     }
 
+    // Force-include every `user` type entry — the developer profile is
+    // almost always relevant context, and a selector that drops it loses
+    // the framing the agent needs to tailor responses. The selector
+    // prompt asks for this in text but a small model isn't a guarantee;
+    // this client-side floor turns the instruction into a contract.
+    for (const e of entries) {
+      if (e.type === 'user') selectedNames.add(e.name)
+    }
+
+    // LRU eviction — drop oldest entry when over cap. Map iteration order
+    // is insertion order; the first key is the least-recently-used.
+    if (selectorCache.size >= SELECTOR_CACHE_MAX_ENTRIES) {
+      const oldestKey = selectorCache.keys().next().value
+      if (oldestKey !== undefined) selectorCache.delete(oldestKey)
+    }
     selectorCache.set(key, {
       selectedNames,
       expiresAt: Date.now() + SELECTOR_CACHE_TTL_MS,

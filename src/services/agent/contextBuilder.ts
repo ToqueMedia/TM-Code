@@ -132,6 +132,121 @@ class ContextBuilder {
    * if the agent writes .toquemedia-id mid-session (standardization pass), the
    * next prompt must reflect tm_code_owned=true, not the cached false.
    */
+  /**
+   * Load persistent memory indexes, optionally filter via the per-plan
+   * selector, and report whether any surviving entry is stale.
+   *
+   * Extracted from `buildSystemPrompt` so it can be started as a Promise
+   * at the top of the prompt build and awaited at the section render
+   * point — the selector model call (~300-600 ms) then overlaps with
+   * disk reads, scaffolding detection, etc. instead of serialising on
+   * the critical path.
+   *
+   * Failure path returns the inject-all fallback (`null` indexes when
+   * the disk reads themselves fail; full indexes when the selector
+   * fails). The agent loop is never blocked by a broken memory layer.
+   */
+  private async runMemoryWork(
+    projectPath: string,
+    userMessage?: string,
+  ): Promise<{
+    userMemoryIndex: string | null
+    projectMemoryIndex: string | null
+    memoryHasStale: boolean
+  }> {
+    let userMemoryIndex: string | null = null
+    let projectMemoryIndex: string | null = null
+    let memoryHasStale = false
+    try {
+      const {
+        loadMemoryIndex,
+        loadMemoryMtimes,
+        parseIndexEntries,
+        projectIndexEntries,
+      } = await import('./memdir')
+      // Index + mtimes loaded in parallel — mtimes is a cheap readdir+stat
+      // per scope and runs alongside the index reads without adding latency.
+      const [userResult, projectResult, userMtimes, projectMtimes] = await Promise.all([
+        loadMemoryIndex('user'),
+        loadMemoryIndex('project', projectPath),
+        loadMemoryMtimes('user'),
+        loadMemoryMtimes('project', projectPath),
+      ])
+      userMemoryIndex = userResult.content
+      projectMemoryIndex = projectResult.content
+
+      const combinedBytes = (userResult.byteCount || 0) + (projectResult.byteCount || 0)
+      const { MEMORY_SELECTOR_THRESHOLD_BYTES } = await import('./memorySelector')
+      if (userMessage && combinedBytes > MEMORY_SELECTOR_THRESHOLD_BYTES) {
+        const userEntries = userMemoryIndex ? parseIndexEntries(userMemoryIndex, userMtimes) : []
+        const projectEntries = projectMemoryIndex ? parseIndexEntries(projectMemoryIndex, projectMtimes) : []
+        const allEntries = [...userEntries, ...projectEntries]
+        if (allEntries.length > 0) {
+          const { selectRelevantMemories } = await import('./memorySelector')
+          const { useChatStore } = await import('../../stores/chatStore')
+          const sessionId = useChatStore.getState().activeSessionId || 'no-session'
+          const selection = await selectRelevantMemories({
+            sessionId,
+            userMessage,
+            entries: allEntries.map(e => ({
+              name: e.name,
+              type: e.type,
+              description: e.description,
+              mtimeMs: e.mtimeMs,
+            })),
+          })
+          if (selection) {
+            // Project each scope's index down to selected entries. The
+            // selector's set is global — userMemoryIndex keeps only its
+            // user/feedback rows that survived, projectMemoryIndex keeps
+            // only its project/reference rows. If a scope ends up empty
+            // after projection, the section render drops it.
+            if (userMemoryIndex) {
+              const projected = projectIndexEntries(userMemoryIndex, selection.selectedNames)
+              userMemoryIndex = parseIndexEntries(projected).length > 0 ? projected : null
+            }
+            if (projectMemoryIndex) {
+              const projected = projectIndexEntries(projectMemoryIndex, selection.selectedNames)
+              projectMemoryIndex = parseIndexEntries(projected).length > 0 ? projected : null
+            }
+
+            void import('../../services/analytics').then(({ trackEvent }) =>
+              trackEvent('memory_selector_run', {
+                cache_hit: selection.cacheHit,
+                latency_ms: selection.latencyMs,
+                items_total: allEntries.length,
+                items_selected: selection.selectedNames.size,
+                combined_bytes_before: combinedBytes,
+              }),
+            ).catch(() => { /* analytics never blocks prompt build */ })
+          }
+        }
+      }
+
+      // memoryHasStale: section-level header flips into "verify before
+      // recommending" mode when at least one visible entry is past the
+      // stale threshold. Per-entry inline annotation was removed —
+      // duplicated the age already passed to the selector model. The
+      // section header is the single freshness signal in the slice.
+      const { isMemoryStale } = await import('./memoryAge')
+      const survivingFilenames = new Set<string>()
+      if (userMemoryIndex) {
+        for (const e of parseIndexEntries(userMemoryIndex)) survivingFilenames.add(e.filename)
+      }
+      if (projectMemoryIndex) {
+        for (const e of parseIndexEntries(projectMemoryIndex)) survivingFilenames.add(e.filename)
+      }
+      for (const filename of survivingFilenames) {
+        const mtimeMs = userMtimes.get(filename) ?? projectMtimes.get(filename) ?? 0
+        if (isMemoryStale(mtimeMs)) {
+          memoryHasStale = true
+          break
+        }
+      }
+    } catch { /* memdir is best-effort, prompt builds fine without it */ }
+    return { userMemoryIndex, projectMemoryIndex, memoryHasStale }
+  }
+
   invalidatePromptCache(projectPath?: string): void {
     if (!projectPath) {
       this.promptCache.clear()
@@ -196,6 +311,16 @@ class ContextBuilder {
       })
       return cached.prompt
     }
+    // Kick off memory work IMMEDIATELY so its network call (selector
+    // model side-car, ~300-600 ms) overlaps with everything else this
+    // function does: disk I/O, scaffolding detection, MCP refresh,
+    // skill load, even the cmdMode branch above us in the call stack.
+    // The result is awaited at the section render point below. Previous
+    // shape (Promise.all of disk reads, THEN memory work, THEN render)
+    // serialised the selector latency on the critical path; now it
+    // hides behind whichever I/O happens to be slowest.
+    const memoryWorkPromise = this.runMemoryWork(projectPath, userMessage)
+
     // Gather context in parallel for speed
     const { detectScaffolding } = await import('../scaffoldingDetector')
     const [treeString, pkgSummary, readme, templateManifest, tmsContent, planContent, todoContent, toquemediaIdRaw, appliedScaffolding] = await Promise.all([
@@ -267,83 +392,10 @@ class ContextBuilder {
       }))
     } catch { /* non-critical */ }
 
-    // Persistent memory — user-scope and project-scope MEMORY.md indexes.
-    // Loaded in parallel to keep the prompt build cheap; failures fall
-    // through to `null` which simply drops the section.
-    //
-    // Selector pass: when the combined index byte count exceeds the
-    // `MEMORY_SELECTOR_THRESHOLD_BYTES` threshold, ask the per-plan
-    // selector model which entries are relevant to the current user
-    // request and inject only those. Below threshold we keep the full
-    // indexes — the selector's ~300-600ms latency isn't worth saving
-    // a few hundred tokens. Failure path returns null which falls back
-    // to injecting everything (the pre-selector default behaviour).
-    let userMemoryIndex: string | null = null
-    let projectMemoryIndex: string | null = null
-    try {
-      const { loadMemoryIndex, parseIndexEntries, projectIndexEntries } = await import('./memdir')
-      const [userResult, projectResult] = await Promise.all([
-        loadMemoryIndex('user'),
-        loadMemoryIndex('project', projectPath),
-      ])
-      userMemoryIndex = userResult.content
-      projectMemoryIndex = projectResult.content
-
-      const combinedBytes = (userResult.byteCount || 0) + (projectResult.byteCount || 0)
-      const { MEMORY_SELECTOR_THRESHOLD_BYTES } = await import('./memorySelector')
-      if (
-        userMessage
-        && combinedBytes > MEMORY_SELECTOR_THRESHOLD_BYTES
-      ) {
-        const userEntries = userMemoryIndex ? parseIndexEntries(userMemoryIndex) : []
-        const projectEntries = projectMemoryIndex ? parseIndexEntries(projectMemoryIndex) : []
-        const allEntries = [...userEntries, ...projectEntries]
-        if (allEntries.length > 0) {
-          const { selectRelevantMemories } = await import('./memorySelector')
-          const { useChatStore } = await import('../../stores/chatStore')
-          const sessionId = useChatStore.getState().activeSessionId || 'no-session'
-          const selection = await selectRelevantMemories({
-            sessionId,
-            userMessage,
-            entries: allEntries.map(e => ({
-              name: e.name,
-              type: e.type,
-              description: e.description,
-            })),
-          })
-          if (selection) {
-            // Project each scope's index down to selected entries. The
-            // selector's set is global — userMemoryIndex keeps only its
-            // user/feedback rows that survived, projectMemoryIndex keeps
-            // only its project/reference rows. If a scope ends up empty
-            // after projection, the section render drops it.
-            if (userMemoryIndex) {
-              const projected = projectIndexEntries(userMemoryIndex, selection.selectedNames)
-              userMemoryIndex = projected.includes('](') ? projected : null
-            }
-            if (projectMemoryIndex) {
-              const projected = projectIndexEntries(projectMemoryIndex, selection.selectedNames)
-              projectMemoryIndex = projected.includes('](') ? projected : null
-            }
-
-            // Fire-and-forget telemetry — lets us measure selector value
-            // (token reduction) vs cost (latency / hit rate) in aggregate.
-            void import('../../services/analytics').then(({ trackEvent }) =>
-              trackEvent('memory_selector_run', {
-                cache_hit: selection.cacheHit,
-                latency_ms: selection.latencyMs,
-                items_total: allEntries.length,
-                items_selected: selection.selectedNames.size,
-                combined_bytes_before: combinedBytes,
-              }),
-            ).catch(() => { /* analytics never blocks prompt build */ })
-          }
-          // selection === null → selector failed; userMemoryIndex /
-          // projectMemoryIndex stay as the full content (inject-all
-          // fallback).
-        }
-      }
-    } catch { /* memdir is best-effort, prompt builds fine without it */ }
+    // Persistent memory work was kicked off at the top of this function
+    // so its network call (selector model) overlaps with the disk reads
+    // above. Now that we need the result, await it.
+    const { userMemoryIndex, projectMemoryIndex, memoryHasStale } = await memoryWorkPromise
 
     // Pending memory proposals — surfaced as a system reminder when the
     // post-turn extractor identified facts worth saving in a prior turn
@@ -379,6 +431,7 @@ class ContextBuilder {
       currentTasks,
       userMemoryIndex,
       projectMemoryIndex,
+      memoryHasStale,
       pendingMemoryProposals,
     }
 

@@ -10,6 +10,8 @@ import { useChatStore } from '../../stores/chatStore'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import CodeBlockAction from './CodeBlockAction'
 import ToolCallDisplayComponent from './ToolCallDisplay'
+import ReadOutputBatch from './ReadOutputBatch'
+import { groupConsecutiveLargeReads, computeContentBlockBatches } from '../../utils/groupToolCalls'
 import AgentLogo from '../ui/AgentLogo'
 import ReasoningBlock from './ReasoningBlock'
 import PlanApprovalCard from './PlanApprovalCard'
@@ -625,10 +627,26 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             />
           )}
 
-        {/* Interleaved content blocks — reasoning, text, tool calls in order */}
-        {message.contentBlocks && message.contentBlocks.length > 0 ? (
+        {/* Interleaved content blocks — reasoning, text, tool calls in order.
+            Pre-compute batching directives (read_large_result consolidation)
+            once for this render so the .map can read them by index. Strict
+            adjacency: only consecutive read_large_result blocks with same id
+            batch up; reasoning/text in between breaks the batch (so the
+            timeline stays honest about when the agent paused to think). */}
+        {message.contentBlocks && message.contentBlocks.length > 0 ? (() => {
+          const batchDirectives = computeContentBlockBatches(
+            message.contentBlocks,
+            id => message.toolCalls?.find(t => t.id === id),
+          )
+          return (
           <>
             {message.contentBlocks.map((block, idx) => {
+              // Batch handling — runs before the existing block-type switch.
+              const directive = batchDirectives[idx]
+              if (directive?.kind === 'batch_member') return null
+              if (directive?.kind === 'batch_start') {
+                return <ReadOutputBatch key={`batch-${idx}`} calls={directive.calls} />
+              }
               if (block.type === 'reasoning') {
                 // Hide reasoning blocks when the developer didn't ask for
                 // reasoning on this turn. Some BYOK reasoning models emit
@@ -690,7 +708,8 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
               return null
             })}
           </>
-        ) : (
+          )
+        })() : (
           <>
             {/* Fallback for legacy messages without contentBlocks */}
             {message.content && (
@@ -769,8 +788,10 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             )}
             {message.toolCalls && message.toolCalls.length > 0 && (
               <Box mt={message.content ? 3 : 0}>
-                {message.toolCalls.map(tc => (
-                  <ToolCallDisplayComponent key={tc.id} toolCall={tc} messageId={message.id} />
+                {groupConsecutiveLargeReads(message.toolCalls).map(group => (
+                  group.kind === 'large_read_batch'
+                    ? <ReadOutputBatch key={group.calls[0].id} calls={group.calls} />
+                    : <ToolCallDisplayComponent key={group.call.id} toolCall={group.call} messageId={message.id} />
                 ))}
               </Box>
             )}

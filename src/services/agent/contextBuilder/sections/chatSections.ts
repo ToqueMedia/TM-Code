@@ -396,6 +396,20 @@ export function getMemorySection(ctx: PromptContext): string | null {
     `Each entry below is a one-line summary — use \`read_memory(scope, name)\` to load the full body when you need the *Why* / *How to apply* detail behind a feedback or project entry.`,
   )
 
+  // Freshness header: appears only when at least one visible entry is past
+  // MEMORY_STALE_DAYS. Entries with the inline " _(Nd old)_" annotation are
+  // still useful — but if they cite specific file paths, function names, or
+  // flags, the model should verify before acting on them. Below the
+  // threshold this header is omitted so the section stays compact.
+  if (ctx.memoryHasStale) {
+    parts.push(
+      `**Freshness:** some entries below are tagged with their age (e.g. _(45d old)_). ` +
+      `For old entries that cite specific file paths, function names, env vars, or flags, ` +
+      `verify the citation against current code (\`read_file\` / grep) before recommending. ` +
+      `The rule the memory captures is usually still valid; the *concrete identifiers* may have moved.`,
+    )
+  }
+
   if (user) {
     parts.push('## User memory (cross-project)')
     parts.push(sanitizeProjectContent(user))

@@ -46,7 +46,13 @@ describe('detectTestBrowsers', () => {
   it('forwards to detect_test_browsers and returns the array', async () => {
     mockInvoke.mockResolvedValueOnce([chromeChannel])
     const result = await detectTestBrowsers(true)
-    expect(mockInvoke).toHaveBeenCalledWith('detect_test_browsers')
+    // The IDE-wide invokeMetrics wrapper forwards (cmd, args, options) to
+    // the underlying Tauri invoke unconditionally, so trailing undefineds
+    // show up here. Tauri treats undefined args as omitted, so this is
+    // semantically identical to calling invoke('detect_test_browsers').
+    // Asserting just the command name keeps the test honest about the
+    // wrapper's call shape without coupling to its internals.
+    expect(mockInvoke.mock.calls[0][0]).toBe('detect_test_browsers')
     expect(result).toEqual([chromeChannel])
   })
 })

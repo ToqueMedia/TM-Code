@@ -198,6 +198,7 @@ class ToolExecutor {
   resetSessionState(): void {
     this.readFileTimestamps.clear()
     this.largeResults.clear()
+    this.largeResultRangesShown.clear()
     this.largeResultCounter = 0
     this.readOnlyContexts.clear()
   }
@@ -422,6 +423,16 @@ class ToolExecutor {
   /** Large result storage — maps reference IDs to full content for later retrieval. */
   private largeResults: Map<string, string> = new Map()
   private largeResultCounter = 0
+  /** Per-id ranges already shown to the model (S1: overlap warnings on
+   *  re-read). Stored as `[offset, end)` pairs in call order. Bounded by
+   *  the per-id read count; the whole entry is dropped when the large
+   *  result itself is evicted. */
+  private largeResultRangesShown: Map<string, Array<[number, number]>> = new Map()
+  /** Approximate cap on total bytes held across all cached large results
+   *  (S2). When a new result would push past the cap, the oldest entries
+   *  are evicted until we fit. Independent from the entry-count cap below. */
+  private static readonly LARGE_RESULT_MAX_BYTES = 8 * 1024 * 1024 // 8MB
+  private static readonly LARGE_RESULT_MAX_ENTRIES = 20
 
   /**
    * Handles large tool results: if the result exceeds the threshold,
@@ -436,11 +447,29 @@ class ToolExecutor {
     const refId = `large_result_${++this.largeResultCounter}`
     this.largeResults.set(refId, result)
 
-    // Keep only the last 20 large results to prevent memory bloat
-    if (this.largeResults.size > 20) {
+    // S2: byte-budget eviction. Pop the oldest entries until total fits
+    // under LARGE_RESULT_MAX_BYTES. Runs alongside the count cap because
+    // 20 entries of 5MB each would still drown a long session in RAM.
+    let totalBytes = 0
+    for (const v of this.largeResults.values()) totalBytes += v.length
+    while (totalBytes > ToolExecutor.LARGE_RESULT_MAX_BYTES && this.largeResults.size > 1) {
       const firstKey = this.largeResults.keys().next().value
-      if (firstKey) this.largeResults.delete(firstKey)
+      if (!firstKey) break
+      const removed = this.largeResults.get(firstKey)!.length
+      this.largeResults.delete(firstKey)
+      this.largeResultRangesShown.delete(firstKey)
+      totalBytes -= removed
     }
+
+    // B4: count-cap eviction. Keep the most recent N entries. Surface a
+    // warning when we're near the cap so the model can plan ahead.
+    while (this.largeResults.size > ToolExecutor.LARGE_RESULT_MAX_ENTRIES) {
+      const firstKey = this.largeResults.keys().next().value
+      if (!firstKey) break
+      this.largeResults.delete(firstKey)
+      this.largeResultRangesShown.delete(firstKey)
+    }
+    const nearCap = this.largeResults.size >= ToolExecutor.LARGE_RESULT_MAX_ENTRIES - 2
 
     const previewSize = 2000
     const preview = result.slice(0, previewSize)
@@ -448,9 +477,18 @@ class ToolExecutor {
       ? `${(result.length / 1024).toFixed(1)}KB`
       : `${result.length} chars`
 
-    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the first ${previewSize} chars are shown below. Do not reason about content past byte ${previewSize} from this preview alone — call read_large_result("${refId}") to read any specific slice of the full output before acting on it.</system-reminder>
+    // B1: was "byte ${previewSize}" — the unit is JS string code units,
+    //     not bytes (matters for non-ASCII content like emoji / CJK).
+    // B2: explicit offset-to-continue, so the model doesn't waste a call
+    //     re-reading the preview region from offset 0.
+    // B3: terminology now matches the read_large_result suffix.
+    // B4: cap-approaching nudge.
+    const capNote = nearCap
+      ? ` [warning: ${this.largeResults.size}/${ToolExecutor.LARGE_RESULT_MAX_ENTRIES} cached large results — oldest will be evicted as new ones arrive; save what you need now.]`
+      : ''
+    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the first ${previewSize} characters are shown below. Continue from offset ${previewSize} unless you need a specific slice — call read_large_result("${refId}", offset: ${previewSize}). Do not reason about content past character ${previewSize} from this preview alone.${capNote}</system-reminder>
 
-Preview (first ${previewSize} chars):
+Preview (first ${previewSize} characters):
 ${preview}
 ...
 `
@@ -1449,10 +1487,34 @@ ${preview}
         }
 
         if (occurrences > 1) {
-          return `Error: old_str appears ${occurrences} times in ${path}. It must be unique. Include more surrounding context to make it unique.`
+          // Two failure modes look identical here:
+          //   (a) old_str is genuinely ambiguous — the model needs more context;
+          //   (b) the file was corrupted by a previous edit in this turn (e.g.
+          //       a `$\`` sequence in new_str expanded to "string-before-match"
+          //       under String.prototype.replace) and now legitimately has
+          //       duplicates of what used to be unique anchors.
+          // Suggesting (a) alone — as the message used to — sends the model on
+          // a search_files / read_large_result hunt for context when the right
+          // recovery is (b): re-read the file, then write_file overwrite with
+          // the corrected full content in a single call.
+          return `Error: old_str appears ${occurrences} times in ${path}. It must be unique. Options: ` +
+            `(a) add more surrounding context to old_str/new_str so the match is unique; ` +
+            `(b) if you did not expect a duplicate (the file may have been corrupted by a previous edit), ` +
+            `re-read the file with read_file to confirm, then use write_file to overwrite with the corrected full content in one call — ` +
+            `do NOT chase the duplicate with successive edits.`
         }
 
-        const newContent = content.replace(oldStr, newStr)
+        // Literal substring replacement — must NOT use String.prototype.replace
+        // here. JavaScript's replace() interprets special sequences in the
+        // replacement string ($$, $&, $`, $', $n) EVEN WHEN the pattern is a
+        // plain string. A new_str containing the email-regex anchor `$` followed
+        // by a backtick (e.g. `^[^\s@]+@...\.[^\s@]+$`) is parsed as the
+        // `$\`` pattern ("insert string before match") and silently splices the
+        // entire pre-match portion of the file into the edit. The corruption is
+        // invisible until a later edit fails its uniqueness check on something
+        // that was unique before. indexOf + slice is the literal alternative.
+        const matchIdx = content.indexOf(oldStr)
+        const newContent = content.slice(0, matchIdx) + newStr + content.slice(matchIdx + oldStr.length)
 
         // Mechanical block on forbidden SQL data-layer deps in package.json.
         // Edits that add Prisma/SQLite/Drizzle to a package.json get rejected.
@@ -1580,7 +1642,7 @@ ${preview}
           return 'Error: Not authenticated. Cannot fetch web content.'
         }
 
-        const workerUrl = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787'
+        const workerUrl = resolveWorkerUrl()
 
         const callWebFetch = async (token: string) =>
           tauriFetch(`${workerUrl}/v1/web-fetch`, {
@@ -1978,13 +2040,29 @@ ${preview}
 
         const offset = Math.max(0, (input.offset as number) || 0)
         const limit = Math.min((input.limit as number) || 10000, 25000)
+        const end = Math.min(offset + limit, content.length)
         const slice = content.slice(offset, offset + limit)
-        const hasMore = offset + limit < content.length
-        const remaining = content.length - offset - limit
+        const hasMore = end < content.length
+        const remaining = content.length - end
+
+        // S1: detect overlap with ranges already read in this session for
+        // this large_result id. Flag the read so the model gets a clear
+        // signal that it's re-reading content it already has in context.
+        const priorRanges = this.largeResultRangesShown.get(id) ?? []
+        const overlapping = priorRanges.find(([o, e]) => offset < e && end > o)
+        priorRanges.push([offset, end])
+        this.largeResultRangesShown.set(id, priorRanges)
 
         let result = slice
+        const notes: string[] = []
+        if (overlapping) {
+          notes.push(`note: offset ${offset}–${end} overlaps with a slice you already read (${overlapping[0]}–${overlapping[1]}). The overlap region is duplicated in your context.`)
+        }
         if (hasMore) {
-          result += `\n\n[${remaining} more characters — use offset: ${offset + limit} to continue reading]`
+          notes.push(`${remaining} more characters — use offset: ${end} to continue reading.`)
+        }
+        if (notes.length > 0) {
+          result += `\n\n[${notes.join(' ')}]`
         }
         return result
       }
@@ -2688,6 +2766,14 @@ Project root: ${projectRoot}`
         import('./memoryProposalsStore').then(m =>
           m.markProposalSaved(projectPath ?? null, name, type),
         ).catch(() => { /* noop */ })
+        // Mark a write in this turn — the post-turn extractor skips its
+        // pass when the agent already persisted memory, avoiding the
+        // duplicate-proposal noise that's the extractor's main miss.
+        import('./memoryWriteTracker').then(async (m) => {
+          const { useChatStore } = await import('../../stores/chatStore')
+          const sessionId = useChatStore.getState().activeSessionId
+          if (sessionId) m.recordMemoryWrite(sessionId)
+        }).catch(() => { /* noop */ })
 
         return `Memory saved: ${scope}/${filename} (${type}). It will appear in the persistent-memory section of every future prompt for this ${scope === 'project' ? 'project' : 'IDE installation'}.`
       },
@@ -2762,6 +2848,14 @@ Project root: ${projectRoot}`
 
         import('../fsVersion').then(m => m.bumpFsVersion(`forget_memory:${name}`)).catch(() => {})
         import('./memorySelector').then(m => m.invalidateMemorySelectorCache()).catch(() => {})
+        // Count a forget as a write for the extractor-skip gate too —
+        // the agent's noticing discipline (whether saving or deleting)
+        // is what we want to defer to.
+        import('./memoryWriteTracker').then(async (m) => {
+          const { useChatStore } = await import('../../stores/chatStore')
+          const sessionId = useChatStore.getState().activeSessionId
+          if (sessionId) m.recordMemoryWrite(sessionId)
+        }).catch(() => { /* noop */ })
         return `Memory forgotten: ${scope}/${filename}.`
       },
     })
@@ -2805,13 +2899,26 @@ Project root: ${projectRoot}`
         const scope = defaultScopeForType(type)
         const filename = memoryFilenameFor(type, name)
         const projectPath = useProjectStore.getState().currentProject?.path
-        const file = await loadMemoryFile(scope, filename, projectPath)
+        // Load the file and its mtime in parallel — mtime drives the age
+        // warning prepended below. `loadMemoryMtimes` returns the whole
+        // scope (cheap single readdir), but only this filename's entry
+        // is used here.
+        const { loadMemoryMtimes } = await import('./memdir')
+        const { memoryAgeWarning } = await import('./memoryAge')
+        const [file, mtimes] = await Promise.all([
+          loadMemoryFile(scope, filename, projectPath),
+          loadMemoryMtimes(scope, projectPath),
+        ])
         if (!file) {
           return `Memory not found: ${scope}/${filename}. Check MEMORY.md for the current list of names + types.`
         }
-        // Return the body only (not the frontmatter — the model has the
-        // metadata from MEMORY.md already).
-        return file.body || `[Memory ${filename} is empty]`
+        const body = file.body || `[Memory ${filename} is empty]`
+        // Prepend a verbose age warning when the file is past
+        // MEMORY_OLD_DAYS (1 day). The agent reads this BEFORE the body,
+        // so any citation it then pulls out of the body lands with the
+        // "verify identifiers" instruction fresh in context.
+        const warning = memoryAgeWarning(mtimes.get(filename) ?? 0)
+        return warning + body
       },
     })
 
@@ -2881,7 +2988,7 @@ Project root: ${projectRoot}`
           return 'No memories saved yet — nothing to distill. Run `save_memory` first when you learn facts worth persisting; come back here once the catalog has accumulated.'
         }
 
-        if (files.length < 3) {
+        if (files.length < 8) {
           return `Only ${files.length} memory entries exist — too few to meaningfully distill. Distillation pays off once the catalog has 8+ entries with overlap. Skipping for now.`
         }
 

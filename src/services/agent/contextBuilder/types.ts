@@ -93,6 +93,11 @@ export interface PromptContext {
    *  (`<project>/.toquemedia/memory/`). Project-bound facts: initiatives,
    *  references, repo conventions. Null when none exists yet. */
   projectMemoryIndex: string | null
+  /** True iff at least one injected memory file is past the
+   *  MEMORY_STALE_DAYS threshold. Drives the section's "verify before
+   *  recommending" header so it only appears when there's a genuinely
+   *  old entry, not for every project that has memories older than a month. */
+  memoryHasStale: boolean
   /** Auto-extracted proposals from the previous turn — surfaced to the
    *  agent as a system reminder so it can decide whether to convert each
    *  into a real `save_memory` call. Null when there are no pending

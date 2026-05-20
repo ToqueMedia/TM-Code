@@ -44,26 +44,6 @@ import { tokens } from '@/theme/tokens'
  * don't confuse it with the plan-consumption pill next door.
  */
 
-// Plan-profile model IDs → human labels. The server may already send a
-// friendlier value via `X-Model-Name` (preferred); this table is a
-// fallback for legacy / unknown ids that come back as raw provider slugs.
-const FRIENDLY_MODEL_NAMES: Record<string, string> = {
-  'deepseek-v4-flash': 'TM Model',
-  'glm-5.1': 'TM Model',
-  'glm-5.1-thinking': 'TM Model',
-  'mimo-v2-flash': 'TM Model',
-  'mimo-v2.5': 'mimo-v2.5',
-  'mimo-v2.5-pro': 'mimo-v2.5-pro',
-  'mimo-v2.5-1m': 'mimo-v2.5-1m',
-  'qwen3-coder-flash': 'TM Model',
-  'step-3.5-flash-2603': 'TM Model',
-}
-
-function friendlyModelLabel(modelId: string | null | undefined): string {
-  if (!modelId) return 'unknown model'
-  return FRIENDLY_MODEL_NAMES[modelId] ?? modelId
-}
-
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
@@ -88,7 +68,6 @@ function ContextWindowIndicator() {
   const outputTokens = useChatStore((s) => s.currentResponseTokens)
   const plan = useBillingStore((s) => s.plan)
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
-  const modelName = useAgentStore((s) => s.modelName)
   const [hovered, setHovered] = useState(false)
 
   // Profile lookup is a static map read — no useMemo needed.
@@ -97,7 +76,6 @@ function ContextWindowIndicator() {
   // window before the first response lands. This intentionally mirrors
   // the compression heuristic so the pill and the IDE agree.
   const rawContextWindow = headerContextWindow ?? profile?.contextWindow ?? 0
-  const displayedModelName = friendlyModelLabel(modelName ?? profile?.name)
 
   // Stay hidden only until the window is known. Show 0% as soon as it is —
   // gives the user continuity across resets (compact, new message) instead
@@ -278,13 +256,6 @@ function ContextWindowIndicator() {
               <Text fontSize="10px" color={tokens.colors.text.muted}>Auto-compact at</Text>
               <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
                 {formatTokens(compactThreshold)}
-              </Text>
-            </Flex>
-            <Box h="1px" bg="rgba(255,255,255,0.06)" my="2px" />
-            <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Model</Text>
-              <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
-                {displayedModelName}
               </Text>
             </Flex>
             <Text fontSize="9px" color={tokens.colors.text.disabled} lineHeight="1.4" mt="2px">

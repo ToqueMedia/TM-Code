@@ -594,6 +594,20 @@ class AgentService {
     // Reset per-message tracking (files edited and verify status are per user message, not per session)
     this.filesEditedThisSession.clear()
     this.lastFileChangeTimestamp = 0
+
+    // Stamp the turn-start timestamp so the post-turn memory extractor
+    // can skip its run when the main agent wrote memory during the
+    // turn — duplicating writes the agent already noticed is the
+    // extractor's #1 false-positive source. Sub-agents share the
+    // parent's session id, so they're naturally part of the same
+    // window; lightweight runs (no session in the store) just no-op.
+    if (!this.lightweightOptions) {
+      try {
+        const { markTurnStart } = await import('./memoryWriteTracker')
+        const sessionId = useChatStore.getState().activeSessionId
+        if (sessionId) markTurnStart(sessionId)
+      } catch { /* non-critical */ }
+    }
     // Clear agent tasks from previous message
     try {
       const { useAgentStore } = await import('../../stores/agentStore')
@@ -1082,10 +1096,29 @@ class AgentService {
         const toolResultBlocks: AnthropicContentBlock[] = []
         for (const entry of toolResults) {
           if (!entry) continue
+          // Diff results (from write_file / edit_file / create_file) are JSON
+          // carrying the full pre- and post-edit file content. The UI consumes
+          // that JSON in chatStore.updateToolCallResult to render InlineDiff;
+          // the MODEL only needs to know the edit happened. Echoing both
+          // copies of the file in every tool_result was the third bug behind
+          // the /plan PLAN.md loop (Opus 4.7 session, May 2026):
+          //   - 14 sequential edit_file calls on a file growing 1KB→44KB
+          //   - each call's tool_result added ~2× current size to context
+          //   - ~700KB / ~175K tokens of pure file echo per /plan
+          // The same sanitization already runs in rebuildConversationHistory
+          // for ON-DISK history; this mirrors it for the WITHIN-TURN tool
+          // result that goes into the very next API call.
+          let modelContent = entry.content
+          try {
+            const parsed = JSON.parse(modelContent)
+            if (parsed?.type === 'diff' && typeof parsed.path === 'string') {
+              modelContent = `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
+            }
+          } catch { /* not JSON — pass through */ }
           toolResultBlocks.push({
             type: 'tool_result',
             tool_use_id: entry.toolCall.id,
-            content: `[TOOL_RESULT:${entry.toolCall.name}]\n${entry.content}\n[/TOOL_RESULT]`,
+            content: `[TOOL_RESULT:${entry.toolCall.name}]\n${modelContent}\n[/TOOL_RESULT]`,
           })
         }
 
@@ -1604,13 +1637,26 @@ Developer message: ${displayText}
         { invalidateMemorySelectorCache },
         { loadMemoryIndex, parseIndexEntries },
         { useProjectStore },
+        { hasMemoryWriteSinceTurnStart },
       ] = await Promise.all([
         import('./memoryExtractor'),
         import('./memoryProposalsStore'),
         import('./memorySelector'),
         import('./memdir'),
         import('../../stores/projectStore'),
+        import('./memoryWriteTracker'),
       ])
+
+      // Skip when the main agent already persisted memory in this turn.
+      // The extractor's job is to catch what the agent missed; if the
+      // agent caught it, re-proposing tends to duplicate or contradict.
+      // Claude-vaz uses the same gate (hasMemoryWritesSince) — the
+      // signal-to-noise on these proposals drops sharply once the agent
+      // has been "noticing".
+      const sessionId = useChatStore.getState().activeSessionId
+      if (sessionId && hasMemoryWriteSinceTurnStart(sessionId)) {
+        return
+      }
 
       const projectPath = useProjectStore.getState().currentProject?.path ?? null
 

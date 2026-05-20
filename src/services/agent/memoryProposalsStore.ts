@@ -69,29 +69,11 @@ interface ActiveProposalsFileV1 {
   proposals: StoredProposal[]
 }
 
-function proposalsBasePath(projectPath: string, scope: MemoryScope, filename: string): string {
-  if (scope === 'project') {
-    const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
-    return `${normalized}/.toquemedia/memory/${filename}`
-  }
-  // user scope: needs home dir. We compute this in the Rust layer
-  // normally, but here we want a direct path for write_file/read_file
-  // — same as the rest of the persistence helpers. Caller resolves via
-  // `getHomeDir` if needed; for now, project-scope is the common case
-  // (most proposals tie to the current task).
-  return `~/${filename}` // placeholder — see resolveUserProposalsPath
-}
-
 /**
- * Resolve the absolute path for a user-scope proposal file. Same lazy
- * home-dir lookup pattern queueOperationLog uses.
+ * Resolve the absolute on-disk path for a proposal file. Project scope
+ * lives next to MEMORY.md inside `.toquemedia/memory/`; user scope lives
+ * in the IDE-installation memdir under the home directory.
  */
-async function resolveUserScopePath(filename: string): Promise<string> {
-  const home = await invoke<string>('get_home_directory')
-  const normalized = home.replace(/\\/g, '/').replace(/\/$/, '')
-  return `${normalized}/.toquemedia-studio/memory/${filename}`
-}
-
 async function resolvePath(
   projectPath: string | null,
   scope: MemoryScope,
@@ -99,9 +81,12 @@ async function resolvePath(
 ): Promise<string> {
   if (scope === 'project') {
     if (!projectPath) throw new Error('project-scope proposals require projectPath')
-    return proposalsBasePath(projectPath, 'project', filename)
+    const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
+    return `${normalized}/.toquemedia/memory/${filename}`
   }
-  return resolveUserScopePath(filename)
+  const home = await invoke<string>('get_home_directory')
+  const normalized = home.replace(/\\/g, '/').replace(/\/$/, '')
+  return `${normalized}/.toquemedia-studio/memory/${filename}`
 }
 
 /**
@@ -207,15 +192,11 @@ export async function recordProposals(
   for (const scope of ['user', 'project'] as const) {
     if (byScope[scope].length === 0) continue
 
-    // Project scope requires an open project; if none, those proposals
-    // get audit-logged with status: 'discarded' and skipped — the user
-    // can re-trigger after opening a project if they care.
-    if (scope === 'project' && !projectPath) {
-      for (const p of byScope[scope]) {
-        await appendProposalLog(null, 'user', { ...p, status: 'discarded' })
-      }
-      continue
-    }
+    // Project scope requires an open project. If none is open, drop the
+    // proposals silently — auditing them in user-scope would pollute the
+    // user audit log with entries from random projects. The extractor
+    // can re-propose on a future turn once a project is actually open.
+    if (scope === 'project' && !projectPath) continue
 
     // Audit every new proposal.
     for (const p of byScope[scope]) {

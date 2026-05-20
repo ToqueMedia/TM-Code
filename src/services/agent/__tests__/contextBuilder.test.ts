@@ -11,6 +11,19 @@ describe('ContextBuilder', () => {
     builder = ContextBuilder.getInstance()
     builder.invalidatePromptCache()
     mockedInvoke.mockReset()
+    // ipcCache (`fileTreeStore` / `readFileStore`) and the fsVersion
+    // counter are module-level state. Without resetting them, prior
+    // tests' cached file-trees keep being served (so a test mocking
+    // build_file_tree to throw never reaches the throwing mock), and
+    // the monotonic fsVersion carries over (so tests asserting an
+    // expected counter value see drift). The reset helpers exist for
+    // exactly this scenario — wire them in here.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { __resetIpcCacheForTests } = require('../ipcCache')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { __resetFsVersionForTests } = require('../../fsVersion')
+    __resetIpcCacheForTests()
+    __resetFsVersionForTests()
   })
 
   describe('singleton', () => {

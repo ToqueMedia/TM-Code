@@ -94,6 +94,54 @@ export interface MemoryIndexEntry {
   /** Original line in MEMORY.md, preserved verbatim for re-emission when
    *  the selector picks this entry. */
   rawLine: string
+  /** On-disk filename (e.g. "feedback_no-outlines.md"). Lets the freshness
+   *  layer pair this entry with its file mtime from `list_memory_files`. */
+  filename: string
+  /** mtime in epoch milliseconds — populated when the caller has a
+   *  mtime map (via `loadMemoryMtimes`). 0 when unknown; downstream age
+   *  helpers treat 0 as "fresh" (no annotation). */
+  mtimeMs: number
+}
+
+/** filename → mtime (epoch ms). Used to enrich index entries with age. */
+export type MemoryMtimeMap = Map<string, number>
+
+/** Tauri payload shape returned by `list_memory_files`. Keep in sync with
+ *  `MemoryFileEntry` in src-tauri/src/commands/memory.rs. */
+interface MemoryListEntryDTO {
+  filename: string
+  sizeBytes: number
+  mtimeMs: number
+}
+
+/**
+ * Load the per-scope mtime map by listing the memory directory once.
+ * Cheap (single readdir + stat per scope) — runs in parallel with
+ * `loadMemoryIndex` in the prompt builder.
+ *
+ * Returns an empty map on any failure so the freshness layer degrades to
+ * "no annotations" rather than blocking prompt build. The age annotation
+ * is a nicety; an outdated MEMORY.md is still useful.
+ */
+export async function loadMemoryMtimes(
+  scope: MemoryScope,
+  projectPath?: string,
+): Promise<MemoryMtimeMap> {
+  const map: MemoryMtimeMap = new Map()
+  try {
+    const entries = await invoke<MemoryListEntryDTO[]>('list_memory_files', {
+      scope,
+      projectPath: scope === 'project' ? projectPath : null,
+    })
+    for (const entry of entries) {
+      if (entry && typeof entry.filename === 'string' && typeof entry.mtimeMs === 'number') {
+        map.set(entry.filename, entry.mtimeMs)
+      }
+    }
+  } catch (err) {
+    console.warn('[memdir] failed to load mtimes:', err)
+  }
+  return map
 }
 
 const INDEX_LINE_REGEX = /^-\s+\[([^\]]+)\]\(([^)]+\.md)\)\s+—\s+(.+)$/
@@ -113,7 +161,10 @@ function inferTypeFromFilename(filename: string): MemoryType {
  * skipped — they're either headers or future format extensions, neither
  * is the selector's job to validate.
  */
-export function parseIndexEntries(indexContent: string): MemoryIndexEntry[] {
+export function parseIndexEntries(
+  indexContent: string,
+  mtimes?: MemoryMtimeMap,
+): MemoryIndexEntry[] {
   const entries: MemoryIndexEntry[] = []
   for (const line of indexContent.split('\n')) {
     const trimmed = line.trim()
@@ -126,6 +177,10 @@ export function parseIndexEntries(indexContent: string): MemoryIndexEntry[] {
       type: inferTypeFromFilename(filename),
       description: description.trim(),
       rawLine: line,
+      filename,
+      // 0 = unknown (caller didn't pass mtimes, or file missing from listing).
+      // Downstream age helpers treat 0 as fresh, so the worst case is "no annotation".
+      mtimeMs: mtimes?.get(filename) ?? 0,
     })
   }
   return entries
