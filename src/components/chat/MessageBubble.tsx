@@ -1,4 +1,4 @@
-import { memo, useCallback, useRef, useState } from 'react'
+import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiUser, FiCopy, FiCheck, FiDownload, FiCode, FiFileText } from 'react-icons/fi'
 import ReactMarkdown from 'react-markdown'
@@ -321,6 +321,18 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     [toggleReasoning, toggleReasoningBlock],
   )
 
+  // Pre-compute read_large_result batching directives ONCE per render so
+  // the contentBlocks .map below can read them by index without an IIFE
+  // or per-iteration look-ahead. Strict adjacency on text/tool boundaries;
+  // reasoning between same-id reads is swallowed into the batch.
+  const batchDirectives = useMemo(() => {
+    if (!message.contentBlocks || message.contentBlocks.length === 0) return []
+    return computeContentBlockBatches(
+      message.contentBlocks,
+      id => message.toolCalls?.find(t => t.id === id),
+    )
+  }, [message.contentBlocks, message.toolCalls])
+
   // Build plain-text representation of this assistant message for copying.
   // Walks contentBlocks IN ORDER so reasoning passes interleave with text in
   // the correct positions (matching what the user sees in the chat).
@@ -628,17 +640,12 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           )}
 
         {/* Interleaved content blocks — reasoning, text, tool calls in order.
-            Pre-compute batching directives (read_large_result consolidation)
-            once for this render so the .map can read them by index. Strict
-            adjacency: only consecutive read_large_result blocks with same id
-            batch up; reasoning/text in between breaks the batch (so the
-            timeline stays honest about when the agent paused to think). */}
-        {message.contentBlocks && message.contentBlocks.length > 0 ? (() => {
-          const batchDirectives = computeContentBlockBatches(
-            message.contentBlocks,
-            id => message.toolCalls?.find(t => t.id === id),
-          )
-          return (
+            `batchDirectives` is pre-computed by useMemo above so this render
+            path is a clean .map, no IIFE. Read_large_result consolidation:
+            text/non-read tool boundaries break the batch; reasoning between
+            same-id reads is swallowed (timeline stays honest about real
+            narrative state changes, not noise). */}
+        {message.contentBlocks && message.contentBlocks.length > 0 ? (
           <>
             {message.contentBlocks.map((block, idx) => {
               // Batch handling — runs before the existing block-type switch.
@@ -708,8 +715,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
               return null
             })}
           </>
-          )
-        })() : (
+        ) : (
           <>
             {/* Fallback for legacy messages without contentBlocks */}
             {message.content && (

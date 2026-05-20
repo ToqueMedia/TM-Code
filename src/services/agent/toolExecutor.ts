@@ -31,6 +31,7 @@ import { devServerManager } from '../devServerManager'
 import { resolveWorkerUrl, resolveDeployUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
+import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
 // TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
@@ -198,9 +199,55 @@ class ToolExecutor {
   resetSessionState(): void {
     this.readFileTimestamps.clear()
     this.largeResults.clear()
+    this.largeResultsTotalBytes = 0
     this.largeResultRangesShown.clear()
     this.largeResultCounter = 0
     this.readOnlyContexts.clear()
+  }
+
+  /**
+   * Evict the oldest large result and update the incremental byte counter.
+   * Used by both the byte-cap and entry-count eviction loops in
+   * `truncateResult` — single source of truth for the bookkeeping.
+   */
+  private evictOldestLargeResult(): void {
+    const firstKey = this.largeResults.keys().next().value
+    if (!firstKey) return
+    const removed = this.largeResults.get(firstKey)
+    this.largeResults.delete(firstKey)
+    this.largeResultRangesShown.delete(firstKey)
+    if (removed) this.largeResultsTotalBytes -= removed.length
+  }
+
+  /**
+   * Merge a new `[offset, end)` range into the per-id ranges-shown list,
+   * coalescing with any existing ranges it touches. Keeps the list flat
+   * and small even after many sequential reads — three reads at 0-2k,
+   * 2k-4k, 4k-6k collapse to a single `[0, 6000)` entry. Returns the
+   * single range that the new read overlapped with (for the model's
+   * overlap warning), or `null` if there was no overlap.
+   */
+  private trackShownRange(id: string, offset: number, end: number): [number, number] | null {
+    const ranges = this.largeResultRangesShown.get(id) ?? []
+    // Find every existing range that touches [offset, end) — they all merge.
+    let mergedStart = offset
+    let mergedEnd = end
+    let firstOverlap: [number, number] | null = null
+    const survivors: Array<[number, number]> = []
+    for (const r of ranges) {
+      if (r[0] <= mergedEnd && mergedStart <= r[1]) {
+        if (!firstOverlap) firstOverlap = [r[0], r[1]]
+        mergedStart = Math.min(mergedStart, r[0])
+        mergedEnd = Math.max(mergedEnd, r[1])
+      } else {
+        survivors.push(r)
+      }
+    }
+    survivors.push([mergedStart, mergedEnd])
+    // Re-sort by start so future overlap checks see ascending ranges.
+    survivors.sort((a, b) => a[0] - b[0])
+    this.largeResultRangesShown.set(id, survivors)
+    return firstOverlap
   }
 
   async execute(
@@ -423,10 +470,15 @@ class ToolExecutor {
   /** Large result storage — maps reference IDs to full content for later retrieval. */
   private largeResults: Map<string, string> = new Map()
   private largeResultCounter = 0
+  /** Incremental byte counter kept in sync with `largeResults` set/delete
+   *  ops. Avoids the O(N) `for ... values()` total-scan that the byte-cap
+   *  eviction loop used to do on every `truncateResult` call. */
+  private largeResultsTotalBytes = 0
   /** Per-id ranges already shown to the model (S1: overlap warnings on
-   *  re-read). Stored as `[offset, end)` pairs in call order. Bounded by
-   *  the per-id read count; the whole entry is dropped when the large
-   *  result itself is evicted. */
+   *  re-read). Stored as `[offset, end)` pairs MERGED on insert — so
+   *  three sequential reads (0-2k, 2k-4k, 4k-6k) collapse to a single
+   *  [0, 6000) instead of fragmenting. The whole entry is dropped when
+   *  the large result itself is evicted. */
   private largeResultRangesShown: Map<string, Array<[number, number]>> = new Map()
   /** Approximate cap on total bytes held across all cached large results
    *  (S2). When a new result would push past the cap, the oldest entries
@@ -443,31 +495,24 @@ class ToolExecutor {
   private truncateResult(result: string, maxChars: number = 30000): string {
     if (result.length <= maxChars) return result
 
-    // Store full result in memory for later retrieval
+    // Store full result in memory for later retrieval. Update the
+    // incremental byte counter so eviction doesn't have to total-scan.
     const refId = `large_result_${++this.largeResultCounter}`
     this.largeResults.set(refId, result)
+    this.largeResultsTotalBytes += result.length
 
-    // S2: byte-budget eviction. Pop the oldest entries until total fits
-    // under LARGE_RESULT_MAX_BYTES. Runs alongside the count cap because
-    // 20 entries of 5MB each would still drown a long session in RAM.
-    let totalBytes = 0
-    for (const v of this.largeResults.values()) totalBytes += v.length
-    while (totalBytes > ToolExecutor.LARGE_RESULT_MAX_BYTES && this.largeResults.size > 1) {
-      const firstKey = this.largeResults.keys().next().value
-      if (!firstKey) break
-      const removed = this.largeResults.get(firstKey)!.length
-      this.largeResults.delete(firstKey)
-      this.largeResultRangesShown.delete(firstKey)
-      totalBytes -= removed
+    // S2: byte-budget eviction. Pop oldest until we fit under the cap.
+    // O(K) where K is the number of entries evicted, not O(N) like before.
+    while (
+      this.largeResultsTotalBytes > ToolExecutor.LARGE_RESULT_MAX_BYTES
+      && this.largeResults.size > 1
+    ) {
+      this.evictOldestLargeResult()
     }
 
-    // B4: count-cap eviction. Keep the most recent N entries. Surface a
-    // warning when we're near the cap so the model can plan ahead.
+    // B4: count-cap eviction. Keep the most recent N entries.
     while (this.largeResults.size > ToolExecutor.LARGE_RESULT_MAX_ENTRIES) {
-      const firstKey = this.largeResults.keys().next().value
-      if (!firstKey) break
-      this.largeResults.delete(firstKey)
-      this.largeResultRangesShown.delete(firstKey)
+      this.evictOldestLargeResult()
     }
     const nearCap = this.largeResults.size >= ToolExecutor.LARGE_RESULT_MAX_ENTRIES - 2
 
@@ -1018,22 +1063,66 @@ ${preview}
     this.tools.set('read_file', {
       definition: {
         name: 'read_file',
-        description: 'Read the contents of a file at the given path.',
+        description: 'Read the contents of a file at the given file_path. By default reads the entire file; for large files use `offset` + `limit` to read a line range (1-indexed), matching Claude Code\'s Read tool semantics. Files larger than 256 KB throw with instructions to use offset/limit — auto-truncating would waste 25K+ tokens of context vs. the model refining its call.',
         input_schema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Absolute path to the file to read' }
+            file_path: { type: 'string', description: 'Absolute path to the file to read' },
+            offset: { type: 'number', description: '1-indexed line number to start from. Combine with `limit` to read a slice of a large file.' },
+            limit: { type: 'number', description: 'Maximum number of lines to read. Default: read to end of file.' }
           },
-          required: ['path']
+          required: ['file_path']
         },
         concurrencySafe: true,
       },
       execute: async (input) => {
-        const filePath = input.path as string
+        const filePath = input.file_path as string
+        // Detect "provided" BEFORE clamping — Math.max(1, 0) would turn
+        // a missing offset into 1 and make sliceRequested always true.
+        const offsetProvided = typeof input.offset === 'number' && input.offset > 0
+        const limitProvided = typeof input.limit === 'number' && input.limit > 0
+        const offset = offsetProvided ? Math.max(1, input.offset as number) : 1
+        const limit = limitProvided ? Math.max(1, input.limit as number) : 0
+        const sliceRequested = offsetProvided || limitProvided
         this.validatePathWithinProject(filePath)
         try {
-          const content = await invoke<string>('read_file', { path: filePath })
-          const newHash = this.simpleHash(content)
+          const MAX_FILE_BYTES = 256 * 1024
+          const fullContent = await invoke<string>('read_file', { path: filePath })
+
+          // Byte-size guard (claude-vaz adoption, FileReadTool/limits.ts).
+          // The cheap pre-flight stat that claude-vaz uses isn't available
+          // on the Rust side yet, so we check AFTER read — still buys us
+          // throw-and-instruct (the 256 KB doesn't ship to the model;
+          // only a ~150-byte error does), which the claude-vaz #21841
+          // experiment showed beats auto-truncation in mean token cost.
+          // Skipped when the model is explicitly slicing — that's the
+          // refinement path the error tells it to use.
+          if (!sliceRequested && fullContent.length > MAX_FILE_BYTES) {
+            void import('../../services/analytics').then(({ trackEvent }) => {
+              trackEvent('read_file_oversize_throw', {
+                path: filePath,
+                size_kb: Math.round(fullContent.length / 1024),
+              })
+            }).catch(() => {})
+            return `Error: File is ${(fullContent.length / 1024).toFixed(1)} KB which exceeds the 256 KB read cap. Use \`offset\` + \`limit\` to read a line range, or use search_files / glob to locate specific content. Reading the whole file would saturate the output budget for one call.`
+          }
+
+          // Apply line-based slice if requested. Lines are 1-indexed for
+          // model parity with Claude Code's Read tool.
+          let content = fullContent
+          if (sliceRequested) {
+            const lines = fullContent.split('\n')
+            const start = Math.max(0, offset - 1)
+            const end = limit > 0 ? start + limit : lines.length
+            const slice = lines.slice(start, end)
+            const hasMore = end < lines.length
+            content = slice.join('\n')
+            if (hasMore) {
+              const nextOffset = end + 1
+              content += `\n\n[truncated at line ${end} of ${lines.length}; use offset: ${nextOffset} to continue]`
+            }
+          }
+          const newHash = this.simpleHash(fullContent)
 
           // Detect external modification BEFORE overwriting the stored
           // timestamp. If the file's content hash differs from what we
@@ -1052,10 +1141,14 @@ ${preview}
           // truly-previous state.
           this.readFileTimestamps.set(filePath, { timestamp: Date.now(), hash: newHash })
 
-          // Empty file: the model often assumes a non-empty file when none
-          // was returned and proceeds to "modify" by writing whole files.
-          // The reminder makes the empty-ness explicit before the next turn.
+          // Empty content: distinguish "file is empty" (no slice requested,
+          // file genuinely has no bytes) from "slice past EOF" (model paged
+          // beyond the last line) — generic "empty" message would mislead.
           if (content.length === 0) {
+            if (sliceRequested && fullContent.length > 0) {
+              const totalLines = fullContent.split('\n').length
+              return `<system-reminder>The slice (offset ${offset}${limit > 0 ? `, limit ${limit}` : ''}) is past the end of the file. The file has ${totalLines} lines; pick an offset within range.</system-reminder>`
+            }
             return '<system-reminder>The file exists but the contents are empty.</system-reminder>'
           }
 
@@ -1202,13 +1295,13 @@ ${preview}
         if (!isNewFile) {
           const readState = this.readFileTimestamps.get(path)
           if (!readState) {
-            return `Error: You must read_file("${path}") before overwriting it. Read the file first to understand its current content, then call write_file.`
+            return `Error: You must ${READ_FILE}("${path}") before overwriting it. Read the file first to understand its current content, then call ${WRITE_FILE}.`
           }
           // Concurrent modification detection: check if file changed on disk since the model read it
           const currentHash = this.simpleHash(oldContent)
           if (currentHash !== readState.hash) {
             this.readFileTimestamps.delete(path)
-            return `Error: File "${path}" has been modified since you last read it (by the developer, a formatter, or another process). Read it again with read_file before writing.`
+            return `Error: File "${path}" has been modified since you last read it (by the developer, a formatter, or another process). Read it again with ${READ_FILE} before writing.`
           }
         }
 
@@ -1277,7 +1370,7 @@ ${preview}
         // Check if file already exists
         try {
           await invoke<string>('read_file', { path })
-          return `Error: File already exists: ${path}. Use write_file to overwrite or edit_file for small changes.`
+          return `Error: File already exists: ${path}. Use ${WRITE_FILE} to overwrite or ${EDIT_FILE} for small changes.`
         } catch {
           // File doesn't exist — good, proceed
         }
@@ -1432,24 +1525,51 @@ ${preview}
     this.tools.set('edit_file', {
       definition: {
         name: 'edit_file',
-        description: 'Replace a specific string in a file with new content. The old_str must match exactly and appear only once in the file. Use this for surgical edits instead of rewriting entire files with write_file.',
+        description: 'Replace a specific string in a file with new content. The old_string must match exactly and appear only once in the file. Use this for surgical edits instead of rewriting entire files with write_file. Field names match Claude Code\'s Edit tool: `old_string` / `new_string`.',
         input_schema: {
           type: 'object',
           properties: {
             path: { type: 'string', description: 'Absolute path to the file to edit' },
-            old_str: { type: 'string', description: 'Exact string to find and replace. Must be unique in the file.' },
-            new_str: { type: 'string', description: 'String to replace old_str with. Use empty string to delete.' }
+            old_string: { type: 'string', description: 'Exact text to find and replace. Must be unique in the file.' },
+            new_string: { type: 'string', description: 'Text to replace old_string with. Use empty string to delete.' }
           },
-          required: ['path', 'old_str', 'new_str']
+          required: ['path', 'old_string', 'new_string']
         }
       },
       execute: async (input) => {
         const path = input.path as string
-        const oldStr = input.old_str as string
-        const newStr = input.new_str as string
+        // Field names align with Claude Code's Edit tool — the model uses
+        // these from training. Background: the May 2026 todo-mimo /plan
+        // session looped when the schema was old_str-only; the model
+        // defaulted to old_string (its training default) and the original
+        // "cannot be empty" error gave no hint about the key-name issue.
+        const oldStr = (input.old_string ?? '') as string
+        const newStr = (input.new_string ?? '') as string
 
         if (!oldStr) {
-          return 'Error: old_str cannot be empty. Provide the exact text you want to replace.'
+          // Detect known typos (camelCase, snake_str legacy, alternate
+          // editor names) so the error tells the model exactly what to
+          // fix instead of just "empty" — which it can't act on if the
+          // value was actually there under a misspelled key.
+          const passedKeys = Object.keys(input).filter(k => !k.startsWith('_'))
+          const wrongName = passedKeys.find(k =>
+            k === 'oldStr' || k === 'oldString' || k === 'old_text' ||
+            k === 'old_str' || k === 'new_str',
+          )
+          // Fire-and-forget telemetry (#22 from prompt techniques manual).
+          // Without this we can't tell if the field-name fixes reduced
+          // the loop rate or just shifted it. `kind` lets us slice by
+          // failure mode in the dashboard.
+          void import('../../services/analytics').then(({ trackEvent }) => {
+            trackEvent('edit_file_error', {
+              kind: wrongName ? 'typo' : 'empty_old_string',
+              wrong_name: wrongName ?? '',
+            })
+          }).catch(() => { /* never block on telemetry */ })
+          if (wrongName) {
+            return `Error: this tool expects \`old_string\` (and \`new_string\`). You passed: ${passedKeys.join(', ')}. Rename your field to old_string / new_string and retry.`
+          }
+          return 'Error: old_string cannot be empty. Provide the exact text you want to replace.'
         }
 
         this.validatePathWithinProject(path)
@@ -1468,7 +1588,7 @@ ${preview}
         // Enforce read-before-edit: the model must have read the file to know what to edit
         const readState = this.readFileTimestamps.get(path)
         if (!readState) {
-          return `Error: You must read_file("${path}") before editing it. Read the file first to see the current content, then call edit_file.`
+          return `Error: You must ${READ_FILE}("${path}") before editing it. Read the file first to see the current content, then call ${EDIT_FILE}.`
         }
 
         const content = await invoke<string>('read_file', { path })
@@ -1477,44 +1597,34 @@ ${preview}
         const currentHash = this.simpleHash(content)
         if (currentHash !== readState.hash) {
           this.readFileTimestamps.delete(path)
-          return `Error: File "${path}" has been modified since you last read it. Read it again with read_file before editing.`
+          return `Error: File "${path}" has been modified since you last read it. Read it again with ${READ_FILE} before editing.`
         }
 
         const occurrences = content.split(oldStr).length - 1
 
         if (occurrences === 0) {
-          return `Error: old_str not found in ${path}. The content you're trying to replace doesn't exist in the file. Read the file first to see the current content.`
+          void import('../../services/analytics').then(({ trackEvent }) => {
+            trackEvent('edit_file_error', { kind: 'not_found', wrong_name: '' })
+          }).catch(() => {})
+          return `Error: old_string not found in ${path}. The content you're trying to replace doesn't exist in the file. Read the file first to see the current content.`
         }
 
         if (occurrences > 1) {
-          // Two failure modes look identical here:
-          //   (a) old_str is genuinely ambiguous — the model needs more context;
-          //   (b) the file was corrupted by a previous edit in this turn (e.g.
-          //       a `$\`` sequence in new_str expanded to "string-before-match"
-          //       under String.prototype.replace) and now legitimately has
-          //       duplicates of what used to be unique anchors.
-          // Suggesting (a) alone — as the message used to — sends the model on
-          // a search_files / read_large_result hunt for context when the right
-          // recovery is (b): re-read the file, then write_file overwrite with
-          // the corrected full content in a single call.
-          return `Error: old_str appears ${occurrences} times in ${path}. It must be unique. Options: ` +
-            `(a) add more surrounding context to old_str/new_str so the match is unique; ` +
-            `(b) if you did not expect a duplicate (the file may have been corrupted by a previous edit), ` +
-            `re-read the file with read_file to confirm, then use write_file to overwrite with the corrected full content in one call — ` +
-            `do NOT chase the duplicate with successive edits.`
+          // Two failure modes look identical here — see editLiteralReplace.ts
+          // for the full reasoning. Pure function so production and tests
+          // can't drift.
+          const { duplicateMatchError } = await import('./editLiteralReplace')
+          void import('../../services/analytics').then(({ trackEvent }) => {
+            trackEvent('edit_file_error', { kind: 'non_unique', wrong_name: '', occurrences })
+          }).catch(() => {})
+          return duplicateMatchError(path, occurrences)
         }
 
-        // Literal substring replacement — must NOT use String.prototype.replace
-        // here. JavaScript's replace() interprets special sequences in the
-        // replacement string ($$, $&, $`, $', $n) EVEN WHEN the pattern is a
-        // plain string. A new_str containing the email-regex anchor `$` followed
-        // by a backtick (e.g. `^[^\s@]+@...\.[^\s@]+$`) is parsed as the
-        // `$\`` pattern ("insert string before match") and silently splices the
-        // entire pre-match portion of the file into the edit. The corruption is
-        // invisible until a later edit fails its uniqueness check on something
-        // that was unique before. indexOf + slice is the literal alternative.
-        const matchIdx = content.indexOf(oldStr)
-        const newContent = content.slice(0, matchIdx) + newStr + content.slice(matchIdx + oldStr.length)
+        // Literal substring replace — see editLiteralReplace.ts for the
+        // $-sequence corruption history. Pure function so production and
+        // tests can't drift.
+        const { editFileReplace } = await import('./editLiteralReplace')
+        const newContent = editFileReplace(content, oldStr, newStr)
 
         // Mechanical block on forbidden SQL data-layer deps in package.json.
         // Edits that add Prisma/SQLite/Drizzle to a package.json get rejected.
@@ -2046,12 +2156,10 @@ ${preview}
         const remaining = content.length - end
 
         // S1: detect overlap with ranges already read in this session for
-        // this large_result id. Flag the read so the model gets a clear
-        // signal that it's re-reading content it already has in context.
-        const priorRanges = this.largeResultRangesShown.get(id) ?? []
-        const overlapping = priorRanges.find(([o, e]) => offset < e && end > o)
-        priorRanges.push([offset, end])
-        this.largeResultRangesShown.set(id, priorRanges)
+        // this large_result id, AND coalesce adjacent ranges so the list
+        // stays small. trackShownRange returns the first range the new
+        // read overlapped with — null when there was no overlap.
+        const overlapping = this.trackShownRange(id, offset, end)
 
         let result = slice
         const notes: string[] = []

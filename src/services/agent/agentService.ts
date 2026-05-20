@@ -1093,32 +1093,19 @@ class AgentService {
         // Multiple tool_results from the same turn are merged into ONE user message.
         // Dev server feedback is also merged here to avoid creating consecutive
         // user messages (Anthropic requires strictly alternating user/assistant).
+        const { sanitizeDiffForModel } = await import('./editLiteralReplace')
         const toolResultBlocks: AnthropicContentBlock[] = []
         for (const entry of toolResults) {
           if (!entry) continue
-          // Diff results (from write_file / edit_file / create_file) are JSON
-          // carrying the full pre- and post-edit file content. The UI consumes
-          // that JSON in chatStore.updateToolCallResult to render InlineDiff;
-          // the MODEL only needs to know the edit happened. Echoing both
-          // copies of the file in every tool_result was the third bug behind
-          // the /plan PLAN.md loop (Opus 4.7 session, May 2026):
-          //   - 14 sequential edit_file calls on a file growing 1KB→44KB
-          //   - each call's tool_result added ~2× current size to context
-          //   - ~700KB / ~175K tokens of pure file echo per /plan
-          // The same sanitization already runs in rebuildConversationHistory
-          // for ON-DISK history; this mirrors it for the WITHIN-TURN tool
-          // result that goes into the very next API call.
-          let modelContent = entry.content
-          try {
-            const parsed = JSON.parse(modelContent)
-            if (parsed?.type === 'diff' && typeof parsed.path === 'string') {
-              modelContent = `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
-            }
-          } catch { /* not JSON — pass through */ }
+          // Diff results (write_file / edit_file / create_file) carry the
+          // full pre- and post-edit file in the JSON. UI consumes the full
+          // payload via chatStore.updateToolCallResult to render InlineDiff;
+          // the MODEL only needs the one-line summary. See editLiteralReplace.ts
+          // for the postmortem.
           toolResultBlocks.push({
             type: 'tool_result',
             tool_use_id: entry.toolCall.id,
-            content: `[TOOL_RESULT:${entry.toolCall.name}]\n${modelContent}\n[/TOOL_RESULT]`,
+            content: `[TOOL_RESULT:${entry.toolCall.name}]\n${sanitizeDiffForModel(entry.content)}\n[/TOOL_RESULT]`,
           })
         }
 

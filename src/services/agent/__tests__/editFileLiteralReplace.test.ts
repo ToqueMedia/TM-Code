@@ -1,75 +1,151 @@
 /**
  * edit_file regression tests for the three bugs identified after the
- * Opus 4.7 /plan PLAN.md loop (May 2026 session for "todo-mimo"):
+ * Opus 4.7 /plan PLAN.md loop (May 2026 session for "todo-mimo"). The
+ * helpers under test are exported from `editLiteralReplace.ts` and used
+ * verbatim by `toolExecutor.ts` / `agentService.ts` — no mirror copies,
+ * no drift risk.
  *
- *   Bug #1 — String.prototype.replace interprets `$` special sequences in the
- *            REPLACEMENT string (even when the pattern is a literal string).
- *            A new_str containing the email-regex `^...$` followed by a
- *            backtick (`$\``) expanded as "insert string-before-match" and
- *            silently spliced the file's pre-edit content into the middle of
- *            the table cell.
+ *   Bug #1 — editFileReplace: literal substring replace, no $-sequence
+ *            interpretation. A new_str containing the email-regex `^...$`
+ *            followed by a backtick (`$\``) used to expand as "insert
+ *            string-before-match" under String.prototype.replace.
  *
- *   Bug #2 — The "old_str appears N times" error pushed the model toward
- *            `(a) add more context` only. When the duplicate was caused by
- *            Bug #1's corruption, the right recovery is `(b) re-read + write_file`.
- *            Assert the error message now mentions both options.
+ *   Bug #2 — duplicateMatchError: multi-option message listing both
+ *            "add more context" AND "re-read + write_file overwrite".
  *
- *   Bug #3 — The diff JSON tool result (oldContent + newContent, full file
- *            twice) was sent verbatim to the model in the next iteration's
- *            tool_result. For PLAN.md across 14 edits this was ~700KB of pure
- *            file echo. Assert the diff-sanitization helper collapses the diff
- *            JSON to a one-line "File updated: <path>" summary.
- *
- * Pure-function tests — mirror the inline implementations in
- * `toolExecutor.ts:edit_file` and `agentService.ts:runAgentLoop` so a
- * regression of either inline form is caught at unit-test time. If the
- * implementations drift, re-sync `editFileReplace()` / `duplicateMatchError()`
- * / `sanitizeForModel()` here.
- *
- * Why not instantiate ToolExecutor directly: importing `toolExecutor.ts` pulls
- * in `projectStore` → `windowService` → `@tauri-apps/api/webviewWindow` which
- * fails Jest module loading (Tauri webview surface assumes a native runtime).
- * The existing `safeToolPool.test.ts` follows the same pattern — import the
- * type, build a fake / test the pure logic.
+ *   Bug #3 — sanitizeDiffForModel: collapse diff JSON (44KB+) to a
+ *            one-line "File updated: <path>" summary for the next API
+ *            turn's tool_result.
  */
 
+import {
+  editFileReplace,
+  duplicateMatchError,
+  sanitizeDiffForModel,
+} from '../editLiteralReplace'
+
+// Alias kept for test readability; the implementation lives in
+// editLiteralReplace.ts and is shared with production.
+const sanitizeForModel = sanitizeDiffForModel
+
 /**
- * Literal substring replace that mirrors the production implementation in
- * toolExecutor.ts edit_file (the `content.slice + newStr + content.slice`
- * pattern). Must NOT use String.prototype.replace — see the test cases.
+ * Mirror of the field-name normalization logic in the edit_file handler.
+ * Production lives inline at `toolExecutor.ts:edit_file.execute`. The May
+ * 2026 todo-mimo /plan loop fired because the schema declared
+ * `old_str`/`new_str` while the model defaulted to `old_string`/`new_string`
+ * (Claude Code's Edit tool convention — the names it knows from training).
+ * Resolution: align with Claude Code — only `old_string`/`new_string` are
+ * accepted now; any misnamed key triggers a key-aware diagnostic error
+ * instead of a generic "cannot be empty".
  */
-function editFileReplace(content: string, oldStr: string, newStr: string): string {
-  const idx = content.indexOf(oldStr)
-  if (idx === -1) throw new Error('old_str not found')
-  return content.slice(0, idx) + newStr + content.slice(idx + oldStr.length)
+interface EditFileInput {
+  path?: string
+  old_string?: string
+  new_string?: string
+  // Common wrong names the diagnostic detects:
+  old_str?: string
+  new_str?: string
+  oldStr?: string
+  oldString?: string
+  old_text?: string
+  [k: string]: unknown
 }
 
-/**
- * Returns the same multi-option error message that the production
- * `edit_file` handler returns when `old_str` matches more than once.
- */
-function duplicateMatchError(path: string, occurrences: number): string {
-  return `Error: old_str appears ${occurrences} times in ${path}. It must be unique. Options: ` +
-    `(a) add more surrounding context to old_str/new_str so the match is unique; ` +
-    `(b) if you did not expect a duplicate (the file may have been corrupted by a previous edit), ` +
-    `re-read the file with read_file to confirm, then use write_file to overwrite with the corrected full content in one call — ` +
-    `do NOT chase the duplicate with successive edits.`
-}
-
-/**
- * Mirrors the diff-sanitization the agent loop applies to tool_result content
- * before injecting into the next API call's user message. Production site:
- * `agentService.ts:runAgentLoop` toolResultBlocks loop.
- */
-function sanitizeForModel(rawResult: string): string {
-  try {
-    const parsed = JSON.parse(rawResult)
-    if (parsed?.type === 'diff' && typeof parsed.path === 'string') {
-      return `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
+function normalizeEditFileInput(input: EditFileInput): { oldStr: string; newStr: string; error: string | null } {
+  const oldStr = (input.old_string ?? '') as string
+  const newStr = (input.new_string ?? '') as string
+  if (oldStr) return { oldStr, newStr, error: null }
+  const passedKeys = Object.keys(input).filter(k => !k.startsWith('_'))
+  const wrongName = passedKeys.find(k =>
+    k === 'oldStr' || k === 'oldString' || k === 'old_text' ||
+    k === 'old_str' || k === 'new_str',
+  )
+  if (wrongName) {
+    return {
+      oldStr: '',
+      newStr: '',
+      error: `Error: this tool expects \`old_string\` (and \`new_string\`). You passed: ${passedKeys.join(', ')}. Rename your field to old_string / new_string and retry.`,
     }
-  } catch { /* not JSON — pass through */ }
-  return rawResult
+  }
+  return {
+    oldStr: '',
+    newStr: '',
+    error: 'Error: old_string cannot be empty. Provide the exact text you want to replace.',
+  }
 }
+
+describe('Bug #4: edit_file uses old_string/new_string (Claude Code convention)', () => {
+  // Regression context — todo-mimo /plan session, May 2026:
+  //   Schema declared `old_str`/`new_str`. Model defaulted to
+  //   `old_string`/`new_string` (Claude Code naming — what its training
+  //   prefers). Tool read `input.old_str` (undefined), returned
+  //   "old_str cannot be empty", model retried with same wrong key. Loop.
+  //   Resolution: align schema with Claude Code. The legacy aliases are
+  //   removed — strict canonical only, with a key-aware diagnostic when
+  //   the model passes a wrong name.
+
+  it('accepts the canonical names (old_string + new_string)', () => {
+    const { oldStr, newStr, error } = normalizeEditFileInput({
+      path: '/x',
+      old_string: 'foo',
+      new_string: 'bar',
+    })
+    expect(error).toBeNull()
+    expect(oldStr).toBe('foo')
+    expect(newStr).toBe('bar')
+  })
+
+  it('REJECTS the legacy alias names (old_str + new_str) with key-aware diagnostic', () => {
+    // Aliases removed. Anyone still passing old_str/new_str gets the
+    // typo-aware error pointing them at the canonical names.
+    const { oldStr, error } = normalizeEditFileInput({
+      path: '/x',
+      old_str: 'foo',
+      new_str: 'bar',
+    } as EditFileInput)
+    expect(oldStr).toBe('')
+    expect(error).toMatch(/this tool expects `old_string`/)
+    expect(error).toContain('old_str')
+  })
+
+  it('returns a key-aware diagnostic for camelCase typos (oldString, oldStr)', () => {
+    const { error } = normalizeEditFileInput({
+      path: '/x',
+      oldString: 'foo',  // missing underscore
+      new_string: 'bar',
+    } as EditFileInput)
+    expect(error).toMatch(/this tool expects `old_string`/)
+    expect(error).toContain('oldString')
+    expect(error).toContain('Rename your field')
+  })
+
+  it('returns a key-aware diagnostic for the old_text editor convention', () => {
+    const { error } = normalizeEditFileInput({
+      path: '/x',
+      old_text: 'foo',
+      new_string: 'bar',
+    } as EditFileInput)
+    expect(error).toMatch(/this tool expects `old_string`/)
+    expect(error).toContain('old_text')
+  })
+
+  it('returns a generic "empty" error only when NO recognised wrong name is present', () => {
+    const { error } = normalizeEditFileInput({ path: '/x' })
+    expect(error).toMatch(/old_string cannot be empty/)
+    expect(error).not.toMatch(/this tool expects/)
+  })
+
+  it('does NOT leak internal flags (_toolCallId, _abortSignal) into the error key list', () => {
+    const { error } = normalizeEditFileInput({
+      path: '/x',
+      _toolCallId: 'tc_1',
+      _abortSignal: {} as never,
+      oldString: 'foo',
+    } as EditFileInput)
+    expect(error).not.toContain('_toolCallId')
+    expect(error).not.toContain('_abortSignal')
+  })
+})
 
 describe('Bug #1: edit_file does literal substring replacement', () => {
   // Sanity baseline — String.prototype.replace WOULD corrupt this. Documenting
@@ -123,6 +199,14 @@ describe('Bug #1: edit_file does literal substring replacement', () => {
     expect(out).toBe('capture group $1 here')
   })
 
+  it('throws when oldStr is not in content (defensive invariant)', () => {
+    // Production guards against this with `occurrences > 0` upstream of
+    // the call. The throw is defensive — if the upstream check ever drifts
+    // the failure stays loud instead of silently writing garbage.
+    expect(() => editFileReplace('hello world', 'missing', 'X'))
+      .toThrow(/uniqueness check upstream is broken/)
+  })
+
   it('preserves byte-perfect identity for arbitrary $ patterns mixed in markdown', () => {
     const tricky = [
       'Line 1 with $`',
@@ -135,7 +219,7 @@ describe('Bug #1: edit_file does literal substring replacement', () => {
   })
 })
 
-describe('Bug #2: improved error message on non-unique old_str', () => {
+describe('Bug #2: improved error message on non-unique old_string', () => {
   it('mentions both the "add context" path AND the "write_file overwrite" recovery path', () => {
     const msg = duplicateMatchError('/proj/PLAN.md', 2)
     expect(msg).toMatch(/appears 2 times/)
@@ -144,6 +228,8 @@ describe('Bug #2: improved error message on non-unique old_str', () => {
     expect(msg.toLowerCase()).toContain('surrounding context')
     expect(msg.toLowerCase()).toContain('write_file')
     expect(msg.toLowerCase()).toContain('corrupted')
+    // References to the canonical schema names, not the removed legacy alias.
+    expect(msg).toContain('old_string/new_string')
   })
 
   it('discourages chasing the duplicate with more edits', () => {

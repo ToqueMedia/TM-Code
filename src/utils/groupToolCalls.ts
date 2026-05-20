@@ -42,15 +42,27 @@ function readLargeResultId(tc: ToolCallDisplay): string | null {
  *   - `{ kind: 'batch_member' }` → return null (already covered by the
  *     preceding batch_start)
  *
- * Strict adjacency: only consecutive `tool_call` blocks resolving to the
- * same large_result id are batched. A reasoning/text block in between
- * breaks the batch — keeping the timeline honest about when the agent
- * paused to think.
+ * Batching rule: consecutive `tool_call` blocks resolving to the same
+ * large_result id batch together, AND reasoning blocks sitting between
+ * those reads are "swallowed" into the batch (rendered as nothing). Short
+ * per-read planning chunks like "I'll read offset 28000 next" become pure
+ * noise in the chat once the consolidated range pills tell the same story
+ * — explicit user request to suppress them.
+ *
+ * What still breaks a batch: a `text` block (real assistant prose), a
+ * non-read_large_result `tool_call`, or a `tool_call` with a different
+ * large_result id. Those represent narrative state changes the developer
+ * needs to see.
  */
 export type ContentBlockDirective =
   | { kind: 'render' }
   | { kind: 'batch_start'; calls: ToolCallDisplay[] }
   | { kind: 'batch_member' }
+
+/** Block types that can sit between two same-id reads without breaking
+ *  the batch. Currently only `reasoning` — extend with caution; anything
+ *  carrying user-visible narrative MUST break the batch. */
+const SWALLOWABLE_TYPES = new Set(['reasoning'])
 
 export function computeContentBlockBatches(
   blocks: Array<{ type: string; toolCallId?: string }>,
@@ -64,21 +76,41 @@ export function computeContentBlockBatches(
     const tc = resolveToolCall(block.toolCallId)
     const id = tc ? readLargeResultId(tc) : null
     if (!tc || id === null) { i += 1; continue }
-    // Look-ahead for the longest run of same-id read_large_result blocks.
+
+    // Greedy look-ahead. Two-state walk: collect read_large_result calls
+    // of the SAME id, swallowing reasoning blocks in between. Any other
+    // block type (text, different tool, different id) commits the batch.
     const batchCalls: ToolCallDisplay[] = [tc]
+    const swallowed: number[] = [] // reasoning indices consumed by this batch
     let j = i + 1
     while (j < blocks.length) {
       const nb = blocks[j]
+      if (SWALLOWABLE_TYPES.has(nb.type)) {
+        // Tentatively swallow — only commit if a same-id read follows.
+        // Otherwise (reasoning is the last block, or followed by a
+        // non-batchable block) the reasoning must render normally.
+        let k = j + 1
+        while (k < blocks.length && SWALLOWABLE_TYPES.has(blocks[k].type)) k += 1
+        if (k >= blocks.length) break
+        const candidate = blocks[k]
+        if (candidate.type !== 'tool_call' || !candidate.toolCallId) break
+        const candidateTc = resolveToolCall(candidate.toolCallId)
+        if (!candidateTc || readLargeResultId(candidateTc) !== id) break
+        // Commit: swallow [j..k-1], add the read at k, then continue.
+        for (let s = j; s < k; s++) swallowed.push(s)
+        batchCalls.push(candidateTc)
+        j = k + 1
+        continue
+      }
       if (nb.type !== 'tool_call' || !nb.toolCallId) break
       const ntc = resolveToolCall(nb.toolCallId)
       if (!ntc || readLargeResultId(ntc) !== id) break
       batchCalls.push(ntc)
       j += 1
     }
-    if (batchCalls.length >= 1) {
-      directives[i] = { kind: 'batch_start', calls: batchCalls }
-      for (let k = i + 1; k < j; k++) directives[k] = { kind: 'batch_member' }
-    }
+    directives[i] = { kind: 'batch_start', calls: batchCalls }
+    for (let k = i + 1; k < j; k++) directives[k] = { kind: 'batch_member' }
+    for (const s of swallowed) directives[s] = { kind: 'batch_member' }
     i = j
   }
   return directives

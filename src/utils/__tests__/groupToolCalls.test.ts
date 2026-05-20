@@ -118,10 +118,52 @@ describe('computeContentBlockBatches — contentBlocks.map path', () => {
     expect(out[2].kind).toBe('batch_member')
   })
 
-  it('reasoning between two read blocks breaks the batch (timeline honest)', () => {
+  it('swallows reasoning blocks sitting between two same-id reads', () => {
+    // The "(pensou 1s)" pattern the user explicitly asked to suppress:
+    // per-read reasoning chunks become noise once the batch's range pills
+    // tell the same story.
     const blocks = [
       block('tool_call', 'c1'),
       block('reasoning'),
+      block('tool_call', 'c2'),
+      block('reasoning'),
+      block('tool_call', 'c3'),
+    ]
+    const calls = new Map([
+      ['c1', read('lr_4', 0, 2000, 'c1')],
+      ['c2', read('lr_4', 2000, 2000, 'c2')],
+      ['c3', read('lr_4', 4000, 2000, 'c3')],
+    ])
+    const out = computeContentBlockBatches(blocks, id => calls.get(id))
+    expect(out[0].kind).toBe('batch_start')
+    if (out[0].kind === 'batch_start') expect(out[0].calls).toHaveLength(3)
+    // All three intervening members (read + reasoning + read + reasoning) get
+    // collapsed into batch_members — the row renders nothing in their place.
+    expect(out[1].kind).toBe('batch_member') // reasoning swallowed
+    expect(out[2].kind).toBe('batch_member') // c2 absorbed
+    expect(out[3].kind).toBe('batch_member') // reasoning swallowed
+    expect(out[4].kind).toBe('batch_member') // c3 absorbed
+  })
+
+  it('does NOT swallow reasoning that is followed by a non-batchable block', () => {
+    // Reasoning at the tail (no same-id read after it) must render as-is —
+    // the developer needs the agent's wrap-up thought.
+    const blocks = [
+      block('tool_call', 'c1'),
+      block('reasoning'),
+      block('text'),
+    ]
+    const calls = new Map([['c1', read('lr_4', 0, 2000, 'c1')]])
+    const out = computeContentBlockBatches(blocks, id => calls.get(id))
+    expect(out[0].kind).toBe('batch_start')
+    expect(out[1].kind).toBe('render') // reasoning stays
+    expect(out[2].kind).toBe('render') // text stays
+  })
+
+  it('text blocks between two reads still break the batch (real prose, not noise)', () => {
+    const blocks = [
+      block('tool_call', 'c1'),
+      block('text'),
       block('tool_call', 'c2'),
     ]
     const calls = new Map([

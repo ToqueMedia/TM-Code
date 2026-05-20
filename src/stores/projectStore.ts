@@ -13,6 +13,7 @@ import WindowService from '../services/windowService';
 import { sessionService } from '../services/agent/sessionService';
 import CheckpointService from '../services/agent/checkpointService';
 import { useChatStore } from './chatStore';
+import { projectHasMeaningfulContent } from '../utils/projectHasContent';
 import { useProblemsStore } from './problemsStore';
 import { IS_VITE_DEV } from '../utils/viteEnv';
 import { devServerManager } from '../services/devServerManager';
@@ -374,26 +375,25 @@ export const useProjectStore = create<ProjectStore>()(
           // a freshly-opened empty folder is noise: there is nothing to
           // memorize and the agent's first natural turn will start TMS.md
           // organically as work happens.
+          //
+          // The "meaningful content" rule lives in projectHasContent.ts — it
+          // rejects dot-files (.toquemedia/, .git/, .DS_Store, .gitignore,
+          // .env, …) and tool artifacts (node_modules, dist, build, …)
+          // because none of those alone represents developer-authored
+          // intent worth analyzing. The Rust `glob_files('*')` returns
+          // hidden entries by default (glob crate's `require_literal_leading_dot`
+          // defaults to false), and the prior 4-name allowlist was leaking
+          // `.toquemedia/` on every freshly-opened empty project.
           try {
             await invoke('read_file', { path: `${path}/TMS.md` });
           } catch {
-            // TMS.md missing — check if the project has any real content.
-            // Look for top-level entries other than TM Code's own marker
-            // (.toquemedia-id), git metadata (.git), and OS junk (.DS_Store).
             let projectHasContent = false;
             try {
               const entries = await invoke<string[]>('glob_files', {
                 pattern: '*',
                 directory: path,
               });
-              const meaningful = entries.filter((entry) => {
-                const name = entry.split('/').pop() ?? entry;
-                return name !== '.toquemedia-id'
-                  && name !== '.git'
-                  && name !== '.DS_Store'
-                  && name !== 'Thumbs.db';
-              });
-              projectHasContent = meaningful.length > 0;
+              projectHasContent = projectHasMeaningfulContent(entries);
             } catch {
               // glob_files failed — fail open (don't suggest) so we don't
               // nag on a transient FS hiccup.
