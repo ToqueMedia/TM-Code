@@ -947,6 +947,18 @@ const en = {
   'dataViewer.errorTitle': 'Could not load data',
   'dataViewer.noProject': 'No project open',
   'dataViewer.noProjectHint': 'Open a project to inspect its data.',
+
+  // ── Welcome Plan Banner ───────────────────────────
+  'welcomePlan.title': 'Welcome TM Code by Xiaomi Mimo',
+  'welcomePlan.description': 'Exclusive welcome plan with all Vibe benefits powered by Mimo V2.5 Pro.',
+  'welcomePlan.badge': 'Vibe',
+  'welcomePlan.model': 'Mimo V2.5 Pro',
+  'welcomePlan.tokens': 'Extensive usage',
+  'welcomePlan.validUntil': 'May 28, 2026',
+  'welcomePlan.activate': 'Activate Plan',
+  'welcomePlan.activating': 'Activating...',
+  'welcomePlan.activated': 'Plan activated!',
+  'welcomePlan.error': 'Could not activate plan. Try again.',
 } as const
 
 const pt: Record<keyof typeof en, string> = {
@@ -1881,6 +1893,18 @@ const pt: Record<keyof typeof en, string> = {
   'dataViewer.errorTitle': 'Não foi possível carregar os dados',
   'dataViewer.noProject': 'Nenhum projeto aberto',
   'dataViewer.noProjectHint': 'Abre um projeto para inspecionar os seus dados.',
+
+  // ── Welcome Plan Banner ───────────────────────────
+  'welcomePlan.title': 'Welcome TM Code by Xiaomi Mimo',
+  'welcomePlan.description': 'Plano exclusivo de boas-vindas com todos os benefícios Vibe powered by Mimo V2.5 Pro.',
+  'welcomePlan.badge': 'Vibe',
+  'welcomePlan.model': 'Mimo V2.5 Pro',
+  'welcomePlan.tokens': 'Consumo extensivo',
+  'welcomePlan.validUntil': '28 de Maio de 2026',
+  'welcomePlan.activate': 'Activar Plano',
+  'welcomePlan.activating': 'A activar...',
+  'welcomePlan.activated': 'Plano activado!',
+  'welcomePlan.error': 'Não foi possível activar o plano. Tenta novamente.',
 }
 
 export type TranslationKey = keyof typeof en

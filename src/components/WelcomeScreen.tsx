@@ -5,7 +5,7 @@ import { useProjectStore } from '../stores/projectStore'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
-import { WelcomeSidebar, WelcomeHero, CloneDialog, StartupRequirementsBanner } from './welcome'
+import { WelcomeSidebar, WelcomeHero, CloneDialog, StartupRequirementsBanner, WelcomePlanBanner } from './welcome'
 import SettingsView from './views/SettingsView'
 import WindowControls from './ui/WindowControls'
 import { IS_MAC } from '@/utils/platform'
@@ -160,7 +160,9 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
           onOpenFolder={handleOpenFolder}
           onCloneRepository={() => cloneDialog.setOpen(true)}
           onCmdMode={handleCmdMode}
-        />
+        >
+          <WelcomePlanBanner />
+        </WelcomeHero>
       )}
 
       <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} />

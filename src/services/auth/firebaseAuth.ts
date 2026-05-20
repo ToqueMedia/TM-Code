@@ -598,6 +598,17 @@ class FirebaseAuthService {
           `Extra: ${data.billing.extraUsageBalance}, Status: ${data.billing.status}`
         )
 
+        // Check if the welcome plan has expired — downgrade to explorer
+        // if the user's welcomePlanExpiresAt is in the past.
+        if (data.plan === 'vibe') {
+          const downgraded = await this.downgradeExpiredWelcomePlan()
+          if (downgraded) {
+            data.plan = 'explorer'
+            data.billing.tokenBudget = 1_500_000 // Explorer: 1.5M
+            data.billing.status = 'allowed'
+          }
+        }
+
         useBillingStore.getState().updateFromMe(data)
         useFeaturesStore.getState().updateFromMe(data.features)
 
@@ -703,6 +714,60 @@ class FirebaseAuthService {
   /** Best-effort profile field sync (fire-and-forget) */
   private syncProfile(uid: string, fields: Record<string, unknown>) {
     setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid), fields, { merge: true }).catch(() => {})
+  }
+
+  /**
+   * Persist the welcome plan claim to the user's Firestore document.
+   * Called once after activation so the backend `/v1/me` can read the plan
+   * on subsequent app launches — even if the activation endpoint is not
+   * yet deployed.
+   *
+   * Fire-and-forget: a failed write should never block the UI.
+   */
+  claimWelcomePlan(fingerprint: string): void {
+    if (!this.currentUser) return
+    this.syncProfile(this.currentUser.uid, {
+      userPlan: 'vibe',
+      welcomePlanClaimed: true,
+      welcomePlanFingerprint: fingerprint,
+      welcomePlanClaimedAt: Timestamp.now(),
+      welcomePlanExpiresAt: '2026-05-28',
+      updatedAt: Timestamp.now(),
+    })
+  }
+
+  /**
+   * If the user's plan was set by the welcome promo and the expiry date
+   * has passed, downgrade to 'explorer' in Firestore so the backend
+   * returns the correct plan on the next /v1/me call.
+   *
+   * Reads the user doc once, checks `welcomePlanExpiresAt`, and writes
+   * back `userPlan: 'explorer'` if expired. Silent no-op on errors.
+   */
+  private async downgradeExpiredWelcomePlan(): Promise<boolean> {
+    if (!this.currentUser) return false
+    try {
+      const snap = await getDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, this.currentUser.uid))
+      if (!snap.exists()) return false
+      const data = snap.data() as Record<string, unknown>
+      if (data.welcomePlanClaimed !== true) return false
+      const expiresAt = data.welcomePlanExpiresAt as string | undefined
+      if (!expiresAt) return false
+      if (new Date(expiresAt) >= new Date()) return false
+
+      // Expired — downgrade to explorer
+      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, this.currentUser.uid), {
+        userPlan: 'explorer',
+        welcomePlanExpired: true,
+        updatedAt: Timestamp.now(),
+      }, { merge: true })
+      console.info('[billing] Welcome plan expired — downgraded to explorer')
+      return true
+    } catch {
+      // Silent — worst case the user stays on 'vibe' until next /v1/me
+      // call with a backend-side check.
+      return false
+    }
   }
 }
 

@@ -24,9 +24,10 @@ interface WelcomeHeroProps {
   onOpenFolder: () => void
   onCloneRepository: () => void
   onCmdMode: () => void
+  children?: React.ReactNode
 }
 
-const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onCloneRepository, onCmdMode }) => {
+const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, onCloneRepository, onCmdMode, children }) => {
   const shortcuts = useSettingsStore(s => s.shortcuts)
 
   const featureCards: {
@@ -159,6 +160,8 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onNewProject, onOpenFolder, o
           {t('welcome.subtitle2')}
         </Text>
       </VStack>
+
+      {children}
 
       <Grid
         templateColumns={{ base: '1fr', md: 'repeat(2, 1fr)' }}
