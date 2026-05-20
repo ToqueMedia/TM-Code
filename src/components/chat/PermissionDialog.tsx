@@ -79,7 +79,7 @@ function getPreviewPath(toolName: string, args: Record<string, unknown>): string
     case 'create_file':
     case 'delete_file':
     case 'create_directory':
-      return (args.path as string) || null
+      return (args.file_path as string) || (args.path as string) || null
     case 'rename_file':
       // Path shown via content preview as "old → new", so skip here to avoid duplication
       return null

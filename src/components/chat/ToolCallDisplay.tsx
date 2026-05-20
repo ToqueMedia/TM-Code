@@ -85,23 +85,25 @@ function getToolLabel(toolName: string): string {
 
 function getInputSummary(toolName: string, input: Record<string, unknown>): string {
   const fileName = (p: string) => p.split('/').pop() || p
+  // Resolver: new tool calls use file_path, old sessions (pre-rename) use path.
+  const fp = String(input.file_path || input.path || '')
 
   switch (toolName) {
     case 'read_file':
-      return fileName(String(input.path || ''))
+      return fileName(fp)
     case 'write_file':
     case 'create_file':
-      return fileName(String(input.path || ''))
+      return fileName(fp)
     case 'edit_file':
-      return fileName(String(input.path || ''))
+      return fileName(fp)
     case 'delete_file':
-      return fileName(String(input.path || ''))
+      return fileName(fp)
     case 'rename_file':
       return `${fileName(String(input.oldPath || ''))} → ${input.newName}`
     case 'list_directory':
-      return fileName(String(input.path || '')) || 'project'
+      return fileName(fp) || 'project'
     case 'create_directory':
-      return fileName(String(input.path || ''))
+      return fileName(fp)
     case 'search_files':
       return `"${input.query}"`
     case 'execute_command': {
@@ -113,7 +115,7 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       return `${type} server`
     }
     case 'get_diagnostics':
-      return fileName(String(input.path || ''))
+      return fileName(fp)
     case 'read_dev_server_logs':
       return `last ${input.lines || 50} lines`
     case 'glob':
@@ -181,7 +183,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   const resultText = toolCall.result || ''
 
   // Syntax-highlight read_file output
-  const readFileLang = toolCall.toolName === 'read_file' ? detectLanguage(String(toolCall.input.path || '')) : null
+  const readFileLang = toolCall.toolName === 'read_file' ? detectLanguage(String(toolCall.input.file_path || toolCall.input.path || '')) : null
   const highlightedOutput = useMemo(() => {
     if (!readFileLang || !resultText) return null
     return highlightLines(resultText, readFileLang)
@@ -245,7 +247,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
           </Text>
         </Flex>
         <InlineDiff
-          filePath={toolCall.input.path as string}
+          filePath={(toolCall.input.file_path || toolCall.input.path) as string}
           oldContent={toolCall.diffOldContent || ''}
           newContent={toolCall.diffNewContent || ''}
           isNewFile={toolCall.isNewFile || false}

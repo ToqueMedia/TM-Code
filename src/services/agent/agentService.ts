@@ -1071,14 +1071,14 @@ class AgentService {
           for (const entry of validResults) {
             const name = entry.toolCall.name
             if (name !== 'write_file' && name !== 'create_file') continue
-            const args = entry.toolCall.args as { content?: unknown; path?: unknown }
+            const args = entry.toolCall.args as { content?: unknown; file_path?: unknown }
             const content = typeof args.content === 'string' ? args.content : null
             if (content && content.length > 0 && content.length < 100) {
               import('../../services/analytics').then(({ trackEvent }) => {
                 void trackEvent('rule_drop_signal', {
                   rule: 'short_overwrite',
                   tool: name,
-                  path: typeof args.path === 'string' ? args.path : 'unknown',
+                  path: typeof args.file_path === 'string' ? args.file_path : 'unknown',
                   content_length: content.length,
                   cumulative_tools: this.cumulativeToolCalls,
                   turn_index: this.turnIndex,
@@ -1801,7 +1801,7 @@ Developer message: ${displayText}
           if (block.type === 'tool_use' && block.name && block.input) {
             try {
               const args = block.input
-              const path = (args.path as string) || ''
+              const path = (args.file_path as string) || ''
               switch (block.name) {
                 case 'read_file': filesRead.add(path); break
                 case 'write_file': case 'create_file': case 'edit_file':
@@ -1938,11 +1938,11 @@ Developer message: ${displayText}
 
       switch (toolName) {
         case 'read_file':
-          return `[File read: ${args.path} (${lineCount} lines)]`
+          return `[File read: ${args.file_path} (${lineCount} lines)]`
         case 'search_files':
           return `[Search "${args.query}" in ${args.directory || 'project'}: ${lineCount} result lines]`
         case 'list_directory':
-          return `[Directory listing: ${args.path} (${lineCount} entries)]`
+          return `[Directory listing: ${args.file_path} (${lineCount} entries)]`
         case 'glob':
           return `[Glob "${args.pattern}": ${lineCount} matches]`
         case 'execute_command': {
@@ -1952,7 +1952,7 @@ Developer message: ${displayText}
         case 'web_fetch':
           return `[Fetched: ${args.url} (${result.length} chars)]`
         case 'get_diagnostics':
-          return `[Diagnostics: ${args.path} — ${result.split('\n')[0] || 'no issues'}]`
+          return `[Diagnostics: ${args.file_path} — ${result.split('\n')[0] || 'no issues'}]`
         default:
           return result.length > 200 ? result.slice(0, 150) + ' [... compacted]' : result
       }
@@ -1989,7 +1989,7 @@ Developer message: ${displayText}
    * Records a file access event. Maintains a deduplicated list ordered by recency.
    */
   private trackFileAccess(toolName: string, args: Record<string, unknown>) {
-    const path = (args.path as string) || ''
+    const path = (args.file_path as string) || ''
     if (!path) return
 
     let action: 'read' | 'modified' | null = null

@@ -39,7 +39,7 @@ const sanitizeForModel = sanitizeDiffForModel
  * instead of a generic "cannot be empty".
  */
 interface EditFileInput {
-  path?: string
+  file_path?: string
   old_string?: string
   new_string?: string
   // Common wrong names the diagnostic detects:
@@ -86,7 +86,7 @@ describe('Bug #4: edit_file uses old_string/new_string (Claude Code convention)'
 
   it('accepts the canonical names (old_string + new_string)', () => {
     const { oldStr, newStr, error } = normalizeEditFileInput({
-      path: '/x',
+      file_path: '/x',
       old_string: 'foo',
       new_string: 'bar',
     })
@@ -99,7 +99,7 @@ describe('Bug #4: edit_file uses old_string/new_string (Claude Code convention)'
     // Aliases removed. Anyone still passing old_str/new_str gets the
     // typo-aware error pointing them at the canonical names.
     const { oldStr, error } = normalizeEditFileInput({
-      path: '/x',
+      file_path: '/x',
       old_str: 'foo',
       new_str: 'bar',
     } as EditFileInput)
@@ -110,7 +110,7 @@ describe('Bug #4: edit_file uses old_string/new_string (Claude Code convention)'
 
   it('returns a key-aware diagnostic for camelCase typos (oldString, oldStr)', () => {
     const { error } = normalizeEditFileInput({
-      path: '/x',
+      file_path: '/x',
       oldString: 'foo',  // missing underscore
       new_string: 'bar',
     } as EditFileInput)
@@ -121,7 +121,7 @@ describe('Bug #4: edit_file uses old_string/new_string (Claude Code convention)'
 
   it('returns a key-aware diagnostic for the old_text editor convention', () => {
     const { error } = normalizeEditFileInput({
-      path: '/x',
+      file_path: '/x',
       old_text: 'foo',
       new_string: 'bar',
     } as EditFileInput)
@@ -130,14 +130,14 @@ describe('Bug #4: edit_file uses old_string/new_string (Claude Code convention)'
   })
 
   it('returns a generic "empty" error only when NO recognised wrong name is present', () => {
-    const { error } = normalizeEditFileInput({ path: '/x' })
+    const { error } = normalizeEditFileInput({ file_path: '/x' })
     expect(error).toMatch(/old_string cannot be empty/)
     expect(error).not.toMatch(/this tool expects/)
   })
 
   it('does NOT leak internal flags (_toolCallId, _abortSignal) into the error key list', () => {
     const { error } = normalizeEditFileInput({
-      path: '/x',
+      file_path: '/x',
       _toolCallId: 'tc_1',
       _abortSignal: {} as never,
       oldString: 'foo',

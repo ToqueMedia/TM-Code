@@ -282,7 +282,7 @@ class ToolExecutor {
     }
 
     // .env files are ALWAYS blocked — read, write, edit, delete
-    const filePath = (input.path || input.oldPath || '') as string
+    const filePath = (input.file_path || input.oldPath || '') as string
     if (this.isEnvFile(filePath) && ['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'].includes(toolName)) {
       return 'Blocked: .env files contain secrets and cannot be read or modified by the agent. Ask the developer what environment variables are needed, or create a .env.example with placeholder values.'
     }
@@ -315,7 +315,7 @@ class ToolExecutor {
     }
 
     // Sensitive files require explicit developer authorization
-    const isSensitive = toolName === 'read_file' && this.isSensitiveFile(input.path as string)
+    const isSensitive = toolName === 'read_file' && this.isSensitiveFile(input.file_path as string)
 
     // Dangerous commands: all commands in the DANGEROUS_COMMANDS list.
     // - If BLOCKED by user in Settings → rejected immediately (never runs)
@@ -357,7 +357,7 @@ class ToolExecutor {
       const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false)
       this.recordPermission(toolCallId, decision)
       if (!decision.approved) {
-        const target = (input.path || input.command || input.name || '') as string
+        const target = (input.file_path || input.command || input.name || '') as string
         const reason = decision.denyReason
           ? ` User says: ${decision.denyReason}`
           : ' Ask the user what they want instead or suggest an alternative approach.'
@@ -1192,17 +1192,17 @@ ${preview}
         input_schema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Absolute path to the directory to list' },
+            file_path: { type: 'string', description: 'Absolute path to the directory to list' },
             maxDepth: { type: 'number', description: 'Maximum depth to traverse. Default: 3' }
           },
-          required: ['path']
+          required: ['file_path']
         },
         concurrencySafe: true,
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.path as string)
+        this.validatePathWithinProject(input.file_path as string)
         const filter = { showHidden: false, maxDepth: (input.maxDepth as number) || 3 }
-        const tree = await invoke('build_file_tree', { rootPath: input.path, filter })
+        const tree = await invoke('build_file_tree', { rootPath: input.file_path, filter })
         return this.formatFileTreeCompact(tree as Record<string, unknown>)
       }
     })
@@ -1252,15 +1252,15 @@ ${preview}
         input_schema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Absolute path to the file to write' },
+            file_path: { type: 'string', description: 'Absolute path to the file to write' },
             content: { type: 'string', description: 'Complete content to write to the file' }
           },
-          required: ['path', 'content']
+          required: ['file_path', 'content']
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.path as string)
-        const path = input.path as string
+        this.validatePathWithinProject(input.file_path as string)
+        const path = input.file_path as string
         const newContent = input.content as string
 
         // Mechanical blocks on prompt-rule violations the model commits
@@ -1344,15 +1344,15 @@ ${preview}
         input_schema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Absolute path for the new file' },
+            file_path: { type: 'string', description: 'Absolute path for the new file' },
             content: { type: 'string', description: 'Initial content for the file. Default: empty' }
           },
-          required: ['path']
+          required: ['file_path']
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.path as string)
-        const path = input.path as string
+        this.validatePathWithinProject(input.file_path as string)
+        const path = input.file_path as string
         const content = (input.content as string) || ''
 
         // Mechanical blocks — see write_file for the rationale.
@@ -1412,16 +1412,16 @@ ${preview}
         input_schema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Absolute path of the directory to create' }
+            file_path: { type: 'string', description: 'Absolute path of the directory to create' }
           },
-          required: ['path']
+          required: ['file_path']
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.path as string)
-        await invoke('create_directories_all', { path: input.path })
+        this.validatePathWithinProject(input.file_path as string)
+        await invoke('create_directories_all', { path: input.file_path })
         this.refreshFileTree()
-        return `Directory created successfully: ${input.path}`
+        return `Directory created successfully: ${input.file_path}`
       }
     })
 
@@ -1433,22 +1433,22 @@ ${preview}
         input_schema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Absolute path to delete' }
+            file_path: { type: 'string', description: 'Absolute path to delete' }
           },
-          required: ['path']
+          required: ['file_path']
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.path as string)
+        this.validatePathWithinProject(input.file_path as string)
 
         // Capture checkpoint before deleting. Use injected _toolCallId so
         // concurrent invocations don't race a shared field.
         const tcId = input._toolCallId as string | undefined
         if (tcId) {
           try {
-            const content = await invoke<string>('read_file', { path: input.path as string })
+            const content = await invoke<string>('read_file', { path: input.file_path as string })
             await CheckpointService.getInstance().captureBeforeDelete(
-              input.path as string,
+              input.file_path as string,
               content,
               tcId,
             )
@@ -1458,13 +1458,13 @@ ${preview}
           }
         }
 
-        this.closeEditorIfOpen(input.path as string)
-        await invoke('delete_file_or_directory', { path: input.path })
+        this.closeEditorIfOpen(input.file_path as string)
+        await invoke('delete_file_or_directory', { path: input.file_path })
         this.refreshFileTree()
         // Deletes are filesystem mutations too — bump the version so the
         // next system-prompt build sees the file tree without the gone path.
-        import('../fsVersion').then(m => m.bumpFsVersion(`delete:${input.path}`)).catch(() => {})
-        return `Deleted successfully: ${input.path}`
+        import('../fsVersion').then(m => m.bumpFsVersion(`delete:${input.file_path}`)).catch(() => {})
+        return `Deleted successfully: ${input.file_path}`
       }
     })
 
@@ -1529,15 +1529,15 @@ ${preview}
         input_schema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Absolute path to the file to edit' },
+            file_path: { type: 'string', description: 'Absolute path to the file to edit' },
             old_string: { type: 'string', description: 'Exact text to find and replace. Must be unique in the file.' },
             new_string: { type: 'string', description: 'Text to replace old_string with. Use empty string to delete.' }
           },
-          required: ['path', 'old_string', 'new_string']
+          required: ['file_path', 'old_string', 'new_string']
         }
       },
       execute: async (input) => {
-        const path = input.path as string
+        const path = input.file_path as string
         // Field names align with Claude Code's Edit tool — the model uses
         // these from training. Background: the May 2026 todo-mimo /plan
         // session looped when the schema was old_str-only; the model
@@ -2043,16 +2043,16 @@ ${preview}
         input_schema: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Absolute path to a TS/JS file or the project root. If a file, checks only that file. If a directory, checks the whole project.' }
+            file_path: { type: 'string', description: 'Absolute path to a TS/JS file or the project root. If a file, checks only that file. If a directory, checks the whole project.' }
           },
-          required: ['path']
+          required: ['file_path']
         },
         // Spawns `npx tsc --noEmit` via execute_command. Read-only — no side effects on
         // the user's project. Safe to run in parallel with other read-only tools.
         concurrencySafe: true,
       },
       execute: async (input) => {
-        const filePath = input.path as string
+        const filePath = input.file_path as string
         this.validatePathWithinProject(filePath)
 
         // Use tsc --noEmit directly instead of the IDE's internal LSP
@@ -2447,7 +2447,7 @@ Project root: ${projectRoot}`
           },
           onToolCallStart: (childId, toolName, args) => {
             visibility.callbacks.onToolCallStart(childId, toolName, args)
-            const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
+            const target = (args.file_path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.query as string)
               || (args.pattern as string)
               || (args.url as string)
@@ -2611,7 +2611,7 @@ Project root: ${projectRoot}`
           },
           onToolCallStart: (childId, toolName, args) => {
             visibility.callbacks.onToolCallStart(childId, toolName, args)
-            const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
+            const target = (args.file_path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.query as string)
               || (args.pattern as string)
               || ''
@@ -4212,7 +4212,7 @@ Verify this implementation. Run tests, type checks, and any other relevant valid
           },
           onToolCallStart: (childId, toolName, args) => {
             visibility.callbacks.onToolCallStart(childId, toolName, args)
-            const target = (args.path as string)?.replace(/\\/g, '/').split('/').pop()
+            const target = (args.file_path as string)?.replace(/\\/g, '/').split('/').pop()
               || (args.command as string)?.slice(0, 40)
               || (args.query as string)
               || ''

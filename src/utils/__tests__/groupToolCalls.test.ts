@@ -33,7 +33,7 @@ describe('groupConsecutiveLargeReads — toolCalls.map path', () => {
 
   it('keeps non-read_large_result tools as singles', () => {
     const calls = [
-      tc({ id: 'a', toolName: 'read_file', input: { path: '/x' } }),
+      tc({ id: 'a', toolName: 'read_file', input: { file_path: '/x' } }),
       tc({ id: 'b', toolName: 'glob', input: { pattern: '**/*.ts' } }),
     ]
     const out = groupConsecutiveLargeReads(calls)
