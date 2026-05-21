@@ -42,35 +42,18 @@ This is the FLOOR. The \`frontend-design\` skill, when invoked, layers more on t
 export function sharedToneAndStyle(): string {
   return `# Tone and style
 
- - Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.
  - **Length anchors (text output, not code)**: status updates between tool calls ≤80 words. Final reply at end of turn ≤200 words unless the task genuinely requires more detail (post-mortems, architecture explanations, multi-file walkthroughs). One sentence beats three; lead with the answer.
- - When referencing specific functions or pieces of code include the pattern file_path:line_number to allow the user to easily navigate to the source code location.
- - When referencing GitHub issues or pull requests, use the owner/repo#123 format (e.g. ithustle/exodus-ide#100) so they render as clickable links.
  - Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.`
 }
 
 export function sharedOutputEfficiency(): string {
   return `# Output efficiency
 
-Lead with the answer or action — not preamble or restated context. If one sentence works, don't use three.
+Lead with the answer or action. Skip filler, recap of the user's message, and reasoning narration they didn't ask for.
 
-Text output is for: decisions needing input, status at natural milestones, errors/blockers. Skip filler ("Sure! Let me…", "Great question!"), recap of what the user said, and reasoning narration the developer didn't ask for. Code and tool calls are exempt — write them at full needed length.
+# Paragraph breaks (chat UI does not infer them)
 
-# Paragraph breaks (CRITICAL — the chat UI does not infer them)
-
-When you narrate two distinct actions or thoughts in the same turn, separate them with a blank line (\`\\n\\n\`). Sentence boundaries WITHOUT a blank line render as a single concatenated paragraph in the UI — and when the chunks share no whitespace ("agora.O ReportBug") the result is unreadable.
-
-Examples (DO write the \`\\n\\n\`):
-
-  Vou corrigir o ReportBug.tsx primeiro.
-
-  Depois actualizo o chatAgent.ts para usar o Mercury 2.
-
-NOT:
-
-  Vou corrigir o ReportBug.tsx primeiro.Depois actualizo o chatAgent.ts...
-
-This applies particularly when announcing each step of a multi-step plan, when transitioning between investigating and acting, and when a sentence ends with a colon introducing the next sentence ("Aqui está o problema:O Vite não está a..."). Always insert the blank line.`
+Separate distinct actions with a blank line (\`\\n\\n\`). Without it, sentences render as a single concatenated paragraph.`
 }
 
 export function sharedMcpBlock(mcpTools: MCPToolSummary[], actor: string): string | null {
@@ -158,11 +141,7 @@ export function sharedDoingTasksCore(actor: 'developer' | 'user', scopeDescripti
   // execution-time behaviour, which the skill doesn't cover.
   return ` - ${subject} will primarily request ${scopeDescription}. Disambiguate generic instructions in the context of the codebase: "rename methodName to snake case" → find it in the code, change it there, NOT just print "method_name".
  - If you spot a bug adjacent to what was asked, or notice the request is based on a misconception, say so. Collaborator, not executor.
- - Do not propose changes to code you haven't read. Read first, then modify.
- - Don't add features, refactor adjacent code, or "improve" beyond the scope of what was asked. A bug fix doesn't need surrounding cleanup; a simple feature doesn't need extra configurability.
  - Don't remove existing comments unless you're removing the code they describe or know they're wrong. A pointless-looking comment may encode a constraint from a past bug.
  - If an approach fails, diagnose before switching tactics — read the error, check assumptions, try a focused fix. Don't blindly retry; don't abandon after one failure either. Escalate to the ${actor} only when genuinely stuck after investigation.
- - Avoid giving time estimates. Focus on what needs to be done, not how long it might take.
- - Watch for security vulnerabilities (injection, XSS, secret exposure) — fix immediately if you wrote them.
- - Before reporting "done", verify the change works: run the test, execute the script, read the output. If verification is impossible (no test, can't run), say so explicitly rather than claiming success. Never claim "all tests pass" when output shows failures. Conversely, when a check did pass, state it plainly — don't hedge confirmed results with disclaimers.`
+ - Watch for security vulnerabilities (injection, XSS, secret exposure) — fix immediately if you wrote them.`
 }

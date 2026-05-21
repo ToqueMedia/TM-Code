@@ -87,10 +87,7 @@ ${sharedDoingTasksCore('user', 'tasks ranging from software engineering (bugs, f
 
 ## Dependencies
 
-Before importing an external package, confirm it is installed:
- - Check the project's dependency manifest (package.json, requirements.txt, Cargo.toml, go.mod, etc.).
- - Listed → proceed. Missing → install first, verify exit code 0, then import.
- - Write imports only for packages present in the manifest.`
+Before importing an external package, confirm it is in the dependency manifest. Missing → install via \`${EXECUTE_COMMAND}\` first, then import.`
 }
 
 export function getCmdExecutingActionsSection(): string {
@@ -114,22 +111,9 @@ When you hit an obstacle, do NOT use destructive actions as a shortcut to make i
 export function getCmdToolsSection(): string {
   return `# Using your tools
 
- - Do NOT use \`${EXECUTE_COMMAND}\` to run commands when a relevant dedicated tool is provided. Using dedicated tools allows the user to better understand and review your work. This is CRITICAL to assisting the user:
-   - To read files use \`${READ_FILE}\` instead of \`cat\`, \`head\`, \`tail\`, or \`sed\`
-   - To edit files use \`${EDIT_FILE}\` instead of \`sed\` or \`awk\`
-   - To create files use \`${CREATE_FILE}\` instead of \`cat\` with heredoc or \`echo\` redirection
-   - To search for files use \`${GLOB}\` instead of \`find\` or \`ls\`
-   - To search the content of files, use \`${SEARCH_FILES}\` instead of \`grep\` or \`rg\`
-   - Reserve using \`${EXECUTE_COMMAND}\` exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using \`${EXECUTE_COMMAND}\` if it is absolutely necessary.
- - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. It is helpful for planning your work and helping the user track your progress. Mark each task as completed as soon as you are done with the task. Do not batch up multiple tasks before marking them as completed.
- - When the user asks for multiple things with different scopes in a single message (e.g. "fix the bug AND refactor X AND add tests"), DO NOT interleave them. Concrete protocol:
-   1. List the distinct scopes you identified back to the user — explicitly, in your reply.
-   2. Recommend an order (usually: fixes first, refactors second, additions last) and explain why in one line.
-   3. Create the task list via \`${UPDATE_TASKS}\` with one task per scope, all \`pending\` initially.
-   4. Mark only the first as \`in_progress\` and work it to completion before touching the next. Update task statuses as each finishes.
-   This avoids the failure mode where partially-applied changes from scope A break verification of scope B and the user has to untangle a half-finished mix.
- - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
- - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.`
+ - Use dedicated tools (\`${READ_FILE}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`) instead of shell commands for file operations. Reserve \`${EXECUTE_COMMAND}\` for system commands and terminal operations only.
+ - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. Mark each task as completed as soon as you are done with it.
+ - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.`
 }
 
 export function getCmdEnvironmentSection(ctx: CmdPromptContext): string {
@@ -145,9 +129,7 @@ export function getCmdEnvironmentSection(ctx: CmdPromptContext): string {
 
 export function getCmdSessionGuidanceSection(): string {
   return `# Session guidance
- - When the user denies a tool call, ask why before adjusting your approach.
- - When the user needs to run a command themselves (e.g., interactive login like \`gcloud auth login\`), suggest they type \`! <command>\` in the prompt.
- - When the user asks for multiple things with different scopes in a single message (e.g. "fix the bug AND refactor X AND add tests"), DO NOT interleave them. List the distinct scopes back to the user, recommend an order (fixes first, refactors second, additions last), create a task list via \`update_tasks\` with one task per scope, and work them sequentially — finish one before starting the next.`
+ - When the user needs to run a command themselves (e.g., interactive login like \`gcloud auth login\`), suggest they type \`! <command>\` in the prompt.`
 }
 
 export function getCmdSecuritySection(): string {

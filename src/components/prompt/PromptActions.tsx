@@ -36,8 +36,11 @@ function PromptActions({
   const isPreviewActive = viewMode === 'preview'
   const isPreviewLoading = useLayoutStore(s => s.isPreviewServerLoading)
   const billingPlan = useBillingStore(s => s.plan)
-  // Plan label via i18n — falls back to raw plan name for unknown plans
-  const planLabel = t(`prompt.planLabel.${billingPlan}` as any) || billingPlan
+  // Plan label via i18n — falls back to raw plan name for unknown plans.
+  // Welcome plan shows the model name instead of the plan label.
+  const planLabel = billingPlan === 'welcome'
+    ? 'MiMo V2.5 Pro'
+    : t(`prompt.planLabel.${billingPlan}` as any) || billingPlan
 
   // ── Paperclip gate ──
   //
