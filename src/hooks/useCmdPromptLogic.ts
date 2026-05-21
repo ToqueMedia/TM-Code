@@ -35,7 +35,7 @@ const MENTION_MENU_LIMIT = 50
 /**
  * CMD-mode prompt logic — slash commands, message queue, @mention support.
  */
-const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/payments'])
+const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/payments', '/terminal'])
 
 // Control commands that must run immediately even while the agent is streaming.
 // They each stop the agent internally (stopAgent()) before doing their work, so

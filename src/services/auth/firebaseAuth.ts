@@ -181,6 +181,9 @@ class FirebaseAuthService {
   private unsubscribeUserDoc: (() => void) | null = null
   private lastBillingFetchMs = 0
   private authGeneration = 0
+  /** Tracks the uid for which device registration was last attempted.
+   *  Prevents redundant register-device calls on token refresh (~50min). */
+  private lastRegisteredUid: string | null = null
 
   static getInstance(): FirebaseAuthService {
     if (!FirebaseAuthService.instance) {
@@ -203,6 +206,7 @@ class FirebaseAuthService {
         store.setUser(null)
         useBillingStore.getState().reset()
         this.lastBillingFetchMs = 0 // allow immediate fetch on next login
+        this.lastRegisteredUid = null // allow re-registration on next login
         this.unsubscribeUserDocListener()
         return
       }
@@ -252,6 +256,7 @@ class FirebaseAuthService {
       // Load billing data from backend API.
       // Always fetch if not yet loaded (first login, after logout).
       // Throttle to 5 min for subsequent auth events (token refresh, tab focus).
+      // Backend /v1/me always reads fresh from Firestore (no KV cache).
       const billingState = useBillingStore.getState()
       const BILLING_THROTTLE_MS = 5 * 60 * 1000
       const now = Date.now()
@@ -269,6 +274,14 @@ class FirebaseAuthService {
       // server-side state. Without this, admin changes only surface on next
       // window-focus, network reconnect, or chat turn.
       this.subscribeToUserDoc(user.uid)
+
+      // Register device fingerprint for anti-abuse tracking (fire-and-forget).
+      // Skip if already registered for this uid (prevents redundant calls on
+      // token refresh which fires ~every 50min).
+      if (this.lastRegisteredUid !== user.uid) {
+        this.lastRegisteredUid = user.uid
+        this.registerDevice()
+      }
     })
   }
 
@@ -294,6 +307,7 @@ class FirebaseAuthService {
         if (!snap.exists()) return
         // Update the throttle stamp so onAuthStateChanged's token-refresh
         // path doesn't redundantly refetch within the next 5 minutes.
+        // Backend /v1/me reads fresh from Firestore on every call.
         this.lastBillingFetchMs = Date.now()
         this.fetchBillingInfo(expectedGen).catch(() => {})
       },
@@ -307,6 +321,36 @@ class FirebaseAuthService {
     if (this.unsubscribeUserDoc) {
       this.unsubscribeUserDoc()
       this.unsubscribeUserDoc = null
+    }
+  }
+
+  /**
+   * Register this device's hardware fingerprint with the backend for
+   * anti-abuse tracking (MAX_ACCOUNTS_PER_DEVICE). Fire-and-forget —
+   * failures are non-blocking.
+   */
+  private async registerDevice(): Promise<void> {
+    try {
+      const { getDeviceFingerprint } = await import('./deviceFingerprint')
+      const fingerprint = await getDeviceFingerprint()
+      if (!fingerprint) return
+
+      const token = await this.getIdToken()
+      if (!token) return
+
+      const workerUrl = resolveWorkerUrl()
+      const appCheck = await getAppCheckHeader()
+      await tauriFetch(`${workerUrl}/v1/auth/register-device`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          ...appCheck,
+        },
+        body: JSON.stringify({ fingerprint }),
+      })
+    } catch {
+      // Non-blocking — device registration failure should not prevent login
     }
   }
 
@@ -411,6 +455,8 @@ class FirebaseAuthService {
           if (downgraded) {
             data.plan = 'explorer'
             data.billing.tokenBudget = 1_500_000 // Explorer: 1.5M
+            data.billing.tokensConsumed = 0
+            data.billing.consumedPct = 0
             data.billing.status = 'allowed'
           }
         }
@@ -561,10 +607,33 @@ class FirebaseAuthService {
       if (!expiresAt) return false
       if (new Date(expiresAt) >= new Date()) return false
 
-      // Expired — downgrade to explorer
+      // Expired — downgrade to explorer. Reset tokenBudget so the backend
+      // doesn't return stale vibe-level tokensConsumed against the 1.5M
+      // explorer budget (which would make the user appear permanently
+      // over-budget). Cycle dates use the same anchor-based calculation as
+      // the backend's computeCycleDates() to stay consistent.
+      const now = new Date()
+      const anchorDay = Math.min(28, Math.max(1, now.getUTCDate()))
+      const todayDay = now.getUTCDate()
+      let startYear = now.getUTCFullYear()
+      let startMonth = now.getUTCMonth()
+      if (todayDay < anchorDay) {
+        startMonth -= 1
+        if (startMonth < 0) { startMonth = 11; startYear -= 1 }
+      }
+      const fmtUtc = (d: Date) => d.toISOString().slice(0, 10)
+      const cycleStart = fmtUtc(new Date(Date.UTC(startYear, startMonth, anchorDay)))
+      const cycleEnd = fmtUtc(new Date(new Date(Date.UTC(startYear, startMonth + 1, anchorDay)).getTime() - 86400000))
       await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, this.currentUser.uid), {
         userPlan: 'explorer',
         welcomePlanExpired: true,
+        tokenBudget: {
+          tokensConsumed: 0,
+          cycleStart,
+          cycleEnd,
+          billingAnchorDay: anchorDay,
+          extraUsageBalance: 0,
+        },
         updatedAt: Timestamp.now(),
       }, { merge: true })
       console.info('[billing] Welcome plan expired — downgraded to explorer')

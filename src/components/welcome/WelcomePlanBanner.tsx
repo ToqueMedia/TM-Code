@@ -1,6 +1,6 @@
 import { memo, useEffect, useState, useCallback, useRef } from 'react'
 import { Box, Flex, HStack, Text, VStack, SimpleGrid, Portal } from '@chakra-ui/react'
-import { FiZap, FiCheck, FiStar, FiX } from 'react-icons/fi'
+import { FiZap, FiCheck, FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { getDeviceFingerprint } from '@/services/auth/deviceFingerprint'
@@ -249,7 +249,6 @@ function WelcomePlanBanner() {
               t('welcomePlan.validUntil'),
             ]}
             price={t('welcomePlan.free')}
-            priceNote={t('welcomePlan.promoNote')}
             isActive={activated}
             isCurrent={false}
             isPromo={true}
@@ -584,23 +583,6 @@ function PlanCard({
             <FiCheck size={13} color={tokens.colors.accent.green} />
             <Text fontSize="12px" fontWeight="600" color={tokens.colors.accent.green}>
               {t('welcomePlan.activated')}
-            </Text>
-          </Flex>
-        )}
-
-        {isCurrent && (
-          <Flex
-            align="center"
-            gap="5px"
-            px={4}
-            py="8px"
-            borderRadius="10px"
-            bg="rgba(255, 255, 255, 0.04)"
-            border="1px solid rgba(255, 255, 255, 0.06)"
-          >
-            <FiStar size={12} color={tokens.colors.text.disabled} />
-            <Text fontSize="11px" fontWeight="500" color={tokens.colors.text.disabled}>
-              {t('welcomePlan.activeNow')}
             </Text>
           </Flex>
         )}

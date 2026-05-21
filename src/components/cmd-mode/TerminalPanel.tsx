@@ -100,12 +100,13 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx 
     termRef.current = term
     fitRef.current = fit
 
-    // Initial fit — defer to next frame so the container has dimensions.
+    // Initial fit + focus — defer to next frame so the container has dimensions.
     requestAnimationFrame(() => {
       try {
         fit.fit()
+        term.focus()
       } catch (err) {
-        logger.warn('terminal-panel', 'initial fit failed:', err)
+        logger.warn('terminal-panel', 'initial fit/focus failed:', err)
       }
     })
 

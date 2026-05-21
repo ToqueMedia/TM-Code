@@ -589,6 +589,8 @@ pub fn run() {
     let fim_state = commands::ai_completion::FimState::new();
     let pty_map: commands::terminal::PtySessionMap =
         std::sync::Mutex::new(std::collections::HashMap::new());
+    let child_map: commands::terminal::PtyChildMap =
+        std::sync::Mutex::new(std::collections::HashMap::new());
 
     tauri::Builder::default()
         .manage(command_history)
@@ -599,6 +601,7 @@ pub fn run() {
         .manage(http_client)
         .manage(fim_state)
         .manage(pty_map)
+        .manage(child_map)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())

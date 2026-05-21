@@ -32,7 +32,9 @@ export function useBillingRefresh(): void {
       const now = Date.now()
       if (now - lastRefreshAt.current < DEBOUNCE_MS) return
       lastRefreshAt.current = now
-      // Fire-and-forget — failures are handled inside fetchBillingInfo
+      // Fire-and-forget — failures are handled inside fetchBillingInfo.
+      // Backend /v1/me always reads fresh from Firestore (no KV cache),
+      // so stale billing data after plan changes is not a concern.
       FirebaseAuthService.getInstance().fetchBillingInfo().catch(err => {
         console.warn('[useBillingRefresh] fetchBillingInfo failed:', err)
       })
