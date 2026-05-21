@@ -95,9 +95,10 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
 
   const truncatePath = (path: string, maxLen = 38) => {
     if (path.length <= maxLen) return path
-    const parts = path.split('/')
+    const parts = path.split(/[/\\]/)
     if (parts.length <= 3) return '...' + path.slice(-maxLen)
-    return parts[0] + '/.../' + parts.slice(-2).join('/')
+    const sep = path.includes('\\') ? '\\' : '/'
+    return parts[0] + sep + '...' + sep + parts.slice(-2).join(sep)
   }
 
   // Split recent projects into CMD mode and IDE mode groups

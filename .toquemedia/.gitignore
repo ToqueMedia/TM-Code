@@ -1,0 +1,8 @@
+# Agent recovery snapshots — throwaway state, never source of truth.
+checkpoints/
+# Conversation history — may contain sensitive prompts or pasted code.
+sessions/
+# Per-turn queue operation log — debug-only, not portable.
+queue-operations.jsonl
+# Unsaved editor buffers — recovery state, never source of truth.
+editor-state.json

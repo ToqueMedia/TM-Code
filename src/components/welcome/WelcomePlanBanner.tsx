@@ -1,6 +1,6 @@
 import { memo, useEffect, useState, useCallback, useRef } from 'react'
-import { Box, Flex, HStack, Text, VStack } from '@chakra-ui/react'
-import { FiZap, FiX } from 'react-icons/fi'
+import { Box, Flex, HStack, Text, VStack, SimpleGrid, Portal } from '@chakra-ui/react'
+import { FiZap, FiCheck, FiStar, FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { getDeviceFingerprint } from '@/services/auth/deviceFingerprint'
@@ -9,18 +9,17 @@ import { tauriFetch } from '@/services/tauriFetch'
 import { resolveWorkerUrl } from '@/utils/devUrls'
 import FirebaseAuthService, { getAppCheckHeader } from '@/services/auth/firebaseAuth'
 
-const DISMISS_KEY = 'tm-welcome-plan-dismissed'
 const EXPIRY_DATE = new Date('2026-05-28T23:59:59Z')
+const DISMISS_KEY = 'tm-welcome-plan-dismissed-v2'
 
 // Simulated MeResponse for when the backend endpoint is not yet deployed (404).
-// Matches the Vibe plan structure so the billing store hydrates correctly.
 const WELCOME_PLAN_RESPONSE: MeResponse = {
   plan: 'vibe',
   isActive: true,
   billing: {
     consumedPct: 0,
     tokensConsumed: 0,
-    tokenBudget: 10_820_000, // Vibe: 10.82M
+    tokenBudget: 10_820_000,
     cycleEnd: '2026-05-28',
     extraUsageBalance: 0,
     status: 'allowed',
@@ -39,7 +38,7 @@ function dismiss(): void {
   try { sessionStorage.setItem(DISMISS_KEY, '1') } catch { /* ignore */ }
 }
 
-/** Minimal runtime guard — ensures the billing sub-object exists. */
+/** Minimal runtime guard */
 function isValidMeResponse(data: unknown): data is MeResponse {
   if (typeof data !== 'object' || data === null) return false
   const d = data as Record<string, unknown>
@@ -58,15 +57,13 @@ function isValidMeResponse(data: unknown): data is MeResponse {
 
 function WelcomePlanBanner() {
   const [visible, setVisible] = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
   const [activating, setActivating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [activated, setActivated] = useState(false)
   const plan = useBillingStore(s => s.plan)
   const isLoaded = useBillingStore(s => s.isLoaded)
   const updateFromMe = useBillingStore(s => s.updateFromMe)
-  // Guard: once the banner has been shown, never re-show even if the plan
-  // temporarily reverts to 'explorer' (e.g. from a stale /v1/me response
-  // triggered by the Firestore onSnapshot listener after claimWelcomePlan).
   const hasShown = useRef(false)
 
   useEffect(() => {
@@ -79,6 +76,20 @@ function WelcomePlanBanner() {
     hasShown.current = true
     setVisible(true)
   }, [isLoaded, plan])
+
+  const requestClose = useCallback(() => {
+    setShowConfirm(true)
+  }, [])
+
+  const confirmClose = useCallback(() => {
+    dismiss()
+    setShowConfirm(false)
+    setVisible(false)
+  }, [])
+
+  const cancelClose = useCallback(() => {
+    setShowConfirm(false)
+  }, [])
 
   const handleActivate = useCallback(async () => {
     setActivating(true)
@@ -116,13 +127,11 @@ function WelcomePlanBanner() {
         setActivated(true)
         setTimeout(() => setVisible(false), 1800)
       } else if (res.status === 404) {
-        // Endpoint not yet deployed — activate locally + persist to Firestore
         updateFromMe(WELCOME_PLAN_RESPONSE)
         authService.claimWelcomePlan(fingerprint)
         setActivated(true)
         setTimeout(() => setVisible(false), 1800)
       } else if (res.status === 409) {
-        // Already claimed on another account with this fingerprint
         setVisible(false)
       } else {
         setError(t('welcomePlan.error'))
@@ -134,218 +143,469 @@ function WelcomePlanBanner() {
     }
   }, [updateFromMe])
 
-  // Reserve vertical space even when hidden to prevent layout shift
-  if (!visible) return <Box h="0" />
+  if (!visible) return null
 
   return (
-    <Box
-      position="relative"
-      w="100%"
-      maxW="720px"
-      mt={6}
-      data-no-drag
-      css={{
-        animation: 'promoFadeIn 0.4s ease-out',
-        '@keyframes promoFadeIn': {
-          from: { opacity: '0', transform: 'translateY(8px)' },
-          to: { opacity: '1', transform: 'translateY(0)' },
-        },
-      }}
-    >
-      {/* Outer glow container */}
+    <Portal>
+      {/* Backdrop */}
       <Box
-        position="absolute"
-        inset="-1px"
-        borderRadius="16px"
-        bg={`linear-gradient(135deg, ${tokens.colors.accent.primary}60, ${tokens.colors.accent.purple}40, ${tokens.colors.accent.primary}60)`}
-        opacity={0.6}
-        css={{ filter: 'blur(1px)' }}
+        position="fixed"
+        inset={0}
+        bg="rgba(0, 0, 0, 0.55)"
+        backdropFilter="blur(6px)"
+        zIndex={1000}
+        css={{
+          animation: 'planOverlayIn 0.3s ease-out',
+          '@keyframes planOverlayIn': {
+            from: { opacity: '0' },
+            to: { opacity: '1' },
+          },
+        }}
+        onClick={requestClose}
       />
 
-      {/* Card */}
-      <Box
-        position="relative"
-        bg="rgba(15, 15, 15, 0.95)"
-        backdropFilter="blur(20px)"
-        borderRadius="16px"
-        overflow="hidden"
+      {/* Floating card */}
+      <Flex
+        position="fixed"
+        top="50%"
+        left="50%"
+        transform="translate(-50%, -50%)"
+        zIndex={1001}
+        direction="column"
+        align="center"
+        data-no-drag
+        css={{
+          animation: 'planCardIn 0.45s cubic-bezier(0.16, 1, 0.3, 1)',
+          '@keyframes planCardIn': {
+            from: { opacity: '0', transform: 'translate(-50%, -48%) scale(0.95)' },
+            to: { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
+          },
+        }}
       >
-        {/* Top gradient line */}
-        <Box
-          h="2px"
-          bg={`linear-gradient(90deg, transparent, ${tokens.colors.accent.primary}, ${tokens.colors.accent.purple}, transparent)`}
-        />
-
-        <Flex align="center" px={6} py={5} gap={5}>
-          {/* Left: Mimo badge */}
-          <Flex
-            direction="column"
-            align="center"
-            gap="6px"
-            flexShrink={0}
+        {/* Close button */}
+        <Flex justify="flex-end" w="100%" maxW="680px" mb={2}>
+          <Box
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            w="28px"
+            h="28px"
+            borderRadius="8px"
+            cursor="pointer"
+            bg="rgba(255, 255, 255, 0.06)"
+            border="1px solid rgba(255, 255, 255, 0.08)"
+            color={tokens.colors.text.secondary}
+            _hover={{
+              bg: 'rgba(255, 255, 255, 0.1)',
+              color: tokens.colors.text.primary,
+            }}
+            transition={`all ${tokens.transition.fast}`}
+            onClick={requestClose}
           >
-            <Box
-              w="48px"
-              h="48px"
-              borderRadius="14px"
-              bg={`linear-gradient(135deg, ${tokens.colors.accent.primary}20, ${tokens.colors.accent.purple}20)`}
-              border={`1px solid ${tokens.colors.accent.primary}30`}
-              display="flex"
-              alignItems="center"
-              justifyContent="center"
-              position="relative"
-            >
-              <Box
-                position="absolute"
-                inset="0"
-                borderRadius="14px"
-                bg={`radial-gradient(circle at 30% 30%, ${tokens.colors.accent.primary}15, transparent 70%)`}
-              />
-              <Text fontSize="20px" fontWeight="900" color={tokens.colors.accent.primary} position="relative">
-                M
-              </Text>
-            </Box>
-          </Flex>
+            <FiX size={14} />
+          </Box>
+        </Flex>
 
-          {/* Center: content */}
-          <VStack align="stretch" gap="6px" flex={1} minW={0}>
-            <HStack gap={2} align="center">
-              <Text
-                fontSize="14px"
-                fontWeight="700"
-                color={tokens.colors.text.primary}
-                lineHeight="1.3"
-                letterSpacing="-0.2px"
-              >
-                {t('welcomePlan.title')}
-              </Text>
+        {/* Section label */}
+        <Text
+          fontSize="12px"
+          fontWeight="600"
+          color={tokens.colors.text.disabled}
+          textTransform="uppercase"
+          letterSpacing="0.08em"
+          mb={4}
+        >
+          {t('welcomePlan.sectionLabel')}
+        </Text>
+
+        <SimpleGrid columns={{ base: 1, md: 2 }} gap={4} w="100%" maxW="680px">
+          {/* Explorer — Free (active plan) */}
+          <PlanCard
+            name={t('welcomePlan.explorerName')}
+            badge={t('welcomePlan.explorerBadge')}
+            badgeColor={tokens.colors.accent.green}
+            icon={FiCheck}
+            description={t('welcomePlan.explorerDesc')}
+            features={[
+              t('welcomePlan.explorerFeature1'),
+              t('welcomePlan.explorerFeature2'),
+            ]}
+            price={t('welcomePlan.free')}
+            isActive={true}
+            isCurrent={plan === 'explorer' && !activated}
+            accentColor={tokens.colors.accent.green}
+          />
+
+          {/* Vibe — Promotional */}
+          <PlanCard
+            name={t('welcomePlan.vibName')}
+            badge={t('welcomePlan.badge')}
+            badgeColor={tokens.colors.accent.primary}
+            icon={FiZap}
+            description={t('welcomePlan.description')}
+            features={[
+              t('welcomePlan.model'),
+              t('welcomePlan.tokens'),
+              t('welcomePlan.validUntil'),
+            ]}
+            price={t('welcomePlan.free')}
+            priceNote={t('welcomePlan.promoNote')}
+            isActive={activated}
+            isCurrent={false}
+            isPromo={true}
+            accentColor={tokens.colors.accent.primary}
+            activating={activating}
+            onActivate={handleActivate}
+          />
+        </SimpleGrid>
+
+        {error && (
+          <Text fontSize="11px" color={tokens.colors.accent.red} lineHeight="1.4" mt={3}>
+            {error}
+          </Text>
+        )}
+      </Flex>
+
+      {/* Confirmation dialog */}
+      {showConfirm && (
+        <Portal>
+          <Box
+            position="fixed"
+            inset={0}
+            bg="rgba(0, 0, 0, 0.6)"
+            zIndex={1002}
+            onClick={cancelClose}
+          />
+          <Flex
+            position="fixed"
+            top="50%"
+            left="50%"
+            transform="translate(-50%, -50%)"
+            zIndex={1003}
+            direction="column"
+            bg={tokens.colors.bg.overlay}
+            backdropFilter="blur(24px)"
+            border={`1px solid ${tokens.colors.border.glass}`}
+            borderRadius="16px"
+            p={6}
+            maxW="380px"
+            w="90%"
+            gap={4}
+            css={{
+              animation: 'dialogIn 0.2s ease-out',
+              '@keyframes dialogIn': {
+                from: { opacity: '0', transform: 'translate(-50%, -48%) scale(0.96)' },
+                to: { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
+              },
+            }}
+          >
+            <Text fontSize="15px" fontWeight="700" color={tokens.colors.text.primary}>
+              {t('welcomePlan.confirmTitle')}
+            </Text>
+            <Text fontSize="13px" color={tokens.colors.text.muted} lineHeight="1.6">
+              {t('welcomePlan.confirmDesc')}
+            </Text>
+            <HStack gap={3} justify="flex-end">
               <Box
-                px="8px"
-                py="2px"
-                borderRadius="6px"
-                bg={`${tokens.colors.accent.primary}18`}
-                border={`1px solid ${tokens.colors.accent.primary}30`}
+                as="button"
+                px={4}
+                py="8px"
+                borderRadius="8px"
+                fontSize="12px"
+                fontWeight="500"
+                color={tokens.colors.text.secondary}
+                bg="rgba(255, 255, 255, 0.05)"
+                border={`1px solid ${tokens.colors.border.glass}`}
+                cursor="pointer"
+                _hover={{ bg: 'rgba(255, 255, 255, 0.08)' }}
+                transition={`all ${tokens.transition.fast}`}
+                onClick={cancelClose}
               >
-                <Text
-                  fontSize="9px"
-                  fontWeight="700"
-                  color={tokens.colors.accent.primary}
-                  textTransform="uppercase"
-                  letterSpacing="0.06em"
-                >
-                  {t('welcomePlan.badge')}
-                </Text>
+                {t('welcomePlan.confirmCancel')}
+              </Box>
+              <Box
+                as="button"
+                px={4}
+                py="8px"
+                borderRadius="8px"
+                fontSize="12px"
+                fontWeight="600"
+                color="#fff"
+                bg={`linear-gradient(135deg, ${tokens.colors.accent.primary}, ${tokens.colors.accent.primaryDark})`}
+                cursor="pointer"
+                _hover={{ filter: 'brightness(1.12)' }}
+                transition={`all ${tokens.transition.fast}`}
+                onClick={confirmClose}
+              >
+                {t('welcomePlan.confirmClose')}
               </Box>
             </HStack>
-
-            <Text fontSize="12px" color={tokens.colors.text.muted} lineHeight="1.5" maxW="400px">
-              {t('welcomePlan.description')}
-            </Text>
-
-            {/* Feature pills */}
-            <HStack gap={2} flexWrap="wrap">
-              <FeatureTag text={t('welcomePlan.model')} />
-              <FeatureTag text={t('welcomePlan.tokens')} />
-              <FeatureTag text={t('welcomePlan.validUntil')} />
-            </HStack>
-
-            {error && (
-              <Text fontSize="11px" color={tokens.colors.accent.red} lineHeight="1.4">
-                {error}
-              </Text>
-            )}
-          </VStack>
-
-          {/* Right: CTA + dismiss */}
-          <Flex direction="column" align="flex-end" gap={2} flexShrink={0}>
-            <Box
-              as="button"
-              aria-label="Dismiss"
-              display="flex"
-              alignItems="center"
-              justifyContent="center"
-              w="20px"
-              h="20px"
-              borderRadius="4px"
-              cursor="pointer"
-              color={tokens.colors.text.disabled}
-              _hover={{ bg: 'rgba(255,255,255,0.06)', color: tokens.colors.text.secondary }}
-              transition={`all ${tokens.transition.fast}`}
-              onClick={() => { dismiss(); setVisible(false) }}
-            >
-              <FiX size={10} />
-            </Box>
-
-            <Box
-              as="button"
-              display="flex"
-              alignItems="center"
-              justifyContent="center"
-              gap="6px"
-              px={5}
-              py="10px"
-              borderRadius="10px"
-              bg={activated
-                ? 'rgba(46, 160, 67, 0.15)'
-                : `linear-gradient(135deg, ${tokens.colors.accent.primary}, ${tokens.colors.accent.primaryDark})`
-              }
-              border={activated ? `1px solid ${tokens.colors.accent.green}30` : 'none'}
-              color={activated ? tokens.colors.accent.green : '#fff'}
-              fontSize="13px"
-              fontWeight="600"
-              letterSpacing="-0.1px"
-              cursor={activating || activated ? 'default' : 'pointer'}
-              opacity={activating ? 0.7 : 1}
-              transition={`all ${tokens.transition.normal}`}
-              _hover={activating || activated ? {} : {
-                filter: 'brightness(1.12)',
-                boxShadow: `0 6px 24px ${tokens.colors.accent.primary}35`,
-                transform: 'translateY(-1px)',
-              }}
-              _active={activating || activated ? {} : { transform: 'translateY(0)' }}
-              onClick={activating || activated ? undefined : handleActivate}
-              whiteSpace="nowrap"
-            >
-              {activated ? (
-                <>
-                  <FiZap size={14} />
-                  {t('welcomePlan.activated')}
-                </>
-              ) : activating ? (
-                t('welcomePlan.activating')
-              ) : (
-                <>
-                  <FiZap size={14} />
-                  {t('welcomePlan.activate')}
-                </>
-              )}
-            </Box>
           </Flex>
-        </Flex>
-      </Box>
-    </Box>
+        </Portal>
+      )}
+    </Portal>
   )
 }
 
-function FeatureTag({ text }: { text: string }) {
+// ── Plan Card Component ──
+
+interface PlanCardProps {
+  name: string
+  badge: string
+  badgeColor: string
+  icon: typeof FiZap
+  description: string
+  features: string[]
+  price: string
+  priceNote?: string
+  isActive: boolean
+  isCurrent: boolean
+  isPromo?: boolean
+  accentColor: string
+  activating?: boolean
+  onActivate?: () => void
+}
+
+function PlanCard({
+  name,
+  badge,
+  badgeColor,
+  icon: Icon,
+  description,
+  features,
+  price,
+  priceNote,
+  isActive,
+  isCurrent,
+  isPromo,
+  accentColor,
+  activating,
+  onActivate,
+}: PlanCardProps) {
   return (
-    <Flex
-      align="center"
-      px="10px"
-      py="4px"
-      borderRadius="8px"
-      bg="rgba(255, 255, 255, 0.03)"
-      border="1px solid rgba(255, 255, 255, 0.06)"
+    <Box
+      bg={isPromo ? 'rgba(255, 255, 255, 0.06)' : 'rgba(255, 255, 255, 0.04)'}
+      backdropFilter="blur(20px)"
+      border="1px solid"
+      borderColor={isCurrent ? `${accentColor}50` : isActive && !isCurrent ? `${tokens.colors.accent.green}40` : 'rgba(255, 255, 255, 0.08)'}
+      borderRadius="20px"
+      p={6}
+      position="relative"
+      overflow="hidden"
+      cursor={isPromo && !isActive ? 'pointer' : 'default'}
+      _hover={isPromo && !isActive ? {
+        transform: 'translateY(-4px)',
+        borderColor: `${accentColor}70`,
+        bg: 'rgba(255, 255, 255, 0.09)',
+        boxShadow: `0 20px 40px -12px ${accentColor}25`,
+      } : isCurrent ? {
+        borderColor: `${accentColor}60`,
+      } : {}}
+      transition="all 0.35s cubic-bezier(0.4, 0, 0.2, 1)"
+      onClick={isPromo && !isActive && onActivate ? onActivate : undefined}
     >
+      {/* Top gradient line */}
+      <Box
+        position="absolute"
+        top="0"
+        left="0"
+        right="0"
+        height="2px"
+        background={`linear-gradient(90deg, transparent, ${accentColor}, transparent)`}
+        opacity={0.7}
+      />
+
+      {/* Corner glow */}
+      <Box
+        position="absolute"
+        top="-40px"
+        right="-40px"
+        width="120px"
+        height="120px"
+        bg={`radial-gradient(circle, ${accentColor}12 0%, transparent 70%)`}
+        borderRadius="full"
+        pointerEvents="none"
+      />
+
+      {/* Header: icon + badge */}
+      <Flex align="center" gap={3} mb={4}>
+        <Flex
+          w="40px"
+          h="40px"
+          borderRadius="12px"
+          align="center"
+          justify="center"
+          bg={`${accentColor}12`}
+          border={`1px solid ${accentColor}25`}
+          flexShrink={0}
+        >
+          <Icon size={18} color={accentColor} />
+        </Flex>
+        <VStack align="flex-start" gap={0} flex={1} minW={0}>
+          <Text
+            fontSize="15px"
+            fontWeight="700"
+            color={tokens.colors.text.primary}
+            lineHeight="1.2"
+          >
+            {name}
+          </Text>
+          <HStack gap={2} align="center">
+            <Box
+              px="6px"
+              py="1px"
+              borderRadius="4px"
+              bg={`${badgeColor}18`}
+              border={`1px solid ${badgeColor}30`}
+            >
+              <Text
+                fontSize="9px"
+                fontWeight="700"
+                color={badgeColor}
+                textTransform="uppercase"
+                letterSpacing="0.06em"
+              >
+                {badge}
+              </Text>
+            </Box>
+            {isCurrent && (
+              <Box
+                px="6px"
+                py="1px"
+                borderRadius="4px"
+                bg={`${tokens.colors.accent.green}15`}
+                border={`1px solid ${tokens.colors.accent.green}25`}
+              >
+                <Text
+                  fontSize="9px"
+                  fontWeight="600"
+                  color={tokens.colors.accent.green}
+                  textTransform="uppercase"
+                  letterSpacing="0.04em"
+                >
+                  {t('welcomePlan.current')}
+                </Text>
+              </Box>
+            )}
+          </HStack>
+        </VStack>
+      </Flex>
+
+      {/* Description */}
       <Text
-        fontSize="10px"
-        fontWeight="500"
-        color={tokens.colors.text.subtle}
-        letterSpacing="0.01em"
+        fontSize="12px"
+        color={tokens.colors.text.muted}
+        lineHeight="1.5"
+        mb={4}
+        css={{
+          display: '-webkit-box',
+          WebkitLineClamp: 2,
+          WebkitBoxOrient: 'vertical',
+          overflow: 'hidden',
+        }}
       >
-        {text}
+        {description}
       </Text>
-    </Flex>
+
+      {/* Features */}
+      <VStack align="stretch" gap={2} mb={5}>
+        {features.map((feat, i) => (
+          <HStack key={i} gap={2} align="center">
+            <Box
+              w="4px"
+              h="4px"
+              borderRadius="full"
+              bg={accentColor}
+              opacity={0.6}
+              flexShrink={0}
+            />
+            <Text fontSize="11px" color={tokens.colors.text.subtle} lineHeight="1.4">
+              {feat}
+            </Text>
+          </HStack>
+        ))}
+      </VStack>
+
+      {/* Price + CTA */}
+      <Flex align="center" justify="space-between" gap={3}>
+        <VStack align="flex-start" gap={0}>
+          <Text fontSize="18px" fontWeight="800" color={tokens.colors.text.primary}>
+            {price}
+          </Text>
+          {priceNote && (
+            <Text fontSize="10px" color={tokens.colors.text.disabled} lineHeight="1.3">
+              {priceNote}
+            </Text>
+          )}
+        </VStack>
+
+        {isPromo && !isActive && (
+          <Box
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            gap="6px"
+            px={5}
+            py="9px"
+            borderRadius="10px"
+            bg={activating
+              ? `${accentColor}30`
+              : `linear-gradient(135deg, ${accentColor}, ${tokens.colors.accent.primaryDark})`
+            }
+            color="#fff"
+            fontSize="12px"
+            fontWeight="600"
+            letterSpacing="-0.1px"
+            cursor={activating ? 'default' : 'pointer'}
+            opacity={activating ? 0.7 : 1}
+            transition={`all ${tokens.transition.normal}`}
+            _hover={activating ? {} : {
+              filter: 'brightness(1.15)',
+              boxShadow: `0 4px 16px ${accentColor}30`,
+            }}
+            whiteSpace="nowrap"
+            onClick={(e) => { e.stopPropagation(); onActivate?.() }}
+          >
+            <FiZap size={13} />
+            {activating ? t('welcomePlan.activating') : t('welcomePlan.activate')}
+          </Box>
+        )}
+
+        {isActive && (
+          <Flex
+            align="center"
+            gap="5px"
+            px={4}
+            py="8px"
+            borderRadius="10px"
+            bg={`${tokens.colors.accent.green}12`}
+            border={`1px solid ${tokens.colors.accent.green}20`}
+          >
+            <FiCheck size={13} color={tokens.colors.accent.green} />
+            <Text fontSize="12px" fontWeight="600" color={tokens.colors.accent.green}>
+              {t('welcomePlan.activated')}
+            </Text>
+          </Flex>
+        )}
+
+        {isCurrent && (
+          <Flex
+            align="center"
+            gap="5px"
+            px={4}
+            py="8px"
+            borderRadius="10px"
+            bg="rgba(255, 255, 255, 0.04)"
+            border="1px solid rgba(255, 255, 255, 0.06)"
+          >
+            <FiStar size={12} color={tokens.colors.text.disabled} />
+            <Text fontSize="11px" fontWeight="500" color={tokens.colors.text.disabled}>
+              {t('welcomePlan.activeNow')}
+            </Text>
+          </Flex>
+        )}
+      </Flex>
+    </Box>
   )
 }
 
