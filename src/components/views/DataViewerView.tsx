@@ -72,12 +72,18 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
     setDetectReady(false)
     dataViewerService
       .detectSources(project)
-      .then((result) => {
+      .then(async (result) => {
         if (cancelled) return
-        setHasDev(result.hasDevDb)
+        // Even though Dev is "available", check if a DB file actually exists.
+        // If not, disable Dev so the user sees "no database" instead of loading forever.
+        const devDbExists = result.hasDevDb
+          ? await dataViewerService.hasDevDatabase(project.path)
+          : false
+        if (cancelled) return
+        setHasDev(devDbExists)
         setHasProd(result.hasProdConfig)
         const fallback: DataSource =
-          result.hasDevDb ? 'dev' : result.hasProdConfig ? 'prod' : 'dev'
+          devDbExists ? 'dev' : result.hasProdConfig ? 'prod' : 'dev'
         hydrate(project.id, fallback)
         setDetectReady(true)
       })

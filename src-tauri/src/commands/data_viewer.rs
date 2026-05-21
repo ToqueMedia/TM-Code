@@ -45,8 +45,8 @@ fn open_dev_db(project_path: &str) -> Result<Connection, String> {
     if !project.exists() || !project.is_dir() {
         return Err(format!("Project path does not exist: {}", project_path));
     }
-    let canonical_project = canonicalize_path(project)
-        .map_err(|e| format!("Invalid project path: {}", e))?;
+    let canonical_project =
+        canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
 
     let db_path = canonical_project.join("dev.db");
     if !db_path.starts_with(&canonical_project) {
@@ -106,9 +106,7 @@ fn value_ref_to_cell(v: ValueRef) -> CellValue {
         ValueRef::Null => CellValue::Null,
         ValueRef::Integer(i) => CellValue::Integer(i),
         ValueRef::Real(f) => CellValue::Real(f),
-        ValueRef::Text(bytes) => {
-            CellValue::Text(String::from_utf8_lossy(bytes).into_owned())
-        }
+        ValueRef::Text(bytes) => CellValue::Text(String::from_utf8_lossy(bytes).into_owned()),
         ValueRef::Blob(bytes) => CellValue::Blob(BlobMarker {
             binary: bytes.len() as u64,
         }),

@@ -41,7 +41,11 @@ const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/payments'
 // They each stop the agent internally (stopAgent()) before doing their work, so
 // queueing them would defeat their purpose — /exit would wait for the very task
 // it's supposed to cancel.
-const CONTROL_COMMANDS_BYPASS_QUEUE = new Set(['/exit', '/new', '/clear'])
+const CONTROL_COMMANDS_BYPASS_QUEUE = new Set(['/exit', '/new', '/clear', '/terminal'])
+
+function isTerminalToggleCommand(input: string): boolean {
+  return input.trim() === '/terminal'
+}
 
 export function useCmdPromptLogic() {
   const [input, setInput] = useState('')
@@ -80,6 +84,9 @@ export function useCmdPromptLogic() {
   })
 
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Pending shell command from `! ` prefix — stored in ref, consumed by effect
+  // that waits for PTY session readiness instead of polling.
+  const pendingShellCmdRef = useRef<string | null>(null)
   // History is kept in-memory for instant ArrowUp/Down; IDB is only touched
   // on mount (load) and send (write). See src/services/cmdPromptHistory.ts.
   const historyRef = useRef<string[]>([])
@@ -123,6 +130,19 @@ export function useCmdPromptLogic() {
     if (!projectPath) return
     QuickOpenService.getInstance().initialize(projectPath).catch(() => {})
   }, [projectPath])
+
+  // Consume pending `! ` shell command once PTY session is ready.
+  // Uses Zustand subscription instead of polling for instant reaction.
+  useEffect(() => {
+    const unsubscribe = useTerminalPanelStore.subscribe((state) => {
+      const cmd = pendingShellCmdRef.current
+      if (cmd && state.ptySessionId) {
+        pendingShellCmdRef.current = null
+        state.writeToPty(cmd + '\r')
+      }
+    })
+    return unsubscribe
+  }, [])
 
   // Load persisted prompt history from IDB once per project — populates the
   // in-memory ref used for ArrowUp/Down navigation. Non-blocking: the UI
@@ -188,33 +208,33 @@ export function useCmdPromptLogic() {
       ? promptValue
       : promptValue.filter(b => b.type === 'text').map(b => b.text).join(' ')
 
-    // ── ! prefix: run shell command directly, output injected into conversation ──
+    // ── ! prefix: run shell command in the terminal panel ──
     if (textPrompt.startsWith('! ')) {
       const command = textPrompt.slice(2).trim()
       if (!command) return
-      try {
-        const { invoke } = await import('@tauri-apps/api/core')
-
-        // Resolve CWD: use project path if open, otherwise fall back to home directory
-        // (Tauri's default CWD is the app bundle dir — not useful for the user)
-        let cwd: string | undefined = path || undefined
-        if (!cwd) {
-          try { cwd = await invoke<string>('get_home_directory') }
-          catch { /* leave undefined */ }
-        }
-
-        const result = await invoke<{ stdout: string; stderr: string; exitCode: number }>('execute_command', {
-          command,
-          cwd,
-          timeoutSecs: 30,
-        })
-        const output = [result.stdout, result.stderr].filter(s => s.trim()).join('\n') || '(no output)'
-        const msgContent = `$ ${command}\n\`\`\`\n${output}\n\`\`\``
-        useChatStore.getState().addUserMessage(msgContent)
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        useChatStore.getState().addSystemMessage(`$ ${command}: ${msg}`, 'error')
+      // Open terminal panel if not already open.
+      const tpStore = useTerminalPanelStore.getState()
+      if (!tpStore.isOpen) {
+        tpStore.toggle()
       }
+      // If PTY session is already ready, write immediately.
+      // Otherwise, store in ref — the useEffect subscription will consume it
+      // as soon as ptySessionId becomes available.
+      if (tpStore.ptySessionId) {
+        tpStore.writeToPty(command + '\r')
+      } else {
+        pendingShellCmdRef.current = command
+      }
+      return
+    }
+
+    // ── /terminal: local CMD-mode control, not an agent slash command ──
+    //
+    // Keep this as an explicit fast path instead of relying only on
+    // CMD_MODE_COMMANDS lookup. The terminal panel is UI state owned by CMD mode,
+    // so it should toggle even if the global slash registry/menu changes.
+    if (isTerminalToggleCommand(textPrompt)) {
+      useTerminalPanelStore.getState().toggle()
       return
     }
 
@@ -476,8 +496,8 @@ export function useCmdPromptLogic() {
     // slash command). Detect by checking whether the current input already
     // includes a space — we only enter arg-suggest mode after the command
     // name + space.
-    setInput(prev => {
-      if (prev.includes(' ')) {
+    if (input.includes(' ')) {
+      setInput(prev => {
         const lastSpaceIdx = prev.lastIndexOf(' ')
         const prefix = prev.slice(0, lastSpaceIdx + 1)
         const next = prefix + command.name + ' '
@@ -500,20 +520,24 @@ export function useCmdPromptLogic() {
         }
         textareaRef.current?.focus()
         return next
-      }
+      })
+      return
+    }
 
-      // Command mode: real command pick. No-arg commands run immediately;
-      // commands that accept args get the trailing space + focus.
-      setShowCommandMenu(false)
-      setIsArgMode(false)
-      if (NO_ARG_COMMANDS.has(command.name)) {
-        executePrompt(command.name)
-        return ''
-      }
-      textareaRef.current?.focus()
-      return command.name + ' '
-    })
-  }, [executePrompt])
+    // Command mode: real command pick. No-arg commands run immediately;
+    // commands that accept args get the trailing space + focus.
+    setShowCommandMenu(false)
+    setIsArgMode(false)
+    if (NO_ARG_COMMANDS.has(command.name)) {
+      setInput('')
+      // Fire-and-forget: executePrompt has side effects (toggle, agent calls)
+      // that must NOT run inside a React state updater.
+      executePrompt(command.name)
+      return
+    }
+    setInput(command.name + ' ')
+    textareaRef.current?.focus()
+  }, [input, executePrompt])
 
   const handleSend = useCallback(async () => {
     const prompt = input.trim()
@@ -697,6 +721,14 @@ export function useCmdPromptLogic() {
       // textarea.
       if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
         const terminalOpen = useTerminalPanelStore.getState().isOpen
+        // Ctrl+X closes the terminal panel when open; when closed, allow
+        // native cut (Ctrl+X) to work in the textarea.
+        if (e.key === 'x' && terminalOpen) {
+          e.preventDefault()
+          e.stopPropagation()
+          useTerminalPanelStore.getState().toggle()
+          return
+        }
         if (terminalOpen) {
           const CONTROL_MAP: Record<string, string> = {
             c: '\x03',  // SIGINT

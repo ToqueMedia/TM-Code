@@ -85,7 +85,10 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
         return Err(format!("Invalid session id characters: {}", session_id));
     }
     if session_id.starts_with('.') || session_id.contains("..") {
-        return Err(format!("Session id cannot start with . or contain .. ({})", session_id));
+        return Err(format!(
+            "Session id cannot start with . or contain .. ({})",
+            session_id
+        ));
     }
     Ok(())
 }
@@ -100,7 +103,10 @@ fn validate_file_path_hash(hash: &str) -> Result<(), String> {
         return Err(format!("Invalid file path hash length: {}", hash.len()));
     }
     // Hex / base64url-ish — alphanum + - _ . only.
-    if !hash.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !hash
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(format!("Invalid file path hash characters: {}", hash));
     }
     Ok(())
@@ -111,7 +117,8 @@ fn checkpoints_root(project_path: &str) -> Result<PathBuf, String> {
     if !project.exists() || !project.is_dir() {
         return Err(format!("Project path does not exist: {}", project_path));
     }
-    let canonical = canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
+    let canonical =
+        canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
     let dir = canonical.join(".toquemedia").join("checkpoints");
     if !dir.starts_with(&canonical) {
         return Err("Resolved checkpoints path escapes project root".to_string());
@@ -124,11 +131,7 @@ fn session_dir(project_path: &str, session_id: &str) -> Result<PathBuf, String> 
     Ok(checkpoints_root(project_path)?.join(session_id))
 }
 
-fn file_dir(
-    project_path: &str,
-    session_id: &str,
-    checkpoint_id: &str,
-) -> Result<PathBuf, String> {
+fn file_dir(project_path: &str, session_id: &str, checkpoint_id: &str) -> Result<PathBuf, String> {
     validate_checkpoint_id(checkpoint_id)?;
     Ok(session_dir(project_path, session_id)?
         .join("files")
@@ -168,7 +171,8 @@ async fn ensure_toquemedia_gitignore(project_path: &str) -> Result<(), String> {
     ];
 
     let project = Path::new(project_path);
-    let canonical = canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
+    let canonical =
+        canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
     let gitignore = canonical.join(".toquemedia").join(".gitignore");
     if let Some(parent) = gitignore.parent() {
         tokio::fs::create_dir_all(parent)
@@ -176,7 +180,9 @@ async fn ensure_toquemedia_gitignore(project_path: &str) -> Result<(), String> {
             .map_err(|e| format!("Failed to create .toquemedia/: {}", e))?;
     }
 
-    let existing = tokio::fs::read_to_string(&gitignore).await.unwrap_or_default();
+    let existing = tokio::fs::read_to_string(&gitignore)
+        .await
+        .unwrap_or_default();
     let present: std::collections::HashSet<&str> = existing
         .lines()
         .map(|l| l.trim())

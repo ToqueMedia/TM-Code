@@ -233,6 +233,34 @@ const GLM_5_1: ModelProfile = {
   ],
 }
 
+// MiMo V2.5 Pro — Xiaomi's flagship reasoning model via OpenRouter.
+// Used by the Welcome promotional plan.
+const MIMO_V2_5_PRO: ModelProfile = {
+  id: 'mimo-v2.5-pro',
+  name: 'MiMo V2.5 Pro',
+  persona: { name: 'Mimo Pro', tagline: 'Raciocínio avançado com custo otimizado — herda Vibe para o plano Welcome. Custo: 2x' },
+  modelId: 'xiaomi/mimo-v2.5-pro',
+  contextWindow: 262_144,
+  maxOutputTokens: 32_768,
+
+  temperature: 1.0,
+  reasoningTemperature: null,
+  topP: 0.95,
+  topK: null,
+
+  // MiMo V2.5-Pro uses OpenRouter reasoning format: { type: enabled|disabled }
+  thinkingMode: 'toggleable',
+  supportsThinking: true,
+  thinkingParam: 'reasoning',
+  thinkingBudget: null,
+  thinkingMandatory: false,
+
+  preserveReasoning: true,
+  supportsAttachments: false,
+  supportsSearch: false,
+  counterweights: [],
+}
+
 // ─────────────────────────────────────────────────
 // Registry
 // ─────────────────────────────────────────────────
@@ -254,6 +282,7 @@ const GLM_5_1: ModelProfile = {
 export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'deepseek-v4-flash': DEEPSEEK_V4_FLASH,
   'glm-5.1':           GLM_5_1,
+  'mimo-v2.5-pro':     MIMO_V2_5_PRO,
 }
 
 export const DEFAULT_MODEL_ID = 'deepseek-v4-flash'
@@ -281,6 +310,7 @@ export function getAllModelProfiles(): ModelProfile[] {
  */
 export function getProfileForPlan(plan: UserPlanName): ModelProfile {
   if (plan === 'explorer' || plan === 'vibe') return DEEPSEEK_V4_FLASH
+  if (plan === 'welcome') return MIMO_V2_5_PRO
   return GLM_5_1
 }
 

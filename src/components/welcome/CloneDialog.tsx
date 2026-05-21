@@ -29,6 +29,17 @@ function isValidGitUrl(url: string): boolean {
   return GIT_URL_REGEX.test(url.trim()) || url.includes('github.com/') || url.includes('gitlab.com/')
 }
 
+function joinPath(base: string, child: string): string {
+  const sep = base.includes('\\') ? '\\' : '/'
+  return `${base.replace(/[\\/]+$/, '')}${sep}${child}`
+}
+
+function replaceLastPathSegment(path: string, segment: string): string {
+  const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  if (idx < 0) return path
+  return `${path.slice(0, idx + 1)}${segment}`
+}
+
 const inputStyles = {
   bg: 'rgba(255, 255, 255, 0.04)',
   border: '1px solid rgba(255, 255, 255, 0.08)',
@@ -81,9 +92,9 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
   // Auto-fill repo name into path
   useEffect(() => {
     if (repoName && localPath && !localPath.endsWith(repoName)) {
-      const base = localPath.replace(/\/[^/]*$/, '')
-      if (base !== localPath) {
-        setLocalPath(`${base}/${repoName}`)
+      const next = replaceLastPathSegment(localPath, repoName)
+      if (next !== localPath) {
+        setLocalPath(next)
       }
     }
   }, [repoName])
@@ -98,7 +109,7 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
       })
       if (selected) {
         const name = repoName || 'project'
-        setLocalPath(`${selected as string}/${name}`)
+        setLocalPath(joinPath(selected as string, name))
       }
     } catch { /* user cancelled */ }
   }, [repoName])
@@ -111,20 +122,10 @@ const CloneDialog: React.FC<CloneDialogProps> = ({ dialog, onCloned }) => {
     setProgress(t('clone.connecting'))
 
     try {
-      // Shell-escape inputs to prevent command injection
-      const safeUrl = repoUrl.trim().replace(/'/g, "'\\''")
-      const safePath = localPath.trim().replace(/'/g, "'\\''")
-      let cmd = `git clone '${safeUrl}'`
-      if (branch.trim()) {
-        const safeBranch = branch.trim().replace(/'/g, "'\\''")
-        cmd += ` --branch '${safeBranch}'`
-      }
-      cmd += ` '${safePath}'`
-
-      const result = await invoke<{ stdout: string; stderr: string; exitCode: number; success: boolean }>('execute_command', {
-        command: cmd,
-        cwd: null,
-        timeoutSecs: 120,
+      const result = await invoke<{ stdout: string; stderr: string; exitCode: number; success: boolean }>('git_clone_repository', {
+        repoUrl: repoUrl.trim(),
+        destinationPath: localPath.trim(),
+        branch: branch.trim() || null,
       })
 
       if (!result.success) {

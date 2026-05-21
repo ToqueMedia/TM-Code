@@ -215,6 +215,8 @@ const PLAN_CONFIG: Record<string, { labelKey: string; color: string; creditsLabe
   vibe:     { labelKey: 'Vibe', color: tokens.colors.accent.green,   creditsLabelKey: 'settings.monthlyCredits', isTop: false },
   pro:      { labelKey: 'Pro',  color: tokens.colors.accent.purple,  creditsLabelKey: 'settings.monthlyCredits', isTop: false },
   max:      { labelKey: 'Max',  color: tokens.colors.accent.primary, creditsLabelKey: 'settings.monthlyCredits', isTop: true  },
+  welcome:  { labelKey: 'Vibe', color: tokens.colors.accent.green,   creditsLabelKey: 'settings.monthlyCredits', isTop: false },
+  'byok-only': { labelKey: 'BYOK', color: tokens.colors.accent.orange, creditsLabelKey: 'settings.monthlyCredits', isTop: false },
 }
 
 function ProfileSection() {

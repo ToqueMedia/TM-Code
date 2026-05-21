@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::path::Path;
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
 use std::process::Command;
@@ -97,10 +98,95 @@ fn git_cmd_path(cwd: &std::path::Path) -> Command {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommandResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub success: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct GitLineChange {
     pub kind: String, // "added", "modified", "removed"
     pub start_line: u32,
     pub line_count: u32,
+}
+
+/// Clone a repository without going through a shell.
+///
+/// The old frontend path built `git clone 'url' 'C:\path'` and sent it to
+/// `execute_command`. On Windows that becomes `cmd /C ...`, where single quotes
+/// are literal characters, so Git receives a destination like `'C:\Users\...'`
+/// and fails with:
+/// `fatal: could not create leading directories of: "'C:\...'": Invalid argument`.
+///
+/// Passing arguments directly preserves Windows drive letters (`C:\`, `D:\`,
+/// etc.) and avoids shell-quoting bugs/injection risks.
+#[tauri::command]
+pub async fn git_clone_repository(
+    repo_url: String,
+    destination_path: String,
+    branch: Option<String>,
+) -> Result<GitCommandResult, String> {
+    let repo_url = repo_url.trim();
+    let destination_path = destination_path.trim();
+    let branch = branch
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty());
+
+    if repo_url.is_empty() {
+        return Err("Repository URL is required".to_string());
+    }
+    if destination_path.is_empty() {
+        return Err("Destination path is required".to_string());
+    }
+
+    let destination = Path::new(destination_path);
+    if let Some(parent) = destination.parent() {
+        if !parent.exists() {
+            return Err(format!(
+                "Destination parent directory does not exist: {}",
+                parent.display()
+            ));
+        }
+        if !parent.is_dir() {
+            return Err(format!(
+                "Destination parent is not a directory: {}",
+                parent.display()
+            ));
+        }
+    }
+
+    if destination.exists() {
+        return Err(format!(
+            "Destination already exists: {}",
+            destination.display()
+        ));
+    }
+
+    let cwd = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    let mut cmd = git_cmd_path(cwd);
+    cmd.arg("clone");
+    if let Some(branch) = &branch {
+        cmd.arg("--branch").arg(branch);
+    }
+    cmd.arg(repo_url).arg(destination_path);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("git clone failed: {}", e))?;
+
+    Ok(GitCommandResult {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code().unwrap_or(-1),
+        success: output.status.success(),
+    })
 }
 
 /// Parse a unified diff hunk header: @@ -old_start[,old_count] +new_start[,new_count] @@

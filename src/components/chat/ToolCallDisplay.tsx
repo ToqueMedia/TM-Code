@@ -167,6 +167,8 @@ function isWriteTool(toolName: string): boolean {
   return toolName === 'write_file' || toolName === 'edit_file' || toolName === 'create_file'
 }
 
+const SUBAGENT_SPAWNERS = new Set(['research', 'verify', 'spawn_background_agent'])
+
 function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps) {
   const [expanded, setExpanded] = useState(false)
   const filePath = (toolCall.input?.path || toolCall.input?.oldPath || '') as string
@@ -264,7 +266,6 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   // Sub-agent spawners emit their output inline via the text stream + nested
   // child tool calls. Their `result` duplicates that content, so suppress the
   // result panel on the parent to avoid showing the same text twice.
-  const SUBAGENT_SPAWNERS = new Set(['research', 'verify', 'spawn_background_agent'])
   const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(toolCall.toolName)
   // read_skill body carries platform/provider names + implementation
   // details aimed at the agent. Render the friendly description in the

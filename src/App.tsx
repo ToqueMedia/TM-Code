@@ -3,6 +3,7 @@ import './utils/platformPatches'
 import './utils/monacoEnv'
 import WelcomeScreen from './components/WelcomeScreen';
 import MainLayout from './components/MainLayout';
+import FileViewer from './components/FileViewer';
 import LoginScreen from './components/auth/LoginScreen';
 import OnboardingFlow from './components/onboarding/OnboardingFlow';
 import { useProjectStore } from './stores/projectStore';
@@ -53,6 +54,8 @@ function App() {
 	// Guards against concurrent initializeApp invocations (dependency re-runs while async in progress,
 	// or React StrictMode double-fire). Without this, openProject can be called twice in parallel.
 	const hasStartedInitRef = useRef(false);
+	// Standalone files opened from OS (no project context).
+	const [standaloneFiles, setStandaloneFiles] = useState<string[]>([]);
 
 	const handleRetryRequirements = useCallback(async () => {
 		const result = await checkStartupRequirements(true);
@@ -182,10 +185,13 @@ function App() {
 				if (onlyFiles) {
 					// No openProject call. If there's already a project open, the
 					// files open inside it (same UX as drag-drop onto the editor
-					// pane). If not, the editor shows the file alone over the
-					// welcome backdrop — recents stays untouched.
+					// pane). If not, track standalone files and show FileViewer —
+					// recents stays untouched.
 					const repo = useEditorRepository.getState()
 					for (const p of paths) repo.openFile(p)
+					if (!already) {
+						setStandaloneFiles(paths)
+					}
 					useLayoutStore.getState().setViewMode('editor')
 					return
 				}
@@ -778,9 +784,16 @@ function App() {
 
 			<Box position="relative" zIndex={1}>
 				{currentProject ? <MainLayout /> :
-					<WelcomeScreen
-						onOpenProject={handleOpenProject}
-					/>
+					standaloneFiles.length > 0 ? (
+						<FileViewer
+							filePath={standaloneFiles[0]}
+							onClose={() => setStandaloneFiles([])}
+						/>
+					) : (
+						<WelcomeScreen
+							onOpenProject={handleOpenProject}
+						/>
+					)
 				}
 			</Box>
 

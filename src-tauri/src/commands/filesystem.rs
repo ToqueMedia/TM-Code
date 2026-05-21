@@ -472,7 +472,9 @@ pub async fn read_env_vars(
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let Some(eq_idx) = trimmed.find('=') else { continue };
+        let Some(eq_idx) = trimmed.find('=') else {
+            continue;
+        };
         let key = trimmed[..eq_idx].trim();
         if !wanted.contains(key) {
             continue;
@@ -557,8 +559,6 @@ pub async fn read_skill_content(skill_path: String) -> Result<SkillContent, Stri
     })
 }
 
-
-
 // ── Agent state persistence (.toquemedia/) ─────────────────────────────
 //
 // Per-project hidden folder for agent state that must survive across:
@@ -583,7 +583,10 @@ fn validate_agent_state_filename(filename: &str) -> Result<(), String> {
         return Err("Agent state filename cannot be empty".to_string());
     }
     if filename.len() > 64 {
-        return Err(format!("Agent state filename too long ({} chars)", filename.len()));
+        return Err(format!(
+            "Agent state filename too long ({} chars)",
+            filename.len()
+        ));
     }
     if !filename
         .chars()
@@ -592,7 +595,10 @@ fn validate_agent_state_filename(filename: &str) -> Result<(), String> {
         return Err(format!("Invalid agent state filename: {}", filename));
     }
     if filename.starts_with('.') || filename.contains("..") {
-        return Err(format!("Agent state filename cannot start with . or contain .. ({})", filename));
+        return Err(format!(
+            "Agent state filename cannot start with . or contain .. ({})",
+            filename
+        ));
     }
     Ok(())
 }
@@ -654,10 +660,7 @@ pub async fn write_agent_state(
         "{}.tmp",
         path.extension().and_then(|s| s.to_str()).unwrap_or("")
     ));
-    std::fs::write(&tmp, content)
-        .map_err(|e| format!("Failed to write {}: {}", filename, e))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| format!("Failed to commit {}: {}", filename, e))?;
+    std::fs::write(&tmp, content).map_err(|e| format!("Failed to write {}: {}", filename, e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit {}: {}", filename, e))?;
     Ok(())
 }
-

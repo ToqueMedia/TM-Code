@@ -43,7 +43,8 @@ unsafe impl Sync for PtySession {}
 pub type PtySessionMap = Mutex<HashMap<String, Arc<Mutex<PtySession>>>>;
 /// Separate child-process map so the exit-detection thread can own the child
 /// without holding the session mutex (which would block write/resize ops).
-pub type PtyChildMap = Mutex<HashMap<String, Arc<Mutex<Option<Box<dyn portable_pty::Child + Send>>>>>>;
+pub type PtyChildMap =
+    Mutex<HashMap<String, Arc<Mutex<Option<Box<dyn portable_pty::Child + Send>>>>>>;
 
 // Default terminal dimensions (used until first resize event from xterm.js)
 const DEFAULT_PTY_COLS: u16 = 120;
@@ -1025,7 +1026,10 @@ pub async fn start_pty_shell(
             }
         }
         // Only emit if the child-wait thread hasn't already
-        if exit_flag_reader.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        if exit_flag_reader
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
             let _ = app_clone.emit(
                 "pty-exit",
                 PtyExitEvent {
@@ -1036,10 +1040,7 @@ pub async fn start_pty_shell(
         }
     });
 
-    let session = PtySession {
-        master,
-        writer,
-    };
+    let session = PtySession { master, writer };
 
     let session_arc = Arc::new(Mutex::new(session));
     pty_map
@@ -1064,20 +1065,23 @@ pub async fn start_pty_shell(
     let exit_flag_wait = Arc::clone(&exit_signaled);
     std::thread::spawn(move || {
         let code = {
-            let child_opt = child_arc
-                .lock()
-                .ok()
-                .and_then(|mut guard| guard.take());
+            let child_opt = child_arc.lock().ok().and_then(|mut guard| guard.take());
             match child_opt {
                 Some(mut c) => c.wait().ok().map(|s| s.exit_code() as i32).unwrap_or(-1),
                 None => return, // child already taken (kill_pty_session ran first)
             }
         };
-        if exit_flag_wait.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            let _ = app_wait.emit("pty-exit", PtyExitEvent {
-                session_id: sid_wait,
-                exit_code: code,
-            });
+        if exit_flag_wait
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let _ = app_wait.emit(
+                "pty-exit",
+                PtyExitEvent {
+                    session_id: sid_wait,
+                    exit_code: code,
+                },
+            );
         }
     });
 
@@ -1142,7 +1146,11 @@ pub async fn kill_pty_session(
     child_map: State<'_, PtyChildMap>,
 ) -> Result<(), String> {
     // Remove and kill the child process (if still owned by the map).
-    if let Some(child_arc) = child_map.lock().map_err(|_| "Failed to lock child map")?.remove(&session_id) {
+    if let Some(child_arc) = child_map
+        .lock()
+        .map_err(|_| "Failed to lock child map")?
+        .remove(&session_id)
+    {
         if let Ok(mut guard) = child_arc.lock() {
             if let Some(mut child) = guard.take() {
                 let _ = child.kill();
@@ -1150,7 +1158,10 @@ pub async fn kill_pty_session(
         }
     }
     // Remove the session (master + writer). Dropping master closes the PTY fd.
-    pty_map.lock().map_err(|_| "Failed to lock PTY map")?.remove(&session_id);
+    pty_map
+        .lock()
+        .map_err(|_| "Failed to lock PTY map")?
+        .remove(&session_id);
     Ok(())
 }
 

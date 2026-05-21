@@ -7,6 +7,7 @@ import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layou
 import { useBillingStore } from '../../stores/billingStore'
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 import { useProblemsStore } from '../../stores/problemsStore'
 import { devServerManager } from '../../services/devServerManager'
 import AgentService from '../../services/agent/agentService'
@@ -106,6 +107,7 @@ export function usePromptBar() {
   const navigatingHistoryRef = useRef(false)
   const isStreaming = useChatStore(s => s.isStreaming)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
+  const hasPendingCredential = useCredentialRequestStore(s => s.pending.size > 0)
   // Subscribe to the QueryGuard via useSyncExternalStore — same pattern
   // Claude Code uses. Re-renders when reserve/tryStart/end/forceEnd fires.
   const queryGuard = getQueryGuard()
@@ -117,8 +119,8 @@ export function usePromptBar() {
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const isScaffolding = scaffoldPhase === 'installing' || scaffoldPhase === 'starting'
   // Input is always active — user can type and enqueue while agent is busy.
-  // Only disable during permission dialogs (user must respond first).
-  const isDisabled = hasPendingPermission
+  // Only disable during permission or credential dialogs (user must respond first).
+  const isDisabled = hasPendingPermission || hasPendingCredential
   // Send is only blocked during scaffolding (deps install / server start).
   const isSendBlocked = isScaffolding
   // Preview button is ALWAYS visible when a project is open.
@@ -1347,6 +1349,7 @@ export function usePromptBar() {
     isScaffolding,
     isSendBlocked,
     isDisabled,
+    hasPendingCredential,
     viewMode,
     hasPreview,
     handleSend,

@@ -3,6 +3,7 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import { useTerminalPanelStore, TERMINAL_PANEL_MIN_WIDTH } from '../../stores/terminalPanelStore'
 import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands'
@@ -33,6 +34,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const streamingVersion = useChatStore(s => s.streamingVersion)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
+  const hasPendingCredential = useCredentialRequestStore(s => s.pending.size > 0)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
@@ -141,8 +143,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   } = useAttachments({ localState: true })
 
   // Focus input only when click lands on the container itself (not on code/copy/mention etc).
+  // Skip when the terminal just opened (suppressPromptFocusRef) so xterm keeps focus.
   const handleOutputClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (pendingPermission) return
+    if (pendingPermission || suppressPromptFocusRef.current) return
     const target = e.target as HTMLElement
     if (target.closest('[data-no-focus-steal], button, a, textarea, input, [role="button"]')) return
     const sel = window.getSelection()
@@ -163,10 +166,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   // Unified Escape handler. Priority:
   //   1. Permission prompt owns Escape while visible (handled by the prompt itself)
   //   2. Session picker owns Escape (closes picker, does NOT exit CMD Mode)
-  //   3. Open menus (slash / @mention) own Escape to close themselves
-  //   4. Streaming → stop agent
-  //   5. Typing with text → let the textarea handle it
-  //   6. Idle → exit to welcome
+  //   3. Terminal panel open → close panel (does NOT exit CMD Mode)
+  //   4. Open menus (slash / @mention) own Escape to close themselves
+  //   5. Streaming → stop agent
+  //   6. Typing with text → let the textarea handle it
+  //   7. Idle → exit to welcome
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
@@ -178,6 +182,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         e.preventDefault()
         e.stopPropagation()
         useCmdOverlayStore.getState().closeSessionPicker()
+        return
+      }
+      // Close terminal panel first if open — don't exit CMD mode entirely.
+      if (useTerminalPanelStore.getState().isOpen) {
+        e.preventDefault()
+        e.stopPropagation()
+        useTerminalPanelStore.getState().close()
         return
       }
       if (promptInputRef.current?.isMenuOpen?.()) return
@@ -246,6 +257,21 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const terminalOpen = useTerminalPanelStore(s => s.isOpen)
   const terminalWidthPref = useTerminalPanelStore(s => s.widthPx)
   const setTerminalWidth = useTerminalPanelStore(s => s.setWidth)
+
+  // Suppress prompt input focus until the terminal panel's PTY is ready.
+  // onReady callback fires when start_pty_shell succeeds — clears the flag
+  // so the xterm keeps focus and the textarea doesn't steal it back.
+  const suppressPromptFocusRef = useRef(false)
+  const prevTerminalOpenRef = useRef(terminalOpen)
+  useEffect(() => {
+    if (terminalOpen && !prevTerminalOpenRef.current) {
+      suppressPromptFocusRef.current = true
+    }
+    prevTerminalOpenRef.current = terminalOpen
+  }, [terminalOpen])
+  const handleTerminalReady = useCallback(() => {
+    suppressPromptFocusRef.current = false
+  }, [])
 
   const maxPanelWidth = outerWidth > 0 ? Math.floor(outerWidth * 0.5) : terminalWidthPref
   const clampedPanelWidth = Math.min(terminalWidthPref, Math.max(TERMINAL_PANEL_MIN_WIDTH, maxPanelWidth))
@@ -392,7 +418,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
 
       <TerminalStatusLine />
 
-      <Box display={pendingPermission ? 'none' : undefined} data-no-focus-steal>
+      <Box display={(pendingPermission || hasPendingCredential) ? 'none' : undefined} data-no-focus-steal>
         <CmdModePromptInput ref={promptInputRef} />
       </Box>
     </Flex>
@@ -412,7 +438,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
             aria-label="Resize terminal panel"
             role="separator"
           />
-          <TerminalPanel projectPath={projectPath} widthPx={clampedPanelWidth} />
+          <TerminalPanel projectPath={projectPath} widthPx={clampedPanelWidth} onReady={handleTerminalReady} />
         </>
       )}
     </Flex>

@@ -11,15 +11,16 @@ import FirebaseAuthService, { getAppCheckHeader } from '@/services/auth/firebase
 
 const EXPIRY_DATE = new Date('2026-05-28T23:59:59Z')
 const DISMISS_KEY = 'tm-welcome-plan-dismissed-v2'
+const ACTIVATED_KEY = 'tm-welcome-plan-activated'
 
 // Simulated MeResponse for when the backend endpoint is not yet deployed (404).
 const WELCOME_PLAN_RESPONSE: MeResponse = {
-  plan: 'vibe',
+  plan: 'welcome',
   isActive: true,
   billing: {
     consumedPct: 0,
     tokensConsumed: 0,
-    tokenBudget: 10_820_000,
+    tokenBudget: 32_500_000,
     cycleEnd: '2026-05-28',
     extraUsageBalance: 0,
     status: 'allowed',
@@ -72,6 +73,12 @@ function WelcomePlanBanner() {
     if (isExpired()) return
     if (isDismissed()) return
     if (plan !== 'explorer') return
+    // Don't show again if the welcome plan was already activated in this session
+    // (prevents reappear when fetchBillingInfo briefly returns 'explorer' before
+    // the Firestore write propagates).
+    try {
+      if (sessionStorage.getItem(ACTIVATED_KEY) === '1') return
+    } catch { /* ignore */ }
 
     hasShown.current = true
     setVisible(true)
@@ -125,11 +132,13 @@ function WelcomePlanBanner() {
         }
         authService.claimWelcomePlan(fingerprint)
         setActivated(true)
+        try { sessionStorage.setItem(ACTIVATED_KEY, '1') } catch { /* ignore */ }
         setTimeout(() => setVisible(false), 1800)
       } else if (res.status === 404) {
         updateFromMe(WELCOME_PLAN_RESPONSE)
         authService.claimWelcomePlan(fingerprint)
         setActivated(true)
+        try { sessionStorage.setItem(ACTIVATED_KEY, '1') } catch { /* ignore */ }
         setTimeout(() => setVisible(false), 1800)
       } else if (res.status === 409) {
         setVisible(false)

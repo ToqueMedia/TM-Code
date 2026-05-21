@@ -24,6 +24,7 @@ function PromptBar() {
     isScaffolding,
     isSendBlocked,
     isDisabled,
+    hasPendingCredential,
     viewMode,
     hasPreview,
     handleSend,
@@ -160,7 +161,7 @@ function PromptBar() {
           {isScaffolding ? (
             <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.settingUp')}</Text>
           ) : isDisabled ? (
-            <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.awaitingPermission')}</Text>
+            <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{hasPendingCredential ? t('prompt.completeCredentialForm') : t('prompt.awaitingPermission')}</Text>
           ) : isAgentBusy ? (
             <>
               <KeyBindingDisplay binding={{ key: 'Enter', meta: true }} size="sm" />

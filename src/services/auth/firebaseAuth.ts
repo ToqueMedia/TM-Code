@@ -1,4 +1,5 @@
 import { initializeApp } from 'firebase/app'
+import { checkTimeManipulation, EXPLORER_TOKEN_BUDGET } from '../timeManipulationGuard'
 import {
   getAuth,
   connectAuthEmulator,
@@ -450,7 +451,7 @@ class FirebaseAuthService {
 
         // Check if the welcome plan has expired — downgrade to explorer
         // if the user's welcomePlanExpiresAt is in the past.
-        if (data.plan === 'vibe') {
+        if (data.plan === 'welcome') {
           const downgraded = await this.downgradeExpiredWelcomePlan()
           if (downgraded) {
             data.plan = 'explorer'
@@ -459,6 +460,41 @@ class FirebaseAuthService {
             data.billing.consumedPct = 0
             data.billing.status = 'allowed'
           }
+        }
+
+        // Time manipulation guard — detect clock rollback and block abuse.
+        try {
+          const { getDeviceFingerprint } = await import('./deviceFingerprint')
+          const fingerprint = await getDeviceFingerprint()
+          if (fingerprint) {
+            const timeCheck = checkTimeManipulation(
+              fingerprint,
+              data.plan,
+              data.billing.cycleEnd,
+            )
+            if (timeCheck.manipulated) {
+              console.warn('[billing] Time manipulation detected — blocking account')
+              // Always block server-side regardless of current plan.
+              const uid = this.currentUser?.uid
+              if (uid) {
+                this.syncProfile(uid, {
+                  blocked: true,
+                  blockedReason: 'time_manipulation',
+                  updatedAt: Timestamp.now(),
+                })
+              }
+              // Downgrade non-explorer/non-welcome plans to explorer.
+              if (timeCheck.downgradeToExplorer) {
+                data.plan = 'explorer'
+                data.billing.tokenBudget = EXPLORER_TOKEN_BUDGET
+                data.billing.tokensConsumed = EXPLORER_TOKEN_BUDGET
+                data.billing.consumedPct = 1
+                data.billing.status = 'rejected'
+              }
+            }
+          }
+        } catch {
+          // Fingerprint unavailable — fail open (don't block legitimate users)
         }
 
         useBillingStore.getState().updateFromMe(data)
@@ -579,7 +615,7 @@ class FirebaseAuthService {
   claimWelcomePlan(fingerprint: string): void {
     if (!this.currentUser) return
     this.syncProfile(this.currentUser.uid, {
-      userPlan: 'vibe',
+      userPlan: 'welcome',
       welcomePlanClaimed: true,
       welcomePlanFingerprint: fingerprint,
       welcomePlanClaimedAt: Timestamp.now(),

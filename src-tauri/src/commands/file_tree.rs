@@ -500,6 +500,50 @@ pub fn path_exists(path: String) -> bool {
     }
 }
 
+/// Search common subdirectories for SQLite database files (*.db, *.sqlite, *.sqlite3).
+/// Returns true if ANY database file is found in the project.
+#[tauri::command]
+pub fn has_database_file(project_path: String) -> bool {
+    let root = Path::new(&project_path);
+    if !root.exists() || !root.is_dir() {
+        return false;
+    }
+
+    const SEARCH_DIRS: &[&str] = &[
+        "",
+        "prisma",
+        "db",
+        "data",
+        ".data",
+        "backend",
+        "backend/db",
+        "src/db",
+        "server/db",
+    ];
+    const DB_EXTENSIONS: &[&str] = &["db", "sqlite", "sqlite3"];
+
+    for dir in SEARCH_DIRS {
+        let dir_path = if dir.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(dir)
+        };
+        if !dir_path.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir_path) {
+            for entry in entries.flatten() {
+                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                    if DB_EXTENSIONS.contains(&ext) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 // Read file content (async — does not block the Tauri command queue)
 #[tauri::command]
 pub async fn read_file(path: String) -> Result<String> {

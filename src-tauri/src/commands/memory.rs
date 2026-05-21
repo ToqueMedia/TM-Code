@@ -36,7 +36,10 @@ fn parse_scope(s: &str) -> Result<MemoryScope, String> {
     match s {
         "project" => Ok(MemoryScope::Project),
         "user" => Ok(MemoryScope::User),
-        _ => Err(format!("Invalid memory scope: {} (expected 'project' or 'user')", s)),
+        _ => Err(format!(
+            "Invalid memory scope: {} (expected 'project' or 'user')",
+            s
+        )),
     }
 }
 
@@ -47,7 +50,10 @@ fn validate_memory_filename(filename: &str) -> Result<(), String> {
         return Err("Memory filename cannot be empty".to_string());
     }
     if filename.len() > 80 {
-        return Err(format!("Memory filename too long ({} chars)", filename.len()));
+        return Err(format!(
+            "Memory filename too long ({} chars)",
+            filename.len()
+        ));
     }
     if !filename
         .chars()
@@ -56,7 +62,10 @@ fn validate_memory_filename(filename: &str) -> Result<(), String> {
         return Err(format!("Invalid memory filename: {}", filename));
     }
     if filename.starts_with('.') || filename.contains("..") {
-        return Err(format!("Memory filename cannot start with . or contain .. ({})", filename));
+        return Err(format!(
+            "Memory filename cannot start with . or contain .. ({})",
+            filename
+        ));
     }
     // .md extension required to match the convention; index file is "MEMORY.md".
     if !filename.ends_with(".md") {
@@ -73,7 +82,8 @@ fn memory_root(scope: MemoryScope, project_path: Option<&str>) -> Result<PathBuf
             if !p.exists() || !p.is_dir() {
                 return Err(format!("Project path does not exist: {}", project));
             }
-            let canonical = canonicalize_path(p).map_err(|e| format!("Invalid project path: {}", e))?;
+            let canonical =
+                canonicalize_path(p).map_err(|e| format!("Invalid project path: {}", e))?;
             let dir = canonical.join(".toquemedia").join("memory");
             if !dir.starts_with(&canonical) {
                 return Err("Resolved memory path escapes project root".to_string());
@@ -150,10 +160,8 @@ pub async fn write_memory_file(
         "{}.tmp",
         path.extension().and_then(|s| s.to_str()).unwrap_or("md")
     ));
-    std::fs::write(&tmp, content)
-        .map_err(|e| format!("Failed to write {}: {}", filename, e))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| format!("Failed to commit {}: {}", filename, e))?;
+    std::fs::write(&tmp, content).map_err(|e| format!("Failed to write {}: {}", filename, e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit {}: {}", filename, e))?;
     Ok(())
 }
 
@@ -215,7 +223,11 @@ pub async fn list_memory_files(
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        out.push(MemoryFileEntry { filename, size_bytes, mtime_ms });
+        out.push(MemoryFileEntry {
+            filename,
+            size_bytes,
+            mtime_ms,
+        });
     }
     Ok(out)
 }

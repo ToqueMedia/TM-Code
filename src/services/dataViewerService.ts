@@ -89,23 +89,32 @@ export interface SourceDetectionResult {
 }
 
 /**
- * Detect which sources are available for the current project. The viewer
- * uses this to choose a sensible default and to disable the toggle when only
- * one side is set up.
+ * Detect which sources are available for the current project.
  *
- * `hasDevDb`     — `dev.db` exists at the project root.
- * `hasProdConfig` — `TMDB_URL` AND `TMDB_TOKEN` are both present in `.env`.
+ * Dev is always available (local SQLite database). The Rust command scans
+ * for any *.db, *.sqlite, *.sqlite3 file in common subdirectories.
+ *
+ * Prod is only available when the project has a deploy configuration
+ * (TMDB_URL + TMDB_TOKEN in .env).
  */
 export async function detectSources(project: ProjectContext): Promise<SourceDetectionResult> {
-  const [hasDevDb, env] = await Promise.all([
-    invoke<boolean>('path_exists', { path: `${project.path}/dev.db` }).catch(() => false),
-    invoke<Record<string, string>>('read_env_vars', {
-      projectPath: project.path,
-      keys: ['TMDB_URL', 'TMDB_TOKEN'],
-    }).catch(() => ({} as Record<string, string>)),
-  ])
+  // Dev is always available — the agent can create a database via provision_database.
+  // Prod is only available when the project has deploy config (TMDB_URL + TMDB_TOKEN).
+  const env = await invoke<Record<string, string>>('read_env_vars', {
+    projectPath: project.path,
+    keys: ['TMDB_URL', 'TMDB_TOKEN'],
+  }).catch(() => ({} as Record<string, string>))
   const hasProdConfig = !!(env.TMDB_URL && env.TMDB_TOKEN)
-  return { hasDevDb, hasProdConfig }
+  return { hasDevDb: true, hasProdConfig }
+}
+
+/**
+ * Check whether a local dev database actually exists.
+ * Returns false when the Dev source is selected but no DB file was found —
+ * the DataViewer shows a "no database" empty state instead of loading forever.
+ */
+export async function hasDevDatabase(projectPath: string): Promise<boolean> {
+  return invoke<boolean>('has_database_file', { projectPath }).catch(() => false)
 }
 
 // ─── Dev path ────────────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ import { logger } from '../../utils/logger'
 interface TerminalPanelProps {
   projectPath: string
   widthPx: number
+  onReady?: () => void
 }
 
 interface PtyOutputEvent {
@@ -43,7 +44,7 @@ interface PtyExitEvent {
 
 const HEADER_HEIGHT_PX = 28
 
-export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx }: TerminalPanelProps) {
+export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx, onReady }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -100,14 +101,17 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx 
     termRef.current = term
     fitRef.current = fit
 
-    // Initial fit + focus — defer to next frame so the container has dimensions.
+    // Initial fit + focus — double rAF so the container has final dimensions
+    // before we measure. Single rAF can fire before layout is computed.
     requestAnimationFrame(() => {
-      try {
-        fit.fit()
-        term.focus()
-      } catch (err) {
-        logger.warn('terminal-panel', 'initial fit/focus failed:', err)
-      }
+      requestAnimationFrame(() => {
+        try {
+          fit.fit()
+          term.focus()
+        } catch (err) {
+          logger.warn('terminal-panel', 'initial fit/focus failed:', err)
+        }
+      })
     })
 
     // Frontend → PTY: forward keystrokes
@@ -155,6 +159,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx 
       .then(() => {
         if (disposed) return
         setSessionId(sessionId)
+        onReady?.()
       })
       .catch((err) => {
         logger.error('terminal-panel', 'start_pty_shell failed:', err)
@@ -244,7 +249,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx 
           as="button"
           onClick={close}
           aria-label="Close terminal panel"
-          title="Close (Esc or /terminal)"
+          title="Close (Esc or Ctrl+X)"
           p="2px"
           borderRadius="3px"
           color={tokens.colors.text.disabled}
