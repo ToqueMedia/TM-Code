@@ -3,14 +3,8 @@ import {
   getAuth,
   connectAuthEmulator,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  RecaptchaVerifier,
   signOut,
   onAuthStateChanged,
-  sendEmailVerification,
-  updateProfile,
-  linkWithPhoneNumber,
-  type ConfirmationResult,
   type User
 } from 'firebase/auth'
 import {
@@ -180,14 +174,6 @@ function connectEmulatorsIfNeeded() {
   }
 }
 
-// Default onboarding status (aligned with web project)
-const DEFAULT_ONBOARDING = {
-  completed: false,
-  currentStep: 0,
-  completedSteps: [] as number[],
-  skipped: false,
-}
-
 class FirebaseAuthService {
   private static instance: FirebaseAuthService
   private currentUser: User | null = null
@@ -195,15 +181,6 @@ class FirebaseAuthService {
   private unsubscribeUserDoc: (() => void) | null = null
   private lastBillingFetchMs = 0
   private authGeneration = 0
-  /**
-   * When signUp is in flight, holds a promise that resolves after the Firestore
-   * profile write completes. `onAuthStateChanged` awaits this before calling
-   * `/v1/me` so the backend's GET finds the doc the frontend just wrote instead
-   * of racing ahead, seeing 404, and creating a minimal doc that — even with
-   * `updateMask` — ends up sharing the write window with the frontend. Cleared
-   * to null immediately after the await so existing-user sign-ins never wait.
-   */
-  private signupWriteGate: Promise<void> | null = null
 
   static getInstance(): FirebaseAuthService {
     if (!FirebaseAuthService.instance) {
@@ -281,17 +258,7 @@ class FirebaseAuthService {
       const shouldFetch = !billingState.isLoaded || (now - this.lastBillingFetchMs > BILLING_THROTTLE_MS)
       if (shouldFetch) {
         this.lastBillingFetchMs = now
-        // Wait for an in-flight signUp to finish writing the Firestore profile
-        // BEFORE calling /v1/me. Otherwise the backend's GET returns 404, the
-        // backend creates a minimal billing doc (without the profile fields),
-        // and the user sees no displayName in Firestore. The gate resolves
-        // synchronously to `undefined` for sign-ins (no signup in flight),
-        // adding zero overhead to the common path.
-        const gate = this.signupWriteGate
-        this.signupWriteGate = null
-        const kickBilling = () => this.fetchBillingInfo(gen)
-        if (gate) gate.then(kickBilling).catch(kickBilling)
-        else kickBilling()
+        this.fetchBillingInfo(gen)
       }
 
       // Real-time listener for plan/quota changes on the user document.
@@ -366,167 +333,6 @@ class FirebaseAuthService {
     })
 
     return result.user
-  }
-
-  async signUp(email: string, password: string, displayName?: string): Promise<User> {
-    // Arm the gate BEFORE createUserWithEmailAndPassword fires — onAuthStateChanged
-    // will pick up the new user synchronously, and if the gate isn't set yet the
-    // /v1/me call leaves before our setDoc lands. Resolved in the try below
-    // after the Firestore write completes (success OR failure — we never want
-    // to hang onAuthStateChanged if setDoc throws).
-    let gateResolve: () => void = () => {}
-    this.signupWriteGate = new Promise<void>(resolve => { gateResolve = resolve })
-
-    let result
-    try {
-      result = await createUserWithEmailAndPassword(getFirebaseAuth(), email, password)
-    } catch (err) {
-      // Auth rejected (email already in use, weak password, etc.). Release the
-      // gate so a subsequent successful signIn/signUp in this session isn't
-      // blocked by a dangling unresolved promise.
-      gateResolve()
-      this.signupWriteGate = null
-      throw err
-    }
-    const user = result.user
-    const trimmedName = displayName?.trim() || ''
-
-    // ── Step 1: Auth profile ─────────────────────────────────────
-    // Persist the display name on the Firebase Auth user object. Without this,
-    // `user.displayName` stays null — the ID-token `name` claim is empty, the
-    // email-template sender has no name, and every place reading `user.displayName`
-    // (onAuthStateChanged, UI fallbacks, ProfileSection) shows the fallback
-    // until Firestore enrichment races in (and often not even then — see below).
-    if (trimmedName) {
-      try {
-        await updateProfile(user, { displayName: trimmedName })
-      } catch (err) {
-        console.warn('[auth] updateProfile failed during signUp:', err)
-      }
-    }
-
-    // ── Step 2: Firestore profile (merge:true so backend /v1/me seed doesn't clobber) ─
-    // The backend's /v1/me endpoint auto-creates the user doc on first call. That
-    // request fires as soon as onAuthStateChanged runs (before this setDoc gets
-    // scheduled), so we race with it. Without `{ merge: true }`, whichever write
-    // lands second REPLACES the other. With merge:true both sides contribute
-    // their fields and the name always survives.
-    // Catch logs instead of swallowing — silent failures previously hid rule
-    // violations and emulator connectivity issues for weeks.
-    try {
-      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, user.uid), {
-        uid: user.uid,
-        email: user.email,
-        fullName: trimmedName,
-        displayName: trimmedName,
-        photoURL: null,
-        provider: 'email',
-        emailVerified: user.emailVerified,
-        onboarding: DEFAULT_ONBOARDING,
-        createdAt: Timestamp.now(),
-        updatedAt: Timestamp.now(),
-        userPlan: 'explorer',
-        // Set false here so the backend's signup gates block this account
-        // until phone link succeeds. Flipped to true in confirmPhoneCode.
-        signupComplete: false,
-      }, { merge: true })
-    } catch (err) {
-      console.warn('[auth] Firestore profile write failed during signUp:', err)
-    } finally {
-      // Release the gate whether setDoc succeeded or failed — we never want
-      // onAuthStateChanged to hang indefinitely on a failed write.
-      gateResolve()
-    }
-
-    // ── Step 3: Sync displayName to authStore ────────────────────
-    // onAuthStateChanged fired synchronously on createUser with displayName=null.
-    // `updateProfile` does NOT re-trigger onAuthStateChanged, so the store still
-    // holds the stale null. Push the name explicitly so the UI shows the real
-    // name immediately (previously showed "User" fallback until next token refresh).
-    if (trimmedName) {
-      const authStore = useAuthStore.getState()
-      const current = authStore.user
-      if (current && !current.displayName) {
-        authStore.setUser({ ...current, displayName: trimmedName })
-      }
-    }
-
-    // ── Step 4: Email verification (fire-and-forget) ─────────────
-    // The backend /v1/me will reject unverified accounts older than 24h with
-    // 403, so this email must reach the user. We don't block signUp on it —
-    // a transient network error here would otherwise force the user to retry
-    // the entire signup. Failures here are logged and surface as the 24h-grace
-    // verification reminder banner; they're not fatal at this moment.
-    sendEmailVerification(user).catch(err => {
-      console.warn('[auth] sendEmailVerification failed:', err)
-    })
-
-    return user
-  }
-
-  /**
-   * Initiate the phone-number link flow. Renders an invisible reCAPTCHA in
-   * the given container element, sends an SMS code to `phoneE164`, and
-   * returns a `ConfirmationResult` to be passed to `confirmPhoneCode`.
-   *
-   * The container element must exist in the DOM at call time. Caller is
-   * responsible for cleanup of the verifier via the returned `cleanup` fn —
-   * Firebase keeps internal references that prevent GC otherwise.
-   */
-  async startPhoneLink(
-    phoneE164: string,
-    recaptchaContainer: HTMLElement,
-  ): Promise<{ confirmation: ConfirmationResult; cleanup: () => void }> {
-    if (!this.currentUser) {
-      throw new Error('No authenticated user — call signUp first')
-    }
-
-    const verifier = new RecaptchaVerifier(getFirebaseAuth(), recaptchaContainer, {
-      size: 'invisible',
-    })
-
-    try {
-      const confirmation = await linkWithPhoneNumber(this.currentUser, phoneE164, verifier)
-      return {
-        confirmation,
-        cleanup: () => {
-          try { verifier.clear() } catch { /* noop */ }
-        },
-      }
-    } catch (err) {
-      try { verifier.clear() } catch { /* noop */ }
-      throw err
-    }
-  }
-
-  /**
-   * Complete the phone-link flow with the 6-digit code the user received via
-   * SMS. On success, the phone number is linked to the account and persisted
-   * to Firestore. Throws on invalid code so the UI can show an inline error.
-   */
-  async confirmPhoneCode(confirmation: ConfirmationResult, code: string): Promise<void> {
-    const result = await confirmation.confirm(code)
-    const user = result.user
-
-    // Persist phone fields to Firestore so the backend /v1/me sees the
-    // linked phone without having to read it from the Auth admin SDK.
-    // signupComplete=true unlocks all backend signup gates.
-    try {
-      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, user.uid), {
-        phoneNumber: user.phoneNumber,
-        phoneVerifiedAt: Timestamp.now(),
-        updatedAt: Timestamp.now(),
-        signupComplete: true,
-      }, { merge: true })
-    } catch (err) {
-      console.warn('[auth] phone profile sync failed:', err)
-    }
-  }
-
-  /** Re-send email verification — used by the persistent unverified banner. */
-  async resendEmailVerification(): Promise<void> {
-    if (!this.currentUser) throw new Error('No authenticated user')
-    await sendEmailVerification(this.currentUser)
   }
 
   async signOut(): Promise<void> {

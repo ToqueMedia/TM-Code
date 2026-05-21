@@ -5,7 +5,6 @@ import WelcomeScreen from './components/WelcomeScreen';
 import MainLayout from './components/MainLayout';
 import LoginScreen from './components/auth/LoginScreen';
 import OnboardingFlow from './components/onboarding/OnboardingFlow';
-import type { OnboardingDoneAction } from './components/onboarding/OnboardingFlow';
 import { useProjectStore } from './stores/projectStore';
 import { useAuthStore } from './stores/authStore';
 import { useSettingsStore } from './stores/settingsStore';
@@ -50,7 +49,6 @@ function App() {
 	// setInitializing(false) fires — prevents WelcomeScreen from showing while a
 	// project is actively loading (both on startup auto-open and manual opens).
 	const [isOpeningProject, setIsOpeningProject] = useState(false);
-	const [loginInitialMode, setLoginInitialMode] = useState<'signin' | 'signup'>('signin');
 	const prevProjectRef = useRef<string | null>(null);
 	// Guards against concurrent initializeApp invocations (dependency re-runs while async in progress,
 	// or React StrictMode double-fire). Without this, openProject can be called twice in parallel.
@@ -707,13 +705,11 @@ function App() {
 			await openProject(path, options);
 		} catch (error) {
 			logger.error('app', 'Failed to open project:', error);
+			const { useToastStore } = await import('./stores/toastStore');
+			useToastStore.getState().addToast('error', `Failed to open project: ${(error as Error).message || 'Unknown error'}`);
 		} finally {
 			setIsOpeningProject(false);
 		}
-	};
-
-	const handleOnboardingComplete = (action: OnboardingDoneAction) => {
-		setLoginInitialMode(action);
 	};
 
 	// Show loading state while:
@@ -747,21 +743,18 @@ function App() {
 
 	// First-time install → show onboarding before login
 	if (!hasCompletedOnboarding) {
-		return <OnboardingFlow onComplete={handleOnboardingComplete} />;
+		return <OnboardingFlow onComplete={() => {}} />;
 	}
 
 	// Not authenticated → show login
 	if (!isAuthenticated) {
-		return <LoginScreen initialMode={loginInitialMode} />;
+		return <LoginScreen />;
 	}
 
-	// Authenticated but signup not yet complete (mid-phone-link or backend
-	// /v1/me reported `signup_incomplete`). Stay on the login surface — the
-	// IDE shell must not render until the backend confirms signup is done.
-	// `signupComplete === null` means the first /v1/me hasn't returned yet;
-	// we wait rather than render the IDE optimistically.
+	// Authenticated but signup not yet complete (backend /v1/me reported
+	// `signup_incomplete`). Show login screen — signup must be done on the website.
 	if (signupComplete !== true) {
-		return <LoginScreen initialMode="signup" />;
+		return <LoginScreen />;
 	}
 
 	return (

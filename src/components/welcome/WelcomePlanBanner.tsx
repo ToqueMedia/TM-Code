@@ -1,4 +1,4 @@
-import { memo, useEffect, useState, useCallback } from 'react'
+import { memo, useEffect, useState, useCallback, useRef } from 'react'
 import { Box, Flex, HStack, Text, VStack } from '@chakra-ui/react'
 import { FiZap, FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
@@ -64,15 +64,19 @@ function WelcomePlanBanner() {
   const plan = useBillingStore(s => s.plan)
   const isLoaded = useBillingStore(s => s.isLoaded)
   const updateFromMe = useBillingStore(s => s.updateFromMe)
+  // Guard: once the banner has been shown, never re-show even if the plan
+  // temporarily reverts to 'explorer' (e.g. from a stale /v1/me response
+  // triggered by the Firestore onSnapshot listener after claimWelcomePlan).
+  const hasShown = useRef(false)
 
   useEffect(() => {
-    // Wait until the backend has reported the real plan — the store defaults
-    // to 'explorer' which would flash the banner for paid users.
+    if (hasShown.current) return
     if (!isLoaded) return
     if (isExpired()) return
     if (isDismissed()) return
     if (plan !== 'explorer') return
 
+    hasShown.current = true
     setVisible(true)
   }, [isLoaded, plan])
 

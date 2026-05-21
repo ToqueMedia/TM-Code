@@ -771,7 +771,7 @@ class AgentService {
         }).join(' → ')}]`)
 
         // Get streaming response
-        const response = await this.callAPI(apiMessages)
+        const response = await this.callAPI(apiMessages, turnCount)
 
         // Phase D: create streaming pool BEFORE processing the stream.
         // processStreamedTurn calls pool.addTool() on each content_block_stop
@@ -2156,7 +2156,7 @@ Developer message: ${displayText}
     }
   }
 
-  private async callAPI(messages: AnthropicMessage[]): Promise<Response> {
+  private async callAPI(messages: AnthropicMessage[], turnCount: number): Promise<Response> {
     const MAX_RETRIES = 3
     const RETRY_DELAYS = [3000, 5000, 10000] // default backoff for network errors
 
@@ -2164,7 +2164,7 @@ Developer message: ${displayText}
       if (this.abortController?.signal.aborted) throw new DOMException('Aborted', 'AbortError')
 
       try {
-        const response = await this.callAPIOnce(messages)
+        const response = await this.callAPIOnce(messages, turnCount)
         return response
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') throw err
@@ -2194,7 +2194,7 @@ Developer message: ${displayText}
     throw new ServiceError('Max retries exceeded', 'NETWORK_ERROR', false)
   }
 
-  private async callAPIOnce(messages: AnthropicMessage[]): Promise<Response> {
+  private async callAPIOnce(messages: AnthropicMessage[], turnCount: number): Promise<Response> {
     // Anthropic Messages API endpoint — the worker converts to OpenAI
     // format internally for DashScope, and converts the response back
     // to Anthropic SSE with content_block_stop events for Phase D.
@@ -2220,7 +2220,22 @@ Developer message: ${displayText}
     const activeSession = useChatStore.getState().getActiveSession?.()
     if (activeSession?.id) {
       headers['X-Conversation-Id'] = activeSession.id
+      // Mimo trajectory tracking — Xiaomi uses these headers to correlate
+      // user sessions across turns for trajectory analysis.
+      headers['X-Mimo-Code-Session-Id'] = activeSession.id
     }
+
+    // Mimo trajectory: turn number in the current conversation
+    headers['X-Mimo-Turn-Number'] = String(turnCount)
+
+    // TM-Code — equivalent to Claude Code's Anthropic-Beta header.
+    // Tells Xiaomi which client capabilities are active for this session.
+    headers['TM-Code'] = [
+      'tm-code-ide',
+      'runtime:tauri',
+      'platform:desktop',
+      `tools:${this.tools.length}`,
+    ].join(',')
 
     // Request type — forwarded as X-Request-Type for the backend's
     // analytics / model-routing / billing visibility. Auto-cleared for

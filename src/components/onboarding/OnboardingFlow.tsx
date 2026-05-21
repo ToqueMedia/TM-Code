@@ -17,10 +17,8 @@ import ReadyStep from './steps/ReadyStep'
 
 const TOTAL_STEPS = 6
 
-export type OnboardingDoneAction = 'signup' | 'signin'
-
 interface OnboardingFlowProps {
-  onComplete: (action: OnboardingDoneAction) => void
+  onComplete: () => void
 }
 
 const MotionBox = motion.create(Box)
@@ -70,12 +68,12 @@ function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
 
   const handleSkip = useCallback(() => {
     completeOnboarding()
-    onComplete('signin')
+    onComplete()
   }, [completeOnboarding, onComplete])
 
-  const handleDone = useCallback((action: OnboardingDoneAction) => {
+  const handleDone = useCallback(() => {
     completeOnboarding()
-    onComplete(action)
+    onComplete()
   }, [completeOnboarding, onComplete])
 
   // Keyboard navigation — ArrowRight/ArrowLeft between steps, Escape to skip

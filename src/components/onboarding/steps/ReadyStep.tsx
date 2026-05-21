@@ -7,10 +7,9 @@ import {
   primaryBtnStyle, primaryHoverEnter, primaryHoverLeave,
   secondaryBtnStyle, secondaryHoverEnter, secondaryHoverLeave,
 } from '../onboardingStyles'
-import type { OnboardingDoneAction } from '../OnboardingFlow'
 
 interface ReadyStepProps {
-  onDone: (action: OnboardingDoneAction) => void
+  onDone: () => void
   onBack: () => void
 }
 
@@ -117,26 +116,30 @@ function ReadyStep({ onDone, onBack }: ReadyStepProps) {
         alignItems="center"
         gap={3}
       >
-        <button
-          type="button"
-          className="ob-ready-btn ob-ready-primary"
-          onClick={() => onDone('signup')}
+        <a
+          href="https://toquemedia.net"
+          target="_blank"
+          rel="noopener noreferrer"
           style={{
             ...primaryBtnStyle,
             width: '100%',
             padding: '13px 0',
             fontSize: '14px',
+            display: 'block',
+            textAlign: 'center',
+            textDecoration: 'none',
+            boxSizing: 'border-box',
           }}
           onMouseEnter={primaryHoverEnter}
           onMouseLeave={primaryHoverLeave}
         >
           {t('onboarding.ready.createAccount')}
-        </button>
+        </a>
 
         <button
           type="button"
           className="ob-ready-btn"
-          onClick={() => onDone('signin')}
+          onClick={onDone}
           style={{ ...secondaryBtnStyle, width: '100%', padding: '13px 0', color: tokens.colors.text.primary }}
           onMouseEnter={secondaryHoverEnter}
           onMouseLeave={secondaryHoverLeave}

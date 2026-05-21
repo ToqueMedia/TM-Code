@@ -27,12 +27,12 @@ export const primaryBtnStyle: React.CSSProperties = {
   boxShadow: PRIMARY_SHADOW,
 }
 
-export function primaryHoverEnter(e: React.MouseEvent<HTMLButtonElement>) {
+export function primaryHoverEnter(e: React.MouseEvent<HTMLElement>) {
   e.currentTarget.style.boxShadow = PRIMARY_SHADOW_HOVER
   e.currentTarget.style.transform = 'translateY(-1px)'
 }
 
-export function primaryHoverLeave(e: React.MouseEvent<HTMLButtonElement>) {
+export function primaryHoverLeave(e: React.MouseEvent<HTMLElement>) {
   e.currentTarget.style.boxShadow = PRIMARY_SHADOW
   e.currentTarget.style.transform = 'translateY(0)'
 }
@@ -47,12 +47,12 @@ export const secondaryBtnStyle: React.CSSProperties = {
   fontWeight: '500',
 }
 
-export function secondaryHoverEnter(e: React.MouseEvent<HTMLButtonElement>) {
+export function secondaryHoverEnter(e: React.MouseEvent<HTMLElement>) {
   e.currentTarget.style.borderColor = tokens.colors.text.muted
   e.currentTarget.style.background = tokens.colors.bg.hoverSubtle
 }
 
-export function secondaryHoverLeave(e: React.MouseEvent<HTMLButtonElement>) {
+export function secondaryHoverLeave(e: React.MouseEvent<HTMLElement>) {
   e.currentTarget.style.borderColor = tokens.colors.border.panel
   e.currentTarget.style.background = 'transparent'
 }

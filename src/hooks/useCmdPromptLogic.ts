@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo, useSyncExternalStore
 import { useChatStore } from '../stores/chatStore'
 import { useProjectStore } from '../stores/projectStore'
 import { useAuthStore } from '../stores/authStore'
+import { useTerminalPanelStore } from '../stores/terminalPanelStore'
 import { slashCommandRegistry, type SlashCommand } from '../services/agent/slashCommandRegistry'
 import { CMD_MODE_COMMANDS } from '../services/agent/cmdModeCommands'
 import { runAgentWithCallbacks } from '../services/agent/agentRunner'
@@ -686,6 +687,31 @@ export function useCmdPromptLogic() {
           historyIndexRef.current--
           setInput(historyRef.current[historyIndexRef.current])
           return
+        }
+      }
+
+      // Control keys — when the terminal panel is open, forward common
+      // shell control sequences to the PTY instead of letting the browser
+      // handle them (copy, undo, bookmark, etc.). Only `ctrlKey` is used
+      // (not `metaKey`) so Cmd+C on macOS still copies text from the
+      // textarea.
+      if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+        const terminalOpen = useTerminalPanelStore.getState().isOpen
+        if (terminalOpen) {
+          const CONTROL_MAP: Record<string, string> = {
+            c: '\x03',  // SIGINT
+            z: '\x1a',  // SIGTSTP
+            d: '\x04',  // EOF
+            l: '\x0c',  // clear screen
+          }
+          const seq = CONTROL_MAP[e.key]
+          if (seq) {
+            e.preventDefault()
+            e.stopPropagation()
+            useTerminalPanelStore.getState().writeToPty(seq)
+            textareaRef.current?.blur()
+            return
+          }
         }
       }
 

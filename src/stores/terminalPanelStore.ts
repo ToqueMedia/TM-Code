@@ -20,6 +20,8 @@ interface TerminalPanelActions {
   close: () => void
   setWidth: (px: number) => void
   setSessionId: (id: string | null) => void
+  /** Write raw data to the active PTY session (e.g. Ctrl+C → \x03). */
+  writeToPty: (data: string) => void
 }
 
 export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelActions>((set, get) => ({
@@ -45,6 +47,13 @@ export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelAc
   },
   setWidth: (px) => set({ widthPx: Math.max(MIN_WIDTH_PX, px) }),
   setSessionId: (id) => set({ ptySessionId: id }),
+  writeToPty: (data) => {
+    const id = get().ptySessionId
+    if (!id) return
+    invoke('write_to_pty', { sessionId: id, data }).catch((err) => {
+      logger.warn('terminal-panel', 'write_to_pty failed:', err)
+    })
+  },
 }))
 
 export const TERMINAL_PANEL_MIN_WIDTH = MIN_WIDTH_PX

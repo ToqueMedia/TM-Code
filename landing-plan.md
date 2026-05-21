@@ -13,7 +13,7 @@
 > - **Firebase Auth authorized domains**: add `code.toquemedia.net` in the Firebase/GIP console (manual, no code).
 > - **`yarn install`**: regenerate lockfile after Phase 8 dependency drop (22 deps removed).
 > - **e2e tests** (`packages/web/e2e/`): not validated since route map changed extensively.
-> - **Worker CORS allowlist**: `studio.toquemedia.net` left for transition — remove once DNS swap completes.
+> - **Worker CORS allowlist**: `code.toquemedia.net` left for transition — remove once DNS swap completes.
 > - **`aiService` Cloud Function**: still in `packages/functions` source. Drop after a week of zero invocations.
 
 > **Phase 0 audit findings (2026-05-02):**
@@ -124,7 +124,7 @@ packages/web/src/mocks/
 The frontend doesn't own API routes. The production AI/billing API is the **Cloudflare Worker `toquemedia-studio-api`** at `~/dev/deskotp/toquemedia-studio-api`, deployed to `api-agents.toquemedia.net` (per `wrangler.toml:32`). Firebase Hosting still has a stale rewrite `/ai/**` → `aiService` Firebase Function (`firebase.prod.json:48-52`) that is almost certainly dead — Q10. The worker is reused by TM Code IDE (Tauri).
 
 - **No deletion needed** — there are no Next.js API routes here.
-- **One small addition required (not a deletion)**: the worker's `ALLOWED_ORIGINS` (`src/index.ts:132-138`) only whitelists Tauri origins (`tauri://localhost`, `https://tauri.localhost`, `http://localhost:1420`). The new web `/account` will be CORS-blocked when calling `/v1/me`. Need to add `https://code.toquemedia.net` (and during transition `https://studio.toquemedia.net`). One-line PR on `toquemedia-studio-api`.
+- **One small addition required (not a deletion)**: the worker's `ALLOWED_ORIGINS` (`src/index.ts:132-138`) only whitelists Tauri origins (`tauri://localhost`, `https://tauri.localhost`, `http://localhost:1420`). The new web `/account` will be CORS-blocked when calling `/v1/me`. Need to add `https://code.toquemedia.net` (and during transition `https://code.toquemedia.net`). One-line PR on `toquemedia-studio-api`.
 
 ### 2.3 Database / Firestore — delete nothing destructively
 
@@ -272,7 +272,7 @@ Use a single nested layout: `AccountLayout` with sidebar nav + tab outlet. React
 
 Current state (`packages/web/index.html`):
 - Has `<title>`, description, OG tags, Twitter cards, JSON-LD `SoftwareApplication`, sitemap link, robots verification meta. Good baseline but **all messaging targets the prototype tool** — must be rewritten for TM Code.
-- All `studio.toquemedia.net` references → **`code.toquemedia.net`** (Q7). Includes `og:url`, `twitter:url`, JSON-LD `url`, canonical link, sitemap `<loc>` entries.
+- All `code.toquemedia.net` references → **`code.toquemedia.net`** (Q7). Includes `og:url`, `twitter:url`, JSON-LD `url`, canonical link, sitemap `<loc>` entries.
 - `public/sitemap.xml` exists but stale; regenerate with new routes + new host.
 - `public/robots.txt` references `/_next/` (Next.js artifact, copy-pasted) — clean it up; update `Sitemap:` entry to `https://code.toquemedia.net/sitemap.xml`.
 - Per-route meta tags need a head manager. Vite SPA has no built-in head — recommend `react-helmet-async` (small dep) or hand-rolled per-route effect.
@@ -412,13 +412,13 @@ Recommendation: **Phased, not big-bang.** Two reasons:
 
 ### 9.1 Where it deploys today
 
-- **Frontend**: Firebase Hosting, project `maiplayer-ac56d`, target inferred from `.firebaserc`. Deploy: `yarn deploy:web` → `firebase deploy --only hosting --config firebase.prod.json`. Output dir: `packages/web/dist`. **New domain: `code.toquemedia.net`** (rebrand from `studio.toquemedia.net`; Cloudflare DNS handled separately by Célio).
+- **Frontend**: Firebase Hosting, project `maiplayer-ac56d`, target inferred from `.firebaserc`. Deploy: `yarn deploy:web` → `firebase deploy --only hosting --config firebase.prod.json`. Output dir: `packages/web/dist`. **New domain: `code.toquemedia.net`** (rebrand from `code.toquemedia.net`; Cloudflare DNS handled separately by Célio).
 - **AI rewrite**: `/ai/**` proxied to Firebase Function `aiService` — **stale**. All AI traffic moved to the Cloudflare Worker at `api-agents.toquemedia.net`. Drop the rewrite + the function (Q10).
 - **Worker**: Cloudflare `toquemedia-studio-api` at `api-agents.toquemedia.net` (AI/billing/deploy/admin), plus `showcases.toquemedia.net` for R2 sites. **Untouched except for one CORS allowlist update** to permit the new web origin.
 
 ### 9.2 Recommendation: stay on Firebase Hosting
 
-Rationale: auth flow, CSP rules, redirects, and the function rewrite are all already configured. Migration to Cloudflare Pages or Vercel adds risk for zero benefit. Domain rebrand: `studio.toquemedia.net` → **`code.toquemedia.net`** (Q7 resolved). Cloudflare DNS handled separately; Firebase Hosting custom domain + Auth authorized domains updated in code.
+Rationale: auth flow, CSP rules, redirects, and the function rewrite are all already configured. Migration to Cloudflare Pages or Vercel adds risk for zero benefit. Domain rebrand: `code.toquemedia.net` → **`code.toquemedia.net`** (Q7 resolved). Cloudflare DNS handled separately; Firebase Hosting custom domain + Auth authorized domains updated in code.
 
 ### 9.3 Env vars
 
@@ -468,7 +468,7 @@ Total: roughly 1×L + 4×M + 4×S of focused work.
 
 **Two narrow exceptions** to "worker is untouched":
 
-1. **CORS allowlist update** in `toquemedia-studio-api/src/index.ts:132-138` — add `https://code.toquemedia.net` (and `https://studio.toquemedia.net` during transition). One-line PR; required before `/account/billing` works in production.
+1. **CORS allowlist update** in `toquemedia-studio-api/src/index.ts:132-138` — add `https://code.toquemedia.net` (and `https://code.toquemedia.net` during transition). One-line PR; required before `/account/billing` works in production.
 2. **Optional**: drop the dead `/ai/**` Firebase Function rewrite + the `aiService` Cloud Function once confirmed nothing reads them (Q10).
 
 ---
@@ -483,7 +483,7 @@ Total: roughly 1×L + 4×M + 4×S of focused work.
 | **Q3** | **CONFIRMED** (audit 2026-05-02): worker `toquemedia-studio-api` does NOT read or write `blueprints`, `chatMessages`, `projects/{id}/screens`, or `projects/{id}/files`. Worker only touches `users`, `subscription_plans`, `admin_audit`, `deviceFingerprints`, `projectDeployments`, `subdomains`. The four web-only collections can be archived 30/60/90 days after the web stops writing them. |
 | **Q4** | **DROPPED FROM PLAN (2026-05-02).** No PAT/device-token endpoint exists, and no business reason to build one. The IDE authenticates via Firebase ID token with auto-refresh — there is nothing for the user to manage from the web. Not "deferred" — removed entirely. If a future product need surfaces (third-party CI integrations, multi-device PAT control), that becomes its own scoped initiative. |
 | **Q6** | **GitHub Releases at `https://github.com/ToqueMedia/TM-Code`.** Landing/`/download` calls `https://api.github.com/repos/ToqueMedia/TM-Code/releases/latest` (no auth, 60 req/h per IP — sufficient), detects OS, picks the asset by filename pattern (`.dmg` macOS, `.msi` Windows, `.AppImage` Linux). No new worker endpoint, no static manifest to maintain. `VITE_TM_CODE_DOWNLOAD_BASE_URL` is no longer needed. |
-| **Q7** | **Rebrand to `code.toquemedia.net`.** DNS handled separately by Célio in Cloudflare. Code-side changes: `firebase.prod.json` (hosting site + CSP + OAuth domains), `index.html` (`<title>`, `og:url`, `og:image`, `twitter:*`, `<link rel="canonical">`, JSON-LD `SoftwareApplication.url`), `public/sitemap.xml` (regenerate), `public/robots.txt` (new `Sitemap:`), `<link rel="alternate" hreflang>` for pt/en/fr/zh, grep for hard-coded `studio.toquemedia.net` literals, **add `code.toquemedia.net` to Firebase Auth authorized domains** (GIP/Auth console). Also: add to worker `ALLOWED_ORIGINS` (see §11). |
+| **Q7** | **Rebrand to `code.toquemedia.net`.** DNS handled separately by Célio in Cloudflare. Code-side changes: `firebase.prod.json` (hosting site + CSP + OAuth domains), `index.html` (`<title>`, `og:url`, `og:image`, `twitter:*`, `<link rel="canonical">`, JSON-LD `SoftwareApplication.url`), `public/sitemap.xml` (regenerate), `public/robots.txt` (new `Sitemap:`), `<link rel="alternate" hreflang>` for pt/en/fr/zh, grep for hard-coded `code.toquemedia.net` literals, **add `code.toquemedia.net` to Firebase Auth authorized domains** (GIP/Auth console). Also: add to worker `ALLOWED_ORIGINS` (see §11). |
 | **Q10** | **CONFIRMED dead** (audit 2026-05-02): worker source has zero references to `aiService` Cloud Function. All AI traffic goes to `api-agents.toquemedia.net/v1/chat/completions`. Drop the `/ai/**` rewrite from `firebase.prod.json:48-52` and the `aiService` Cloud Function. Optional belt-and-braces: tail Functions logs for a week first to catch any rogue caller. |
 
 ### Still open
