@@ -862,7 +862,10 @@ fn compute_code_masks(bytes: &[u8]) -> (Vec<bool>, Vec<bool>) {
                     i += 2;
                     continue;
                 }
-                if (state == State::Single && b == b'\'') || (state == State::Double && b == b'"') || b == b'\n' {
+                if (state == State::Single && b == b'\'')
+                    || (state == State::Double && b == b'"')
+                    || b == b'\n'
+                {
                     state = State::Code;
                 }
             }
