@@ -33,7 +33,7 @@ function slugSuggest(name: string): string {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/[^a-z0-9-]+/g, '')
     .replace(/^-+|-+$/g, '')
     .slice(0, 63)
 }
@@ -120,7 +120,7 @@ function PublishModal({ isOpen, onClose }: PublishModalProps) {
       await deployService.deploy(project.path, {
         projectId: project.id,
         projectName: project.name,
-        customSubdomain: subdomain || undefined,
+        customSubdomain: subdomain.replace(/^-+|-+$/g, '') || undefined,
         userPlan,
       })
     } catch {
@@ -557,8 +557,13 @@ function ConfigureStep({
         >
           <Input
             value={subdomain}
-            onChange={(e) => onSubdomainChange(slugSuggest(e.target.value))}
+            onChange={(e) => onSubdomainChange(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+            onBlur={() => onSubdomainChange(subdomain.replace(/^-+|-+$/g, ''))}
             placeholder="my-project"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
             bg="transparent"
             border="none"
             color={tokens.colors.text.primary}
