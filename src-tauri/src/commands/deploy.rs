@@ -607,16 +607,12 @@ fn scan_express_wildcard_routes(content: &str, rel_path: &str, findings: &mut Ve
             State::Single => {
                 if b == b'\\' {
                     i += 2;
-                    if i > 0 && i - 1 < bytes.len() {
-                        if bytes[i - 1] == b'\n' {
-                            line += 1;
-                        }
+                    if i > 0 && i - 1 < bytes.len() && bytes[i - 1] == b'\n' {
+                        line += 1;
                     }
                     continue;
                 }
-                if b == b'\'' {
-                    state = State::Code;
-                } else if b == b'\n' {
+                if b == b'\'' || b == b'\n' {
                     // Unterminated single-quoted string — most likely a syntax error
                     // in the source; bail back to Code to avoid eating the whole file.
                     state = State::Code;
@@ -625,26 +621,20 @@ fn scan_express_wildcard_routes(content: &str, rel_path: &str, findings: &mut Ve
             State::Double => {
                 if b == b'\\' {
                     i += 2;
-                    if i > 0 && i - 1 < bytes.len() {
-                        if bytes[i - 1] == b'\n' {
-                            line += 1;
-                        }
+                    if i > 0 && i - 1 < bytes.len() && bytes[i - 1] == b'\n' {
+                        line += 1;
                     }
                     continue;
                 }
-                if b == b'"' {
-                    state = State::Code;
-                } else if b == b'\n' {
+                if b == b'"' || b == b'\n' {
                     state = State::Code;
                 }
             }
             State::Template => {
                 if b == b'\\' {
                     i += 2;
-                    if i > 0 && i - 1 < bytes.len() {
-                        if bytes[i - 1] == b'\n' {
-                            line += 1;
-                        }
+                    if i > 0 && i - 1 < bytes.len() && bytes[i - 1] == b'\n' {
+                        line += 1;
                     }
                     continue;
                 }
@@ -872,9 +862,7 @@ fn compute_code_masks(bytes: &[u8]) -> (Vec<bool>, Vec<bool>) {
                     i += 2;
                     continue;
                 }
-                if (state == State::Single && b == b'\'') || (state == State::Double && b == b'"') {
-                    state = State::Code;
-                } else if b == b'\n' {
+                if (state == State::Single && b == b'\'') || (state == State::Double && b == b'"') || b == b'\n' {
                     state = State::Code;
                 }
             }

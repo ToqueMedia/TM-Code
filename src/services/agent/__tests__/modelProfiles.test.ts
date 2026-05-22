@@ -8,15 +8,12 @@ import {
 
 describe('modelProfiles', () => {
   describe('MODEL_PROFILES registry', () => {
-    it('contains exactly the two production request shapes', () => {
-      // Frontend ships only the two profiles getProfileForPlan returns —
-      // V4-Flash for explorer/vibe and GLM-5.1 for pro/max. Every other
-      // catalog entry is admin-routable; the proxy normalizes whichever
-      // shape we send to that upstream's contract.
+    it('contains exactly the production request shapes', () => {
       const ids = Object.keys(MODEL_PROFILES)
       expect(ids).toContain('deepseek-v4-flash')
       expect(ids).toContain('glm-5.1')
-      expect(ids.length).toBe(2)
+      expect(ids).toContain('mimo-v2.5-pro')
+      expect(ids.length).toBe(3)
     })
 
     it('deepseek-v4-flash has correct specs', () => {
@@ -59,7 +56,7 @@ describe('modelProfiles', () => {
   describe('getAllModelProfiles', () => {
     it('returns all profiles', () => {
       const all = getAllModelProfiles()
-      expect(all.length).toBe(2)
+      expect(all.length).toBe(3)
     })
   })
 
