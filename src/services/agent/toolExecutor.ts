@@ -121,6 +121,33 @@ function createLinkedAbortController(parentSignal?: AbortSignal): AbortControlle
 
 // === Tool Executor ===
 
+function formatBackgroundCommandResult(cmd: {
+  id: string; command: string; status: string; pid: number;
+  exitCode: number | null; output: string; startedAt: number; completedAt: number | null
+}): string {
+  const elapsed = cmd.completedAt
+    ? `${Math.round((cmd.completedAt - cmd.startedAt) / 1000)}s`
+    : `${Math.round((Date.now() - cmd.startedAt) / 1000)}s (still running)`
+
+  const lines: string[] = [
+    `[${cmd.status.toUpperCase()}] ${cmd.command} (id: ${cmd.id}, PID: ${cmd.pid}, elapsed: ${elapsed})`,
+  ]
+
+  if (cmd.exitCode !== null) {
+    lines.push(`Exit code: ${cmd.exitCode}`)
+  }
+
+  if (cmd.output) {
+    const MAX_OUTPUT = 4000
+    const output = cmd.output.length > MAX_OUTPUT
+      ? `...(truncated)\n${cmd.output.slice(-MAX_OUTPUT)}`
+      : cmd.output
+    lines.push(output)
+  }
+
+  return lines.join('\n')
+}
+
 class ToolExecutor {
   private static instance: ToolExecutor
   private tools: Map<string, ToolEntry> = new Map()
@@ -379,6 +406,7 @@ class ToolExecutor {
     const PERMISSION_EXEMPT_TOOLS = new Set([
       'update_tasks',
       'check_background_agents',
+      'check_background_commands',
       'request_credentials',
       'ask_user_question',
     ])
@@ -2647,6 +2675,198 @@ Project root: ${projectRoot}`
         }
 
         return lines.join('\n\n')
+      }
+    })
+
+    // === execute_command_background ===
+    this.tools.set('execute_command_background', {
+      definition: {
+        name: 'execute_command_background',
+        description: 'Execute a shell command in the background. Returns immediately with a tracking ID — the command runs while you continue working. Use for long-running operations like npm install, build, or compile that would otherwise block your workflow. The command runs in the project directory. Use check_background_commands to see results when ready. Max 6 concurrent background commands.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'Shell command to execute (e.g., "npm install", "npm run build", "tsc --noEmit")' },
+            cwd: { type: 'string', description: 'Working directory. Default: project root' },
+            timeout_secs: { type: 'number', description: 'Timeout in seconds. Default: 300. Max: 600.' }
+          },
+          required: ['command']
+        }
+      },
+      execute: async (input) => {
+        const cmd = (input.command as string).trim()
+        this.validateCommand(cmd)
+
+        const projectRoot = this.getProjectRoot()
+        const cwd = (input.cwd as string) || projectRoot
+        this.validatePathWithinProject(cwd)
+
+        const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
+        const bgCmdStore = useBackgroundCommandStore.getState()
+
+        // Fix #4: GC old completed entries before checking concurrency
+        bgCmdStore.removeCompleted()
+
+        if (bgCmdStore.getRunningCount() >= 6) {
+          return 'Cannot start: maximum 6 background commands running. Wait for one to complete or use check_background_commands.'
+        }
+
+        const { listen } = await import('@tauri-apps/api/event')
+        const { invoke } = await import('@tauri-apps/api/core')
+
+        const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+        const allOutput: string[] = []
+        let targetPid = 0
+        let finished = false
+        // Fix #6: declared before listeners so they can clear it on normal exit
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+
+        const bufferedOutput: { pid: number; data: string }[] = []
+        const bufferedExit: { pid: number; code: number }[] = []
+
+        // Register listeners BEFORE spawning
+        const unOutput = await listen<{ pid: number; stream: string; data: string }>(
+          'cmd-output',
+          (event) => {
+            if (targetPid === 0) {
+              bufferedOutput.push({ pid: event.payload.pid, data: event.payload.data })
+            } else if (event.payload.pid === targetPid) {
+              allOutput.push(event.payload.data)
+              useBackgroundCommandStore.getState().appendOutput(cmdId, event.payload.data)
+            }
+          }
+        )
+
+        const unExit = await listen<{ pid: number; code: number }>(
+          'cmd-exit',
+          (event) => {
+            if (targetPid === 0) {
+              bufferedExit.push({ pid: event.payload.pid, code: event.payload.code })
+            } else if (event.payload.pid === targetPid && !finished) {
+              finished = true
+              if (timeoutTimer) clearTimeout(timeoutTimer) // Fix #6
+              unOutput(); unExit()
+              const code = event.payload.code
+              if (code === 0) {
+                useBackgroundCommandStore.getState().completeCommand(cmdId, code)
+              } else {
+                useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${code}`)
+              }
+            }
+          }
+        )
+
+        try {
+          const pid = await invoke<number>('run_streaming_command', { command: cmd, cwd })
+          targetPid = pid
+
+          // Fix #1: addCommand BEFORE flush — so store entry exists when
+          // buffered exit events are processed (avoids completeCommand no-op)
+          useBackgroundCommandStore.getState().addCommand({
+            id: cmdId,
+            command: cmd,
+            status: 'running',
+            pid,
+            exitCode: null,
+            output: '',
+            startedAt: Date.now(),
+            completedAt: null,
+          })
+
+          // Flush buffered events (events emitted between spawn and PID assignment)
+          for (const ev of bufferedOutput) {
+            if (ev.pid === pid) {
+              allOutput.push(ev.data)
+              useBackgroundCommandStore.getState().appendOutput(cmdId, ev.data)
+            }
+          }
+          for (const ev of bufferedExit) {
+            if (ev.pid === pid && !finished) {
+              finished = true
+              if (timeoutTimer) clearTimeout(timeoutTimer)
+              unOutput(); unExit()
+              if (ev.code === 0) {
+                useBackgroundCommandStore.getState().completeCommand(cmdId, ev.code)
+              } else {
+                useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${ev.code}`)
+              }
+            }
+          }
+
+          // If command already exited during flush, return immediately
+          if (finished) {
+            const result = useBackgroundCommandStore.getState().getById(cmdId)
+            const exitInfo = result?.exitCode !== null ? ` (exit ${result?.exitCode})` : ''
+            return `Command completed immediately (PID: ${pid}, id: ${cmdId})${exitInfo}. Use check_background_commands to see results.`
+          }
+
+          const timeoutSecs = Math.min((input.timeout_secs as number) || 300, 600)
+          timeoutTimer = setTimeout(async () => {
+            if (!finished) {
+              finished = true
+              unOutput(); unExit()
+              try { await invoke('kill_process', { pid }) } catch { /* best effort */ }
+              useBackgroundCommandStore.getState().failCommand(cmdId, `Timed out after ${timeoutSecs}s`)
+            }
+          }, timeoutSecs * 1000)
+
+          // Setup abort listener — kills on agent stop
+          const callSignal = input._abortSignal as AbortSignal | undefined
+          if (callSignal) {
+            callSignal.addEventListener('abort', async () => {
+              if (!finished) {
+                finished = true
+                if (timeoutTimer) clearTimeout(timeoutTimer)
+                unOutput(); unExit()
+                try { await invoke('kill_process', { pid }) } catch { /* best effort */ }
+                useBackgroundCommandStore.getState().cancelCommand(cmdId)
+              }
+            }, { once: true })
+          }
+
+          return `Background command started (PID: ${pid}, id: ${cmdId}). Use check_background_commands to see results when ready.`
+        } catch (err) {
+          unOutput(); unExit()
+          const msg = err instanceof Error ? err.message : String(err)
+          return `Failed to start background command: ${msg}`
+        }
+      }
+    })
+
+    // === check_background_commands ===
+    this.tools.set('check_background_commands', {
+      definition: {
+        name: 'check_background_commands',
+        description: 'Check the status and output of background commands started with execute_command_background. Returns all running and recently completed commands with their output.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Optional specific command ID to check. Omit to see all.' }
+          },
+          required: []
+        }
+      },
+      execute: async (input) => {
+        const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
+        const bgCmdStore = useBackgroundCommandStore.getState()
+
+        const targetId = input.id as string | undefined
+
+        if (targetId) {
+          const cmd = bgCmdStore.getById(targetId)
+          if (!cmd) return `No background command found with id: ${targetId}`
+          return formatBackgroundCommandResult(cmd)
+        }
+
+        const all = bgCmdStore.getAll()
+        if (all.length === 0) return 'No background commands running or recently completed.'
+
+        const lines: string[] = []
+        for (const cmd of all) {
+          lines.push(formatBackgroundCommandResult(cmd))
+        }
+
+        return lines.join('\n\n---\n\n')
       }
     })
 

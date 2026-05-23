@@ -16,6 +16,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useSkillStore } from '../../stores/skillStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useLayoutStore } from '../../stores/layoutStore'
+import { useBackgroundCommandStore } from '../../stores/backgroundCommandStore'
 import { stopAgent } from '../../services/agent/cmdModeCommands'
 import { getCommandQueueSnapshot, subscribeToCommandQueue } from '../../services/agent/messageQueue'
 import { usePreflightStatus } from '../../hooks/usePreflightStatus'
@@ -46,6 +47,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   const queueLength = queuedCommands.length
   const preflight = usePreflightStatus()
   const devServer = useLayoutStore(s => s.devServer)
+  const bgCommands = useBackgroundCommandStore(s => s.commands)
 
   // Session-mode elapsed: total wall time per request, freezes during permission waits.
   const { elapsedMs: elapsed } = useAgentElapsed('session')
@@ -140,8 +142,19 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
       const port = url?.match(/:(\d+)/)?.[1]
       out.push(port ? `dev :${port}` : devServer.status === 'starting' ? 'dev…' : 'dev')
     }
+    // Background commands
+    const bgCmdRunning = Array.from(bgCommands.values()).filter(c => c.status === 'running').length
+    const bgCmdCompleted = Array.from(bgCommands.values()).filter(c => c.status === 'completed').length
+    const bgCmdErrored = Array.from(bgCommands.values()).filter(c => c.status === 'error').length
+    if (bgCmdRunning > 0 || bgCmdCompleted > 0 || bgCmdErrored > 0) {
+      const parts: string[] = []
+      if (bgCmdRunning > 0) parts.push(`${bgCmdRunning} running`)
+      if (bgCmdCompleted > 0) parts.push(`${bgCmdCompleted} done`)
+      if (bgCmdErrored > 0) parts.push(`${bgCmdErrored} err`)
+      out.push(`cmds: ${parts.join(' ')}`)
+    }
     return out
-  }, [autoApproveDiffs, queueLength, skillCount, mcpIsInitializing, mcpServers, totalMcpTools, devServer])
+  }, [autoApproveDiffs, queueLength, skillCount, mcpIsInitializing, mcpServers, totalMcpTools, devServer, bgCommands])
 
   // Same auto-hide rule the chat-mode AgentTasksPanel uses: once the agent
   // finishes AND every task is completed, stop rendering the strip. This

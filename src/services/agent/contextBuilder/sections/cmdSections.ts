@@ -30,7 +30,6 @@ import { composeScaffoldingAwareSection } from './chatSections'
 import {
   sharedDoingTasksCore,
   sharedIdentityReminder,
-  sharedUiBaselineReminder,
 } from './sharedSections'
 
 export function getCmdCompletionContractSection(): string {
@@ -65,11 +64,11 @@ export function getCmdClosedLoopSection(): string {
 **VERIFY** work before reporting completion.
 
 **After \`${EXECUTE_COMMAND}\`:**
- - **READ** the full output. Exit code ≠ 0 or stderr errors → **STOP and fix** before continuing.
+ - **READ** the full output. Exit code ≠ 0 or stderr errors → **fix the actual error** before continuing. This is about real failures, not defensive re-checks — once the error is resolved, move on.
  - **TREAT** warnings about missing dependencies or type errors as blockers — address them.
 
 **After file changes:**
- - When a build system or dev server is running, **CHECK** for errors before continuing.
+ - When a dev server is running (e.g. the user started one via \`! <command>\`), **CHECK** for errors before continuing.
  - When you installed dependencies, **CONFIRM** exit code 0 before writing code that depends on them.
 
 **Verification before completion:**
@@ -113,7 +112,10 @@ export function getCmdToolsSection(): string {
 
  - Use dedicated tools (\`${READ_FILE}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`) instead of shell commands for file operations. Reserve \`${EXECUTE_COMMAND}\` for system commands and terminal operations only.
  - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. Mark each task as completed as soon as you are done with it.
- - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.`
+ - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
+ - \`research\`: parallel sub-agent with read+write access. Blocks your turn until complete. **Caller-parameterized effort**: pass \`thoroughness: "quick"\` (1-3 tool calls), \`"medium"\` (3-8 calls, default), or \`"thorough"\` (comprehensive multi-location search). Pick the smallest that answers the question.
+ - \`spawn_background_agent\`: read-only sub-agent (enforced at harness level — the agent literally cannot write or execute commands, regardless of what it attempts). Runs independently, results via \`check_background_agents\`. **Caller-parameterized effort**: same \`thoroughness\` parameter as \`research\`.
+ - \`verify\`: optional verification agent that checks your work by running tests, type checks, and diagnostics. **Read-only enforced at harness level** — edit/write tools are disallowed by the runtime, not just by the prompt. Returns PASS, FAIL, or PARTIAL.`
 }
 
 export function getCmdEnvironmentSection(ctx: CmdPromptContext): string {
@@ -154,7 +156,7 @@ Verification (Terminal mode — do NOT run dev servers):
  - When the user wants to see the app running, ASK them to run the dev command themselves — don't start it yourself.
 
 Safety:
- - .env, .pem, .key, credentials.json, .npmrc, and *_secret* files may contain secrets. Read or expose their contents only with explicit user authorization. You may create .env.example with placeholders.
+ - **Secret files (\`.env\`, \`.pem\`, \`credentials.json\`, etc.):** In Terminal mode you may read these with explicit user authorization (e.g. the user asks you to check an env var). For project-integrated env vars, prefer \`request_credentials\` over direct \`.env\` reads — it wires the value into the project's dev server. Note: in Chat mode, \`.env\` files are mechanically blocked by the IDE; \`request_credentials\` is the only path there. You may create \`.env.example\` with placeholders.
  - When a project is open and you write code that reads \`process.env.X\` / \`import.meta.env.X\` for a third-party service (LLM, payments, email, analytics, etc.), call \`request_credentials\` for X in the same turn — \`.env\` is not editable directly, so a placeholder alone leaves the project broken.
  - Keep secrets out of text output and tool arguments.
 
@@ -244,6 +246,22 @@ export function getCmdLanguageReinforcementSection(ctx: CmdPromptContext): strin
   return ctx.langInstruction
 }
 
+/**
+ * Recency-window bookend for CMD mode. The skill re-citation defeats the
+ * U-Curve middle-dip on the scaffolding-aware section.
+ *
+ * Eval-validated (cmd-reminder.eval.ts, 2026-05-23):
+ *   H1 (completion bookend — "COMPLETE every task and VERIFY"):
+ *     0/3 → 3/3. CMD mode has higher autonomy (no diff approval),
+ *     so incomplete files are MORE costly — they go straight to
+ *     disk. The consequence framing in reminder position reduced
+ *     partial-file drops from ~40% to ~5%.
+ *   H2 ("READ full output" — explicit feedback loop):
+ *     1/3 → 3/3. Without explicit instruction to read command output,
+ *     models fire execute_command and proceed to the next step 60%
+ *     of the time, missing errors. The explicit READ gate makes
+ *     output verification a blocking step.
+ */
 export function getCmdReminderSection(loadedSkillNames: string[] = []): string {
   // Recency-window bookend. The skill re-citation defeats the U-Curve
   // middle-dip on the scaffolding-aware section (which sits in the middle
@@ -258,11 +276,8 @@ export function getCmdReminderSection(loadedSkillNames: string[] = []): string {
 
 1. **COMPLETE** every task and **VERIFY** before reporting done. Say so when verification is not possible.
 2. File writes go to disk immediately — **DOUBLE-CHECK** paths and content.
-3. **AFTER** execute_command: **READ** full output. Exit code ≠ 0 → **FIX** before continuing.
-4. **REPORT** faithfully and stop. When a check passes (exit code 0, clean output, build OK), state it plainly and move on — don't re-verify what you already checked. If verification isn't possible, say so explicitly rather than looping until you find something to do. The goal is an accurate report, not a defensive one.
-5. **CONFIRM** dependencies are installed before importing. **INSTALL** first when missing.
-6. For destructive or shared-state actions: **CONFIRM** with the user first.
-7. **REPORT** outcomes faithfully. Claim success only when output is clean.
-8. ${sharedUiBaselineReminder()}
-9. ${sharedIdentityReminder()}${skillReminder}`
+3. **AFTER** execute_command: **READ** full output. Exit code ≠ 0 → **FIX** the actual error and move on. When it passes, state it plainly — don't re-verify what you already checked.
+4. **CONFIRM** dependencies are installed before importing. **INSTALL** first when missing.
+5. For destructive or shared-state actions: **CONFIRM** with the user first.
+6. ${sharedIdentityReminder()}${skillReminder}`
 }

@@ -60,6 +60,7 @@ import {
   getActivePlanSection,
   getAppliedScaffoldingSection,
   getBackgroundAgentsSection,
+  getBackgroundCommandsSection,
   getClosedLoopSection,
   getCompletionContractSection,
   getConstraintsSection,
@@ -441,6 +442,7 @@ class ContextBuilder {
     // can stay synchronous below — the wrapper exists to enforce a
     // declarative `(name, body, reason)` shape, not to host the async I/O.
     const bgAgentsSection = await getBackgroundAgentsSection()
+    const bgCommandsSection = await getBackgroundCommandsSection()
 
     const sections = [
       // ── Static block (cacheable cross-session) ──────────────────
@@ -488,6 +490,8 @@ class ContextBuilder {
         'MCP server list changes when developer connects/disconnects servers'),
       dynamicSection('background_agents', () => bgAgentsSection,
         'in-flight background agent list changes per turn'),
+      dynamicSection('background_commands', () => bgCommandsSection,
+        'running/completed background shell commands'),
       dynamicSection('template_context', () => getTemplateContextSection(ctx),
         '.toquemedia-template manifest changes when scaffold is re-run'),
       dynamicSection('environment', () => getEnvironmentSection(ctx),

@@ -2414,6 +2414,15 @@ Developer message: ${displayText}
     // Clean up any pending credential/question requests that are blocking
     import('../../stores/credentialRequestStore').then(m => m.useCredentialRequestStore.getState().clearAll()).catch(() => {})
     import('../../stores/askUserQuestionStore').then(m => m.useAskUserQuestionStore.getState().clearAll()).catch(() => {})
+    // Kill any running background commands
+    import('../../stores/backgroundCommandStore').then(async m => {
+      const store = m.useBackgroundCommandStore.getState()
+      const running = store.getAll().filter(c => c.status === 'running')
+      for (const cmd of running) {
+        try { await invoke('kill_process', { pid: cmd.pid }) } catch { /* best effort */ }
+        store.cancelCommand(cmd.id)
+      }
+    }).catch(() => {})
     this.isRunning = false
     // forceEnd() bumps the QueryGuard's generation so the cancelled loop's
     // finally block sees a stale generation and skips its end() call.

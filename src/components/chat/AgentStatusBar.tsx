@@ -10,6 +10,7 @@ import { useMcpStore } from '../../stores/mcpStore'
 import { useBillingStore, isInOverageState } from '../../stores/billingStore'
 import { useThinkingToggle } from '../../hooks/useThinkingToggle'
 import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
+import { useBackgroundCommandStore } from '../../stores/backgroundCommandStore'
 import { getCommandQueueSnapshot } from '../../services/agent/messageQueue'
 import AgentService from '../../services/agent/agentService'
 import { tokens } from '@/theme/tokens'
@@ -43,6 +44,7 @@ function AgentStatusBar() {
   const usingTmsOverage = isInOverageState(billingStatus, consumedPct)
   const isBudgetBlocked = billingStatus === 'rejected'
   const bgAgents = useBackgroundAgentStore(s => s.agents)
+  const bgCommands = useBackgroundCommandStore(s => s.commands)
   const agentTasks = useAgentStore(s => s.tasks)
   const queueLength = getCommandQueueSnapshot().length
 
@@ -102,6 +104,9 @@ function AgentStatusBar() {
   const runningServers = mcpServers.filter(s => s.status === 'running')
   const bgTotal = bgAgents.size
   const bgRunning = Array.from(bgAgents.values()).filter(a => a.status === 'running').length
+  const bgCmdRunning = Array.from(bgCommands.values()).filter(c => c.status === 'running').length
+  const bgCmdCompleted = Array.from(bgCommands.values()).filter(c => c.status === 'completed').length
+  const bgCmdErrored = Array.from(bgCommands.values()).filter(c => c.status === 'error').length
 
   const infoSegments: string[] = []
   if (modelName) infoSegments.push(modelName)
@@ -118,7 +123,14 @@ function AgentStatusBar() {
     const parts: string[] = []
     if (bgRunning > 0) parts.push(`${bgRunning} running`)
     if (bgDone > 0) parts.push(`${bgDone} done`)
-    infoSegments.push(`bg: ${parts.join(', ')}`)
+    infoSegments.push(`agents: ${parts.join(', ')}`)
+  }
+  if (bgCmdRunning > 0 || bgCmdCompleted > 0 || bgCmdErrored > 0) {
+    const parts: string[] = []
+    if (bgCmdRunning > 0) parts.push(`${bgCmdRunning} running`)
+    if (bgCmdCompleted > 0) parts.push(`${bgCmdCompleted} done`)
+    if (bgCmdErrored > 0) parts.push(`${bgCmdErrored} errored`)
+    infoSegments.push(`cmds: ${parts.join(', ')}`)
   }
 
   return (

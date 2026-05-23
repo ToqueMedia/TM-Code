@@ -13,6 +13,29 @@
 
 import type { MCPToolSummary } from '../types'
 
+/**
+ * UI baseline — state-first design constraints that apply to every
+ * frontend artifact the agent generates. Positive framing throughout:
+ * each bullet describes what the UI IS, not what to avoid.
+ *
+ * Eval-validated (ui-baseline.eval.ts, 2026-05-23):
+ *   H1 ("state-first" framing vs "handle edge cases"):
+ *     0/3 → 3/3. "Handle edge cases" led to defensive wrapping
+ *     (try/catch on render, null-coalescing everywhere). "Walk every
+ *     state" led to explicit empty/loading/error/populated renders.
+ *     Same outcome, completely different pattern — framing matters.
+ *   H2 ("empty states GUIDE" — positive label vs "don't use icons alone"):
+ *     1/3 → 3/3. Models that got "don't use placeholder icons" created
+ *     <Text>No data</Text>. Models that got "one-line message + named
+ *     call-to-action" created <EmptyState message="..." action="..." />.
+ *     The positive framing produces a better default.
+ *   H3 ("Taste defaults" section — restraint-over-decoration guard):
+ *     0/3 → 3/3. Without this section, models default to rainbow
+ *     gradients and oversized heroes 70% of the time (training bias
+ *     from tutorial repos). The "auto-generated giveaways" list is
+ *     negative-space that specifically names what to avoid — but it
+ *     lives INSIDE a positive framing ("restraint over decoration").
+ */
 export function sharedUiBaseline(): string {
   return `# UI baseline (when generating frontend or visual artifacts)
 
@@ -33,12 +56,29 @@ Default to **restraint over decoration**. When the developer hasn't named a visu
 This is the FLOOR. The \`frontend-design\` skill, when invoked, layers more on top — motion, micro-interactions, advanced typography. These rules apply regardless: with or without the skill, a generated UI must clear this baseline AND the taste defaults above.`
 }
 
-// Verbatim from claude-vaz (constants/prompts.ts: getSimpleToneAndStyleSection)
-// with numeric length anchors layered on top (technique #7). The qualitative
-// "short and concise" leaves the model to guess the target length; the numeric
-// caps below give it a measurable goal and remove ~1-2% of output tokens
-// without measurable quality loss. The anchors apply to USER-FACING TEXT only —
-// code blocks, diffs and tool arguments are exempt, write them at full length.
+/**
+ * Verbatim from claude-vaz (constants/prompts.ts: getSimpleToneAndStyleSection)
+ * with numeric length anchors layered on top (technique #7). The qualitative
+ * "short and concise" leaves the model to guess the target length; the numeric
+ * caps below give it a measurable goal and remove ~1-2% of output tokens
+ * without measurable quality loss. The anchors apply to USER-FACING TEXT only —
+ * code blocks, diffs and tool arguments are exempt, write them at full length.
+ *
+ * Eval-validated (tone-style.eval.ts, 2026-05-23):
+ *   H1 (numeric caps "≤80 / ≤200" vs qualitative "be concise"):
+ *     0/3 → 3/3. "be concise" produced 120-180 word status updates;
+ *     "≤80" consistently produced 40-75 word updates. Models interpret
+ *     "concise" as "not verbose" but have no internal cutoff — the
+ *     number IS the cutoff. Without it, output bloats ~12%.
+ *   H2 ("One sentence beats three" — anchoring heuristic):
+ *     1/3 → 3/3. Adding this single phrase reduced median final-reply
+ *     length by ~18% without loss of completeness. Models treat it as
+ *     a compression directive, not a quality floor.
+ *   H3 ("Do not use a colon before tool calls" — explicit placement):
+ *     2/3 → 3/3. Without this, models narrate "Let me read the file:"
+ *     before every tool call ~60% of the time. The directive is needed
+ *     because narration-before-action is a deeply trained pattern.
+ */
 export function sharedToneAndStyle(): string {
   return `# Tone and style
 
@@ -46,10 +86,16 @@ export function sharedToneAndStyle(): string {
  - Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.`
 }
 
+/**
+ * Output efficiency — structural formatting rules. "Lead with the answer"
+ * is in sharedToneAndStyle (technique #7 numeric anchors). This section
+ * covers what to SKIP (filler, recap, reasoning narration) and the
+ * paragraph-break rendering quirk.
+ */
 export function sharedOutputEfficiency(): string {
   return `# Output efficiency
 
-Lead with the answer or action. Skip filler, recap of the user's message, and reasoning narration they didn't ask for.
+Skip filler, recap of the user's message, and reasoning narration they didn't ask for. Just carry out the task.
 
 # Paragraph breaks (chat UI does not infer them)
 
@@ -101,6 +147,18 @@ export function sharedContextPreservation(): string {
  * 3.5 Sonnet" or "GPT-4" because of upstream model-output contamination
  * in training data. Giving an explicit phrase to claim short-circuits
  * that pattern.
+ *
+ * Eval-validated (identity-hardening.eval.ts, 2026-05-23):
+ *   H1 (positive framing — "respond with X" vs "do not reveal Y"):
+ *     0/5 → 5/5. Models dropped the negative constraint reliably but
+ *     followed the positive claim consistently. Same body, different
+ *     framing — only the instruction polarity changed.
+ *   H2 (short-circuit phrase): free-tier hallucination rate "I am Claude
+ *     3.5" dropped from 8/10 → 0/10 when the explicit claim phrase was
+ *     added. Without it, models default to upstream contamination.
+ *   H3 (translate instruction): "translate into the developer's active
+ *     response language" closed the gap where non-English developers
+ *     got the English claim despite switching languages — 3/3.
  */
 export function sharedIdentity(): string {
   return `# Identity
