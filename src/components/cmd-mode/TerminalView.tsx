@@ -51,10 +51,26 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const pendingPermissionRef = useRef(pendingPermission)
   const prevPendingPermissionRef = useRef(pendingPermission)
   const sessionPickerOpenRef = useRef(sessionPickerOpen)
+  const hasPendingAskUserQuestionRef = useRef(hasPendingAskUserQuestion)
+  const prevHasPendingAskUserQuestionRef = useRef(hasPendingAskUserQuestion)
 
   useEffect(() => {
     sessionPickerOpenRef.current = sessionPickerOpen
   }, [sessionPickerOpen])
+
+  useEffect(() => {
+    hasPendingAskUserQuestionRef.current = hasPendingAskUserQuestion
+  }, [hasPendingAskUserQuestion])
+
+  // Restore focus when ask_user_question prompt clears (after submit/cancel).
+  useEffect(() => {
+    const wasBlocked = prevHasPendingAskUserQuestionRef.current
+    prevHasPendingAskUserQuestionRef.current = hasPendingAskUserQuestion
+    if (wasBlocked && !hasPendingAskUserQuestion) {
+      const t = setTimeout(() => promptInputRef.current?.focus(), 50)
+      return () => clearTimeout(t)
+    }
+  }, [hasPendingAskUserQuestion])
 
   useEffect(() => {
     isStreamingRef.current = isStreaming
@@ -64,10 +80,33 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     pendingPermissionRef.current = pendingPermission
   }, [pendingPermission])
 
-  // Create a session once if none exists. Runs independently from open_project so
-  // activeSessionId changes do not re-invoke the backend.
+  // Clear chat state when this TerminalView unmounts (user switched
+  // projects or went back to Welcome). Without this, activeSessionId
+  // persists in the Zustand store and the next project's TerminalView
+  // mounts with stale messages from the previous project.
+  //
+  // saveSessionToDisk captures the session snapshot synchronously (before
+  // its first await), so it's safe to fire-and-forget — the disk write
+  // uses its own copy of the messages regardless of what happens to the
+  // store afterward. clearAllSessions must run synchronously in the
+  // cleanup so the new TerminalView mounts into a clean store.
   useEffect(() => {
-    if (!activeSessionId) useChatStore.getState().createSession(projectPath)
+    return () => {
+      const state = useChatStore.getState()
+      if (state.isStreaming) stopAgent()
+      // Fire-and-forget: snapshot captured sync inside saveSessionToDisk.
+      state.saveSessionToDisk().catch(() => {})
+      // Synchronous: wipe store before the next component mounts.
+      useChatStore.getState().clearAllSessions()
+    }
+  }, [])
+
+  // Create a session if none exists (fresh mount or after cleanup above).
+  useEffect(() => {
+    if (!projectPath) return
+    if (!useChatStore.getState().activeSessionId) {
+      useChatStore.getState().createSession(projectPath)
+    }
   }, [activeSessionId, projectPath])
 
   // Focus the prompt input on mount so the user can start typing immediately.
@@ -205,16 +244,19 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
 
   // Unified Escape handler. Priority:
   //   1. Permission prompt owns Escape while visible (handled by the prompt itself)
-  //   2. Session picker owns Escape (closes picker, does NOT exit CMD Mode)
-  //   3. Terminal panel open → close panel (does NOT exit CMD Mode)
-  //   4. Open menus (slash / @mention) own Escape to close themselves
-  //   5. Streaming → stop agent
-  //   6. Typing with text → let the textarea handle it
-  //   7. Idle → exit to welcome
+  //   2. AskUserQuestion owns Escape (cancels the question)
+  //   3. Session picker owns Escape (closes picker, does NOT exit CMD Mode)
+  //   4. Terminal panel open → close panel (does NOT exit CMD Mode)
+  //   5. Open menus (slash / @mention) own Escape to close themselves
+  //   6. Streaming → stop agent
+  //   7. Typing with text → let the textarea handle it
+  //   8. Idle → exit to welcome
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       if (pendingPermissionRef.current) return
+      // AskUserQuestion component handles its own Escape — don't exit CMD mode.
+      if (hasPendingAskUserQuestionRef.current) return
       // Picker's own onKeyDown also handles Esc, but a click elsewhere can
       // defocus the overlay — intercept here too so Escape never leaks out
       // of CMD Mode while the picker is open.

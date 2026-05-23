@@ -601,6 +601,7 @@ class AgentService {
         this.isRunning = false
         return
       }
+      logger.info('agent', `→ QueryGuard acquired (gen: ${myGeneration})`)
     } else if (!this.abortController) {
       this.abortController = new AbortController()
     }
@@ -854,7 +855,10 @@ class AgentService {
         }).join(' → ')}]`)
 
         // Get streaming response
+        const apiStartTime = Date.now()
+        logger.info('agent', `→ Calling API (turn ${turnCount})...`)
         const response = await this.callAPI(apiMessages, turnCount)
+        logger.info('agent', `✓ API response received (${Date.now() - apiStartTime}ms)`)
 
         // Phase D: create streaming pool BEFORE processing the stream.
         // processStreamedTurn calls pool.addTool() on each content_block_stop
@@ -881,8 +885,12 @@ class AgentService {
 
         // Seal the pool — no more tools will be added after the stream ends
         streamingPool.seal()
+        logger.info('agent', `→ Stream processed: text=${turnResult.textContent?.length ?? 0} chars, reasoning=${turnResult.reasoningContent?.length ?? 0} chars, finish=${turnResult.finishReason}`)
 
-        if (this.abortController?.signal.aborted) return
+        if (this.abortController?.signal.aborted) {
+          logger.info('agent', '✗ Aborted by user')
+          return
+        }
 
         // Report usage and track prompt tokens for compression decisions
         if (turnResult.usage) {
@@ -896,6 +904,7 @@ class AgentService {
         // seamlessly appending text to the same streaming message in the UI.
         if (turnResult.finishReason === 'length' && continuationCount < MAX_CONTINUATIONS) {
           continuationCount++
+          logger.info('agent', `⟳ Token limit hit, continuing... (${continuationCount}/${MAX_CONTINUATIONS})`)
           // Add partial assistant response in Anthropic format
           const partialBlocks: AnthropicContentBlock[] = []
           if (this.preserveReasoningBetweenTurns && turnResult.reasoningContent) {
@@ -2720,6 +2729,9 @@ Developer message: ${displayText}
     }
 
     let response: Response
+    const fetchStartTime = Date.now()
+    const bodySizeKb = requestBody ? (new Blob([requestBody]).size / 1024).toFixed(1) : '?'
+    logger.info('agent', `→ Fetch: POST ${url.split('?')[0]} (body: ${bodySizeKb}KB)`)
     try {
       response = await fetch(url, {
         method: 'POST',
@@ -2729,14 +2741,18 @@ Developer message: ${displayText}
       })
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
+        logger.info('agent', '✗ Fetch aborted by user')
         throw err
       }
+      logger.info('agent', `✗ Fetch failed: NETWORK_ERROR (${Date.now() - fetchStartTime}ms)`)
       throw new ServiceError(
         'Sem conexão. Verifica a internet.',
         'NETWORK_ERROR',
         true
       )
     }
+    const ttfb = Date.now() - fetchStartTime
+    logger.info('agent', `✓ Response: ${response.status} ${response.statusText || 'OK'} (${ttfb}ms TTFB)`)
 
     if (!response.ok) {
       if (response.status === 401) {
@@ -2758,6 +2774,7 @@ Developer message: ${displayText}
         )
       }
       if (response.status === 402) {
+        logger.info('agent', '✗ No credits (402)')
         useBillingStore.getState().setNoCredits()
         throw new ServiceError(
           'Sem créditos disponíveis. Aguarda a renovação ou faz upgrade do plano.',
@@ -2766,6 +2783,7 @@ Developer message: ${displayText}
         )
       }
       if (response.status === 429) {
+        logger.info('agent', '✗ Rate limited (429)')
         // Parse cost-budget headers so UI can show post-rejection state
         useBillingStore.getState().updateFromHeaders(response.headers)
 
@@ -2899,6 +2917,7 @@ Developer message: ${displayText}
     // is set by callAPIOnce via this.lastResponseShape. The rest of the
     // turn processing is shape-agnostic (StreamEvent is the common surface).
     const parser = this.lastResponseShape === 'openai' ? parseOpenAISSEStream : parseSSEStream
+    logger.info('agent', '→ Processing stream...')
 
     await parser(response, {
       onEvent: (event: StreamEvent) => {

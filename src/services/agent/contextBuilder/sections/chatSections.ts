@@ -225,6 +225,200 @@ export function getEnvironmentSection(ctx: PromptContext): string {
 // Tells the agent whether a dev server is already running, what kind
 // it is, and what URLs it serves. Prevents the agent from blindly
 // starting a second server and getting stuck until the 300s timeout.
+// ── Preview & deploy compatibility ───────────────────────────────
+/**
+ * Warn the agent when the open project has compatibility gaps with the
+ * Chat-mode preview (iframe) and/or the deploy pipeline. The agent
+ * should surface these to the developer early — ideally on the first
+ * turn after project open — so they can decide whether to adapt the
+ * project or switch to Terminal mode.
+ *
+ * Returns null for fully-compatible projects (React+Vite, Vue+Vite,
+ * Svelte+Vite, Astro) — no noise when everything works.
+ *
+ * BUG FIX NOTES (critical-analysis pass):
+ * - Go/Python/Rust without package.json were silently accepted because
+ *   `detectProjectType()` returns 'node' for __type_*__ tokens. Now we
+ *   extract the real type from the synthetic devDependency tokens.
+ * - Tier 4 guard (`scripts.length > 0`) excluded projects with zero
+ *   scripts, which are the ones that actually need the warning.
+ * - Empty/unknown projects (no pkgSummary, no markers) now get a
+ *   generic compatibility note instead of silent `return null`.
+ * - Tier 3 (backend-only) now mentions deploy incompatibility.
+ * - One-shot: repeated injection on every turn wastes tokens. Uses a
+ *   module-level Set to track warned project paths; subsequent turns
+ *   inject a one-liner instead of the full block.
+ */
+// Track which project paths have already received the full warning.
+// Survives across turns within the same session; resets on project switch.
+const _compatWarnedProjects = new Set<string>()
+
+/**
+ * Extract the real non-JS project type from synthetic __type_*__ tokens
+ * injected by the contextBuilder when there's no package.json. Returns
+ * undefined if no synthetic token is found.
+ */
+function extractSyntheticType(devDeps: string[]): string | undefined {
+  for (const dep of devDeps) {
+    const m = dep.match(/^__type_(\w+)__$/)
+    if (m) return m[1]
+  }
+  return undefined
+}
+
+export function getPreviewCompatibilitySection(ctx: PromptContext): string | null {
+  const projectPath = ctx.projectPath
+  const rawPt = ctx.projectType
+  const deps = ctx.pkgSummary
+    ? [...ctx.pkgSummary.dependencies, ...ctx.pkgSummary.devDependencies]
+    : []
+  const scripts = ctx.pkgSummary?.scripts ?? []
+
+  // Extract real type from synthetic tokens (Go/Python/Rust without package.json)
+  const syntheticType = ctx.pkgSummary ? extractSyntheticType(ctx.pkgSummary.devDependencies) : undefined
+  const pt = syntheticType || rawPt
+
+  // ── Edge case: unknown / empty project ────────────────────────
+  // No package.json AND no marker files (go.mod, requirements.txt, etc.)
+  // → detectProjectType returned 'node' but syntheticType is also absent.
+  // Could be a bare directory or a language the detector doesn't cover yet.
+  if (!pt || pt === 'node' && !ctx.pkgSummary && !syntheticType) {
+    if (_compatWarnedProjects.has(projectPath)) return null
+    _compatWarnedProjects.add(projectPath)
+    return [
+      '# Project compatibility',
+      '',
+      'No recognized project structure detected (no `package.json`, `go.mod`, `requirements.txt`, or similar). The IDE may not be able to auto-start a dev server.',
+      '',
+      '**Options:**',
+      '1. Tell the agent the command to start your project — it will use `start_dev_server` with that command.',
+      '2. Use Terminal mode for full control over build and serve commands.',
+      '3. If the project is in a subdirectory, reopen it at the correct path.',
+    ].join('\n')
+  }
+
+  // One-shot: if already warned for this project, inject a brief reminder
+  // instead of the full block. Saves ~300-500 tokens per turn.
+  if (_compatWarnedProjects.has(projectPath)) {
+    // Brief reminder — keeps the model aware without burning tokens.
+    // Only re-inject if something changed (framework detected differently).
+    return null
+  }
+
+  // ── Tier 1: non-JS/TS projects (Go, Python, Rust, etc.) ──────
+  // No package.json dev command → the IDE can't start a dev server,
+  // so the preview iframe has nothing to load. The HTTP Client panel
+  // can still talk to a manually-started backend, but the full
+  // Chat-mode loop (agent edits → preview updates live) is broken.
+  const nonJsTypes = ['go', 'python', 'rust']
+  if (nonJsTypes.includes(pt)) {
+    _compatWarnedProjects.add(projectPath)
+    const commands: Record<string, string> = {
+      go: '`go run .`',
+      python: '`python manage.py runserver` or `uvicorn main:app`',
+      rust: '`cargo run`',
+    }
+    return [
+      '# Project compatibility',
+      '',
+      `Detected project type: **${pt}**. This project is not JavaScript/TypeScript-based, so the Chat-mode preview (live iframe) cannot start a dev server automatically.`,
+      '',
+      '**What works in Chat mode:** file editing, code analysis, Terminal commands, and the HTTP Client panel (if you start the server manually).',
+      '',
+      '**What does NOT work:** the live preview iframe — there is no `npm run dev` equivalent the IDE can auto-detect.',
+      '',
+      '**Options for the developer:**',
+      `1. **Tell the agent your start command** — e.g. ${commands[pt] || '`./your-server`'}. The agent can call \`start_dev_server\` with any command, and the preview will load once the server is ready.`,
+      '2. **Stay in Chat mode** — the agent can still edit files, run tests, and use the Terminal. Start the server manually and use the HTTP Client or an external browser to verify changes.',
+      '3. **Switch to Terminal mode** — full freedom to run any build/serve command without IDE constraints.',
+    ].join('\n')
+  }
+
+  // ── Tier 2: JS/TS frameworks with preview but no deploy ──────
+  // These start a dev server fine (Next=3000, Nuxt=similar, Angular=4200)
+  // so the preview iframe works. But the deploy pipeline only supports
+  // Vite-shape flat `dist/` output — these frameworks produce nested or
+  // non-standard output that `collect_deploy_bundle` can't handle.
+  const noDeployFrameworks: Record<string, { name: string; note: string }> = {
+    nextjs: {
+      name: 'Next.js',
+      note: 'produces `.next/` output — requires `@cloudflare/next-on-pages` for deploy (not yet supported).',
+    },
+    nuxt: {
+      name: 'Nuxt',
+      note: 'produces `.output/` — not compatible with the current deploy pipeline.',
+    },
+    angular: {
+      name: 'Angular',
+      note: 'produces nested `dist/<app>/` — not compatible with the current deploy pipeline.',
+    },
+  }
+  const noDeploy = noDeployFrameworks[pt]
+  if (noDeploy) {
+    _compatWarnedProjects.add(projectPath)
+    return [
+      '# Project compatibility',
+      '',
+      `Detected framework: **${noDeploy.name}**. The preview iframe works (the IDE will detect the dev server URL automatically), but the **Publish (deploy)** feature is not yet supported for this framework — ${noDeploy.note}`,
+      '',
+      '**What works:** live preview, file editing, HTTP Client, Terminal, all agent tools.',
+      '',
+      '**What does NOT work yet:** the Publish button will fail at the bundle-collection step.',
+      '',
+      'If the developer needs deploy, suggest switching to a Vite-based template or using an external deployment method.',
+    ].join('\n')
+  }
+
+  // ── Tier 3: backend-only Node projects ───────────────────────
+  // Express, Fastify, NestJS, Hono, Koa — the IDE opens the HTTP
+  // Client panel instead of the iframe. This is by design, but the
+  // agent should be aware so it doesn't promise "you'll see it in
+  // the preview".
+  const backendFrameworks = ['express', 'fastify', '@nestjs/core', 'hono', 'koa']
+  const isBackendOnly = backendFrameworks.some(f => deps.includes(f))
+    && !['react', 'vue', 'svelte', 'nextjs', 'nuxt', 'angular'].includes(pt)
+  if (isBackendOnly) {
+    _compatWarnedProjects.add(projectPath)
+    return [
+      '# Project compatibility',
+      '',
+      'Detected a **backend-only** Node.js project. The Chat mode opens the **HTTP Client panel** (not an iframe preview) — this is by design.',
+      '',
+      '**What works:** HTTP Client for testing API endpoints, file editing, Terminal, all agent tools.',
+      '',
+      '**Deploy note:** backend-only Node.js projects (Express, Fastify, NestJS) are **not deployable** through the Publish pipeline — it only supports Worker bundles (Hono on Cloudflare). If the developer needs deploy, suggest converting to a Hono Worker or using an external hosting service.',
+      '',
+      '**Note for the developer:** if you expected a visual preview, this project serves API routes only. To add a frontend, tell the agent to scaffold one (e.g. "add a React frontend with Vite").',
+    ].join('\n')
+  }
+
+  // ── Tier 4: generic node project with no dev script ──────────
+  // Has a package.json but no dev/start/serve script → the IDE
+  // can't auto-start a preview server.
+  if (pt === 'node') {
+    const hasDevScript = scripts.some(s =>
+      s === 'dev' || s === 'start' || s === 'serve' || s.startsWith('dev:')
+    )
+    if (!hasDevScript) {
+      _compatWarnedProjects.add(projectPath)
+      return [
+        '# Project compatibility',
+        '',
+        'This project has a `package.json` but no `dev`, `start`, or `serve` script. The IDE needs one of these to auto-start a dev server for the preview iframe.',
+        '',
+        '**Options:**',
+        '1. Add a `"dev"` script to `package.json` that starts your development server.',
+        '2. Tell the agent what command starts the server — it can use `start_dev_server` with a custom command.',
+        '3. Use Terminal mode to run the server manually.',
+      ].join('\n')
+    }
+  }
+
+  // Fully compatible — no warning needed.
+  return null
+}
+
+// ── Dev server status (dynamic) ────────────────────────────────
 export function getDevServerStatusSection(): string | null {
   const ds = useLayoutStore.getState().devServer
   if (!ds) return null  // no server → inject nothing (same as not mentioning it)

@@ -42,8 +42,10 @@ function TerminalSpecialCards({ message }: { message: ChatMessage }) {
     return (
       <TerminalAskUserQuestion
         key={message.id}
+        messageId={message.id}
         requestId={card.requestId}
         questions={card.questions}
+        status={card.status}
       />
     )
   }
@@ -84,9 +86,20 @@ function ContentBlocksRenderer({
   return (
     <>
       {blocks.map((block, i) => {
-        // Hide blocks after an in-flight reasoning block during streaming
+        // Hide text/tool_call blocks after an in-flight reasoning block during streaming.
+        // Reasoning blocks themselves are always rendered (they show the thinking UI).
         if (activeReasoningIdx !== -1 && i > activeReasoningIdx) {
           return null
+        }
+        if (block.type === 'reasoning') {
+          return (
+            <TerminalReasoningBlock
+              key={`reasoning-${i}`}
+              content={block.text}
+              isStreaming={!!isStreaming && block.durationMs === undefined}
+              durationMs={block.durationMs}
+            />
+          )
         }
         if (block.type === 'text') {
           return (
@@ -295,8 +308,16 @@ function TerminalMessageRendererInner({
         </Flex>
       )}
 
-      {/* Reasoning block — live streaming with film-credits effect, same as chat mode */}
-      {message.reasoningContent && (
+      {/* Legacy reasoning fallback — older persisted messages have a flat
+          `reasoningContent` string but no reasoning entry inside contentBlocks.
+          Render those at the top exactly as before. New messages put each
+          reasoning chunk into contentBlocks (rendered inline by ContentBlocksRenderer)
+          so reasoning appears AT its real position in the stream rather than being
+          collapsed back into this top block. */}
+      {message.reasoningContent
+        && !message.contentBlocks?.some(b => b.type === 'reasoning')
+        && message.thinkingRequested !== false
+        && (
         <TerminalReasoningBlock
           content={message.reasoningContent}
           isStreaming={!!isStreaming}

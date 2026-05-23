@@ -11,8 +11,11 @@ import { slashCommandRegistry, type SlashCommand } from '../../services/agent/sl
  *
  * Used by both `PromptTextarea` (chat mode) and `CmdModePromptInput`
  * (terminal mode) so the UX parity is mechanical, not duplicated.
+ *
+ * @param extraCommands - Optional additional commands to check beyond the
+ *   global registry (e.g. CMD_MODE_COMMANDS for terminal mode).
  */
-export function resolveInlineArgHint(value: string): string | null {
+export function resolveInlineArgHint(value: string, extraCommands?: SlashCommand[]): string | null {
   if (!value.startsWith('/')) return null
   // Strip a single trailing space — `/plan ` should still hint just like
   // `/plan`. But `/plan x` means args are starting; no hint.
@@ -20,5 +23,6 @@ export function resolveInlineArgHint(value: string): string | null {
   if (trimmed.includes(' ')) return null
   // Use registry's getCommand — match-exact, no startsWith ambiguity.
   const cmd: SlashCommand | null = slashCommandRegistry.getCommand(trimmed)
+    ?? (extraCommands?.find(c => c.name === trimmed) ?? null)
   return cmd?.argHint ?? null
 }

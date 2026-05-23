@@ -2,87 +2,180 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text, Input } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
+import { useChatStore } from '../../stores/chatStore'
 import type { Question } from '../../stores/askUserQuestionStore'
+import type { ChatMessageCard } from '../../types/chat'
 
 const OTHER_LABEL = 'Other'
 
 interface TerminalAskUserQuestionProps {
+  messageId: string
   requestId: string
   questions: Question[]
+  status?: ChatMessageCard['status']
 }
 
-const TerminalQuestionBlock = memo(function TerminalQuestionBlock({
-  question,
-  idx,
-  total,
-  selected,
-  otherText,
-  onSelect,
-  onOtherTextChange,
+// ─── Tab bar ────────────────────────────────────────────────────────────────
+
+function TabBar({
+  questions,
+  activeTab,
+  allAnswered,
 }: {
-  question: Question
-  idx: number
-  total: number
-  selected: string[]
-  otherText: string
-  onSelect: (label: string) => void
-  onOtherTextChange: (text: string) => void
+  questions: Question[]
+  activeTab: number
+  allAnswered: boolean
 }) {
-  const isOtherSelected = selected.includes(OTHER_LABEL)
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    if (isOtherSelected && inputRef.current) {
-      inputRef.current.focus()
-    }
-  }, [isOtherSelected])
-
+  const tabCount = questions.length + 1 // +1 for summary tab
   return (
-    <Box mb={idx < total - 1 ? 3 : 0}>
-      {/* Header */}
-      <Flex align="center" gap={2} mb={1}>
+    <Flex
+      gap={0}
+      borderBottom={`1px solid ${tokens.colors.border.panel}`}
+      mb={2}
+      userSelect="none"
+    >
+      {questions.map((q, i) => {
+        const isActive = i === activeTab
+        return (
+          <Flex
+            key={i}
+            align="center"
+            gap={1}
+            px={2}
+            py="4px"
+            cursor="pointer"
+            borderBottom={isActive ? `2px solid ${tokens.colors.accent.primary}` : '2px solid transparent'}
+            bg={isActive ? 'rgba(254, 16, 99, 0.06)' : 'transparent'}
+            transition="all 0.12s"
+            _hover={{ bg: isActive ? 'rgba(254, 16, 99, 0.06)' : 'rgba(255, 255, 255, 0.03)' }}
+          >
+            <Text
+              fontSize="11px"
+              fontFamily={tokens.fontFamily.mono}
+              fontWeight="600"
+              color={isActive ? tokens.colors.accent.primary : tokens.colors.text.muted}
+            >
+              {isActive ? '●' : '○'}
+            </Text>
+            <Text
+              fontSize="11px"
+              fontFamily={tokens.fontFamily.mono}
+              fontWeight={isActive ? '700' : '400'}
+              color={isActive ? tokens.colors.text.primary : tokens.colors.text.muted}
+              textTransform="uppercase"
+              letterSpacing="0.04em"
+            >
+              {q.header}
+            </Text>
+          </Flex>
+        )
+      })}
+      {/* Summary / Review tab */}
+      <Flex
+        align="center"
+        gap={1}
+        px={2}
+        py="4px"
+        cursor="pointer"
+        borderBottom={activeTab === tabCount - 1 ? `2px solid ${tokens.colors.accent.primary}` : '2px solid transparent'}
+        bg={activeTab === tabCount - 1 ? 'rgba(254, 16, 99, 0.06)' : 'transparent'}
+        transition="all 0.12s"
+        _hover={{ bg: activeTab === tabCount - 1 ? 'rgba(254, 16, 99, 0.06)' : 'rgba(255, 255, 255, 0.03)' }}
+      >
         <Text
           fontSize="11px"
-          color={tokens.colors.accent.primary}
           fontFamily={tokens.fontFamily.mono}
-          fontWeight="700"
-          textTransform="uppercase"
-          letterSpacing="0.06em"
+          fontWeight="600"
+          color={activeTab === tabCount - 1 ? tokens.colors.accent.primary : tokens.colors.text.muted}
         >
-          {question.header}
+          {activeTab === tabCount - 1 ? '●' : allAnswered ? '✓' : '○'}
         </Text>
-        {question.multiSelect && (
-          <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
-            (multi-select)
-          </Text>
-        )}
+        <Text
+          fontSize="11px"
+          fontFamily={tokens.fontFamily.mono}
+          fontWeight={activeTab === tabCount - 1 ? '700' : '400'}
+          color={activeTab === tabCount - 1 ? tokens.colors.text.primary : allAnswered ? tokens.colors.terminal.green : tokens.colors.text.muted}
+          textTransform="uppercase"
+          letterSpacing="0.04em"
+        >
+          Review
+        </Text>
       </Flex>
+    </Flex>
+  )
+}
 
-      {/* Question */}
+// ─── Question panel (single question view) ──────────────────────────────────
+
+function QuestionPanel({
+  question,
+  selections,
+  otherText,
+  focusedOption,
+  onOtherTextChange,
+  onOtherKeyDown,
+  otherInputRef,
+}: {
+  question: Question
+  selections: string[]
+  otherText: string
+  focusedOption: number
+  onOtherTextChange: (text: string) => void
+  onOtherKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void
+  otherInputRef: React.RefObject<HTMLInputElement | null>
+}) {
+  const isOtherSelected = selections.includes(OTHER_LABEL)
+  const totalOptions = question.options.length + 1 // +1 for Other
+  const isOtherFocusedOption = focusedOption === totalOptions - 1
+
+  return (
+    <Box>
+      {/* Question header */}
+      <Text
+        fontSize="10px"
+        fontFamily={tokens.fontFamily.mono}
+        color={tokens.colors.accent.primary}
+        fontWeight="700"
+        textTransform="uppercase"
+        letterSpacing="0.08em"
+        mb={1}
+      >
+        {question.header}
+      </Text>
       <Text
         fontSize="12px"
-        color={tokens.colors.text.primary}
         fontFamily={tokens.fontFamily.mono}
+        color={tokens.colors.text.primary}
         lineHeight="1.5"
-        mb={2}
+        mb={3}
       >
         {question.question}
       </Text>
 
       {/* Options */}
       {question.options.map((opt, optIdx) => {
-        const isSelected = selected.includes(opt.label)
-        const key = `${idx}-${optIdx}`
+        const isSelected = selections.includes(opt.label)
+        const isFocused = focusedOption === optIdx
         return (
           <Flex
-            key={key}
+            key={optIdx}
             align="center"
             gap={2}
             py="3px"
-            cursor="pointer"
-            onClick={() => onSelect(opt.label)}
-            _hover={{ bg: 'rgba(255, 255, 255, 0.03)' }}
+            px={1}
+            borderRadius="3px"
+            bg={isFocused ? 'rgba(255, 255, 255, 0.04)' : 'transparent'}
+            transition="background 0.1s"
           >
+            <Text
+              fontSize="12px"
+              fontFamily={tokens.fontFamily.mono}
+              color={tokens.colors.text.muted}
+              w="14px"
+              textAlign="center"
+            >
+              {isFocused ? '→' : ' '}
+            </Text>
             <Text
               fontSize="12px"
               fontFamily={tokens.fontFamily.mono}
@@ -96,13 +189,17 @@ const TerminalQuestionBlock = memo(function TerminalQuestionBlock({
             <Text
               fontSize="12px"
               fontFamily={tokens.fontFamily.mono}
-              fontWeight={isSelected ? '600' : '400'}
-              color={isSelected ? tokens.colors.text.primary : tokens.colors.text.secondary}
+              fontWeight={isSelected || isFocused ? '600' : '400'}
+              color={isSelected ? tokens.colors.text.primary : isFocused ? tokens.colors.text.primary : tokens.colors.text.secondary}
             >
               {opt.label}
             </Text>
             {opt.description && (
-              <Text fontSize="11px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.text.muted}>
+              <Text
+                fontSize="11px"
+                fontFamily={tokens.fontFamily.mono}
+                color={tokens.colors.text.muted}
+              >
                 — {opt.description}
               </Text>
             )}
@@ -110,15 +207,25 @@ const TerminalQuestionBlock = memo(function TerminalQuestionBlock({
         )
       })}
 
-      {/* Other option with free-text input — always shown so the user can type freely */}
+      {/* Other option */}
       <Flex
-        align="flex-start"
+        align="center"
         gap={2}
         py="3px"
-        cursor="pointer"
-        onClick={() => onSelect(OTHER_LABEL)}
-        _hover={{ bg: 'rgba(255, 255, 255, 0.03)' }}
+        px={1}
+        borderRadius="3px"
+        bg={isOtherFocusedOption ? 'rgba(255, 255, 255, 0.04)' : 'transparent'}
+        transition="background 0.1s"
       >
+        <Text
+          fontSize="12px"
+          fontFamily={tokens.fontFamily.mono}
+          color={tokens.colors.text.muted}
+          w="14px"
+          textAlign="center"
+        >
+          {isOtherFocusedOption ? '→' : ' '}
+        </Text>
         <Text
           fontSize="12px"
           fontFamily={tokens.fontFamily.mono}
@@ -126,95 +233,168 @@ const TerminalQuestionBlock = memo(function TerminalQuestionBlock({
           fontWeight="600"
           w="14px"
           textAlign="center"
-          mt="3px"
         >
           {isOtherSelected ? (question.multiSelect ? '☑' : '●') : (question.multiSelect ? '☐' : '○')}
         </Text>
-        <Box flex={1} onClick={(e) => e.stopPropagation()}>
+        <Box flex={1}>
           <Text
             fontSize="12px"
             fontFamily={tokens.fontFamily.mono}
-            fontWeight={isOtherSelected ? '600' : '400'}
-            color={isOtherSelected ? tokens.colors.text.primary : tokens.colors.text.secondary}
+            fontWeight={isOtherSelected || isOtherFocusedOption ? '600' : '400'}
+            color={isOtherSelected ? tokens.colors.text.primary : isOtherFocusedOption ? tokens.colors.text.primary : tokens.colors.text.secondary}
             mb={isOtherSelected ? 1 : 0}
           >
-            Other
+            {otherText.trim() && isOtherSelected ? otherText.trim() : OTHER_LABEL}
           </Text>
           {isOtherSelected && (
             <Input
-              ref={inputRef}
+              ref={otherInputRef}
               size="sm"
               fontSize="12px"
               fontFamily={tokens.fontFamily.mono}
               placeholder="Type your answer..."
               value={otherText}
               onChange={(e) => onOtherTextChange(e.target.value)}
+              onKeyDown={onOtherKeyDown}
               bg="rgba(0, 0, 0, 0.2)"
               border="1px solid rgba(255, 255, 255, 0.12)"
               borderRadius="4px"
               color={tokens.colors.text.primary}
               _placeholder={{ color: tokens.colors.text.muted }}
               _focus={{ borderColor: tokens.colors.accent.primary, outline: 'none' }}
-              onClick={(e) => {
-                e.stopPropagation()
-                onSelect(OTHER_LABEL)
-              }}
             />
           )}
         </Box>
       </Flex>
     </Box>
   )
-})
+}
+
+// ─── Summary panel ──────────────────────────────────────────────────────────
+
+function SummaryPanel({
+  questions,
+  selections,
+  otherTexts,
+}: {
+  questions: Question[]
+  selections: Record<number, string[]>
+  otherTexts: Record<number, string>
+}) {
+  return (
+    <Box>
+      <Text
+        fontSize="10px"
+        fontFamily={tokens.fontFamily.mono}
+        color={tokens.colors.accent.primary}
+        fontWeight="700"
+        textTransform="uppercase"
+        letterSpacing="0.08em"
+        mb={3}
+      >
+        Summary
+      </Text>
+      {questions.map((q, i) => {
+        const sel = selections[i] ?? []
+        const resolved = sel.map((label) => {
+          if (label === OTHER_LABEL) {
+            return (otherTexts[i] ?? '').trim() || OTHER_LABEL
+          }
+          return label
+        })
+        const display = resolved.length > 0 ? resolved.join(', ') : '—'
+        return (
+          <Flex key={i} gap={3} mb={1}>
+            <Text
+              fontSize="12px"
+              fontFamily={tokens.fontFamily.mono}
+              color={tokens.colors.text.muted}
+              fontWeight="600"
+              minW="120px"
+              textTransform="uppercase"
+              letterSpacing="0.04em"
+            >
+              {q.header}:
+            </Text>
+            <Text
+              fontSize="12px"
+              fontFamily={tokens.fontFamily.mono}
+              color={resolved.length > 0 ? tokens.colors.text.primary : tokens.colors.text.muted}
+            >
+              {display}
+            </Text>
+          </Flex>
+        )
+      })}
+    </Box>
+  )
+}
+
+// ─── Main component ─────────────────────────────────────────────────────────
 
 export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
+  messageId,
   requestId,
   questions,
+  status,
 }: TerminalAskUserQuestionProps) {
+  const [activeTab, setActiveTab] = useState(0)
   const [selections, setSelections] = useState<Record<number, string[]>>({})
   const [otherTexts, setOtherTexts] = useState<Record<number, string>>({})
+  const [focusedOption, setFocusedOption] = useState(0)
   const [submitting, setSubmitting] = useState(false)
 
-  const handleSelect = useCallback(
-    (questionIdx: number, label: string, multiSelect: boolean) => {
-      setSelections((prev) => {
-        const current = prev[questionIdx] ?? []
-        let next: string[]
-        if (multiSelect) {
-          next = current.includes(label)
-            ? current.filter((l) => l !== label)
-            : [...current, label]
-        } else {
-          next = current.includes(label) ? [] : [label]
-        }
-        return { ...prev, [questionIdx]: next }
-      })
-    },
-    [],
-  )
+  const tabCount = questions.length + 1 // +1 for summary
+  const isSummaryTab = activeTab === tabCount - 1
+  const rootRef = useRef<HTMLDivElement>(null)
+  const otherInputRef = useRef<HTMLInputElement>(null)
 
-  const handleOtherTextChange = useCallback((questionIdx: number, text: string) => {
-    setOtherTexts((prev) => ({ ...prev, [questionIdx]: text }))
-  }, [])
-
-  const resolveAnswer = useCallback((_q: Question, sel: string[], idx: number): string | string[] => {
-    const mapLabel = (label: string) => {
-      if (label === OTHER_LABEL) {
-        return (otherTexts[idx] ?? '').trim() || OTHER_LABEL
-      }
-      return label
-    }
-    return _q.multiSelect ? sel.map(mapLabel) : mapLabel(sel[0])
-  }, [otherTexts])
-
+  // Resolve whether all questions are answered
   const allAnswered = questions.every((_q, i) => {
     const sel = selections[i] ?? []
     if (sel.length === 0) return false
-    if (sel.includes(OTHER_LABEL) && !(otherTexts[i] ?? '').trim()) {
-      return false
-    }
+    if (sel.includes(OTHER_LABEL) && !(otherTexts[i] ?? '').trim()) return false
     return true
   })
+
+  // Auto-focus root on mount so keyboard navigation works immediately.
+  useEffect(() => {
+    rootRef.current?.focus()
+  }, [])
+
+  // Reset focused option when switching tabs
+  useEffect(() => {
+    setFocusedOption(0)
+  }, [activeTab])
+
+  // Auto-remove after submit/cancel
+  useEffect(() => {
+    if (status !== 'submitted' && status !== 'cancelled') return
+    const timer = setTimeout(() => {
+      useChatStore.getState().removeMessage(messageId)
+    }, 2000)
+    return () => clearTimeout(timer)
+  }, [status, messageId])
+
+  const handleSelect = useCallback((questionIdx: number, label: string) => {
+    const q = questions[questionIdx]
+    setSelections((prev) => {
+      const current = prev[questionIdx] ?? []
+      let next: string[]
+      if (q.multiSelect) {
+        next = current.includes(label)
+          ? current.filter((l) => l !== label)
+          : [...current, label]
+      } else {
+        next = current.includes(label) ? [] : [label]
+      }
+      return { ...prev, [questionIdx]: next }
+    })
+  }, [questions])
+
+  const handleOtherTextChange = useCallback((text: string) => {
+    setOtherTexts((prev) => ({ ...prev, [activeTab]: text }))
+  }, [activeTab])
 
   const handleSubmit = useCallback(() => {
     if (!allAnswered || submitting) return
@@ -222,108 +402,210 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
     const answers: Record<string, string | string[]> = {}
     questions.forEach((q, i) => {
       const sel = selections[i] ?? []
-      answers[`question_${i}`] = resolveAnswer(q, sel, i)
+      const mapLabel = (label: string) => {
+        if (label === OTHER_LABEL) {
+          return (otherTexts[i] ?? '').trim() || OTHER_LABEL
+        }
+        return label
+      }
+      answers[`question_${i}`] = q.multiSelect ? sel.map(mapLabel) : mapLabel(sel[0])
     })
     useAskUserQuestionStore.getState().submit(requestId, answers)
-  }, [allAnswered, submitting, selections, requestId, questions, resolveAnswer])
+  }, [allAnswered, submitting, selections, requestId, questions, otherTexts])
 
   const handleCancel = useCallback(() => {
     useAskUserQuestionStore.getState().cancel(requestId)
   }, [requestId])
 
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (submitting) return
+  // Handle Enter/Escape/Tab in the "Other" text input.
+  // Uses stopPropagation to prevent the root onKeyDown from seeing these events.
+  const handleOtherKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      e.stopPropagation()
+      rootRef.current?.focus()
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      rootRef.current?.focus()
+      return
+    }
+    // Tab/Shift+Tab: advance/go back in tabs. Without this, the browser's
+    // default Tab behavior steals focus to the next tabbable element (prompt
+    // input, buttons, etc.), breaking keyboard navigation.
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      e.stopPropagation()
+      setActiveTab((prev) => e.shiftKey ? (prev - 1 + tabCount) % tabCount : (prev + 1) % tabCount)
+      rootRef.current?.focus()
+    }
+  }, [tabCount])
 
-      // Cmd/Ctrl+Enter = submit
-      if ((e.key === 'Enter' && (e.metaKey || e.ctrlKey)) || (e.key === 's' && (e.metaKey || e.ctrlKey))) {
+  // Keyboard navigation — scoped to the root div's DOM subtree via onKeyDown.
+  // This avoids window.addEventListener which would capture keys globally
+  // and interfere with the prompt input, code blocks, session picker, etc.
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (submitting) return
+    if (status === 'submitted' || status === 'cancelled') return
+
+    // Don't intercept when typing in the Other input — let the input handle
+    // its own cursor movement, selection, etc. Enter/Escape in the input are
+    // handled by handleOtherKeyDown which calls stopPropagation to prevent
+    // this handler from seeing them.
+    if (e.target instanceof HTMLInputElement) return
+
+    const totalOptions = isSummaryTab ? 0 : questions[activeTab].options.length + 1 // +1 for Other
+
+    switch (e.key) {
+      case 'ArrowLeft': {
         e.preventDefault()
-        handleSubmit()
+        e.stopPropagation()
+        setActiveTab((prev) => (prev - 1 + tabCount) % tabCount)
         return
       }
-
-      // Escape = cancel
-      if (e.key === 'Escape') {
+      case 'ArrowRight': {
         e.preventDefault()
+        e.stopPropagation()
+        setActiveTab((prev) => (prev + 1) % tabCount)
+        return
+      }
+      case 'ArrowUp': {
+        if (isSummaryTab) return
+        e.preventDefault()
+        e.stopPropagation()
+        setFocusedOption((prev) => (prev - 1 + totalOptions) % totalOptions)
+        return
+      }
+      case 'ArrowDown': {
+        if (isSummaryTab) return
+        e.preventDefault()
+        e.stopPropagation()
+        setFocusedOption((prev) => (prev + 1) % totalOptions)
+        return
+      }
+      case 'Enter': {
+        e.preventDefault()
+        e.stopPropagation()
+        if (isSummaryTab) {
+          handleSubmit()
+          return
+        }
+        const isOther = focusedOption === questions[activeTab].options.length
+        if (isOther) {
+          // Ensure "Other" is selected (don't toggle off if already selected).
+          const currentSel = selections[activeTab] ?? []
+          if (!currentSel.includes(OTHER_LABEL)) {
+            handleSelect(activeTab, OTHER_LABEL)
+          }
+          // Focus input on next tick (after React renders it if newly selected).
+          setTimeout(() => {
+            otherInputRef.current?.focus()
+          }, 0)
+          return
+        }
+        handleSelect(activeTab, questions[activeTab].options[focusedOption].label)
+        return
+      }
+      case 'Escape': {
+        e.preventDefault()
+        e.stopPropagation()
         handleCancel()
         return
       }
-
-      // Enter without modifier = submit if all answered (but not if typing in Other input)
-      if (e.key === 'Enter' && allAnswered && !(e.target instanceof HTMLInputElement)) {
-        e.preventDefault()
-        handleSubmit()
-      }
     }
 
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [submitting, handleSubmit, handleCancel, allAnswered])
+    // Tab / Shift+Tab for tab navigation
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      e.stopPropagation()
+      setActiveTab((prev) => e.shiftKey ? (prev - 1 + tabCount) % tabCount : (prev + 1) % tabCount)
+    }
+  }, [submitting, status, activeTab, tabCount, isSummaryTab, questions, focusedOption, selections, handleSelect, handleSubmit, handleCancel])
+
+  // Submitted / cancelled status
+  if (status === 'submitted') {
+    return (
+      <Box mb={3} pl={3} py={1}>
+        <Text fontSize="12px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.green}>
+          ✓ answers submitted
+        </Text>
+      </Box>
+    )
+  }
+
+  if (status === 'cancelled') {
+    return (
+      <Box mb={3} pl={3} py={1}>
+        <Text fontSize="12px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.accent.red}>
+          ✗ cancelled
+        </Text>
+      </Box>
+    )
+  }
 
   return (
     <Box
+      ref={rootRef}
+      data-question-root
+      tabIndex={-1}
       mb={3}
       borderLeft={`2px solid ${tokens.colors.accent.primary}`}
       pl={3}
       py={2}
+      outline="none"
+      _focus={{ outline: 'none' }}
+      onKeyDown={handleKeyDown}
     >
-      {/* Questions */}
-      {questions.map((q, idx) => (
-        <TerminalQuestionBlock
-          key={idx}
-          question={q}
-          idx={idx}
-          total={questions.length}
-          selected={selections[idx] ?? []}
-          otherText={otherTexts[idx] ?? ''}
-          onSelect={(label) => handleSelect(idx, label, q.multiSelect)}
-          onOtherTextChange={(text) => handleOtherTextChange(idx, text)}
-        />
-      ))}
+      {/* Tab bar */}
+      <TabBar questions={questions} activeTab={activeTab} allAnswered={allAnswered} />
+
+      {/* Panel content */}
+      <Box minH="80px" mb={2}>
+        {isSummaryTab ? (
+          <SummaryPanel questions={questions} selections={selections} otherTexts={otherTexts} />
+        ) : (
+          <QuestionPanel
+            question={questions[activeTab]}
+            selections={selections[activeTab] ?? []}
+            otherText={otherTexts[activeTab] ?? ''}
+            focusedOption={focusedOption}
+            onOtherTextChange={handleOtherTextChange}
+            onOtherKeyDown={handleOtherKeyDown}
+            otherInputRef={otherInputRef}
+          />
+        )}
+      </Box>
 
       {/* Key hints */}
-      <Flex align="center" gap={3} mt={3} pt={2} borderTop={`1px solid rgba(255, 255, 255, 0.06)`}>
+      <Flex
+        align="center"
+        gap={3}
+        pt={2}
+        borderTop={`1px solid rgba(255, 255, 255, 0.06)`}
+        userSelect="none"
+      >
         <Flex align="center" gap={1}>
-          <Box
-            as="span"
-            px="5px"
-            py="1px"
-            borderRadius="3px"
-            bg="rgba(255, 255, 255, 0.06)"
-            border="1px solid rgba(255, 255, 255, 0.1)"
-            fontSize="10px"
-            fontFamily={tokens.fontFamily.mono}
-            color={tokens.colors.terminal.foreground}
-            fontWeight="600"
-          >
-            {navigator.platform.includes('Mac') ? '⌘↵' : 'Ctrl+Enter'}
-          </Box>
-          <Text fontSize="10px" color={allAnswered ? tokens.colors.terminal.green : tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.8}>
-            {submitting ? 'submitting...' : 'submit'}
+          <Box as="span" px="4px" py="1px" borderRadius="3px" bg="rgba(255, 255, 255, 0.06)" border="1px solid rgba(255, 255, 255, 0.1)" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">←→</Box>
+          <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.7}>tabs</Text>
+        </Flex>
+        {!isSummaryTab && (
+          <Flex align="center" gap={1}>
+            <Box as="span" px="4px" py="1px" borderRadius="3px" bg="rgba(255, 255, 255, 0.06)" border="1px solid rgba(255, 255, 255, 0.1)" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">↑↓</Box>
+            <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.7}>navigate</Text>
+          </Flex>
+        )}
+        <Flex align="center" gap={1}>
+          <Box as="span" px="4px" py="1px" borderRadius="3px" bg="rgba(255, 255, 255, 0.06)" border="1px solid rgba(255, 255, 255, 0.1)" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">↵</Box>
+          <Text fontSize="10px" color={isSummaryTab && allAnswered ? tokens.colors.terminal.green : tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.7}>
+            {isSummaryTab ? (submitting ? 'submitting...' : 'submit') : 'select'}
           </Text>
         </Flex>
-        <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
-          ·
-        </Text>
+        <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.4}>·</Text>
         <Flex align="center" gap={1}>
-          <Box
-            as="span"
-            px="5px"
-            py="1px"
-            borderRadius="3px"
-            bg="rgba(255, 255, 255, 0.06)"
-            border="1px solid rgba(255, 255, 255, 0.1)"
-            fontSize="10px"
-            fontFamily={tokens.fontFamily.mono}
-            color={tokens.colors.terminal.foreground}
-            fontWeight="600"
-          >
-            esc
-          </Box>
-          <Text fontSize="10px" color={tokens.colors.accent.red} fontFamily={tokens.fontFamily.mono} opacity={0.8}>
-            cancel
-          </Text>
+          <Box as="span" px="4px" py="1px" borderRadius="3px" bg="rgba(255, 255, 255, 0.06)" border="1px solid rgba(255, 255, 255, 0.1)" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">esc</Box>
+          <Text fontSize="10px" color={tokens.colors.accent.red} fontFamily={tokens.fontFamily.mono} opacity={0.7}>cancel</Text>
         </Flex>
       </Flex>
     </Box>

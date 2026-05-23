@@ -8,6 +8,7 @@ import { TerminalMentionMenu } from './TerminalMentionMenu'
 import CmdAttachmentBar from './CmdAttachmentBar'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import { resolveInlineArgHint } from '../prompt/slashArgHint'
+import { CMD_MODE_COMMANDS } from '../../services/agent/cmdModeCommands'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import type { QueuedCommand } from '../../types/messageQueueTypes'
@@ -288,7 +289,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
               // resolveInlineArgHint helper. Pure visual; the textarea
               // value is unchanged. Cheap enough to compute inline (one
               // startsWith + Map lookup per render).
-              const hint = resolveInlineArgHint(input)
+              const hint = resolveInlineArgHint(input, CMD_MODE_COMMANDS)
               if (!hint) return null
               return (
                 <Box

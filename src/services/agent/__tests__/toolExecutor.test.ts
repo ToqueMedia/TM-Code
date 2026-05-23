@@ -66,6 +66,7 @@ const mockUpdateToolCallProgress = jest.fn()
 const mockGetState_chat = jest.fn(() => ({
   recordToolPermission: mockRecordToolPermission,
   updateToolCallProgress: mockUpdateToolCallProgress,
+  tasks: [] as Array<{ id: string; description: string; status: string }>,
 }))
 
 jest.mock('../../../stores/permissionStore', () => ({
@@ -97,7 +98,7 @@ jest.mock('../../../stores/layoutStore', () => ({
 }))
 
 jest.mock('../../../stores/chatStore', () => ({
-  useChatStore: { getState: mockGetState_chat },
+  useChatStore: { getState: mockGetState_chat, setState: jest.fn() },
   appendTextDeltaBuffered: jest.fn(),
   appendReasoningDeltaBuffered: jest.fn(),
 }))

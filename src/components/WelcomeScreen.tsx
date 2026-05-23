@@ -144,6 +144,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
       {cmdModeProjectPath ? (
         <Box flex="1" minH={0} display="flex" flexDirection="column">
           <TerminalView
+            key={cmdModeProjectPath}
             projectPath={cmdModeProjectPath}
             onBack={() => setCmdModeProjectPath(null)}
           />
