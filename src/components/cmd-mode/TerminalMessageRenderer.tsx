@@ -56,18 +56,38 @@ function TerminalSpecialCards({ message }: { message: ChatMessage }) {
 function ContentBlocksRenderer({
   blocks,
   toolCalls,
+  isStreaming,
 }: {
   blocks: ContentBlock[]
   toolCalls?: ToolCallDisplay[]
+  isStreaming?: boolean
 }) {
   const toolCallMap = useMemo(
     () => new Map(toolCalls?.map(tc => [tc.id, tc]) || []),
     [toolCalls],
   )
 
+  // When streaming, find the last in-flight reasoning block (no durationMs).
+  // All text/tool_call blocks that come AFTER it should be hidden to prevent
+  // narration from appearing while thinking is still in progress (race condition).
+  const activeReasoningIdx = useMemo(() => {
+    if (!isStreaming) return -1
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i]
+      if (b.type === 'reasoning' && b.durationMs === undefined && b.startedAt) {
+        return i
+      }
+    }
+    return -1
+  }, [blocks, isStreaming])
+
   return (
     <>
       {blocks.map((block, i) => {
+        // Hide blocks after an in-flight reasoning block during streaming
+        if (activeReasoningIdx !== -1 && i > activeReasoningIdx) {
+          return null
+        }
         if (block.type === 'text') {
           return (
             <Box
@@ -212,6 +232,17 @@ function TerminalMessageRendererInner({
 
   // ── System message ──
   if (message.role === 'system') {
+    // Cards (ask_user_question, plan_approval, credential_request) are system
+    // messages with card data — render them via TerminalSpecialCards instead of
+    // plain text.
+    if (message.card) {
+      return (
+        <Box mb={3} py="2px" pl="6px">
+          <TerminalSpecialCards message={message} />
+        </Box>
+      )
+    }
+
     const text = message.content || ''
     const level = message.level
 
@@ -276,14 +307,15 @@ function TerminalMessageRendererInner({
       {/* Special cards (credential requests, etc.) */}
       <TerminalSpecialCards message={message} />
 
-      {/* Content */}
+      {/* Content — hide text/narration while reasoning is in-flight to prevent race */}
       {hasContentBlocks ? (
         // Content blocks already contain all text + tool call refs — don't also render message.content
-        <ContentBlocksRenderer blocks={message.contentBlocks!} toolCalls={message.toolCalls} />
+        <ContentBlocksRenderer blocks={message.contentBlocks!} toolCalls={message.toolCalls} isStreaming={isStreaming} />
       ) : (
         <>
           {message.toolCalls?.map(tc => <TerminalToolCall key={tc.id} toolCall={tc} />)}
-          {message.content && (
+          {/* Hide text content while reasoning is in-flight */}
+          {!(isStreaming && message.reasoningContent && !message.reasoningDurationMs) && message.content && (
             <Box
               mb={1}
               fontSize="14px"

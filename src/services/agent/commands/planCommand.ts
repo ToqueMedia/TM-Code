@@ -657,7 +657,7 @@ Before writing PLAN.md, assess whether the developer's request contains ambiguit
 
 **How to ask:**
 - Present 2-4 concrete options with labels and short descriptions explaining the trade-off.
-- Set \`allowOther: true\` on every question so the developer can type a free-text answer if none of the pre-defined options fit.
+- The UI always includes an "Other" option with a free-text input — no action needed from you.
 - Ask one question per concern — do not bundle unrelated decisions into a single question.
 - After receiving answers, incorporate them into PLAN.md (§7 Technical Decisions, §3 Architecture, etc.) and continue the scaffold-then-edit flow.
 

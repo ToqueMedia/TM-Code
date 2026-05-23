@@ -346,11 +346,13 @@ class ToolExecutor {
     // Agent-internal tools + tools that surface their own confirmation UI:
     // bypass the generic permission dialog. update_tasks/check_background_agents
     // are autonomous; request_credentials renders a secure form in the chat
-    // (Save/Skip is the gate, not the permission dialog).
+    // (Save/Skip is the gate, not the permission dialog); ask_user_question
+    // renders an interactive question card (Submit/Cancel is the gate).
     const PERMISSION_EXEMPT_TOOLS = new Set([
       'update_tasks',
       'check_background_agents',
       'request_credentials',
+      'ask_user_question',
     ])
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
@@ -4088,10 +4090,6 @@ Project root: ${projectRoot}`
                     type: 'boolean',
                     description: 'Whether multiple options can be selected. Default: false (single-select).'
                   },
-                  allowOther: {
-                    type: 'boolean',
-                    description: 'When true, the UI adds an "Other" option with a free-text input field. The user can type a custom answer if none of the predefined options fit. The typed text becomes the answer value instead of the literal label "Other". Default: false.'
-                  },
                   options: {
                     type: 'array',
                     description: 'The available options. Each has a label (display text, 1-5 words) and optional description (explanation of what this option means). Must have 2-4 options.',
@@ -4122,7 +4120,6 @@ Project root: ${projectRoot}`
           header: string
           options: Array<{ label: string; description?: string }>
           multiSelect?: boolean
-          allowOther?: boolean
         }>
 
         if (!questionsRaw || !Array.isArray(questionsRaw) || questionsRaw.length === 0) {
@@ -4146,7 +4143,6 @@ Project root: ${projectRoot}`
           header: q.header,
           options: q.options.map(o => ({ label: o.label, description: o.description })),
           multiSelect: !!q.multiSelect,
-          allowOther: !!q.allowOther,
         }))
 
         const { useAskUserQuestionStore } = await import('../../stores/askUserQuestionStore')

@@ -70,6 +70,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     if (!activeSessionId) useChatStore.getState().createSession(projectPath)
   }, [activeSessionId, projectPath])
 
+  // Focus the prompt input on mount so the user can start typing immediately.
+  useEffect(() => {
+    const t = setTimeout(() => promptInputRef.current?.focus(), 50)
+    return () => clearTimeout(t)
+  }, [])
+
   // Hydrate per-project state. Terminal Mode bypasses projectStore.openProject
   // (it invokes Rust open_project directly), so we must clear stale state from
   // the previous project and load the new project's data here — same logic as

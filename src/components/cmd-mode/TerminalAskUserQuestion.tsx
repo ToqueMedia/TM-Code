@@ -110,61 +110,59 @@ const TerminalQuestionBlock = memo(function TerminalQuestionBlock({
         )
       })}
 
-      {/* Other option with free-text input */}
-      {question.allowOther && (
-        <Flex
-          align="flex-start"
-          gap={2}
-          py="3px"
-          cursor="pointer"
-          onClick={() => onSelect(OTHER_LABEL)}
-          _hover={{ bg: 'rgba(255, 255, 255, 0.03)' }}
+      {/* Other option with free-text input — always shown so the user can type freely */}
+      <Flex
+        align="flex-start"
+        gap={2}
+        py="3px"
+        cursor="pointer"
+        onClick={() => onSelect(OTHER_LABEL)}
+        _hover={{ bg: 'rgba(255, 255, 255, 0.03)' }}
+      >
+        <Text
+          fontSize="12px"
+          fontFamily={tokens.fontFamily.mono}
+          color={isOtherSelected ? tokens.colors.accent.primary : tokens.colors.text.muted}
+          fontWeight="600"
+          w="14px"
+          textAlign="center"
+          mt="3px"
         >
+          {isOtherSelected ? (question.multiSelect ? '☑' : '●') : (question.multiSelect ? '☐' : '○')}
+        </Text>
+        <Box flex={1} onClick={(e) => e.stopPropagation()}>
           <Text
             fontSize="12px"
             fontFamily={tokens.fontFamily.mono}
-            color={isOtherSelected ? tokens.colors.accent.primary : tokens.colors.text.muted}
-            fontWeight="600"
-            w="14px"
-            textAlign="center"
-            mt="3px"
+            fontWeight={isOtherSelected ? '600' : '400'}
+            color={isOtherSelected ? tokens.colors.text.primary : tokens.colors.text.secondary}
+            mb={isOtherSelected ? 1 : 0}
           >
-            {isOtherSelected ? (question.multiSelect ? '☑' : '●') : (question.multiSelect ? '☐' : '○')}
+            Other
           </Text>
-          <Box flex={1} onClick={(e) => e.stopPropagation()}>
-            <Text
+          {isOtherSelected && (
+            <Input
+              ref={inputRef}
+              size="sm"
               fontSize="12px"
               fontFamily={tokens.fontFamily.mono}
-              fontWeight={isOtherSelected ? '600' : '400'}
-              color={isOtherSelected ? tokens.colors.text.primary : tokens.colors.text.secondary}
-              mb={isOtherSelected ? 1 : 0}
-            >
-              Other
-            </Text>
-            {isOtherSelected && (
-              <Input
-                ref={inputRef}
-                size="sm"
-                fontSize="12px"
-                fontFamily={tokens.fontFamily.mono}
-                placeholder="Type your answer..."
-                value={otherText}
-                onChange={(e) => onOtherTextChange(e.target.value)}
-                bg="rgba(0, 0, 0, 0.2)"
-                border="1px solid rgba(255, 255, 255, 0.12)"
-                borderRadius="4px"
-                color={tokens.colors.text.primary}
-                _placeholder={{ color: tokens.colors.text.muted }}
-                _focus={{ borderColor: tokens.colors.accent.primary, outline: 'none' }}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onSelect(OTHER_LABEL)
-                }}
-              />
-            )}
-          </Box>
-        </Flex>
-      )}
+              placeholder="Type your answer..."
+              value={otherText}
+              onChange={(e) => onOtherTextChange(e.target.value)}
+              bg="rgba(0, 0, 0, 0.2)"
+              border="1px solid rgba(255, 255, 255, 0.12)"
+              borderRadius="4px"
+              color={tokens.colors.text.primary}
+              _placeholder={{ color: tokens.colors.text.muted }}
+              _focus={{ borderColor: tokens.colors.accent.primary, outline: 'none' }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onSelect(OTHER_LABEL)
+              }}
+            />
+          )}
+        </Box>
+      </Flex>
     </Box>
   )
 })
@@ -199,20 +197,20 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
     setOtherTexts((prev) => ({ ...prev, [questionIdx]: text }))
   }, [])
 
-  const resolveAnswer = useCallback((q: Question, sel: string[], idx: number): string | string[] => {
+  const resolveAnswer = useCallback((_q: Question, sel: string[], idx: number): string | string[] => {
     const mapLabel = (label: string) => {
-      if (label === OTHER_LABEL && q.allowOther) {
+      if (label === OTHER_LABEL) {
         return (otherTexts[idx] ?? '').trim() || OTHER_LABEL
       }
       return label
     }
-    return q.multiSelect ? sel.map(mapLabel) : mapLabel(sel[0])
+    return _q.multiSelect ? sel.map(mapLabel) : mapLabel(sel[0])
   }, [otherTexts])
 
-  const allAnswered = questions.every((q, i) => {
+  const allAnswered = questions.every((_q, i) => {
     const sel = selections[i] ?? []
     if (sel.length === 0) return false
-    if (q.allowOther && sel.includes(OTHER_LABEL) && !(otherTexts[i] ?? '').trim()) {
+    if (sel.includes(OTHER_LABEL) && !(otherTexts[i] ?? '').trim()) {
       return false
     }
     return true
