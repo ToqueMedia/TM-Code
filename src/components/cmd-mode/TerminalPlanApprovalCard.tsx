@@ -14,6 +14,18 @@ interface TerminalPlanApprovalCardProps {
   card: ChatMessageCard
 }
 
+/** Strip YAML frontmatter (--- ... ---) from plan content. */
+function stripFrontmatter(content: string): string {
+  const trimmed = content.replace(/^\s*\n/, '')
+  if (trimmed.startsWith('---')) {
+    const end = trimmed.indexOf('\n---', 3)
+    if (end !== -1) {
+      return trimmed.slice(end + 4).replace(/^\s*\n/, '')
+    }
+  }
+  return content
+}
+
 export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
   messageId,
   card,
@@ -35,7 +47,14 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
 
   const handleApprove = useCallback(async () => {
     useChatStore.getState().updateCardStatus(messageId, 'approved')
-    await handlePlanApprove(projectPath)
+    try {
+      await handlePlanApprove(projectPath)
+    } catch {
+      useChatStore.getState().updateCardStatus(messageId, 'pending')
+      useChatStore.getState().addSystemMessage(
+        t('plan.approveError') ?? 'Failed to approve plan. Try again.',
+      )
+    }
   }, [messageId, projectPath])
 
   const handleChanges = useCallback(() => {
@@ -57,11 +76,11 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
     try {
       setLoadingPlan(true)
       const content = await FileService.readFile(planPath)
-      setPlanContent(content)
+      setPlanContent(stripFrontmatter(content))
       setViewingPlan(true)
     } catch {
       useChatStore.getState().addSystemMessage(
-        'PLAN.md is missing. Run /plan again to regenerate it.',
+        t('plan.missing') ?? 'PLAN.md is missing. Run /plan again to regenerate it.',
       )
     } finally {
       setLoadingPlan(false)
@@ -74,29 +93,13 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
     useLayoutStore.getState().setViewMode('editor')
   }, [projectPath])
 
-  // Keyboard: Enter=approve, Escape=reject (only when pending)
-  useEffect(() => {
-    if (status !== 'pending') return
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
-        e.preventDefault()
-        handleApprove()
-      } else if (e.key === 'Escape') {
-        e.preventDefault()
-        handleReject()
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [status, handleApprove, handleReject])
-
   // ── Approved state ──
   if (status === 'approved') {
     return (
       <Box mb={3} py="2px" pl="6px">
         <Flex align="center" gap={1.5}>
           <Text fontSize="12px" color={tokens.colors.terminal.green} fontFamily={tokens.fontFamily.mono} flexShrink={0}>
-            ✓
+            [OK]
           </Text>
           <Text fontSize="13px" color={tokens.colors.terminal.green} fontFamily={tokens.fontFamily.mono}>
             {t('plan.approved')}
@@ -112,7 +115,7 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
       <Box mb={3} py="2px" pl="6px">
         <Flex align="center" gap={1.5}>
           <Text fontSize="12px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} flexShrink={0}>
-            ✎
+            [~]
           </Text>
           <Text fontSize="13px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono}>
             {t('plan.changesRequested')}
@@ -128,7 +131,7 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
       <Box mb={3} py="2px" pl="6px">
         <Flex align="center" gap={1.5}>
           <Text fontSize="12px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} flexShrink={0}>
-            ✗
+            [x]
           </Text>
           <Text fontSize="13px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
             {t('plan.rejected')}
@@ -247,7 +250,7 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
           onClick={handleViewPlan}
         >
           <Text fontSize="12px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono} fontWeight="500">
-            {loadingPlan ? '...' : viewingPlan ? t('plan.hidePlan') ?? 'Hide Plan' : t('plan.viewFull')}
+            {loadingPlan ? '...' : viewingPlan ? t('plan.hidePlan') : t('plan.viewFull')}
           </Text>
         </Flex>
 
@@ -267,7 +270,7 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
           onClick={handleOpenInEditor}
         >
           <Text fontSize="12px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono} fontWeight="500">
-            {t('plan.openInEditor') ?? 'Open in Editor'}
+            {t('plan.openInEditor')}
           </Text>
         </Flex>
 
@@ -288,51 +291,6 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
         >
           <Text fontSize="12px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} fontWeight="500">
             {t('plan.requestChanges')}
-          </Text>
-        </Flex>
-      </Flex>
-
-      {/* Key hints */}
-      <Flex align="center" gap={3} mt={3} pt={2} borderTop="1px solid rgba(255, 255, 255, 0.06)">
-        <Flex align="center" gap={1}>
-          <Box
-            as="span"
-            px="5px"
-            py="1px"
-            borderRadius="3px"
-            bg="rgba(255, 255, 255, 0.06)"
-            border="1px solid rgba(255, 255, 255, 0.1)"
-            fontSize="10px"
-            fontFamily={tokens.fontFamily.mono}
-            color={tokens.colors.terminal.foreground}
-            fontWeight="600"
-          >
-            ↵
-          </Box>
-          <Text fontSize="10px" color={tokens.colors.terminal.green} fontFamily={tokens.fontFamily.mono} opacity={0.8}>
-            approve
-          </Text>
-        </Flex>
-        <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
-          ·
-        </Text>
-        <Flex align="center" gap={1}>
-          <Box
-            as="span"
-            px="5px"
-            py="1px"
-            borderRadius="3px"
-            bg="rgba(255, 255, 255, 0.06)"
-            border="1px solid rgba(255, 255, 255, 0.1)"
-            fontSize="10px"
-            fontFamily={tokens.fontFamily.mono}
-            color={tokens.colors.terminal.foreground}
-            fontWeight="600"
-          >
-            esc
-          </Box>
-          <Text fontSize="10px" color={tokens.colors.accent.red} fontFamily={tokens.fontFamily.mono} opacity={0.8}>
-            reject
           </Text>
         </Flex>
       </Flex>

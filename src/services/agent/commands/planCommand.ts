@@ -15,6 +15,7 @@ import {
   PROVISION_AUTH, REQUEST_CREDENTIALS, UPDATE_TASKS,
   ASK_USER_QUESTION,
 } from '../toolNames'
+import { t } from '@/i18n'
 
 async function fileExists(path: string): Promise<boolean> {
   try {
@@ -155,7 +156,7 @@ export async function handlePlanApprove(projectPath: string): Promise<void> {
   // to "approved"); this is just a transitional "working on next phase" hint.
   // Self-removes once TODO generation finishes (or after ~8s, whichever first).
   chatStore.addSystemMessage(
-    'Plan approved. Generating development task list...',
+    t('plan.generating'),
     undefined,
     { ephemeral: true },
   )
@@ -571,6 +572,7 @@ function getApprovalFlowSection(): string {
 
 The IDE handles approval through a UI card, not through chat. Strict sequence:
 
+0. If the developer's request is ambiguous on a decision that affects the architecture, call \`${ASK_USER_QUESTION}\` to resolve it (see "Clarifying questions" below). After receiving answers, incorporate them and continue to step 1.
 1. You call \`${WRITE_FILE}\`({ path: "...PLAN.md", content: "<scaffold>" }) with frontmatter (\`Status: DRAFT\`) and every section heading from §1 to §14 with a placeholder body.
 2. You call \`${EDIT_FILE}\` repeatedly — one call per section — replacing each placeholder with finished content.
 3. A final \`${EDIT_FILE}\` flips frontmatter \`Status: DRAFT\` → \`Status: PENDING APPROVAL\`. This is the user-visible "ready" marker.
@@ -655,14 +657,14 @@ Before writing PLAN.md, assess whether the developer's request contains ambiguit
 
 **How to ask:**
 - Present 2-4 concrete options with labels and short descriptions explaining the trade-off.
-- ALWAYS include an "Other" option so the developer can type a free-text answer if none of the pre-defined options fit.
+- Set \`allowOther: true\` on every question so the developer can type a free-text answer if none of the pre-defined options fit.
 - Ask one question per concern — do not bundle unrelated decisions into a single question.
 - After receiving answers, incorporate them into PLAN.md (§7 Technical Decisions, §3 Architecture, etc.) and continue the scaffold-then-edit flow.
 
-**What NOT to do:**
-- Do NOT ask more than 3 clarifying questions in a single plan run. If you have more than 3 unknowns, pick the 3 that most affect the architecture and record the rest in §14 Open Questions.
-- Do NOT ask questions you can answer by reading the codebase.
-- Do NOT ask for plan approval via \`${ASK_USER_QUESTION}\` — that is what the approval card is for.`
+You DO NOT:
+- Ask more than 3 clarifying questions in a single plan run. If you have more than 3 unknowns, pick the 3 that most affect the architecture and record the rest in §14 Open Questions.
+- Ask questions you can answer by reading the codebase.
+- Ask for plan approval via \`${ASK_USER_QUESTION}\` — that is what the approval card is for.`
 }
 
 function getComplexityClassification(): string {

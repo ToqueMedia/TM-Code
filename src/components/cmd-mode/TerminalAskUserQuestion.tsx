@@ -1,8 +1,10 @@
-import { memo, useCallback, useEffect, useState } from 'react'
-import { Box, Flex, Text } from '@chakra-ui/react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { Box, Flex, Text, Input } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
 import type { Question } from '../../stores/askUserQuestionStore'
+
+const OTHER_LABEL = 'Other'
 
 interface TerminalAskUserQuestionProps {
   requestId: string
@@ -14,14 +16,27 @@ const TerminalQuestionBlock = memo(function TerminalQuestionBlock({
   idx,
   total,
   selected,
+  otherText,
   onSelect,
+  onOtherTextChange,
 }: {
   question: Question
   idx: number
   total: number
   selected: string[]
+  otherText: string
   onSelect: (label: string) => void
+  onOtherTextChange: (text: string) => void
 }) {
+  const isOtherSelected = selected.includes(OTHER_LABEL)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (isOtherSelected && inputRef.current) {
+      inputRef.current.focus()
+    }
+  }, [isOtherSelected])
+
   return (
     <Box mb={idx < total - 1 ? 3 : 0}>
       {/* Header */}
@@ -94,6 +109,62 @@ const TerminalQuestionBlock = memo(function TerminalQuestionBlock({
           </Flex>
         )
       })}
+
+      {/* Other option with free-text input */}
+      {question.allowOther && (
+        <Flex
+          align="flex-start"
+          gap={2}
+          py="3px"
+          cursor="pointer"
+          onClick={() => onSelect(OTHER_LABEL)}
+          _hover={{ bg: 'rgba(255, 255, 255, 0.03)' }}
+        >
+          <Text
+            fontSize="12px"
+            fontFamily={tokens.fontFamily.mono}
+            color={isOtherSelected ? tokens.colors.accent.primary : tokens.colors.text.muted}
+            fontWeight="600"
+            w="14px"
+            textAlign="center"
+            mt="3px"
+          >
+            {isOtherSelected ? (question.multiSelect ? '☑' : '●') : (question.multiSelect ? '☐' : '○')}
+          </Text>
+          <Box flex={1} onClick={(e) => e.stopPropagation()}>
+            <Text
+              fontSize="12px"
+              fontFamily={tokens.fontFamily.mono}
+              fontWeight={isOtherSelected ? '600' : '400'}
+              color={isOtherSelected ? tokens.colors.text.primary : tokens.colors.text.secondary}
+              mb={isOtherSelected ? 1 : 0}
+            >
+              Other
+            </Text>
+            {isOtherSelected && (
+              <Input
+                ref={inputRef}
+                size="sm"
+                fontSize="12px"
+                fontFamily={tokens.fontFamily.mono}
+                placeholder="Type your answer..."
+                value={otherText}
+                onChange={(e) => onOtherTextChange(e.target.value)}
+                bg="rgba(0, 0, 0, 0.2)"
+                border="1px solid rgba(255, 255, 255, 0.12)"
+                borderRadius="4px"
+                color={tokens.colors.text.primary}
+                _placeholder={{ color: tokens.colors.text.muted }}
+                _focus={{ borderColor: tokens.colors.accent.primary, outline: 'none' }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onSelect(OTHER_LABEL)
+                }}
+              />
+            )}
+          </Box>
+        </Flex>
+      )}
     </Box>
   )
 })
@@ -103,6 +174,7 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
   questions,
 }: TerminalAskUserQuestionProps) {
   const [selections, setSelections] = useState<Record<number, string[]>>({})
+  const [otherTexts, setOtherTexts] = useState<Record<number, string>>({})
   const [submitting, setSubmitting] = useState(false)
 
   const handleSelect = useCallback(
@@ -123,7 +195,28 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
     [],
   )
 
-  const allAnswered = questions.every((_, i) => (selections[i] ?? []).length > 0)
+  const handleOtherTextChange = useCallback((questionIdx: number, text: string) => {
+    setOtherTexts((prev) => ({ ...prev, [questionIdx]: text }))
+  }, [])
+
+  const resolveAnswer = useCallback((q: Question, sel: string[], idx: number): string | string[] => {
+    const mapLabel = (label: string) => {
+      if (label === OTHER_LABEL && q.allowOther) {
+        return (otherTexts[idx] ?? '').trim() || OTHER_LABEL
+      }
+      return label
+    }
+    return q.multiSelect ? sel.map(mapLabel) : mapLabel(sel[0])
+  }, [otherTexts])
+
+  const allAnswered = questions.every((q, i) => {
+    const sel = selections[i] ?? []
+    if (sel.length === 0) return false
+    if (q.allowOther && sel.includes(OTHER_LABEL) && !(otherTexts[i] ?? '').trim()) {
+      return false
+    }
+    return true
+  })
 
   const handleSubmit = useCallback(() => {
     if (!allAnswered || submitting) return
@@ -131,10 +224,10 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
     const answers: Record<string, string | string[]> = {}
     questions.forEach((q, i) => {
       const sel = selections[i] ?? []
-      answers[`question_${i}`] = q.multiSelect ? sel : sel[0]
+      answers[`question_${i}`] = resolveAnswer(q, sel, i)
     })
     useAskUserQuestionStore.getState().submit(requestId, answers)
-  }, [allAnswered, submitting, selections, requestId, questions])
+  }, [allAnswered, submitting, selections, requestId, questions, resolveAnswer])
 
   const handleCancel = useCallback(() => {
     useAskUserQuestionStore.getState().cancel(requestId)
@@ -159,8 +252,8 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
         return
       }
 
-      // Enter without modifier = submit if all answered
-      if (e.key === 'Enter' && allAnswered) {
+      // Enter without modifier = submit if all answered (but not if typing in Other input)
+      if (e.key === 'Enter' && allAnswered && !(e.target instanceof HTMLInputElement)) {
         e.preventDefault()
         handleSubmit()
       }
@@ -185,7 +278,9 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
           idx={idx}
           total={questions.length}
           selected={selections[idx] ?? []}
+          otherText={otherTexts[idx] ?? ''}
           onSelect={(label) => handleSelect(idx, label, q.multiSelect)}
+          onOtherTextChange={(text) => handleOtherTextChange(idx, text)}
         />
       ))}
 

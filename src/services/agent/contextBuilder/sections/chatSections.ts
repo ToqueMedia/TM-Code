@@ -200,6 +200,9 @@ export function getEnvironmentSection(ctx: PromptContext): string {
 
   const lines = [
     `project_path: ${ctx.normalizedProjectPath}`,
+    ...(ctx.normalizedProjectPath.includes(' ')
+      ? [`⚠ project_path_contains_spaces — all shell paths must be quoted`]
+      : []),
     `project_type: ${ctx.projectType}`,
     `os: ${osName} (Tauri 2)`,
     `shell: ${shell}`,

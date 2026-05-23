@@ -12,6 +12,10 @@ export interface Question {
   header: string
   options: QuestionOption[]
   multiSelect: boolean
+  /** When true, the UI adds an "Other" option with a free-text input field.
+   *  If the user selects "Other" and types text, the answer is the typed text
+   *  (not the literal label "Other"). */
+  allowOther?: boolean
 }
 
 export interface PendingAskUserQuestion {

@@ -120,8 +120,11 @@ export function getCmdEnvironmentSection(ctx: CmdPromptContext): string {
   const osName = IS_WINDOWS ? 'Windows' : IS_MAC ? 'macOS' : 'Linux'
   const shell = IS_WINDOWS ? 'powershell' : IS_MAC ? 'zsh' : 'bash'
   const today = new Date().toISOString().split('T')[0]
+  const spaceWarning = ctx.normalizedCwd.includes(' ')
+    ? '\n - ⚠ working_directory_contains_spaces — all shell paths must be quoted'
+    : ''
   return `# Environment
- - Working directory: ${ctx.normalizedCwd}
+ - Working directory: ${ctx.normalizedCwd}${spaceWarning}
  - Platform: ${osName}
  - Shell: ${shell}
  - Date: ${today}`
