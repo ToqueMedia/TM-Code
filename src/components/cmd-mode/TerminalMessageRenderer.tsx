@@ -9,13 +9,24 @@ import { TerminalToolCall } from './TerminalToolCall'
 import { TerminalCodeBlock } from './TerminalCodeBlock'
 import { TerminalCredentialPrompt } from './TerminalCredentialPrompt'
 import { TerminalAskUserQuestion } from './TerminalAskUserQuestion'
+import { TerminalPlanApprovalCard } from './TerminalPlanApprovalCard'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 
-// ─── Special card renderer (credential_request) ───
+// ─── Special card renderer (plan_approval, credential_request, ask_user_question) ───
 
 function TerminalSpecialCards({ message }: { message: ChatMessage }) {
   const card = message.card
   if (!card) return null
+
+  if (card.type === 'plan_approval') {
+    return (
+      <TerminalPlanApprovalCard
+        key={message.id}
+        messageId={message.id}
+        card={card}
+      />
+    )
+  }
 
   if (card.type === 'credential_request') {
     return (
@@ -31,8 +42,10 @@ function TerminalSpecialCards({ message }: { message: ChatMessage }) {
     return (
       <TerminalAskUserQuestion
         key={message.id}
+        messageId={message.id}
         requestId={card.requestId}
         questions={card.questions}
+        status={card.status}
       />
     )
   }
@@ -45,18 +58,49 @@ function TerminalSpecialCards({ message }: { message: ChatMessage }) {
 function ContentBlocksRenderer({
   blocks,
   toolCalls,
+  isStreaming,
 }: {
   blocks: ContentBlock[]
   toolCalls?: ToolCallDisplay[]
+  isStreaming?: boolean
 }) {
   const toolCallMap = useMemo(
     () => new Map(toolCalls?.map(tc => [tc.id, tc]) || []),
     [toolCalls],
   )
 
+  // When streaming, find the last in-flight reasoning block (no durationMs).
+  // All text/tool_call blocks that come AFTER it should be hidden to prevent
+  // narration from appearing while thinking is still in progress (race condition).
+  const activeReasoningIdx = useMemo(() => {
+    if (!isStreaming) return -1
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i]
+      if (b.type === 'reasoning' && b.durationMs === undefined && b.startedAt) {
+        return i
+      }
+    }
+    return -1
+  }, [blocks, isStreaming])
+
   return (
     <>
       {blocks.map((block, i) => {
+        // Hide text/tool_call blocks after an in-flight reasoning block during streaming.
+        // Reasoning blocks themselves are always rendered (they show the thinking UI).
+        if (activeReasoningIdx !== -1 && i > activeReasoningIdx) {
+          return null
+        }
+        if (block.type === 'reasoning') {
+          return (
+            <TerminalReasoningBlock
+              key={`reasoning-${i}`}
+              content={block.text}
+              isStreaming={!!isStreaming && block.durationMs === undefined}
+              durationMs={block.durationMs}
+            />
+          )
+        }
         if (block.type === 'text') {
           return (
             <Box
@@ -201,6 +245,17 @@ function TerminalMessageRendererInner({
 
   // ── System message ──
   if (message.role === 'system') {
+    // Cards (ask_user_question, plan_approval, credential_request) are system
+    // messages with card data — render them via TerminalSpecialCards instead of
+    // plain text.
+    if (message.card) {
+      return (
+        <Box mb={3} py="2px" pl="6px">
+          <TerminalSpecialCards message={message} />
+        </Box>
+      )
+    }
+
     const text = message.content || ''
     const level = message.level
 
@@ -253,8 +308,16 @@ function TerminalMessageRendererInner({
         </Flex>
       )}
 
-      {/* Reasoning block — live streaming with film-credits effect, same as chat mode */}
-      {message.reasoningContent && (
+      {/* Legacy reasoning fallback — older persisted messages have a flat
+          `reasoningContent` string but no reasoning entry inside contentBlocks.
+          Render those at the top exactly as before. New messages put each
+          reasoning chunk into contentBlocks (rendered inline by ContentBlocksRenderer)
+          so reasoning appears AT its real position in the stream rather than being
+          collapsed back into this top block. */}
+      {message.reasoningContent
+        && !message.contentBlocks?.some(b => b.type === 'reasoning')
+        && message.thinkingRequested !== false
+        && (
         <TerminalReasoningBlock
           content={message.reasoningContent}
           isStreaming={!!isStreaming}
@@ -265,14 +328,15 @@ function TerminalMessageRendererInner({
       {/* Special cards (credential requests, etc.) */}
       <TerminalSpecialCards message={message} />
 
-      {/* Content */}
+      {/* Content — hide text/narration while reasoning is in-flight to prevent race */}
       {hasContentBlocks ? (
         // Content blocks already contain all text + tool call refs — don't also render message.content
-        <ContentBlocksRenderer blocks={message.contentBlocks!} toolCalls={message.toolCalls} />
+        <ContentBlocksRenderer blocks={message.contentBlocks!} toolCalls={message.toolCalls} isStreaming={isStreaming} />
       ) : (
         <>
           {message.toolCalls?.map(tc => <TerminalToolCall key={tc.id} toolCall={tc} />)}
-          {message.content && (
+          {/* Hide text content while reasoning is in-flight */}
+          {!(isStreaming && message.reasoningContent && !message.reasoningDurationMs) && message.content && (
             <Box
               mb={1}
               fontSize="14px"

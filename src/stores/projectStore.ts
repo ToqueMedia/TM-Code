@@ -323,7 +323,7 @@ export const useProjectStore = create<ProjectStore>()(
               import('./permissionStore'),
             ]);
             const scopes = await loadPermissionsFromDisk(path);
-            hydrateApprovedScopes(scopes);
+            hydrateApprovedScopes(scopes, path);
           } catch (error) {
             logger.warn('project', 'Failed to hydrate permission grants:', error);
           }

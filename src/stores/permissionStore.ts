@@ -52,27 +52,29 @@ function saveAutoApproveDiffs(value: boolean) {
 }
 
 /** Fire-and-forget write of `approvedScopes` to the current project's
- *  `.toquemedia/permissions.json`. Resolves the project path lazily so
- *  this module doesn't pull the project store into its module graph at
- *  load time. */
+ *  `.toquemedia/permissions.json`. Uses the store's own `projectPath`
+ *  so it works in both Chat Mode (set by projectStore.openProject) and
+ *  Terminal Mode (set by TerminalView) without depending on projectStore. */
 function persistApprovedScopes(scopes: Set<'core' | 'mcp'>): void {
-  void Promise.all([
-    import('./projectStore'),
-    import('../services/agent/permissionPersistence'),
-  ]).then(([{ useProjectStore }, { savePermissionsToDisk }]) => {
-    const path = useProjectStore.getState().currentProject?.path
-    if (path) void savePermissionsToDisk(path, scopes)
-  }).catch(() => { /* persistence failure must not break the permission flow */ })
+  const path = usePermissionStore.getState().projectPath
+  if (!path) return
+  void import('../services/agent/permissionPersistence')
+    .then(({ savePermissionsToDisk }) => savePermissionsToDisk(path, scopes))
+    .catch(() => { /* persistence failure must not break the permission flow */ })
 }
 
 /** Replace the live `approvedScopes` set — used at project-open time to
  *  hydrate from disk. Exposed as a module function rather than a store
  *  action so the projectStore hook can call it without round-tripping
- *  through React's update queue. */
-export function hydrateApprovedScopes(scopes: Set<'core' | 'mcp'>): void {
+ *  through React's update queue.
+ *  Also sets `projectPath` so `persistApprovedScopes` writes to the
+ *  correct project in both Chat Mode and Terminal Mode. */
+export function hydrateApprovedScopes(scopes: Set<'core' | 'mcp'>, projectPath?: string): void {
   // Set directly — no persistence write here: this IS the load step. The
   // disk file is already canonical; writing back would be a no-op.
-  usePermissionStore.setState({ approvedScopes: scopes })
+  const patch: Partial<PermissionState> = { approvedScopes: scopes }
+  if (projectPath != null) patch.projectPath = projectPath
+  usePermissionStore.setState(patch)
 }
 
 const SAFE_TOOLS = new Set([
@@ -151,6 +153,10 @@ interface PendingPermission {
 }
 
 interface PermissionState {
+  /** Current project path — set by whoever opens a project (projectStore
+   *  in Chat Mode, TerminalView in CMD Mode) so persistApprovedScopes
+   *  writes to the correct project without depending on projectStore. */
+  projectPath: string | null
   /** Scopes where user clicked "Accept All" — 'core' and 'mcp' are independent */
   approvedScopes: Set<'core' | 'mcp'>
   /** When true, file diffs (write_file/edit_file/create_file) are auto-accepted without user confirmation */
@@ -213,6 +219,7 @@ function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionSt
 }
 
 export const usePermissionStore = create<PermissionState & PermissionActions>()((set, get) => ({
+  projectPath: null,
   approvedScopes: new Set(),
   autoApproveDiffs: loadAutoApproveDiffs(),
   autoDenyAll: false,

@@ -51,6 +51,7 @@ describe('checkPlanModeAccess', () => {
       // Snapshot guard: if someone adds/removes a tool from the allowlist
       // they have to update the test, forcing a conscious decision.
       expect([...PLAN_MODE_ALLOWED_TOOLS].sort()).toEqual([
+        'ask_user_question',
         'check_background_agents',
         'create_file',
         'edit_file',

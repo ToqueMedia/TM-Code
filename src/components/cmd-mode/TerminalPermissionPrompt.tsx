@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
 
@@ -63,7 +64,6 @@ function getWarningText(toolName: string, promptReason?: PromptReason): string |
 
 const isDangerous = (toolName: string, promptReason?: PromptReason) =>
   promptReason === 'dangerous_command' ||
-  promptReason === 'sensitive_file' ||
   toolName === 'delete_file' ||
   toolName === 'execute_command'
 
@@ -115,11 +115,11 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
       } else if (!hideApproveAll && (e.key === 'a' || e.key === 'A' || (e.key === 'Enter' && e.shiftKey))) {
         e.preventDefault()
         onApproveAll()
-      } else if (e.key === 'w' || e.key === 'W') {
+      } else if (!dangerous && (e.key === 'w' || e.key === 'W')) {
         if (!onDenyWith) return
         e.preventDefault()
         setMode('writing')
-      } else if (e.key === 'd' || e.key === 'D') {
+      } else if (!dangerous && (e.key === 'd' || e.key === 'D')) {
         e.preventDefault()
         onDenyAll()
       } else if (e.key === 'n' || e.key === 'N' || e.key === 'Escape') {
@@ -129,7 +129,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [mode, onApprove, onApproveAll, onDeny, onDenyAll, onDenyWith, hideApproveAll])
+  }, [mode, dangerous, onApprove, onApproveAll, onDeny, onDenyAll, onDenyWith, hideApproveAll])
 
   const handleSubmitReason = () => {
     if (!onDenyWith) return
@@ -177,21 +177,23 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
       {/* Keyboard hint row OR write-reason textarea */}
       {mode === 'choose' ? (
         <Flex align="center" gap={1} mt={1.5} wrap="wrap">
-          <KeyHint label="y" description="yes" color={tokens.colors.terminal.green} />
-          {!hideApproveAll && (
+          {dangerous ? (
             <>
+              <KeyHint label="y" description={t('perm.approve')} color={tokens.colors.terminal.green} />
               <Sep />
-              <KeyHint label="a" description="yes, always" color={tokens.colors.accent.purple} />
+              <KeyHint label="n" description={t('perm.deny')} color={tokens.colors.accent.red} />
             </>
-          )}
-          <Sep />
-          <KeyHint label="n" description="no" color={tokens.colors.accent.red} />
-          <Sep />
-          <KeyHint label="d" description="no, always" color={tokens.colors.accent.red} />
-          {onDenyWith && (
+          ) : (
             <>
+              <KeyHint label="y" description={t('perm.approve')} color={tokens.colors.terminal.green} />
               <Sep />
-              <KeyHint label="w" description="write reason" color={tokens.colors.accent.orange} />
+              <KeyHint label="a" description={t('perm.approveAll')} color={tokens.colors.accent.purple} />
+              <Sep />
+              <KeyHint label="n" description={t('perm.deny')} color={tokens.colors.accent.red} />
+              <Sep />
+              <KeyHint label="d" description={t('perm.denyAll')} color={tokens.colors.accent.red} />
+              <Sep />
+              <KeyHint label="w" description={t('perm.justify')} color={tokens.colors.accent.orange} />
             </>
           )}
           <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} ml={2}>
@@ -213,7 +215,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
                 handleCancelWriting()
               }
             }}
-            placeholder="Why not? (sent to the agent as the tool result)"
+            placeholder={t('perm.reasonPlaceholder')}
             rows={2}
             style={{
               width: '100%',

@@ -12,7 +12,10 @@ import type { RecentProject } from '../../types/project'
 
 function formatTimeAgo(dateStr: string): string {
   if (!dateStr) return ''
-  const date = new Date(dateStr)
+  // Rust stores last_opened as unix seconds (e.g. "1748112000")
+  const date = /^\d+$/.test(dateStr)
+    ? new Date(Number(dateStr) * 1000)
+    : new Date(dateStr)
   if (isNaN(date.getTime())) return ''
   const diff = Date.now() - date.getTime()
   const minutes = Math.floor(diff / 60000)

@@ -8,9 +8,12 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
-import { PUBLISHING_SKILL_NAME } from './skillService'
+import { registerTaskTools } from './toolExecutor/taskOps'
+import { registerMemoryTools } from './toolExecutor/memoryOps'
+import { registerInteractionTools } from './toolExecutor/interactionOps'
+import { registerProvisionTools } from './toolExecutor/provisionOps'
+import type { ToolRegistrationContext } from './toolExecutor/context'
 import {
-  describePlatformManagedField,
   normalizePath,
   isEnvFile,
   isSensitiveFile,
@@ -28,7 +31,7 @@ import {
 } from './toolExecutor/checks'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
-import { resolveWorkerUrl, resolveDeployUrl } from '../../utils/devUrls'
+import { resolveWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
@@ -118,6 +121,33 @@ function createLinkedAbortController(parentSignal?: AbortSignal): AbortControlle
 
 // === Tool Executor ===
 
+function formatBackgroundCommandResult(cmd: {
+  id: string; command: string; status: string; pid: number;
+  exitCode: number | null; output: string; startedAt: number; completedAt: number | null
+}): string {
+  const elapsed = cmd.completedAt
+    ? `${Math.round((cmd.completedAt - cmd.startedAt) / 1000)}s`
+    : `${Math.round((Date.now() - cmd.startedAt) / 1000)}s (still running)`
+
+  const lines: string[] = [
+    `[${cmd.status.toUpperCase()}] ${cmd.command} (id: ${cmd.id}, PID: ${cmd.pid}, elapsed: ${elapsed})`,
+  ]
+
+  if (cmd.exitCode !== null) {
+    lines.push(`Exit code: ${cmd.exitCode}`)
+  }
+
+  if (cmd.output) {
+    const MAX_OUTPUT = 4000
+    const output = cmd.output.length > MAX_OUTPUT
+      ? `...(truncated)\n${cmd.output.slice(-MAX_OUTPUT)}`
+      : cmd.output
+    lines.push(output)
+  }
+
+  return lines.join('\n')
+}
+
 class ToolExecutor {
   private static instance: ToolExecutor
   private tools: Map<string, ToolEntry> = new Map()
@@ -155,7 +185,11 @@ class ToolExecutor {
   private planFileWritten: boolean = false
   private planTasksSeeded: boolean = false
 
+  /** Shared context — passed to domain registration functions. */
+  private readonly ctx: ToolRegistrationContext
+
   private constructor() {
+    this.ctx = this.buildContext()
     this.registerTools()
   }
 
@@ -169,6 +203,27 @@ class ToolExecutor {
   /** Enable CLI/CMD mode: file ops write directly to disk, no project required. */
   enableCmdMode(cwd: string): void {
     this.cmdModeCwd = cwd
+  }
+
+  private buildContext(): ToolRegistrationContext {
+    return {
+      tools: this.tools,
+      getProjectRoot: () => this.getProjectRoot(),
+      validatePathWithinProject: (p: string) => { this.validatePathWithinProject(p); return p },
+      readFileTimestamps: this.readFileTimestamps,
+      largeResults: this.largeResults,
+      getCmdModeCwd: () => this.cmdModeCwd,
+      getPlanMode: () => this.planMode,
+      getPlanFileWritten: () => this.planFileWritten,
+      setPlanTasksSeeded: (v: boolean) => { this.planTasksSeeded = v },
+      truncateResult: (r, maxChars) => this.truncateResult(r, maxChars),
+      trackShownRange: (id, o, e) => this.trackShownRange(id, o, e),
+      simpleHash: (s) => simpleHash(s),
+      formatFileTreeCompact: (n, indent) => this.formatFileTreeCompact(n, indent),
+      refreshFileTree: () => this.refreshFileTree(),
+      closeEditorIfOpen: (p) => this.closeEditorIfOpen(p),
+      suggestSimilarPath: async (p: string) => this.suggestSimilarPath(p),
+    }
   }
 
   /** Disable CLI/CMD mode and return to IDE diff mode. */
@@ -346,11 +401,14 @@ class ToolExecutor {
     // Agent-internal tools + tools that surface their own confirmation UI:
     // bypass the generic permission dialog. update_tasks/check_background_agents
     // are autonomous; request_credentials renders a secure form in the chat
-    // (Save/Skip is the gate, not the permission dialog).
+    // (Save/Skip is the gate, not the permission dialog); ask_user_question
+    // renders an interactive question card (Submit/Cancel is the gate).
     const PERMISSION_EXEMPT_TOOLS = new Set([
       'update_tasks',
       'check_background_agents',
+      'check_background_commands',
       'request_credentials',
+      'ask_user_question',
     ])
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
@@ -723,10 +781,13 @@ ${preview}
   private getProjectRoot(): string {
     if (this.cmdModeCwd) return this.cmdModeCwd
     const project = useProjectStore.getState().currentProject
-    if (!project?.path) {
-      throw new Error('No project is open. Cannot perform file operations without an active project.')
-    }
-    return project.path
+    if (project?.path) return project.path
+    // CMD-mode fallback: TerminalView never populates currentProject
+    // (it invokes Rust open_project directly). cmdModeProjectPath is set
+    // by the WelcomeScreen and persists for the entire CMD session.
+    const cmdPath = useProjectStore.getState().cmdModeProjectPath
+    if (cmdPath) return cmdPath
+    throw new Error('No project is open. Cannot perform file operations without an active project.')
   }
 
   private validatePathWithinProject(filePath: string): void {
@@ -2093,88 +2154,7 @@ ${preview}
       }
     })
 
-    // === read_skill ===
-    this.tools.set('read_skill', {
-      definition: {
-        name: 'read_skill',
-        description: 'Load the full content of a skill (process, examples, install steps, verification) by its name. The system prompt lists each available skill with a one-line description; call this tool ONCE per skill when you decide it is relevant to the current task. Content stays in conversation history afterward — no need to re-read.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Skill name as listed in the "Skills available" section of the system prompt (e.g., "pdf-document", "frontend-design", "slidev-presentation").' }
-          },
-          required: ['name']
-        },
-        concurrencySafe: true,
-      },
-      execute: async (input) => {
-        const name = (input.name as string)?.trim()
-        if (!name) return 'Error: read_skill requires a non-empty "name" argument.'
-        const skillModule = await import('./skillService')
-        const svc = skillModule.default.getInstance()
-        const skill = svc.getCachedSkillContent(name)
-        if (!skill) {
-          const available = svc.getCachedSkillNames()
-          return `Error: skill "${name}" is not loaded for the current context. Available skills: ${available.join(', ') || '(none — check the "Skills available" section of the system prompt)'}.`
-        }
-        // Cache the skill body in module-level state so it survives context
-        // compression. After compression strips the original tool result, we
-        // re-inject this content so the verbatim CRITICAL blocks aren't lost.
-        skillModule.trackInvokedSkill(skill.name, skill.content)
-        return svc.formatSkillForReading(skill)
-      }
-    })
 
-    // === read_large_result ===
-    this.tools.set('read_large_result', {
-      definition: {
-        name: 'read_large_result',
-        description: 'Read a portion of a large tool result that was too big to return inline. Use the reference ID from the "Output too large" message. Specify offset and limit to read specific sections.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Reference ID (e.g., "large_result_1")' },
-            offset: { type: 'number', description: 'Character offset to start reading from. Default: 0.' },
-            limit: { type: 'number', description: 'Maximum characters to return. Default: 10000. Max: 25000 — read in 2–3 well-targeted pages instead of one giant slice; the suffix tells you exactly how many chars remain.' }
-          },
-          required: ['id']
-        },
-        concurrencySafe: true,
-      },
-      execute: async (input) => {
-        const id = input.id as string
-        const content = this.largeResults.get(id)
-        if (!content) {
-          return `Error: Large result "${id}" not found. It may have been cleared from memory. Available results: ${Array.from(this.largeResults.keys()).join(', ') || 'none'}`
-        }
-
-        const offset = Math.max(0, (input.offset as number) || 0)
-        const limit = Math.min((input.limit as number) || 10000, 25000)
-        const end = Math.min(offset + limit, content.length)
-        const slice = content.slice(offset, offset + limit)
-        const hasMore = end < content.length
-        const remaining = content.length - end
-
-        // S1: detect overlap with ranges already read in this session for
-        // this large_result id, AND coalesce adjacent ranges so the list
-        // stays small. trackShownRange returns the first range the new
-        // read overlapped with — null when there was no overlap.
-        const overlapping = this.trackShownRange(id, offset, end)
-
-        let result = slice
-        const notes: string[] = []
-        if (overlapping) {
-          notes.push(`note: offset ${offset}–${end} overlaps with a slice you already read (${overlapping[0]}–${overlapping[1]}). The overlap region is duplicated in your context.`)
-        }
-        if (hasMore) {
-          notes.push(`${remaining} more characters — use offset: ${end} to continue reading.`)
-        }
-        if (notes.length > 0) {
-          result += `\n\n[${notes.join(' ')}]`
-        }
-        return result
-      }
-    })
 
     // === read_dev_server_logs ===
     this.tools.set('read_dev_server_logs', {
@@ -2647,510 +2627,16 @@ Project root: ${projectRoot}`
     // request thinking on demand; profile.supportsThinking is the single
     // switch and it's evaluated in agentService.buildRequestBody.
 
-    // === update_tasks ===
-    this.tools.set('update_tasks', {
-      definition: {
-        name: 'update_tasks',
-        description: 'Create or update a task list visible to the developer in the chat UI. Use at the start of complex work to show what you plan to do, and update task statuses as you complete each step. The developer sees checkboxes with real-time progress.\n\n**Completion contract — each `completed` flip is a claim that THAT specific task\'s acceptance was verified** (test passed, endpoint smoked successfully, diff approved AND behaviour confirmed). Filesystem existence is not completion: a scaffold file written in a previous turn does NOT mean the task that creates it is done.\n\n**One transition per call is the norm.** When resuming after an interruption, do NOT flip multiple pending tasks to completed in a single call by inferring from the filesystem — the tool returns a warning in that case so the call can be reconsidered. Legitimate batch transitions only happen at seed time (all `pending`) or at the very end of a flow (every task already verified one-by-one in prior calls).',
-        input_schema: {
-          type: 'object',
-          properties: {
-            tasks: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  id: { type: 'string', description: 'Unique task ID (e.g., "1", "install_deps")' },
-                  description: { type: 'string', description: 'Short task description' },
-                  status: { type: 'string', enum: ['pending', 'in_progress', 'completed'], description: 'Task status' },
-                },
-                required: ['id', 'description', 'status'],
-              },
-              description: 'Full task list. Each call replaces the previous list — always send the complete state.',
-            },
-          },
-          required: ['tasks'],
-        },
-      },
-      execute: async (input) => {
-        const { useAgentStore } = await import('../../stores/agentStore')
-        // Defensive: streaming JSON parse can deliver a truthy non-array (e.g.
-        // partial object) before the call settles. Coerce to array.
-        const raw = input.tasks
-        const tasks = Array.isArray(raw)
-          ? (raw as Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>)
-          : []
 
-        // Capture the previous tracker BEFORE applying the new state so we
-        // can detect batch-completion jumps. Snapshot is shallow {id, status}
-        // so iteration is cheap on large trackers.
-        const prev = useAgentStore.getState().tasks
-        const prevCompletedIds = new Set(prev.filter(t => t.status === 'completed').map(t => t.id))
 
-        useAgentStore.getState().setTasks(tasks)
 
-        // Persist to `<project>/.toquemedia/tasks.json` so the tracker
-        // survives app restarts, budget interrupts, and chat-session
-        // boundaries. The agent reading the prompt next turn sees the same
-        // state regardless of zustand re-init. Fire-and-forget on the IO —
-        // failures only warn; the in-memory store is still live and the
-        // next mutation will retry the persist.
-        const project = useProjectStore.getState().currentProject
-        if (project?.path) {
-          void import('./taskPersistence').then(({ saveTasksToDisk }) =>
-            saveTasksToDisk(project.path, tasks),
-          )
-        }
 
-        // Invalidate the prompt cache. `getTrackerStateSection` is part of
-        // the dynamic block but the cache key does NOT include a tracker
-        // signature — without this bump, the next turn within the 30s TTL
-        // would serve a stale prompt rendering the PRE-update tracker.
-        // That's exactly the failure this fix was meant to prevent. Using
-        // `bumpFsVersion` (not the regex-based invalidatePromptCache path)
-        // because `fsVersion` is the live key the cache reads on every
-        // build — see fsVersion.ts for why it's the safer hook.
-        import('../fsVersion').then(m => m.bumpFsVersion('update_tasks')).catch(() => { /* non-critical */ })
 
-        // Plan-mode progress: a successful update_tasks after PLAN.md is the
-        // signal that the architect has finished. Combined with planFileWritten
-        // this trips the strict-STOP guard in execute() on any subsequent call.
-        if (this.planMode && this.planFileWritten) {
-          this.planTasksSeeded = true
-        }
-
-        const completed = tasks.filter(t => t.status === 'completed').length
-        const newlyCompletedIds = tasks
-          .filter(t => t.status === 'completed' && !prevCompletedIds.has(t.id))
-          .map(t => t.id)
-
-        // Batch-completion guard — soft warning, not a block. Returns the
-        // standard success message PLUS a structured warning when more than
-        // one task transitioned to completed since the previous call (and
-        // it's not the seed state where prev was empty). The agent reads
-        // the warning in its tool result and either confirms the jump (if
-        // each task was genuinely verified in this same turn) or reverts
-        // the over-claim on the next call.
-        //
-        // This is the exact failure mode observed in the post-budget-interrupt
-        // session: 12 → 19 completed in one call, then 20 → 23 with a single
-        // file write — both based on filesystem inference rather than per-task
-        // verification. The warning surfaces the jump as a question, not a
-        // rule violation, so legitimate sequenced work is unaffected.
-        const wasSeed = prev.length === 0
-        const jumpSize = newlyCompletedIds.length
-        if (!wasSeed && jumpSize > 1) {
-          return (
-            `Task list updated: ${completed}/${tasks.length} completed.\n\n` +
-            `⚠️ Batch-completion warning: ${jumpSize} tasks flipped to \`completed\` in this single call ` +
-            `(IDs: ${newlyCompletedIds.join(', ')}). Each \`completed\` is a claim that THAT task's ` +
-            `acceptance was verified — test passed, endpoint smoked, diff approved AND behaviour confirmed. ` +
-            `If you batch-marked them by inferring "files exist → tasks done", revert the over-claim now: ` +
-            `keep only the one you actually verified this turn as \`completed\`, return the rest to \`pending\`, ` +
-            `and pick one to set \`in_progress\`. If every task in the batch WAS verified one-by-one earlier in ` +
-            `this turn (separate tool calls per task), confirm by ignoring this warning — but the developer ` +
-            `sees the warning too, so the bar is "I can defend each completion".`
-          )
-        }
-
-        return `Task list updated: ${completed}/${tasks.length} completed.`
-      }
-    })
-
-    // === save_memory ===
-    // Persists a memory entry to `.toquemedia/memory/` (project scope) or
-    // `~/.toquemedia-studio/memory/` (user scope). Writes the topic file
-    // AND updates MEMORY.md so the index reflects the new entry on the
-    // next prompt build. Bumps fsVersion so the in-flight prompt cache
-    // invalidates and the new memory shows up the next turn.
-    this.tools.set('save_memory', {
-      definition: {
-        name: 'save_memory',
-        description:
-          'Persist a long-lived memory the model should see in future turns and future sessions. Use when you learn a fact about the developer (their role, preferences), get explicit feedback ("don\'t do X" / "yes exactly, do X"), discover a project-specific decision worth keeping (initiative, deadline, ownership), or want to remember where to look up external info (Linear project, Grafana board). DO NOT save: code patterns/conventions derivable from the repo, git-blame style "who changed what", debugging recipes (the fix is in the code), or anything already in CLAUDE.md. The entry is written to disk and travels with the project (project/reference types) or the IDE installation (user/feedback types).',
-        input_schema: {
-          type: 'object',
-          properties: {
-            name: {
-              type: 'string',
-              description: 'Short kebab-case slug identifying this memory. Used both as the filename and to update or link the entry later. Example: "no-emojis", "rename-tm-code", "auth-proxy-pattern".',
-            },
-            type: {
-              type: 'string',
-              enum: ['user', 'feedback', 'project', 'reference'],
-              description: 'Closed taxonomy: `user` (developer role/profile/skills), `feedback` (explicit correction OR validated approach, with Why + How), `project` (ongoing initiative/decision/bug context for the current project), `reference` (where to look for X in external systems).',
-            },
-            description: {
-              type: 'string',
-              description: 'One-line summary (≤150 chars) shown in MEMORY.md to decide if this memory is relevant to a future task. Be specific — "user is data scientist focused on logging observability" beats "user is a data scientist".',
-            },
-            body: {
-              type: 'string',
-              description: 'Full memory content. For `feedback` and `project` types, structure as: Lead with the rule/fact, then a `**Why:**` line (the motivation — incident or strong preference) and a `**How to apply:**` line (when/where this kicks in). For `user` and `reference` types, plain prose is fine. Use [[other-name]] to link related memories.',
-            },
-          },
-          required: ['name', 'type', 'description', 'body'],
-        },
-      },
-      execute: async (input) => {
-        const { defaultScopeForType, memoryFilenameFor, buildMemoryFileContent, loadMemoryIndex } =
-          await import('./memdir')
-        const name = String(input.name || '').trim()
-        const type = String(input.type || '').trim() as 'user' | 'feedback' | 'project' | 'reference'
-        const description = String(input.description || '').trim()
-        const body = String(input.body || '').trim()
-
-        if (!name) return 'save_memory failed: `name` is required and cannot be empty.'
-        if (!['user', 'feedback', 'project', 'reference'].includes(type)) {
-          return `save_memory failed: \`type\` must be one of user/feedback/project/reference (got "${type}").`
-        }
-        if (!description) return 'save_memory failed: `description` is required (one-line summary for the index).'
-        if (description.length > 200) return 'save_memory failed: `description` must be ≤200 chars (it goes on a single line in MEMORY.md).'
-        if (!body) return 'save_memory failed: `body` is required (the actual memory content).'
-
-        const scope = defaultScopeForType(type)
-        const filename = memoryFilenameFor(type, name)
-        const projectPath = useProjectStore.getState().currentProject?.path
-        if (scope === 'project' && !projectPath) {
-          return 'save_memory failed: project-scope memories require an open project. Try `type: "user"` for a cross-project fact.'
-        }
-
-        // Write the topic file first — if this fails the index isn't
-        // touched, so MEMORY.md never points at a missing entry.
-        try {
-          await invoke('write_memory_file', {
-            scope,
-            projectPath: scope === 'project' ? projectPath : null,
-            filename,
-            content: buildMemoryFileContent({ name, type, description }, body),
-          })
-        } catch (err) {
-          return `save_memory failed to write topic file: ${err instanceof Error ? err.message : String(err)}`
-        }
-
-        // Update MEMORY.md — read existing, replace the line for this
-        // name if present, otherwise append. Keeping the index simple
-        // (one line per entry) is the contract — see memdir.ts for the
-        // truncation cap. Concurrent saves race; pragmatic for now since
-        // saves are user-driven and rare.
-        try {
-          const existingIndex = await loadMemoryIndex(scope, projectPath)
-          const lineToWrite = `- [${name}](${filename}) — ${description}`
-          let lines = (existingIndex.content ?? '').split('\n')
-          // Strip trailing truncation warning if present — preserve only the
-          // actual index lines for the rewrite.
-          const warningIdx = lines.findIndex(l => l.startsWith('> ⚠️ MEMORY.md'))
-          if (warningIdx >= 0) lines = lines.slice(0, warningIdx).filter(l => l.length > 0)
-          const headerLines = lines[0]?.startsWith('# ') ? [lines[0]] : ['# Memory Index']
-          const entryLines = lines
-            .slice(headerLines.length)
-            .filter(l => l.trim().length > 0 && !l.includes(`(${filename})`))
-          entryLines.push(lineToWrite)
-          // Stable sort by name — keeps the index predictable for humans.
-          entryLines.sort((a, b) => a.localeCompare(b))
-          const merged = [...headerLines, '', ...entryLines, ''].join('\n')
-          await invoke('write_memory_file', {
-            scope,
-            projectPath: scope === 'project' ? projectPath : null,
-            filename: 'MEMORY.md',
-            content: merged,
-          })
-        } catch (err) {
-          // Topic file was written; index update failed. Surface it but
-          // don't treat it as a fatal — next save_memory call retries the
-          // index merge.
-          console.warn('[save_memory] index update failed:', err)
-        }
-
-        // Invalidate caches so the next turn sees the new memory:
-        //   - fsVersion bump invalidates the prompt cache (contextBuilder).
-        //   - memory-selector cache clear forces a fresh relevance pass on
-        //     the new catalog instead of serving a stale name list.
-        import('../fsVersion').then(m => m.bumpFsVersion(`save_memory:${name}`)).catch(() => {})
-        import('./memorySelector').then(m => m.invalidateMemorySelectorCache()).catch(() => {})
-        // If this save corresponded to an auto-extracted proposal, mark
-        // the proposal `saved` in the audit log and drop it from the
-        // active working set so it doesn't re-fire on the next prompt.
-        import('./memoryProposalsStore').then(m =>
-          m.markProposalSaved(projectPath ?? null, name, type),
-        ).catch(() => { /* noop */ })
-        // Mark a write in this turn — the post-turn extractor skips its
-        // pass when the agent already persisted memory, avoiding the
-        // duplicate-proposal noise that's the extractor's main miss.
-        import('./memoryWriteTracker').then(async (m) => {
-          const { useChatStore } = await import('../../stores/chatStore')
-          const sessionId = useChatStore.getState().activeSessionId
-          if (sessionId) m.recordMemoryWrite(sessionId)
-        }).catch(() => { /* noop */ })
-
-        return `Memory saved: ${scope}/${filename} (${type}). It will appear in the persistent-memory section of every future prompt for this ${scope === 'project' ? 'project' : 'IDE installation'}.`
-      },
-    })
-
-    // === forget_memory ===
-    // Removes a memory entry. Idempotent — deleting an already-gone
-    // entry returns the same success message.
-    this.tools.set('forget_memory', {
-      definition: {
-        name: 'forget_memory',
-        description: 'Remove a previously-saved memory. Use when a memory turns out to be wrong, outdated, or no longer applies (developer changed their preference, project moved off the approach, fact was learned to be incorrect). Specify the same `name` you used when saving.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            name: {
-              type: 'string',
-              description: 'The kebab-case slug used at save time.',
-            },
-            type: {
-              type: 'string',
-              enum: ['user', 'feedback', 'project', 'reference'],
-              description: 'The type used at save time — needed to construct the filename. If you forget the type, list_directory the memory dir to find the right one.',
-            },
-          },
-          required: ['name', 'type'],
-        },
-      },
-      execute: async (input) => {
-        const { defaultScopeForType, memoryFilenameFor, loadMemoryIndex } = await import('./memdir')
-        const name = String(input.name || '').trim()
-        const type = String(input.type || '').trim() as 'user' | 'feedback' | 'project' | 'reference'
-
-        if (!name) return 'forget_memory failed: `name` is required.'
-        if (!['user', 'feedback', 'project', 'reference'].includes(type)) {
-          return `forget_memory failed: \`type\` must be one of user/feedback/project/reference (got "${type}").`
-        }
-
-        const scope = defaultScopeForType(type)
-        const filename = memoryFilenameFor(type, name)
-        const projectPath = useProjectStore.getState().currentProject?.path
-
-        // Delete the topic file (idempotent).
-        try {
-          await invoke('delete_memory_file', {
-            scope,
-            projectPath: scope === 'project' ? projectPath : null,
-            filename,
-          })
-        } catch (err) {
-          return `forget_memory failed: ${err instanceof Error ? err.message : String(err)}`
-        }
-
-        // Strip the line from MEMORY.md.
-        try {
-          const existingIndex = await loadMemoryIndex(scope, projectPath)
-          if (existingIndex.content) {
-            let lines = existingIndex.content.split('\n')
-            const warningIdx = lines.findIndex(l => l.startsWith('> ⚠️ MEMORY.md'))
-            if (warningIdx >= 0) lines = lines.slice(0, warningIdx)
-            const filtered = lines.filter(l => !l.includes(`(${filename})`))
-            await invoke('write_memory_file', {
-              scope,
-              projectPath: scope === 'project' ? projectPath : null,
-              filename: 'MEMORY.md',
-              content: filtered.join('\n'),
-            })
-          }
-        } catch (err) {
-          console.warn('[forget_memory] index update failed:', err)
-        }
-
-        import('../fsVersion').then(m => m.bumpFsVersion(`forget_memory:${name}`)).catch(() => {})
-        import('./memorySelector').then(m => m.invalidateMemorySelectorCache()).catch(() => {})
-        // Count a forget as a write for the extractor-skip gate too —
-        // the agent's noticing discipline (whether saving or deleting)
-        // is what we want to defer to.
-        import('./memoryWriteTracker').then(async (m) => {
-          const { useChatStore } = await import('../../stores/chatStore')
-          const sessionId = useChatStore.getState().activeSessionId
-          if (sessionId) m.recordMemoryWrite(sessionId)
-        }).catch(() => { /* noop */ })
-        return `Memory forgotten: ${scope}/${filename}.`
-      },
-    })
-
-    // === read_memory ===
-    // Reads the full body of a memory entry. The system prompt injects
-    // only the MEMORY.md index (one line per entry); the full body —
-    // including the Why / How to apply structure — is loaded on demand
-    // when the agent decides a memory's full content is relevant to the
-    // current task.
-    this.tools.set('read_memory', {
-      definition: {
-        name: 'read_memory',
-        description: 'Read the full body of a memory entry referenced in MEMORY.md. The system prompt injects only the one-line summaries (the indexes); call this when you need the Why / How to apply detail behind a feedback or project entry.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            name: {
-              type: 'string',
-              description: 'The kebab-case slug from MEMORY.md.',
-            },
-            type: {
-              type: 'string',
-              enum: ['user', 'feedback', 'project', 'reference'],
-              description: 'The memory type (also encoded in the filename prefix shown in MEMORY.md).',
-            },
-          },
-          required: ['name', 'type'],
-        },
-      },
-      execute: async (input) => {
-        const { defaultScopeForType, memoryFilenameFor, loadMemoryFile } = await import('./memdir')
-        const name = String(input.name || '').trim()
-        const type = String(input.type || '').trim() as 'user' | 'feedback' | 'project' | 'reference'
-
-        if (!name) return 'read_memory failed: `name` is required.'
-        if (!['user', 'feedback', 'project', 'reference'].includes(type)) {
-          return `read_memory failed: \`type\` must be one of user/feedback/project/reference (got "${type}").`
-        }
-
-        const scope = defaultScopeForType(type)
-        const filename = memoryFilenameFor(type, name)
-        const projectPath = useProjectStore.getState().currentProject?.path
-        // Load the file and its mtime in parallel — mtime drives the age
-        // warning prepended below. `loadMemoryMtimes` returns the whole
-        // scope (cheap single readdir), but only this filename's entry
-        // is used here.
-        const { loadMemoryMtimes } = await import('./memdir')
-        const { memoryAgeWarning } = await import('./memoryAge')
-        const [file, mtimes] = await Promise.all([
-          loadMemoryFile(scope, filename, projectPath),
-          loadMemoryMtimes(scope, projectPath),
-        ])
-        if (!file) {
-          return `Memory not found: ${scope}/${filename}. Check MEMORY.md for the current list of names + types.`
-        }
-        const body = file.body || `[Memory ${filename} is empty]`
-        // Prepend a verbose age warning when the file is past
-        // MEMORY_OLD_DAYS (1 day). The agent reads this BEFORE the body,
-        // so any citation it then pulls out of the body lands with the
-        // "verify identifiers" instruction fresh in context.
-        const warning = memoryAgeWarning(mtimes.get(filename) ?? 0)
-        return warning + body
-      },
-    })
-
-    // === distill_memory ===
-    // Periodic memdir hygiene — reviews ALL saved entries and proposes
-    // merges, deletes, and rewrites. Returns a structured proposal list
-    // for the AGENT to act on (via subsequent save_memory / forget_memory
-    // calls) after the developer reviews. Never mutates memdir itself.
-    this.tools.set('distill_memory', {
-      definition: {
-        name: 'distill_memory',
-        description:
-          'Review the full persistent memory (user + project scopes) and propose hygiene actions: merge near-duplicates, delete stale/superseded entries, rewrite imprecise bodies. Returns proposals for review — does NOT apply them. Use periodically when the developer asks for memory cleanup, or when you notice contradictions / duplicates while reading the catalog. After this returns, surface the proposals to the developer in plain language, get explicit approval for each one, then call `save_memory` (for merges and rewrites) or `forget_memory` (for deletes) to apply.',
-        input_schema: {
-          type: 'object',
-          properties: {},
-          required: [],
-        },
-      },
-      execute: async () => {
-        // The TS memdir layer doesn't expose a list helper today —
-        // enumerating via the MEMORY.md index is enough (every saved
-        // entry lives in the index by contract). A future enhancement
-        // could surface the Rust `list_memory_files` command directly
-        // for cases where MEMORY.md drifts from the on-disk file set.
-        const [
-          { distillMemories },
-          { loadMemoryFile, loadMemoryIndex, parseIndexEntries, memoryFilenameFor },
-        ] = await Promise.all([
-          import('./memoryDistiller'),
-          import('./memdir'),
-        ])
-
-        const projectPath = useProjectStore.getState().currentProject?.path
-
-        // Load both indexes, parse entries, load each body.
-        const [userIdx, projectIdx] = await Promise.all([
-          loadMemoryIndex('user'),
-          projectPath
-            ? loadMemoryIndex('project', projectPath)
-            : Promise.resolve({ content: null } as { content: string | null }),
-        ])
-
-        const userEntries = userIdx.content ? parseIndexEntries(userIdx.content) : []
-        const projectEntries = projectIdx.content ? parseIndexEntries(projectIdx.content) : []
-
-        // Load every body in parallel — small files, OK to batch.
-        const files: import('./memdir').MemoryFile[] = []
-        const loadOps: Promise<unknown>[] = []
-        for (const e of userEntries) {
-          loadOps.push(
-            loadMemoryFile('user', memoryFilenameFor(e.type, e.name)).then(f => {
-              if (f) files.push(f)
-            }),
-          )
-        }
-        for (const e of projectEntries) {
-          loadOps.push(
-            loadMemoryFile('project', memoryFilenameFor(e.type, e.name), projectPath).then(f => {
-              if (f) files.push(f)
-            }),
-          )
-        }
-        await Promise.all(loadOps)
-
-        if (files.length === 0) {
-          return 'No memories saved yet — nothing to distill. Run `save_memory` first when you learn facts worth persisting; come back here once the catalog has accumulated.'
-        }
-
-        if (files.length < 8) {
-          return `Only ${files.length} memory entries exist — too few to meaningfully distill. Distillation pays off once the catalog has 8+ entries with overlap. Skipping for now.`
-        }
-
-        const result = await distillMemories({ files })
-        if (!result) {
-          return 'Distillation failed (network / side-car model unavailable). Try again later — the memdir is unchanged.'
-        }
-
-        // Telemetry — measure distiller yield over time.
-        void import('../../services/analytics').then(({ trackEvent }) =>
-          trackEvent('memory_distiller_run', {
-            input_files: files.length,
-            input_bytes: result.inputBytes,
-            input_truncated: result.inputTruncated,
-            proposals: result.proposals.length,
-            latency_ms: result.latencyMs,
-          }),
-        ).catch(() => { /* noop */ })
-
-        if (result.proposals.length === 0) {
-          return `Distilled ${files.length} memory entries — no hygiene actions needed. The catalog looks clean (no obvious duplicates, contradictions, or stale entries).`
-        }
-
-        // Format proposals for the agent to surface to the developer.
-        const lines: string[] = [
-          `Distilled ${files.length} memory entries — ${result.proposals.length} hygiene proposal${result.proposals.length === 1 ? '' : 's'} below.`,
-          '',
-          'Review each with the developer, get explicit approval, then apply:',
-          '- **merge** / **rewrite** → call `save_memory(name, type, description, body)` with the proposed name/description/body. Then `forget_memory` any obsolete original names.',
-          '- **delete** → call `forget_memory(name, type)` for each target.',
-          '',
-          '---',
-          '',
-        ]
-        for (const [i, p] of result.proposals.entries()) {
-          lines.push(`### Proposal ${i + 1}: \`${p.action}\``)
-          lines.push(`**Targets:** ${p.targets.map(t => `\`${t}\``).join(', ')}`)
-          lines.push(`**Why:** ${p.rationale}`)
-          if (p.action !== 'delete') {
-            lines.push(`**Proposed name:** \`${p.newName ?? p.targets[0]}\``)
-            lines.push(`**Proposed description:** ${p.newDescription ?? ''}`)
-            lines.push('**Proposed body:**')
-            lines.push('```')
-            lines.push(p.newBody ?? '')
-            lines.push('```')
-          }
-          lines.push('')
-        }
-        if (result.inputTruncated) {
-          lines.push(`> Note: the input was truncated to fit the model's window. Re-run distill_memory after applying a first batch — the remaining entries will be considered next time.`)
-        }
-        return lines.join('\n')
-      },
-    })
+    // ── Domain extractions (SOLID decomposition) ─────────────────────
+    registerTaskTools(this.ctx)
+    registerMemoryTools(this.ctx)
+    registerInteractionTools(this.ctx)
+    registerProvisionTools(this.ctx)
 
     // === check_background_agents ===
     this.tools.set('check_background_agents', {
@@ -3192,1017 +2678,204 @@ Project root: ${projectRoot}`
       }
     })
 
-    // === verify (adversarial verification sub-agent) ===
-    // === provision_auth ===
-    // One-shot tool that provisions authentication for the current project:
-    // 1. Calls the backend's /v1/auth/provision-gip to get-or-create the
-    //    per-project auth tenant on the shared platform project. Idempotent.
-    // 2. Writes the returned credentials to .env via write_env_vars: the
-    //    neutral TM_* names (preferred for new code) PLUS the legacy
-    //    FIREBASE_* / GIP_* / GCP_PROJECT_ID names (backward compat with
-    //    already-scaffolded projects whose code still references them).
-    // 3. Returns a structured summary with the auth contract (env keys, env
-    //    loading rules, auth-API call shape, frontend wiring, DB caveats,
-    //    smoke test) — read by the agent before it scaffolds the auth-proxy.
-    //
-    // The agent uses this when the user requests login/signup/auth in their
-    // project. After this tool returns, the agent should:
-    //   - read_skill('auth-proxy') for the frontend recipe
-    //   - read_skill('google-signin') if Google sign-in is requested
-    //   - mount the auth-proxy router in the backend entry (app.use('/api', authProxyRouter))
-    //
-    // This tool does NOT write code or copy boilerplate. The agent chooses the
-    // backend stack (Express / Hono / Fastify / Nest / FastAPI / Go / etc.) and
-    // implements routes following the skill — see authCommand.ts.
-    this.tools.set('provision_auth', {
+    // === execute_command_background ===
+    this.tools.set('execute_command_background', {
       definition: {
-        name: 'provision_auth',
-        description:
-          'Set up TM Code Authentication for the current project. Reserves a per-project auth tenant on the platform and writes the necessary credentials to .env. Use ONCE per project when the user requests login/signup/auth. The agent then implements the auth-proxy and frontend in whatever stack fits the project (Express, Hono, Fastify, FastAPI, etc.) — see read_skill("auth-proxy") for the protocol. After this returns, the project has every credential it needs: the auth-proxy uses the public client key written to .env for identity provider calls. Skip request_credentials for any platform-managed credential (admin SDK keys, service-account files, infrastructure tokens) — they live only on the TM Code worker and the user does not have them.',
+        name: 'execute_command_background',
+        description: 'Execute a shell command in the background. Returns immediately with a tracking ID — the command runs while you continue working. Use for long-running operations like npm install, build, or compile that would otherwise block your workflow. The command runs in the project directory. Use check_background_commands to see results when ready. Max 6 concurrent background commands.',
         input_schema: {
           type: 'object',
           properties: {
-            provider: {
-              type: 'string',
-              enum: ['gip'],
-              description: 'Auth provider. Currently only "gip" is supported.',
-            },
+            command: { type: 'string', description: 'Shell command to execute (e.g., "npm install", "npm run build", "tsc --noEmit")' },
+            cwd: { type: 'string', description: 'Working directory. Default: project root' },
+            timeout_secs: { type: 'number', description: 'Timeout in seconds. Default: 300. Max: 600.' }
           },
-          required: ['provider'],
-        },
+          required: ['command']
+        }
       },
       execute: async (input) => {
-        const provider = String(input.provider || '').toLowerCase()
-        if (provider !== 'gip') {
-          return `Unsupported auth provider: ${provider}. Only "gip" is supported.`
-        }
-
-        const project = useProjectStore.getState().currentProject
-        if (!project) {
-          return 'No project is open. Open a project before provisioning auth.'
-        }
-
-        // Early-return guard: if auth is already provisioned (detected from
-        // .env + filesystem markers), don't re-run the network call. The
-        // backend is idempotent (get-or-create) so re-running is safe — but
-        // returning early with an instructive message avoids wasted tokens
-        // AND signals to the agent "fix existing" instead of "re-scaffold".
-        // Defense-in-depth alongside the system-prompt section and the UI
-        // hint that warn before the tool is even invoked.
-        try {
-          const { detectScaffolding } = await import('../scaffoldingDetector')
-          const detected = await detectScaffolding(project.path)
-          const hasEmailAuth = detected.applied.includes('auth.email-password')
-          const hasGoogleAuth = detected.applied.includes('auth.google')
-          if (hasEmailAuth || hasGoogleAuth) {
-            const evidence: string[] = []
-            if (hasEmailAuth) evidence.push(...(detected.evidence['auth.email-password'] ?? []))
-            if (hasGoogleAuth) evidence.push(...(detected.evidence['auth.google'] ?? []))
-            // Telemetry for the agent-initiated re-provision path. The
-            // smart-router (chat-mode + cmd-mode) covers user-initiated
-            // hashtag re-runs; this captures the case where the model
-            // reaches for provision_auth on its own despite the system-
-            // prompt section. High frequency = system prompt isn't being
-            // attended to; consider strengthening the bookend.
-            import('../../services/analytics').then(({ trackEvent }) => {
-              void trackEvent('provision_auth_early_return', {
-                applied: [hasEmailAuth ? 'auth.email-password' : '', hasGoogleAuth ? 'auth.google' : ''].filter(Boolean).join(','),
-              })
-            }).catch(() => { /* non-critical */ })
-            return `Already provisioned. Detected: ${evidence.join(', ')}.\n\nDO NOT re-run provision_auth on the default path — the .env credentials already exist and the backend is idempotent (returns the same tenant). The default task is to FIX the existing implementation:\n  1. read_file the marker paths above to see what's there.\n  2. Diagnose the actual bug (read_dev_server_logs for runtime errors, get_diagnostics for type errors).\n  3. Edit the broken file with edit_file.\n\nEXCEPTION — explicit re-provisioning. If the developer's CURRENT message includes any of: "re-provision", "rotate credentials", "wipe and start over", "reset the auth", "delete and re-create the tenant", "reprovisiona", "rotaciona credenciais", "apaga e recomeça" — they have OPTED IN. In that case, ack in chat what you'll do, then call provision_auth again (the same call you just received). The platform is idempotent so the tenant won't duplicate; .env is overwritten with the same values; no destructive change to data. If the developer's intent is unclear, ASK before re-running.`
-          }
-        } catch { /* non-critical — fall through to normal provisioning */ }
-
-        const firebaseAuth = FirebaseAuthService.getInstance()
-        const idToken = await firebaseAuth.getIdToken()
-        if (!idToken) {
-          return 'Not authenticated to TM Code. Sign in first, then retry.'
-        }
-
-        const workerUrl = resolveWorkerUrl()
-        let provisionRes: Awaited<ReturnType<typeof tauriFetch>>
-        try {
-          provisionRes = await tauriFetch(`${workerUrl}/v1/auth/provision-gip`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${idToken}`,
-            },
-            body: JSON.stringify({
-              projectId: project.id,
-              projectName: project.name,
-            }),
-          })
-        } catch (err) {
-          // Same hard-stop contract as the HTTP-error path below. Network
-          // failures used to read as transient by the model and trigger
-          // "let me ask the developer for the credentials instead", which
-          // is always wrong (the credentials don't exist until provision_auth
-          // succeeds).
-          return (
-            `PROVISION_AUTH FAILED — STOP THE AUTH IMPLEMENTATION NOW.\n\n` +
-            `Network error reaching the auth provisioning endpoint: ${err instanceof Error ? err.message : String(err)}\n\n` +
-            `Do NOT fall back to request_credentials for VITE_FIREBASE_*, VITE_TM_*, VITE_GOOGLE_CLIENT_ID. ` +
-            `Those credentials do not exist until provision_auth succeeds; asking the developer to type them is impossible to satisfy.\n\n` +
-            `Required recovery: report the network error to the developer in chat, suggest checking their connection, and wait for them to decide whether to retry. Do not auto-retry.`
-          )
-        }
-
-        if (!provisionRes.ok) {
-          const body = await provisionRes.text().catch(() => '')
-          // STOP signal — without this, the model rationalises around the
-          // failure and falls back to request_credentials for VITE_FIREBASE_*
-          // and friends, which only ever produces a form the developer
-          // cannot satisfy. Hard-block the rationalisation by naming the
-          // exact wrong-next-steps and prescribing the correct recovery.
-          return (
-            `PROVISION_AUTH FAILED — STOP THE AUTH IMPLEMENTATION NOW.\n\n` +
-            `Error from worker (HTTP ${provisionRes.status}): ${body.slice(0, 300)}\n\n` +
-            `What this means: the platform tenant for this project could not be created. ` +
-            `Without it, NONE of the auth credentials exist — there is no Firebase API key, no auth domain, ` +
-            `no tenant id, no Google client id. Auth simply cannot be implemented until provision_auth succeeds.\n\n` +
-            `Wrong recovery paths (DO NOT TAKE):\n` +
-            `  ✗ request_credentials for VITE_FIREBASE_*, VITE_TM_*, VITE_GOOGLE_CLIENT_ID — the developer does not have these; the form will block on the platform-managed field IDs anyway.\n` +
-            `  ✗ "implement auth-proxy manually" — the proxy still needs the platform tenant; without it every call returns API_KEY_INVALID.\n` +
-            `  ✗ scaffold a LoginScreen / Firebase init expecting VITE_FIREBASE_API_KEY to exist later.\n\n` +
-            `Required recovery:\n` +
-            `  1. STOP the auth task. Do not write any auth-related code.\n` +
-            `  2. Tell the developer in chat what happened — quote the error above verbatim.\n` +
-            `  3. Suggest one of: (a) retry provision_auth in a new chat turn if this is a transient error, (b) report the error to TM Code support if it persists, (c) skip the auth feature for now.\n` +
-            `  4. Wait for the developer's decision. Do not auto-retry.`
-          )
-        }
-
-        const data = (await provisionRes.json()) as {
-          tenantId?: string
-          apiKey?: string
-          authDomain?: string
-          projectId?: string
-          googleClientId?: string | null
-        }
-
-        if (!data.tenantId || !data.apiKey || !data.authDomain || !data.projectId) {
-          return `Provisioning returned incomplete data: ${JSON.stringify(data)}`
-        }
-
-        // Write the credentials to .env via the same single-write-path used by
-        // request_credentials. Dual-write the new TM-prefixed names + the
-        // legacy Firebase/GIP/GCP names so existing user projects (which
-        // reference the legacy names in their code) continue to work, while
-        // new code generated by the agent uses the neutral names. Both sets
-        // hold the same values; the duplication is the migration cost paid
-        // once per project. The legacy names will be removed in a future
-        // release after enough projects have migrated.
-        const envVars: Array<{ key: string; value: string }> = [
-          // Neutral names (preferred for new code)
-          { key: 'VITE_TM_AUTH_KEY', value: data.apiKey },
-          { key: 'VITE_TM_AUTH_DOMAIN', value: data.authDomain },
-          { key: 'VITE_TM_PROJECT_ID', value: data.projectId },
-          { key: 'VITE_TM_TENANT_ID', value: data.tenantId },
-          { key: 'TM_AUTH_KEY', value: data.apiKey },
-          { key: 'TM_TENANT_ID', value: data.tenantId },
-          { key: 'TM_PROJECT_ID', value: data.projectId },
-          // Legacy names (kept for backward compatibility with already-scaffolded
-          // projects). New agent-generated code reads the TM_* names above;
-          // these continue to be written so a re-provision on an old project
-          // doesn't break existing references.
-          { key: 'VITE_FIREBASE_API_KEY', value: data.apiKey },
-          { key: 'VITE_FIREBASE_AUTH_DOMAIN', value: data.authDomain },
-          { key: 'VITE_FIREBASE_PROJECT_ID', value: data.projectId },
-          { key: 'VITE_GIP_TENANT_ID', value: data.tenantId },
-          { key: 'GCP_PROJECT_ID', value: data.projectId },
-          { key: 'GIP_TENANT_ID', value: data.tenantId },
-          { key: 'GIP_FIREBASE_API_KEY', value: data.apiKey },
-        ]
-        if (data.googleClientId) {
-          envVars.push({ key: 'VITE_TM_GOOGLE_CLIENT_ID', value: data.googleClientId })
-          envVars.push({ key: 'VITE_GOOGLE_CLIENT_ID', value: data.googleClientId }) // legacy
-        }
-
-        try {
-          await invoke('write_env_vars', { projectPath: project.path, vars: envVars })
-        } catch (err) {
-          return `Wrote tenant ${data.tenantId} but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
-        }
-
-        // .env just changed — invalidate detection cache so the next
-        // detectScaffolding call picks up the new credentials immediately.
-        try {
-          const { invalidateScaffoldingCache } = await import('../scaffoldingDetector')
-          invalidateScaffoldingCache(project.path)
-        } catch { /* non-critical */ }
-
-        // Structured contract: machine-readable header + skill-readable
-        // body. The header lists the env vars and the rules the agent must
-        // honour when implementing the proxy. Empirically (BugHunterKimi
-        // session, May 2026) the prose-only response let the agent forget
-        // canonical rules — `tenantId` was dropped from `signInWithIdp`,
-        // backend env was read from `VITE_*` instead of `GIP_*` mirrors,
-        // dotenv.config() was used manually instead of `--env-file`.
-        // The structured block makes each rule one bullet per scan line.
-        const lines: string[] = []
-        // Tenant id is internal-ish (matters for diagnosing auth bugs) but
-        // the platform GCP project id is not relevant to the chat agent —
-        // it would leak the platform project name when the developer asks
-        // the agent to summarise what happened or generate manual-deploy
-        // scripts. Keep the tenant id (already in .env via VITE_GIP_TENANT_ID),
-        // drop the project id.
-        lines.push(`Authentication tenant ready: ${data.tenantId}.`)
-        lines.push(`.env written: ${envVars.map((v) => v.key).join(', ')}.`)
-        lines.push('')
-        lines.push('## Auth contract (do not improvise — these rules are not negotiable)')
-        lines.push('')
-        lines.push('### Env keys (already in .env — read them, do not regenerate)')
-        lines.push('  - Frontend (Vite, public): VITE_TM_AUTH_KEY, VITE_TM_AUTH_DOMAIN, VITE_TM_PROJECT_ID, VITE_TM_TENANT_ID' + (data.googleClientId ? ', VITE_TM_GOOGLE_CLIENT_ID' : ''))
-        lines.push('  - Backend (server-only): TM_AUTH_KEY, TM_TENANT_ID, TM_PROJECT_ID')
-        lines.push('  - The backend reads the server-only names (TM_* without VITE_ prefix), the frontend reads the VITE_TM_* mirrors. Both hold the same values; the split avoids the bug where the agent reads a frontend key on the server before dotenv loads.')
-        lines.push('  - Legacy names (VITE_FIREBASE_*, GIP_*, GCP_PROJECT_ID, VITE_GOOGLE_CLIENT_ID) are also written for backward compat with existing code. New code reads the TM_* names — explain to the developer as "your project credentials" in chat prose, not by listing variable names.')
-        lines.push('')
-        lines.push('### Env loading (eliminates the dotenv-config-after-imports class of bug)')
-        lines.push('  - Node 20.6+: pass --env-file=.env in the dev script (e.g. `tsx watch --env-file=../.env src/index.ts`).')
-        lines.push('  - Bun: loads .env automatically.')
-        lines.push('  - NestJS: ConfigModule.forRoot({ isGlobal: true }).')
-        lines.push('  - Older Node fallback only: `import \'dotenv/config\'` at the very top of the entry file. Never `dotenv.config({ path: ... })` after other imports — ESM hoists imports above the call.')
-        lines.push('')
-        lines.push('### Auth-API calls')
-        lines.push('  - Every signInWithIdp / signInWithPassword / signUp request body includes `tenantId` (read from `TM_TENANT_ID`). Without it, the auth API returns 400 with INVALID_ID_TOKEN or a tenant-mismatch error.')
-        lines.push('  - Map auth-API 4xx responses to 401 (auth failure), not 502. 502 is for upstream 5xx / network errors only.')
-        lines.push('')
-        lines.push('### Frontend wiring')
-        lines.push('  - Vite proxy MUST forward /api to the backend port — `server.proxy[\'/api\']` in vite.config.ts. Without it, every fetch(\'/api/...\') hits port 5173 and returns 404 HTML. CORS headers are NOT a substitute.')
-        lines.push('  - In a monorepo (vite.config.ts in client/ while .env is at root), set `envDir: path.resolve(__dirname, \'..\')`. In a flat layout, do NOT set envDir — over-set silently breaks all VITE_* reads.')
-        lines.push('  - firebase.ts: `auth.tenantId = import.meta.env.VITE_TM_TENANT_ID`. Inside an iframe (IDE preview), call `setPersistence(auth, inMemoryPersistence)`.')
-        lines.push('  - Only `onAuthStateChanged` is importable from firebase/auth. NEVER signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, etc. — popup is silently blocked in the IDE preview webview.')
-        lines.push('')
-        lines.push('### Data layer — publish-ready by DEFAULT (TM Code Database)')
-        lines.push('  - Use `drizzle-orm` + `@libsql/client` for persistence. The harness rejects incompatible-shape deps (`@prisma/client`, `prisma`, `better-sqlite3`, `sqlite3`, `mysql2`, `pg`) on writes to package.json — Prisma needs a persistent connection (incompatible with Cloud Run scale-to-zero + worker HTTPS proxy); native-bound SQLite drivers and non-SQLite dialects don\'t round-trip through the worker.')
-        lines.push('  - Generate `server/db.ts` with the dev/prod connection switch: `drizzle-orm/libsql/node` against `DATABASE_URL=file:./dev.db` in dev, `drizzle-orm/sqlite-proxy` against `TMDB_URL` + `TMDB_TOKEN` in prod. The libSQL endpoint and Turso credentials stay in the TM Code Worker — never in user code or `.env`.')
-        lines.push('  - Schema in TypeScript via `server/schema.ts`. Generate migrations with `drizzle-kit generate`; the deploy pipeline reapplies them against the app\'s TMDB at publish time.')
-        lines.push('  - Full SQL ergonomics — `where + orderBy` on different fields, multi-where, JOINs, aggregations, transactions. No composite-index trap. Performance indexes via `index().on(...)` in Drizzle schema.')
-        lines.push('')
-        lines.push('### Dockerfile — generated in the SAME scaffold turn')
-        lines.push('  - When the project has a backend (server/ or backend/ directory, or backend deps), generate a `Dockerfile` + `.dockerignore` at the project root in the same turn that creates the backend code. The Publish detector classifies a project as composite only when `Dockerfile` is present; without it, Publish ships the frontend and the backend stays unpublished — silent failure mode.')
-        lines.push('  - Templates by language in `read_skill("publish-backend")` §8. Node 22 is the default; Python (FastAPI/Flask) is the other shipped option.')
-        lines.push('  - Skip `cloudbuild.yaml` — the platform build pipeline runs an inline spec server-side; a file at the project root is unused.')
-        lines.push('')
-        lines.push('### Existing-project rule')
-        lines.push('  - When you find legacy `firebase-admin/firestore` or Prisma in the project, port it to Drizzle + libSQL first, before adding auth code. A hybrid persistence layer breaks Publish.')
-        lines.push('  - `firebase-admin/auth` stays — it\'s used for GIP JWT verification, separate from the data layer. Only the `/firestore` and `/database` imports are removed.')
-        lines.push('  - For the auth-proxy boilerplate, `read_skill("auth-proxy")` covers Express, Fastify, NestJS, Hono, FastAPI.')
-        lines.push('')
-        lines.push('### After the phase that adds /api/auth/* — REQUIRED smoke test')
-        lines.push('  - `execute_command: curl -s -o /dev/null -w \'%{http_code} %{content_type}\\n\' http://localhost:5173/api/auth/me` MUST return `401 application/json`. If 404 HTML, the Vite proxy is missing — fix before claiming the phase done.')
-        lines.push('')
-        lines.push('## Next-step references')
-        lines.push('  1. read_skill("auth-proxy") for the full protocol.')
-        lines.push('  2. read_skill("google-signin") if Google sign-in is requested.')
-        lines.push('  3. CREDENTIALS COMPLETE — request_credentials is for third-party integrations the developer adds (OpenAI, Stripe, etc.), not for anything the platform manages. The public client key in .env is the only auth credential the project needs; admin keys and service-account files live only on the platform side.')
-
-        return lines.join('\n')
-      },
-    })
-
-    // === provision_database ===
-    // Reserves a per-app SQLite/libSQL database on the platform's Turso fleet
-    // and writes the two credentials user code needs (`TMDB_URL` +
-    // `TMDB_TOKEN`) to .env. The Turso platform token and the database's
-    // own JWT stay on the TM Code Worker — user code only sees the
-    // app-scoped TMDB token, which the worker validates per request.
-    //
-    // The endpoint is idempotent (worker reuses an existing record when
-    // present), so re-running on an already-provisioned project just
-    // returns the existing credentials. Same shape as provision_auth.
-    this.tools.set('provision_database', {
-      definition: {
-        name: 'provision_database',
-        description:
-          "Set up TM Code Database (per-app SQLite/libSQL on Turso) for the current project. Reserves the app's database on the platform, mints an app-scoped TMDB token, and writes TMDB_URL + TMDB_TOKEN to .env. The Turso platform token and per-DB JWT stay on the TM Code Worker — user code talks to the worker via HTTPS using the TMDB_TOKEN. Call when the project needs persistence in production (an auth user record, app state, anything that must survive container restarts). Local dev alone does not need this — db.ts can stay on `DATABASE_URL=file:./dev.db`. The endpoint is fully idempotent: calling on an already-provisioned project returns the same credentials with zero side-effect, so call it whenever the .env mechanical check (look for TMDB_URL and TMDB_TOKEN) shows either is missing — including after a transient failure where you're retrying. After a successful return, generate `server/db.ts` with the dev/prod connection switch from read_skill(\"publish-backend\") and `server/schema.ts` for Drizzle.",
-        input_schema: {
-          type: 'object',
-          properties: {},
-          required: [],
-        },
-      },
-      execute: async () => {
-        const project = useProjectStore.getState().currentProject
-        if (!project) {
-          return 'No project is open. Open a project before provisioning the database.'
-        }
-
-        const firebaseAuth = FirebaseAuthService.getInstance()
-        const idToken = await firebaseAuth.getIdToken()
-        if (!idToken) {
-          return 'Not authenticated to TM Code. Sign in first, then retry.'
-        }
-
-        const workerUrl = resolveWorkerUrl()
-        let provisionRes: Awaited<ReturnType<typeof tauriFetch>>
-        try {
-          provisionRes = await tauriFetch(
-            `${workerUrl}/v1/apps/${encodeURIComponent(project.id)}/database/provision`,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${idToken}`,
-              },
-              body: JSON.stringify({}),
-            },
-          )
-        } catch (err) {
-          // Same hard-stop posture as provision_auth: network failure must
-          // not become "let me ask the developer for the DB URL", because
-          // the developer doesn't own those credentials. Wait for the user.
-          return (
-            `PROVISION_DATABASE FAILED — STOP DATA-LAYER WORK.\n\n` +
-            `Network error reaching the database provisioning endpoint: ${err instanceof Error ? err.message : String(err)}\n\n` +
-            `Do NOT fall back to request_credentials for TMDB_URL, TMDB_TOKEN, DATABASE_URL — those credentials are minted by the platform and do not exist until provision_database succeeds.\n\n` +
-            `Required recovery: report the network error to the developer in chat, suggest checking their connection, and wait for them to decide whether to retry. Do not auto-retry.`
-          )
-        }
-
-        if (!provisionRes.ok) {
-          const body = await provisionRes.text().catch(() => '')
-          return (
-            `PROVISION_DATABASE FAILED — STOP DATA-LAYER WORK.\n\n` +
-            `Error from worker (HTTP ${provisionRes.status}): ${body.slice(0, 300)}\n\n` +
-            `What this means: the platform could not provision a per-app database. ` +
-            `Without it, TMDB_URL / TMDB_TOKEN do not exist and production persistence cannot be wired up.\n\n` +
-            `Wrong recovery paths (DO NOT TAKE):\n` +
-            `  ✗ request_credentials for TMDB_URL / TMDB_TOKEN / DATABASE_URL — the developer does not own these.\n` +
-            `  ✗ swap to a different ORM/driver hoping it bypasses the platform — the harness rejects Prisma, mysql2, pg, sqlite3, better-sqlite3 on write to package.json.\n\n` +
-            `Required recovery:\n` +
-            `  1. STOP the data-layer task. Do not write db.ts / schema.ts / migrations.\n` +
-            `  2. Tell the developer what happened — quote the error above verbatim.\n` +
-            `  3. If the error says "group not found" / "HTTP 400" / "Turso ..." (any platform-side rejection): ask the developer to share the line that starts with \`[turso] createDatabase:\` from the TM Code Worker logs (\`wrangler tail\` or the dev terminal). That line shows the org + group + db-name the worker actually sent, which pinpoints whether it's a config issue (wrong group), a stale build (wrangler dev not restarted), or a true upstream outage.\n` +
-            `  4. Suggest one of: (a) retry provision_database in a new chat turn if transient, (b) report to TM Code support if it persists, (c) keep persistence local-dev-only by using DATABASE_URL=file:./dev.db without the prod branch.\n` +
-            `  5. Wait for the developer's decision. Do not auto-retry.`
-          )
-        }
-
-        const data = (await provisionRes.json()) as {
-          tmdbUrl?: string
-          tmdbToken?: string
-          dbName?: string
-          reused?: boolean
-        }
-
-        if (!data.tmdbUrl || !data.tmdbToken || !data.dbName) {
-          return `Provisioning returned incomplete data: ${JSON.stringify(data)}`
-        }
-
-        const envVars: Array<{ key: string; value: string }> = [
-          { key: 'TMDB_URL', value: data.tmdbUrl },
-          { key: 'TMDB_TOKEN', value: data.tmdbToken },
-        ]
-
-        try {
-          await invoke('write_env_vars', { projectPath: project.path, vars: envVars })
-        } catch (err) {
-          return `Database provisioned (${data.dbName}) but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
-        }
-
-        const reusedSuffix = data.reused ? ' (reused existing)' : ''
-        const lines: string[] = []
-        lines.push(`Database ready: ${data.dbName}${reusedSuffix}.`)
-        lines.push(`.env written: TMDB_URL, TMDB_TOKEN.`)
-        lines.push('')
-        lines.push('## Database contract (do not improvise)')
-        lines.push('')
-        lines.push('### Connection switch (server/db.ts)')
-        lines.push('  - Dev (`NODE_ENV !== "production"`): `drizzle-orm/libsql/node` with `createClient({ url: process.env.DATABASE_URL ?? "file:./dev.db" })`.')
-        lines.push('  - Prod (`NODE_ENV === "production"`): `drizzle-orm/sqlite-proxy` driver, forwarding queries to `${TMDB_URL}` over HTTPS with `Authorization: Bearer ${TMDB_TOKEN}`. The worker accepts `POST { sql, params, method }` for single queries and `POST { batch: [...] }` for transactions.')
-        lines.push('  - The user code MUST NOT import `@libsql/client` directly in production — the worker is the only path to Turso. Direct libsql connections from Cloud Run will fail (no platform token in user env).')
-        lines.push('')
-        lines.push('### Schema (server/schema.ts)')
-        lines.push('  - Drizzle table definitions in TypeScript. Add `index().on(field)` for query hot paths.')
-        lines.push('  - Generate migrations with `drizzle-kit generate --config=drizzle.config.ts` after schema changes.')
-        lines.push('  - The deploy pipeline reapplies migration SQL against the app\'s TMDB on publish. Local dev runs `drizzle-kit push` or `drizzle-kit migrate` against the file:./dev.db, never against TMDB.')
-        lines.push('')
-        lines.push('### Forbidden')
-        lines.push('  - `@prisma/client`, `prisma`, `better-sqlite3`, `sqlite3`, `mysql2`, `pg` — the write_file harness rejects these on package.json edits. The reason: Prisma needs a persistent connection (incompatible with Cloud Run scale-to-zero + worker HTTPS proxy); native-bound SQLite drivers and non-SQLite dialects don\'t round-trip through the worker.')
-        lines.push('  - Hard-coding TMDB_URL or TMDB_TOKEN in any committed file. They live ONLY in .env.')
-        lines.push('')
-        lines.push('### Next steps')
-        lines.push('  1. read_skill("publish-backend") for the full db.ts template + sqlite-proxy fetcher.')
-        lines.push('  2. Write server/schema.ts with the tables you need (start small — add columns later).')
-        lines.push('  3. Write server/db.ts using the dev/prod switch from the skill.')
-        lines.push('  4. Generate the first migration with drizzle-kit.')
-
-        return lines.join('\n')
-      },
-    })
-
-    // === provision_files ===
-    // Reserves the per-app file storage credentials on the platform and
-    // writes TM_FILES_URL / TM_FILES_TOKEN / TM_FILES_PUBLIC_BASE to .env.
-    //
-    // Storage layout on R2: `{slug}/_files/{userKey}`. Reads are served
-    // directly by the slug's subdomain (`https://{slug}.toquemedia.net/_files/key`)
-    // — no Worker hop, no CORS for same-origin frontend fetches. Writes
-    // go through this Worker (PUT /v1/apps/{appId}/files/{key}) with
-    // TM_FILES_TOKEN as a bearer.
-    //
-    // Same idempotency semantics as provision_database / provision_auth:
-    // second call reuses the existing record.
-    this.tools.set('provision_files', {
-      definition: {
-        name: 'provision_files',
-        description:
-          "Set up TM Code File Storage for the current project. Tries R2 via the platform Worker first; on failure, falls back to LOCAL filesystem (.toquemedia/uploads/). Writes TM_FILES_URL + TM_FILES_TOKEN + TM_FILES_PUBLIC_BASE to .env (R2 mode) or TM_FILES_MODE=local (local mode). Use ONCE when the project needs to handle user uploads (avatars, images, attachments, documents). **Required before writing any upload route** — the alternative (base64 in DB) is forbidden: it bloats the DB, kills query latency, and has no CDN. After provisioning, generate the files helper from read_skill(\"publish-backend\") §9.5 at `backend/src/files.ts` (or `server/src/files.ts`). In your files.ts, check `process.env.TM_FILES_MODE === 'local'` to switch between R2 (Worker PUT) and local (fs.writeFile). Idempotent: second call returns the same credentials.",
-        input_schema: {
-          type: 'object',
-          properties: {},
-          required: [],
-        },
-      },
-      execute: async () => {
-        const project = useProjectStore.getState().currentProject
-        if (!project) {
-          return 'No project is open. Open a project before provisioning file storage.'
-        }
-
-        const firebaseAuth = FirebaseAuthService.getInstance()
-        const idToken = await firebaseAuth.getIdToken()
-        if (!idToken) {
-          return 'Not authenticated to TM Code. Sign in first, then retry.'
-        }
-
-        // Compute a candidate slug from the project name. The worker accepts
-        // this as a fallback when no deploy record exists yet — most agent
-        // calls to provision_files happen pre-publish (during scaffolding of
-        // upload routes), so the deploy record doesn't exist. After the first
-        // publish, the worker will pin to the actual deploy slug regardless
-        // of what we send here.
-        const candidateSlug = project.name
-          .toLowerCase()
-          .normalize('NFD')
-          .replace(/[̀-ͯ]/g, '')
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-+|-+$/g, '')
-          .slice(0, 63) || project.id.slice(0, 32)
-
-        const workerUrl = resolveWorkerUrl()
-        let provisionRes: Awaited<ReturnType<typeof tauriFetch>>
-        try {
-          provisionRes = await tauriFetch(
-            `${workerUrl}/v1/apps/${encodeURIComponent(project.id)}/files/provision`,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${idToken}`,
-              },
-              body: JSON.stringify({ slug: candidateSlug }),
-            },
-          )
-        } catch (err) {
-          // Network error — fall back to local filesystem storage
-          const uploadsDir = `${project.path}/.toquemedia/uploads`
-          try { await invoke('create_directories_all', { path: uploadsDir }) } catch {}
-          try {
-            await invoke('write_env_vars', {
-              projectPath: project.path,
-              vars: [{ key: 'TM_FILES_MODE', value: 'local' }],
-            })
-          } catch {}
-          return (
-            `PROVISION_FILES: platform unreachable — falling back to LOCAL file storage.\n\n` +
-            `Network error: ${err instanceof Error ? err.message : String(err)}\n\n` +
-            `Local fallback active:\n` +
-            `  - Uploads go to .toquemedia/uploads/ (gitignored)\n` +
-            `  - TM_FILES_MODE=local written to .env\n` +
-            `  - Serve via static middleware: app.use('/uploads', express.static('.toquemedia/uploads'))\n` +
-            `  - writeFile() saves to disk, readFile() reads from disk, deleteFile() removes from disk\n\n` +
-            `In your files.ts, check process.env.TM_FILES_MODE === 'local' to switch between R2 (Worker PUT) and local (fs.writeFile). ` +
-            `The public URL for local files is /uploads/{key} on the dev server.\n\n` +
-            `base64-in-DB is still FORBIDDEN.`
-          )
-        }
-
-        if (!provisionRes.ok) {
-          const body = await provisionRes.text().catch(() => '')
-          // Non-OK response — fall back to local filesystem storage
-          const uploadsDir = `${project.path}/.toquemedia/uploads`
-          try { await invoke('create_directories_all', { path: uploadsDir }) } catch {}
-          try {
-            await invoke('write_env_vars', {
-              projectPath: project.path,
-              vars: [{ key: 'TM_FILES_MODE', value: 'local' }],
-            })
-          } catch {}
-          return (
-            `PROVISION_FILES: platform returned HTTP ${provisionRes.status} — falling back to LOCAL file storage.\n\n` +
-            `Error body: ${body.slice(0, 300)}\n\n` +
-            `Local fallback active:\n` +
-            `  - Uploads go to .toquemedia/uploads/ (gitignored)\n` +
-            `  - TM_FILES_MODE=local written to .env\n` +
-            `  - Serve via static middleware: app.use('/uploads', express.static('.toquemedia/uploads'))\n` +
-            `  - writeFile() saves to disk, readFile() reads from disk, deleteFile() removes from disk\n\n` +
-            `In your files.ts, check process.env.TM_FILES_MODE === 'local' to switch between R2 (Worker PUT) and local (fs.writeFile). ` +
-            `The public URL for local files is /uploads/{key} on the dev server.\n\n` +
-            `base64-in-DB is still FORBIDDEN.`
-          )
-        }
-
-        const data = (await provisionRes.json()) as {
-          url?: string
-          token?: string
-          publicBase?: string
-          reused?: boolean
-        }
-
-        if (!data.url || !data.token || !data.publicBase) {
-          return `Provisioning returned incomplete data: ${JSON.stringify(data)}`
-        }
-
-        const envVars: Array<{ key: string; value: string }> = [
-          { key: 'TM_FILES_URL', value: data.url },
-          { key: 'TM_FILES_TOKEN', value: data.token },
-          { key: 'TM_FILES_PUBLIC_BASE', value: data.publicBase },
-        ]
-
-        try {
-          await invoke('write_env_vars', { projectPath: project.path, vars: envVars })
-        } catch (err) {
-          return `File storage provisioned but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
-        }
-
-        const reusedSuffix = data.reused ? ' (reused existing)' : ''
-        const lines: string[] = []
-        lines.push(`File storage ready${reusedSuffix}.`)
-        lines.push(`.env written: TM_FILES_URL, TM_FILES_TOKEN, TM_FILES_PUBLIC_BASE.`)
-        lines.push('')
-        lines.push('## Storage contract (do not improvise)')
-        lines.push('')
-        lines.push('### Write path (server/files.ts)')
-        lines.push('  - PUT to `${TM_FILES_URL}/{key}` with `Authorization: Bearer ${TM_FILES_TOKEN}` and the file body as the request body.')
-        lines.push('  - Response: `{ publicUrl, key, size, contentType }`. Store the `publicUrl` in your DB row — never the bytes themselves.')
-        lines.push('  - Max 10 MB per upload. The Worker enforces this — your route should also pre-validate to reject early.')
-        lines.push('  - Keys allow nested paths (`posts/cover.jpg`). Forbidden: `..`, leading `/`, control chars.')
-        lines.push('')
-        lines.push('### Read path')
-        lines.push('  - Public URL is `${TM_FILES_PUBLIC_BASE}/_files/{key}` — same origin as your frontend, no CORS. Cloudflare serves it directly from R2, zero Worker invocations on the read path.')
-        lines.push('  - Embed in `<img src=...>` / `<video src=...>` etc. with normal browser caching.')
-        lines.push('')
-        lines.push('### Delete path')
-        lines.push('  - DELETE on `${TM_FILES_URL}/{key}` with the same bearer. Returns `{ deleted: key }`.')
-        lines.push('  - When the app itself is deleted, the platform cleans up the whole prefix — you do not need to delete files manually unless the user explicitly removes them.')
-        lines.push('')
-        lines.push('### Forbidden')
-        lines.push('  - base64-in-DB columns (`avatarData`, `imageBase64`, `dataUrl: "data:image/..."`). Use the publicUrl returned by the upload instead.')
-        lines.push('  - Storing TM_FILES_TOKEN anywhere in committed code. It lives ONLY in .env.')
-        lines.push('  - Direct R2 SDK calls (`@aws-sdk/client-s3`, `wrangler-r2`) — the Worker is the only authorized write path.')
-        lines.push('')
-        lines.push('### Next steps')
-        lines.push('  1. read_skill("publish-backend") §9.5 for the full files.ts helper.')
-        lines.push('  2. Write `backend/src/files.ts` exporting `uploadFile(key, body, contentType)` and `deleteFile(key)`.')
-        lines.push('  3. Wire upload routes that accept multipart/form-data, validate type+size, then call uploadFile.')
-        lines.push('  4. Store the returned publicUrl in the relevant DB row.')
-
-        return lines.join('\n')
-      },
-    })
-
-    // === provision_deploy ===
-    // Mirrors provision_auth for the backend deploy side. With the Firestore
-    // data model there's no per-app database to provision — the app's data
-    // lives at apps/{APP_ID}/... under the shared (default) Firestore in
-    // dev-studio-projects, isolated by Security Rules. The tool:
-    // 1. Calls /v1/projects/deploy/init to reserve <slug>.toquemedia.net +
-    //    create the projectDeployments record (subscription/quota gated).
-    // 2. Writes APP_ID (= project.id) to .env so the server code can build
-    //    its paths under apps/${APP_ID}/...
-    // 3. Returns a summary the agent reads before swapping the DB layer to
-    //    the Firebase Admin SDK (read_skill('publish-backend')
-    //    for the cost-conscious access patterns).
-    //
-    // Reserved for the Publish flow. The agent should NOT call this during
-    // normal scaffolding — the system prompt's Publishing section explains
-    // the rationale (paid commitment, hostname reservation, quota slot).
-    // Idempotent: if APP_ID is already in .env, returns no-op.
-    this.tools.set('provision_deploy', {
-      definition: {
-        name: 'provision_deploy',
-        description:
-          "Reserve a public hostname for this project and register it in the platform's publish quota. Writes APP_ID to .env (the per-app data namespace). RESERVED for the Publish flow — do NOT call this from scaffolding turns. The publish-ready code shape (firebase-admin data layer, Dockerfile, cache pattern) must be in place BEFORE this is called; use APP_ID with a local-dev fallback in your db.ts so the backend runs without this tool ever firing. Idempotent: a second call when APP_ID already exists returns a no-op. May return DEPLOY_QUOTA (free=0/vibe=1/pro=2/max=5 active publishes) — surface verbatim and stop.",
-        input_schema: {
-          type: 'object',
-          properties: {},
-          required: [],
-        },
-      },
-      execute: async () => {
-        const project = useProjectStore.getState().currentProject
-        if (!project) {
-          return 'No project is open. Open a project before provisioning the deploy.'
-        }
-
-        // Defense-in-depth: the system prompt instructs the agent to NOT
-        // call provision_deploy during normal scaffolding turns — the
-        // Publish flow owns this. The agent may still call it (e.g., if a
-        // legacy prompt or a user instruction asks for it). Make it
-        // idempotent so a stray call from scaffolding doesn't double-
-        // reserve, double-consume quota, or trigger surprise public-host
-        // commitments. If APP_ID is already in .env, treat as no-op.
-        try {
-          const existing = await invoke<string>('read_file', {
-            path: `${project.path}/.env`,
-          })
-          if (typeof existing === 'string' && /^\s*APP_ID\s*=/m.test(existing)) {
-            return (
-              `provision_deploy already applied to "${project.name}" — APP_ID is in .env. ` +
-              `Skipping re-provision. If you intended to rotate the slug or move to a different ` +
-              `plan, the developer must do that from Settings → Deploys (not from the agent).`
-            )
-          }
-        } catch {
-          // .env doesn't exist yet — fine, continue with the normal flow.
-        }
-
-        const firebaseAuth = FirebaseAuthService.getInstance()
-        const idToken = await firebaseAuth.getIdToken()
-        if (!idToken) {
-          return 'Not authenticated to TM Code. Sign in first, then retry.'
-        }
-        const workerUrl = resolveDeployUrl()
-
-        // /init reserves the slug + creates the projectDeployments record
-        // (quota gated, idempotent on re-run). No DB provisioning — the
-        // platform database is a shared default with per-app path scoping;
-        // nothing to physically create up front.
-        let initRes: Awaited<ReturnType<typeof tauriFetch>>
-        try {
-          initRes = await tauriFetch(`${workerUrl}/v1/projects/deploy/init`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${idToken}`,
-            },
-            body: JSON.stringify({
-              projectId: project.id,
-              projectName: project.name,
-            }),
-          })
-        } catch (err) {
-          return `Failed to reach deploy/init: ${err instanceof Error ? err.message : String(err)}`
-        }
-        if (!initRes.ok) {
-          const body = await initRes.text().catch(() => '')
-          // Surface the structured DEPLOY_QUOTA / subscription codes so the
-          // agent can offer the right next step (upgrade vs. remove existing).
-          return `Deploy init failed (HTTP ${initRes.status}): ${body.slice(0, 300)}`
-        }
-        const initData = (await initRes.json()) as { slug?: string }
-        const slug = initData.slug
-        if (!slug) {
-          return 'Init returned without a slug — unexpected response shape.'
-        }
-
-        // Write APP_ID to .env. APP_ID is the project.id (same identifier
-        // used in projectDeployments + the path namespace under
-        // apps/{APP_ID}/... in Firestore). GCP_PROJECT_ID is already there
-        // from provision_auth; no other vars to add.
-        const envVars: Array<{ key: string; value: string }> = [
-          { key: 'APP_ID', value: project.id },
-        ]
-        try {
-          await invoke('write_env_vars', { projectPath: project.path, vars: envVars })
-        } catch (err) {
-          return `Reserved slug "${slug}" but failed to write .env: ${err instanceof Error ? err.message : String(err)}`
-        }
-
-        // Invalidate scaffolding cache so detection picks up the new vars.
-        try {
-          const { invalidateScaffoldingCache } = await import('../scaffoldingDetector')
-          invalidateScaffoldingCache(project.path)
-        } catch { /* non-critical */ }
-
-        const lines: string[] = []
-        lines.push(`Deploy infrastructure ready for "${project.name}".`)
-        lines.push(`  - Public hostname: ${slug}.toquemedia.net (locked to this project)`)
-        lines.push(`  - Data namespace: apps/${project.id}/... (platform-managed)`)
-        lines.push(`  - .env written: APP_ID`)
-        lines.push('')
-        lines.push('## What to do next')
-        lines.push('')
-        lines.push(`1. Confirm the publish-ready code shape is already in place (it should be — that's the platform default): firebase-admin data layer with the local-dev APP_ID fallback, Dockerfile + cloudbuild.yaml at root, read-once + in-memory cache pattern applied. If anything is missing, read_skill("${PUBLISHING_SKILL_NAME}") and fill the gaps.`)
-        lines.push('2. The developer can now click Publish — the IDE handles build + bring-online from there.')
-        lines.push('')
-        lines.push('CREDENTIALS COMPLETE — do NOT call request_credentials for database / cloud / service-account keys. The platform runtime authenticates natively (no JSON keys, no API tokens). The only env vars the backend reads at runtime are APP_ID + the auth keys provision_auth already wrote.')
-
-        return lines.join('\n')
-      },
-    })
-
-    // === request_credentials ===
-    // Renders a secure form in the chat for collecting API keys, tokens, and
-    // secrets. The form is the ONLY legitimate write path for the project's
-    // .env file (the agent's normal write/read tools are mechanically blocked
-    // from .env). Values never enter the chat history or the model context —
-    // the tool result only echoes the keys that were saved.
-    this.tools.set('request_credentials', {
-      definition: {
-        name: 'request_credentials',
-        description:
-          'Request API keys, tokens, or other secrets from the developer via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by the agent). Never instruct the developer to create or edit .env manually, and never ask them to paste secrets into the chat.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nSKIP FOR: platform-managed credentials. The platform mints these via dedicated provision_* tools — the developer doesn\'t have the values and never will. Mapping: TM_AUTH_*/VITE_TM_*/GIP_*/GCP_* → provision_auth; TMDB_URL/TMDB_TOKEN/DATABASE_URL → provision_database; TM_FILES_URL/TM_FILES_TOKEN/TM_FILES_PUBLIC_BASE → provision_files; APP_ID → provision_deploy. Calling this form for any of those is incorrect.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            service_name: {
-              type: 'string',
-              description: 'Name of the service the credentials are for (e.g. "OpenAI", "Stripe", "Firebase")',
-            },
-            fields: {
-              type: 'array',
-              description: 'Credential fields to collect. Maximum 8 per request.',
-              items: {
-                type: 'object',
-                properties: {
-                  id: {
-                    type: 'string',
-                    description: 'Env var key as it will appear in .env (UPPER_SNAKE_CASE, e.g. "OPENAI_API_KEY")',
-                  },
-                  label: {
-                    type: 'string',
-                    description: 'Human-readable label shown in the form',
-                  },
-                  type: {
-                    type: 'string',
-                    enum: ['text', 'password'],
-                    description: 'Use "password" for API keys, tokens, secrets. Use "text" for non-sensitive values like project IDs.',
-                  },
-                  required: {
-                    type: 'boolean',
-                    description: 'Whether the field must be filled before the user can submit',
-                  },
-                  helperText: {
-                    type: 'string',
-                    description: 'Optional hint shown below the field (e.g. "Find this at https://...")',
-                  },
-                },
-                required: ['id', 'label', 'type', 'required'],
-              },
-            },
-          },
-          required: ['service_name', 'fields'],
-        },
-      },
-      execute: async (input) => {
-        const serviceName = String(input.service_name || '').trim()
-        if (!serviceName) {
-          return 'Missing required parameter: service_name'
-        }
-
-        const rawFields = input.fields
-        if (!Array.isArray(rawFields) || rawFields.length === 0) {
-          return 'Missing required parameter: fields (must be a non-empty array)'
-        }
-        if (rawFields.length > 8) {
-          return 'Too many fields: maximum 8 per request. Group related credentials into separate calls.'
-        }
-
-        const fields: Array<{
-          id: string
-          label: string
-          type: 'text' | 'password'
-          required: boolean
-          helperText?: string
-        }> = []
-        const seenIds = new Set<string>()
-        for (const raw of rawFields as Array<Record<string, unknown>>) {
-          const id = String(raw?.id ?? '').trim()
-          const label = String(raw?.label ?? '').trim()
-          if (!id || !label) {
-            return 'Each field must have non-empty "id" and "label".'
-          }
-          if (!/^[A-Z_][A-Z0-9_]*$/.test(id)) {
-            return `Field id "${id}" is not a valid env var key (must match /^[A-Z_][A-Z0-9_]*$/).`
-          }
-          // Mechanical blocklist for platform-managed credentials. These are
-          // written by provision_auth / provision_deploy when those tools
-          // succeed; asking the developer for them surfaces a form they
-          // cannot satisfy. Documented in the auth-proxy skill's hard rules
-          // (rule #2). The prose-only directive in the tool description was
-          // ignored repeatedly (BugHunter session 2026-05-16) when
-          // provision_auth failed and the model fell back to "let me just
-          // ask the developer for these" — so the gate is now mechanical.
-          const blockReason = describePlatformManagedField(id)
-          if (blockReason) {
-            return blockReason
-          }
-          if (seenIds.has(id)) {
-            return `Duplicate field id "${id}".`
-          }
-          seenIds.add(id)
-          const type = raw?.type === 'text' ? 'text' : 'password'
-          fields.push({
-            id,
-            label,
-            type,
-            required: raw?.required !== false,
-            helperText: raw?.helperText ? String(raw.helperText).trim() : undefined,
-          })
-        }
+        const cmd = (input.command as string).trim()
+        this.validateCommand(cmd)
 
         const projectRoot = this.getProjectRoot()
-        if (!projectRoot) {
-          return 'No active project — cannot collect credentials. Open a project first.'
+        const cwd = (input.cwd as string) || projectRoot
+        this.validatePathWithinProject(cwd)
+
+        const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
+        const bgCmdStore = useBackgroundCommandStore.getState()
+
+        // Fix #4: GC old completed entries before checking concurrency
+        bgCmdStore.removeCompleted()
+
+        if (bgCmdStore.getRunningCount() >= 6) {
+          return 'Cannot start: maximum 6 background commands running. Wait for one to complete or use check_background_commands.'
         }
 
-        const { useCredentialRequestStore } = await import('../../stores/credentialRequestStore')
-        const chatStore = useChatStore.getState()
+        const { listen } = await import('@tauri-apps/api/event')
+        const { invoke } = await import('@tauri-apps/api/core')
 
-        // request() is synchronous — returns the id and a promise we await
-        // below. We race the promise against the abort signal so the tool
-        // unblocks immediately if the loop is cancelled.
-        const { id: requestId, promise: requestPromise } = useCredentialRequestStore
-          .getState()
-          .request({ serviceName, fields })
+        const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+        const allOutput: string[] = []
+        let targetPid = 0
+        let finished = false
+        // Fix #6: declared before listeners so they can clear it on normal exit
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined
 
-        const cardMessageId = chatStore.addCredentialRequestCard(
-          projectRoot,
-          requestId,
-          serviceName,
-          fields,
+        const bufferedOutput: { pid: number; data: string }[] = []
+        const bufferedExit: { pid: number; code: number }[] = []
+
+        // Register listeners BEFORE spawning
+        const unOutput = await listen<{ pid: number; stream: string; data: string }>(
+          'cmd-output',
+          (event) => {
+            if (targetPid === 0) {
+              bufferedOutput.push({ pid: event.payload.pid, data: event.payload.data })
+            } else if (event.payload.pid === targetPid) {
+              allOutput.push(event.payload.data)
+              useBackgroundCommandStore.getState().appendOutput(cmdId, event.payload.data)
+            }
+          }
         )
 
-        const abortSignal = input._abortSignal as AbortSignal | undefined
-
-        const result = await new Promise<{ submitted: boolean; keys?: string[] }>((resolve) => {
-          let settled = false
-          const onAbort = () => {
-            if (settled) return
-            settled = true
-            useCredentialRequestStore.getState().cancel(requestId)
-            resolve({ submitted: false })
-          }
-          if (abortSignal) {
-            if (abortSignal.aborted) {
-              onAbort()
-              return
+        const unExit = await listen<{ pid: number; code: number }>(
+          'cmd-exit',
+          (event) => {
+            if (targetPid === 0) {
+              bufferedExit.push({ pid: event.payload.pid, code: event.payload.code })
+            } else if (event.payload.pid === targetPid && !finished) {
+              finished = true
+              if (timeoutTimer) clearTimeout(timeoutTimer) // Fix #6
+              unOutput(); unExit()
+              const code = event.payload.code
+              if (code === 0) {
+                useBackgroundCommandStore.getState().completeCommand(cmdId, code)
+              } else {
+                useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${code}`)
+              }
             }
-            abortSignal.addEventListener('abort', onAbort, { once: true })
           }
-          requestPromise.then((r) => {
-            if (settled) return
-            settled = true
-            resolve(r)
+        )
+
+        try {
+          const pid = await invoke<number>('run_streaming_command', { command: cmd, cwd })
+          targetPid = pid
+
+          // Fix #1: addCommand BEFORE flush — so store entry exists when
+          // buffered exit events are processed (avoids completeCommand no-op)
+          useBackgroundCommandStore.getState().addCommand({
+            id: cmdId,
+            command: cmd,
+            status: 'running',
+            pid,
+            exitCode: null,
+            output: '',
+            startedAt: Date.now(),
+            completedAt: null,
           })
-        })
 
-        if (result.submitted) {
-          chatStore.markCredentialRequestSubmitted(cardMessageId, result.keys ?? [])
-          const keysList = (result.keys ?? []).join(', ') || '(none)'
-          return `Credentials saved to .env for ${serviceName}: ${keysList}. Values are masked from the chat history. Continue with the implementation.`
+          // Flush buffered events (events emitted between spawn and PID assignment)
+          for (const ev of bufferedOutput) {
+            if (ev.pid === pid) {
+              allOutput.push(ev.data)
+              useBackgroundCommandStore.getState().appendOutput(cmdId, ev.data)
+            }
+          }
+          for (const ev of bufferedExit) {
+            if (ev.pid === pid && !finished) {
+              finished = true
+              if (timeoutTimer) clearTimeout(timeoutTimer)
+              unOutput(); unExit()
+              if (ev.code === 0) {
+                useBackgroundCommandStore.getState().completeCommand(cmdId, ev.code)
+              } else {
+                useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${ev.code}`)
+              }
+            }
+          }
+
+          // If command already exited during flush, return immediately
+          if (finished) {
+            const result = useBackgroundCommandStore.getState().getById(cmdId)
+            const exitInfo = result?.exitCode !== null ? ` (exit ${result?.exitCode})` : ''
+            return `Command completed immediately (PID: ${pid}, id: ${cmdId})${exitInfo}. Use check_background_commands to see results.`
+          }
+
+          const timeoutSecs = Math.min((input.timeout_secs as number) || 300, 600)
+          timeoutTimer = setTimeout(async () => {
+            if (!finished) {
+              finished = true
+              unOutput(); unExit()
+              try { await invoke('kill_process', { pid }) } catch { /* best effort */ }
+              useBackgroundCommandStore.getState().failCommand(cmdId, `Timed out after ${timeoutSecs}s`)
+            }
+          }, timeoutSecs * 1000)
+
+          // Setup abort listener — kills on agent stop
+          const callSignal = input._abortSignal as AbortSignal | undefined
+          if (callSignal) {
+            callSignal.addEventListener('abort', async () => {
+              if (!finished) {
+                finished = true
+                if (timeoutTimer) clearTimeout(timeoutTimer)
+                unOutput(); unExit()
+                try { await invoke('kill_process', { pid }) } catch { /* best effort */ }
+                useBackgroundCommandStore.getState().cancelCommand(cmdId)
+              }
+            }, { once: true })
+          }
+
+          return `Background command started (PID: ${pid}, id: ${cmdId}). Use check_background_commands to see results when ready.`
+        } catch (err) {
+          unOutput(); unExit()
+          const msg = err instanceof Error ? err.message : String(err)
+          return `Failed to start background command: ${msg}`
         }
-
-        chatStore.updateCardStatus(cardMessageId, 'cancelled')
-        return `User cancelled the credential request for ${serviceName}. Ask the user how they want to proceed without these credentials.`
-      },
+      }
     })
 
-    // === ask_user_question ===
-    this.tools.set('ask_user_question', {
+    // === check_background_commands ===
+    this.tools.set('check_background_commands', {
       definition: {
-        name: 'ask_user_question',
-        description: 'Ask the user structured questions to gather context or make decisions. Use when you need the user to choose between options, provide requirements, or confirm an approach. Renders an interactive form in the chat/terminal. The agent loop blocks until the user submits answers. Supports single-select (radio) and multi-select (checkbox) options. If you just need free-text input, use a single open-ended option like "Other".',
+        name: 'check_background_commands',
+        description: 'Check the status and output of background commands started with execute_command_background. Returns all running and recently completed commands with their output.',
         input_schema: {
           type: 'object',
           properties: {
-            questions: {
-              type: 'array',
-              description: 'The questions to ask the user (1-4 questions per call)',
-              items: {
-                type: 'object',
-                properties: {
-                  question: {
-                    type: 'string',
-                    description: 'The question to ask. Should be clear, specific, and end with a question mark.'
-                  },
-                  header: {
-                    type: 'string',
-                    description: 'Short label for the question (max 12 chars). Shown as a tag/chip.'
-                  },
-                  multiSelect: {
-                    type: 'boolean',
-                    description: 'Whether multiple options can be selected. Default: false (single-select).'
-                  },
-                  options: {
-                    type: 'array',
-                    description: 'The available options. Each has a label (display text, 1-5 words) and optional description (explanation of what this option means). Must have 2-4 options.',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        label: { type: 'string', description: 'Display text for the option (1-5 words)' },
-                        description: { type: 'string', description: 'Explanation of what this option means or implies' }
-                      },
-                      required: ['label']
-                    },
-                    minItems: 2,
-                    maxItems: 4
-                  }
-                },
-                required: ['question', 'header', 'options']
-              },
-              minItems: 1,
-              maxItems: 4
-            }
+            id: { type: 'string', description: 'Optional specific command ID to check. Omit to see all.' }
           },
-          required: ['questions']
+          required: []
         }
       },
       execute: async (input) => {
-        const questionsRaw = input.questions as Array<{
-          question: string
-          header: string
-          options: Array<{ label: string; description?: string }>
-          multiSelect?: boolean
-        }>
+        const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
+        const bgCmdStore = useBackgroundCommandStore.getState()
 
-        if (!questionsRaw || !Array.isArray(questionsRaw) || questionsRaw.length === 0) {
-          return 'Error: must provide at least one question.'
-        }
-        if (questionsRaw.length > 4) {
-          return 'Error: maximum 4 questions per call.'
+        const targetId = input.id as string | undefined
+
+        if (targetId) {
+          const cmd = bgCmdStore.getById(targetId)
+          if (!cmd) return `No background command found with id: ${targetId}`
+          return formatBackgroundCommandResult(cmd)
         }
 
-        for (const q of questionsRaw) {
-          if (!q.question || !q.header || !q.options || q.options.length < 2) {
-            return `Error: each question needs "question", "header" (max 12 chars), and 2-4 options.`
-          }
-          if (q.options.length > 4) {
-            return `Error: maximum 4 options per question. "${q.header}" has ${q.options.length}.`
-          }
+        const all = bgCmdStore.getAll()
+        if (all.length === 0) return 'No background commands running or recently completed.'
+
+        const lines: string[] = []
+        for (const cmd of all) {
+          lines.push(formatBackgroundCommandResult(cmd))
         }
 
-        const questions = questionsRaw.map(q => ({
-          question: q.question,
-          header: q.header,
-          options: q.options.map(o => ({ label: o.label, description: o.description })),
-          multiSelect: !!q.multiSelect,
-        }))
-
-        const { useAskUserQuestionStore } = await import('../../stores/askUserQuestionStore')
-
-        const projectRoot = this.getProjectRoot()
-        if (!projectRoot) return 'No active project — cannot ask questions. Open a project first.'
-
-        // Create store request (returns a promise)
-        const { id: requestId, promise: answerPromise } = useAskUserQuestionStore
-          .getState()
-          .request(questions)
-
-        // Add visual card to chat
-        const chatStore = useChatStore.getState()
-        const cardMessageId = chatStore.addAskUserQuestionCard(projectRoot, requestId, questions)
-
-        // Block on user answers (with abort support)
-        const abortSignal = input._abortSignal as AbortSignal | undefined
-
-        const result = await new Promise<Record<string, string | string[]>>((resolve) => {
-          let settled = false
-          const onAbort = () => {
-            if (settled) return
-            settled = true
-            useAskUserQuestionStore.getState().cancel(requestId)
-            resolve({})
-          }
-          if (abortSignal) {
-            if (abortSignal.aborted) {
-              onAbort()
-              return
-            }
-            abortSignal.addEventListener('abort', onAbort, { once: true })
-          }
-          answerPromise.then((r) => {
-            if (settled) return
-            settled = true
-            resolve(r)
-          })
-        })
-
-        // If empty, user cancelled
-        if (!result || Object.keys(result).length === 0) {
-          chatStore.updateCardStatus(cardMessageId, 'cancelled')
-          return 'User cancelled the questions. Continue with your best judgment.'
-        }
-
-        // Update card status
-        chatStore.updateCardStatus(cardMessageId, 'submitted')
-
-        // Format answers for the model
-        const answerLines = questionsRaw.map((q, i) => {
-          const key = `question_${i}`
-          const answer = result[key]
-          if (answer === undefined) return `${q.header}: (no answer)`
-          const display = Array.isArray(answer) ? answer.join(', ') : answer
-          return `${q.header}: ${display}`
-        })
-
-        return `User answered:\n${answerLines.join('\n')}\n\nContinue based on these answers.`
-      },
+        return lines.join('\n\n---\n\n')
+      }
     })
+
+    // === verify (adversarial verification sub-agent) ===
+
+
+
+
+
 
     this.tools.set('verify', {
       definition: {

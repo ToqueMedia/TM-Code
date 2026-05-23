@@ -563,11 +563,13 @@ export const CMD_MODE_COMMANDS: SlashCommand[] = [
     description: 'Dar nome à sessão: /save <nome>',
     enabled: true,
     execute: executeSave,
+    argHint: '[nome da sessão]',
   },
   {
     name: '/resume',
     description: 'Listar sessões — /resume <n> para carregar',
     enabled: true,
+    argHint: '[número ou ID da sessão]',
     execute: async (args: string, projectPath: string) => {
       const trimmed = args.trim()
       if (trimmed) {
@@ -582,6 +584,7 @@ export const CMD_MODE_COMMANDS: SlashCommand[] = [
     description: 'Instalar integração MCP do registo (ex: /mcp-install gamma)',
     enabled: true,
     execute: executeMcpInstall,
+    argHint: '[nome da integração MCP]',
   },
   {
     name: '/mcp-browse',

@@ -38,9 +38,48 @@ import { ToastContainer } from './components/ui/Toast';
 import UpdateBanner from './components/ui/UpdateBanner';
 import { t } from '@/i18n';
 import { tokens } from '@/theme/tokens';
+import { invoke } from '@tauri-apps/api/core';
 
+
+// Detect standalone editor windows opened via "Open With" from OS.
+// The URL looks like: index.html?standalone=<encoded-paths>
+const standaloneParam = new URLSearchParams(window.location.search).get('standalone')
+const STANDALONE_FILES: string[] = standaloneParam ? JSON.parse(decodeURIComponent(standaloneParam)) : []
+
+/** Lightweight app shell for standalone editor windows (no auth, no project, no sidebar). */
+function StandaloneEditorApp({ files }: { files: string[] }) {
+	useEffect(() => {
+		invoke('app_ready').catch(() => { /* not running under Tauri */ })
+	}, [])
+
+	return (
+		<Flex
+			w="100vw"
+			h="100vh"
+			direction="column"
+			bg={tokens.colors.bg.app}
+			overflow="hidden"
+		>
+			<FileViewer
+				filePath={files[0]}
+				onClose={() => {
+					import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+						getCurrentWindow().close().catch(() => {})
+					})
+				}}
+			/>
+		</Flex>
+	)
+}
 
 function App() {
+	// If this is a standalone editor window, skip all normal init and render only FileViewer
+	if (STANDALONE_FILES.length > 0) {
+		return (
+			<StandaloneEditorApp files={STANDALONE_FILES} />
+		)
+	}
+
 	const { currentProject, openProject, hasHydrated } = useProjectStore();
 	const { isAuthenticated, isLoading: authLoading, signupComplete } = useAuthStore();
 	const hasCompletedOnboarding = useSettingsStore(s => s.hasCompletedOnboarding);
@@ -185,12 +224,29 @@ function App() {
 				if (onlyFiles) {
 					// No openProject call. If there's already a project open, the
 					// files open inside it (same UX as drag-drop onto the editor
-					// pane). If not, track standalone files and show FileViewer —
-					// recents stays untouched.
+					// pane). If not, open a separate window — recents stays untouched.
 					const repo = useEditorRepository.getState()
 					for (const p of paths) repo.openFile(p)
 					if (!already) {
-						setStandaloneFiles(paths)
+						// Open a new standalone editor window
+						const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+						const fileParam = encodeURIComponent(JSON.stringify(paths))
+						const label = `editor-${Date.now()}`
+						new WebviewWindow(label, {
+							url: `index.html?standalone=${fileParam}`,
+							title: paths.length === 1
+								? paths[0].split(/[\/\\]/).pop() ?? 'Editor'
+								: `${paths.length} files`,
+							width: 960,
+							height: 720,
+							minWidth: 600,
+							minHeight: 400,
+							decorations: false,
+							transparent: true,
+							titleBarStyle: 'overlay',
+							hiddenTitle: true,
+						})
+						return
 					}
 					useLayoutStore.getState().setViewMode('editor')
 					return

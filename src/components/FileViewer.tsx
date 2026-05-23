@@ -133,7 +133,7 @@ function FileViewer({ filePath, onClose }: FileViewerProps) {
   }
 
   return (
-    <Flex flex="1" direction="column" bg={tokens.colors.bg.app} overflow="hidden">
+    <Flex h="100vh" direction="column" bg={tokens.colors.bg.app} overflow="hidden">
       {/* Title bar */}
       <Flex
         height="32px"

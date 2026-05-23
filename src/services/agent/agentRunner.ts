@@ -1,4 +1,5 @@
 import { invoke } from '@/utils/invokeMetrics'
+import { logger } from '@/utils/logger'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, markReasoningBoundary, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -135,6 +136,7 @@ async function runAgentInternal(
       userMessageAttachments,
       userMessageBlocks,
     )
+    logger.info('agent', `→ User message sent (${(userMessageText || prompt).length} chars)`)
   }
 
   // Reset the per-request token counter at the START of each new request so
@@ -159,6 +161,7 @@ async function runAgentInternal(
   // 'awaiting_response': prompt is about to be sent; nothing has streamed yet.
   // Flips to 'reasoning' or 'generating' once the first delta lands.
   agentStore.setStatus('awaiting_response')
+  logger.info('agent', '⟳ Status: awaiting_response')
 
   // Refresh MCP tools before building prompt (handles mid-session server changes)
   const mcpService = MCPService.getInstance()
@@ -172,12 +175,14 @@ async function runAgentInternal(
       ),
     )
     AgentService.getInstance().refreshTools()
+    logger.info('agent', `→ MCP tools: ${mcpTools.length} tools registered`)
   }
 
   // Enable CLI mode on the executor — direct disk writes, CWD-scoped path validation.
   // Always paired with disableCmdMode() in the finally block below.
   if (cmdOnlyMode && cmdCwd) {
     toolExecutor.enableCmdMode(cmdCwd)
+    logger.info('agent', `→ CMD mode enabled: ${cmdCwd}`)
   }
 
   // Build system prompt with MCP tool info
@@ -190,6 +195,8 @@ async function runAgentInternal(
   const coreToolCount = toolExecutor.getCoreToolCount()
 
   let systemPrompt: string
+  logger.info('agent', '→ Building system prompt...')
+  const promptBuildStart = Date.now()
   if (systemPromptOverride) {
     systemPrompt = systemPromptOverride
   } else if (cmdOnlyMode && cmdCwd) {
@@ -206,13 +213,16 @@ async function runAgentInternal(
     // CRITICAL rules at turn 1.
     systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText)
   }
+  logger.info('agent', `✓ System prompt built (${systemPrompt.length} chars, ${Date.now() - promptBuildStart}ms)`)
 
   // Get conversation history
   const rawHistory = useConversationHistory
     ? useChatStore.getState().conversationHistory
     : []
+  logger.info('agent', `→ Conversation history: ${rawHistory.length} messages`)
 
   agentService.setSystemPrompt(systemPrompt)
+  logger.info('agent', '→ System prompt set on agent service')
 
   // ── Build user content (text-only or multimodal) ──
   // Same split as usePromptBar: paid plans send real image_url content parts,
@@ -230,6 +240,10 @@ async function runAgentInternal(
   let userContent: string | OpenAIContentPart[] = prompt
 
   if (hasAnyAttachments && userMessageBlocks) {
+    const imageCount = userMessageAttachments?.filter(a => a.type === 'image').length ?? 0
+    const fileCount = (userMessageAttachments?.length ?? 0) - imageCount
+    logger.info('agent', `→ Processing attachments (${imageCount} images, ${fileCount} files)...`)
+    const attachStart = Date.now()
     const promptResolvers = {
       resolveMentions: extractAndResolveMentions,
       resolveAttachmentXml: resolveAttachments,
@@ -247,6 +261,7 @@ async function runAgentInternal(
     if (typeof userContent === 'string') {
       userContent = await buildAugmentedPrompt(userMessageBlocks, projectPath, promptResolvers)
     }
+    logger.info('agent', `✓ Content parts built (${Date.now() - attachStart}ms)`)
   }
 
   const history = supportsMultimodal
@@ -256,6 +271,11 @@ async function runAgentInternal(
   // Guard against double-finalization (onDone and onError can't both finalize)
   let finalized = false
 
+  const loopStartTime = Date.now()
+  let firstTextReceived = false
+  let firstReasoningReceived = false
+  logger.info('agent', '→ Agent loop starting...')
+
   try {
     await agentService.runAgentLoop(userContent, history, {
       onTextDelta: (delta) => {
@@ -263,11 +283,19 @@ async function runAgentInternal(
         // in flight would otherwise flip the status back to a busy state and
         // strand "A pensar..." in the title bar / status indicators.
         if (agentService.isAborted()) return
+        if (!firstTextReceived) {
+          firstTextReceived = true
+          logger.info('agent', `✓ First text delta received (${Date.now() - loopStartTime}ms into loop)`)
+        }
         agentStore.setStatus('generating')
         appendTextDeltaBuffered(delta)
       },
       onReasoningDelta: (delta) => {
         if (agentService.isAborted()) return
+        if (!firstReasoningReceived) {
+          firstReasoningReceived = true
+          logger.info('agent', `✓ Reasoning started (${Date.now() - loopStartTime}ms into loop)`)
+        }
         agentStore.setStatus('reasoning')
         appendReasoningDeltaBuffered(delta)
       },
@@ -283,21 +311,27 @@ async function runAgentInternal(
       },
       onToolCallPending: (toolId, toolName) => {
         if (agentService.isAborted()) return
+        logger.info('agent', `→ Tool call pending: ${toolName} (id: ${toolId})`)
         flushBufferedDeltas()
         agentStore.setStatus('applying')
         useChatStore.getState().addPendingToolCall(toolId, toolName)
       },
-      onToolCallStart: (toolId, _toolName, args) => {
+      onToolCallStart: (toolId, toolName, args) => {
         if (agentService.isAborted()) return
+        const argsPreview = JSON.stringify(args).slice(0, 80)
+        logger.info('agent', `→ Executing: ${toolName}(${argsPreview}...)`)
         useChatStore.getState().updateToolCallWithArgs(toolId, args)
       },
-      onToolResult: (toolId, _toolName, result, isError) => {
+      onToolResult: (toolId, toolName, result, isError) => {
         if (agentService.isAborted()) return
+        const resultLen = typeof result === 'string' ? result.length : JSON.stringify(result).length
+        logger.info('agent', `✓ ${toolName} completed (${resultLen} chars${isError ? ', ERROR' : ''})`)
         useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
         // Tool finished — we are now waiting for the model's next response.
         agentStore.setStatus('awaiting_response')
       },
       onTurnComplete: () => {
+        logger.info('agent', '✓ Turn complete')
         useChatStore.getState().incrementTurnCount()
       },
       onDone: () => {
@@ -307,6 +341,7 @@ async function runAgentInternal(
           useChatStore.getState().finalizeAssistantMessage()
         }
         agentStore.setStatus('idle')
+        logger.info('agent', `✓ Agent done (total: ${Date.now() - loopStartTime}ms)`)
         useProblemsStore.getState().scanProject().catch(() => {})
       },
       onError: (error) => {
@@ -314,20 +349,24 @@ async function runAgentInternal(
         resolveAllPendingDiffApprovals(false)
         agentStore.setStatus('error')
         agentStore.setError(error.message)
+        logger.info('agent', `✗ Agent error: ${error.message}`)
         if (!finalized) {
           finalized = true
           useChatStore.getState().finalizeAssistantMessage()
         }
       },
       onUsageUpdate: (inputTokens, outputTokens) => {
+        logger.info('agent', `→ Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out`)
         useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
       },
       onContextCompression: (beforeTokens, signal) => {
         if (signal === 0) {
           // Compression starting
+          logger.info('agent', `⟳ Context compression starting (current: ${beforeTokens} tokens)...`)
           agentStore.setStatus('compressing')
         } else if (signal === -1) {
           // Compression complete — insert compact boundary marker
+          logger.info('agent', '✓ Context compression complete')
           agentStore.setStatus('awaiting_response')
           useChatStore.getState().addCompactBoundaryMessage(beforeTokens)
         }

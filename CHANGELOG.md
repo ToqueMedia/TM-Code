@@ -5,9 +5,43 @@ All notable changes to TM Code are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.6] — 2026-05-23
 
-_No unreleased changes._
+**Your agent now works while it waits.** Background command execution lets the agent install dependencies, build, and compile without blocking — it writes your project files in parallel and checks results when ready. The welcome screen got a visual upgrade, the terminal mode is smarter about project compatibility, and the agent itself is leaner and more reliable.
+
+### Added
+
+- **Background command execution.** The agent can now run long commands (`npm install`, `npm run build`, `tsc --noEmit`) in the background without blocking your conversation. It starts the command, continues writing your project files in parallel, and checks the results when ready. Scaffolding a new project is roughly twice as fast — the agent writes all source files while dependencies install. Max 6 concurrent background commands, with automatic cleanup and timeout protection (up to 10 minutes per command). Status bar shows running, completed, and errored commands in both Chat and Terminal modes.
+
+- **Project compatibility detection.** When you open a project, the agent now evaluates whether it's fully compatible with the Chat-mode live preview and deploy pipeline. Non-JS projects (Go, Python, Rust), frameworks without deploy support (Next.js, Nuxt, Angular), backend-only projects (Express, Fastify, NestJS), and projects missing a dev script all get a clear, actionable compatibility note — with options to adapt the project or switch to Terminal mode. Compatible projects (React+Vite, Vue+Vite, Svelte+Vite, Astro) see nothing — zero noise when everything works.
+
+- **Standalone editor windows.** Double-click a file in your OS file manager and it opens in a standalone TM Code editor window — no project sidebar, no chat, just the file. Works on macOS ("Open With"), Windows ("Open with"), and Linux. Supports `.ts`, `.tsx`, `.js`, `.jsx`, `.json`, `.md`, `.css`, `.html`, `.py`, `.go`, `.rs`, `.toml`, `.yaml`, and more.
+
+- **Terminal plan approval cards.** The `/plan` command now renders a full approval card directly in Terminal mode — diff preview, file list, and approve/reject buttons — instead of falling back to a plain text prompt.
+
+### Changed
+
+- **Welcome screen redesign.** The welcome hero uses motion-driven animations, cleaner layout, and better visual hierarchy. The sidebar was simplified — action buttons moved into the hero as two large mode cards (Chat and Terminal).
+
+- **Ask-user-question always has a free-text option.** The `ask_user_question` tool now always shows an "Other" option with a free-text input field, regardless of whether the model requested it. The `allowOther` field was removed from the tool schema — the UI always renders it. This eliminates the common scenario where the model's predefined options didn't cover the user's answer.
+
+- **Terminal mode status bar.** The bottom status bar in Terminal mode now shows background command counts (running, completed, errored) alongside auto-approve, queue, skills, MCP, and dev server status.
+
+- **Agent internals — SOLID refactor.** The tool executor was refactored from a single 4,400-line file into focused domain modules (context, interaction, memory, provision, task). 80 regression tests ensure the refactor introduced no behaviour changes. The agent is now easier to maintain and extend.
+
+### Fixed
+
+- **Agent blocks on `npm install` during scaffolding.** The agent would wait 15–60 seconds for `npm install` to finish before writing any project files. Now it installs in the background and writes files in parallel, cutting total scaffolding time roughly in half.
+
+- **No warning when project is incompatible with preview.** Opening a Go, Python, or Rust project in Chat mode would silently fail to show a preview — the agent wouldn't explain why. Now the agent detects the project type and explains the limitations, with concrete options to proceed.
+
+- **Closed-loop contradiction for background commands.** The agent was told to "STOP and fix" after every command exit, which contradicted the background install pattern. Blocking commands still require immediate attention; background commands now have explicit permission to continue working while the command runs.
+
+- **Background command race condition.** Commands that exited before the store entry was created (e.g. very fast `echo` or `ls`) would get stuck as "running" forever. The store entry is now created before the event buffer is flushed, so fast exits are correctly captured.
+
+- **Background command results lost after GC.** Completed commands were garbage-collected immediately, making their output unavailable for diagnosis. The GC now keeps the 5 most recent results regardless of status.
+
+- **Errors hidden in background command status.** The status bar showed "cmds: 2 done" even when one had errored. Now it shows "cmds: 1 done, 1 errored" — errors are never silently absorbed.
 
 ## [0.6.2] — 2026-05-16
 

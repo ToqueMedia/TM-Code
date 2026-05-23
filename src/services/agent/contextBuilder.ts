@@ -60,6 +60,7 @@ import {
   getActivePlanSection,
   getAppliedScaffoldingSection,
   getBackgroundAgentsSection,
+  getBackgroundCommandsSection,
   getClosedLoopSection,
   getCompletionContractSection,
   getConstraintsSection,
@@ -72,6 +73,7 @@ import {
   getMemoryToolsGuidanceSection,
   getModelSpecificSection,
   getPendingMemoryProposalsSection,
+  getPreviewCompatibilitySection,
   getProjectMemorySection,
   getProjectStructureSection,
   getReadmeSection,
@@ -440,6 +442,7 @@ class ContextBuilder {
     // can stay synchronous below — the wrapper exists to enforce a
     // declarative `(name, body, reason)` shape, not to host the async I/O.
     const bgAgentsSection = await getBackgroundAgentsSection()
+    const bgCommandsSection = await getBackgroundCommandsSection()
 
     const sections = [
       // ── Static block (cacheable cross-session) ──────────────────
@@ -487,10 +490,14 @@ class ContextBuilder {
         'MCP server list changes when developer connects/disconnects servers'),
       dynamicSection('background_agents', () => bgAgentsSection,
         'in-flight background agent list changes per turn'),
+      dynamicSection('background_commands', () => bgCommandsSection,
+        'running/completed background shell commands'),
       dynamicSection('template_context', () => getTemplateContextSection(ctx),
         '.toquemedia-template manifest changes when scaffold is re-run'),
       dynamicSection('environment', () => getEnvironmentSection(ctx),
         'project path / package manager / language detected per session'),
+      dynamicSection('preview_compatibility', () => getPreviewCompatibilitySection(ctx),
+        'framework/deploy compatibility detected per project — null for compatible projects'),
       dynamicSection('dev_server_status', () => getDevServerStatusSection(),
         'dev server status flips null→starting→running→stopped per session'),
       dynamicSection('applied_scaffolding', () => getAppliedScaffoldingSection(ctx),

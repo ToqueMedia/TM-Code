@@ -4,28 +4,18 @@ import { FiZap, FiCheck, FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { getDeviceFingerprint } from '@/services/auth/deviceFingerprint'
-import { useBillingStore, type MeResponse } from '@/stores/billingStore'
+import { useBillingStore } from '@/stores/billingStore'
+import { useAuthStore } from '@/stores/authStore'
 import { tauriFetch } from '@/services/tauriFetch'
 import { resolveWorkerUrl } from '@/utils/devUrls'
-import FirebaseAuthService, { getAppCheckHeader } from '@/services/auth/firebaseAuth'
+import FirebaseAuthService, { getAppCheckHeader, db, COLLECTIONS } from '@/services/auth/firebaseAuth'
+import { doc, getDoc } from 'firebase/firestore'
 
 const EXPIRY_DATE = new Date('2026-05-28T23:59:59Z')
 const DISMISS_KEY = 'tm-welcome-plan-dismissed-v2'
 const ACTIVATED_KEY = 'tm-welcome-plan-activated'
 
-// Simulated MeResponse for when the backend endpoint is not yet deployed (404).
-const WELCOME_PLAN_RESPONSE: MeResponse = {
-  plan: 'welcome',
-  isActive: true,
-  billing: {
-    consumedPct: 0,
-    tokensConsumed: 0,
-    tokenBudget: 32_500_000,
-    cycleEnd: '2026-05-28',
-    extraUsageBalance: 0,
-    status: 'allowed',
-  },
-}
+
 
 function isExpired(): boolean {
   return new Date() > EXPIRY_DATE
@@ -39,23 +29,6 @@ function dismiss(): void {
   try { sessionStorage.setItem(DISMISS_KEY, '1') } catch { /* ignore */ }
 }
 
-/** Minimal runtime guard */
-function isValidMeResponse(data: unknown): data is MeResponse {
-  if (typeof data !== 'object' || data === null) return false
-  const d = data as Record<string, unknown>
-  if (typeof d.plan !== 'string') return false
-  if (typeof d.isActive !== 'boolean') return false
-  if (typeof d.billing !== 'object' || d.billing === null) return false
-  const b = d.billing as Record<string, unknown>
-  return (
-    typeof b.consumedPct === 'number' &&
-    typeof b.tokensConsumed === 'number' &&
-    typeof b.tokenBudget === 'number' &&
-    typeof b.cycleEnd === 'string' &&
-    typeof b.status === 'string'
-  )
-}
-
 function WelcomePlanBanner() {
   const [visible, setVisible] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
@@ -64,24 +37,54 @@ function WelcomePlanBanner() {
   const [activated, setActivated] = useState(false)
   const plan = useBillingStore(s => s.plan)
   const isLoaded = useBillingStore(s => s.isLoaded)
-  const updateFromMe = useBillingStore(s => s.updateFromMe)
   const hasShown = useRef(false)
+  // Caches the Firestore claim check from useEffect to avoid a second
+  // read in handleActivate (Bug 6). Values: null = not checked,
+  // true = already claimed/expired, false = safe to activate.
+  const claimedInFirestore = useRef<boolean | null>(null)
 
   useEffect(() => {
-    if (hasShown.current) return
+    // Synchronous guards run on EVERY effect trigger — they respond to
+    // state changes (plan upgrade, expiry, dismiss) that can happen
+    // after the banner is already visible.
     if (!isLoaded) return
-    if (isExpired()) return
-    if (isDismissed()) return
-    if (plan !== 'explorer') return
-    // Don't show again if the welcome plan was already activated in this session
-    // (prevents reappear when fetchBillingInfo briefly returns 'explorer' before
-    // the Firestore write propagates).
+    if (isExpired()) { setVisible(false); return }
+    if (isDismissed()) { setVisible(false); return }
+    if (plan !== 'explorer') { setVisible(false); return }
     try {
-      if (sessionStorage.getItem(ACTIVATED_KEY) === '1') return
+      if (sessionStorage.getItem(ACTIVATED_KEY) === '1') { setVisible(false); return }
     } catch { /* ignore */ }
 
-    hasShown.current = true
-    setVisible(true)
+    // hasShown only gates the async Firestore check — not the guards above.
+    if (hasShown.current) return
+
+    // Verify welcomePlanClaimed/welcomePlanExpired in Firestore — prevents
+    // re-activation when userPlan was manually reset to 'explorer' in
+    // Firestore without clearing the claim flag.
+    hasShown.current = true  // Block re-entries before async resolves
+    const checkFirestoreClaim = async () => {
+      try {
+        const user = useAuthStore.getState().user
+        if (!user?.uid) return
+        const snap = await getDoc(doc(db(), COLLECTIONS.USERS, user.uid))
+        if (!snap.exists()) {
+          claimedInFirestore.current = false
+          setVisible(true)
+          return
+        }
+        const data = snap.data() as Record<string, unknown>
+        if (data.welcomePlanClaimed === true || data.welcomePlanExpired === true) {
+          claimedInFirestore.current = true
+          return
+        }
+        claimedInFirestore.current = false
+      } catch {
+        // Firestore read failed — fall through to showing (fail open)
+        claimedInFirestore.current = false
+      }
+      setVisible(true)
+    }
+    checkFirestoreClaim()
   }, [isLoaded, plan])
 
   const requestClose = useCallback(() => {
@@ -123,23 +126,51 @@ function WelcomePlanBanner() {
         body: JSON.stringify({ fingerprint }),
       })
 
-      if (res.ok) {
-        const data: unknown = await res.json()
-        if (isValidMeResponse(data)) {
-          updateFromMe(data)
-        } else {
-          updateFromMe(WELCOME_PLAN_RESPONSE)
+      // Bug 5 fix: re-verify welcomePlanClaimed before ANY activation path.
+      // The endpoint (200) may not check this flag; the useEffect cache
+      // may be stale if the user acted in another window. Use the cached
+      // result when available (Bug 6), falling back to a live read.
+      if (claimedInFirestore.current === null) {
+        // Cache miss — read Firestore now
+        const user = useAuthStore.getState().user
+        if (user?.uid) {
+          const snap = await getDoc(doc(db(), COLLECTIONS.USERS, user.uid))
+          if (snap.exists()) {
+            const userData = snap.data() as Record<string, unknown>
+            claimedInFirestore.current =
+              userData.welcomePlanClaimed === true || userData.welcomePlanExpired === true
+          }
         }
-        authService.claimWelcomePlan(fingerprint)
-        setActivated(true)
-        try { sessionStorage.setItem(ACTIVATED_KEY, '1') } catch { /* ignore */ }
-        setTimeout(() => setVisible(false), 1800)
-      } else if (res.status === 404) {
-        updateFromMe(WELCOME_PLAN_RESPONSE)
-        authService.claimWelcomePlan(fingerprint)
-        setActivated(true)
-        try { sessionStorage.setItem(ACTIVATED_KEY, '1') } catch { /* ignore */ }
-        setTimeout(() => setVisible(false), 1800)
+      }
+      if (claimedInFirestore.current === true) {
+        setVisible(false)
+        return
+      }
+
+      // Unified activation flow — all paths write to Firestore first,
+      // then re-sync from /v1/me. This ensures IDE/Web/Backend always
+      // agree on the plan state. No optimistic local updates.
+      const shouldActivate = res.ok || res.status === 404
+
+      if (shouldActivate) {
+        // 1. Write to Firestore
+        await authService.claimWelcomePlan(fingerprint)
+        claimedInFirestore.current = true
+
+        // 2. Re-sync from authoritative backend (/v1/me reads Firestore)
+        await authService.fetchBillingInfo()
+
+        // 3. Confirm the backend agrees
+        const confirmedPlan = useBillingStore.getState().plan
+        if (confirmedPlan === 'welcome') {
+          setActivated(true)
+          try { sessionStorage.setItem(ACTIVATED_KEY, '1') } catch { /* ignore */ }
+          setTimeout(() => setVisible(false), 1800)
+        } else {
+          // Backend still returns 'explorer' — Firestore propagation lag.
+          // Keep the banner visible so the user can retry.
+          setError(t('welcomePlan.error'))
+        }
       } else if (res.status === 409) {
         setVisible(false)
       } else {
@@ -150,7 +181,7 @@ function WelcomePlanBanner() {
     } finally {
       setActivating(false)
     }
-  }, [updateFromMe])
+  }, [])
 
   if (!visible) return null
 
