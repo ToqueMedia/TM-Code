@@ -14,6 +14,7 @@ import {
   UPDATE_TASKS, CHECK_BACKGROUND_AGENTS,
   WEB_SEARCH, WEB_FETCH, RESEARCH,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
+  ASK_USER_QUESTION,
 } from './toolNames'
 
 // Tools the architect agent is allowed to call while planMode is on.
@@ -28,6 +29,8 @@ export const PLAN_MODE_ALLOWED_TOOLS: ReadonlySet<string> = new Set<string>([
   WEB_SEARCH, WEB_FETCH, RESEARCH,
   // Writing the deliverable. Path-restricted to PLAN.md / TODO.md below.
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
+  // Structured clarifying questions — blocks the agent loop until the developer answers
+  ASK_USER_QUESTION,
 ])
 
 // Files the architect is allowed to mutate, identified by basename. The
@@ -77,7 +80,7 @@ export function checkPlanModeAccess(
   if (!PLAN_MODE_ALLOWED_TOOLS.has(toolName)) {
     const allowedList = [
       READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES, GET_DIAGNOSTICS, READ_SKILL,
-      UPDATE_TASKS, WEB_SEARCH, WEB_FETCH,
+      UPDATE_TASKS, WEB_SEARCH, WEB_FETCH, ASK_USER_QUESTION,
     ].join(', ')
     return `Blocked in /plan architect mode: ${toolName} is an implementation tool. Document what this step would do in PLAN.md's Implementation Phases section — the coding agent will run it after the user approves the plan. Allowed in this mode: ${allowedList}, ${WRITE_FILE}/${CREATE_FILE}/${EDIT_FILE} (PLAN.md or TODO.md only).`
   }

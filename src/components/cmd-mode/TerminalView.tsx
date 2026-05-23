@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
+import { useAgentStore } from '../../stores/agentStore'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
@@ -68,6 +69,37 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   useEffect(() => {
     if (!activeSessionId) useChatStore.getState().createSession(projectPath)
   }, [activeSessionId, projectPath])
+
+  // Hydrate per-project state. Terminal Mode bypasses projectStore.openProject
+  // (it invokes Rust open_project directly), so we must clear stale state from
+  // the previous project and load the new project's data here — same logic as
+  // projectStore.openProject lines ~300-329.
+  useEffect(() => {
+    if (!projectPath) return
+    let cancelled = false
+
+    // Tasks — clear cross-project leak, hydrate new project's tasks.json.
+    const { clearTasks, setTasks } = useAgentStore.getState()
+    clearTasks()
+    import('../../services/agent/taskPersistence').then(({ loadTasksFromDisk }) =>
+      loadTasksFromDisk(projectPath)
+        .then(tasks => { if (!cancelled) setTasks(tasks) })
+        .catch(() => { /* non-critical — empty tracker is fine */ }),
+    )
+
+    // Permissions — clear stale trust grants, hydrate new project's
+    // permissions.json. Without this, scopes approved in Project A leak
+    // into Project B (auto-approved tools without user consent).
+    import('../../stores/permissionStore').then(({ hydrateApprovedScopes }) =>
+      import('../../services/agent/permissionPersistence').then(({ loadPermissionsFromDisk }) =>
+        loadPermissionsFromDisk(projectPath)
+          .then(scopes => { if (!cancelled) hydrateApprovedScopes(scopes, projectPath) })
+          .catch(() => { /* non-critical — empty grants means re-prompt */ }),
+      ),
+    )
+
+    return () => { cancelled = true }
+  }, [projectPath])
 
   // Notify backend of project path exactly once per path.
   useEffect(() => {

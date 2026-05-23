@@ -180,6 +180,7 @@ class FirebaseAuthService {
   private currentUser: User | null = null
   private unsubscribeAuth: (() => void) | null = null
   private unsubscribeUserDoc: (() => void) | null = null
+  private unsubscribeSubscription: (() => void) | null = null
   private lastBillingFetchMs = 0
   private authGeneration = 0
   /** Tracks the uid for which device registration was last attempted.
@@ -209,6 +210,7 @@ class FirebaseAuthService {
         this.lastBillingFetchMs = 0 // allow immediate fetch on next login
         this.lastRegisteredUid = null // allow re-registration on next login
         this.unsubscribeUserDocListener()
+        this.unsubscribeSubscriptionDocListener()
         return
       }
 
@@ -276,6 +278,13 @@ class FirebaseAuthService {
       // window-focus, network reconnect, or chat turn.
       this.subscribeToUserDoc(user.uid)
 
+      // Real-time listener for subscription document (TTL delete detection).
+      // Mirrors toquemedia-studio AuthContext:257-298 — when the subscription
+      // doc is deleted by Firestore TTL or manual cleanup, this detects it
+      // immediately (<1s) instead of waiting for the onSubscriptionExpired
+      // Cloud Function to write userPlan='explorer' to the user doc (1-3s).
+      this.subscribeToSubscriptionDoc(user.uid)
+
       // Register device fingerprint for anti-abuse tracking (fire-and-forget).
       // Skip if already registered for this uid (prevents redundant calls on
       // token refresh which fires ~every 50min).
@@ -316,6 +325,55 @@ class FirebaseAuthService {
         console.warn('[billing] user-doc listener error:', err)
       }
     )
+  }
+
+  /**
+   * Attach an onSnapshot listener to subscriptions/{uid}. Detects TTL
+   * delete immediately — the onSubscriptionExpired Cloud Function then
+   * writes userPlan='explorer' to the user doc, which the other listener
+   * picks up. This listener provides <1s latency (vs 1-3s via the
+   * Cloud Function path) so the IDE matches the Web's detection speed.
+   */
+  private subscribeToSubscriptionDoc(uid: string): void {
+    this.unsubscribeSubscriptionDocListener()
+
+    let firstSnapshot = true
+    const expectedGen = this.authGeneration
+    this.unsubscribeSubscription = onSnapshot(
+      doc(getFirebaseDb(), 'subscriptions', uid),
+      (snap) => {
+        if (expectedGen !== this.authGeneration) return
+        if (firstSnapshot) { firstSnapshot = false; return }
+        if (snap.exists()) return // doc exists (active/pending) — no action
+        // Subscription doc deleted (TTL or manual) → refetch from /v1/me.
+        // The Cloud Function onSubscriptionExpired will write userPlan='explorer'
+        // to the user doc, but we trigger a refetch now so the billingStore
+        // updates as soon as the Cloud Function completes (instead of waiting
+        // for the user-doc listener to pick it up).
+        //
+        // If fetchBillingInfo fails (network, 401, 5xx), fall back to a
+        // direct billingStore downgrade so the IDE doesn't stay on the old
+        // plan while the Web already downgraded.
+        this.lastBillingFetchMs = Date.now()
+        this.fetchBillingInfo(expectedGen).catch(() => {
+          if (expectedGen !== this.authGeneration) return
+          const store = useBillingStore.getState()
+          if (store.plan !== 'explorer') {
+            store.reset()
+          }
+        })
+      },
+      (err) => {
+        console.warn('[billing] subscription-doc listener error:', err)
+      }
+    )
+  }
+
+  private unsubscribeSubscriptionDocListener(): void {
+    if (this.unsubscribeSubscription) {
+      this.unsubscribeSubscription()
+      this.unsubscribeSubscription = null
+    }
   }
 
   private unsubscribeUserDocListener(): void {
@@ -361,6 +419,7 @@ class FirebaseAuthService {
       this.unsubscribeAuth = null
     }
     this.unsubscribeUserDocListener()
+    this.unsubscribeSubscriptionDocListener()
   }
 
   private async loadProfile(uid: string) {
@@ -610,18 +669,19 @@ class FirebaseAuthService {
    * on subsequent app launches — even if the activation endpoint is not
    * yet deployed.
    *
-   * Fire-and-forget: a failed write should never block the UI.
+   * Returns a promise so callers can await it before triggering a
+   * billing re-sync, ensuring IDE/Web/Backend stay in sync.
    */
-  claimWelcomePlan(fingerprint: string): void {
-    if (!this.currentUser) return
-    this.syncProfile(this.currentUser.uid, {
+  async claimWelcomePlan(fingerprint: string): Promise<void> {
+    if (!this.currentUser) throw new Error('Not authenticated — cannot claim welcome plan')
+    await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, this.currentUser.uid), {
       userPlan: 'welcome',
       welcomePlanClaimed: true,
       welcomePlanFingerprint: fingerprint,
       welcomePlanClaimedAt: Timestamp.now(),
       welcomePlanExpiresAt: '2026-05-28',
       updatedAt: Timestamp.now(),
-    })
+    }, { merge: true })
   }
 
   /**

@@ -11,8 +11,9 @@ import { t } from '@/i18n'
  * Two layouts depending on risk:
  *  - **Dangerous** (dangerous_command): only [Sim] [Nao] — no bulk actions.
  *  - **Normal** (sensitive_file, browser_action, null):
- *    [Sim] [Sim para todos] [Nao] [Nao para todos] — "Nao" toggles an
- *    optional reason textarea so the user can explain their decision.
+ *    [Sim] [Sim para todos] [Nao] [Nao para todos] [Justificar] —
+ *    "Justificar" opens a textarea so the user can explain their denial;
+ *    "Nao" is a simple deny without explanation.
  */
 export default function PermissionDialog() {
   const pending = usePermissionStore(s => s.pendingPermission)
@@ -241,21 +242,23 @@ export default function PermissionDialog() {
         {/* Non-dangerous: full set of buttons */}
         {!isDangerous && (
           <>
-            {/* "Nao para todos" */}
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={() => denyAll()}
-              color={tokens.colors.text.muted}
-              fontSize="11px"
-              h="28px"
-              px={2}
-              _hover={{ color: tokens.colors.text.secondary, bg: 'transparent' }}
-            >
-              {t('perm.denyAll')}
-            </Button>
+            {/* "Nao para todos" — hidden when textarea is open */}
+            {!showReason && (
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => denyAll()}
+                color={tokens.colors.text.muted}
+                fontSize="11px"
+                h="28px"
+                px={2}
+                _hover={{ color: tokens.colors.text.secondary, bg: 'transparent' }}
+              >
+                {t('perm.denyAll')}
+              </Button>
+            )}
 
-            {/* "Nao" — first click shows reason textarea, second click confirms */}
+            {/* "Justificar" / "Enviar" — opens textarea, then submits */}
             <Button
               size="xs"
               variant="outline"
@@ -266,15 +269,32 @@ export default function PermissionDialog() {
                   setShowReason(true)
                 }
               }}
-              color={tokens.colors.accent.red}
-              borderColor="rgba(248,81,73,0.3)"
+              color={tokens.colors.accent.purple}
+              borderColor="rgba(163,113,247,0.3)"
               fontSize="11px"
               h="28px"
               px={3}
-              _hover={{ bg: 'rgba(248,81,73,0.1)', borderColor: 'rgba(248,81,73,0.5)' }}
+              _hover={{ bg: 'rgba(163,113,247,0.1)', borderColor: 'rgba(163,113,247,0.5)' }}
             >
-              {t('perm.deny')}
+              {showReason ? t('perm.send') : t('perm.justify')}
             </Button>
+
+            {/* "Nao" — simple deny, hidden when textarea is open */}
+            {!showReason && (
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => deny()}
+                color={tokens.colors.accent.red}
+                borderColor="rgba(248,81,73,0.3)"
+                fontSize="11px"
+                h="28px"
+                px={3}
+                _hover={{ bg: 'rgba(248,81,73,0.1)', borderColor: 'rgba(248,81,73,0.5)' }}
+              >
+                {t('perm.deny')}
+              </Button>
+            )}
 
             {/* "Sim" */}
             <Button

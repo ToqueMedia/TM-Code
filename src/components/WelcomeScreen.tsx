@@ -133,10 +133,6 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         <WelcomeSidebar
           recentProjects={recentProjects}
           cmdModeProjectPaths={cmdModeProjectPaths}
-          onNewProject={handleNewProject}
-          onOpenFolder={handleOpenFolder}
-          onCloneRepository={() => cloneDialog.setOpen(true)}
-          onCmdMode={handleCmdMode}
           onOpenCmdProject={setCmdModeProjectPath}
           onOpenCmdProjectAsIde={(path) => { removeCmdModePath(path); onOpenProject(path) }}
           onOpenProject={onOpenProject}

@@ -13,6 +13,7 @@ import {
   READ_SKILL, WRITE_FILE, EDIT_FILE, CREATE_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
   PROVISION_AUTH, REQUEST_CREDENTIALS, UPDATE_TASKS,
+  ASK_USER_QUESTION,
 } from '../toolNames'
 
 async function fileExists(path: string): Promise<boolean> {
@@ -554,7 +555,7 @@ After step 4, do NOT call any more tools — the executor enforces this. Begin i
 function getAllowedToolsSection(): string {
   return `# Allowed tools
 
-For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${GET_DIAGNOSTICS}\`, \`${READ_SKILL}\`. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
+For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${GET_DIAGNOSTICS}\`, \`${READ_SKILL}\`. For structured clarifying questions: \`${ASK_USER_QUESTION}\` — see "Clarifying questions" below. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
 
 You MUST NOT call: \`${PROVISION_AUTH}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
 }
@@ -584,7 +585,9 @@ You DO NOT:
 - Wait for the developer to type "yes" — the card answers for them.
 - Continue calling tools after the chat summary — the next phase runs in a fresh turn after card approval.
 
-Asking for verbal approval is the same failure mode as outputting the plan in chat: the developer sees a question with no card, replies in chat, the system has no PLAN.md to approve, the run dies.`
+Asking for verbal approval is the same failure mode as outputting the plan in chat: the developer sees a question with no card, replies in chat, the system has no PLAN.md to approve, the run dies.
+
+**Note:** \`${ASK_USER_QUESTION}\` is for pre-plan clarifying questions (stack choice, auth provider, etc.) — it renders an interactive form and blocks your turn until the developer answers. This is NOT the same as asking for verbal plan approval. Use \`${ASK_USER_QUESTION}\` BEFORE writing PLAN.md when requirements are ambiguous; use the approval card AFTER PLAN.md is complete.`
 }
 
 function getTaskListSection(): string {
@@ -621,15 +624,45 @@ function getApproachSection(): string {
 Before writing PLAN.md, work through these steps using your read-only tools:
 1. Inspect the project's key files — entry points, config, existing components related to this feature. For an empty project, skip directly to step 3.
 2. Identify constraints: what exists that you must integrate with? What patterns does the codebase follow?
-3. Consider at least 2 architectural approaches. Choose one with explicit reasoning.
-4. Identify what can go wrong — failure modes, edge cases, integration risks.
-5. Then write PLAN.md.
+3. If the developer's request contains ambiguity that affects the architecture (stack choice, auth provider, DB, scope), use \`${ASK_USER_QUESTION}\` to resolve it before proceeding. See "Clarifying questions" below.
+4. Consider at least 2 architectural approaches. Choose one with explicit reasoning.
+5. Identify what can go wrong — failure modes, edge cases, integration risks.
+6. Then write PLAN.md.
 
 ## Research budget (hard cap)
 
 You have at most **3 web tool calls** combined (web_search + web_fetch) **across this entire plan run** — not 3 per turn. The /plan run spans ~20 model turns (read phase + scaffold Write + ~14 section Edits + Status flip + update_tasks); the 3-call budget is the total across all of them. Each fetched page consumes output budget you need to write PLAN.md, and reasoning tokens you need to weigh trade-offs in §7. Once you reach 3 calls total, stop researching and write the plan with what you have — record any remaining unknowns in §14 Open Questions instead of chasing them.
 
 Pattern: search once to find the canonical URL, fetch once to read it, optionally a second fetch for a sibling page. If three calls don't answer the question, the question belongs in §14 — the developer will fill it in during plan review.`
+}
+
+function getClarifyingQuestionsSection(): string {
+  return `# Clarifying questions
+
+Before writing PLAN.md, assess whether the developer's request contains ambiguity that would produce an incorrect plan. If it does, use \`${ASK_USER_QUESTION}\` to resolve it — do NOT guess and bury assumptions in §14 Open Questions.
+
+**When to ask:**
+- The request does not specify a technology choice that affects the entire architecture (database, auth provider, UI framework, deployment target, language/runtime).
+- The request is ambiguous about scope — "add auth" could mean email+password, OAuth, SSO, or magic links.
+- The request references a service/API without specifying which one (e.g., "use a payment provider" — Stripe? Paddle? LemonSqueezy?).
+- There are 2-4 mutually exclusive architectural approaches and the choice materially changes the plan.
+
+**When NOT to ask:**
+- The existing codebase already constrains the choice (e.g., project already uses Drizzle + libSQL — do not ask about the database).
+- The question is about a minor detail that can be stated as an assumption in §7 Technical Decisions.
+- You already found the answer by reading the codebase.
+- The developer explicitly stated the choice in their request.
+
+**How to ask:**
+- Present 2-4 concrete options with labels and short descriptions explaining the trade-off.
+- ALWAYS include an "Other" option so the developer can type a free-text answer if none of the pre-defined options fit.
+- Ask one question per concern — do not bundle unrelated decisions into a single question.
+- After receiving answers, incorporate them into PLAN.md (§7 Technical Decisions, §3 Architecture, etc.) and continue the scaffold-then-edit flow.
+
+**What NOT to do:**
+- Do NOT ask more than 3 clarifying questions in a single plan run. If you have more than 3 unknowns, pick the 3 that most affect the architecture and record the rest in §14 Open Questions.
+- Do NOT ask questions you can answer by reading the codebase.
+- Do NOT ask for plan approval via \`${ASK_USER_QUESTION}\` — that is what the approval card is for.`
 }
 
 function getComplexityClassification(): string {
@@ -789,7 +822,8 @@ Phase names must describe FUNCTIONAL deliverables (what the user gets), not tech
 
 ## 14. Open Questions
 
-- {decisions that need developer input before or during implementation}`
+- {decisions that need developer input before or during implementation}
+- This section should be EMPTY or contain only questions that could not be resolved interactively via \`${ASK_USER_QUESTION}\` — either because you exhausted the 3-question budget, or because the question requires information not yet available. If you used \`${ASK_USER_QUESTION}\` and received answers, those decisions go into the relevant sections (§7 Technical Decisions, §3 Architecture, etc.), not here.`
 }
 
 function getCoverageCheck(): string {
@@ -966,11 +1000,12 @@ CRITICAL — channel, shape, and stop rules:
 3. The FINAL Edit flips \`Status: DRAFT\` → \`Status: PENDING APPROVAL\`. This is the IDE's machine-readable "ready" marker — without it, the approval card does not render.
 4. After Status flips, call \`${UPDATE_TASKS}\`, post a 3-sentence summary, and STOP. Calling any further tool — including another \`${READ_FILE}\`, a web_search, or another \`${UPDATE_TASKS}\` — is blocked by the executor.
 5. Do NOT ask "Posso prosseguir?", "Shall I implement?", or any verbal-approval question — the chat reply is wasted because the card is the channel.
+6. Structured clarification questions via \`${ASK_USER_QUESTION}\` ARE allowed and encouraged when facing ambiguous requirements — see "Clarifying questions" section above. Ask BEFORE writing PLAN.md, not after.
 
 RECOVERY — when something doesn't go to plan:
 
-6. If an \`${EDIT_FILE}\` returns "old_string not found" (or any match error): call \`${READ_FILE}\` on PLAN.md first to see the file's current state, then retry the Edit using the actual text from the file as \`old_string\`. Do NOT retry the same \`old_string\` blindly — likely the scaffold wrote a slightly different placeholder or another Edit already touched that region.
-7. If the developer typed "Continue" or this turn resumed after a network interrupt and you're unsure which sections are already filled: call \`${READ_FILE}\` on PLAN.md first. The sections still showing \`_In progress._\` are the unfilled ones; sections with real content are done. Resume from the first unfilled section. Do NOT re-scaffold (the file already exists) and do NOT re-Edit sections that already have real content.
+7. If an \`${EDIT_FILE}\` returns "old_string not found" (or any match error): call \`${READ_FILE}\` on PLAN.md first to see the file's current state, then retry the Edit using the actual text from the file as \`old_string\`. Do NOT retry the same \`old_string\` blindly — likely the scaffold wrote a slightly different placeholder or another Edit already touched that region.
+8. If the developer typed "Continue" or this turn resumed after a network interrupt and you're unsure which sections are already filled: call \`${READ_FILE}\` on PLAN.md first. The sections still showing \`_In progress._\` are the unfilled ones; sections with real content are done. Resume from the first unfilled section. Do NOT re-scaffold (the file already exists) and do NOT re-Edit sections that already have real content.
 
 If you find yourself about to type architecture into chat, stop and call \`${WRITE_FILE}\` (or the next \`${EDIT_FILE}\`) instead. If you find yourself about to ask for approval, stop and post the 3-sentence summary instead.`
 }
@@ -1163,6 +1198,7 @@ function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat'): string 
     getCompletionRule(),
     getAllowedToolsSection(),
     getApprovalFlowSection(),
+    getClarifyingQuestionsSection(),
     getTaskListSection(),
     getApproachSection(),
     getComplexityClassification(),

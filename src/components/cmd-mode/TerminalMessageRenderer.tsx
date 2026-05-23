@@ -9,13 +9,24 @@ import { TerminalToolCall } from './TerminalToolCall'
 import { TerminalCodeBlock } from './TerminalCodeBlock'
 import { TerminalCredentialPrompt } from './TerminalCredentialPrompt'
 import { TerminalAskUserQuestion } from './TerminalAskUserQuestion'
+import { TerminalPlanApprovalCard } from './TerminalPlanApprovalCard'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 
-// ─── Special card renderer (credential_request) ───
+// ─── Special card renderer (plan_approval, credential_request, ask_user_question) ───
 
 function TerminalSpecialCards({ message }: { message: ChatMessage }) {
   const card = message.card
   if (!card) return null
+
+  if (card.type === 'plan_approval') {
+    return (
+      <TerminalPlanApprovalCard
+        key={message.id}
+        messageId={message.id}
+        card={card}
+      />
+    )
+  }
 
   if (card.type === 'credential_request') {
     return (

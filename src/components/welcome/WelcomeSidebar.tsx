@@ -9,14 +9,10 @@ import {
   Icon,
 } from '@chakra-ui/react'
 import {
-  LuFilePlus2,
-  LuFolderOpen,
-  LuGitBranch,
   LuFolder,
   LuClock,
   LuChevronRight,
   LuSettings,
-  LuTerminal,
   LuEraser,
 } from 'react-icons/lu'
 import { invoke } from '@/utils/invokeMetrics'
@@ -34,6 +30,32 @@ function getAppVersion(): Promise<string> {
   return versionPromise
 }
 
+// ─── Relative time helper ──────────────────────────────────────────────
+function relativeTime(dateStr?: string): string | null {
+  if (!dateStr) return null
+  const now = new Date()
+  // Rust stores last_opened as unix seconds (e.g. "1748112000")
+  const then = /^\d+$/.test(dateStr)
+    ? new Date(Number(dateStr) * 1000)
+    : new Date(dateStr)
+  const diffMs = now.getTime() - then.getTime()
+  if (diffMs < 0) return null
+
+  const diffMin = Math.floor(diffMs / 60000)
+  if (diffMin < 1) return t('welcome.today')
+  if (diffMin < 60) return null // don't show minutes
+
+  const diffHours = Math.floor(diffMin / 60)
+  if (diffHours < 24) return t('welcome.today')
+
+  const diffDays = Math.floor(diffHours / 24)
+  if (diffDays === 1) return t('welcome.yesterday')
+  if (diffDays <= 30) return t('welcome.daysAgo').replace('{n}', String(diffDays))
+
+  // Older than 30 days: show short date
+  return then.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 interface RecentProject {
   id?: string
   name: string
@@ -45,10 +67,6 @@ interface WelcomeSidebarProps {
   recentProjects: RecentProject[]
   /** Paths that have been opened in CMD mode — used to show the terminal icon */
   cmdModeProjectPaths?: string[]
-  onNewProject: () => void
-  onOpenFolder: () => void
-  onCloneRepository: () => void
-  onCmdMode: () => void
   /** Open an existing CMD mode project directly (no dialog) */
   onOpenCmdProject?: (path: string) => void
   /** Promote a CMD mode project to the full IDE (removes from CMD list) */
@@ -63,10 +81,6 @@ interface WelcomeSidebarProps {
 const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   recentProjects,
   cmdModeProjectPaths = [],
-  onNewProject,
-  onOpenFolder,
-  onCloneRepository,
-  onCmdMode,
   onOpenCmdProject,
   onOpenCmdProjectAsIde,
   onOpenProject,
@@ -75,23 +89,9 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
 }) => {
   const [appVersion, setAppVersion] = useState('')
 
-  const actionItems = [
-    { id: 'new', icon: LuFilePlus2, label: t('welcome.newProject'), color: tokens.colors.accent.primary },
-    { id: 'open', icon: LuFolderOpen, label: t('welcome.openProject'), color: tokens.colors.accent.greenBright },
-    { id: 'clone', icon: LuGitBranch, label: t('welcome.cloneRepo'), color: tokens.colors.accent.purple },
-    { id: 'cmd', icon: LuTerminal, label: t('welcome.terminalMode'), color: tokens.colors.accent.purple },
-  ]
-
   useEffect(() => {
     getAppVersion().then(setAppVersion)
   }, [])
-
-  const handleAction = (id: string) => {
-    if (id === 'new') onNewProject()
-    else if (id === 'open') onOpenFolder()
-    else if (id === 'clone') onCloneRepository()
-    else if (id === 'cmd') onCmdMode()
-  }
 
   const truncatePath = (path: string, maxLen = 38) => {
     if (path.length <= maxLen) return path
@@ -160,62 +160,6 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
         </Heading>
       </Flex>
 
-      {/* Action buttons */}
-      <VStack align="stretch" gap={1} mb={8}>
-        <Text
-          fontSize="11px"
-          fontWeight="700"
-          textTransform="uppercase"
-          color={tokens.colors.text.muted}
-          mb={3}
-          letterSpacing="1px"
-          px={2}
-        >
-          {t('welcome.start')}
-        </Text>
-
-        {actionItems.map((item) => (
-          <Flex
-            key={item.id}
-            alignItems="center"
-            gap={3}
-            px={3}
-            py={2.5}
-            borderRadius="10px"
-            cursor="pointer"
-            transition="all 0.2s ease"
-            _hover={{
-              bg: 'rgba(254, 16, 99, 0.08)',
-              transform: 'translateX(4px)',
-            }}
-            onClick={() => handleAction(item.id)}
-          >
-            <Flex
-              width="32px"
-              height="32px"
-              borderRadius="8px"
-              alignItems="center"
-              justifyContent="center"
-              bg="rgba(255, 255, 255, 0.05)"
-              border="1px solid"
-              borderColor="rgba(255, 255, 255, 0.08)"
-              flexShrink={0}
-            >
-              <Icon color={item.color} fontSize="15px">
-                {React.createElement(item.icon)}
-              </Icon>
-            </Flex>
-            <Text
-              fontSize="13px"
-              fontWeight="500"
-              color={tokens.colors.text.primary}
-            >
-              {item.label}
-            </Text>
-          </Flex>
-        ))}
-      </VStack>
-
       {/* Recent projects */}
       <VStack align="stretch" flex={1} overflow="hidden" minH={0}>
         <HStack px={2} mb={3} justify="space-between">
@@ -234,8 +178,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
             </Text>
           </HStack>
 
-          {/* Clear-all button — shown only when there is something to clear.
-              Caller owns the confirmation dialog (see projectStore.clearAllRecent). */}
+          {/* Clear-all button */}
           {onClearRecent && recentProjects.length > 0 && (
             <Flex
               as="button"
@@ -315,7 +258,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
                   project={project}
                   isCmdMode
                   truncatePath={truncatePath}
-                  onClick={() => project.path && (onOpenCmdProject ? onOpenCmdProject(project.path) : onCmdMode())}
+                  onClick={() => project.path && (onOpenCmdProject ? onOpenCmdProject(project.path) : undefined)}
                   onOpenAsIde={onOpenCmdProjectAsIde && project.path ? () => onOpenCmdProjectAsIde(project.path) : undefined}
                 />
               ))}
@@ -358,44 +301,61 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
         </VStack>
       </VStack>
 
-      {/* Footer — settings + version */}
-      <Flex pt={4} mt={4} borderTop="1px solid rgba(255,255,255,0.05)" alignItems="center" justifyContent="space-between" px={2}>
-        <Flex
-          width="28px"
-          height="28px"
-          alignItems="center"
-          justifyContent="center"
-          borderRadius="6px"
-          cursor="pointer"
-          transition="all 0.2s ease"
-          _hover={{ bg: 'rgba(255, 255, 255, 0.06)' }}
-          onClick={onSettings}
-        >
-          <Icon color={tokens.colors.text.muted} fontSize="15px">
-            <LuSettings />
-          </Icon>
+      {/* Footer — powered by + settings + version */}
+      <Flex direction="column" pt={4} mt={4} borderTop="1px solid rgba(255,255,255,0.05)" gap={3}>
+        <Flex alignItems="center" justifyContent="space-between" px={2}>
+          <Flex
+            width="28px"
+            height="28px"
+            alignItems="center"
+            justifyContent="center"
+            borderRadius="6px"
+            cursor="pointer"
+            transition="all 0.2s ease"
+            _hover={{ bg: 'rgba(255, 255, 255, 0.06)' }}
+            onClick={onSettings}
+          >
+            <Icon color={tokens.colors.text.muted} fontSize="15px">
+              <LuSettings />
+            </Icon>
+          </Flex>
+          <Text fontSize="10px" color={tokens.colors.text.disabled} opacity={0.6}>
+            {appVersion}
+          </Text>
         </Flex>
-        <Text fontSize="10px" color={tokens.colors.text.muted} opacity={0.5}>
-          {appVersion}
+        <Text
+          fontSize="9px"
+          color={tokens.colors.text.disabled}
+          opacity={0.4}
+          textAlign="center"
+          letterSpacing="0.3px"
+        >
+          Powered by Toque Media, Lda
         </Text>
       </Flex>
     </Box>
   )
 }
 
-// ─── ProjectRow ───
+// ─── Project row (shared between CMD and IDE lists) ─────────────────────
 
 interface ProjectRowProps {
   project: RecentProject
   isCmdMode: boolean
-  truncatePath: (path: string) => string
+  truncatePath: (path: string, maxLen?: number) => string
   onClick: () => void
-  /** For CMD mode rows — promote this project to the full IDE */
+  /** If provided, show an "Open in IDE" button */
   onOpenAsIde?: () => void
 }
 
-function ProjectRow({ project, isCmdMode, truncatePath, onClick, onOpenAsIde }: ProjectRowProps) {
-  const [hovered, setHovered] = React.useState(false)
+const ProjectRow: React.FC<ProjectRowProps> = ({
+  project,
+  isCmdMode,
+  truncatePath,
+  onClick,
+  onOpenAsIde,
+}) => {
+  const timeLabel = relativeTime(project.lastOpened)
 
   return (
     <Flex
@@ -406,66 +366,89 @@ function ProjectRow({ project, isCmdMode, truncatePath, onClick, onOpenAsIde }: 
       borderRadius="8px"
       cursor="pointer"
       transition="all 0.2s ease"
-      _hover={{ bg: isCmdMode ? 'rgba(163,113,247,0.07)' : 'rgba(255, 255, 255, 0.05)' }}
+      _hover={{
+        bg: 'rgba(255, 255, 255, 0.05)',
+        transform: 'translateX(2px)',
+      }}
       onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
     >
-      <Icon
-        color={isCmdMode ? tokens.colors.accent.purple : tokens.colors.accent.primary}
-        fontSize="14px"
+      {/* Icon */}
+      <Flex
+        width="28px"
+        height="28px"
+        borderRadius="6px"
+        alignItems="center"
+        justifyContent="center"
+        bg={isCmdMode ? 'rgba(163, 113, 247, 0.12)' : 'rgba(255, 255, 255, 0.05)'}
         flexShrink={0}
-        opacity={0.7}
       >
-        {isCmdMode ? <LuTerminal /> : <LuFolder />}
-      </Icon>
-      <VStack gap={0} alignItems="flex-start" flex={1} minWidth={0}>
+        <Icon
+          as={LuFolder}
+          fontSize="14px"
+          color={isCmdMode ? tokens.colors.accent.purple : tokens.colors.text.secondary}
+        />
+      </Flex>
+
+      {/* Name + path */}
+      <Box flex="1" minW={0}>
         <Text
           fontSize="13px"
           fontWeight="500"
           color={tokens.colors.text.primary}
           lineClamp={1}
+          overflow="hidden"
+          textOverflow="ellipsis"
+          whiteSpace="nowrap"
         >
           {project.name}
         </Text>
-        <Text
-          fontSize="10px"
-          color={tokens.colors.text.muted}
-          lineClamp={1}
-          opacity={0.7}
-        >
-          {truncatePath(project.path)}
-        </Text>
-      </VStack>
+        <Flex align="center" gap={2}>
+          <Text
+            fontSize="10px"
+            color={tokens.colors.text.muted}
+            lineClamp={1}
+            overflow="hidden"
+            textOverflow="ellipsis"
+            whiteSpace="nowrap"
+            flex="1"
+            minW={0}
+          >
+            {truncatePath(project.path)}
+          </Text>
+          {timeLabel && (
+            <Text
+              fontSize="9px"
+              color={tokens.colors.text.disabled}
+              flexShrink={0}
+              opacity={0.6}
+            >
+              {timeLabel}
+            </Text>
+          )}
+        </Flex>
+      </Box>
 
-      {/* Escape hatch: open CMD project in full IDE */}
-      {isCmdMode && onOpenAsIde && hovered && (
-        <Box
-          as="button"
-          fontSize="9px"
-          fontWeight="700"
-          color={tokens.colors.text.disabled}
-          _hover={{ color: tokens.colors.accent.primary }}
-          px="5px"
-          py="2px"
-          border="1px solid rgba(255,255,255,0.1)"
-          borderRadius="3px"
-          transition="all 0.1s"
-          textTransform="uppercase"
-          letterSpacing="0.08em"
-          flexShrink={0}
-          onClick={(e: React.MouseEvent) => { e.stopPropagation(); onOpenAsIde() }}
-          title={t('welcome.openInIde')}
-        >
-          {t('welcome.ide')}
-        </Box>
-      )}
-
-      {(!isCmdMode || !onOpenAsIde || !hovered) && (
-        <Icon color={tokens.colors.text.muted} fontSize="12px" opacity={hovered ? 0.6 : 0} transition="opacity 0.2s" flexShrink={0}>
-          <LuChevronRight />
-        </Icon>
-      )}
+      {/* Hover arrow */}
+      <Flex gap={1} alignItems="center" opacity={0.5} flexShrink={0}>
+        {onOpenAsIde && (
+          <Flex
+            alignItems="center"
+            justifyContent="center"
+            width="22px"
+            height="22px"
+            borderRadius="5px"
+            bg="rgba(254, 16, 99, 0.12)"
+            opacity={0}
+            _groupHover={{ opacity: 1 }}
+            transition="opacity 0.15s"
+            title={t('welcome.openInIde')}
+            onClick={(e: React.MouseEvent) => { e.stopPropagation(); onOpenAsIde() }}
+          >
+            <Icon as={LuFolder} fontSize="12px" color={tokens.colors.accent.primary} />
+          </Flex>
+        )}
+        <Icon as={LuChevronRight} fontSize="12px" color={tokens.colors.text.disabled} />
+      </Flex>
     </Flex>
   )
 }
