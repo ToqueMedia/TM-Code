@@ -322,6 +322,16 @@ async function runAgentInternal(
       onUsageUpdate: (inputTokens, outputTokens) => {
         useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
       },
+      onContextCompression: (beforeTokens, signal) => {
+        if (signal === 0) {
+          // Compression starting
+          agentStore.setStatus('compressing')
+        } else if (signal === -1) {
+          // Compression complete — insert compact boundary marker
+          agentStore.setStatus('awaiting_response')
+          useChatStore.getState().addCompactBoundaryMessage(beforeTokens)
+        }
+      },
     })
   } finally {
     // Always restore IDE mode regardless of how the loop exited

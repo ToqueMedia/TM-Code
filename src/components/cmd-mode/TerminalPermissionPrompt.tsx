@@ -11,6 +11,7 @@ interface TerminalPermissionPromptProps {
   onApprove: () => void
   onApproveAll: () => void
   onDeny: () => void
+  onDenyAll: () => void
   /** "Write" a custom reason for denial — the reason is surfaced to the agent
    *  in the tool result (instead of the generic "Ask the user what they want"). */
   onDenyWith?: (reason: string) => void
@@ -75,11 +76,16 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   onApprove,
   onApproveAll,
   onDeny,
+  onDenyAll,
   onDenyWith,
 }: TerminalPermissionPromptProps) {
   const preview = getArgPreview(toolName, args)
   const warning = getWarningText(toolName, promptReason)
   const dangerous = isDangerous(toolName, promptReason)
+  // Destructive operations (dangerous_command, sensitive_file, delete_file,
+  // execute_command) must NOT offer "approve all" — every action requires
+  // explicit individual authorization from the user.
+  const hideApproveAll = dangerous
 
   const accentColor = dangerous ? tokens.colors.accent.orange : tokens.colors.accent.purple
   const borderColor = dangerous ? 'rgba(247,127,0,0.3)' : 'rgba(163,113,247,0.25)'
@@ -106,13 +112,16 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
       if (e.key === 'y' || e.key === 'Y' || (e.key === 'Enter' && !e.shiftKey)) {
         e.preventDefault()
         onApprove()
-      } else if (e.key === 'a' || e.key === 'A' || (e.key === 'Enter' && e.shiftKey)) {
+      } else if (!hideApproveAll && (e.key === 'a' || e.key === 'A' || (e.key === 'Enter' && e.shiftKey))) {
         e.preventDefault()
         onApproveAll()
       } else if (e.key === 'w' || e.key === 'W') {
         if (!onDenyWith) return
         e.preventDefault()
         setMode('writing')
+      } else if (e.key === 'd' || e.key === 'D') {
+        e.preventDefault()
+        onDenyAll()
       } else if (e.key === 'n' || e.key === 'N' || e.key === 'Escape') {
         e.preventDefault()
         onDeny()
@@ -120,7 +129,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [mode, onApprove, onApproveAll, onDeny, onDenyWith])
+  }, [mode, onApprove, onApproveAll, onDeny, onDenyAll, onDenyWith, hideApproveAll])
 
   const handleSubmitReason = () => {
     if (!onDenyWith) return
@@ -169,10 +178,16 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
       {mode === 'choose' ? (
         <Flex align="center" gap={1} mt={1.5} wrap="wrap">
           <KeyHint label="y" description="yes" color={tokens.colors.terminal.green} />
-          <Sep />
-          <KeyHint label="a" description="yes, always" color={tokens.colors.accent.purple} />
+          {!hideApproveAll && (
+            <>
+              <Sep />
+              <KeyHint label="a" description="yes, always" color={tokens.colors.accent.purple} />
+            </>
+          )}
           <Sep />
           <KeyHint label="n" description="no" color={tokens.colors.accent.red} />
+          <Sep />
+          <KeyHint label="d" description="no, always" color={tokens.colors.accent.red} />
           {onDenyWith && (
             <>
               <Sep />

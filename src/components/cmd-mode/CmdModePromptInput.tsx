@@ -1,4 +1,4 @@
-import { memo, useCallback, useImperativeHandle, useState, forwardRef } from 'react'
+import { memo, useCallback, useImperativeHandle, useLayoutEffect, useState, forwardRef } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiPaperclip } from 'react-icons/fi'
 import { useCmdPromptLogic } from '../../hooks/useCmdPromptLogic'
@@ -123,6 +123,17 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     if (textareaRef.current) setScrollTop(textareaRef.current.scrollTop)
   }, [textareaRef])
 
+  // Auto-resize textarea to fit content (same pattern as PromptTextarea).
+  // useLayoutEffect so the height is set synchronously before paint — avoids
+  // the flash of collapsed-then-expanded height on every keystroke.
+  useLayoutEffect(() => {
+    const ta = textareaRef.current
+    if (!ta) return
+    ta.style.height = 'auto'
+    const maxHeight = 6 * 24
+    ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`
+  }, [input])
+
   return (
     <Box
       bg={tokens.colors.terminal.background}
@@ -228,6 +239,11 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
         <Box
           flex="1"
           position="relative"
+          // CRITICAL: clipping must live on the parent (not the overlay) so the
+          // transformed overlay can't leak above/below the textarea's visible
+          // bounds when the user scrolls inside the textarea. Same fix applied
+          // to PromptTextarea.tsx — see detailed comment there.
+          overflow="hidden"
           // The textarea uses WebkitTextFillColor: transparent so the colored
           // overlay below can be seen — the same property cascades into
           // ::placeholder, hiding the empty-state hint. Re-color it here.
@@ -244,6 +260,12 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
               WebkitTextFillColor: tokens.colors.terminal.foreground,
               background: 'rgba(163, 113, 247, 0.35)',
             },
+            // Hide native scrollbar so content width stays equal to overlay's.
+            // Same fix as PromptTextarea.tsx — see detailed comment there.
+            '& > textarea::-webkit-scrollbar': {
+              width: 0,
+              height: 0,
+            },
           }}
         >
           {/* Highlight overlay (slash-command tone). Behind the textarea;
@@ -252,7 +274,6 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             aria-hidden
             position="absolute"
             inset={0}
-            overflow="hidden"
             pointerEvents="none"
             color={tokens.colors.terminal.foreground}
             style={{

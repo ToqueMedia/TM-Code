@@ -11,6 +11,7 @@
 
 import { IS_MAC, IS_WINDOWS } from '@/utils/platform'
 import { MONOREPO_DIRS } from '../../../projectTypeDetector'
+import { useLayoutStore } from '../../../../stores/layoutStore'
 import SkillService from '../../skillService'
 import {
   READ_FILE, GET_DIAGNOSTICS,
@@ -214,6 +215,25 @@ export function getEnvironmentSection(ctx: PromptContext): string {
     if (ctx.pkgSummary.devDependencies.length) lines.push(`devDeps: ${ctx.pkgSummary.devDependencies.join(', ')}`)
   }
   return `# Environment\n${lines.join('\n')}`
+}
+
+// ── 10a. Dev server status (live, per-turn) ──────────────────
+// Tells the agent whether a dev server is already running, what kind
+// it is, and what URLs it serves. Prevents the agent from blindly
+// starting a second server and getting stuck until the 300s timeout.
+export function getDevServerStatusSection(): string | null {
+  const ds = useLayoutStore.getState().devServer
+  if (!ds) return null  // no server → inject nothing (same as not mentioning it)
+
+  const lines = [
+    `status: ${ds.status}`,
+    `project_kind: ${ds.projectKind}`,
+    `pid: ${ds.pid}`,
+  ]
+  if (ds.frontendUrl) lines.push(`frontend_url: ${ds.frontendUrl}`)
+  if (ds.backendUrl) lines.push(`backend_url: ${ds.backendUrl}`)
+
+  return `# Dev Server (running)\n${lines.join('\n')}\n\nA dev server is ALREADY RUNNING. Do NOT call \`${START_DEV_SERVER}\` or \`npm run dev\` / \`yarn dev\` — it will fail or create a duplicate. Use \`${READ_DEV_SERVER_LOGS}\` to check for errors.`
 }
 
 // ── 10b. Already-applied scaffolding (conditional) ─────────────

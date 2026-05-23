@@ -392,7 +392,7 @@ function processAnthropicEvent(
       // processStreamedTurn maps `upstream_stream_interrupted` to the
       // auto-retry path instead of treating it as a hard error.
       const errObj = data.error
-      const errType = typeof errObj?.type === 'string' ? errObj.type : undefined
+      let errType = typeof errObj?.type === 'string' ? errObj.type : undefined
       let msg: string
       if (errType === 'upstream_stream_interrupted') {
         msg = `The model's response was interrupted mid-stream (upstream: ${errObj?.provider || 'unknown'}). ` +
@@ -400,7 +400,17 @@ function processAnthropicEvent(
       } else if (errType === 'upstream_fetch_failed') {
         msg = `Could not reach the model after multiple retries: ${errObj?.message || 'unknown error'}`
       } else if (errType === 'upstream_http_error') {
-        msg = `Upstream returned HTTP ${errObj?.status || '?'}: ${errObj?.message || ''}`
+        const upstreamMsg = (errObj?.message || '').toLowerCase()
+        const isContextLength = [
+          'context_length_exceeded', 'maximum context length',
+          'prompt is too long', 'too many tokens', 'request too large',
+        ].some(ind => upstreamMsg.includes(ind))
+        if (isContextLength) {
+          errType = 'prompt_too_long'
+          msg = `Context window exceeded — attempting to compact and retry.`
+        } else {
+          msg = `Upstream returned HTTP ${errObj?.status || '?'}: ${errObj?.message || ''}`
+        }
       } else {
         msg = errObj?.message ?? JSON.stringify(data)
       }

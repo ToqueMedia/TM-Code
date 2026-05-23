@@ -750,14 +750,7 @@ function PreviewView() {
 
         {/* Permission dialog above prompt */}
         {pendingPermission && (
-          <PermissionDialog
-            toolName={pendingPermission.toolName}
-            args={pendingPermission.args}
-            promptReason={pendingPermission.promptReason}
-            onApprove={() => usePermissionStore.getState().approve()}
-            onApproveAll={() => usePermissionStore.getState().approveAll()}
-            onDeny={() => usePermissionStore.getState().deny()}
-          />
+          <PermissionDialog />
         )}
 
         {/* PromptBar at bottom of chat sidebar */}

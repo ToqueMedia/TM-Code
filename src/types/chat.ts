@@ -127,7 +127,7 @@ export interface CredentialFieldDescriptor {
 }
 
 export interface ChatMessageCard {
-  type: 'plan_approval' | 'todo_list' | 'credential_request' | 'permission_request'
+  type: 'plan_approval' | 'todo_list' | 'credential_request' | 'permission_request' | 'ask_user_question'
   projectPath: string
   status: 'pending' | 'approved' | 'changes_requested' | 'rejected' | 'submitted' | 'cancelled' | 'expired'
   /** credential_request only: identifies the pending entry in credentialRequestStore */
@@ -138,6 +138,10 @@ export interface ChatMessageCard {
   fields?: CredentialFieldDescriptor[]
   /** credential_request only: keys actually submitted (no values) — populated after submit */
   submittedKeys?: string[]
+  /** ask_user_question only: the questions to display */
+  questions?: import('../stores/askUserQuestionStore').Question[]
+  /** ask_user_question only: answers submitted by the user */
+  answers?: Record<string, string | string[]>
   /** permission_request only: identifies the pending entry in permissionStore.
    *  When the user clicks Allow/Deny after a reload, the in-memory entry is
    *  gone — we use this id to detect the "stale card" path and instruct the

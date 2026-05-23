@@ -4,6 +4,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
+import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import { useTerminalPanelStore, TERMINAL_PANEL_MIN_WIDTH } from '../../stores/terminalPanelStore'
 import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands'
@@ -35,6 +36,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const hasPendingCredential = useCredentialRequestStore(s => s.pending.size > 0)
+  const hasPendingAskUserQuestion = useAskUserQuestionStore(s => s.pending.size > 0)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
@@ -325,11 +327,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       <TerminalTitleBar projectPath={projectPath} onBack={onBack} />
       <BillingOverageBanner />
 
-      {/* Output area */}
+      {/* Output area — overflow="hidden" on the wrapper prevents large content
+          from pushing siblings off-screen. Same pattern as ChatView. */}
+      <Box position="relative" flex="1" minH={0} overflow="hidden">
       <Box
         ref={scrollRef as React.RefObject<HTMLDivElement>}
-        flex="1"
-        minH={0}
+        h="100%"
         overflowY="auto"
         px={3}
         pt={3}
@@ -393,8 +396,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           )}
         </Box>
       </Box>
+      </Box>
 
       {pendingPermission && (
+        <Box flexShrink={0}>
         <TerminalPermissionPrompt
           key={pendingPermission.id}
           toolName={pendingPermission.toolName}
@@ -403,8 +408,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           onApprove={() => usePermissionStore.getState().approve()}
           onApproveAll={() => usePermissionStore.getState().approveAll()}
           onDeny={() => usePermissionStore.getState().deny()}
+          onDenyAll={() => usePermissionStore.getState().denyAll()}
           onDenyWith={(reason) => usePermissionStore.getState().denyWith(reason)}
         />
+        </Box>
       )}
 
       {sessionPickerOpen && (
@@ -416,9 +423,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         />
       )}
 
-      <TerminalStatusLine />
+      <Box flexShrink={0}>
+        <TerminalStatusLine />
+      </Box>
 
-      <Box display={(pendingPermission || hasPendingCredential) ? 'none' : undefined} data-no-focus-steal>
+      <Box display={(pendingPermission || hasPendingCredential || hasPendingAskUserQuestion) ? 'none' : undefined} flexShrink={0} data-no-focus-steal>
         <CmdModePromptInput ref={promptInputRef} />
       </Box>
     </Flex>

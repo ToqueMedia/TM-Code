@@ -16,6 +16,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useByokStore } from '../../stores/byokStore'
 import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '../../utils/logger'
+import { useToastStore } from '../../stores/toastStore'
 import { resolveWorkerUrl } from '../../utils/devUrls'
 import { getQueryGuard } from './queryGuard'
 import { contentAsText } from './promptValueHelpers'
@@ -90,7 +91,7 @@ const REMINDER_REINJECT_MIN_TOOLS = 10
 
 // Context compression threshold is now token-absolute (claude-vaz pattern):
 // effective window = raw − 20K (summary headroom)
-// trigger          = effective − 13K (AUTOCOMPACT_BUFFER_TOKENS)
+// trigger          = effective − buffer (adaptive: floor 13K, 5% on large windows)
 // See utils/contextWindow.ts and ContextWindowIndicator for the same math.
 const DEFAULT_CONTEXT_WINDOW = 131_072  // Conservative fallback (128K)
 
@@ -188,6 +189,7 @@ const MAX_KEEP_RECENT_TURNS = 12
 // Layer 1: Microcompaction — keep last N tool results in full, compact older ones.
 // A typical turn has 1-3 tool calls; 8 means ~3-4 recent turns have full results.
 const MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS = 8
+const MICROCOMPACT_KEEP_RECENT_DENSE = 16   // sessions with many tool calls (CMD mode)
 
 // Time-based microcompaction (claude-vaz parity, services/compact/timeBasedMCConfig.ts).
 // When (now − last assistant timestamp) exceeds this gap, switch to a more
@@ -202,6 +204,9 @@ const MICROCOMPACT_GAP_KEEP_RECENT = 5
 const POST_COMPACTION_REREAD_FILES = 5
 // Max chars per re-read file (prevents re-blowing context).
 const POST_COMPACTION_FILE_MAX_CHARS = 8000
+// Back-pressure: max retries when compaction doesn't free enough space.
+// Each retry halves the kept turns. claude-vaz pattern.
+const MAX_BACKPRESSURE_RETRIES = 2
 
 // Compact-summary prompt + post-processing live in a zero-dependency
 // module so they can be unit-tested without the store/Firebase chain.
@@ -573,6 +578,15 @@ class AgentService {
       this.cancelLoop()
     }
     this.isRunning = true
+    // Reset auto-deny at the start of each agent turn so the user is
+    // prompted again for new tools. "Deny All" should only apply within
+    // the same turn (when the model batches multiple tool calls).
+    import('../../stores/permissionStore').then(m => {
+      const ps = m.usePermissionStore.getState()
+      if (ps.autoDenyAll) {
+        m.usePermissionStore.setState({ autoDenyAll: false })
+      }
+    }).catch(() => {})
     let myGeneration: number | null = null
     if (!this.lightweightOptions) {
       this.abortController = new AbortController()
@@ -708,12 +722,58 @@ class AgentService {
           const before = this.lastPromptTokens
           callbacks.onContextCompression?.(before, 0) // signal start
           try {
-            const compressedMessages = await this.compressContext(messages)
-            messages.length = 0
-            messages.push(...compressedMessages)
+            // Extract tool ops log BEFORE compaction discards old messages —
+            // this captures commands run, searches performed, diagnostics
+            // seen, etc. that the summary may drop. Injected post-compaction
+            // so the model remembers what it already tried.
+            const toolOpsLog = this.extractToolOpsLog(messages)
 
-            // Layer 2b: Re-read recent files to recover file content knowledge
-            await this.injectFileReReadings(messages)
+            // Back-pressure loop (claude-vaz pattern): after compaction,
+            // re-estimate the prompt size. If still above the threshold,
+            // retry with progressively fewer kept turns until it fits.
+            let attempts = 0
+            let forceKeep: number | undefined
+            while (attempts <= MAX_BACKPRESSURE_RETRIES) {
+              const compressedMessages = await this.compressContext(messages, forceKeep)
+              messages.length = 0
+              messages.push(...compressedMessages)
+
+              // Layer 2b: Re-read recent files + inject tool ops log
+              await this.injectFileReReadings(messages, toolOpsLog)
+
+              // Re-estimate: count tokens in the compacted messages by
+              // serializing and estimating. If below threshold, done.
+              // Use a rough estimate: sum of content lengths / 4 chars per token.
+              let estChars = 0
+              for (const m of messages) {
+                if (typeof m.content === 'string') {
+                  estChars += m.content.length
+                } else if (Array.isArray(m.content)) {
+                  for (const block of m.content) {
+                    if (block.type === 'text') estChars += block.text.length
+                    else if (block.type === 'tool_result' && typeof block.content === 'string') estChars += block.content.length
+                    else estChars += 200 // rough estimate for tool_use, thinking, etc.
+                  }
+                }
+              }
+              const estimatedTokens = Math.ceil(estChars / 4)
+              if (estimatedTokens <= compressionThreshold || attempts >= MAX_BACKPRESSURE_RETRIES) {
+                if (attempts > 0) {
+                  logger.info('agent', `[compaction] back-pressure: freed enough after ${attempts} retry(ies) — est ${estimatedTokens} tokens`)
+                }
+                break
+              }
+
+              // Still too large — halve the kept turns for the next attempt.
+              // Count current assistant messages to determine new keep count.
+              let assistantCount = 0
+              for (const m of messages) {
+                if (m.role === 'assistant') assistantCount++
+              }
+              forceKeep = Math.max(MIN_KEEP_RECENT_TURNS, Math.floor(assistantCount / 2))
+              attempts++
+              logger.warn('agent', `[compaction] back-pressure: still ${estimatedTokens} tokens after compact (threshold ${compressionThreshold}) — retry ${attempts}/${MAX_BACKPRESSURE_RETRIES}, keeping ${forceKeep} turns`)
+            }
           } catch (compErr) {
             // Compression failed — continue with existing messages rather than stopping
             logger.error('agent', 'Context compression failed, continuing with uncompressed context:', compErr)
@@ -735,14 +795,37 @@ class AgentService {
         // that would have paid full price anyway. Sub-agents skip this
         // because their short lifetimes mean gap-eviction doesn't apply
         // (the gap field is null for them too — extra defence).
-        let microcompactKeepRecent = MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS
+        // Adaptive keep count: sessions with many tool results (typical of
+        // CMD-mode autonomous loops) keep more to preserve recent operational
+        // context. Threshold: ≥20 tool_result blocks → dense mode.
+        // Short-circuit: <20 messages can't possibly be dense.
+        let isDense = false
+        if (messages.length >= 20) {
+          let totalToolResults = 0
+          for (const m of messages) {
+            if (m.role === 'user' && Array.isArray(m.content)) {
+              for (const block of m.content) {
+                if (block.type === 'tool_result') totalToolResults++
+              }
+            }
+            if (totalToolResults >= 20) { isDense = true; break }
+          }
+        }
+        let microcompactKeepRecent = isDense
+          ? MICROCOMPACT_KEEP_RECENT_DENSE
+          : MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS
         if (!this.lightweightOptions && this.lastAssistantMessageAt !== null) {
           const gapMs = Date.now() - this.lastAssistantMessageAt
           if (gapMs > MICROCOMPACT_GAP_THRESHOLD_MS) {
-            microcompactKeepRecent = MICROCOMPACT_GAP_KEEP_RECENT
+            // On dense sessions, gap mode still trims but respects the normal
+            // default floor (8) — don't collapse a 16-keep session to 5 when
+            // the operational context matters more than the cache-expiry saving.
+            microcompactKeepRecent = isDense
+              ? Math.max(MICROCOMPACT_GAP_KEEP_RECENT, MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS)
+              : MICROCOMPACT_GAP_KEEP_RECENT
             logger.info(
               'agent',
-              `[microcompact] time-based eviction firing: gap=${Math.round(gapMs / 60_000)}min > ${MICROCOMPACT_GAP_THRESHOLD_MS / 60_000}min — keepRecent=${MICROCOMPACT_GAP_KEEP_RECENT} (default ${MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS})`,
+              `[microcompact] time-based eviction firing: gap=${Math.round(gapMs / 60_000)}min > ${MICROCOMPACT_GAP_THRESHOLD_MS / 60_000}min — keepRecent=${microcompactKeepRecent} (dense=${isDense})`,
             )
           }
         }
@@ -888,6 +971,69 @@ class AgentService {
             false,
           ))
           break
+        }
+
+        // Reactive compact (claude-vaz pattern): when the upstream model
+        // rejects the request with prompt_too_long, force aggressive
+        // compaction and retry the turn. The model got no usable output,
+        // so we can safely discard the empty turn and re-issue.
+        if (turnResult.finishReason === 'prompt_too_long') {
+          logger.warn('agent', `[reactive-compact] prompt too long — attempting compaction and retry`)
+          try {
+            useChatStore.getState().addSystemMessage(
+              'Context window exceeded — compacting and retrying automatically…',
+              undefined,
+              { ephemeral: true },
+            )
+          } catch { /* chatStore may be torn down */ }
+
+          try {
+            const toolOpsLog = this.extractToolOpsLog(messages)
+
+            // Aggressive: force keep only 4 turns (the minimum).
+            const compressedMessages = await this.compressContext(messages, 4)
+            messages.length = 0
+            messages.push(...compressedMessages)
+            await this.injectFileReReadings(messages, toolOpsLog)
+
+            // Re-estimate — if still too large, trim file re-reads too
+            let estChars = 0
+            for (const m of messages) {
+              if (typeof m.content === 'string') estChars += m.content.length
+              else if (Array.isArray(m.content)) {
+                for (const b of m.content) {
+                  if (b.type === 'text') estChars += (b as { text: string }).text.length
+                  else if (b.type === 'tool_result' && typeof b.content === 'string') estChars += b.content.length
+                  else estChars += 200
+                }
+              }
+            }
+            const estimatedTokens = Math.ceil(estChars / 4)
+            const ctxWindow = useAgentStore.getState().modelContextWindow ?? 0
+            if (estimatedTokens > ctxWindow - 5000) {
+              // Still too large — remove all file re-reads as last resort
+              logger.warn('agent', `[reactive-compact] still ${estimatedTokens} tokens after aggressive compact — stripping file re-reads`)
+              const systemMsg = messages[0]
+              const summaryMsg = messages[messages.length - 1]
+              messages.length = 0
+              if (systemMsg) messages.push(systemMsg)
+              if (summaryMsg && (summaryMsg.role === 'user' || summaryMsg.role === 'assistant')) messages.push(summaryMsg)
+            }
+
+            this.lastPromptTokens = 0
+            callbacks.onContextCompression?.(0, -1)
+
+            // Retry the same turn — don't count as a new iteration.
+            continue
+          } catch (compactErr) {
+            logger.error('agent', '[reactive-compact] failed:', compactErr)
+            callbacks.onError(new ServiceError(
+              'Context window exceeded and automatic compaction failed. Please start a new session.',
+              'CONTEXT_EXCEEDED',
+              false,
+            ))
+            break
+          }
         }
 
         // Add assistant message to history in Anthropic content blocks format.
@@ -1435,7 +1581,16 @@ Developer message: ${displayText}
    * 4. Replace old turns with a single summary message
    * 5. Return [system, summary, ...recentTurns]
    */
-  private async compressContext(messages: AnthropicMessage[]): Promise<AnthropicMessage[]> {
+  /**
+   * Compress old messages into a summary. Returns the compacted message array.
+   * @param maxTurnsToKeep Override for the adaptive keep count — used by
+   *   back-pressure retries to force more aggressive summarization when the
+   *   previous compaction didn't free enough space.
+   */
+  private async compressContext(
+    messages: AnthropicMessage[],
+    maxTurnsToKeep?: number,
+  ): Promise<AnthropicMessage[]> {
     const systemMsg = messages[0]
     const rest = messages.slice(1)
 
@@ -1449,7 +1604,8 @@ Developer message: ${displayText}
 
     // Adaptive: keep more recent turns for longer conversations
     // Short (< 14 turns): keep 4 | Medium (14-40): ~30% | Long (40+): keep 12
-    const adaptiveKeep = Math.min(
+    // Back-pressure retries pass a lower maxTurnsToKeep to force more room.
+    const adaptiveKeep = maxTurnsToKeep ?? Math.min(
       Math.max(MIN_KEEP_RECENT_TURNS, Math.ceil(turnStarts.length * 0.3)),
       MAX_KEEP_RECENT_TURNS,
     )
@@ -1544,45 +1700,66 @@ Developer message: ${displayText}
   /**
    * Serialize Anthropic messages to readable text for the LLM summarizer.
    * Iterates content blocks to extract text, tool_use, tool_result, thinking.
+   *
+   * Caps per-block size so a long terminal session (dozens of file reads,
+   * command outputs) doesn't blow up the summarizer's own context window.
+   * The summarizer needs the *shape* of what happened (which files, which
+   * commands, what went wrong), not verbatim 10 KB file contents.
    */
   private serializeMessagesForSummary(messages: AnthropicMessage[]): string {
-    return messages.map((msg: any) => {
-      const content = msg.content
+    const TOOL_RESULT_MAX = 4000   // chars per tool result
+    const TOOL_INPUT_MAX = 800     // chars per tool_use input JSON
+    const TEXT_MAX = 6000          // chars per text/thinking block
+    const TOTAL_MAX = 300_000      // total serialized chars (~75K tokens)
 
-      // Simple string content
+    let totalLen = 0
+    const msgStrings: string[] = []
+
+    for (const msg of messages) {
+      if (totalLen >= TOTAL_MAX) break
+      const content = (msg as any).content
+
+      let rendered: string
       if (typeof content === 'string') {
-        return `[${msg.role.toUpperCase()}]\n${content}`
-      }
-
-      // Array of Anthropic content blocks
-      if (Array.isArray(content)) {
+        rendered = `[${(msg as any).role.toUpperCase()}]\n${content.slice(0, TEXT_MAX)}`
+      } else if (Array.isArray(content)) {
         const parts: string[] = []
         for (const block of content) {
           switch (block.type) {
             case 'text':
-              parts.push(block.text)
+              parts.push(block.text.slice(0, TEXT_MAX))
               break
             case 'thinking':
-              parts.push(`[THINKING]\n${block.thinking}`)
+              parts.push(`[THINKING]\n${(block.thinking || '').slice(0, TEXT_MAX)}`)
               break
-            case 'tool_use':
-              parts.push(`[TOOL CALL: ${block.name}]\n${JSON.stringify(block.input)}`)
+            case 'tool_use': {
+              const inputStr = JSON.stringify(block.input)
+              parts.push(`[TOOL CALL: ${block.name}]\n${inputStr.slice(0, TOOL_INPUT_MAX)}`)
               break
-            case 'tool_result':
-              parts.push(`[TOOL RESULT (${block.tool_use_id})]\n${typeof block.content === 'string' ? block.content : JSON.stringify(block.content)}`)
+            }
+            case 'tool_result': {
+              const raw = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+              parts.push(`[TOOL RESULT (${block.tool_use_id})]\n${raw.slice(0, TOOL_RESULT_MAX)}`)
               break
+            }
             case 'image_url':
+            case 'image':
               parts.push('[image]')
               break
             default:
-              parts.push(JSON.stringify(block))
+              parts.push(JSON.stringify(block).slice(0, TOOL_RESULT_MAX))
           }
         }
-        return `[${msg.role.toUpperCase()}]\n${parts.join('\n')}`
+        rendered = `[${(msg as any).role.toUpperCase()}]\n${parts.join('\n')}`
+      } else {
+        rendered = `[${(msg as any).role.toUpperCase()}]\n${String(content || '').slice(0, TEXT_MAX)}`
       }
 
-      return `[${msg.role.toUpperCase()}]\n${String(content || '')}`
-    }).join('\n\n---\n\n')
+      totalLen += rendered.length
+      msgStrings.push(rendered)
+    }
+
+    return msgStrings.join('\n\n---\n\n')
   }
 
   /**
@@ -1898,10 +2075,10 @@ Developer message: ${displayText}
         if (block.type !== 'tool_result') return block
         const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
         if (content.length < 200) return block
-        // Find matching tool_use in preceding assistant message to get tool name
-        const toolName = this.findToolNameForResult(block.tool_use_id, idx, messages)
-        const summary = toolName
-          ? this.buildToolSummaryLine(toolName, '{}', content)
+        // Find matching tool_use in preceding assistant message to get tool name + args
+        const toolInfo = this.findToolInfoForResult(block.tool_use_id, idx, messages)
+        const summary = toolInfo
+          ? this.buildToolSummaryLine(toolInfo.name, toolInfo.input, content)
           : content.slice(0, 150) + ' [... compacted]'
         return { ...block, content: summary }
       })
@@ -1911,16 +2088,16 @@ Developer message: ${displayText}
   }
 
   /**
-   * Find the tool name for a given tool_use_id by searching backwards through
-   * assistant messages for a matching tool_use content block.
+   * Find the tool name and input args for a given tool_use_id by searching
+   * backwards through assistant messages for a matching tool_use content block.
    */
-  private findToolNameForResult(toolUseId: string, fromIndex: number, messages: AnthropicMessage[]): string | null {
+  private findToolInfoForResult(toolUseId: string, fromIndex: number, messages: AnthropicMessage[]): { name: string; input: Record<string, unknown> } | null {
     for (let i = fromIndex - 1; i >= 0; i--) {
       const msg = messages[i]
       if (msg.role === 'assistant' && Array.isArray(msg.content)) {
         for (const block of msg.content) {
           if (block.type === 'tool_use' && block.id === toolUseId) {
-            return block.name
+            return { name: block.name, input: (block.input ?? {}) as Record<string, unknown> }
           }
         }
       }
@@ -1929,38 +2106,56 @@ Developer message: ${displayText}
   }
 
   // summarizeToolResult removed — replaced by inline compaction in
-  // microcompactToolResults using findToolNameForResult for Anthropic format.
+  // microcompactToolResults using findToolInfoForResult for Anthropic format.
+
+  /**
+   * Forward-scan for a tool_result block matching a given tool_use_id.
+   * Used by extractToolOpsLog to pair commands with their output.
+   */
+  private findToolResultForId(toolUseId: string, messages: AnthropicMessage[]): { content: string | unknown } | null {
+    for (const msg of messages) {
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue
+      for (const block of msg.content) {
+        if (block.type === 'tool_result' && block.tool_use_id === toolUseId) {
+          return { content: block.content }
+        }
+      }
+    }
+    return null
+  }
 
   /**
    * Builds a contextual one-line summary based on the tool type.
+   * Args are passed as a pre-parsed Record (extracted from the tool_use
+   * block in the preceding assistant message) — no JSON.parse needed.
    */
-  private buildToolSummaryLine(toolName: string, argsJson: string, result: string): string {
-    try {
-      const args = JSON.parse(argsJson)
-      const lineCount = result.split('\n').length
+  private buildToolSummaryLine(toolName: string, args: Record<string, unknown>, result: string): string {
+    const lineCount = result.split('\n').length
 
-      switch (toolName) {
-        case 'read_file':
-          return `[File read: ${args.file_path} (${lineCount} lines)]`
-        case 'search_files':
-          return `[Search "${args.query}" in ${args.directory || 'project'}: ${lineCount} result lines]`
-        case 'list_directory':
-          return `[Directory listing: ${args.file_path} (${lineCount} entries)]`
-        case 'glob':
-          return `[Glob "${args.pattern}": ${lineCount} matches]`
-        case 'execute_command': {
-          const firstLine = result.split('\n')[0]?.slice(0, 100) || ''
-          return `[Command "${(args.command as string)?.slice(0, 80)}": ${firstLine}]`
-        }
-        case 'web_fetch':
-          return `[Fetched: ${args.url} (${result.length} chars)]`
-        case 'get_diagnostics':
-          return `[Diagnostics: ${args.file_path} — ${result.split('\n')[0] || 'no issues'}]`
-        default:
-          return result.length > 200 ? result.slice(0, 150) + ' [... compacted]' : result
+    switch (toolName) {
+      case 'read_file':
+        return `[File read: ${args.file_path ?? '?'} (${lineCount} lines)]`
+      case 'search_files':
+        return `[Search "${args.query ?? '?'}" in ${args.directory || 'project'}: ${lineCount} result lines]`
+      case 'list_directory':
+        return `[Directory listing: ${args.file_path ?? '?'} (${lineCount} entries)]`
+      case 'glob':
+        return `[Glob "${args.pattern ?? '?'}": ${lineCount} matches]`
+      case 'execute_command': {
+        const firstLine = result.split('\n')[0]?.slice(0, 100) || ''
+        return `[Command "${(args.command as string)?.slice(0, 80) ?? '?'}": ${firstLine}]`
       }
-    } catch {
-      return result.length > 200 ? result.slice(0, 150) + ' [... compacted]' : result
+      case 'web_fetch':
+        return `[Fetched: ${args.url ?? '?'} (${result.length} chars)]`
+      case 'get_diagnostics':
+        return `[Diagnostics: ${args.file_path ?? '?'} — ${result.split('\n')[0] || 'no issues'}]`
+      case 'edit_file':
+        return `[Edit: ${args.file_path ?? '?'} (${lineCount} lines)]`
+      case 'write_file':
+      case 'create_file':
+        return `[Write: ${args.file_path ?? '?'} (${lineCount} lines)]`
+      default:
+        return result.length > 200 ? result.slice(0, 150) + ' [... compacted]' : result
     }
   }
 
@@ -2019,6 +2214,73 @@ Developer message: ${displayText}
   }
 
   /**
+   * Extract a lightweight "operations log" from messages that are about
+   * to be compacted. Captures commands run, searches performed,
+   * diagnostics seen, and web research — things the summary may drop
+   * but the model needs to avoid repeating work.
+   *
+   * Max ~8KB — enough to retain the last ~20 tool operations with
+   * key args and a truncated result snippet.
+   */
+  private extractToolOpsLog(messages: AnthropicMessage[]): string {
+    const OPS_LOG_MAX = 8000
+    const ops: string[] = []
+    for (const msg of messages) {
+      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+      for (const block of msg.content) {
+        if (block.type !== 'tool_use') continue
+        const name = block.name as string
+        const input = (block.input ?? {}) as Record<string, unknown>
+        let entry = ''
+        switch (name) {
+          case 'execute_command':
+            entry = `run: ${(input.command as string)?.slice(0, 120) ?? '?'}`
+            break
+          case 'search_files':
+            entry = `search "${input.query ?? '?'}" in ${input.directory || 'project'}`
+            break
+          case 'glob':
+            entry = `glob "${input.pattern ?? '?'}"`
+            break
+          case 'get_diagnostics':
+            entry = `diagnostics: ${input.file_path ?? '?'}`
+            break
+          case 'web_search':
+            entry = `web search: "${input.query ?? '?'}"`
+            break
+          case 'web_fetch':
+            entry = `web fetch: ${input.url ?? '?'}`
+            break
+          default:
+            continue // skip read_file, write_file, edit_file (recovered by file re-reads)
+        }
+        // Find the matching tool result
+        const resultBlock = this.findToolResultForId(block.id as string, messages)
+        if (resultBlock) {
+          const raw = typeof resultBlock.content === 'string'
+            ? resultBlock.content
+            : JSON.stringify(resultBlock.content)
+          const snippet = raw.slice(0, 200).replace(/\n/g, ' ')
+          entry += ` → ${snippet}${raw.length > 200 ? '…' : ''}`
+        }
+        ops.push(`- ${entry}`)
+      }
+    }
+
+    if (ops.length === 0) return ''
+    let result = ops.join('\n')
+    const truncated = result.length > OPS_LOG_MAX
+    if (truncated) {
+      result = result.slice(0, OPS_LOG_MAX) + '\n[... truncated]'
+    }
+    logger.info(
+      'agent',
+      `[post-compaction] tool ops log: ${ops.length} operations, ${result.length} chars${truncated ? ' (truncated)' : ''}`,
+    )
+    return result
+  }
+
+  /**
    * Returns the most recently accessed/modified files for re-reading.
    * Prioritizes modified files over read-only files.
    */
@@ -2034,10 +2296,11 @@ Developer message: ${displayText}
   /**
    * Layer 2b: After LLM compaction, re-reads recently accessed files
    * and injects their content so the model recovers file-level knowledge.
+   * Also injects the tool operations log if provided.
    */
-  private async injectFileReReadings(messages: AnthropicMessage[]): Promise<void> {
+  private async injectFileReReadings(messages: AnthropicMessage[], toolOpsLog?: string): Promise<void> {
     const recentFiles = this.getRecentFiles()
-    if (recentFiles.length === 0) return
+    if (recentFiles.length === 0 && !toolOpsLog) return
 
     const diffService = DiffService.getInstance()
     const pendingDiffs = diffService.getPendingDiffs()
@@ -2080,11 +2343,14 @@ Developer message: ${displayText}
     const { buildPostCompactionSkillsBlock } = await import('./skillService')
     const skillsBlock = buildPostCompactionSkillsBlock()
 
-    if (fileContents.length === 0 && !devServerNote && !skillsBlock) return
+    if (fileContents.length === 0 && !devServerNote && !skillsBlock && !toolOpsLog) return
 
     const parts = []
     if (skillsBlock) {
       parts.push(skillsBlock)
+    }
+    if (toolOpsLog) {
+      parts.push(`[Context recovery — tool operations already performed this session]\n\n${toolOpsLog}`)
     }
     if (fileContents.length > 0) {
       parts.push(`[Context recovery — current content of recently accessed files]\n\n${fileContents.join('\n\n')}`)
@@ -2092,7 +2358,6 @@ Developer message: ${displayText}
     if (devServerNote) {
       parts.push(devServerNote)
     }
-    parts.push('\n[Continue from where you left off without asking the user any further questions.]')
 
     // Anthropic requires strictly alternating user/assistant messages.
     // If the last message is already user (e.g., tool_results from the
@@ -2102,7 +2367,7 @@ Developer message: ${displayText}
     if (lastMsg?.role === 'user') {
       messages.push({
         role: 'assistant',
-        content: 'Understood. I\'ll continue working with the recovered context.',
+        content: '[context recovered — continuing from recovered state]',
       })
     }
 
@@ -2137,6 +2402,9 @@ Developer message: ${displayText}
     resolveAllPendingDiffApprovals(false)
     // Reset auto-approve diffs so next session requires manual approval
     import('../../stores/permissionStore').then(m => m.usePermissionStore.getState().resetAutoApprove()).catch(() => {})
+    // Clean up any pending credential/question requests that are blocking
+    import('../../stores/credentialRequestStore').then(m => m.useCredentialRequestStore.getState().clearAll()).catch(() => {})
+    import('../../stores/askUserQuestionStore').then(m => m.useAskUserQuestionStore.getState().clearAll()).catch(() => {})
     this.isRunning = false
     // forceEnd() bumps the QueryGuard's generation so the cancelled loop's
     // finally block sees a stale generation and skips its end() call.
@@ -2180,6 +2448,11 @@ Developer message: ${displayText}
         const isCf520 = err instanceof ServiceError && err.code === 'CLOUDFLARE_520'
         const delay = isRateLimit ? 20000 : isCf520 ? (CF_520_DELAYS[attempt] || 30000) : (RETRY_DELAYS[attempt] || 10000)
         logger.warn('agent', `API call failed (${(err as ServiceError).code}), retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`)
+        useToastStore.getState().addToast(
+          'warning',
+          `Tentativa ${attempt + 1}/${MAX_RETRIES} falhou (${(err as ServiceError).code}). Retry em ${delay / 1000}s...`,
+          Math.min(delay + 2000, 15000), // cap at 15s to avoid long-lived toasts
+        )
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(resolve, delay)
           this.abortController?.signal.addEventListener('abort', () => {
@@ -2765,6 +3038,14 @@ Developer message: ${displayText}
                   { ephemeral: true },
                 )
               } catch { /* chatStore may be torn down */ }
+              break
+            }
+            // Prompt-too-long: the upstream model rejected the request
+            // because the context exceeded its window. Signal the outer
+            // loop to attempt reactive compaction and retry.
+            if (event.errorType === 'prompt_too_long') {
+              finishReason = 'prompt_too_long'
+              logger.warn('agent', `[stream] prompt too long — will attempt reactive compact`)
               break
             }
             callbacks.onError(new ServiceError(event.message, 'STREAM_ERROR', false))

@@ -121,8 +121,13 @@ export function usePromptBar() {
   // Input is always active — user can type and enqueue while agent is busy.
   // Only disable during permission or credential dialogs (user must respond first).
   const isDisabled = hasPendingPermission || hasPendingCredential
-  // Send is only blocked during scaffolding (deps install / server start).
-  const isSendBlocked = isScaffolding
+  // Blocking limit: when context is nearly full, block input until compaction runs.
+  const currentPromptTokens = useChatStore(s => s.currentPromptTokens)
+  const headerContextWindow = useAgentStore(s => s.modelContextWindow)
+  const isContextBlocked = currentPromptTokens > 0 && (headerContextWindow ?? 0) > 0
+    && currentPromptTokens >= (headerContextWindow ?? 0) - 3000
+  // Send is blocked during scaffolding or when context is at the blocking limit.
+  const isSendBlocked = isScaffolding || isContextBlocked
   // Preview button is ALWAYS visible when a project is open.
   // It serves dual purpose:
   //   - If dev server is running: switches to preview/HTTP client view

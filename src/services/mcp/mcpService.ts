@@ -305,9 +305,17 @@ class MCPService {
 
   /**
    * Get all tools from all running servers.
+   * Filters out tools whose server is no longer running to prevent the
+   * agent from seeing stale tools in its system prompt and getting
+   * "MCP server 'X' is not running" errors at call time.
    */
   getAllTools(): MCPTool[] {
-    return Array.from(this.tools.values())
+    const runningNames = new Set(
+      useMcpStore.getState().servers
+        .filter(s => s.status === 'running')
+        .map(s => s.name)
+    )
+    return Array.from(this.tools.values()).filter(t => runningNames.has(t.serverName))
   }
 
   /**

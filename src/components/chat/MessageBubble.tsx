@@ -17,6 +17,7 @@ import ReasoningBlock from './ReasoningBlock'
 import PlanApprovalCard from './PlanApprovalCard'
 import TodoListCard from './TodoListCard'
 import CredentialRequestCard from './CredentialRequestCard'
+import { AskUserQuestionCard } from './AskUserQuestionCard'
 import {
   sessionToJson,
   sessionToMarkdown,
@@ -466,6 +467,17 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       }
       if (message.card.type === 'credential_request') {
         return <CredentialRequestCard messageId={message.id} card={message.card} />
+      }
+      if (message.card.type === 'ask_user_question' && message.card.questions && message.card.requestId) {
+        return (
+          <AskUserQuestionCard
+            messageId={message.id}
+            requestId={message.card.requestId}
+            projectPath={message.card.projectPath}
+            status={message.card.status}
+            questions={message.card.questions}
+          />
+        )
       }
     }
 

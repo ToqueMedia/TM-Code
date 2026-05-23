@@ -114,10 +114,9 @@ export const REJECTION_REASONS = {
 
   dataLayerDeps: (path: string, newlyAdded: readonly string[]) =>
     `Write rejected — ${path} adds [${newlyAdded.join(', ')}] to dependencies. ` +
-    `The publish-ready data layer uses \`firebase-admin\` (Publishing section, system prompt). ` +
-    `Recovery: drop those entries from dependencies, install \`firebase-admin\` instead, ` +
-    `and copy the db.ts pattern from read_skill('publish-backend'). ` +
-    `The local-dev fallback APP_ID makes \`npm run dev\` work immediately, no emulator setup needed.`,
+    `The platform data layer uses \`drizzle-orm\` + \`@libsql/client\` (Publishing section, system prompt). ` +
+    `Recovery: drop those entries from dependencies, install \`drizzle-orm\` + \`@libsql/client\` instead, ` +
+    `and use the Drizzle schema pattern from the system prompt's data layer section.`,
 
   itkV2Path: (path: string) =>
     `Blocked: ${path} references identitytoolkit.googleapis.com/v2 — every auth-API call you need ` +

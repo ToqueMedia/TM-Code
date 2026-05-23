@@ -1,5 +1,5 @@
 import { memo, useMemo } from 'react'
-import { Box, Flex, Text } from '@chakra-ui/react'
+import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import type { ToolCallDisplay } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { TerminalStructuredDiff } from './TerminalStructuredDiff'
@@ -43,6 +43,21 @@ const SUBAGENT_SPAWNERS = new Set([
 ])
 
 const RESULT_PREVIEW_CHARS = 1400
+
+// Detect base64-encoded images in tool results (browser_take_screenshot, etc.)
+// Returns the data URI if the result is a valid image, null otherwise.
+function extractImageSrc(result: string): string | null {
+  if (!result) return null
+  // Already a data URI
+  if (result.startsWith('data:image/')) return result
+  // Raw base64 that looks like image data (PNG starts with iVBOR, JPEG with /9j/)
+  const trimmed = result.trim()
+  if (/^(?:iVBOR[A-Za-z0-9+/=]{100,}|\/9j\/[A-Za-z0-9+/=]{100,})/.test(trimmed)) {
+    const mime = trimmed.startsWith('iVBOR') ? 'image/png' : 'image/jpeg'
+    return `data:${mime};base64,${trimmed}`
+  }
+  return null
+}
 
 function buildReadSummary(toolName: string, result: string | undefined): string | null {
   if (!result) return null
@@ -231,39 +246,55 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
         )}
 
         {/* Tool result for non-read, non-diff tools (execute_command, etc.) */}
-        {showResult && (
-          <Box
-            mt="3px"
-            px={2}
-            py="4px"
-            borderRadius="3px"
-            bg={isError ? 'rgba(248,81,73,0.04)' : 'rgba(255,255,255,0.015)'}
-            border={`1px solid ${isError ? 'rgba(248,81,73,0.12)' : 'rgba(255,255,255,0.04)'}`}
-          >
-            <Text
-              fontSize="12px"
-              color={isError ? tokens.colors.accent.red : tokens.colors.text.secondary}
-              whiteSpace="pre-wrap"
-              lineHeight="1.5"
-              fontFamily={tokens.fontFamily.mono}
+        {showResult && (() => {
+          const imgSrc = extractImageSrc(toolCall.result!)
+          if (imgSrc) {
+            return (
+              <Box mt="3px" borderRadius="4px" overflow="hidden" maxW="480px">
+                <Image
+                  src={imgSrc}
+                  alt="Screenshot"
+                  w="100%"
+                  borderRadius="4px"
+                  border="1px solid rgba(255,255,255,0.06)"
+                />
+              </Box>
+            )
+          }
+          return (
+            <Box
+              mt="3px"
+              px={2}
+              py="4px"
+              borderRadius="3px"
+              bg={isError ? 'rgba(248,81,73,0.04)' : 'rgba(255,255,255,0.015)'}
+              border={`1px solid ${isError ? 'rgba(248,81,73,0.12)' : 'rgba(255,255,255,0.04)'}`}
             >
-              {toolCall.result!.length > RESULT_PREVIEW_CHARS
-                ? toolCall.result!.slice(0, RESULT_PREVIEW_CHARS)
-                : toolCall.result}
-            </Text>
-            {toolCall.result!.length > RESULT_PREVIEW_CHARS && (
               <Text
-                mt="2px"
-                fontSize="10px"
-                color={tokens.colors.text.disabled}
+                fontSize="12px"
+                color={isError ? tokens.colors.accent.red : tokens.colors.text.secondary}
+                whiteSpace="pre-wrap"
+                lineHeight="1.5"
                 fontFamily={tokens.fontFamily.mono}
-                fontStyle="italic"
               >
-                … {toolCall.result!.length - RESULT_PREVIEW_CHARS} more chars
+                {toolCall.result!.length > RESULT_PREVIEW_CHARS
+                  ? toolCall.result!.slice(0, RESULT_PREVIEW_CHARS)
+                  : toolCall.result}
               </Text>
-            )}
-          </Box>
-        )}
+              {toolCall.result!.length > RESULT_PREVIEW_CHARS && (
+                <Text
+                  mt="2px"
+                  fontSize="10px"
+                  color={tokens.colors.text.disabled}
+                  fontFamily={tokens.fontFamily.mono}
+                  fontStyle="italic"
+                >
+                  … {toolCall.result!.length - RESULT_PREVIEW_CHARS} more chars
+                </Text>
+              )}
+            </Box>
+          )
+        })()}
 
         {/* Error result for read tools — still show the error */}
         {isReadTool && isError && toolCall.result && (

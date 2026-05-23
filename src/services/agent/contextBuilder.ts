@@ -64,6 +64,7 @@ import {
   getCompletionContractSection,
   getConstraintsSection,
   getDoingTasksSection,
+  getDevServerStatusSection,
   getEnvironmentSection,
   getExecutingActionsSection,
   getMemoryGuidanceSection,
@@ -490,6 +491,8 @@ class ContextBuilder {
         '.toquemedia-template manifest changes when scaffold is re-run'),
       dynamicSection('environment', () => getEnvironmentSection(ctx),
         'project path / package manager / language detected per session'),
+      dynamicSection('dev_server_status', () => getDevServerStatusSection(),
+        'dev server status flips null→starting→running→stopped per session'),
       dynamicSection('applied_scaffolding', () => getAppliedScaffoldingSection(ctx),
         'one-shot flow markers (auth, payments) appear after scaffold writes'),
       dynamicSection('project_structure', () => getProjectStructureSection(ctx),
@@ -615,6 +618,8 @@ class ContextBuilder {
         'MCP server list changes when user connects/disconnects servers'),
       dynamicSection('environment', () => getCmdEnvironmentSection(ctx),
         'cwd / homeDir / platform detected per session'),
+      dynamicSection('dev_server_status', () => getDevServerStatusSection(),
+        'dev server status flips null→starting→running→stopped per session'),
       // Scaffolding-aware framing + hashtag-triggered sticky CRITICAL rules.
       // Placed BEFORE the generic skills index so the matched skill rules
       // are read by the model before it sees the generic "skills available"

@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo, useSyncExternalStore } from 'react'
 import { useChatStore } from '../stores/chatStore'
+import { useAgentStore } from '../stores/agentStore'
 import { useProjectStore } from '../stores/projectStore'
 import { useAuthStore } from '../stores/authStore'
 import { useTerminalPanelStore } from '../stores/terminalPanelStore'
@@ -35,7 +36,7 @@ const MENTION_MENU_LIMIT = 50
 /**
  * CMD-mode prompt logic — slash commands, message queue, @mention support.
  */
-const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/payments', '/terminal'])
+const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/terminal'])
 
 // Control commands that must run immediately even while the agent is streaming.
 // They each stop the agent internally (stopAgent()) before doing their work, so
@@ -591,6 +592,13 @@ export function useCmdPromptLogic() {
     const firstToken = textForDispatch.trim().split(/\s+/)[0] || ''
     const isBypassCommand = CONTROL_COMMANDS_BYPASS_QUEUE.has(firstToken)
 
+    // Blocking limit: refuse input when context is nearly full
+    const currentPromptTokens = useChatStore.getState().currentPromptTokens
+    const ctxWindow = useAgentStore.getState().modelContextWindow
+    if (currentPromptTokens > 0 && (ctxWindow ?? 0) > 0 && currentPromptTokens >= (ctxWindow ?? 0) - 3000) {
+      return
+    }
+
     if (isStreaming && !isBypassCommand) {
       enqueue({ value, mode: 'prompt', priority: 'next', uuid: crypto.randomUUID() })
       return
@@ -778,14 +786,8 @@ export function useCmdPromptLogic() {
     }, 150)
   }, [])
 
-  // Auto-resize textarea
-  useEffect(() => {
-    const textarea = textareaRef.current
-    if (!textarea) return
-    textarea.style.height = 'auto'
-    const maxHeight = 6 * 24
-    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`
-  }, [input])
+  // Auto-resize textarea — moved to CmdModePromptInput (useLayoutEffect)
+  // so the resize is synchronous before paint, matching PromptTextarea.tsx.
 
   // Re-run @mention search when the QuickOpen index finishes building (or
   // when live watcher events mutate the index).

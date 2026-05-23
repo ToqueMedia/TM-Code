@@ -55,7 +55,7 @@ interface InternalSlot {
    *  best-guess). A later distinct JSON URL can still replace it. False means
    *  backendUrl came from a real JSON probe and should not be overwritten. */
   backendUrlMirrored: boolean
-  eaddrinuseRetried: boolean
+  eaddrinuseRetries: number
   /** One-shot flag: set after the first cross-origin "Script error. (:0)" hint
    *  is emitted to the console. Prevents the helper text from repeating on
    *  every popup retry attempt during the same dev-server slot. */
@@ -200,11 +200,16 @@ class DevServerManager {
     const frontendPortHint = opts.frontendPortHint
 
     // One server per project. Stop any existing before launching.
-    // Stop() cleanly tears down the previous slot; no preemptive kill_port —
-    // we don't know which ports the server will choose. If a zombie blocks
-    // a port from a previous TM Code crash, the dev server itself surfaces
-    // EADDRINUSE in the log and the user can act on it.
     await this.stop()
+
+    // Preemptive port cleanup for known framework defaults.
+    // If a zombie process from a previous TM Code crash (or another app)
+    // holds a well-known port, kill it before the dev server tries to bind.
+    // This avoids the EADDRINUSE → retry → restart cycle for the common case.
+    const knownPorts = this.guessFrameworkPorts(devCommand)
+    if (knownPorts.length > 0) {
+      await Promise.allSettled(knownPorts.map(p => invoke('kill_port', { port: p })))
+    }
 
     // Resolve wrapper status NOW (may inspect package.json asynchronously).
     const isWrapper = await isFullstackWrapper(devCommand, projectPath)
@@ -223,7 +228,7 @@ class DevServerManager {
       frontendUrl: null,
       backendUrl: null,
       backendUrlMirrored: false,
-      eaddrinuseRetried: false,
+      eaddrinuseRetries: 0,
       scriptErrorHintShown: false,
       gsiPopupHintShown: false,
     }
@@ -332,23 +337,29 @@ class DevServerManager {
         })
       }
 
-      // EADDRINUSE auto-recovery — once per slot.
+      // EADDRINUSE auto-recovery — up to 2 retries per slot.
       const eaddrinuse = line.match(/EADDRINUSE.*(?:port|address)[:\s]*(\d+)/i)
         || line.match(/EADDRINUSE.*:::(\d+)/i)
+        || line.match(/EADDRINUSE.*:(\d+)/i)
         || line.match(/address already in use\s+(?:::)?(\d+)/i)
-      if (eaddrinuse && !slot.eaddrinuseRetried) {
+        || line.match(/listen\s+EADDRINUSE\s+\S+:(\d+)/i)
+      const MAX_EADDRINUSE_RETRIES = 2
+      if (eaddrinuse && slot.eaddrinuseRetries < MAX_EADDRINUSE_RETRIES) {
         const blockedPort = parseInt(eaddrinuse[1], 10)
         if (blockedPort > 0) {
-          slot.eaddrinuseRetried = true
+          slot.eaddrinuseRetries++
           const { projectPath, command, projectKind } = slot
           // Flush whatever we have collected so far before the restart so
           // the user sees the EADDRINUSE line and the recovery message.
           const coalescedSoFar = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
-          coalescedSoFar.push({ text: `Port ${blockedPort} in use — killing and restarting...`, level: 'warn' })
+          coalescedSoFar.push({
+            text: `Port ${blockedPort} in use — killing and restarting (attempt ${slot.eaddrinuseRetries}/${MAX_EADDRINUSE_RETRIES})...`,
+            level: 'warn',
+          })
           if (coalescedSoFar.length > 0) layoutStore.addDevServerLogs(coalescedSoFar)
           this.stop().then(async () => {
             try { await invoke('kill_port', { port: blockedPort }) } catch {}
-            await new Promise(r => setTimeout(r, 500))
+            await new Promise(r => setTimeout(r, 800))
             await this.start(projectPath, command, projectKind).catch(() => {})
           })
           return
@@ -545,6 +556,27 @@ class DevServerManager {
     const kind = slot.projectKind
     console.warn(`[dev-server] EXIT: kind=${kind}, pid=${pid}, wasRunning=${wasRunning}, wasStarting=${wasStarting}`)
     slot.status = 'stopped'
+
+    // Best-effort port cleanup on exit — prevents zombie processes from
+    // blocking the port if the process tree wasn't fully killed.
+    const portsToClean: number[] = []
+    for (const url of [slot.frontendUrl, slot.backendUrl]) {
+      if (!url) continue
+      const m = url.match(/:(\d+)/)
+      if (m) {
+        const p = parseInt(m[1], 10)
+        if (p && !portsToClean.includes(p)) portsToClean.push(p)
+      }
+    }
+    // Also clean known framework ports if no URL was detected yet (server
+    // crashed before becoming ready).
+    if (portsToClean.length === 0) {
+      portsToClean.push(...this.guessFrameworkPorts(slot.command))
+    }
+    for (const port of portsToClean) {
+      invoke('kill_port', { port }).catch(() => {})
+    }
+
     this.server = null
 
     const layoutStore = useLayoutStore.getState()
@@ -603,6 +635,35 @@ class DevServerManager {
     this.unlistenExit = null
     this.unsubPreviewDefer?.()
     this.unsubPreviewDefer = null
+  }
+
+  /** Guess the default ports a framework will bind to based on the dev
+   *  command string. Returns an empty array when no known framework is
+   *  detected — the caller should fall back to EADDRINUSE recovery. */
+  private guessFrameworkPorts(devCommand: string): number[] {
+    const cmd = devCommand.toLowerCase()
+    const ports: number[] = []
+
+    // Next.js → 3000
+    if (cmd.includes('next dev') || cmd.includes('next start')) ports.push(3000)
+    // Nuxt → 3000
+    if (cmd.includes('nuxt dev') || cmd.includes('nuxi dev')) ports.push(3000)
+    // Angular → 4200
+    if (cmd.includes('ng serve')) ports.push(4200)
+    // Vite → 5173 (most common default)
+    if (cmd.includes('vite') && !cmd.includes('next') && !cmd.includes('nuxt')) ports.push(5173)
+    // Astro → 4321
+    if (cmd.includes('astro dev')) ports.push(4321)
+    // NOTE: Express/Fastify/NestJS use port 3000 by default, but we do NOT
+    // preemptively kill that port — it's too common and could terminate
+    // unrelated services. EADDRINUSE recovery handles this case instead.
+
+    // If the command is a wrapper like "npm run dev", check package.json
+    // for the underlying framework. This is async so we can't do it here,
+    // but the EADDRINUSE retry will catch it as a fallback.
+
+    // Deduplicate
+    return [...new Set(ports)]
   }
 
   async restart(): Promise<void> {

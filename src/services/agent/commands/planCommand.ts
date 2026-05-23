@@ -1049,19 +1049,20 @@ fails. Hard constraints (treat these as inviolable inputs, not options to
 evaluate):
 
 ## CRITICAL — Data layer
-- **Backend persistence uses \`firebase-admin\` against the platform's managed
-  database.** The harness BLOCKS \`@prisma/client\` / \`prisma\` /
-  \`drizzle-orm\` / \`@libsql/client\` / \`better-sqlite3\` from package.json
-  writes. Proposing them in the plan guarantees a downstream failure — do not.
+- **Backend persistence uses \`drizzle-orm\` + \`@libsql/client\` against the
+  platform's managed SQLite (libSQL) database.** The harness BLOCKS
+  \`@prisma/client\` / \`prisma\` / \`mysql2\` / \`pg\` / \`better-sqlite3\`
+  / \`firebase-admin\` from package.json writes. Proposing them in the plan
+  guarantees a downstream failure — do not.
 - Tenant isolation key is \`APP_ID\`, resolved as:
   \`\`\`ts
   const APP_ID = process.env.APP_ID
     || \`local-dev-\${(process.env.npm_package_name || 'app').replace(/[^a-z0-9]/gi, '-').toLowerCase()}\`
   \`\`\`
   This pattern makes \`npm run dev\` boot on day 1 without any deploy step.
-  Section 4 (Domain Schema) of PLAN.md describes the document/collection model;
-  Section 7 (Technical Decisions) records "Data layer: firebase-admin via
-  managed DB" with no alternatives evaluated — there is no choice to evaluate.
+  Section 4 (Domain Schema) of PLAN.md describes the Drizzle schema model;
+  Section 7 (Technical Decisions) records "Data layer: Drizzle ORM + libSQL"
+  with no alternatives evaluated — there is no choice to evaluate.
 
 ## CRITICAL — Container shape
 - Every fullstack project (frontend + backend) ships a \`Dockerfile\` at the

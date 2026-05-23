@@ -155,6 +155,8 @@ interface PermissionState {
   approvedScopes: Set<'core' | 'mcp'>
   /** When true, file diffs (write_file/edit_file/create_file) are auto-accepted without user confirmation */
   autoApproveDiffs: boolean
+  /** When true, user clicked "Deny All" — auto-deny all non-dangerous queued permissions */
+  autoDenyAll: boolean
   /** Current permission being shown to the user */
   pendingPermission: PendingPermission | null
   /** Queue of permissions waiting to be shown (FIFO) */
@@ -166,6 +168,9 @@ interface PermissionActions {
   approve: () => void
   approveAll: () => void
   deny: () => void
+  /** Deny the current permission and auto-deny all subsequent queued
+   *  non-dangerous permissions in the same session. */
+  denyAll: () => void
   /** Deny the current pending permission and feed a user-written reason back
    *  to the agent as part of the tool's result. Useful when the default
    *  "Permission denied" message isn't expressive enough. */
@@ -210,6 +215,7 @@ function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionSt
 export const usePermissionStore = create<PermissionState & PermissionActions>()((set, get) => ({
   approvedScopes: new Set(),
   autoApproveDiffs: loadAutoApproveDiffs(),
+  autoDenyAll: false,
   pendingPermission: null,
   permissionQueue: [],
 
@@ -227,6 +233,11 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       // User authorized all tools in this scope (core or mcp)
       if (get().approvedScopes.has(scope)) {
         return Promise.resolve({ approved: true, prompted: false, source: 'approved_scope' })
+      }
+
+      // User clicked "Deny All" — auto-deny non-dangerous queued tools
+      if (get().autoDenyAll && !promptReason) {
+        return Promise.resolve({ approved: false, prompted: false, source: 'user' })
       }
 
       if (SAFE_TOOLS.has(toolName)) {
@@ -279,7 +290,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       void logPermission(`✓ Autorizaste \`${pendingPermission.toolName}\``, 'success')
-      set({ pendingPermission: null })
+      set({ pendingPermission: null, autoDenyAll: false })
       advanceQueue(set, get)
     }
   },
@@ -342,6 +353,34 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     }
   },
 
+  denyAll: () => {
+    const { pendingPermission, permissionQueue } = get()
+    if (pendingPermission) {
+      pendingPermission.resolve({
+        approved: false,
+        prompted: true,
+        source: 'user',
+        promptKind: pendingPermission.promptReason,
+      })
+      void logPermission(`✗ Recusaste todos \`${pendingPermission.toolName}\``, 'warn')
+    }
+
+    // Deny all queued non-dangerous permissions; keep dangerous ones for
+    // the user to review individually.
+    const remaining: PendingPermission[] = []
+    for (const queued of permissionQueue) {
+      if (queued.promptReason) {
+        // Dangerous — must still show dialog
+        remaining.push(queued)
+      } else {
+        queued.resolve({ approved: false, prompted: false, source: 'user' })
+      }
+    }
+
+    set({ pendingPermission: null, autoDenyAll: true, permissionQueue: remaining })
+    advanceQueue(set, get)
+  },
+
   denyWith: (reason: string) => {
     const { pendingPermission } = get()
     if (pendingPermission) {
@@ -372,7 +411,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   resetAutoApprove: () => {
     saveAutoApproveDiffs(false)
     const empty = new Set<'core' | 'mcp'>()
-    set({ approvedScopes: empty, autoApproveDiffs: false })
+    set({ approvedScopes: empty, autoApproveDiffs: false, autoDenyAll: false })
     persistApprovedScopes(empty)
   },
 

@@ -302,14 +302,7 @@ function MainLayout() {
           {/* Permission dialog - shown above PromptBar when agent needs approval */}
           {/* In preview mode, PermissionDialog is rendered inside PreviewView */}
           {pendingPermission && viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'data' && (
-            <PermissionDialog
-              toolName={pendingPermission.toolName}
-              args={pendingPermission.args}
-              promptReason={pendingPermission.promptReason}
-              onApprove={() => usePermissionStore.getState().approve()}
-              onApproveAll={() => usePermissionStore.getState().approveAll()}
-              onDeny={() => usePermissionStore.getState().deny()}
-            />
+            <PermissionDialog />
           )}
 
           {/* PromptBar - hidden in editor, preview, settings, and data viewer */}

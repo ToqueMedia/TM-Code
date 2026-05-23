@@ -592,7 +592,8 @@ pub fn run() {
     let child_map: commands::terminal::PtyChildMap =
         std::sync::Mutex::new(std::collections::HashMap::new());
 
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default()
         .manage(command_history)
         .manage(process_map)
         .manage(active_container)
@@ -607,12 +608,23 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        // Serve app via HTTP localhost instead of tauri:// protocol.
-        // This allows iframes to load other HTTP origins (dev server previews)
-        // without cross-protocol security restrictions.
-        // Port 14300 — TM Code specific. Avoids conflict with common dev ports.
-        .plugin(tauri_plugin_localhost::Builder::new(14300).build())
+        .plugin(tauri_plugin_updater::Builder::new().build());
+
+    // Serve app via HTTP localhost instead of tauri:// protocol.
+    // This allows iframes to load other HTTP origins (dev server previews)
+    // without cross-protocol security restrictions.
+    // Port 14300 — TM Code specific. Avoids conflict with common dev ports.
+    //
+    // In dev mode, Vite already serves on :1420, so the localhost plugin
+    // is not needed. More importantly, skipping it prevents a port
+    // conflict that blocks the production app from launching while
+    // `npm run tauri dev` is running (both would fight for :14300).
+    #[cfg(not(dev))]
+    {
+        builder = builder.plugin(tauri_plugin_localhost::Builder::new(14300).build());
+    }
+
+    builder
         .setup(move |app| {
             // ── File-association launch args ───────────────────────────
             // On Windows/Linux, "Open with TM Code" launches the binary

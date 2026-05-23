@@ -22,6 +22,7 @@ import { usePreflightStatus } from '../../hooks/usePreflightStatus'
 import { countAvailable } from '../../services/preflightService'
 import { getProfileForPlan } from '../../services/agent/modelProfiles'
 import { getAutoCompactThreshold, getEffectiveContextWindowSize } from '../../utils/contextWindow'
+import { computeSlidingWindow } from '../../utils/taskWindow'
 import { tokens } from '@/theme/tokens'
 import { formatElapsed, formatTokens } from './terminalHelpers'
 
@@ -153,59 +154,82 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
 
   return (
     <>
-      {/* Agent task list — shown above status bar while there's meaningful progress */}
-      {showTasks && (
-        <Box
-          px={3}
-          pt={1.5}
-          pb={1}
-          borderTop="1px solid rgba(255,255,255,0.04)"
-          bg="rgba(0,0,0,0.1)"
-        >
-          <Text
-            fontSize="13px"
-            fontWeight="700"
-            color={tokens.colors.text.disabled}
-            fontFamily={tokens.fontFamily.mono}
-            textTransform="uppercase"
-            letterSpacing="0.1em"
-            mb="4px"
+      {/* Agent task list — 3-task sliding window, same UX as chat-mode AgentTasksPanel */}
+      {showTasks && (() => {
+        const completed = agentTasks.filter((t: AgentTask) => t.status === 'completed').length
+        const inProgressIdx = agentTasks.findIndex((t: AgentTask) => t.status === 'in_progress')
+        const firstPendingIdx = agentTasks.findIndex((t: AgentTask) => t.status === 'pending')
+        const anchorIdx =
+          inProgressIdx !== -1 ? inProgressIdx
+          : firstPendingIdx !== -1 ? firstPendingIdx
+          : -1
+        const { start, end, hiddenAbove, hiddenBelow } =
+          computeSlidingWindow(agentTasks.length, anchorIdx)
+        const visible = agentTasks.slice(start, end + 1)
+
+        return (
+          <Box
+            px={3}
+            pt={1.5}
+            pb={1}
+            borderTop="1px solid rgba(255,255,255,0.04)"
+            bg="rgba(0,0,0,0.1)"
           >
-            {agentTasks.filter((t: AgentTask) => t.status === 'completed').length}/{agentTasks.length} tasks
-          </Text>
-          {agentTasks.map((task: AgentTask) => (
-            <Flex key={task.id} align="center" gap={2} py="2px">
-              {task.status === 'completed' ? (
-                <FiCheck size={13} color={tokens.colors.accent.green} style={{ flexShrink: 0 }} />
-              ) : task.status === 'in_progress' ? (
-                <Box
-                  as={FiLoader}
-                  boxSize="13px"
-                  color={tokens.colors.accent.purple}
-                  flexShrink={0}
-                  css={{
-                    animation: 'taskSpin 1.5s linear infinite',
-                    '@keyframes taskSpin': { '0%': { transform: 'rotate(0deg)' }, '100%': { transform: 'rotate(360deg)' } },
-                  }}
-                />
-              ) : (
-                <Box w="13px" h="13px" flexShrink={0} display="flex" alignItems="center" justifyContent="center">
-                  <Box w="4px" h="4px" borderRadius="full" bg={tokens.colors.text.disabled} />
-                </Box>
-              )}
-              <Text
-                fontSize="13px"
-                color={task.status === 'completed' ? tokens.colors.text.disabled : tokens.colors.text.secondary}
-                textDecoration={task.status === 'completed' ? 'line-through' : 'none'}
-                fontFamily={tokens.fontFamily.mono}
-                lineHeight="1.4"
-              >
-                {task.description}
+            <Text
+              fontSize="13px"
+              fontWeight="700"
+              color={tokens.colors.text.disabled}
+              fontFamily={tokens.fontFamily.mono}
+              textTransform="uppercase"
+              letterSpacing="0.1em"
+              mb="4px"
+            >
+              {completed}/{agentTasks.length} tasks
+            </Text>
+            {hiddenAbove > 0 && (
+              <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} py="1px">
+                · {hiddenAbove} earlier {hiddenAbove === 1 ? 'task' : 'tasks'}
               </Text>
-            </Flex>
-          ))}
-        </Box>
-      )}
+            )}
+            {visible.map((task: AgentTask) => (
+              <Flex key={task.id} align="center" gap={2} py="2px">
+                {task.status === 'completed' ? (
+                  <FiCheck size={13} color={tokens.colors.accent.green} style={{ flexShrink: 0 }} />
+                ) : task.status === 'in_progress' ? (
+                  <Box
+                    as={FiLoader}
+                    boxSize="13px"
+                    color={tokens.colors.accent.purple}
+                    flexShrink={0}
+                    css={{
+                      animation: 'taskSpin 1.5s linear infinite',
+                      '@keyframes taskSpin': { '0%': { transform: 'rotate(0deg)' }, '100%': { transform: 'rotate(360deg)' } },
+                    }}
+                  />
+                ) : (
+                  <Box w="13px" h="13px" flexShrink={0} display="flex" alignItems="center" justifyContent="center">
+                    <Box w="4px" h="4px" borderRadius="full" bg={tokens.colors.text.disabled} />
+                  </Box>
+                )}
+                <Text
+                  fontSize="13px"
+                  color={task.status === 'completed' ? tokens.colors.text.disabled : tokens.colors.text.secondary}
+                  textDecoration={task.status === 'completed' ? 'line-through' : 'none'}
+                  fontFamily={tokens.fontFamily.mono}
+                  lineHeight="1.4"
+                >
+                  {task.description}
+                </Text>
+              </Flex>
+            ))}
+            {hiddenBelow > 0 && (
+              <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} py="1px">
+                · {hiddenBelow} more {hiddenBelow === 1 ? 'task' : 'tasks'}
+              </Text>
+            )}
+          </Box>
+        )
+      })()}
 
       {/* Status bar */}
       <Flex

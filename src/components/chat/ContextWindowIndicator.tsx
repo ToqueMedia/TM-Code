@@ -32,7 +32,7 @@ import { tokens } from '@/theme/tokens'
  *   effective window  =  raw window  −  20K (summary headroom)
  *
  * Trigger logic — token-absolute, not percentage-of-raw:
- *   threshold = effective − 13K (AUTOCOMPACT_BUFFER_TOKENS)
+ *   threshold = effective − buffer (adaptive: floor 13K, 5% on large windows)
  *   warn      = threshold − 20K (WARNING_THRESHOLD_BUFFER_TOKENS)
  *
  * Token-absolute (not 83.5 % of raw) keeps the headroom constant

@@ -224,6 +224,12 @@ interface ChatActions {
   /** Mark a credential_request card as submitted and record which keys were saved (no values). */
   markCredentialRequestSubmitted: (messageId: string, submittedKeys: string[]) => void
   updateCardStatus: (messageId: string, status: ChatMessageCard['status']) => void
+  /** Add an ask_user_question card. Returns the message id. */
+  addAskUserQuestionCard: (
+    projectPath: string,
+    requestId: string,
+    questions: import('../stores/askUserQuestionStore').Question[],
+  ) => string
   /** Remove a message from the active session by id. Used by credential cards
    *  to delete themselves from the transcript after the user accepts or cancels —
    *  the card is a transient UI element, not a permanent log entry, and stacking
@@ -2520,6 +2526,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       const epoch = currentProjectEpoch()
       const isStale = () => currentProjectEpoch() !== epoch
 
+      // Reset auto-approve state from any previous session. Without this,
+      // approvedScopes (persisted in .toquemedia/permissions.json) and
+      // autoApproveDiffs (localStorage) survive across app restarts,
+      // causing the agent to skip ALL permission dialogs on boot.
+      usePermissionStore.getState().resetAutoApprove()
+
       set({ isLoadingSession: true })
       try {
         await sessionService.init(projectPath)
@@ -2939,6 +2951,45 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
 
       debouncedSave()
+    },
+
+    addAskUserQuestionCard: (projectPath, requestId, questions) => {
+      const messageId = generateId('msg')
+      const message: ChatMessage = {
+        id: messageId,
+        role: 'system',
+        content: '',
+        timestamp: Date.now(),
+        card: {
+          type: 'ask_user_question',
+          projectPath,
+          status: 'pending',
+          requestId,
+          questions,
+        },
+      }
+
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const updatedSession: ChatSession = {
+          ...session,
+          messages: [...session.messages, message],
+          updatedAt: Date.now(),
+        }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, updatedSession)
+
+        return { sessions: updatedSessions }
+      })
+
+      debouncedSave()
+      return messageId
     },
 
     removeMessage: (messageId) => {

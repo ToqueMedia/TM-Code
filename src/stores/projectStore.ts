@@ -297,6 +297,11 @@ export const useProjectStore = create<ProjectStore>()(
               import('../services/agent/taskPersistence'),
               import('./agentStore'),
             ]);
+            // Clear stale tasks from the PREVIOUS project before hydrating.
+            // Without this, if the new project has no tasks.json, the old
+            // project's tasks survive in the global agentStore and the
+            // AgentTasksPanel renders cross-project data.
+            useAgentStore.getState().clearTasks();
             const tasks = await loadTasksFromDisk(path);
             useAgentStore.getState().setTasks(tasks);
           } catch (error) {

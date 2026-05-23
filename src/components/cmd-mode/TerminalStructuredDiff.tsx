@@ -1,7 +1,9 @@
-import { memo, useMemo } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { structuredPatch } from 'diff'
 import { tokens } from '@/theme/tokens'
+
+const DEFAULT_MAX_LINES = 40
 
 interface TerminalStructuredDiffProps {
   filePath: string
@@ -10,7 +12,7 @@ interface TerminalStructuredDiffProps {
   isNewFile?: boolean
   contextLines?: number
   maxHunks?: number
-  /** Max visible code rows before truncation (default 20). */
+  /** Max visible code rows before truncation (default 40). */
   maxLines?: number
 }
 
@@ -27,8 +29,13 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
   isNewFile = false,
   contextLines = 3,
   maxHunks = 8,
-  maxLines = 20,
+  maxLines = DEFAULT_MAX_LINES,
 }: TerminalStructuredDiffProps) {
+  const [showFull, setShowFull] = useState(false)
+  // Reset expand state when the diff content changes so a new diff doesn't
+  // inherit the previous one's "expanded" choice.
+  useEffect(() => { setShowFull(false) }, [filePath, oldContent, newContent])
+  const effectiveMaxLines = showFull ? Infinity : maxLines
   const { rows, addedTotal, removedTotal, overflowCount } = useMemo(() => {
     // Normalize CRLF → LF so Windows files don't render with stray \r glyphs
     // and so the line counter matches what the user sees in the editor.
@@ -37,18 +44,18 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
 
     if (isNewFile || oldText === '') {
       const lines = newText.split('\n')
-      const capped = lines.slice(0, maxLines)
+      const capped = lines.slice(0, effectiveMaxLines)
       const r: Row[] = []
       capped.forEach((line, i) => r.push({ kind: 'add', newNo: i + 1, text: line }))
-      return { rows: r, addedTotal: lines.length, removedTotal: 0, overflowCount: Math.max(0, lines.length - maxLines) }
+      return { rows: r, addedTotal: lines.length, removedTotal: 0, overflowCount: Math.max(0, lines.length - effectiveMaxLines) }
     }
 
     if (newText === '') {
       const lines = oldText.split('\n')
-      const capped = lines.slice(0, maxLines)
+      const capped = lines.slice(0, effectiveMaxLines)
       const r: Row[] = []
       capped.forEach((line, i) => r.push({ kind: 'remove', oldNo: i + 1, text: line }))
-      return { rows: r, addedTotal: 0, removedTotal: lines.length, overflowCount: Math.max(0, lines.length - maxLines) }
+      return { rows: r, addedTotal: 0, removedTotal: lines.length, overflowCount: Math.max(0, lines.length - effectiveMaxLines) }
     }
 
     const patch = structuredPatch(filePath, filePath, oldText, newText, '', '', { context: contextLines })
@@ -77,7 +84,7 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
       let oldNo = h.oldStart
       let newNo = h.newStart
       for (const raw of h.lines as string[]) {
-        if (codeLineCount >= maxLines) {
+        if (codeLineCount >= effectiveMaxLines) {
           capped = true
           break
         }
@@ -104,7 +111,7 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
     }
 
     return { rows: r, addedTotal, removedTotal, overflowCount }
-  }, [oldContent, newContent, filePath, isNewFile, contextLines, maxHunks, maxLines])
+  }, [oldContent, newContent, filePath, isNewFile, contextLines, maxHunks, effectiveMaxLines])
 
   const gutterDigits = useMemo(() => {
     let max = 1
@@ -215,11 +222,42 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
           )
         })}
 
-        {/* Overflow indicator */}
+        {/* Overflow indicator / show-full toggle */}
         {overflowCount > 0 && (
-          <Box px={2} py="3px" bg="rgba(255,255,255,0.02)" borderTop="1px solid rgba(255,255,255,0.04)">
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} fontStyle="italic">
-              … {overflowCount} more line{overflowCount !== 1 ? 's' : ''}
+          <Box
+            as="button"
+            w="100%"
+            px={2}
+            py="3px"
+            bg="rgba(255,255,255,0.02)"
+            borderTop="1px solid rgba(255,255,255,0.04)"
+            cursor="pointer"
+            textAlign="left"
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ bg: 'rgba(255,255,255,0.04)' }}
+            onClick={() => setShowFull(true)}
+          >
+            <Text fontSize="10px" color={tokens.colors.accent.purple} fontFamily={tokens.fontFamily.mono}>
+              … {overflowCount} more line{overflowCount !== 1 ? 's' : ''} — click to expand
+            </Text>
+          </Box>
+        )}
+        {showFull && overflowCount === 0 && addedTotal + removedTotal > maxLines && (
+          <Box
+            as="button"
+            w="100%"
+            px={2}
+            py="3px"
+            bg="rgba(255,255,255,0.02)"
+            borderTop="1px solid rgba(255,255,255,0.04)"
+            cursor="pointer"
+            textAlign="left"
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ bg: 'rgba(255,255,255,0.04)' }}
+            onClick={() => setShowFull(false)}
+          >
+            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+              Collapse
             </Text>
           </Box>
         )}

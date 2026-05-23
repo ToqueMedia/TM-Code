@@ -3,6 +3,8 @@ import { Box } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { useChatStore } from '@/stores/chatStore'
+import { useByokStore } from '@/stores/byokStore'
+import { useBillingStore } from '@/stores/billingStore'
 import { renderHighlightedPrompt } from './promptHighlight'
 import { resolveInlineArgHint } from './slashArgHint'
 
@@ -45,6 +47,10 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
   // + highlight overlay genuinely need the value on every change; the rest
   // of PromptBar's tree does not.
   const value = useChatStore(s => s.draftInput)
+  const byokEnabled = useByokStore(s => s.enabled)
+  const billingPlan = useBillingStore(s => s.plan)
+
+  const planSuffix = byokEnabled ? ` (${billingPlan === 'explorer' ? 'Explorer' : billingPlan === 'vibe' ? 'Vibe' : billingPlan === 'pro' ? 'Pro' : billingPlan === 'max' ? 'Max' : billingPlan === 'welcome' ? 'Welcome' : billingPlan})` : ''
   // Mirror the textarea's scrollTop onto the overlay so multi-line content
   // (>6 visible rows, when the textarea starts scrolling internally) keeps
   // the coloured highlight aligned with the real glyphs underneath.
@@ -161,7 +167,7 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
           onBlur={onBlur}
           onPaste={onPaste}
           onScroll={handleScroll}
-          placeholder={isAgentBusy ? t('prompt.placeholderBusy') : t('prompt.placeholder')}
+          placeholder={isAgentBusy ? t('prompt.placeholderBusy') : `${t('prompt.placeholder')}${planSuffix}`}
           aria-label={t('prompt.ariaLabel')}
           disabled={disabled}
           rows={1}

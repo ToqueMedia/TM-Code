@@ -10,10 +10,12 @@
  *     Reserved at the top of the window so a compaction call has room to
  *     emit its summary. Effective window = raw window minus this.
  *
- *   AUTOCOMPACT_BUFFER_TOKENS = 13_000
+ *   AUTOCOMPACT_BUFFER_FLOOR  = 13_000
+ *   AUTOCOMPACT_BUFFER_PCT    = 0.05
  *     Safety margin below the effective ceiling. Threshold for auto-compact
- *     = effective window minus this. Picked by claude-vaz so the next
- *     real turn still fits when compaction is about to fire.
+ *     = effective window minus this. Buffer is adaptive: 13K floor on small
+ *     windows (≤256K), 5% of effective on larger windows so the next turn
+ *     still has room. On 1M: buffer = max(13K, ~49K) = 49K.
  *
  *   WARNING_THRESHOLD_BUFFER_FLOOR = 20_000
  *   WARNING_THRESHOLD_BUFFER_PCT   = 0.07
@@ -28,9 +30,11 @@
  */
 
 export const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
-export const AUTOCOMPACT_BUFFER_TOKENS = 13_000
+export const AUTOCOMPACT_BUFFER_FLOOR = 13_000
+export const AUTOCOMPACT_BUFFER_PCT = 0.05
 export const WARNING_THRESHOLD_BUFFER_FLOOR = 20_000
 export const WARNING_THRESHOLD_BUFFER_PCT = 0.07
+export const BLOCKING_LIMIT_BUFFER = 3_000
 
 /**
  * Window size minus the reserved headroom for the summary call.
@@ -61,7 +65,14 @@ export function getAutoCompactThreshold(
   maxOutputTokens?: number | null,
 ): number {
   const effective = getEffectiveContextWindowSize(contextWindow, maxOutputTokens)
-  return Math.max(0, effective - AUTOCOMPACT_BUFFER_TOKENS)
+  // Adaptive buffer: floor of 13K on small windows (≤256K), scales to 5% of
+  // effective on larger windows. On 1M: buffer = max(13K, 49K) = 49K, giving
+  // the next turn ~49K of breathing room instead of a dangerously tight 13K.
+  const buffer = Math.max(
+    AUTOCOMPACT_BUFFER_FLOOR,
+    Math.floor(effective * AUTOCOMPACT_BUFFER_PCT),
+  )
+  return Math.max(0, effective - buffer)
 }
 
 /**
@@ -82,6 +93,20 @@ export function getWarningThreshold(
     Math.floor(effective * WARNING_THRESHOLD_BUFFER_PCT),
   )
   return Math.max(0, trigger - buffer)
+}
+
+/**
+ * Returns true when the context is so close to full that no useful reply
+ * can fit. Blocks further user input until compaction runs.
+ * Matches claude-vaz autoCompact.ts `isAtBlockingLimit` (tokens >=
+ * contextWindow - 3000).
+ */
+export function isAtBlockingLimit(
+  currentTokens: number,
+  contextWindow: number,
+): boolean {
+  if (contextWindow <= 0) return false
+  return currentTokens >= contextWindow - BLOCKING_LIMIT_BUFFER
 }
 
 /**

@@ -52,6 +52,7 @@ export const SPAWN_BACKGROUND_AGENT = 'spawn_background_agent'
 export const PROVISION_AUTH = 'provision_auth'
 export const PROVISION_DEPLOY = 'provision_deploy'
 export const REQUEST_CREDENTIALS = 'request_credentials'
+export const ASK_USER_QUESTION = 'ask_user_question'
 
 // Verification sub-agent
 export const VERIFY = 'verify'
@@ -79,7 +80,7 @@ export const TOOL_NAMES = [
   EXECUTE_COMMAND, START_DEV_SERVER,
   WEB_SEARCH, WEB_FETCH, RESEARCH,
   UPDATE_TASKS, CHECK_BACKGROUND_AGENTS, SPAWN_BACKGROUND_AGENT,
-  PROVISION_AUTH, PROVISION_DEPLOY, REQUEST_CREDENTIALS,
+  PROVISION_AUTH, PROVISION_DEPLOY, REQUEST_CREDENTIALS, ASK_USER_QUESTION,
   VERIFY,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
 ] as const
