@@ -44,11 +44,22 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
 
   const handleDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
-    const t = e.target as HTMLElement
-    const tag = t.tagName?.toLowerCase() || ''
-    if (['button', 'input', 'svg', 'path', 'a'].includes(tag)) return
-    if (t.getAttribute?.('role') === 'button') return
-    if (t.closest?.('[data-no-drag]')) return
+    // Walk up the DOM from the click target to determine if the user
+    // clicked on an interactive element.  A tag-name allowlist is never
+    // complete (Chakra renders <Text> as <span>, <Flex> as <div>), so we
+    // also check cursor: pointer which Chakra sets via CSS for every
+    // interactive element.
+    let el: HTMLElement | null = e.target as HTMLElement
+    for (let i = 0; i < 8 && el && el !== e.currentTarget; i++) {
+      const tag = el.tagName?.toLowerCase() || ''
+      if (['button', 'input', 'svg', 'path', 'a', 'select', 'textarea'].includes(tag)) return
+      if (el.getAttribute('role') === 'button') return
+      if (el.hasAttribute('data-no-drag')) return
+      try {
+        if (window.getComputedStyle(el).cursor === 'pointer') return
+      } catch { /* getComputedStyle can throw on detached nodes */ }
+      el = el.parentElement
+    }
     getCurrentWindow().startDragging().catch(() => {})
   }, [])
 

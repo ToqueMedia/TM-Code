@@ -16,13 +16,24 @@ import { logger } from '../utils/logger'
 const STORAGE_KEY_PREFIX = 'tm-time-guard:'
 const EXPLORER_TOKEN_BUDGET = 1_500_000 // 1.5M tokens
 /** Maximum forward jump (ms) considered normal. Beyond this = manipulation. */
-const MAX_DRIFT_MS = 24 * 60 * 60 * 1000 // 24h — same as MAX_FORWARD_JUMP_MS
+const MAX_FORWARD_JUMP_MS = 24 * 60 * 60 * 1000 // 24h
+/** Tolerance for small backward clock drift — NTP adjustments, DST, sleep. */
+const TOLERANCE_MS = 5 * 60 * 1000 // 5min
+/**
+ * Cooldown after unblocking: skip manipulation detection for this period
+ * to prevent a block/unblock oscillation when NTP drift hovers near the
+ * tolerance boundary. Without this, a clock that drifts 4m59s backward
+ * (triggers block) then recovers 30s later (triggers unblock) would cycle
+ * indefinitely.
+ */
+const UNBLOCK_COOLDOWN_MS = 60 * 60 * 1000 // 1h
 
 interface TimeGuardState {
   lastCheckTimestamp: number   // Unix ms of last billing check
   lastCycleEnd: string         // "YYYY-MM-DD" from last check
   resetBlocked: boolean        // True if monthly reset is blocked due to time manipulation
   detectedAt: number | null    // When manipulation was first detected
+  unblockedAt: number | null   // When the block was cleared (for cooldown)
 }
 
 function storageKey(fingerprint: string): string {
@@ -74,6 +85,20 @@ export function checkTimeManipulation(
       lastCycleEnd: currentCycleEnd,
       resetBlocked: false,
       detectedAt: null,
+      unblockedAt: null,
+    })
+    return { manipulated: false, downgradeToExplorer: false, blockReset: false }
+  }
+
+  // Cooldown: if the block was recently cleared, skip manipulation detection
+  // for UNBLOCK_COOLDOWN_MS to prevent NTP oscillation cycles.
+  if (prev.unblockedAt && now - prev.unblockedAt < UNBLOCK_COOLDOWN_MS) {
+    saveTimeGuardState(fingerprint, {
+      lastCheckTimestamp: now,
+      lastCycleEnd: currentCycleEnd,
+      resetBlocked: false,
+      detectedAt: null,
+      unblockedAt: prev.unblockedAt,
     })
     return { manipulated: false, downgradeToExplorer: false, blockReset: false }
   }
@@ -83,12 +108,11 @@ export function checkTimeManipulation(
   // backward by a few seconds, which previously triggered a false positive.
   // If the clock is now within tolerance of a reasonable range, unblock.
   if (prev.resetBlocked) {
-    const TOLERANCE_MS = 5 * 60 * 1000
     // Check if the current clock is still unreasonable:
     // - Clock is still BEFORE the last known check time (minus tolerance)
-    // - Clock jumped MORE than 7 days forward (still manipulated)
+    // - Clock jumped MORE than 24h forward (still manipulated)
     const stillRolledBack = now < prev.lastCheckTimestamp - TOLERANCE_MS
-    const stillJumpedForward = now > prev.lastCheckTimestamp + MAX_DRIFT_MS
+    const stillJumpedForward = now > prev.lastCheckTimestamp + MAX_FORWARD_JUMP_MS
     if (stillRolledBack || stillJumpedForward) {
       // Still manipulated — enforce block.
       return {
@@ -98,20 +122,21 @@ export function checkTimeManipulation(
       }
     }
     // Clock is now reasonable — clear the block. This was likely a false
-    // positive from NTP drift or a DST transition.
+    // positive from NTP drift or a DST transition. Set unblockedAt so the
+    // cooldown prevents immediate re-detection.
     logger.warn('time-guard', 'Reset block cleared — clock is now within tolerance')
     saveTimeGuardState(fingerprint, {
       lastCheckTimestamp: now,
       lastCycleEnd: currentCycleEnd,
       resetBlocked: false,
       detectedAt: null,
+      unblockedAt: now,
     })
     return { manipulated: false, downgradeToExplorer: false, blockReset: false }
   }
 
   // Clock rollback detection: current time is BEFORE the last check timestamp.
   // Allow a small tolerance (5 minutes) for NTP adjustments and DST transitions.
-  const TOLERANCE_MS = 5 * 60 * 1000
   const clockWentBackward = now < prev.lastCheckTimestamp - TOLERANCE_MS
 
   // Cycle end anomaly: current time is BEFORE the previously known cycle end,
@@ -125,7 +150,6 @@ export function checkTimeManipulation(
   // the last check. This catches attempts to skip ahead to bypass monthly
   // token reset. Allow 24h tolerance for normal usage patterns (e.g. user
   // leaves app open overnight).
-  const MAX_FORWARD_JUMP_MS = 24 * 60 * 60 * 1000
   const clockWentForward = now > prev.lastCheckTimestamp + MAX_FORWARD_JUMP_MS
 
   // Cycle end skipped: the current cycle end is DIFFERENT from the previous
@@ -146,6 +170,7 @@ export function checkTimeManipulation(
       lastCycleEnd: currentCycleEnd,
       resetBlocked: true,
       detectedAt: prev.detectedAt ?? now,
+      unblockedAt: null, // block clears any previous unblock cooldown
     }
     saveTimeGuardState(fingerprint, state)
     return {
@@ -156,11 +181,15 @@ export function checkTimeManipulation(
   }
 
   // Normal flow — update the guard state.
+  // If cooldown is still active, preserve unblockedAt. If cooldown expired,
+  // clear it to avoid a stale field in localStorage.
+  const cooldownExpired = !prev.unblockedAt || (now - prev.unblockedAt >= UNBLOCK_COOLDOWN_MS)
   saveTimeGuardState(fingerprint, {
     lastCheckTimestamp: now,
     lastCycleEnd: currentCycleEnd,
     resetBlocked: false,
     detectedAt: null,
+    unblockedAt: cooldownExpired ? null : prev.unblockedAt,
   })
 
   return { manipulated: false, downgradeToExplorer: false, blockReset: false }
@@ -176,6 +205,7 @@ export function blockResets(fingerprint: string): void {
     lastCycleEnd: prev?.lastCycleEnd ?? '',
     resetBlocked: true,
     detectedAt: prev?.detectedAt ?? Date.now(),
+    unblockedAt: null,
   })
 }
 

@@ -243,6 +243,7 @@ class FirebaseAuthService {
       // in that window Firestore reads back `''` and without this fallback
       // we'd clobber the name that signUp just pushed to the store.
       const gen = ++this.authGeneration
+      this.blockedSynced = false // reset per-session guard on auth change
       this.loadProfile(user.uid).then(profile => {
         if (gen !== this.authGeneration) return
         if (!profile) return
@@ -568,7 +569,6 @@ class FirebaseAuthService {
               if (uid) {
                 this.syncProfile(uid, {
                   blocked: false,
-                  blockedReason: null,
                   updatedAt: Timestamp.now(),
                 })
               }

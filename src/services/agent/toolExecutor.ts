@@ -2504,7 +2504,7 @@ Project root: ${projectRoot}`
         const subAgent = AgentService.createLightweight({
           tools: bgTools,
           readOnly: true,
-          maxTurns: 30,
+          maxTurns: 200,
           abortController: bgAbort,
         })
 
@@ -2515,7 +2515,7 @@ Project root: ${projectRoot}`
         const effortDirective = thoroughness === 'quick'
           ? '**Effort: QUICK** — single targeted probe. Stop after 1-3 tool calls.'
           : thoroughness === 'thorough'
-            ? '**Effort: THOROUGH** — comprehensive multi-location search (bounded by the 30-turn cap). Cover alternative naming conventions and follow related references.'
+            ? '**Effort: THOROUGH** — comprehensive multi-location search (bounded by the 200-turn cap). Cover alternative naming conventions and follow related references.'
             : '**Effort: MEDIUM** — moderate exploration. 2-3 likely locations, references one hop deep, then synthesise.'
         subAgent.setSystemPrompt(
           `You are a background research agent inside TM Code. Investigate the task using read-only tools and produce a clear summary.\n\n${effortDirective}\n\nProject root: ${projectRoot}`
@@ -2926,7 +2926,7 @@ Project root: ${projectRoot}`
         const subAgent = AgentService.createLightweight({
           tools: verifierTools,
           readOnly: true,
-          maxTurns: 30,
+          maxTurns: 200,
           abortController: verifyAbort,
         })
 
