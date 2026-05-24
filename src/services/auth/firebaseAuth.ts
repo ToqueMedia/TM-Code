@@ -186,6 +186,11 @@ class FirebaseAuthService {
   /** Tracks the uid for which device registration was last attempted.
    *  Prevents redundant register-device calls on token refresh (~50min). */
   private lastRegisteredUid: string | null = null
+  /** Prevents writing blocked=true to Firestore more than once per session.
+   *  Each syncProfile write changes updatedAt → triggers onSnapshot →
+   *  fetchBillingInfo → checkTimeManipulation → write again = infinite loop.
+   *  Setting this flag after the first write breaks the cycle. */
+  private blockedSynced = false
 
   static getInstance(): FirebaseAuthService {
     if (!FirebaseAuthService.instance) {
@@ -534,8 +539,12 @@ class FirebaseAuthService {
             if (timeCheck.manipulated) {
               console.warn('[billing] Time manipulation detected — blocking account')
               // Always block server-side regardless of current plan.
+              // Only write once — subsequent calls would create an onSnapshot
+              // loop because updatedAt changes each time, triggering the
+              // listener → fetchBillingInfo → checkTimeManipulation → write.
               const uid = this.currentUser?.uid
-              if (uid) {
+              if (uid && !this.blockedSynced) {
+                this.blockedSynced = true
                 this.syncProfile(uid, {
                   blocked: true,
                   blockedReason: 'time_manipulation',
@@ -549,6 +558,19 @@ class FirebaseAuthService {
                 data.billing.tokensConsumed = EXPLORER_TOKEN_BUDGET
                 data.billing.consumedPct = 1
                 data.billing.status = 'rejected'
+              }
+            } else if (this.blockedSynced) {
+              // Guard cleared the block — the clock is now within tolerance.
+              // Unset blocked on Firestore so the backend stops returning 403.
+              // Reset the flag so a future detection can block again.
+              this.blockedSynced = false
+              const uid = this.currentUser?.uid
+              if (uid) {
+                this.syncProfile(uid, {
+                  blocked: false,
+                  blockedReason: null,
+                  updatedAt: Timestamp.now(),
+                })
               }
             }
           }

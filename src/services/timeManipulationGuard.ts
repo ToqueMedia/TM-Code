@@ -15,6 +15,8 @@ import { logger } from '../utils/logger'
 
 const STORAGE_KEY_PREFIX = 'tm-time-guard:'
 const EXPLORER_TOKEN_BUDGET = 1_500_000 // 1.5M tokens
+/** Maximum forward jump (ms) considered normal. Beyond this = manipulation. */
+const MAX_DRIFT_MS = 24 * 60 * 60 * 1000 // 24h — same as MAX_FORWARD_JUMP_MS
 
 interface TimeGuardState {
   lastCheckTimestamp: number   // Unix ms of last billing check
@@ -76,13 +78,35 @@ export function checkTimeManipulation(
     return { manipulated: false, downgradeToExplorer: false, blockReset: false }
   }
 
-  // If reset was already blocked from a previous detection, enforce it.
+  // If reset was blocked from a previous detection, re-verify the clock
+  // before enforcing. On Windows, NTP sync (w32tm) can correct the clock
+  // backward by a few seconds, which previously triggered a false positive.
+  // If the clock is now within tolerance of a reasonable range, unblock.
   if (prev.resetBlocked) {
-    return {
-      manipulated: true,
-      downgradeToExplorer: currentPlan !== 'explorer' && currentPlan !== 'welcome',
-      blockReset: true,
+    const TOLERANCE_MS = 5 * 60 * 1000
+    // Check if the current clock is still unreasonable:
+    // - Clock is still BEFORE the last known check time (minus tolerance)
+    // - Clock jumped MORE than 7 days forward (still manipulated)
+    const stillRolledBack = now < prev.lastCheckTimestamp - TOLERANCE_MS
+    const stillJumpedForward = now > prev.lastCheckTimestamp + MAX_DRIFT_MS
+    if (stillRolledBack || stillJumpedForward) {
+      // Still manipulated — enforce block.
+      return {
+        manipulated: true,
+        downgradeToExplorer: currentPlan !== 'explorer' && currentPlan !== 'welcome',
+        blockReset: true,
+      }
     }
+    // Clock is now reasonable — clear the block. This was likely a false
+    // positive from NTP drift or a DST transition.
+    logger.warn('time-guard', 'Reset block cleared — clock is now within tolerance')
+    saveTimeGuardState(fingerprint, {
+      lastCheckTimestamp: now,
+      lastCycleEnd: currentCycleEnd,
+      resetBlocked: false,
+      detectedAt: null,
+    })
+    return { manipulated: false, downgradeToExplorer: false, blockReset: false }
   }
 
   // Clock rollback detection: current time is BEFORE the last check timestamp.
