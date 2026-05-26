@@ -58,10 +58,10 @@ function PreviewView() {
   // previously a tighter "vibe/pro/max" whitelist hid the button on accounts
   // whose plan string didn't match the literal list (legacy values, hydration
   // races, future tiers added in Firestore before the IDE knows them). When
-  // plan is undefined/null (auth still hydrating), default to visible: at worst
-  // the click surfaces a backend 4xx, which is a clearer signal than a
-  // permanently-missing button.
-  const canUseVision = billingPlan !== 'explorer'
+  // plan is undefined/null (auth still hydrating), hide the button — showing
+  // it prematurely leads to a confusing 4xx when billing isn't ready yet.
+  const isLoaded = useBillingStore(s => s.isLoaded)
+  const canUseVision = isLoaded && billingPlan !== 'explorer'
   const previewContainerRef = useRef<HTMLDivElement>(null)
   const [isCapturing, setIsCapturing] = useState(false)
   const frontendUrl = useLayoutStore(selectFrontendUrl)
@@ -340,7 +340,7 @@ function PreviewView() {
       const { openUrl } = await import('@tauri-apps/plugin-opener')
       await openUrl(previewUrl)
     } catch {
-      window.open(previewUrl, '_blank')
+      useToastStore.getState().addToast('error', 'Could not open URL in browser. Copy it manually from the address bar.')
     }
   }
 
@@ -369,14 +369,7 @@ function PreviewView() {
   // For high-fidelity content capture (mac native webview / real iframe
   // pixels) a future native path can be added — out of scope for V1.
   const handleScreenshotToChat = useCallback(async () => {
-    console.log('[screenshot] handler invoked', {
-      canUseVision,
-      isMac: IS_MAC,
-      hasContainer: !!previewContainerRef.current,
-      isCapturing,
-    })
     if (!canUseVision) {
-      console.warn('[screenshot] aborting — canUseVision=false (plan blocks vision)')
       useToastStore.getState().addToast(
         'warning',
         t('preview.screenshotPaidOnly'),
@@ -385,7 +378,6 @@ function PreviewView() {
     }
     const container = previewContainerRef.current
     if (!container) {
-      console.warn('[screenshot] previewContainerRef.current is null — aborting')
       useToastStore.getState().addToast(
         'error',
         'Preview area not ready. Reload the preview and try again.',
@@ -422,31 +414,13 @@ function PreviewView() {
         const y = Math.round(windowTopLeftLogicalY + rect.top)
         const w = Math.round(rect.width)
         const h = Math.round(rect.height)
-        console.log('[screenshot] mac native capture invoking', {
-          x, y, w, h,
-          windowOuter: { x: outer.x, y: outer.y },
-          scaleFactor: scale,
-          windowTopLeftLogical: { x: windowTopLeftLogicalX, y: windowTopLeftLogicalY },
-          rectLeft: rect.left,
-          rectTop: rect.top,
-          rectW: rect.width,
-          rectH: rect.height,
-        })
-        const t0 = performance.now()
         const base64 = await invoke<string>('capture_screen_region_macos_native', {
           x, y, width: w, height: h,
-        })
-        const t1 = performance.now()
-        console.log('[screenshot] invoke returned', {
-          elapsedMs: Math.round(t1 - t0),
-          base64Length: base64?.length ?? 0,
-          base64Head: base64?.slice(0, 40),
         })
         const binary = atob(base64)
         const bytes = new Uint8Array(binary.length)
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
         blob = new Blob([bytes], { type: 'image/png' })
-        console.log('[screenshot] blob built', { size: blob.size, type: blob.type })
       } else {
         // Windows / Linux fallback — html2canvas. Iframe is in-DOM on
         // these platforms so the capture works partially (iframe element
@@ -480,26 +454,10 @@ function PreviewView() {
 
       if (!blob) throw new Error('capture produced no image data')
 
-      console.log('[screenshot] building attachment from blob', { size: blob.size, type: blob.type })
       const attachment = await createImageAttachmentFromClipboard(blob)
       const ext = blob.type === 'image/png' ? 'png' : 'jpg'
       attachment.name = `preview-screenshot-${Date.now()}.${ext}`
-      console.log('[screenshot] calling addDraftAttachment', {
-        id: attachment.id,
-        name: attachment.name,
-        type: attachment.type,
-        hasBase64: !!attachment.base64,
-        base64Length: attachment.base64?.length ?? 0,
-      })
       useChatStore.getState().addDraftAttachment(attachment)
-      const draftAfter = useChatStore.getState().draftAttachments
-      console.log('[screenshot] draft after attach', {
-        count: draftAfter.length,
-        last: draftAfter.length > 0 ? {
-          id: draftAfter[draftAfter.length - 1].id,
-          name: draftAfter[draftAfter.length - 1].name,
-        } : null,
-      })
       useToastStore.getState().addToast(
         'success',
         t('preview.screenshotAttached'),
@@ -760,6 +718,9 @@ function PreviewView() {
       {/* Resize handle (horizontal) — hidden when chat is collapsed */}
       <Box
         ref={handleRef}
+        role="separator"
+        aria-label="Resize chat panel"
+        aria-orientation="vertical"
         w={isChatCollapsed ? '0px' : '4px'}
         cursor="col-resize"
         flexShrink={0}
@@ -917,14 +878,7 @@ function PreviewView() {
                     color: tokens.colors.accent.primary,
                   }}
                   borderRadius="6px"
-                  onPointerDown={() => console.log('[screenshot] pointerdown on button')}
-                  onClick={(e) => {
-                    console.log('[screenshot] click event fired', {
-                      defaultPrevented: e.defaultPrevented,
-                      isCapturing,
-                    })
-                    void handleScreenshotToChat()
-                  }}
+                  onClick={() => void handleScreenshotToChat()}
                 >
                   <FiCamera size={13} />
                 </IconButton>
@@ -1197,6 +1151,9 @@ function PreviewView() {
                 >
               <Box
                 ref={dataDrawerHandleRef}
+                role="separator"
+                aria-label="Resize data viewer"
+                aria-orientation="horizontal"
                 h="4px"
                 cursor="row-resize"
                 flexShrink={0}
@@ -1323,6 +1280,9 @@ function PreviewView() {
               {/* Resize handle (vertical) */}
               <Box
                 ref={consoleHandleRef}
+                role="separator"
+                aria-label="Resize console panel"
+                aria-orientation="horizontal"
                 h="4px"
                 cursor="row-resize"
                 flexShrink={0}
@@ -1429,6 +1389,15 @@ function PreviewView() {
 }
 
 function sendLogToAgent(entry: DevServerLogEntry): void {
+  // Guard: need an active session to enqueue into
+  const { activeSessionId } = useChatStore.getState()
+  if (!activeSessionId) {
+    useToastStore.getState().addToast(
+      'warning',
+      'Open a chat session first to send logs to the agent.',
+    )
+    return
+  }
   // Wrap the captured output in a fenced code block so the agent can tell
   // it apart from the framing question, and prefix the level so error/warn
   // context isn't lost. entry.text may be MULTI-LINE — the dev-server log

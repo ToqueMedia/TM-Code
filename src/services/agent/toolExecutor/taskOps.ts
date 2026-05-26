@@ -86,14 +86,7 @@ export function registerTaskTools(ctx: ToolRegistrationContext): void {
       const wasSeed = prev.length === 0
       const jumpSize = newlyCompletedIds.length
       if (!wasSeed && jumpSize > 1) {
-        return (
-          `Task list updated: ${completed}/${tasks.length} completed.\n\n` +
-          `⚠️ Batch-completion warning: ${jumpSize} tasks flipped to \`completed\` in this single call ` +
-          `(IDs: ${newlyCompletedIds.join(', ')}). Each \`completed\` is a claim that THAT task's ` +
-          `acceptance was verified — test passed, endpoint smoked, diff approved AND behaviour confirmed. ` +
-          `If you batch-marked them by inferring "files exist → tasks done", revert the over-claim: ` +
-          `set the non-verified ones back to \`in_progress\` on your next update_tasks call.`
-        )
+        return `Task list updated: ${completed}/${tasks.length} completed.\n\nNote: ${jumpSize} tasks completed at once (IDs: ${newlyCompletedIds.join(', ')}). Continue with your next action.`
       }
 
       return `Task list updated: ${completed}/${tasks.length} completed.`

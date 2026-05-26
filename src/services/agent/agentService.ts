@@ -67,12 +67,18 @@ const MAX_CONTINUATIONS = 3
 // Max retries when the upstream→worker SSE drops mid-stream
 // (worker emits `upstream_stream_interrupted` typed event). Separate from
 // MAX_CONTINUATIONS because the trigger is network-side, not model-side.
-// 1 retry = 2 total attempts. With the 90 s stream-idle watchdog in
-// streamParser.ts, the worst case before surfacing to the user is
-// 2 × 90 s = 3 min — bounded enough that the user gets feedback instead
-// of staring at a frozen UI. Was 2 retries (4.5 min worst case) before
-// the watchdog made the per-attempt cap reliable.
-const MAX_INTERRUPT_RETRIES = 1
+// 3 retries = 4 total streaming attempts, matching claude-vaz's withRetry
+// pattern. Exponential backoff between retries (500ms → 1s → 2s) prevents
+// thundering-herd on transient upstream blips. If all 4 streaming attempts
+// fail, the loop falls back to a non-streaming request before surfacing
+// the error — the same 3-layer recovery as claude-vaz (stream retry →
+// non-streaming fallback → surface error).
+const MAX_INTERRUPT_RETRIES = 3
+const INTERRUPT_BACKOFF_BASE_MS = 500
+// Non-streaming fallback timeout (5 min — claude-vaz uses 300s for the
+// same path). Non-streaming requests wait for the full response before
+// returning, so they need a longer timeout than streaming.
+const NON_STREAMING_TIMEOUT_MS = 300_000
 
 // Re-inject the top-violation-cost reminders into the tool_result user
 // message every N tool-bearing turns. The full reminder lives at the top of
@@ -704,6 +710,7 @@ class AgentService {
     let interruptRetryCount = 0
     let enforcementRetries = 0
     const MAX_ENFORCEMENT_RETRIES = 3
+    let earlyExit = false  // true when the loop breaks due to an already-reported error
 
     try {
       const maxTurns = this.lightweightOptions?.maxTurns ?? Infinity
@@ -872,7 +879,7 @@ class AgentService {
         )
 
         // Process the stream (text deltas + tool dispatch emitted during this call)
-        const turnResult = await this.processStreamedTurn(response, callbacks, streamingPool)
+        let turnResult = await this.processStreamedTurn(response, callbacks, streamingPool)
 
         // Stamp the assistant-turn timestamp so the NEXT API call can compute
         // gap-since-last-turn for time-based microcompaction. We update
@@ -935,6 +942,21 @@ class AgentService {
         // "network blip, model may or may not have actually emitted anything".
         if (turnResult.finishReason === 'stream_interrupted' && interruptRetryCount < MAX_INTERRUPT_RETRIES) {
           interruptRetryCount++
+          // Exponential backoff: 500ms, 1s, 2s — prevents thundering-herd
+          // on transient upstream blips. Same formula as claude-vaz
+          // (POST_BASE_DELAY_MS * 2^(attempt-1), capped at POST_MAX_DELAY_MS).
+          const backoffMs = INTERRUPT_BACKOFF_BASE_MS * Math.pow(2, interruptRetryCount - 1)
+          logger.info('agent', `[stream] retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES}: waiting ${backoffMs}ms before retrying`)
+          try {
+            useChatStore.getState().addSystemMessage(
+              `Retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES} — waiting ${backoffMs}ms...`,
+              undefined,
+              { ephemeral: true },
+            )
+          } catch { /* chatStore may be torn down */ }
+          await new Promise(resolve => setTimeout(resolve, backoffMs))
+          if (this.abortController?.signal.aborted) break
+
           const partialBlocks: AnthropicContentBlock[] = []
           if (this.preserveReasoningBetweenTurns && turnResult.reasoningContent) {
             partialBlocks.push({ type: 'thinking', thinking: turnResult.reasoningContent })
@@ -958,28 +980,39 @@ class AgentService {
             })
             logger.info('agent', `[stream] retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES}: appended partial (${(turnResult.textContent || '').length} chars text, reasoning=${!!turnResult.reasoningContent})`)
           }
-          // Visible feedback so the user knows the retry is firing.
-          try {
-            useChatStore.getState().addSystemMessage(
-              `Retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES} — resuming from where the stream dropped.`,
-              undefined,
-              { ephemeral: true },
-            )
-          } catch { /* chatStore may be torn down */ }
           callbacks.onTurnComplete(turnCount)
           continue
         }
         if (turnResult.finishReason === 'stream_interrupted' && interruptRetryCount >= MAX_INTERRUPT_RETRIES) {
-          // Exhausted retries — propagate the failure to the UI so the user
-          // can take over. The conversation state is preserved; they can
-          // type a new prompt or click Stop.
-          logger.error('agent', `[stream] exhausted ${MAX_INTERRUPT_RETRIES} retries — surfacing to user`)
-          callbacks.onError(new ServiceError(
-            `Model stream was interrupted ${MAX_INTERRUPT_RETRIES + 1} times in a row. Check your connection and try again.`,
-            'STREAM_INTERRUPTED_EXHAUSTED',
-            false,
-          ))
-          break
+          // Streaming retries exhausted — fall back to non-streaming request
+          // before surfacing the error. Same pattern as claude-vaz:
+          // stream fails → non-streaming fallback → surface error.
+          logger.warn('agent', `[stream] exhausted ${MAX_INTERRUPT_RETRIES} streaming retries — attempting non-streaming fallback`)
+          try {
+            useChatStore.getState().addSystemMessage(
+              'Streaming unstable — switching to non-streaming mode...',
+              undefined,
+              { ephemeral: true },
+            )
+          } catch { /* chatStore may be torn down */ }
+
+          const fallbackResult = await this.tryNonStreamingFallback(messages, callbacks)
+          if (fallbackResult) {
+            logger.info('agent', '[stream] non-streaming fallback succeeded')
+            turnResult = fallbackResult
+            interruptRetryCount = 0  // Reset for next turn
+            // Fall through to normal post-turn handling
+          } else {
+            // Non-streaming also failed — surface the error
+            logger.error('agent', `[stream] exhausted ${MAX_INTERRUPT_RETRIES} retries + non-streaming fallback — surfacing to user`)
+            earlyExit = true
+            callbacks.onError(new ServiceError(
+              `Model stream was interrupted ${MAX_INTERRUPT_RETRIES + 1} times in a row and non-streaming fallback also failed. Check your connection and try again.`,
+              'STREAM_INTERRUPTED_EXHAUSTED',
+              false,
+            ))
+            break
+          }
         }
 
         // Reactive compact (claude-vaz pattern): when the upstream model
@@ -1036,6 +1069,7 @@ class AgentService {
             continue
           } catch (compactErr) {
             logger.error('agent', '[reactive-compact] failed:', compactErr)
+            earlyExit = true
             callbacks.onError(new ServiceError(
               'Context window exceeded and automatic compaction failed. Please start a new session.',
               'CONTEXT_EXCEEDED',
@@ -1534,11 +1568,13 @@ Developer message: ${displayText}
         callbacks.onTurnComplete(turnCount)
       }
 
-      callbacks.onError(new ServiceError(
-        `Agent exceeded maximum turns (${maxTurns})`,
-        'TURN_LIMIT',
-        false,
-      ))
+      if (!earlyExit) {
+        callbacks.onError(new ServiceError(
+          `Agent exceeded maximum turns (${maxTurns})`,
+          'TURN_LIMIT',
+          false,
+        ))
+      }
     } catch (error) {
       // Clean exit on abort — don't treat as error
       if (this.abortController?.signal.aborted) return
@@ -2885,6 +2921,151 @@ Developer message: ${displayText}
     useBillingStore.getState().updateFromHeaders(response.headers)
 
     return response
+  }
+
+  /**
+   * Non-streaming fallback — same pattern as claude-vaz's
+   * executeNonStreamingRequest. When streaming retries are exhausted, we
+   * re-send the same messages with `X-Non-Streaming-Fallback: true` header.
+   * The backend makes a blocking request to the upstream provider (no SSE)
+   * and returns the full JSON response. This avoids the SSE connection that
+   * keeps dropping while still getting a valid model response.
+   *
+   * Returns a TurnResult on success, or null if the fallback also failed.
+   */
+  private async tryNonStreamingFallback(messages: AnthropicMessage[], callbacks: AgentCallbacks): Promise<TurnResult | null> {
+    try {
+      const url = `${WORKER_URL}/v1/messages`
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Non-Streaming-Fallback': 'true',
+      }
+
+      const firebaseToken = await FirebaseAuthService.getInstance().getIdToken()
+      if (!firebaseToken) {
+        logger.error('agent', '[non-streaming-fallback] no auth token')
+        return null
+      }
+      headers['Authorization'] = `Bearer ${firebaseToken}`
+
+      const activeSession = useChatStore.getState().getActiveSession?.()
+      if (activeSession?.id) {
+        headers['X-Session-Id'] = activeSession.id
+      }
+
+      const body = await this.buildRequestBody(messages)
+      const requestBody = JSON.stringify(body)
+
+      logger.info('agent', `[non-streaming-fallback] sending blocking request to ${url}`)
+
+      const timeoutController = new AbortController()
+      const timeoutId = setTimeout(() => timeoutController.abort(), NON_STREAMING_TIMEOUT_MS)
+      const combinedSignal = this.abortController?.signal
+        ? AbortSignal.any([this.abortController.signal, timeoutController.signal])
+        : timeoutController.signal
+
+      let response: Response
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: requestBody,
+          signal: combinedSignal,
+        })
+      } finally {
+        clearTimeout(timeoutId)
+      }
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => 'unknown')
+        logger.error('agent', `[non-streaming-fallback] failed: ${response.status} ${errText.slice(0, 200)}`)
+        return null
+      }
+
+      useBillingStore.getState().updateFromHeaders(response.headers)
+
+      const data = await response.json() as any
+
+      // Try Anthropic shape first (the primary path)
+      if (data.content && Array.isArray(data.content)) {
+        let textContent = ''
+        let reasoningContent = ''
+        const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
+
+        for (const block of data.content) {
+          if (block.type === 'text') {
+            textContent += block.text || ''
+          } else if (block.type === 'thinking') {
+            reasoningContent += block.thinking || ''
+          } else if (block.type === 'tool_use') {
+            toolCalls.push({
+              id: block.id,
+              name: block.name,
+              args: typeof block.input === 'string' ? JSON.parse(block.input) : (block.input || {}),
+            })
+          }
+        }
+
+        if (textContent) callbacks.onTextDelta(textContent)
+        if (reasoningContent) callbacks.onReasoningDelta(reasoningContent)
+        if (data.usage) {
+          callbacks.onUsageUpdate(data.usage.input_tokens || 0, data.usage.output_tokens || 0)
+        }
+
+        return {
+          textContent,
+          reasoningContent,
+          toolCalls,
+          finishReason: data.stop_reason || 'end_turn',
+          usage: data.usage ? { promptTokens: data.usage.input_tokens || 0, completionTokens: data.usage.output_tokens || 0 } : null,
+        }
+      }
+
+      // Try OpenAI shape (BYOK with OpenAI-compatible providers)
+      if (data.choices && Array.isArray(data.choices)) {
+        const choice = data.choices[0]
+        let textContent = ''
+        let reasoningContent = ''
+        const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
+
+        if (choice?.message?.content) {
+          textContent = choice.message.content
+        }
+        if (choice?.message?.reasoning_content) {
+          reasoningContent = choice.message.reasoning_content
+        }
+        if (choice?.message?.tool_calls) {
+          for (const tc of choice.message.tool_calls) {
+            toolCalls.push({
+              id: tc.id,
+              name: tc.function?.name || '',
+              args: typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {}),
+            })
+          }
+        }
+
+        if (textContent) callbacks.onTextDelta(textContent)
+        if (reasoningContent) callbacks.onReasoningDelta(reasoningContent)
+        if (data.usage) {
+          callbacks.onUsageUpdate(data.usage.prompt_tokens || 0, data.usage.completion_tokens || 0)
+        }
+
+        return {
+          textContent,
+          reasoningContent,
+          toolCalls,
+          finishReason: choice?.finish_reason || 'stop',
+          usage: data.usage ? { promptTokens: data.usage.prompt_tokens || 0, completionTokens: data.usage.completion_tokens || 0 } : null,
+        }
+      }
+
+      logger.error('agent', '[non-streaming-fallback] unrecognised response shape:', JSON.stringify(data).slice(0, 300))
+      return null
+    } catch (err) {
+      logger.error('agent', '[non-streaming-fallback] error:', err)
+      return null
+    }
   }
 
   /**

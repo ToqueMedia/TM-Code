@@ -2,38 +2,45 @@
  * Time Manipulation Guard — detects clock rollback and blocks billing abuse.
  *
  * Strategy:
- * 1. On every billing check, store the current system time + cycleEnd in localStorage
+ * 1. On every billing check, store the current system time in localStorage
  *    (keyed by device fingerprint).
  * 2. On next check, if current time < stored timestamp → clock was set back.
  * 3. If clock rollback detected:
  *    - Paid plan → downgrade to explorer
- *    - Explorer plan → add explorer tokens, block reset
- *    - Block monthly reset to prevent further abuse
+ *    - Block lasts at least MIN_BLOCK_DURATION_MS (server-side enforced)
+ *    - Auto-clear only after cooldown + clock is stable
+ *
+ * Design decisions (v3):
+ * - Only backward jumps are detection signals. Forward jumps and cycle-end
+ *   changes are normal user behaviour (long sessions, sleep, new month).
+ * - Block has a minimum duration to prevent unblock-then-reblock oscillation.
+ * - `blockReset` removed — the minimum duration replaces it.
  */
 
 import { logger } from '../utils/logger'
 
 const STORAGE_KEY_PREFIX = 'tm-time-guard:'
 const EXPLORER_TOKEN_BUDGET = 1_500_000 // 1.5M tokens
-/** Maximum forward jump (ms) considered normal. Beyond this = manipulation. */
-const MAX_FORWARD_JUMP_MS = 24 * 60 * 60 * 1000 // 24h
 /** Tolerance for small backward clock drift — NTP adjustments, DST, sleep. */
 const TOLERANCE_MS = 5 * 60 * 1000 // 5min
 /**
- * Cooldown after unblocking: skip manipulation detection for this period
- * to prevent a block/unblock oscillation when NTP drift hovers near the
- * tolerance boundary. Without this, a clock that drifts 4m59s backward
- * (triggers block) then recovers 30s later (triggers unblock) would cycle
- * indefinitely.
+ * Minimum block duration: once a manipulation is detected, the block cannot
+ * be cleared before this period expires. This prevents the model from
+ * oscillating block/unblock when NTP drift hovers near the tolerance
+ * boundary. Also gives the backend time to record the block before the
+ * client clears it.
+ */
+const MIN_BLOCK_DURATION_MS = 30 * 60 * 1000 // 30min
+/**
+ * Cooldown after auto-unblocking: skip manipulation detection for this
+ * period to prevent immediate re-detection if the clock drifts again.
  */
 const UNBLOCK_COOLDOWN_MS = 60 * 60 * 1000 // 1h
 
 interface TimeGuardState {
   lastCheckTimestamp: number   // Unix ms of last billing check
-  lastCycleEnd: string         // "YYYY-MM-DD" from last check
-  resetBlocked: boolean        // True if monthly reset is blocked due to time manipulation
   detectedAt: number | null    // When manipulation was first detected
-  unblockedAt: number | null   // When the block was cleared (for cooldown)
+  unblockedAt: number | null   // When the block was auto-cleared (for cooldown)
 }
 
 function storageKey(fingerprint: string): string {
@@ -47,7 +54,13 @@ export function loadTimeGuardState(fingerprint: string): TimeGuardState | null {
   try {
     const raw = localStorage.getItem(storageKey(fingerprint))
     if (!raw) return null
-    return JSON.parse(raw) as TimeGuardState
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    // Migrate: strip legacy fields that no longer exist
+    return {
+      lastCheckTimestamp: parsed.lastCheckTimestamp as number,
+      detectedAt: (parsed.detectedAt as number | null) ?? null,
+      unblockedAt: (parsed.unblockedAt as number | null) ?? null,
+    }
   } catch {
     return null
   }
@@ -67,14 +80,13 @@ function saveTimeGuardState(fingerprint: string, state: TimeGuardState): void {
 /**
  * Check for time manipulation and update the guard state.
  *
- * @returns `{ manipulated: true, downgradeToExplorer: true }` if clock rollback
- *          was detected and the caller should downgrade the user.
+ * Only detects backward clock jumps (clock set back). Forward jumps and
+ * cycle-end changes are NOT signals — users leave apps open overnight,
+ * hibernate laptops, and cycles change naturally.
  */
 export function checkTimeManipulation(
   fingerprint: string,
-  currentPlan: string,
-  currentCycleEnd: string,
-): { manipulated: boolean; downgradeToExplorer: boolean; blockReset: boolean } {
+): { manipulated: boolean; downgradeToExplorer: boolean } {
   const now = Date.now()
   const prev = loadTimeGuardState(fingerprint)
 
@@ -82,12 +94,10 @@ export function checkTimeManipulation(
   if (!prev) {
     saveTimeGuardState(fingerprint, {
       lastCheckTimestamp: now,
-      lastCycleEnd: currentCycleEnd,
-      resetBlocked: false,
       detectedAt: null,
       unblockedAt: null,
     })
-    return { manipulated: false, downgradeToExplorer: false, blockReset: false }
+    return { manipulated: false, downgradeToExplorer: false }
   }
 
   // Cooldown: if the block was recently cleared, skip manipulation detection
@@ -95,126 +105,91 @@ export function checkTimeManipulation(
   if (prev.unblockedAt && now - prev.unblockedAt < UNBLOCK_COOLDOWN_MS) {
     saveTimeGuardState(fingerprint, {
       lastCheckTimestamp: now,
-      lastCycleEnd: currentCycleEnd,
-      resetBlocked: false,
       detectedAt: null,
       unblockedAt: prev.unblockedAt,
     })
-    return { manipulated: false, downgradeToExplorer: false, blockReset: false }
+    return { manipulated: false, downgradeToExplorer: false }
   }
 
-  // If reset was blocked from a previous detection, re-verify the clock
-  // before enforcing. On Windows, NTP sync (w32tm) can correct the clock
-  // backward by a few seconds, which previously triggered a false positive.
-  // If the clock is now within tolerance of a reasonable range, unblock.
-  if (prev.resetBlocked) {
-    // Check if the current clock is still unreasonable:
-    // - Clock is still BEFORE the last known check time (minus tolerance)
-    // - Clock jumped MORE than 24h forward (still manipulated)
-    const stillRolledBack = now < prev.lastCheckTimestamp - TOLERANCE_MS
-    const stillJumpedForward = now > prev.lastCheckTimestamp + MAX_FORWARD_JUMP_MS
-    if (stillRolledBack || stillJumpedForward) {
-      // Still manipulated — enforce block.
+  // If a block was previously detected, check if it should auto-clear.
+  if (prev.detectedAt) {
+    // Minimum block duration: don't unblock before MIN_BLOCK_DURATION_MS
+    const blockAge = now - prev.detectedAt
+    if (blockAge < MIN_BLOCK_DURATION_MS) {
+      // Still within minimum block window — enforce block, don't re-evaluate
       return {
         manipulated: true,
-        downgradeToExplorer: currentPlan !== 'explorer' && currentPlan !== 'welcome',
-        blockReset: true,
+        downgradeToExplorer: true,
       }
     }
-    // Clock is now reasonable — clear the block. This was likely a false
-    // positive from NTP drift or a DST transition. Set unblockedAt so the
-    // cooldown prevents immediate re-detection.
-    logger.warn('time-guard', 'Reset block cleared — clock is now within tolerance')
-    saveTimeGuardState(fingerprint, {
-      lastCheckTimestamp: now,
-      lastCycleEnd: currentCycleEnd,
-      resetBlocked: false,
-      detectedAt: null,
-      unblockedAt: now,
-    })
-    return { manipulated: false, downgradeToExplorer: false, blockReset: false }
+
+    // Minimum duration elapsed — re-verify the clock.
+    // If it's now within tolerance, auto-clear the block.
+    const stillRolledBack = now < prev.lastCheckTimestamp - TOLERANCE_MS
+    if (!stillRolledBack) {
+      // Clock is reasonable — clear the block.
+      logger.warn('time-guard', 'Block auto-cleared — clock is now within tolerance')
+      saveTimeGuardState(fingerprint, {
+        lastCheckTimestamp: now,
+        detectedAt: null,
+        unblockedAt: now,
+      })
+      return { manipulated: false, downgradeToExplorer: false }
+    }
+
+    // Clock is still unreasonable — continue blocking.
+    return {
+      manipulated: true,
+      downgradeToExplorer: true,
+    }
   }
 
   // Clock rollback detection: current time is BEFORE the last check timestamp.
   // Allow a small tolerance (5 minutes) for NTP adjustments and DST transitions.
   const clockWentBackward = now < prev.lastCheckTimestamp - TOLERANCE_MS
 
-  // Cycle end anomaly: current time is BEFORE the previously known cycle end,
-  // but the previous check was AFTER that cycle end. This means the user
-  // rolled back time to before the cycle reset.
-  const cycleAnomaly = prev.lastCycleEnd && currentCycleEnd === prev.lastCycleEnd &&
-    now < new Date(prev.lastCycleEnd).getTime() &&
-    prev.lastCheckTimestamp >= new Date(prev.lastCycleEnd).getTime()
-
-  // Clock forward detection: current time jumped more than 24 hours ahead of
-  // the last check. This catches attempts to skip ahead to bypass monthly
-  // token reset. Allow 24h tolerance for normal usage patterns (e.g. user
-  // leaves app open overnight).
-  const clockWentForward = now > prev.lastCheckTimestamp + MAX_FORWARD_JUMP_MS
-
-  // Cycle end skipped: the current cycle end is DIFFERENT from the previous
-  // one, but the previous check was BEFORE the old cycle end. This means
-  // the clock jumped past the cycle boundary without the normal flow.
-  const cycleEndSkipped = prev.lastCycleEnd &&
-    currentCycleEnd !== prev.lastCycleEnd &&
-    prev.lastCheckTimestamp < new Date(prev.lastCycleEnd).getTime() &&
-    now >= new Date(prev.lastCycleEnd).getTime()
-
-  if (clockWentBackward || cycleAnomaly || clockWentForward || cycleEndSkipped) {
-    const reason = clockWentBackward ? 'clock_rollback' :
-      clockWentForward ? 'clock_forward' :
-      cycleAnomaly ? 'cycle_anomaly' : 'cycle_end_skipped'
-    logger.warn('time-guard', `Time manipulation detected (${reason}): now=${now}, prev=${prev.lastCheckTimestamp}, cycleEnd=${currentCycleEnd}`)
-    const state: TimeGuardState = {
+  if (clockWentBackward) {
+    logger.warn('time-guard', `Clock rollback detected: now=${now}, prev=${prev.lastCheckTimestamp}`)
+    saveTimeGuardState(fingerprint, {
       lastCheckTimestamp: now,
-      lastCycleEnd: currentCycleEnd,
-      resetBlocked: true,
-      detectedAt: prev.detectedAt ?? now,
-      unblockedAt: null, // block clears any previous unblock cooldown
-    }
-    saveTimeGuardState(fingerprint, state)
+      detectedAt: now,
+      unblockedAt: null,
+    })
     return {
       manipulated: true,
-      downgradeToExplorer: true, // always downgrade on detection
-      blockReset: true,
+      downgradeToExplorer: true,
     }
   }
 
   // Normal flow — update the guard state.
-  // If cooldown is still active, preserve unblockedAt. If cooldown expired,
-  // clear it to avoid a stale field in localStorage.
   const cooldownExpired = !prev.unblockedAt || (now - prev.unblockedAt >= UNBLOCK_COOLDOWN_MS)
   saveTimeGuardState(fingerprint, {
     lastCheckTimestamp: now,
-    lastCycleEnd: currentCycleEnd,
-    resetBlocked: false,
     detectedAt: null,
     unblockedAt: cooldownExpired ? null : prev.unblockedAt,
   })
 
-  return { manipulated: false, downgradeToExplorer: false, blockReset: false }
+  return { manipulated: false, downgradeToExplorer: false }
 }
 
 /**
- * Force-block resets for a fingerprint (e.g. when admin detects abuse).
+ * Force-block a fingerprint (e.g. when admin detects abuse server-side).
  */
 export function blockResets(fingerprint: string): void {
   const prev = loadTimeGuardState(fingerprint)
   saveTimeGuardState(fingerprint, {
     lastCheckTimestamp: Date.now(),
-    lastCycleEnd: prev?.lastCycleEnd ?? '',
-    resetBlocked: true,
     detectedAt: prev?.detectedAt ?? Date.now(),
     unblockedAt: null,
   })
 }
 
 /**
- * Check if resets are blocked for a fingerprint.
+ * Check if a fingerprint is currently blocked.
  */
 export function isResetBlocked(fingerprint: string): boolean {
   const state = loadTimeGuardState(fingerprint)
-  return state?.resetBlocked ?? false
+  return state?.detectedAt != null
 }
 
 export { EXPLORER_TOKEN_BUDGET }

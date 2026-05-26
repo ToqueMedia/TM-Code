@@ -180,11 +180,14 @@ function detectAuthGoogle(ctx: DetectionContext): string[] | null {
     if (!exists) continue
     if (path.includes('useGoogleSignIn')) evidence.push(path)
   }
-  // Require .env (VITE_GOOGLE_CLIENT_ID is the platform-managed signal that
-  // Google sign-in was provisioned) OR the hook file. Either alone is
-  // strong enough — the hook file is unique to this scaffold and the
-  // .env key is platform-written.
-  return evidence.length > 0 ? evidence : null
+  // Require BOTH .env credential AND the hook file. The .env key alone
+  // is NOT enough because `provision_auth` writes VITE_GOOGLE_CLIENT_ID
+  // to .env even when only email-password was requested (the GIP tenant
+  // always returns a googleClientId). Without the hook file, Google
+  // sign-in was never actually scaffolded — only the tenant was created.
+  const hasEnv = evidence.some(e => e.startsWith('.env:'))
+  const hasFile = evidence.some(e => !e.startsWith('.env:'))
+  return hasEnv && hasFile ? evidence : null
 }
 
 function detectPaymentsMomenu(ctx: DetectionContext): string[] | null {

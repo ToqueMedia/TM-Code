@@ -190,7 +190,7 @@ class FirebaseAuthService {
    *  Each syncProfile write changes updatedAt → triggers onSnapshot →
    *  fetchBillingInfo → checkTimeManipulation → write again = infinite loop.
    *  Setting this flag after the first write breaks the cycle. */
-  private blockedSynced = false
+  private blockedSynced = false  // set true on first fetchBillingInfo if Firestore says blocked
 
   static getInstance(): FirebaseAuthService {
     if (!FirebaseAuthService.instance) {
@@ -243,7 +243,8 @@ class FirebaseAuthService {
       // in that window Firestore reads back `''` and without this fallback
       // we'd clobber the name that signUp just pushed to the store.
       const gen = ++this.authGeneration
-      this.blockedSynced = false // reset per-session guard on auth change
+      // blockedSynced will be initialized from Firestore profile below
+      this.blockedSynced = false
       this.loadProfile(user.uid).then(profile => {
         if (gen !== this.authGeneration) return
         if (!profile) return
@@ -260,6 +261,13 @@ class FirebaseAuthService {
           displayName: profile.displayName || profile.fullName || user.displayName || storeDisplayName || authData.displayName,
           photoURL: profile.photoURL || authData.photoURL,
         })
+        // Initialize blockedSynced from Firestore so a restart doesn't
+        // re-write blocked: true (the previous blockedSynced=true was lost
+        // when the app closed). If Firestore says blocked, we respect it
+        // and don't need to write again.
+        if (profile.blocked === true) {
+          this.blockedSynced = true
+        }
       }).catch(() => {})
 
       // Load billing data from backend API.
@@ -532,17 +540,11 @@ class FirebaseAuthService {
           const { getDeviceFingerprint } = await import('./deviceFingerprint')
           const fingerprint = await getDeviceFingerprint()
           if (fingerprint) {
-            const timeCheck = checkTimeManipulation(
-              fingerprint,
-              data.plan,
-              data.billing.cycleEnd,
-            )
+            const timeCheck = checkTimeManipulation(fingerprint)
             if (timeCheck.manipulated) {
               console.warn('[billing] Time manipulation detected — blocking account')
-              // Always block server-side regardless of current plan.
-              // Only write once — subsequent calls would create an onSnapshot
-              // loop because updatedAt changes each time, triggering the
-              // listener → fetchBillingInfo → checkTimeManipulation → write.
+              // Block server-side. Write once per session — subsequent calls
+              // would loop via onSnapshot → fetchBillingInfo → write.
               const uid = this.currentUser?.uid
               if (uid && !this.blockedSynced) {
                 this.blockedSynced = true
@@ -560,19 +562,11 @@ class FirebaseAuthService {
                 data.billing.consumedPct = 1
                 data.billing.status = 'rejected'
               }
-            } else if (this.blockedSynced) {
-              // Guard cleared the block — the clock is now within tolerance.
-              // Unset blocked on Firestore so the backend stops returning 403.
-              // Reset the flag so a future detection can block again.
-              this.blockedSynced = false
-              const uid = this.currentUser?.uid
-              if (uid) {
-                this.syncProfile(uid, {
-                  blocked: false,
-                  updatedAt: Timestamp.now(),
-                })
-              }
             }
+            // NOTE: Auto-unblock removed. Once blocked: true is written to
+            // Firestore, only admin action or MIN_BLOCK_DURATION_MS expiry
+            // clears it. The client never clears blocked unilaterally —
+            // that's the backend's responsibility.
           }
         } catch {
           // Fingerprint unavailable — fail open (don't block legitimate users)
