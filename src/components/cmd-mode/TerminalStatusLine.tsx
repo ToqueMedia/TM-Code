@@ -200,7 +200,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               {completed}/{agentTasks.length} tasks
             </Text>
             {hiddenAbove > 0 && (
-              <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} py="1px">
+              <Text fontSize="13px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} py="1px">
                 · {hiddenAbove} earlier {hiddenAbove === 1 ? 'task' : 'tasks'}
               </Text>
             )}
@@ -236,7 +236,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               </Flex>
             ))}
             {hiddenBelow > 0 && (
-              <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} py="1px">
+              <Text fontSize="13px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} py="1px">
                 · {hiddenBelow} more {hiddenBelow === 1 ? 'task' : 'tasks'}
               </Text>
             )}
@@ -270,7 +270,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
             } : undefined}
           />
           <Text
-            fontSize="10px"
+            fontSize="13px"
             color={tokens.colors.text.muted}
             fontFamily={tokens.fontFamily.mono}
             fontWeight="600"
@@ -279,14 +279,14 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
           </Text>
 
           {segments.length > 0 && (
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+            <Text fontSize="13px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
               {segments.join(' · ')}
             </Text>
           )}
 
           {toolkit && (
             <Text
-              fontSize="10px"
+              fontSize="13px"
               color={toolkit.allGreen ? tokens.colors.accent.green : tokens.colors.accent.orange}
               fontFamily={tokens.fontFamily.mono}
               title={toolkit.title}
@@ -299,7 +299,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
         {/* Right: elapsed + tokens + stop */}
         <Flex align="center" gap={2} flexShrink={0}>
           {isStreaming && (
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} whiteSpace="nowrap" title={ctxTooltip}>
+            <Text fontSize="13px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} whiteSpace="nowrap" title={ctxTooltip}>
               {formatElapsed(elapsed)}
               {ctxPct > 0 && (
                 <>

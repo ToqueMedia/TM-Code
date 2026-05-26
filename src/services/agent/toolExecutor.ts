@@ -2365,13 +2365,20 @@ ${preview}
           agentLanguage: settingsStore.agentLanguage ?? 'en',
         }
 
-        // Get parent message ID from chatStore
+        // Get parent message ID — find the USER message that triggered
+        // this turn, not the streaming assistant message (which is last).
         const { useChatStore } = await import('../../stores/chatStore')
         const chatState = useChatStore.getState()
         const activeSessionId = chatState.activeSessionId
         const session = activeSessionId ? chatState.sessions.get(activeSessionId) : null
         const messages = session?.messages || []
-        const parentMessageId = messages[messages.length - 1]?.id || ''
+        let parentMessageId: string | undefined
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === 'user') {
+            parentMessageId = messages[i].id
+            break
+          }
+        }
 
         // Fire and forget — returns immediately
         const { runSubAgent } = await import('./subAgents/subAgentRunner')
@@ -2383,6 +2390,11 @@ ${preview}
           parentCtx,
           filteredTools,
         })
+
+        // Wire subAgentRunIds so SubAgentCard renders in the UI.
+        if (parentMessageId) {
+          chatState.appendSubAgentRunId(parentMessageId, runId)
+        }
 
         return `Task ${runId} started (${subagentType}: "${description}"). Use check_team() to collect results when ready.`
       }
@@ -2424,6 +2436,9 @@ ${preview}
             : '⚠️'
 
           lines.push(`### ${icon} ${s.agentType}: "${s.description}" (${duration}s, ${s.toolCallCount} tool calls)`)
+          if (s.tokenUsage) {
+            lines.push(`Tokens: ${s.tokenUsage.input.toLocaleString()} in / ${s.tokenUsage.output.toLocaleString()} out`)
+          }
 
           if (s.status === 'error' && s.errorText) {
             lines.push(`Error: ${s.errorText}`)

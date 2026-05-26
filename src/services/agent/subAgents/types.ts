@@ -56,7 +56,7 @@ export interface SubAgentParentContext {
 
 export interface SubAgentRun {
   id: string
-  parentMessageId: string
+  parentMessageId?: string
   definition: SubAgentDefinition
   prompt: string
   description: string               // 3-5 word label for UI
@@ -94,4 +94,5 @@ export interface SubAgentRunSummary {
   toolCallCount: number
   finalText: string
   errorText?: string
+  tokenUsage?: { input: number; output: number }
 }

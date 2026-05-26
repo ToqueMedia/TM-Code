@@ -18,7 +18,7 @@ const ROOT = '/Users/dev/projects/myapp'
 describe('checkPlanModeAccess', () => {
   describe('tool allowlist', () => {
     test('blocks implementation tools', () => {
-      const blocked = ['provision_auth', 'request_credentials', 'execute_command', 'start_dev_server', 'delete_file', 'rename_file', 'create_directory', 'spawn_background_agent', 'verify', 'read_dev_server_logs']
+      const blocked = ['provision_auth', 'request_credentials', 'execute_command', 'start_dev_server', 'delete_file', 'rename_file', 'create_directory', 'spawn_background_agent', 'check_background_agents', 'research', 'verify', 'read_dev_server_logs']
       for (const tool of blocked) {
         const msg = checkPlanModeAccess(tool, '', ROOT)
         expect(msg).not.toBeNull()
@@ -36,15 +36,15 @@ describe('checkPlanModeAccess', () => {
       }
     })
 
-    test('allows update_tasks and check_background_agents (no file paths)', () => {
+    test('allows update_tasks and check_team (no file paths)', () => {
       expect(checkPlanModeAccess('update_tasks', '', ROOT)).toBeNull()
-      expect(checkPlanModeAccess('check_background_agents', '', ROOT)).toBeNull()
+      expect(checkPlanModeAccess('check_team', '', ROOT)).toBeNull()
     })
 
-    test('allows research tools (web_search, web_fetch, research)', () => {
+    test('allows research + delegation tools (web_search, web_fetch, task)', () => {
       expect(checkPlanModeAccess('web_search', '', ROOT)).toBeNull()
       expect(checkPlanModeAccess('web_fetch', '', ROOT)).toBeNull()
-      expect(checkPlanModeAccess('research', '', ROOT)).toBeNull()
+      expect(checkPlanModeAccess('task', '', ROOT)).toBeNull()
     })
 
     test('allowlist is exhaustive vs. expectation', () => {
@@ -52,7 +52,7 @@ describe('checkPlanModeAccess', () => {
       // they have to update the test, forcing a conscious decision.
       expect([...PLAN_MODE_ALLOWED_TOOLS].sort()).toEqual([
         'ask_user_question',
-        'check_background_agents',
+        'check_team',
         'create_file',
         'edit_file',
         'get_diagnostics',
@@ -61,8 +61,8 @@ describe('checkPlanModeAccess', () => {
         'read_file',
         'read_large_result',
         'read_skill',
-        'research',
         'search_files',
+        'task',
         'update_tasks',
         'web_fetch',
         'web_search',

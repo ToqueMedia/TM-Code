@@ -235,6 +235,10 @@ interface ChatActions {
    *  the card is a transient UI element, not a permanent log entry, and stacking
    *  several at the end of the chat displaces the actual conversation flow. */
   removeMessage: (messageId: string) => void
+  /** Append a sub-agent run ID to a message's subAgentRunIds array.
+   *  Called by the task tool after spawning a sub-agent so the UI can
+   *  render SubAgentCard for that run. */
+  appendSubAgentRunId: (messageId: string, runId: string) => void
 }
 
 let idCounter = 0
@@ -3010,6 +3014,27 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
 
       debouncedSave()
+    },
+
+    appendSubAgentRunId: (messageId, runId) => {
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const messages = session.messages.map(msg => {
+          if (msg.id !== messageId) return msg
+          const existing = msg.subAgentRunIds || []
+          if (existing.includes(runId)) return msg
+          return { ...msg, subAgentRunIds: [...existing, runId] }
+        })
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        return { sessions: updatedSessions }
+      })
     },
   }
 })

@@ -67,6 +67,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           letterSpacing="0.1em"
           textTransform="uppercase"
           flexShrink={0}
+          data-tauri-drag-region
         >
           ◆
         </Text>
@@ -77,6 +78,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           color={tokens.colors.text.secondary}
           fontFamily={tokens.fontFamily.mono}
           flexShrink={0}
+          data-tauri-drag-region
         >
           {projectName}
         </Text>
@@ -90,6 +92,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           minW={0}
           opacity={0.5}
           display={{ base: 'none', md: 'block' }}
+          data-tauri-drag-region
         >
           {projectPath}
         </Text>
@@ -107,6 +110,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
             bg="rgba(163,113,247,0.1)"
             border="1px solid rgba(163,113,247,0.2)"
             title="Thinking is always-on for this model"
+            data-tauri-drag-region
           >
             <Text
               fontSize="9px"
@@ -115,6 +119,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
               textTransform="uppercase"
               fontFamily={tokens.fontFamily.mono}
               letterSpacing="0.08em"
+              data-tauri-drag-region
             >
               ⚡ thk
             </Text>

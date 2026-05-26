@@ -19,7 +19,7 @@ interface SubAgentStoreState {
     def: SubAgentDefinition,
     prompt: string,
     description: string,
-    parentMessageId: string,
+    parentMessageId?: string,
   ) => { runId: string; completionPromise: Promise<void> }
 
   /** Record a new tool call in the run's toolCalls list. */
@@ -219,6 +219,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
         toolCallCount: run.toolCalls.length,
         finalText: run.finalText,
         errorText: run.errorText,
+        tokenUsage: run.tokenUsage,
       })
     }
     return summaries
@@ -231,9 +232,14 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
         promises.push(run.completionPromise)
       }
     }
-    if (promises.length > 0) {
-      await Promise.all(promises)
-    }
+    if (promises.length === 0) return
+    // Race against a 5-minute safety timeout to prevent blocking forever
+    // if a sub-agent crashes silently without resolving its promise.
+    const TIMEOUT_MS = 5 * 60 * 1000
+    await Promise.race([
+      Promise.all(promises),
+      new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS)),
+    ])
   },
 
   clearCompleted: () => {

@@ -6,7 +6,7 @@
  * inside a collapsible container.
  */
 
-import { memo, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiChevronRight, FiChevronDown, FiCheck, FiX, FiClock, FiLoader } from 'react-icons/fi'
 import { useSubAgentStore } from '../../stores/subAgentStore'
@@ -26,22 +26,24 @@ function formatDuration(ms: number): string {
   return `${mins}m ${rem}s`
 }
 
-const spinKeyframes = `@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`
-const pulseKeyframes = `@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }`
+const spinCss = {
+  animation: 'agentCardSpin 1s linear infinite',
+  '@keyframes agentCardSpin': { '0%': { transform: 'rotate(0deg)' }, '100%': { transform: 'rotate(360deg)' } },
+}
+const pulseCss = {
+  animation: 'agentCardPulse 1.5s ease-in-out infinite',
+  '@keyframes agentCardPulse': { '0%, 100%': { opacity: 1 }, '50%': { opacity: 0.3 } },
+}
 
 function StatusIcon({ status }: { status: SubAgentRun['status'] }) {
   if (status === 'running') {
     return (
-      <FiLoader
-        size={12}
-        color={tokens.colors.accent.primary}
-        style={{ animation: 'spin 1s linear infinite' }}
-      />
+      <Box as={FiLoader} boxSize="12px" color={tokens.colors.accent.primary} css={spinCss} />
     )
   }
-  if (status === 'completed') return <FiCheck size={12} color={tokens.colors.accent.greenBright} />
-  if (status === 'error' || status === 'timeout') return <FiX size={12} color="#f85149" />
-  return <FiClock size={12} color={tokens.colors.text.disabled} />
+  if (status === 'completed') return <Box as={FiCheck} boxSize="12px" color={tokens.colors.accent.greenBright} />
+  if (status === 'error' || status === 'timeout') return <Box as={FiX} boxSize="12px" color="#f85149" />
+  return <Box as={FiClock} boxSize="12px" color={tokens.colors.text.disabled} />
 }
 
 function ToolCallLine({ tc }: { tc: SubAgentToolCallSummary }) {
@@ -67,11 +69,21 @@ function ToolCallLine({ tc }: { tc: SubAgentToolCallSummary }) {
   )
 }
 
-function SubAgentRunCard({ run }: { run: SubAgentRun }) {
-  const [expanded, setExpanded] = useState(run.status === 'running')
+function SubAgentRunCard({ runId }: { runId: string }) {
+  const [expanded, setExpanded] = useState(false)
+
+  // Each card subscribes to its own run — only re-renders when THIS run changes.
+  const run = useSubAgentStore(state => state.runs.get(runId))
+
+  // Auto-expand when running, collapse when done
+  useEffect(() => {
+    if (run?.status === 'running') setExpanded(true)
+  }, [run?.status])
+
+  if (!run) return null
+
   const color = AGENT_COLORS[run.definition.agentType] || tokens.colors.text.secondary
   const duration = formatDuration((run.endedAt ?? Date.now()) - run.startedAt)
-
   const maxVisible = 8
   const visibleCalls = run.toolCalls.slice(0, maxVisible)
   const hiddenCount = run.toolCalls.length - maxVisible
@@ -151,7 +163,7 @@ function SubAgentRunCard({ run }: { run: SubAgentRun }) {
                 h="4px"
                 borderRadius="full"
                 bg={tokens.colors.accent.primary}
-                style={{ animation: 'pulse 1.5s ease-in-out infinite' }}
+                css={pulseCss}
               />
               <Text fontSize="10px" color={tokens.colors.text.disabled}>
                 Working...
@@ -167,26 +179,38 @@ function SubAgentRunCard({ run }: { run: SubAgentRun }) {
 function SubAgentCard({ runIds }: SubAgentCardProps) {
   const [containerExpanded, setContainerExpanded] = useState(false)
 
-  const runs = useSubAgentStore(state => {
+  // Subscribe to the Map reference — only changes when runs are added/removed.
+  // Individual run mutations (status changes, tool calls) are tracked by
+  // SubAgentRunCard via its own store subscription.
+  const runsMap = useSubAgentStore(state => state.runs)
+
+  const runs = useMemo(() => {
     const result: SubAgentRun[] = []
     for (const id of runIds) {
-      const run = state.runs.get(id)
+      const run = runsMap.get(id)
       if (run) result.push(run)
     }
     return result
-  })
+  }, [runsMap, runIds])
 
   const runningCount = useMemo(() => runs.filter(r => r.status === 'running').length, [runs])
   const completedCount = useMemo(() => runs.filter(r => r.status !== 'running').length, [runs])
 
-  if (runs.length === 0) return null
+  // If all runIds are stale (store cleared, session resumed), show faded indicator
+  if (runs.length === 0) {
+    return (
+      <Flex align="center" gap="6px" my="4px" px="12px" py="6px" opacity={0.4}>
+        <FiCheck size={12} color={tokens.colors.text.disabled} />
+        <Text fontSize="11px" color={tokens.colors.text.disabled}>
+          {runIds.length} team task{runIds.length > 1 ? 's' : ''} completed (results expired)
+        </Text>
+      </Flex>
+    )
+  }
 
   const anyRunning = runningCount > 0
 
   return (
-    <>
-      {/* Inject keyframes once */}
-      <style>{spinKeyframes}{pulseKeyframes}</style>
       <Box
         my="6px"
         borderRadius="8px"
@@ -220,7 +244,7 @@ function SubAgentCard({ runIds }: SubAgentCardProps) {
                 h="5px"
                 borderRadius="full"
                 bg={tokens.colors.accent.primary}
-                style={{ animation: 'pulse 1.5s ease-in-out infinite' }}
+                css={pulseCss}
               />
               <Text fontSize="11px" color={tokens.colors.accent.primary}>
                 {runningCount} running
@@ -238,12 +262,11 @@ function SubAgentCard({ runIds }: SubAgentCardProps) {
         {(containerExpanded || anyRunning) && (
           <Box px="12px" pb="8px">
             {runs.map(run => (
-              <SubAgentRunCard key={run.id} run={run} />
+              <SubAgentRunCard key={run.id} runId={run.id} />
             ))}
           </Box>
         )}
       </Box>
-    </>
   )
 }
 

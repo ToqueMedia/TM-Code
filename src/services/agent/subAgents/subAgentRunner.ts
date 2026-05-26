@@ -15,7 +15,7 @@ export interface SubAgentRunOptions {
   definition: SubAgentDefinition
   prompt: string
   description: string
-  parentMessageId: string
+  parentMessageId: string | undefined
   parentCtx: SubAgentParentContext
   /** Tool definitions filtered to only the sub-agent's allowed tools. */
   filteredTools: OpenAIToolDefinition[]

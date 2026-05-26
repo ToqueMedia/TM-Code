@@ -103,6 +103,15 @@ jest.mock('../../../stores/chatStore', () => ({
   appendReasoningDeltaBuffered: jest.fn(),
 }))
 
+jest.mock('../../../stores/subAgentStore', () => ({
+  useSubAgentStore: { getState: () => ({
+    runs: new Map(),
+    awaitAllPending: jest.fn().mockResolvedValue([]),
+    clearCompleted: jest.fn(),
+    getRunSummaries: jest.fn().mockReturnValue([]),
+  }) },
+}))
+
 jest.mock('../../auth/firebaseAuth', () => ({
   __esModule: true,
   default: { getInstance: () => ({ getIdToken: jest.fn().mockResolvedValue('mock-token') }) },
@@ -262,11 +271,11 @@ describe('A: execute() orchestration', () => {
     expect(mockRequestPermission).not.toHaveBeenCalled()
   })
 
-  it('bypasses permission for check_background_agents', async () => {
+  it('bypasses permission for check_team', async () => {
     const exec = freshExecutor()
     mockInvoke.mockResolvedValue('[]' as never)
 
-    await exec.execute('check_background_agents', {})
+    await exec.execute('check_team', {})
 
     expect(mockRequestPermission).not.toHaveBeenCalled()
   })
