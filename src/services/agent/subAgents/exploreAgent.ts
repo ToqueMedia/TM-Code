@@ -21,7 +21,16 @@ export const EXPLORE_AGENT: SubAgentDefinition = {
       ? '\n\nYou are running in Terminal Mode (no project sidebar). CWD is the working directory.'
       : ''
 
+    const depthGuide = ctx.thoroughness === 'quick'
+      ? 'Stop at the first match. Return immediately when you find what you need.'
+      : ctx.thoroughness === 'thorough'
+        ? 'Be comprehensive. Check multiple naming conventions, related files, test files, and edge cases. Report all findings.'
+        : 'Check 2-3 relevant locations before concluding. Balance speed with coverage.'
+
     return `You are a fast codebase exploration agent inside TM Code. Your job is to find information in the project and return a clear, concise answer.
+
+## Search Depth
+${depthGuide}
 
 ## Capabilities
 - **search_files** — ripgrep search across the codebase. Use for finding usages, references, patterns.

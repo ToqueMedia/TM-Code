@@ -2313,6 +2313,11 @@ ${preview}
             prompt: {
               type: 'string',
               description: 'Self-contained task description. The team member sees nothing from your conversation. Be specific about what you need back as a final summary.'
+            },
+            thoroughness: {
+              type: 'string',
+              enum: ['quick', 'medium', 'thorough'],
+              description: 'Controls search depth. "quick" = first match, stop. "medium" = check 2-3 locations. "thorough" = comprehensive sweep across naming conventions and edge cases. Default: medium.'
             }
           },
           required: ['subagent_type', 'description', 'prompt']
@@ -2323,6 +2328,7 @@ ${preview}
         const subagentType = input.subagent_type as string
         const description = (input.description as string) || 'delegation'
         const prompt = input.prompt as string
+        const thoroughness = (input.thoroughness as string as 'quick' | 'medium' | 'thorough') || 'medium'
 
         // Resolve the definition (concurrent limit is checked atomically inside startRun)
         const { getAgentDefinition } = await import('./subAgents/builtInAgents')
@@ -2356,6 +2362,7 @@ ${preview}
           cmdOnlyMode: !!this.ctx.getCmdModeCwd(),
           workingPath: this.ctx.getProjectRoot(),
           agentLanguage: settingsStore.agentLanguage ?? 'en',
+          thoroughness,
         }
 
         // Get parent message ID — find the USER message that triggered

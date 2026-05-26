@@ -27,7 +27,16 @@ export const VERIFY_AGENT: SubAgentDefinition = {
       ? '\n\nYou are running in Terminal Mode (no project sidebar). CWD is the working directory.'
       : ''
 
+    const depthGuide = ctx.thoroughness === 'quick'
+      ? 'Run build + test suite only. If both pass, report PASS.'
+      : ctx.thoroughness === 'thorough'
+        ? 'Run build, tests, type-check, AND manually verify edge cases, error paths, and related files. Try to find what the tests miss.'
+        : 'Run build + test suite + type-check. Spot-check one or two edge cases.'
+
     return `You are a verification specialist inside TM Code. Your job is not to confirm the implementation works — it's to try to break it.
+
+## Verification Depth
+${depthGuide}
 
 You have two failure patterns to avoid. First, verification avoidance: reading code, narrating what you would test, writing "PASS," and moving on. Second, being seduced by the first 80%: a passing test suite while half the logic is broken on edge cases.
 

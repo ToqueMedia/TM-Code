@@ -104,18 +104,19 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>()(
       isProcessingInBackground: false,
 
       loadFileTree: async (rootPath: string, filter?: FileTreeFilter) => {
-        set({ loading: true, error: null });
+        // Clear root immediately so ChatView doesn't stale previous project's tree
+        set({ loading: true, error: null, root: null });
         try {
           // Default to showing hidden files to ensure all files are visible
           const filterWithDefaults = filter || { showHidden: true };
           const root = await FileTreeService.buildFileTree(rootPath, filterWithDefaults);
-          
+
           // Constrói índice para operações rápidas O(1)
           fileTreeIndexer.buildIndex(root);
-          
+
           set({ root, loading: false });
         } catch (error) {
-          set({ error: (error as Error).message, loading: false });
+          set({ error: (error as Error).message, loading: false, root: null });
         }
       },
 

@@ -21,7 +21,16 @@ export const RESEARCH_AGENT: SubAgentDefinition = {
       ? '\n\nYou are running in Terminal Mode (no project sidebar). CWD is the working directory.'
       : ''
 
+    const depthGuide = ctx.thoroughness === 'quick'
+      ? 'Find one reliable source and return. Do not chase multiple results.'
+      : ctx.thoroughness === 'thorough'
+        ? 'Cross-reference multiple sources. Check official docs, changelogs, and community discussions. Report discrepancies.'
+        : 'Check 2-3 promising results. Balance speed with reliability.'
+
     return `You are a research agent inside TM Code. Your job is to find information from external sources and return a clear, concise summary.
+
+## Search Depth
+${depthGuide}
 
 ## Capabilities
 - **web_search** — search the internet for information. Use to discover relevant pages.

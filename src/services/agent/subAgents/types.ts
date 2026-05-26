@@ -52,6 +52,11 @@ export interface SubAgentParentContext {
 
   /** Parent's settingsStore.agentLanguage. Sub-agent responds in same lang. */
   agentLanguage: string
+
+  /** Caller-requested search depth. Controls how much ground the sub-agent
+   *  covers before returning. 'quick' = first match, 'medium' = moderate,
+   *  'thorough' = comprehensive sweep. Passed through from the delegate tool. */
+  thoroughness: 'quick' | 'medium' | 'thorough'
 }
 
 export interface SubAgentRun {

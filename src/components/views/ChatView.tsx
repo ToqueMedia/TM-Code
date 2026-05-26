@@ -7,6 +7,8 @@ import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
+import { invoke } from '@/utils/invokeMetrics'
+import { projectHasMeaningfulContent } from '../../utils/projectHasContent'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -96,6 +98,18 @@ function ChatView() {
   const preBoundaryCount = lastBoundaryIndex === -1 ? 0 : lastBoundaryIndex
   const hasHiddenPreBoundary = preBoundaryCount > 0 && !revealPreBoundary
   const projectPath = currentProject?.path || ''
+
+  // Check if project directory has meaningful content (not just dot-files).
+  // Uses the same glob_files invoke that projectStore uses for the noTmsFile check.
+  const [hasContent, setHasContent] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (!projectPath) { setHasContent(null); return }
+    let cancelled = false
+    invoke<string[]>('glob_files', { pattern: '*', directory: projectPath })
+      .then(entries => { if (!cancelled) setHasContent(projectHasMeaningfulContent(entries)) })
+      .catch(() => { if (!cancelled) setHasContent(true) }) // fail-open: don't show suggestions on FS error
+    return () => { cancelled = true }
+  }, [projectPath])
 
 // use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
   // streaming content, expanding diffs, and dynamic height changes.
@@ -518,7 +532,7 @@ function ChatView() {
               <Box maxW="900px" mx="auto" w="100%" py={4}>
                 <ChatSkeleton />
               </Box>
-            ) : messages.length === 0 ? (
+            ) : messages.length === 0 && hasContent === false ? (
               <ChatSuggestions />
             ) : (
               <Box

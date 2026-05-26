@@ -13,12 +13,12 @@ import WindowService from '../services/windowService';
 import { sessionService } from '../services/agent/sessionService';
 import CheckpointService from '../services/agent/checkpointService';
 import { useChatStore } from './chatStore';
-import { projectHasMeaningfulContent } from '../utils/projectHasContent';
+
 import { useProblemsStore } from './problemsStore';
 import { IS_VITE_DEV } from '../utils/viteEnv';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
-import { t } from '../i18n';
+
 
 /**
  * Dedupe a recent-projects list by `path`. Rust's `get_recent_projects`
@@ -392,19 +392,20 @@ export const useProjectStore = create<ProjectStore>()(
           try {
             await invoke('read_file', { path: `${path}/TMS.md` });
           } catch {
-            let projectHasContent = false;
+            // TMS.md not found — show system message suggesting /init.
+            const { projectHasMeaningfulContent } = await import('../utils/projectHasContent');
+            let hasContent = false;
             try {
               const entries = await invoke<string[]>('glob_files', {
                 pattern: '*',
                 directory: path,
               });
-              projectHasContent = projectHasMeaningfulContent(entries);
+              hasContent = projectHasMeaningfulContent(entries);
             } catch {
-              // glob_files failed — fail open (don't suggest) so we don't
-              // nag on a transient FS hiccup.
-              projectHasContent = false;
+              hasContent = false;
             }
-            if (projectHasContent) {
+            if (hasContent) {
+              const { t } = await import('../i18n');
               setTimeout(() => {
                 const chatState = useChatStore.getState();
                 if (chatState.activeSessionId) {

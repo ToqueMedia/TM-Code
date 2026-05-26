@@ -15,12 +15,14 @@ const CHAT_CTX: SubAgentParentContext = {
   cmdOnlyMode: false,
   workingPath: '/home/user/my-project',
   agentLanguage: 'en',
+  thoroughness: 'medium',
 }
 
 const CMD_CTX: SubAgentParentContext = {
   cmdOnlyMode: true,
   workingPath: '/home/user/my-project',
   agentLanguage: 'en',
+  thoroughness: 'medium',
 }
 
 describe('Sub-agent definitions', () => {

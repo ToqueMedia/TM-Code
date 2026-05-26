@@ -932,11 +932,32 @@ A memory that names a specific function, file, or flag is a claim that it existe
 "The memory says X exists" is not the same as "X exists now." If a recalled memory conflicts with what you observe, trust what you observe and update or forget the stale memory.`
 }
 
-/** Memory guidance: either "keep TMS.md updated" or bootstrap instructions. */
+/**
+ * TMS.md guidance — unified for all cases.
+ *
+ * Three paths:
+ *  1. TMS.md exists → keep it updated.
+ *  2. TMS.md missing, external project → explain, offer /init or self-create.
+ *  3. TMS.md missing, TM Code project → passive reminder (shouldn't normally happen).
+ */
 export function getMemoryGuidanceSection(ctx: PromptContext): string {
   if (ctx.tmsContent) {
     return `Keep TMS.md updated with milestones (dated) and architectural decisions (with rationale) as you complete work. Preserve "Project Analysis" and "Custom Instructions" sections as-is.`
   }
+
+  // External project without TMS.md — active bootstrap
+  if (!ctx.tmCodeOwned && ctx.treeString) {
+    return `This project has no TMS.md — the persistent project memory file that stores framework info, dev commands, architectural decisions, and milestones across sessions. Without it, you re-analyze the project from scratch every turn.
+
+**Before responding to the user's message:**
+1. Briefly explain (2-3 sentences) why TMS.md matters for this project.
+2. Offer two options:
+   - Run \`/init\` to generate it automatically.
+   - You create it yourself (same analysis as /init: read package.json, detect framework, scan directory, identify key files).
+3. If the user chooses either option, create TMS.md before processing their original request.`
+  }
+
+  // TM Code project missing TMS.md (rare) — passive reminder
   return `No TMS.md yet. After completing your first significant task, create one at the project root with these sections: \`# TMS — Project Memory\`, \`## Project Analysis\` (name, framework, package manager, key deps, directory overview), \`## Memory\` (sub-sections \`### Milestones\` dated, \`### Decisions\` with rationale, \`### Pending Tasks\`), and \`## Custom Instructions\` (developer-specific rules). This is your persistent memory across sessions.`
 }
 
