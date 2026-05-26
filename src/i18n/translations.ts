@@ -528,6 +528,9 @@ const en = {
   'prompt.planLabel.vibe': 'Vibe',
   'prompt.planLabel.pro': 'Pro',
   'prompt.planLabel.max': 'Max',
+  'prompt.subAgents.running': '{count} sub-agent running...',
+  'prompt.subAgents.running.plural': '{count} sub-agents running...',
+  'prompt.subAgents.cancel': 'Cancel',
 
   // ── Terminal Mode Attachments ──────────────────────
   'terminalMode.attach': 'Attach',
@@ -1535,6 +1538,9 @@ const pt: Record<keyof typeof en, string> = {
   'prompt.planLabel.vibe': 'Vibe',
   'prompt.planLabel.pro': 'Pro',
   'prompt.planLabel.max': 'Max',
+  'prompt.subAgents.running': '{count} sub-agente a correr...',
+  'prompt.subAgents.running.plural': '{count} sub-agentes a correr...',
+  'prompt.subAgents.cancel': 'Cancelar',
   'terminalMode.attach': 'Anexar',
   'terminalMode.attachTooltip': 'Anexar ficheiros ou imagens',
   'terminalMode.dropToAttach': 'Largar para anexar',

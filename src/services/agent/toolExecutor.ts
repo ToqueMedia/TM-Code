@@ -405,8 +405,8 @@ class ToolExecutor {
     // renders an interactive question card (Submit/Cancel is the gate).
     const PERMISSION_EXEMPT_TOOLS = new Set([
       'update_tasks',
-      'check_team',
-      'task',
+      'collect_results',
+      'delegate',
       'check_background_commands',
       'request_credentials',
       'ask_user_question',
@@ -2293,11 +2293,11 @@ ${preview}
       }
     })
 
-    // === task (sub-agent delegation — v0.7.0) ===
-    this.tools.set('task', {
+    // === delegate (sub-agent delegation — v0.7.0) ===
+    this.tools.set('delegate', {
       definition: {
-        name: 'task',
-        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working. Call check_team() when you need results.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, grep, read_file, list_directory, get_diagnostics). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. You can spawn multiple tasks in one turn, do other work, then call check_team() to collect results.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
+        name: 'delegate',
+        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, grep, read_file, list_directory, get_diagnostics). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2321,7 +2321,7 @@ ${preview}
       },
       execute: async (input) => {
         const subagentType = input.subagent_type as string
-        const description = (input.description as string) || 'task'
+        const description = (input.description as string) || 'delegation'
         const prompt = input.prompt as string
 
         // Resolve the definition (concurrent limit is checked atomically inside startRun)
@@ -2336,7 +2336,7 @@ ${preview}
         const disallowedTools = new Set(def.disallowedTools ?? [])
         const filteredTools: OpenAIToolDefinition[] = []
         for (const [name, entry] of this.tools) {
-          if (name === 'task' || name === 'check_team') continue // block recursive delegation
+          if (name === 'delegate' || name === 'collect_results') continue // block recursive delegation
           if (disallowedTools.has(name)) continue
           if (allowedTools.has(name)) {
             filteredTools.push({
@@ -2394,15 +2394,15 @@ ${preview}
           chatState.appendSubAgentRunId(parentMessageId, runId)
         }
 
-        return `Task ${runId} started (${subagentType}: "${description}"). Use check_team() to collect results when ready.`
+        return `Task ${runId} started (${subagentType}: "${description}"). Results will be available when ready.`
       }
     })
 
-    // === check_team (v0.7.0) ===
-    this.tools.set('check_team', {
+    // === collect_results (v0.7.0) ===
+    this.tools.set('collect_results', {
       definition: {
-        name: 'check_team',
-        description: 'Collect results from all team members. Blocks until all pending tasks finish, then returns a summary of each task\'s status and result. Use after spawning tasks with task().',
+        name: 'collect_results',
+        description: 'Collect results from team members. Returns immediately with all finished results. If some members are still running, their status is shown but results are not yet available — call collect_results again later to get them. This is non-blocking by design.',
         input_schema: {
           type: 'object',
           properties: {},
@@ -2415,15 +2415,13 @@ ${preview}
 
         // Nothing to check
         if (store.runs.size === 0) {
-          return 'No team members have been assigned tasks.'
+          return 'No team tasks are active. Use the delegate tool to assign work to team members first.'
         }
 
-        // Await all pending tasks
-        await store.awaitAllPending()
-
-        // Build formatted summary
         const summaries = store.getRunSummaries()
         const lines: string[] = ['## Team Results\n']
+
+        let runningCount = 0
 
         for (const s of summaries) {
           const duration = (s.duration / 1000).toFixed(0)
@@ -2431,26 +2429,38 @@ ${preview}
             : s.status === 'error' ? '❌'
             : s.status === 'timeout' ? '⏰'
             : s.status === 'aborted' ? '🛑'
-            : '⚠️'
+            : '⏳'
 
-          lines.push(`### ${icon} ${s.agentType}: "${s.description}" (${duration}s, ${s.toolCallCount} tool calls)`)
-          if (s.tokenUsage) {
-            lines.push(`Tokens: ${s.tokenUsage.input.toLocaleString()} in / ${s.tokenUsage.output.toLocaleString()} out`)
+          if (s.status === 'running') {
+            runningCount++
+            lines.push(`### ${icon} ${s.agentType}: "${s.description}" — still running (${duration}s, ${s.toolCallCount} tool calls so far)`)
+          } else {
+            lines.push(`### ${icon} ${s.agentType}: "${s.description}" (${duration}s, ${s.toolCallCount} tool calls)`)
+            if (s.tokenUsage) {
+              lines.push(`Tokens: ${s.tokenUsage.input.toLocaleString()} in / ${s.tokenUsage.output.toLocaleString()} out`)
+            }
+            if (s.status === 'error' && s.errorText) {
+              lines.push(`Error: ${s.errorText}`)
+            } else if (s.finalText) {
+              lines.push(s.finalText)
+            } else if (s.status === 'aborted') {
+              lines.push('Task was aborted.')
+            }
           }
-
-          if (s.status === 'error' && s.errorText) {
-            lines.push(`Error: ${s.errorText}`)
-          } else if (s.finalText) {
-            lines.push(s.finalText)
-          } else if (s.status === 'aborted') {
-            lines.push('Task was aborted.')
-          }
-
           lines.push('') // blank separator
         }
 
-        // Clear completed runs after reporting
-        store.clearCompleted()
+        if (runningCount > 0) {
+          lines.push(`${runningCount} team member${runningCount > 1 ? 's' : ''} still working. Results will be available when they finish.`)
+        }
+
+        // Only clear completed runs when ALL runs are done (no running left).
+        // If some are still running, keep completed ones so the model can still
+        // reference them in its next turn (the auto-wake will fire again when
+        // the remaining ones finish).
+        if (runningCount === 0) {
+          store.clearCompleted()
+        }
 
         return lines.join('\n')
       }

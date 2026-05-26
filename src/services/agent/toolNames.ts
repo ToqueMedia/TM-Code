@@ -43,8 +43,8 @@ export const WEB_SEARCH = 'web_search'
 export const WEB_FETCH = 'web_fetch'
 
 // Sub-agent delegation (v0.7.0 — replaces research, verify, spawn_background_agent)
-export const TASK = 'task'
-export const CHECK_TEAM = 'check_team'
+export const DELEGATE = 'delegate'
+export const COLLECT_RESULTS = 'collect_results'
 
 // Internal task tracking
 export const UPDATE_TASKS = 'update_tasks'
@@ -79,7 +79,7 @@ export const TOOL_NAMES = [
   WRITE_FILE, CREATE_FILE, EDIT_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
   WEB_SEARCH, WEB_FETCH,
-  TASK, CHECK_TEAM,
+  DELEGATE, COLLECT_RESULTS,
   UPDATE_TASKS,
   PROVISION_AUTH, PROVISION_DEPLOY, REQUEST_CREDENTIALS, ASK_USER_QUESTION,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,

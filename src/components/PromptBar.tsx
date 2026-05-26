@@ -11,6 +11,7 @@ import MentionMenu from './prompt/MentionMenu'
 import HashtagMenu from './prompt/HashtagMenu'
 import QueuedMessagesPreview from './prompt/QueuedMessagesPreview'
 import AgentTasksPanel from './chat/AgentTasksPanel'
+import SubAgentStatusBar from './chat/SubAgentStatusBar'
 import { usePromptBar } from './prompt/usePromptBar'
 import KeyBindingDisplay from './ui/KeyBindingDisplay'
 
@@ -174,6 +175,8 @@ function PromptBar() {
             </>
           )}
         </Flex>
+
+        <SubAgentStatusBar />
       </Box>
     </Box>
   )

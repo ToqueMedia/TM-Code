@@ -113,8 +113,8 @@ export function getCmdToolsSection(): string {
  - Use dedicated tools (\`${READ_FILE}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`) instead of shell commands for file operations. Reserve \`${EXECUTE_COMMAND}\` for system commands and terminal operations only.
  - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. Mark each task as completed as soon as you are done with it.
  - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
- - \`task\`: delegate a task to a team member. Returns immediately — the task runs in background. Call \`check_team()\` when you need results. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel.
- - \`check_team\`: collect results from all team members. Blocks until all pending tasks finish, then returns summaries. Use after spawning tasks with \`task\`.`
+ - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel. After delegating, if you have no other work, end your turn — results will be available on next interaction.
+ - \`collect_results\`: collect results from team members. Returns immediately with finished results — does NOT block. The system auto-wakes you when new results arrive.`
 }
 
 export function getCmdEnvironmentSection(ctx: CmdPromptContext): string {

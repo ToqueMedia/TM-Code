@@ -197,12 +197,15 @@ ${totalTools} tools available. Key behaviors not obvious from tool schemas:
  - \`${READ_DEV_SERVER_LOGS}\` reads output from the running dev server AND runtime errors from the live preview (browser console). Entries prefixed [runtime] are from the browser. Use after file changes or when asked about preview/browser errors. The buffer is CUMULATIVE — old errors persist after a fix; pass the response's \`next_since\` cursor as \`since_timestamp\` on the follow-up call to verify whether your fix landed (otherwise you keep seeing the same stale entry).
  - \`${GET_DIAGNOSTICS}\` checks TypeScript/JavaScript errors without a build step. Use after modifying TS/JS files.
  - \`${READ_LARGE_RESULT}\` retrieves large tool outputs that were too big to return inline. Use the reference ID from the "Output too large" message.
- - \`task\`: delegate a task to a team member. Returns immediately — the task runs in background while you continue working. Call \`check_team()\` when you need results. Available team members:
+ - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background while you continue working. Available team members:
    - **Explore** — Read-only codebase search (glob, grep, read_file, get_diagnostics). Use for "find all usages of X", "where is Y defined".
    - **Research** — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X".
    - **Verify** — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API) to catch bugs. Returns PASS, FAIL, or PARTIAL.
-   All tasks run in parallel. You can spawn multiple tasks in one turn, do other work, then call \`check_team()\` to collect results.
- - \`check_team\`: collect results from all team members. Blocks until all pending tasks finish, then returns a summary of each task's status and result. Use after spawning tasks with \`task\`.
+   All tasks run in parallel. After delegating:
+   - If you have other work to do (reads, edits, analysis), do it in the same turn.
+   - If you have nothing else to do, end your turn. Team results will be available on your next interaction — the system injects active team status automatically. Tell the user you delegated the task and will synthesize results when ready.
+   - Do NOT call \`collect_results\` immediately after spawning unless you need the results right now to continue your current work.
+ - \`collect_results\`: collect results from team members. Returns immediately with all finished results — does NOT block. If some members are still running, their status is shown. The system auto-wakes you when new results arrive, so you do not need to poll.
  - \`execute_command_background\`: runs a shell command without blocking your turn. Returns immediately with an ID. Max 6 concurrent. Results via \`check_background_commands\`.
    **When to use:** commands that take >30 seconds — \`npm install\`, \`npm run build\`, \`tsc --noEmit\`, large compilations. Fire-and-forget: start the install in background, then continue reading/editing files while it runs. Check results when ready.
    **When NOT to use:** quick commands (<30s) — \`ls\`, \`cat\`, \`git status\`, \`curl\`, small \`npm test\` runs. Use \`${EXECUTE_COMMAND}\` for those — you need the output immediately to decide next steps.

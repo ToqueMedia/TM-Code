@@ -36,15 +36,15 @@ describe('checkPlanModeAccess', () => {
       }
     })
 
-    test('allows update_tasks and check_team (no file paths)', () => {
+    test('allows update_tasks and collect_results (no file paths)', () => {
       expect(checkPlanModeAccess('update_tasks', '', ROOT)).toBeNull()
-      expect(checkPlanModeAccess('check_team', '', ROOT)).toBeNull()
+      expect(checkPlanModeAccess('collect_results', '', ROOT)).toBeNull()
     })
 
-    test('allows research + delegation tools (web_search, web_fetch, task)', () => {
+    test('allows research + delegation tools (web_search, web_fetch, delegate)', () => {
       expect(checkPlanModeAccess('web_search', '', ROOT)).toBeNull()
       expect(checkPlanModeAccess('web_fetch', '', ROOT)).toBeNull()
-      expect(checkPlanModeAccess('task', '', ROOT)).toBeNull()
+      expect(checkPlanModeAccess('delegate', '', ROOT)).toBeNull()
     })
 
     test('allowlist is exhaustive vs. expectation', () => {
@@ -52,8 +52,9 @@ describe('checkPlanModeAccess', () => {
       // they have to update the test, forcing a conscious decision.
       expect([...PLAN_MODE_ALLOWED_TOOLS].sort()).toEqual([
         'ask_user_question',
-        'check_team',
+        'collect_results',
         'create_file',
+        'delegate',
         'edit_file',
         'get_diagnostics',
         'glob',
@@ -62,7 +63,6 @@ describe('checkPlanModeAccess', () => {
         'read_large_result',
         'read_skill',
         'search_files',
-        'task',
         'update_tasks',
         'web_fetch',
         'web_search',

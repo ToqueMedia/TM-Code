@@ -6,6 +6,7 @@
  */
 
 import { useSubAgentStore } from '../../../stores/subAgentStore'
+import { maybeWakeMainAgent } from './autoWake'
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
 import type { AgentCallbacks } from '../agentService'
 import type { OpenAIToolDefinition } from '../toolExecutor'
@@ -37,6 +38,9 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   }
   const { runId } = runResult
 
+  // Fetch fresh state — startRun mutated the store, so the old snapshot is stale.
+  const abortController = useSubAgentStore.getState().runs.get(runId)!.abortController
+
   // Dynamically import to avoid circular deps
   const agentModule = await import('../agentService')
   const AgentService = agentModule.default
@@ -46,7 +50,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   const subAgent = AgentService.createLightweight({
     tools: filteredTools,
     readOnly: true,
-    abortController: store.runs.get(runId)!.abortController,
+    abortController,
   })
 
   // Build the sub-agent's system prompt
@@ -59,6 +63,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     if (run && run.status === 'running') {
       useSubAgentStore.getState().timeoutRun(runId, run.finalText || '')
       run.abortController.abort()
+      maybeWakeMainAgent()
     }
   }, definition.maxWallClockMs)
 
@@ -103,10 +108,13 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
         input: inputTokens,
         output: outputTokens,
       })
+      // Wake the main agent to collect this result
+      maybeWakeMainAgent()
     },
     onError: (error) => {
       clearTimeout(wallClockTimer)
       useSubAgentStore.getState().errorRun(runId, error.message)
+      maybeWakeMainAgent()
     },
     onUsageUpdate: (inp, out) => {
       inputTokens += inp
@@ -116,6 +124,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     clearTimeout(wallClockTimer)
     const msg = err instanceof Error ? err.message : String(err)
     useSubAgentStore.getState().errorRun(runId, msg)
+    maybeWakeMainAgent()
   })
 
   return runId

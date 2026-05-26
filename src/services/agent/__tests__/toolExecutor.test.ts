@@ -271,11 +271,11 @@ describe('A: execute() orchestration', () => {
     expect(mockRequestPermission).not.toHaveBeenCalled()
   })
 
-  it('bypasses permission for check_team', async () => {
+  it('bypasses permission for collect_results', async () => {
     const exec = freshExecutor()
     mockInvoke.mockResolvedValue('[]' as never)
 
-    await exec.execute('check_team', {})
+    await exec.execute('collect_results', {})
 
     expect(mockRequestPermission).not.toHaveBeenCalled()
   })
