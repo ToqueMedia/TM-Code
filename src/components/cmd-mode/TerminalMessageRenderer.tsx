@@ -10,6 +10,7 @@ import { TerminalCodeBlock } from './TerminalCodeBlock'
 import { TerminalCredentialPrompt } from './TerminalCredentialPrompt'
 import { TerminalAskUserQuestion } from './TerminalAskUserQuestion'
 import { TerminalPlanApprovalCard } from './TerminalPlanApprovalCard'
+import SubAgentCard from '../chat/SubAgentCard'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 
 // ─── Special card renderer (plan_approval, credential_request, ask_user_question) ───
@@ -327,6 +328,11 @@ function TerminalMessageRendererInner({
 
       {/* Special cards (credential requests, etc.) */}
       <TerminalSpecialCards message={message} />
+
+      {/* Sub-agent team activity cards */}
+      {message.subAgentRunIds && message.subAgentRunIds.length > 0 && (
+        <SubAgentCard runIds={message.subAgentRunIds} />
+      )}
 
       {/* Content — hide text/narration while reasoning is in-flight to prevent race */}
       {hasContentBlocks ? (

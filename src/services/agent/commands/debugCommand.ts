@@ -70,7 +70,7 @@ Follow this loop. Do not skip steps.
 
    **If \`read_dev_server_logs\` returns "No dev server is running"**, call \`start_dev_server\` FIRST and wait for the "Server ready" line before continuing — diagnosing a runtime bug without runtime evidence is guessing. After the server is up, re-run the failing scenario (open the preview, click the broken button, hit the broken endpoint) so the dev-server logs actually capture the symptom you're chasing. Skipping this step is the most common reason /debug spirals into a multi-turn file-reading marathon with no resolution.
 
-2. **Identify the affected files.** Use the stack trace, error message, recent edits, or dev-server output to locate the code path. Read those files in full — never propose a fix to code you have not read.
+2. **Identify the affected files.** Use the stack trace, error message, recent edits, or dev-server output to locate the code path. Read those files in full — never propose a fix to code you have not read. If the codebase is large and the bug spans multiple areas, delegate exploration with \`task({ subagent_type: "Explore", description: "...", prompt: "..." })\` then collect results with \`check_team()\`.
 
 3. **Form 2–3 hypotheses.** State each hypothesis with the evidence that supports OR contradicts it. Reject hypotheses you can't tie to the observable behavior.
 

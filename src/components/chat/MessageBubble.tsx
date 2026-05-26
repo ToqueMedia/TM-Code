@@ -18,6 +18,7 @@ import PlanApprovalCard from './PlanApprovalCard'
 import TodoListCard from './TodoListCard'
 import CredentialRequestCard from './CredentialRequestCard'
 import { AskUserQuestionCard } from './AskUserQuestionCard'
+import SubAgentCard from './SubAgentCard'
 import {
   sessionToJson,
   sessionToMarkdown,
@@ -812,6 +813,11 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                     : <ToolCallDisplayComponent key={group.call.id} toolCall={group.call} messageId={message.id} />
                 ))}
               </Box>
+            )}
+
+            {/* Sub-agent team activity cards */}
+            {!isUser && message.subAgentRunIds && message.subAgentRunIds.length > 0 && (
+              <SubAgentCard runIds={message.subAgentRunIds} />
             )}
           </>
         )}

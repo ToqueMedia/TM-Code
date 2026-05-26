@@ -59,7 +59,7 @@ import {
 import {
   getActivePlanSection,
   getAppliedScaffoldingSection,
-  getBackgroundAgentsSection,
+  getBackgroundAgentsSection as getTeamSection,
   getBackgroundCommandsSection,
   getClosedLoopSection,
   getCompletionContractSection,
@@ -438,10 +438,10 @@ class ContextBuilder {
       pendingMemoryProposals,
     }
 
-    // Resolve the async background-agents section once so dynamicSection()
+    // Resolve the async team section once so dynamicSection()
     // can stay synchronous below — the wrapper exists to enforce a
     // declarative `(name, body, reason)` shape, not to host the async I/O.
-    const bgAgentsSection = await getBackgroundAgentsSection()
+    const teamSection = await getTeamSection()
     const bgCommandsSection = await getBackgroundCommandsSection()
 
     const sections = [
@@ -488,7 +488,7 @@ class ContextBuilder {
       // a regression; if it can be static, move it above the boundary.
       dynamicSection('mcp', () => sharedMcpBlock(ctx.mcpTools, 'developer'),
         'MCP server list changes when developer connects/disconnects servers'),
-      dynamicSection('background_agents', () => bgAgentsSection,
+      dynamicSection('team', () => teamSection,
         'in-flight background agent list changes per turn'),
       dynamicSection('background_commands', () => bgCommandsSection,
         'running/completed background shell commands'),

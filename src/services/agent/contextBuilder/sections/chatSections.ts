@@ -197,13 +197,16 @@ ${totalTools} tools available. Key behaviors not obvious from tool schemas:
  - \`${READ_DEV_SERVER_LOGS}\` reads output from the running dev server AND runtime errors from the live preview (browser console). Entries prefixed [runtime] are from the browser. Use after file changes or when asked about preview/browser errors. The buffer is CUMULATIVE — old errors persist after a fix; pass the response's \`next_since\` cursor as \`since_timestamp\` on the follow-up call to verify whether your fix landed (otherwise you keep seeing the same stale entry).
  - \`${GET_DIAGNOSTICS}\` checks TypeScript/JavaScript errors without a build step. Use after modifying TS/JS files.
  - \`${READ_LARGE_RESULT}\` retrieves large tool outputs that were too big to return inline. Use the reference ID from the "Output too large" message.
- - \`research\`: parallel sub-agent with read+write access. Blocks your turn until complete. **Caller-parameterized effort**: pass \`thoroughness: "quick"\` (1-3 tool calls), \`"medium"\` (3-8 calls, default), or \`"thorough"\` (comprehensive multi-location search). Pick the smallest that answers the question — wrong-sized effort is the most expensive failure mode.
- - \`spawn_background_agent\`: read-only sub-agent (enforced at harness level — the agent literally cannot write or execute commands, regardless of what it attempts). Runs independently, results via \`check_background_agents\`. **Caller-parameterized effort**: same \`thoroughness\` parameter as \`research\`.
+ - \`task\`: delegate a task to a team member. Returns immediately — the task runs in background while you continue working. Call \`check_team()\` when you need results. Available team members:
+   - **Explore** — Read-only codebase search (glob, grep, read_file, get_diagnostics). Use for "find all usages of X", "where is Y defined".
+   - **Research** — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X".
+   - **Verify** — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API) to catch bugs. Returns PASS, FAIL, or PARTIAL.
+   All tasks run in parallel. You can spawn multiple tasks in one turn, do other work, then call \`check_team()\` to collect results.
+ - \`check_team\`: collect results from all team members. Blocks until all pending tasks finish, then returns a summary of each task's status and result. Use after spawning tasks with \`task\`.
  - \`execute_command_background\`: runs a shell command without blocking your turn. Returns immediately with an ID. Max 6 concurrent. Results via \`check_background_commands\`.
    **When to use:** commands that take >30 seconds — \`npm install\`, \`npm run build\`, \`tsc --noEmit\`, large compilations. Fire-and-forget: start the install in background, then continue reading/editing files while it runs. Check results when ready.
    **When NOT to use:** quick commands (<30s) — \`ls\`, \`cat\`, \`git status\`, \`curl\`, small \`npm test\` runs. Use \`${EXECUTE_COMMAND}\` for those — you need the output immediately to decide next steps.
  - \`check_background_commands\`: see status and output of background commands. Use to check if background commands finished before proceeding.
- - \`verify\`: optional verification agent that checks your work by running tests, type checks, and diagnostics. **Read-only enforced at harness level** — edit/write tools are disallowed by the runtime, not just by the prompt. Use when you want independent validation of complex changes. Returns PASS, FAIL, or PARTIAL.
  - \`${UPDATE_TASKS}\`: show a task list to the developer with real-time progress. Use at the start of multi-step work (3+ steps) to communicate your plan. Update task statuses as you complete each step. Each call replaces the full list — always send all tasks. Update sparingly: at the start, when a task completes, and at the end — not after every single tool call.
  - \`ask_user_question\`: structured multi-question form. Use when the task has genuine ambiguity that affects your implementation (stack choice, auth provider, scope ambiguity). Present 2-4 options with labels and descriptions, plus an "Other" option for free-text. Do NOT use for simple yes/no confirmations — just proceed. Do NOT use for sensitive credentials — use \`request_credentials\` for those.
  - \`${READ_SKILL}\`: load the full content of a skill listed in the "Skills available" section. Call ONCE per skill when its topic comes up — content stays in history. Avoids reading skills that are not relevant to the current task.
@@ -212,22 +215,26 @@ ${ctx.modelProfile?.supportsSearch ? ` - \`web_search\`: submit a natural-langua
  - ONE dev server per project (single-slot architecture — two URLs can be tracked from one process, but only one process). Call \`${START_DEV_SERVER}\` ONCE with project_kind: "frontend" | "backend" | "fullstack" (auto-detected if omitted).`
 }
 
-// ── 8. Background agents (conditional, async) ──────────────────
-export async function getBackgroundAgentsSection(): Promise<string | null> {
+// ── 8. Team state (conditional, async) ────────────────────────
+export async function getTeamSection(): Promise<string | null> {
   try {
-    const { useBackgroundAgentStore } = await import('../../../../stores/backgroundAgentStore')
-    const bgAgents = useBackgroundAgentStore.getState().getAll()
-    if (bgAgents.length === 0) return null
-    const statusLines = bgAgents.map(a => {
-      if (a.status === 'completed') return `- [DONE] "${a.question}": ${a.result?.slice(0, 500)}`
-      if (a.status === 'running') return `- [RUNNING] "${a.question}" (${a.progressText})`
-      return `- [${a.status.toUpperCase()}] "${a.question}"`
+    const { useSubAgentStore } = await import('../../../../stores/subAgentStore')
+    const summaries = useSubAgentStore.getState().getRunSummaries()
+    if (summaries.length === 0) return null
+    const lines = summaries.map(s => {
+      const duration = `${Math.round(s.duration / 1000)}s`
+      if (s.status === 'running') return `- ${s.agentType} "${s.description}" — running (${s.toolCallCount} tool calls, ${duration})`
+      if (s.status === 'completed') return `- ${s.agentType} "${s.description}" — completed (${s.toolCallCount} tool calls, ${duration})`
+      return `- ${s.agentType} "${s.description}" — ${s.status}`
     })
-    return `# Background agents\n${statusLines.join('\n')}`
+    return `## Active Team\n${lines.join('\n')}`
   } catch {
     return null
   }
 }
+
+// Keep old name as alias for callers that haven't migrated yet
+export const getBackgroundAgentsSection = getTeamSection
 
 // ── 8b. Background commands (conditional, async) ───────────────
 export async function getBackgroundCommandsSection(): Promise<string | null> {

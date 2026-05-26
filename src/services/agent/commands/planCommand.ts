@@ -13,7 +13,7 @@ import {
   READ_SKILL, WRITE_FILE, EDIT_FILE, CREATE_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
   PROVISION_AUTH, REQUEST_CREDENTIALS, UPDATE_TASKS,
-  ASK_USER_QUESTION,
+  ASK_USER_QUESTION, TASK, CHECK_TEAM,
 } from '../toolNames'
 import { t } from '@/i18n'
 
@@ -556,7 +556,7 @@ After step 4, do NOT call any more tools — the executor enforces this. Begin i
 function getAllowedToolsSection(): string {
   return `# Allowed tools
 
-For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${GET_DIAGNOSTICS}\`, \`${READ_SKILL}\`. For structured clarifying questions: \`${ASK_USER_QUESTION}\` — see "Clarifying questions" below. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
+For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${GET_DIAGNOSTICS}\`, \`${READ_SKILL}\`. For research: \`${TASK}\` — delegate a research or exploration sub-task (e.g., \`task({ subagent_type: "Research", description: "Find WebSocket libraries for Deno", prompt: "..." })\`). Call \`${CHECK_TEAM}\` to collect results. For structured clarifying questions: \`${ASK_USER_QUESTION}\` — see "Clarifying questions" below. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
 
 You MUST NOT call: \`${PROVISION_AUTH}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
 }

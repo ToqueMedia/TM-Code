@@ -113,9 +113,8 @@ export function getCmdToolsSection(): string {
  - Use dedicated tools (\`${READ_FILE}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`) instead of shell commands for file operations. Reserve \`${EXECUTE_COMMAND}\` for system commands and terminal operations only.
  - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. Mark each task as completed as soon as you are done with it.
  - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
- - \`research\`: parallel sub-agent with read+write access. Blocks your turn until complete. **Caller-parameterized effort**: pass \`thoroughness: "quick"\` (1-3 tool calls), \`"medium"\` (3-8 calls, default), or \`"thorough"\` (comprehensive multi-location search). Pick the smallest that answers the question.
- - \`spawn_background_agent\`: read-only sub-agent (enforced at harness level — the agent literally cannot write or execute commands, regardless of what it attempts). Runs independently, results via \`check_background_agents\`. **Caller-parameterized effort**: same \`thoroughness\` parameter as \`research\`.
- - \`verify\`: optional verification agent that checks your work by running tests, type checks, and diagnostics. **Read-only enforced at harness level** — edit/write tools are disallowed by the runtime, not just by the prompt. Returns PASS, FAIL, or PARTIAL.`
+ - \`task\`: delegate a task to a team member. Returns immediately — the task runs in background. Call \`check_team()\` when you need results. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel.
+ - \`check_team\`: collect results from all team members. Blocks until all pending tasks finish, then returns summaries. Use after spawning tasks with \`task\`.`
 }
 
 export function getCmdEnvironmentSection(ctx: CmdPromptContext): string {

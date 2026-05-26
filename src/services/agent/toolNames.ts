@@ -41,12 +41,13 @@ export const START_DEV_SERVER = 'start_dev_server'
 // Web / research
 export const WEB_SEARCH = 'web_search'
 export const WEB_FETCH = 'web_fetch'
-export const RESEARCH = 'research'
+
+// Sub-agent delegation (v0.7.0 — replaces research, verify, spawn_background_agent)
+export const TASK = 'task'
+export const CHECK_TEAM = 'check_team'
 
 // Internal task tracking
 export const UPDATE_TASKS = 'update_tasks'
-export const CHECK_BACKGROUND_AGENTS = 'check_background_agents'
-export const SPAWN_BACKGROUND_AGENT = 'spawn_background_agent'
 
 // Platform integrations
 export const PROVISION_AUTH = 'provision_auth'
@@ -54,8 +55,7 @@ export const PROVISION_DEPLOY = 'provision_deploy'
 export const REQUEST_CREDENTIALS = 'request_credentials'
 export const ASK_USER_QUESTION = 'ask_user_question'
 
-// Verification sub-agent
-export const VERIFY = 'verify'
+// Verify sub-agent — removed in v0.7.0, replaced by task(subagent_type='Verify')
 
 // Persistent memory (memdir) — see services/agent/memdir.ts
 export const SAVE_MEMORY = 'save_memory'
@@ -78,10 +78,10 @@ export const TOOL_NAMES = [
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
-  WEB_SEARCH, WEB_FETCH, RESEARCH,
-  UPDATE_TASKS, CHECK_BACKGROUND_AGENTS, SPAWN_BACKGROUND_AGENT,
+  WEB_SEARCH, WEB_FETCH,
+  TASK, CHECK_TEAM,
+  UPDATE_TASKS,
   PROVISION_AUTH, PROVISION_DEPLOY, REQUEST_CREDENTIALS, ASK_USER_QUESTION,
-  VERIFY,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
 ] as const
 

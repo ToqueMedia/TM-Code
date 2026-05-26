@@ -97,7 +97,7 @@ interface ToolEntry {
  * When the parent fires, the child fires too. If the parent is already
  * aborted at call time, the child is aborted immediately.
  *
- * Used by research, verify, and spawn_background_agent to propagate
+ * Used by sub-agents to propagate
  * the per-call abort signal to sub-agent loops without duplicating the
  * 5-line linking pattern at each call site.
  */
@@ -399,13 +399,14 @@ class ToolExecutor {
     }
 
     // Agent-internal tools + tools that surface their own confirmation UI:
-    // bypass the generic permission dialog. update_tasks/check_background_agents
+    // bypass the generic permission dialog. update_tasks/check_team/task
     // are autonomous; request_credentials renders a secure form in the chat
     // (Save/Skip is the gate, not the permission dialog); ask_user_question
     // renders an interactive question card (Submit/Cancel is the gate).
     const PERMISSION_EXEMPT_TOOLS = new Set([
       'update_tasks',
-      'check_background_agents',
+      'check_team',
+      'task',
       'check_background_commands',
       'request_credentials',
       'ask_user_question',
@@ -2292,357 +2293,106 @@ ${preview}
       }
     })
 
-    // === research (sub-agent) ===
-    this.tools.set('research', {
+    // === task (sub-agent delegation — v0.7.0) ===
+    this.tools.set('task', {
       definition: {
-        name: 'research',
-        description: 'Delegate a task to a parallel sub-agent that can read, create, edit, search files, AND search the internet. Use to investigate code, refactor in parallel, research technical topics online, or handle independent sub-tasks. Multiple research calls run concurrently. The sub-agent returns a text summary of what it did.',
+        name: 'task',
+        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working. Call check_team() when you need results.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, grep, read_file, list_directory, get_diagnostics). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. You can spawn multiple tasks in one turn, do other work, then call check_team() to collect results.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
         input_schema: {
           type: 'object',
           properties: {
-            question: { type: 'string', description: 'The task or question for the sub-agent' },
-            context: { type: 'string', description: 'Optional context to help the sub-agent (e.g., relevant file paths, what you already know)' },
-            thoroughness: {
+            subagent_type: {
               type: 'string',
-              enum: ['quick', 'medium', 'thorough'],
-              description: 'How much effort the sub-agent should spend. "quick" = single targeted lookup (1-3 tool calls, one location); "medium" = moderate exploration (3-8 tool calls, a few related locations); "thorough" = comprehensive search across multiple locations and naming conventions. You have the context to pick — choose the smallest that will answer the question. Defaults to "medium" when omitted.'
+              enum: ['Explore', 'Research', 'Verify'],
+              description: 'Which team member to delegate to.'
+            },
+            description: {
+              type: 'string',
+              description: 'Short label (3-5 words) for the task. Shown in the team activity indicator.'
+            },
+            prompt: {
+              type: 'string',
+              description: 'Self-contained task description. The team member sees nothing from your conversation. Be specific about what you need back as a final summary.'
             }
           },
-          required: ['question']
-        }
+          required: ['subagent_type', 'description', 'prompt']
+        },
+        concurrencySafe: true,
       },
       execute: async (input) => {
-        const question = input.question as string
-        const context = (input.context as string) || ''
-        const thoroughness = (input.thoroughness as 'quick' | 'medium' | 'thorough' | undefined) ?? 'medium'
+        const subagentType = input.subagent_type as string
+        const description = (input.description as string) || 'task'
+        const prompt = input.prompt as string
 
-        // Lazy import to avoid circular dependency
-        const { default: AgentService } = await import('./agentService')
+        // Guard: max 4 concurrent sub-agents
+        const { useSubAgentStore } = await import('../../stores/subAgentStore')
+        const pendingCount = useSubAgentStore.getState().getPendingCount()
+        if (pendingCount >= 4) {
+          return 'Blocked: maximum 4 concurrent team members. Call check_team() to collect existing results before spawning more.'
+        }
 
-        // Sub-agent tools: read, write, create, edit, search, glob, diagnostics + web research
-        const subAgentToolNames = new Set([
-          'read_file', 'write_file', 'create_file', 'edit_file',
-          'list_directory', 'search_files', 'glob', 'get_diagnostics',
-          'web_search',   // native on DashScope models, side-car to Qwen on GLM-5.1
-          'web_fetch',    // frontend fetches a specific URL
-        ])
-        const subAgentTools = this.getToolDefinitions().filter(t =>
-          subAgentToolNames.has(t.function.name)
-        )
+        // Resolve the definition
+        const { getAgentDefinition } = await import('./subAgents/builtInAgents')
+        const def = getAgentDefinition(subagentType as 'Explore' | 'Research' | 'Verify')
+        if (!def) {
+          return `Blocked: unknown sub-agent type '${subagentType}'. Available: Explore, Research, Verify.`
+        }
 
-        // Phase B: derive the sub-agent's abort from the per-call signal.
-        const subAbort = createLinkedAbortController(input._abortSignal as AbortSignal | undefined)
-        const subAgent = AgentService.createLightweight({
-          tools: subAgentTools,
-          readOnly: false,
-          abortController: subAbort,
-        })
-
-        const projectRoot = this.getProjectRoot()
-        // Caller-parameterized verbosity (technique #17). The parent agent
-        // knows whether this is a quick "where is X defined" probe or a
-        // deep refactor investigation — pass it through so the sub-agent
-        // calibrates effort accordingly. Wrong-sized effort is the most
-        // expensive failure mode: "thorough" on a 1-file question wastes
-        // turns; "quick" on a refactor question misses the bug.
-        const effortDirective = thoroughness === 'quick'
-          ? '**Effort: QUICK** — single targeted lookup. Stop after 1-3 tool calls. Do not branch into related questions — answer the literal question and return.'
-          : thoroughness === 'thorough'
-            ? '**Effort: THOROUGH** — comprehensive search. Cover multiple locations and naming conventions, follow related references, read full files (not snippets) when relevant. Report what you searched, not just what you found.'
-            : '**Effort: MEDIUM** — moderate exploration. Check 2-3 likely locations, follow references one hop deep, then synthesise. Do not exhaustively enumerate; do not stop at the first plausible match.'
-        const systemPrompt = `You are a sub-agent inside TM Code. Complete the task using the available tools. You can read, create, edit, and search files, AND search the internet for information.
-
-${effortDirective}
-
-Available tools:
-- File operations: read_file, write_file, create_file, edit_file
-- Search: search_files (ripgrep), glob, list_directory
-- Web research:
-  - web_search — takes a natural-language query and returns ranked results with titles, snippets, and URLs. This is how you discover what pages exist on a topic.
-  - web_fetch — takes one complete target URL you already know and returns the contents of that single page. This is how you read the body of a specific article, doc, or API reference.
-  - Typical flow: start with web_search to find relevant URLs, then web_fetch on the most promising result to read its full content.
-- Diagnostics: get_diagnostics
-
-Project root: ${projectRoot}`
-
-        subAgent.setSystemPrompt(systemPrompt)
-
-        const prompt = context
-          ? `${question}\n\nContext: ${context}`
-          : question
-
-        let result = ''
-        let totalTokens = 0
-        let toolsCalled = 0
-        const toolCallId = input._toolCallId as string | undefined
-
-        const updateProgress = (status: string) => {
-          if (toolCallId) {
-            const tokenStr = totalTokens > 0 ? ` | ${Math.round(totalTokens / 1000)}K tokens` : ''
-            useChatStore.getState().updateToolCallProgress(toolCallId, `${status}${tokenStr}`)
+        // Build filtered tools — only the sub-agent's allowed tools
+        const allowedTools = new Set(def.tools)
+        const disallowedTools = new Set(def.disallowedTools ?? [])
+        const filteredTools: OpenAIToolDefinition[] = []
+        for (const [name, entry] of this.tools) {
+          if (name === 'task' || name === 'check_team') continue // block recursive delegation
+          if (disallowedTools.has(name)) continue
+          if (allowedTools.has(name)) {
+            filteredTools.push({
+              type: 'function' as const,
+              function: {
+                name: entry.definition.name,
+                description: entry.definition.description,
+                parameters: entry.definition.input_schema,
+              },
+            })
           }
         }
 
-        updateProgress('Starting research...')
+        // Build parent context
+        const settingsStore = (await import('../../stores/settingsStore')).useSettingsStore.getState()
+        const parentCtx = {
+          cmdOnlyMode: !!this.ctx.getCmdModeCwd(),
+          workingPath: this.ctx.getProjectRoot(),
+          agentLanguage: settingsStore.agentLanguage ?? 'en',
+        }
 
-        // Forward every sub-agent event to the main chatStore so the user sees
-        // the FULL activity in real-time. Visibility logic extracted to a pure
-        // helper — see src/services/agent/subAgentVisibility.ts.
-        const chatStore = useChatStore.getState()
-        const { useAgentStore } = await import('../../stores/agentStore')
-        const agentStore = useAgentStore.getState()
-        const { createSubAgentVisibility } = await import('./subAgentVisibility')
+        // Get parent message ID from chatStore
+        const { useChatStore } = await import('../../stores/chatStore')
+        const chatState = useChatStore.getState()
+        const activeSessionId = chatState.activeSessionId
+        const session = activeSessionId ? chatState.sessions.get(activeSessionId) : null
+        const messages = session?.messages || []
+        const parentMessageId = messages[messages.length - 1]?.id || ''
 
-        const visibility = createSubAgentVisibility({
-          parentToolCallId: toolCallId,
-          reasoningLabel: 'research sub-agent',
-          hooks: {
-            // Buffered variants — sub-agent SSE bumps streamingVersion at
-            // the same 50ms cadence as the parent agent loop. Without the
-            // swap, every sub-agent token was a fresh re-render of the
-            // streaming bubble even though the parent had already batched
-            // its own.
-            appendTextDelta: appendTextDeltaBuffered,
-            appendReasoningDelta: appendReasoningDeltaBuffered,
-            addPendingToolCall: chatStore.addPendingToolCall,
-            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
-            updateToolCallWithResult: chatStore.updateToolCallWithResult,
-            setStatus: (s) => agentStore.setStatus(s),
-          },
+        // Fire and forget — returns immediately
+        const { runSubAgent } = await import('./subAgents/subAgentRunner')
+        const runId = await runSubAgent({
+          definition: def,
+          prompt,
+          description,
+          parentMessageId,
+          parentCtx,
+          filteredTools,
         })
 
-        await subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => {
-            result += delta
-            visibility.callbacks.onTextDelta(delta)
-          },
-          onReasoningDelta: (delta) => {
-            visibility.callbacks.onReasoningDelta(delta)
-            updateProgress('Thinking...')
-          },
-          onToolCallPending: (childId, toolName) => {
-            toolsCalled++
-            visibility.callbacks.onToolCallPending(childId, toolName)
-            updateProgress(`Using ${toolName}...`)
-          },
-          onToolCallStart: (childId, toolName, args) => {
-            visibility.callbacks.onToolCallStart(childId, toolName, args)
-            const target = (args.file_path as string)?.replace(/\\/g, '/').split('/').pop()
-              || (args.query as string)
-              || (args.pattern as string)
-              || (args.url as string)
-              || ''
-            updateProgress(`${toolName}: ${target}`)
-          },
-          onToolResult: (childId, toolName, res, isError) => {
-            visibility.callbacks.onToolResult(childId, toolName, res, isError)
-          },
-          onTurnComplete: () => {},
-          onDone: (finalText) => {
-            if (finalText && !result) result = finalText
-            updateProgress(`Done — ${toolsCalled} tool calls`)
-          },
-          onError: (error) => {
-            result = `Research error: ${error.message}`
-            visibility.cleanupOrphans(`aborted: research sub-agent failed — ${error.message}`)
-            updateProgress('Error')
-          },
-          onUsageUpdate: (inputTokens, outputTokens) => {
-            totalTokens += inputTokens + outputTokens
-          },
-        } satisfies AgentCallbacks)
-
-        return result || 'No results found.'
+        return `Task ${runId} started (${subagentType}: "${description}"). Use check_team() to collect results when ready.`
       }
     })
 
-    // === spawn_background_agent ===
-    this.tools.set('spawn_background_agent', {
+    // === check_team (v0.7.0) ===
+    this.tools.set('check_team', {
       definition: {
-        name: 'spawn_background_agent',
-        description: 'Start a background sub-agent that works independently while you continue. The sub-agent can read, search, and analyze files but CANNOT write or execute commands. Use for research tasks that do not need immediate results. Returns a tracking ID — use check_background_agents to retrieve results later.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            question: { type: 'string', description: 'The task or question for the background agent' },
-            context: { type: 'string', description: 'Optional context (file paths, prior knowledge)' },
-            thoroughness: {
-              type: 'string',
-              enum: ['quick', 'medium', 'thorough'],
-              description: 'How much effort the background agent should spend. "quick" = single targeted probe; "medium" = moderate exploration; "thorough" = comprehensive multi-location search. Background agents have a 30-turn cap, so "thorough" may still be bounded. Defaults to "medium" when omitted.'
-            },
-          },
-          required: ['question']
-        }
-      },
-      execute: async (input) => {
-        const question = input.question as string
-        const context = (input.context as string) || ''
-        const thoroughness = (input.thoroughness as 'quick' | 'medium' | 'thorough' | undefined) ?? 'medium'
-
-        const { useBackgroundAgentStore } = await import('../../stores/backgroundAgentStore')
-        const bgStore = useBackgroundAgentStore.getState()
-
-        if (bgStore.getRunningCount() >= 4) {
-          return 'Cannot start: maximum 4 background agents running. Wait for one to complete or use check_background_agents.'
-        }
-
-        const { default: AgentService } = await import('./agentService')
-
-        // Read-only tool subset
-        const bgToolNames = new Set([
-          'read_file', 'list_directory', 'search_files', 'glob',
-          'get_diagnostics', 'web_fetch',
-        ])
-        const bgTools = this.getToolDefinitions().filter(t =>
-          bgToolNames.has(t.function.name)
-        )
-
-        // Phase B: derive bg agent abort from the per-call signal.
-        const bgAbort = createLinkedAbortController(input._abortSignal as AbortSignal | undefined)
-
-        const subAgent = AgentService.createLightweight({
-          tools: bgTools,
-          readOnly: true,
-          maxTurns: 200,
-          abortController: bgAbort,
-        })
-
-        const projectRoot = this.getProjectRoot()
-        // Caller-parameterized verbosity (technique #17). Parent picks the
-        // effort level based on what they actually need; the background
-        // agent calibrates rather than always running at full thoroughness.
-        const effortDirective = thoroughness === 'quick'
-          ? '**Effort: QUICK** — single targeted probe. Stop after 1-3 tool calls.'
-          : thoroughness === 'thorough'
-            ? '**Effort: THOROUGH** — comprehensive multi-location search (bounded by the 200-turn cap). Cover alternative naming conventions and follow related references.'
-            : '**Effort: MEDIUM** — moderate exploration. 2-3 likely locations, references one hop deep, then synthesise.'
-        subAgent.setSystemPrompt(
-          `You are a background research agent inside TM Code. Investigate the task using read-only tools and produce a clear summary.\n\n${effortDirective}\n\nProject root: ${projectRoot}`
-        )
-
-        const agentId = `bg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-        const prompt = context ? `${question}\n\nContext: ${context}` : question
-
-        bgStore.addAgent({
-          id: agentId,
-          question,
-          status: 'running',
-          result: null,
-          toolsCalled: 0,
-          totalTokens: 0,
-          progressText: 'Starting...',
-          startedAt: Date.now(),
-          completedAt: null,
-          abortController: bgAbort,
-        })
-
-        // Fire and forget — do NOT await
-        let resultText = ''
-        let tokens = 0
-        let calls = 0
-
-        // Forward events to the main chatStore AND the bg store. The key
-        // difference from research/verify: we capture the active `streamingMessageId`
-        // at spawn time and pass it as `targetMessageId` to every chat-store write.
-        // This keeps the sub-agent's tool calls flowing into the SAME assistant
-        // message even after the main turn finalizes (at which point
-        // `streamingMessageId` becomes null). Without this, bg-agent activity
-        // past the main turn end would be invisible in the chat feed.
-        const parentToolCallId = input._toolCallId as string | undefined
-        const chatStore = useChatStore.getState()
-        const targetMessageId = chatStore.streamingMessageId ?? undefined
-        const { useAgentStore } = await import('../../stores/agentStore')
-        const agentStore = useAgentStore.getState()
-        const { createSubAgentVisibility } = await import('./subAgentVisibility')
-
-        const visibility = createSubAgentVisibility({
-          parentToolCallId,
-          reasoningLabel: 'background sub-agent',
-          targetMessageId,
-          hooks: {
-            // Buffered variants — sub-agent SSE bumps streamingVersion at
-            // the same 50ms cadence as the parent agent loop. Without the
-            // swap, every sub-agent token was a fresh re-render of the
-            // streaming bubble even though the parent had already batched
-            // its own.
-            appendTextDelta: appendTextDeltaBuffered,
-            appendReasoningDelta: appendReasoningDeltaBuffered,
-            addPendingToolCall: chatStore.addPendingToolCall,
-            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
-            updateToolCallWithResult: chatStore.updateToolCallWithResult,
-            setStatus: (s) => agentStore.setStatus(s),
-          },
-        })
-
-        subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => {
-            resultText += delta
-            visibility.callbacks.onTextDelta(delta)
-          },
-          onReasoningDelta: (delta) => {
-            visibility.callbacks.onReasoningDelta(delta)
-            bgStore.updateProgress(agentId, 'Thinking...', calls, tokens)
-          },
-          onToolCallPending: (childId, toolName) => {
-            calls++
-            visibility.callbacks.onToolCallPending(childId, toolName)
-            bgStore.updateProgress(agentId, `Using ${toolName}...`, calls, tokens)
-          },
-          onToolCallStart: (childId, toolName, args) => {
-            visibility.callbacks.onToolCallStart(childId, toolName, args)
-            const target = (args.file_path as string)?.replace(/\\/g, '/').split('/').pop()
-              || (args.query as string)
-              || (args.pattern as string)
-              || ''
-            bgStore.updateProgress(agentId, `${toolName}: ${target}`, calls, tokens)
-          },
-          onToolResult: (childId, toolName, res, isError) => {
-            visibility.callbacks.onToolResult(childId, toolName, res, isError)
-          },
-          onTurnComplete: () => {},
-          onDone: (finalText) => {
-            if (finalText && !resultText) resultText = finalText
-            useBackgroundAgentStore.getState().completeAgent(agentId, resultText || 'No results found.')
-          },
-          onError: (error) => {
-            visibility.cleanupOrphans(`aborted: background sub-agent failed — ${error.message}`)
-            useBackgroundAgentStore.getState().failAgent(agentId, error.message)
-          },
-          onUsageUpdate: (inp, out) => {
-            tokens += inp + out
-          },
-        } satisfies AgentCallbacks).catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err)
-          visibility.cleanupOrphans(`aborted: background sub-agent crashed — ${msg}`)
-          useBackgroundAgentStore.getState().failAgent(agentId, msg)
-        })
-
-        return `Background agent "${agentId}" started for: "${question}". Use check_background_agents to see results when ready.`
-      }
-    })
-
-    // request_thinking tool REMOVED — reasoning is always ON when the
-    // active model supports it (claude-vaz parity). The agent does not
-    // request thinking on demand; profile.supportsThinking is the single
-    // switch and it's evaluated in agentService.buildRequestBody.
-
-
-
-
-
-
-    // ── Domain extractions (SOLID decomposition) ─────────────────────
-    registerTaskTools(this.ctx)
-    registerMemoryTools(this.ctx)
-    registerInteractionTools(this.ctx)
-    registerProvisionTools(this.ctx)
-
-    // === check_background_agents ===
-    this.tools.set('check_background_agents', {
-      definition: {
-        name: 'check_background_agents',
-        description: 'Check the status and results of background agents. Returns all running and recently completed agents with their results.',
+        name: 'check_team',
+        description: 'Collect results from all team members. Blocks until all pending tasks finish, then returns a summary of each task\'s status and result. Use after spawning tasks with task().',
         input_schema: {
           type: 'object',
           properties: {},
@@ -2650,33 +2400,54 @@ Project root: ${projectRoot}`
         }
       },
       execute: async () => {
-        const { useBackgroundAgentStore } = await import('../../stores/backgroundAgentStore')
-        const agents = useBackgroundAgentStore.getState().getAll()
+        const { useSubAgentStore } = await import('../../stores/subAgentStore')
+        const store = useSubAgentStore.getState()
 
-        if (agents.length === 0) {
-          return 'No background agents have been started.'
+        // Nothing to check
+        if (store.runs.size === 0) {
+          return 'No team members have been assigned tasks.'
         }
 
-        const lines: string[] = []
-        for (const agent of agents) {
-          const elapsed = agent.completedAt
-            ? `${Math.round((agent.completedAt - agent.startedAt) / 1000)}s`
-            : `${Math.round((Date.now() - agent.startedAt) / 1000)}s elapsed`
+        // Await all pending tasks
+        await store.awaitAllPending()
 
-          if (agent.status === 'running') {
-            lines.push(`[RUNNING] ${agent.id}: "${agent.question}" (${elapsed}, ${agent.toolsCalled} tools, ${agent.progressText})`)
-          } else if (agent.status === 'completed') {
-            lines.push(`[DONE] ${agent.id}: "${agent.question}" (${elapsed}, ${agent.toolsCalled} tools)\nResult:\n${agent.result}`)
-          } else if (agent.status === 'error') {
-            lines.push(`[ERROR] ${agent.id}: "${agent.question}" — ${agent.result}`)
-          } else if (agent.status === 'cancelled') {
-            lines.push(`[CANCELLED] ${agent.id}: "${agent.question}"`)
+        // Build formatted summary
+        const summaries = store.getRunSummaries()
+        const lines: string[] = ['## Team Results\n']
+
+        for (const s of summaries) {
+          const duration = (s.duration / 1000).toFixed(0)
+          const icon = s.status === 'completed' ? '✅'
+            : s.status === 'error' ? '❌'
+            : s.status === 'timeout' ? '⏰'
+            : s.status === 'aborted' ? '🛑'
+            : '⚠️'
+
+          lines.push(`### ${icon} ${s.agentType}: "${s.description}" (${duration}s, ${s.toolCallCount} tool calls)`)
+
+          if (s.status === 'error' && s.errorText) {
+            lines.push(`Error: ${s.errorText}`)
+          } else if (s.finalText) {
+            lines.push(s.finalText)
+          } else if (s.status === 'aborted') {
+            lines.push('Task was aborted.')
           }
+
+          lines.push('') // blank separator
         }
 
-        return lines.join('\n\n')
+        // Clear completed runs after reporting
+        store.clearCompleted()
+
+        return lines.join('\n')
       }
     })
+
+    // ── Domain extractions (SOLID decomposition) ─────────────────────
+    registerTaskTools(this.ctx)
+    registerMemoryTools(this.ctx)
+    registerInteractionTools(this.ctx)
+    registerProvisionTools(this.ctx)
 
     // === execute_command_background ===
     this.tools.set('execute_command_background', {

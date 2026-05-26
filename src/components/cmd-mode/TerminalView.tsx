@@ -503,7 +503,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         />
       )}
 
-      <Box flexShrink={0}>
+      <Box flexShrink={0} data-tauri-drag-region>
         <TerminalStatusLine />
       </Box>
 

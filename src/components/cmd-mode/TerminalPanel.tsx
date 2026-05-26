@@ -232,6 +232,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
         px={2}
         bg="rgba(0,0,0,0.3)"
         borderBottom="1px solid rgba(255,255,255,0.04)"
+        data-tauri-drag-region
       >
         <Text
           fontSize="10px"

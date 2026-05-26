@@ -237,6 +237,8 @@ export interface ChatMessage {
    * in the conversation history. Not persisted to disk (sanitizer drops them).
    */
   ephemeral?: boolean
+  /** Sub-agent run IDs spawned by task() tool calls in this message. SubAgentCard renders for each. */
+  subAgentRunIds?: string[]
 }
 
 export interface CodeBlock {

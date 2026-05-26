@@ -96,7 +96,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
       </Flex>
 
       {/* Right: controls */}
-      <HStack gap={1.5} flexShrink={0}>
+      <HStack gap={1.5} flexShrink={0} data-tauri-drag-region="false">
         {/* Mandatory-thinking badge — static, not interactive. Renders only
             when the backend reports the active model thinks unconditionally. */}
         {thinkingMandatory && (

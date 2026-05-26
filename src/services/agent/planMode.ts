@@ -11,8 +11,8 @@
 import {
   READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES,
   GET_DIAGNOSTICS, READ_SKILL, READ_LARGE_RESULT,
-  UPDATE_TASKS, CHECK_BACKGROUND_AGENTS,
-  WEB_SEARCH, WEB_FETCH, RESEARCH,
+  UPDATE_TASKS, CHECK_TEAM,
+  WEB_SEARCH, WEB_FETCH, TASK,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   ASK_USER_QUESTION,
 } from './toolNames'
@@ -24,9 +24,9 @@ export const PLAN_MODE_ALLOWED_TOOLS: ReadonlySet<string> = new Set<string>([
   READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES,
   GET_DIAGNOSTICS, READ_SKILL, READ_LARGE_RESULT,
   // Internal task list (not project files)
-  UPDATE_TASKS, CHECK_BACKGROUND_AGENTS,
-  // Research while drafting the plan
-  WEB_SEARCH, WEB_FETCH, RESEARCH,
+  UPDATE_TASKS, CHECK_TEAM,
+  // Delegation + research while drafting the plan
+  WEB_SEARCH, WEB_FETCH, TASK,
   // Writing the deliverable. Path-restricted to PLAN.md / TODO.md below.
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   // Structured clarifying questions — blocks the agent loop until the developer answers
