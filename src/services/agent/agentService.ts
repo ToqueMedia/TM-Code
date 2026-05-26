@@ -711,6 +711,13 @@ class AgentService {
     let enforcementRetries = 0
     const MAX_ENFORCEMENT_RETRIES = 3
     let earlyExit = false  // true when the loop breaks due to an already-reported error
+    // Per-turn tracking for non-streaming fallback dedup (BUG2 + RISK1).
+    // Emitted text length: onTextDelta was already called with this many
+    // chars during streaming, so the fallback must skip the prefix.
+    // Dispatched tool IDs: tools already executed during streaming partial
+    // so the fallback must not re-dispatch them.
+    let emittedTextLen = 0
+    let dispatchedToolIds = new Set<string>()
 
     try {
       const maxTurns = this.lightweightOptions?.maxTurns ?? Infinity
@@ -719,6 +726,10 @@ class AgentService {
 
         turnCount++
         // turnCount tracked for telemetry and max-turns enforcement
+
+        // Reset per-turn dedup tracking for non-streaming fallback
+        emittedTextLen = 0
+        dispatchedToolIds = new Set<string>()
 
         // Layer 2: Compress context if approaching token limit.
         // Token-absolute (claude-vaz pattern): threshold = effective − 13K,
@@ -955,7 +966,10 @@ class AgentService {
             )
           } catch { /* chatStore may be torn down */ }
           await new Promise(resolve => setTimeout(resolve, backoffMs))
-          if (this.abortController?.signal.aborted) break
+          if (this.abortController?.signal.aborted) {
+            earlyExit = true
+            break
+          }
 
           const partialBlocks: AnthropicContentBlock[] = []
           if (this.preserveReasoningBetweenTurns && turnResult.reasoningContent) {
@@ -970,6 +984,10 @@ class AgentService {
           if (partialBlocks.length === 0) {
             logger.info('agent', `[stream] retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES}: empty partial, re-issuing same turn`)
           } else {
+            // Track what the fallback will need to deduplicate
+            if (turnResult.textContent) emittedTextLen = turnResult.textContent.length
+            for (const tc of turnResult.toolCalls) dispatchedToolIds.add(tc.id)
+
             messages.push({
               role: 'assistant',
               content: partialBlocks,
@@ -996,7 +1014,7 @@ class AgentService {
             )
           } catch { /* chatStore may be torn down */ }
 
-          const fallbackResult = await this.tryNonStreamingFallback(messages, callbacks)
+          const fallbackResult = await this.tryNonStreamingFallback(messages, callbacks, emittedTextLen, dispatchedToolIds)
           if (fallbackResult) {
             logger.info('agent', '[stream] non-streaming fallback succeeded')
             turnResult = fallbackResult
@@ -2933,7 +2951,14 @@ Developer message: ${displayText}
    *
    * Returns a TurnResult on success, or null if the fallback also failed.
    */
-  private async tryNonStreamingFallback(messages: AnthropicMessage[], callbacks: AgentCallbacks): Promise<TurnResult | null> {
+  private async tryNonStreamingFallback(
+    messages: AnthropicMessage[],
+    callbacks: AgentCallbacks,
+    /** Text chars already emitted via onTextDelta during streaming retries. */
+    emittedTextLen: number,
+    /** Tool IDs already dispatched during streaming retries. */
+    dispatchedToolIds: Set<string>,
+  ): Promise<TurnResult | null> {
     try {
       const url = `${WORKER_URL}/v1/messages`
 
@@ -2959,20 +2984,37 @@ Developer message: ${displayText}
 
       logger.info('agent', `[non-streaming-fallback] sending blocking request to ${url}`)
 
+      // RISK2 fix: AbortSignal.any() requires Safari 17.4+ / Chrome 116+.
+      // Tauri 2 WKWebView on older macOS may not support it. Use
+      // Promise.race + manual abort instead — works everywhere.
       const timeoutController = new AbortController()
       const timeoutId = setTimeout(() => timeoutController.abort(), NON_STREAMING_TIMEOUT_MS)
-      const combinedSignal = this.abortController?.signal
-        ? AbortSignal.any([this.abortController.signal, timeoutController.signal])
-        : timeoutController.signal
 
       let response: Response
       try {
-        response = await fetch(url, {
+        const fetchPromise = fetch(url, {
           method: 'POST',
           headers,
           body: requestBody,
-          signal: combinedSignal,
+          signal: timeoutController.signal,
         })
+
+        // Race the fetch against caller abort (if any)
+        if (this.abortController?.signal) {
+          if (this.abortController.signal.aborted) {
+            timeoutController.abort()
+            throw new Error('aborted')
+          }
+          const onAbort = () => timeoutController.abort()
+          this.abortController.signal.addEventListener('abort', onAbort, { once: true })
+          try {
+            response = await fetchPromise
+          } finally {
+            this.abortController.signal.removeEventListener('abort', onAbort)
+          }
+        } else {
+          response = await fetchPromise
+        }
       } finally {
         clearTimeout(timeoutId)
       }
@@ -2999,15 +3041,24 @@ Developer message: ${displayText}
           } else if (block.type === 'thinking') {
             reasoningContent += block.thinking || ''
           } else if (block.type === 'tool_use') {
-            toolCalls.push({
-              id: block.id,
-              name: block.name,
-              args: typeof block.input === 'string' ? JSON.parse(block.input) : (block.input || {}),
-            })
+            // RISK1 fix: skip tool calls already dispatched during streaming retries
+            if (!dispatchedToolIds.has(block.id)) {
+              toolCalls.push({
+                id: block.id,
+                name: block.name,
+                args: typeof block.input === 'string' ? JSON.parse(block.input) : (block.input || {}),
+              })
+            }
           }
         }
 
-        if (textContent) callbacks.onTextDelta(textContent)
+        // BUG2 fix: skip text chars already emitted via onTextDelta during
+        // streaming retries. The UI already has the prefix; we only emit the
+        // new portion. If the model restarted (different prefix), we still
+        // skip — the UI partial is already committed and emitting both would
+        // create a worse duplication.
+        const newText = emittedTextLen > 0 ? textContent.slice(emittedTextLen) : textContent
+        if (newText) callbacks.onTextDelta(newText)
         if (reasoningContent) callbacks.onReasoningDelta(reasoningContent)
         if (data.usage) {
           callbacks.onUsageUpdate(data.usage.input_tokens || 0, data.usage.output_tokens || 0)
@@ -3037,15 +3088,20 @@ Developer message: ${displayText}
         }
         if (choice?.message?.tool_calls) {
           for (const tc of choice.message.tool_calls) {
-            toolCalls.push({
-              id: tc.id,
-              name: tc.function?.name || '',
-              args: typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {}),
-            })
+            // RISK1 fix: skip tool calls already dispatched during streaming retries
+            if (!dispatchedToolIds.has(tc.id)) {
+              toolCalls.push({
+                id: tc.id,
+                name: tc.function?.name || '',
+                args: typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {}),
+              })
+            }
           }
         }
 
-        if (textContent) callbacks.onTextDelta(textContent)
+        // BUG2 fix: same dedup for OpenAI shape
+        const newTextOai = emittedTextLen > 0 ? textContent.slice(emittedTextLen) : textContent
+        if (newTextOai) callbacks.onTextDelta(newTextOai)
         if (reasoningContent) callbacks.onReasoningDelta(reasoningContent)
         if (data.usage) {
           callbacks.onUsageUpdate(data.usage.prompt_tokens || 0, data.usage.completion_tokens || 0)
