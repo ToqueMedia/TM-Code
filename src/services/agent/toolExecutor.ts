@@ -2324,14 +2324,7 @@ ${preview}
         const description = (input.description as string) || 'task'
         const prompt = input.prompt as string
 
-        // Guard: max 4 concurrent sub-agents
-        const { useSubAgentStore } = await import('../../stores/subAgentStore')
-        const pendingCount = useSubAgentStore.getState().getPendingCount()
-        if (pendingCount >= 4) {
-          return 'Blocked: maximum 4 concurrent team members. Call check_team() to collect existing results before spawning more.'
-        }
-
-        // Resolve the definition
+        // Resolve the definition (concurrent limit is checked atomically inside startRun)
         const { getAgentDefinition } = await import('./subAgents/builtInAgents')
         const def = getAgentDefinition(subagentType as 'Explore' | 'Research' | 'Verify')
         if (!def) {
@@ -2380,16 +2373,21 @@ ${preview}
           }
         }
 
-        // Fire and forget — returns immediately
-        const { runSubAgent } = await import('./subAgents/subAgentRunner')
-        const runId = await runSubAgent({
-          definition: def,
-          prompt,
-          description,
-          parentMessageId,
-          parentCtx,
-          filteredTools,
-        })
+        // Fire and forget — returns immediately. Throws if concurrent limit (4) is reached.
+        let runId: string
+        try {
+          const { runSubAgent } = await import('./subAgents/subAgentRunner')
+          runId = await runSubAgent({
+            definition: def,
+            prompt,
+            description,
+            parentMessageId,
+            parentCtx,
+            filteredTools,
+          })
+        } catch (e) {
+          return `Error: ${e instanceof Error ? e.message : String(e)}`
+        }
 
         // Wire subAgentRunIds so SubAgentCard renders in the UI.
         if (parentMessageId) {

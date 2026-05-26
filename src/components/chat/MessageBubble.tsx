@@ -816,7 +816,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             )}
 
             {/* Sub-agent team activity cards */}
-            {!isUser && message.subAgentRunIds && message.subAgentRunIds.length > 0 && (
+            {message.subAgentRunIds && message.subAgentRunIds.length > 0 && (
               <SubAgentCard runIds={message.subAgentRunIds} />
             )}
           </>

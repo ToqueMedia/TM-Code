@@ -28,9 +28,14 @@ export interface SubAgentRunOptions {
 export async function runSubAgent(options: SubAgentRunOptions): Promise<string> {
   const { definition, prompt, description, parentMessageId, parentCtx, filteredTools } = options
 
-  // Create the run in the store — gets a runId and completionPromise
+  // Create the run in the store — gets a runId and completionPromise.
+  // Returns null if the concurrent limit (4) is reached.
   const store = useSubAgentStore.getState()
-  const { runId } = store.startRun(definition, prompt, description, parentMessageId)
+  const runResult = store.startRun(definition, prompt, description, parentMessageId)
+  if (!runResult) {
+    throw new Error('Maximum concurrent sub-agents reached (4). Wait for some to complete before spawning more.')
+  }
+  const { runId } = runResult
 
   // Dynamically import to avoid circular deps
   const agentModule = await import('../agentService')

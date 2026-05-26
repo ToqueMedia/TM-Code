@@ -14,13 +14,13 @@ interface SubAgentStoreState {
 
   // ── Actions ──────────────────────────────────────────────────────────
 
-  /** Create a new run. Returns the runId. */
+  /** Create a new run. Returns the runId, or null if the concurrent limit is reached. */
   startRun: (
     def: SubAgentDefinition,
     prompt: string,
     description: string,
     parentMessageId?: string,
-  ) => { runId: string; completionPromise: Promise<void> }
+  ) => { runId: string; completionPromise: Promise<void> } | null
 
   /** Record a new tool call in the run's toolCalls list. */
   addToolCall: (runId: string, summary: SubAgentToolCallSummary) => void
@@ -65,6 +65,14 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   runs: new Map(),
 
   startRun: (def, prompt, description, parentMessageId) => {
+    // Atomic limit check — prevents TOCTOU race when multiple task()
+    // calls run in parallel (concurrencySafe).
+    const MAX_CONCURRENT_SUBAGENTS = 4
+    const runningCount = Array.from(get().runs.values()).filter(r => r.status === 'running').length
+    if (runningCount >= MAX_CONCURRENT_SUBAGENTS) {
+      return null
+    }
+
     const runId = `subagent-${nextRunId++}`
 
     // Create a promise that resolves when finalizeRun/errorRun/timeoutRun/abortRun is called
@@ -126,7 +134,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   finalizeRun: (runId, finalText, tokenUsage) => {
     set((state) => {
       const run = state.runs.get(runId)
-      if (!run) return state
+      if (!run || run.status !== 'running') return state
       const next = new Map(state.runs)
       next.set(runId, {
         ...run,
@@ -147,7 +155,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   errorRun: (runId, errorText) => {
     set((state) => {
       const run = state.runs.get(runId)
-      if (!run) return state
+      if (!run || run.status !== 'running') return state
       const next = new Map(state.runs)
       next.set(runId, { ...run, status: 'error', errorText, endedAt: Date.now() })
       return { runs: next }
@@ -158,7 +166,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   timeoutRun: (runId, partialText) => {
     set((state) => {
       const run = state.runs.get(runId)
-      if (!run) return state
+      if (!run || run.status !== 'running') return state
       const next = new Map(state.runs)
       next.set(runId, { ...run, status: 'timeout', finalText: partialText, endedAt: Date.now() })
       return { runs: next }
@@ -233,9 +241,11 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
       }
     }
     if (promises.length === 0) return
-    // Race against a 5-minute safety timeout to prevent blocking forever
+    // Race against a 5.5-minute safety timeout to prevent blocking forever
     // if a sub-agent crashes silently without resolving its promise.
-    const TIMEOUT_MS = 5 * 60 * 1000
+    // Slightly exceeds the Verify agent's maxWallClockMs (5 min) to avoid
+    // premature timeout when sub-agents are near their wall-clock limit.
+    const TIMEOUT_MS = 330_000
     await Promise.race([
       Promise.all(promises),
       new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS)),

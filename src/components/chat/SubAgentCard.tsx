@@ -69,7 +69,7 @@ function ToolCallLine({ tc }: { tc: SubAgentToolCallSummary }) {
   )
 }
 
-function SubAgentRunCard({ runId }: { runId: string }) {
+const SubAgentRunCard = memo(function SubAgentRunCard({ runId }: { runId: string }) {
   const [expanded, setExpanded] = useState(false)
 
   // Each card subscribes to its own run — only re-renders when THIS run changes.
@@ -174,7 +174,7 @@ function SubAgentRunCard({ runId }: { runId: string }) {
       )}
     </Box>
   )
-}
+})
 
 function SubAgentCard({ runIds }: SubAgentCardProps) {
   const [containerExpanded, setContainerExpanded] = useState(false)

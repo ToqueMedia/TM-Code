@@ -94,5 +94,5 @@ export interface SubAgentRunSummary {
   toolCallCount: number
   finalText: string
   errorText?: string
-  tokenUsage?: { input: number; output: number }
+  tokenUsage: { input: number; output: number }
 }
