@@ -174,8 +174,6 @@ function DiffPreview({ diff, onAccept, onReject }: DiffPreviewProps) {
 
       {/* Diff content — flat, editor-style gutter + code */}
       <Box
-        maxH="400px"
-        overflowY="auto"
         overflowX="auto"
         fontSize="12px"
         fontFamily={tokens.fontFamily.mono}
