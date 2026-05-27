@@ -75,6 +75,8 @@ interface LayoutState {
   isConsoleVisible: boolean
   /** True when the server poll timed out without becoming reachable */
   previewServerTimedOut: boolean
+  /** True when the Plan Viewer side panel is open */
+  isPlanViewerOpen: boolean
   /**
    * Reference count of open overlays that must cover the native preview webview.
    * On Windows/Linux the wry child webview is an OS child window that sits ABOVE
@@ -133,6 +135,8 @@ interface LayoutActions {
   setScaffoldPhase: (phase: ScaffoldPhase, message?: string) => void
   /** Set the section SettingsView should open on. Pair with setViewMode('settings'). */
   setSettingsInitialSection: (section: string | null) => void
+  togglePlanViewer: () => void
+  setPlanViewerOpen: (open: boolean) => void
   /** Drop the pending section so a subsequent Settings open defaults to Profile. */
   clearSettingsInitialSection: () => void
 }
@@ -158,6 +162,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   previewSourcePath: null,
   previewReloadKey: 0,
   previewServerTimedOut: false,
+  isPlanViewerOpen: false,
   devServerLogs: [],
   isConsoleVisible: false,
   overlayCount: 0,
@@ -349,6 +354,14 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
 
   toggleConsole: () => {
     set(state => ({ isConsoleVisible: !state.isConsoleVisible }))
+  },
+
+  togglePlanViewer: () => {
+    set(state => ({ isPlanViewerOpen: !state.isPlanViewerOpen }))
+  },
+
+  setPlanViewerOpen: (open: boolean) => {
+    set({ isPlanViewerOpen: open })
   },
 
   goBack: () => {

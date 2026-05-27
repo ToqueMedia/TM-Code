@@ -78,7 +78,7 @@ interface MessageBubbleProps {
   isStreaming?: boolean
 }
 
-const markdownStyles = {
+export const markdownStyles = {
   // Prevent long unbreakable strings (URLs, file paths, tool output) from
   // causing horizontal scroll on the entire chat view.
   overflowWrap: 'anywhere' as const,
@@ -236,7 +236,7 @@ function CopyMessageButton({ text }: { text: string }) {
   )
 }
 
-const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
+export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || '')
     const codeString = String(children).replace(/\n$/, '')

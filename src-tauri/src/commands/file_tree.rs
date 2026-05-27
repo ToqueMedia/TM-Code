@@ -7,17 +7,82 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{canonicalize_path, normalize_path_for_frontend};
 
+/// Maximum number of visible children per directory to prevent massive trees.
+const MAX_CHILDREN_PER_DIR: usize = 500;
+
 /// Directories always excluded from the file tree to avoid massive context waste.
 /// Matches the exclusion list in `filesystem.rs:has_excluded` (glob tool).
 const EXCLUDED_DIRS: &[&str] = &[
+    // JS/TS ecosystem
     "node_modules",
-    ".git",
-    "dist",
-    "build",
-    "__pycache__",
     ".next",
     ".nuxt",
     ".output",
+    ".turbo",
+    ".parcel-cache",
+    ".yarn",
+    ".pnpm-store",
+    ".npm",
+    "bower_components",
+    "jspm_packages",
+    ".expo",
+    ".svelte-kit",
+    ".angular",
+    // Build outputs
+    "dist",
+    "build",
+    "out",
+    ".vercel",
+    ".netlify",
+    // Version control
+    ".git",
+    ".svn",
+    ".hg",
+    // Python
+    "__pycache__",
+    ".venv",
+    "venv",
+    "env",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    "htmlcov",
+    ".coverage",
+    // Rust
+    "target",
+    // Java/Kotlin/Android
+    ".gradle",
+    ".m2",
+    ".idea",
+    // iOS/macOS
+    "Pods",
+    "DerivedData",
+    "Carthage",
+    // Go/Ruby/PHP
+    "vendor",
+    // .NET
+    "bin",
+    "obj",
+    // Dart/Flutter
+    ".dart_tool",
+    ".pub-cache",
+    // Terraform/IaC
+    ".terraform",
+    ".serverless",
+    // IDE/Editor
+    ".vscode",
+    ".vs",
+    // Caches
+    ".cache",
+    ".sass-cache",
+    ".eslintcache",
+    ".stylelintcache",
+    ".nyc_output",
+    "coverage",
+    // Temp
+    "tmp",
+    "temp",
 ];
 
 // File tree node types
@@ -30,6 +95,9 @@ pub enum FileTreeNode {
         children: Vec<FileTreeNode>,
         expanded: bool,
         metadata: FileMetadata,
+        /// True when children were capped at MAX_CHILDREN_PER_DIR.
+        #[serde(default)]
+        truncated: bool,
     },
     File {
         name: String,
@@ -233,15 +301,18 @@ fn create_file_metadata(metadata: std::fs::Metadata, path: &Path) -> FileMetadat
     }
 }
 
-// Build a file tree recursively
+// Build a file tree recursively.
+// Uses spawn_blocking so the heavy filesystem walk doesn't block the Tokio runtime.
 #[tauri::command]
-pub fn build_file_tree(root_path: String, filter: Option<FileTreeFilter>) -> Result<FileTreeNode> {
-    let path = Path::new(&root_path);
-
+pub async fn build_file_tree(
+    root_path: String,
+    filter: Option<FileTreeFilter>,
+) -> Result<FileTreeNode> {
+    // Validate path existence before spawning blocking task
+    let path = PathBuf::from(&root_path);
     if !path.exists() {
         return Err(FileTreeError::PathNotFound(root_path));
     }
-
     if !path.is_dir() {
         return Err(FileTreeError::InvalidOperation(
             "Path is not a directory".to_string(),
@@ -249,10 +320,7 @@ pub fn build_file_tree(root_path: String, filter: Option<FileTreeFilter>) -> Res
     }
 
     let canonical_root =
-        canonicalize_path(path).map_err(|_| FileTreeError::PathNotFound(root_path.clone()))?;
-
-    let mut visited = HashSet::new();
-    visited.insert(canonical_root.clone());
+        canonicalize_path(&path).map_err(|_| FileTreeError::PathNotFound(root_path.clone()))?;
 
     // Enforce a default max_depth of 20 to prevent unbounded recursion
     let filter_with_default = match filter {
@@ -269,7 +337,14 @@ pub fn build_file_tree(root_path: String, filter: Option<FileTreeFilter>) -> Res
         }),
     };
 
-    build_tree_node(&canonical_root, &filter_with_default, 0, &mut visited)
+    // Run the heavy recursive walk on a blocking thread pool
+    tokio::task::spawn_blocking(move || {
+        let mut visited = HashSet::new();
+        visited.insert(canonical_root.clone());
+        build_tree_node(&canonical_root, &filter_with_default, 0, &mut visited)
+    })
+    .await
+    .map_err(|e| FileTreeError::Io(e.to_string()))?
 }
 
 // Recursive helper to build tree nodes
@@ -316,6 +391,7 @@ fn build_tree_node(
                     children: vec![],
                     expanded: false,
                     metadata: create_file_metadata(metadata, path),
+                    truncated: false,
                 });
             }
         }
@@ -323,6 +399,7 @@ fn build_tree_node(
 
     // Read directory entries
     let mut children = Vec::new();
+    let mut visible_count: usize = 0;
     let entries = std::fs::read_dir(path)?;
 
     for entry in entries {
@@ -365,7 +442,13 @@ fn build_tree_node(
 
         // Recursively build child nodes
         match build_tree_node(&entry_path, filter, depth + 1, visited) {
-            Ok(child_node) => children.push(child_node),
+            Ok(child_node) => {
+                visible_count += 1;
+                children.push(child_node);
+                if visible_count >= MAX_CHILDREN_PER_DIR {
+                    break;
+                }
+            }
             Err(_) => {
                 // Skip entries that can't be read (permissions, broken links, etc.)
                 // Silently continue to build partial tree rather than fail entirely
@@ -396,6 +479,7 @@ fn build_tree_node(
         children,
         expanded: false,
         metadata: create_file_metadata(metadata, path),
+        truncated: visible_count >= MAX_CHILDREN_PER_DIR,
     })
 }
 

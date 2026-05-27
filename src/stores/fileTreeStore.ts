@@ -45,6 +45,9 @@ interface FileTreeActions {
 // FileTree indexer instance para operações O(1)
 const fileTreeIndexer = FileTreeIndexer.getInstance();
 
+// Generation counter to prevent stale loadFileTree results from overwriting fresh ones
+let loadFileTreeGeneration = 0;
+
 // Helper function para converter FileNode para FileTreeNode
 function convertFileNodeToTreeNode(fileNode: FileNode): FileTreeNode {
   const defaultMetadata: FileMetadata = {
@@ -104,18 +107,24 @@ export const useFileTreeRepository = create<FileTreeState & FileTreeActions>()(
       isProcessingInBackground: false,
 
       loadFileTree: async (rootPath: string, filter?: FileTreeFilter) => {
-        // Clear root immediately so ChatView doesn't stale previous project's tree
-        set({ loading: true, error: null, root: null });
+        const gen = ++loadFileTreeGeneration;
+        // Don't clear root immediately — wait for new data to avoid UI flash
+        set({ loading: true, error: null });
         try {
           // Default to showing hidden files to ensure all files are visible
           const filterWithDefaults = filter || { showHidden: true };
           const root = await FileTreeService.buildFileTree(rootPath, filterWithDefaults);
 
+          // Stale check — a newer loadFileTree call has started
+          if (gen !== loadFileTreeGeneration) return;
+
           // Constrói índice para operações rápidas O(1)
           fileTreeIndexer.buildIndex(root);
 
+          if (gen !== loadFileTreeGeneration) return;
           set({ root, loading: false });
         } catch (error) {
+          if (gen !== loadFileTreeGeneration) return;
           set({ error: (error as Error).message, loading: false, root: null });
         }
       },

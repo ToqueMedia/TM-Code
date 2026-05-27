@@ -6,6 +6,8 @@ import { logger } from './logger';
 export class ProjectFileWatcher {
   private fileWatcher: FileWatcher;
   private unwatch: (() => void) | null = null;
+  private refreshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly REFRESH_DEBOUNCE_MS = 1000;
 
   constructor() {
     this.fileWatcher = new FileWatcher();
@@ -41,6 +43,10 @@ export class ProjectFileWatcher {
   }
 
   stopWatching() {
+    if (this.refreshDebounceTimer) {
+      clearTimeout(this.refreshDebounceTimer);
+      this.refreshDebounceTimer = null;
+    }
     if (this.unwatch) {
       this.unwatch();
       this.unwatch = null;
@@ -122,8 +128,14 @@ export class ProjectFileWatcher {
   }
 
   private refreshFileTree() {
-    useFileTreeRepository.getState().refresh().catch(err => {
-      logger.error('file-watcher', 'Failed to refresh file tree:', err);
-    });
+    if (this.refreshDebounceTimer) {
+      clearTimeout(this.refreshDebounceTimer);
+    }
+    this.refreshDebounceTimer = setTimeout(() => {
+      this.refreshDebounceTimer = null;
+      useFileTreeRepository.getState().refresh().catch(err => {
+        logger.error('file-watcher', 'Failed to refresh file tree:', err);
+      });
+    }, this.REFRESH_DEBOUNCE_MS);
   }
 }

@@ -17,6 +17,7 @@ import GeneratingView from './views/GeneratingView'
 import PreviewView from './views/PreviewView'
 import EditorView from './views/EditorView'
 import PermissionDialog from './chat/PermissionDialog'
+import PlanViewerPanel from './chat/PlanViewerPanel'
 import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
 // RequirementsDialog removed — templates disabled
@@ -318,6 +319,9 @@ function MainLayout() {
               </>
             )}
 
+            {/* Plan Viewer side panel */}
+            <PlanViewerPanel />
+
             {/* Main view content */}
             {viewMode === 'editor' ? (
               <ErrorBoundary>
@@ -424,6 +428,9 @@ function MainLayout() {
       </Flex>
 
       {/* Template selector removed — all projects start from scratch */}
+
+      {/* Plan Viewer side panel — slides in from right */}
+      <PlanViewerPanel />
 
       {/* Floating dev server status panel */}
       <DevServerStatus />

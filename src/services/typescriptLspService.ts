@@ -1,8 +1,9 @@
 import * as monaco from 'monaco-editor';
-import { FileTreeService } from './fileTreeService';
 import { FileService } from './fileService';
 import { FileTreeIndexer } from '../utils/fileTreeIndex';
+import { cachedBuildFileTree } from './agent/ipcCache';
 import { logger } from '../utils/logger';
+import type { FileTreeNode } from '../types/fileTree';
 
 // Monaco v0.55+ marks languages.typescript as deprecated in types but it still works at runtime.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -102,10 +103,10 @@ class TypeScriptLspService {
       // actually opens a file in the editor. Pre-creating models for every project
       // file causes Monaco's observable system to accumulate 200+ listeners on shared
       // events, which freezes the app in projects with many TypeScript files.
-      const fileTree = await FileTreeService.buildFileTree(projectRoot, {
-        showHidden: false,
-        extensions: ['.ts', '.tsx', '.js', '.jsx', '.json', '.html', '.css'],
-        maxDepth: undefined
+      // Uses cachedBuildFileTree to avoid duplicate IPC if fileTreeStore already fetched.
+      const fileTree = await cachedBuildFileTree<FileTreeNode>({
+        rootPath: projectRoot,
+        filter: { showHidden: false, maxDepth: 20 }
       });
 
       this.indexer.buildIndex(fileTree);

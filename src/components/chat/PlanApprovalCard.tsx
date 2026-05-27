@@ -2,7 +2,6 @@ import { memo, useCallback } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiFileText, FiCheck, FiEdit2, FiX } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
-import { useEditorRepository } from '../../stores/editorStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { handlePlanApprove, handlePlanRequestChanges, handlePlanReject } from '../../services/agent/commands/planCommand'
 import { FileService } from '../../services/fileService'
@@ -49,8 +48,7 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
       )
       return
     }
-    useEditorRepository.getState().openFile(planPath)
-    useLayoutStore.getState().setViewMode('editor')
+    useLayoutStore.getState().setPlanViewerOpen(true)
   }, [projectPath])
 
   return (
