@@ -597,6 +597,53 @@ export function usePromptBar() {
       chatStore.createSession(projectPath)
     }
 
+    // ── TMS.md Bootstrap Gate ──
+    // When an external project lacks TMS.md, run a dedicated bootstrap turn
+    // that creates TMS.md and starts the dev server BEFORE processing the
+    // user's message. The recursive call uses skipUserMessage=true so the
+    // bootstrap prompt is invisible to the user — only the agent's work
+    // (reading files, creating TMS.md) appears in the chat.
+    const pState = useProjectStore.getState()
+    if (pState.noTmsFile && !pState.tmsBootstrapping && !skipUserMessage) {
+      pState.setTmsBootstrapping(true)
+      try {
+        const { getTmsBootstrapPrompt } = await import('../../services/agent/tmsBootstrap')
+        chatStore.addSystemMessage(t('common.tmsBootstrapStart'))
+
+        const bootstrapPrompt = getTmsBootstrapPrompt(projectPath)
+        const bootstrapOk = await runAgentForPrompt(bootstrapPrompt, true)
+
+        // Verify TMS.md was created
+        try {
+          await invoke('read_file', { path: `${projectPath}/TMS.md` })
+          pState.setNoTmsFile(false)
+          // Invalidate cached system prompt so next build picks up TMS.md
+          ContextBuilder.getInstance().invalidatePromptCache(projectPath)
+          if (bootstrapOk) {
+            chatStore.addSystemMessage(t('common.tmsBootstrapComplete'))
+
+            // Show the user's original message in the chat, then replace
+            // the content with a synthetic prompt that asks the agent to
+            // check with the user before proceeding. This prevents the
+            // redundant "run the project" after the bootstrap already did it.
+            const originalDisplay = extractDisplayFromValue(content)
+            chatStore.addUserMessage(originalDisplay.text, originalDisplay.attachments)
+
+            const originalText = typeof content === 'string' ? content : ''
+            content = `Project setup complete (TMS.md created, dev server started). The user's original request was: "${originalText}". Before doing anything else, ask the user if they still want you to carry out this request, since the initial setup is already done.`
+            skipUserMessage = true
+          }
+        } catch {
+          // TMS.md not created — show warning but continue with user's message
+          chatStore.addSystemMessage(t('common.tmsBootstrapFailed'))
+        }
+      } catch (err) {
+        logger.error('prompt', 'TMS bootstrap failed:', err)
+      } finally {
+        pState.setTmsBootstrapping(false)
+      }
+    }
+
     // Render the user's bubble + assistant placeholder BEFORE the async
     // augmentation step (mention resolution + attachment disk reads can
     // take 50–500ms). Display extraction is sync, so we can paint the

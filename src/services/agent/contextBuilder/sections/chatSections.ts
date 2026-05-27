@@ -945,7 +945,11 @@ export function getMemoryGuidanceSection(ctx: PromptContext): string {
     return `Keep TMS.md updated with milestones (dated) and architectural decisions (with rationale) as you complete work. Preserve "Project Analysis" and "Custom Instructions" sections as-is.`
   }
 
-  // External project without TMS.md — active bootstrap
+  // External project without TMS.md — active bootstrap.
+  // This path is a FALLBACK for when the code-level bootstrap gate in
+  // usePromptBar.ts fails (e.g. agent crashes mid-bootstrap, or the gate
+  // is bypassed). In the normal flow, the gate creates TMS.md before the
+  // user's message reaches the agent, so this section never fires.
   if (!ctx.tmCodeOwned && ctx.treeString) {
     return `This project has no TMS.md — the persistent project memory file that stores framework info, dev commands, architectural decisions, and milestones across sessions. Without it, you re-analyze the project from scratch every turn.
 

@@ -41,12 +41,13 @@ function slugSuggest(name: string): string {
 function PublishModal({ isOpen, onClose }: PublishModalProps) {
   const project = useProjectStore((s) => s.currentProject)
   const userPlan = useBillingStore((s) => s.plan)
+  const billingLoaded = useBillingStore((s) => s.isLoaded)
 
   const record = useDeployStore((s) =>
     project ? s.records.get(project.id) ?? null : null,
   )
 
-  const isFreeTier = !userPlan || userPlan === 'explorer'
+  const isFreeTier = billingLoaded && (!userPlan || userPlan === 'explorer')
 
   const [subdomain, setSubdomain] = useState('')
   const [submitting, setSubmitting] = useState(false)
