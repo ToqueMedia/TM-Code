@@ -143,6 +143,12 @@ class CheckpointService {
   ): Promise<void> {
     if (!this.currentProjectPath || !this.currentSessionId) return
 
+    // Skip capture during revert to avoid race with streaming agent
+    try {
+      const { useCheckpointStore } = await import('../../stores/checkpointStore')
+      if (useCheckpointStore.getState().isReverting) return
+    } catch { /* import failure is non-critical */ }
+
     const filePathHash = await hashFilePath(filePath)
     const checkpointId = `cp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
     const operation: FileSnapshot['operation'] = isNewFile ? 'create' : 'write'
@@ -202,6 +208,12 @@ class CheckpointService {
   ): Promise<void> {
     if (!this.currentProjectPath || !this.currentSessionId) return
 
+    // Skip capture during revert to avoid race with streaming agent
+    try {
+      const { useCheckpointStore } = await import('../../stores/checkpointStore')
+      if (useCheckpointStore.getState().isReverting) return
+    } catch { /* import failure is non-critical */ }
+
     const filePathHash = await hashFilePath(filePath)
     const checkpointId = `cp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
 
@@ -249,6 +261,12 @@ class CheckpointService {
     toolCallId: string,
   ): Promise<void> {
     if (!this.currentProjectPath || !this.currentSessionId) return
+
+    // Skip capture during revert to avoid race with streaming agent
+    try {
+      const { useCheckpointStore } = await import('../../stores/checkpointStore')
+      if (useCheckpointStore.getState().isReverting) return
+    } catch { /* import failure is non-critical */ }
 
     const filePathHash = await hashFilePath(oldPath)
     const checkpointId = `cp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
@@ -384,6 +402,89 @@ class CheckpointService {
     }
 
     return [...new Set(restoredPaths)] // deduplicate
+  }
+
+  /**
+   * Revert ALL checkpoints in the current session — restores every file
+   * to its pre-agent state. Uses the baselineIndex to identify the true
+   * original content for each file, avoiding issues with multiple
+   * checkpoints touching the same file.
+   *
+   * Returns { restored, failed } so the UI can report partial failures.
+   */
+  async revertAll(): Promise<{ restored: string[]; failed: { path: string; error: string }[] }> {
+    if (!this.currentProjectPath || !this.currentSessionId) {
+      throw new Error('No active session')
+    }
+
+    const restoredPaths: string[] = []
+    const failures: { path: string; error: string }[] = []
+
+    // Collect rename destinations from all checkpoints — these are files
+    // created by renames and must be deleted, not restored.
+    const renameNewPaths = new Set<string>()
+    for (const cp of this.checkpoints) {
+      for (const file of cp.files) {
+        if (file.operation === 'rename' && file.newPath) {
+          renameNewPaths.add(file.newPath)
+        }
+      }
+    }
+
+    // Step 1: Delete rename destinations first (cleanup, not counted as restore)
+    for (const newPath of renameNewPaths) {
+      try {
+        await invoke('delete_file_or_directory', { path: newPath })
+      } catch (err) {
+        // File might already be gone — not a critical failure
+        logger.warn('checkpoint', `Could not delete rename destination ${newPath}:`, err)
+      }
+    }
+
+    // Step 2: Restore each baseline file to its pre-session state
+    for (const [filePath, baselineEntry] of this.baselineIndex) {
+      // Skip rename destinations (already handled above)
+      if (renameNewPaths.has(filePath)) continue
+
+      try {
+        if (baselineEntry.wasNew) {
+          // File was created by agent — delete it
+          await invoke('delete_file_or_directory', { path: filePath })
+          restoredPaths.push(filePath)
+        } else {
+          // File existed before — restore original content
+          const content = await this.loadContentFromDisk(
+            baselineEntry.checkpointId,
+            baselineEntry.filePathHash,
+          )
+          await invoke('write_file', { path: filePath, content })
+          restoredPaths.push(filePath)
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.error('checkpoint', `Failed to revert ${filePath}:`, msg)
+        failures.push({ path: filePath, error: msg })
+      }
+    }
+
+    // Step 3: Bump fsVersion so all caches refresh (must complete before
+    // clearing checkpoints — otherwise caches miss the invalidation signal)
+    try { (await import('../fsVersion')).bumpFsVersion('revertAll') } catch { /* non-critical */ }
+
+    // Step 4: Clear all state
+    const removedCheckpoints = [...this.checkpoints]
+    this.checkpoints = []
+    this.sessionBaseline.clear()
+    this.baselineIndex.clear()
+    this.persistDirty = true
+    await this.flushPersist()
+
+    // Step 5: Cleanup snapshot files from disk
+    this.cleanupSnapshotFiles(removedCheckpoints).catch(err =>
+      logger.error('checkpoint', 'Failed to cleanup snapshot files after revertAll:', err),
+    )
+
+    return { restored: [...new Set(restoredPaths)], failed: failures }
   }
 
   private async revertFile(checkpointId: string, file: FileSnapshot): Promise<void> {

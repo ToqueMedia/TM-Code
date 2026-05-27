@@ -1,11 +1,12 @@
-import { memo, useState, useCallback, useEffect } from 'react'
+import { memo, useState, useCallback, useEffect, useMemo } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import {
   FiRotateCcw, FiChevronDown, FiChevronRight, FiClock,
-  FiFile, FiFilePlus, FiTrash2, FiEdit3, FiGitCommit
+  FiFile, FiFilePlus, FiTrash2, FiEdit3, FiGitCommit, FiAlertTriangle
 } from 'react-icons/fi'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useEditorRepository } from '../../stores/editorStore'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -38,7 +39,9 @@ function CheckpointPanel() {
   const isReverting = useCheckpointStore(s => s.isReverting)
   const revertToCheckpoint = useCheckpointStore(s => s.revertToCheckpoint)
   const revertLast = useCheckpointStore(s => s.revertLast)
+  const revertAll = useCheckpointStore(s => s.revertAll)
   const lastRevertedPaths = useCheckpointStore(s => s.lastRevertedPaths)
+  const lastRevertAllResult = useCheckpointStore(s => s.lastRevertAllResult)
   const clearLastRevertedPaths = useCheckpointStore(s => s.clearLastRevertedPaths)
   const sessionDiff = useCheckpointStore(s => s.sessionDiff)
   const isLoadingDiff = useCheckpointStore(s => s.isLoadingDiff)
@@ -47,18 +50,24 @@ function CheckpointPanel() {
   const [isExpanded, setIsExpanded] = useState(false)
   const [showSessionDiff, setShowSessionDiff] = useState(false)
   const [confirmRevertId, setConfirmRevertId] = useState<string | null>(null)
+  const [showRevertAllConfirm, setShowRevertAllConfirm] = useState(false)
   const [, setTick] = useState(0)
 
   // Add system message to chat after revert (avoids circular import in store)
   useEffect(() => {
     if (lastRevertedPaths.length === 0) return
     const names = lastRevertedPaths.map(p => p.split('/').pop()).filter(Boolean)
-    const msg = names.length === 1
+    const result = lastRevertAllResult
+    let msg = names.length === 1
       ? `Reverted: ${names[0]}`
       : `Reverted ${names.length} files: ${names.join(', ')}`
+    if (result && result.failed.length > 0) {
+      const failNames = result.failed.map(f => f.path.split('/').pop()).join(', ')
+      msg += ` (${t("checkpoint.revertAllFailed")}: ${failNames})`
+    }
     useChatStore.getState().addSystemMessage(msg)
     clearLastRevertedPaths()
-  }, [lastRevertedPaths, clearLastRevertedPaths])
+  }, [lastRevertedPaths, lastRevertAllResult, clearLastRevertedPaths])
 
   // Clear stale confirmation when checkpoints change
   useEffect(() => {
@@ -76,12 +85,45 @@ function CheckpointPanel() {
 
   const disabled = isStreaming || isReverting
 
+  // Check for dirty editor files that would be overwritten by revert.
+  // Depends on showRevertAllConfirm so it recalculates when the dialog opens.
+  const hasDirtyFiles = useMemo(() => {
+    const editorState = useEditorRepository.getState()
+    const dirtyPaths = new Set<string>(
+      editorState.openFiles.filter((f: { isDirty: boolean }) => f.isDirty).map((f: { path: string }) => f.path)
+    )
+    // Include both filePath and rename newPath — revertAll deletes newPath
+    const checkpointPaths = new Set<string>(
+      checkpoints.flatMap(cp => cp.files.flatMap(f =>
+        f.newPath ? [f.filePath, f.newPath] : [f.filePath]
+      ))
+    )
+    for (const path of dirtyPaths) {
+      if (checkpointPaths.has(path)) return true
+    }
+    return false
+  }, [checkpoints, showRevertAllConfirm])
+
   const handleRevertLast = useCallback(async () => {
     // Read fresh state to prevent double-click race (closure may be stale)
     const { isReverting: busy } = useCheckpointStore.getState()
     if (isStreaming || busy || checkpoints.length === 0) return
     await revertLast()
   }, [isStreaming, checkpoints.length, revertLast])
+
+  const handleRevertAll = useCallback(async () => {
+    const { isReverting: busy } = useCheckpointStore.getState()
+    if (isStreaming || busy || checkpoints.length === 0) return
+    setShowRevertAllConfirm(false)
+    try {
+      await revertAll()
+      // System message is injected by the useEffect that watches
+      // lastRevertedPaths — no duplicate injection needed here.
+      setIsExpanded(false)
+    } catch {
+      useChatStore.getState().addSystemMessage(t("checkpoint.revertAllFailed"))
+    }
+  }, [isStreaming, checkpoints.length, revertAll])
 
   const handleRevertClick = useCallback(async (checkpointId: string, isLast: boolean) => {
     const { isReverting: busy } = useCheckpointStore.getState()
@@ -197,8 +239,99 @@ function CheckpointPanel() {
             <FiRotateCcw size={10} />
             Undo
           </Box>
+
+          {/* Revert All button */}
+          <Box
+            as="button"
+            display="flex"
+            alignItems="center"
+            gap="4px"
+            px="8px"
+            py="3px"
+            borderRadius={tokens.radius.md}
+            fontSize="10px"
+            fontWeight="600"
+            color={!disabled && checkpoints.length > 0
+              ? tokens.colors.accent.red
+              : tokens.colors.text.disabled}
+            bg="transparent"
+            cursor={!disabled && checkpoints.length > 0 ? 'pointer' : 'not-allowed'}
+            transition={`all ${tokens.transition.fast}`}
+            _hover={!disabled && checkpoints.length > 0
+              ? { bg: 'rgba(248, 81, 73, 0.1)' }
+              : undefined}
+            onClick={(e: React.MouseEvent) => {
+              e.stopPropagation()
+              setShowRevertAllConfirm(true)
+            }}
+            aria-label={t("checkpoint.revertAll")}
+          >
+            <FiRotateCcw size={10} />
+            {t("checkpoint.revertAll")}
+          </Box>
         </Flex>
       </Flex>
+
+      {/* Revert All confirmation dialog */}
+      {showRevertAllConfirm && (
+        <Flex
+          direction="column"
+          mx={2}
+          mb={1}
+          px={3}
+          py={2}
+          borderRadius={tokens.radius.lg}
+          bg={tokens.colors.accent.redSubtle}
+          border={`1px solid ${tokens.colors.accent.redMuted}`}
+        >
+          <Text fontSize="11px" color={tokens.colors.text.primary} fontWeight="600">
+            {t("checkpoint.revertAllConfirm")}
+          </Text>
+          <Text fontSize="10px" color={tokens.colors.text.secondary} mt="2px">
+            {t("checkpoint.revertAllDescription").replace('{count}', String(new Set(checkpoints.flatMap(cp => cp.files.map(f => f.filePath))).size))}
+          </Text>
+          {hasDirtyFiles && (
+            <Flex align="center" gap="4px" mt="4px">
+              <FiAlertTriangle size={10} color={tokens.colors.accent.orange} />
+              <Text fontSize="10px" color={tokens.colors.accent.orange} fontWeight="500">
+                {t("checkpoint.revertAllDirtyWarning")}
+              </Text>
+            </Flex>
+          )}
+          <Flex gap={2} mt={2} justify="flex-end">
+            <Box
+              as="button"
+              px="8px"
+              py="2px"
+              borderRadius={tokens.radius.md}
+              fontSize="10px"
+              fontWeight="500"
+              color={tokens.colors.text.secondary}
+              bg="transparent"
+              cursor="pointer"
+              _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+              onClick={() => setShowRevertAllConfirm(false)}
+            >
+              {t("checkpoint.cancel")}
+            </Box>
+            <Box
+              as="button"
+              px="8px"
+              py="2px"
+              borderRadius={tokens.radius.md}
+              fontSize="10px"
+              fontWeight="600"
+              color={tokens.colors.accent.red}
+              bg="transparent"
+              cursor="pointer"
+              _hover={{ bg: tokens.colors.accent.redSubtle }}
+              onClick={handleRevertAll}
+            >
+              {t("checkpoint.revertAll")}
+            </Box>
+          </Flex>
+        </Flex>
+      )}
 
       {/* Confirmation dialog (inline) */}
       {confirmRevertId && (

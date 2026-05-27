@@ -10,11 +10,18 @@ interface SessionDiffEntry {
   after: string | null
 }
 
+interface RevertAllResult {
+  restored: string[]
+  failed: { path: string; error: string }[]
+}
+
 interface CheckpointState {
   checkpoints: Checkpoint[]
   isReverting: boolean
   /** Paths restored by the last revert — consumed by UI to show system message */
   lastRevertedPaths: string[]
+  /** Result of the last revertAll — includes partial failures for UI display */
+  lastRevertAllResult: RevertAllResult | null
   sessionDiff: SessionDiffEntry[]
   isLoadingDiff: boolean
 }
@@ -23,6 +30,7 @@ interface CheckpointActions {
   syncFromService: () => void
   revertToCheckpoint: (checkpointId: string) => Promise<void>
   revertLast: () => Promise<void>
+  revertAll: () => Promise<{ restored: string[]; failed: { path: string; error: string }[] }>
   loadSessionDiff: () => Promise<void>
   clearLastRevertedPaths: () => void
   clear: () => void
@@ -42,6 +50,7 @@ export const useCheckpointStore = create<CheckpointState & CheckpointActions>()(
   checkpoints: [],
   isReverting: false,
   lastRevertedPaths: [],
+  lastRevertAllResult: null,
   sessionDiff: [],
   isLoadingDiff: false,
 
@@ -94,6 +103,30 @@ export const useCheckpointStore = create<CheckpointState & CheckpointActions>()(
     }
   },
 
+  revertAll: async () => {
+    set({ isReverting: true })
+    try {
+      const service = CheckpointService.getInstance()
+      const result = await service.revertAll()
+
+      await refreshAfterRevert(result.restored)
+
+      set({
+        checkpoints: [],
+        lastRevertedPaths: result.restored,
+        lastRevertAllResult: result,
+        sessionDiff: [],
+        isReverting: false,
+      })
+
+      return result
+    } catch (err) {
+      logger.error('checkpoint', 'Revert all failed:', err)
+      set({ isReverting: false })
+      throw err
+    }
+  },
+
   loadSessionDiff: async () => {
     set({ isLoadingDiff: true })
     try {
@@ -107,7 +140,7 @@ export const useCheckpointStore = create<CheckpointState & CheckpointActions>()(
   },
 
   clearLastRevertedPaths: () => {
-    set({ lastRevertedPaths: [] })
+    set({ lastRevertedPaths: [], lastRevertAllResult: null })
   },
 
   clear: () => {
@@ -115,6 +148,7 @@ export const useCheckpointStore = create<CheckpointState & CheckpointActions>()(
       checkpoints: [],
       isReverting: false,
       lastRevertedPaths: [],
+      lastRevertAllResult: null,
       sessionDiff: [],
       isLoadingDiff: false,
     })
