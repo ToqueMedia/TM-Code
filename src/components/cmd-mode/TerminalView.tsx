@@ -511,8 +511,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         <CmdModePromptInput ref={promptInputRef} />
       </Box>
     </Flex>
-      {terminalOpen && (
-        <>
+      {/* Keep TerminalPanel mounted when instances exist — CSS display toggle
+          prevents unmount/remount which would call start_pty_shell on existing
+          sessions. Instances persist after non-destructive close(). */}
+      {useTerminalPanelStore.getState().instances.length > 0 && (
+        <Flex display={terminalOpen ? 'flex' : 'none'} flexShrink={0}>
           <Box
             width="4px"
             flexShrink={0}
@@ -528,7 +531,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
             role="separator"
           />
           <TerminalPanel projectPath={projectPath} widthPx={clampedPanelWidth} onReady={handleTerminalReady} />
-        </>
+        </Flex>
       )}
     </Flex>
   )

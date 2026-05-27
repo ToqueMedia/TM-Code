@@ -1364,6 +1364,16 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           newMessages = [...session.messages, message]
         }
 
+        // Trim pre-boundary messages from the store so the UI updates
+        // immediately without relying on ChatView's slice logic (which
+        // can lag behind during active streaming). Keep the boundary
+        // message itself and everything after it (including the in-flight
+        // streaming assistant message).
+        const boundaryIdx = newMessages.findIndex(m => m.id === messageId)
+        if (boundaryIdx > 0) {
+          newMessages = newMessages.slice(boundaryIdx)
+        }
+
         const updatedSession: ChatSession = {
           ...session,
           messages: newMessages,

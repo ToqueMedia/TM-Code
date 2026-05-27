@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text, VStack, Input } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
 import type { Question } from '../../stores/askUserQuestionStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -13,7 +14,7 @@ interface AskUserQuestionCardProps {
   questions: Question[]
 }
 
-const OTHER_LABEL = 'Other'
+const OTHER_LABEL = '__other__'
 
 const QuestionBlock = memo(function QuestionBlock({
   question,
@@ -175,7 +176,7 @@ const QuestionBlock = memo(function QuestionBlock({
             )}
           </Box>
 
-          <Box flex={1} onClick={(e) => e.stopPropagation()}>
+          <Box flex={1}>
             <Text
               fontSize="12px"
               fontFamily={tokens.fontFamily.ui}
@@ -183,7 +184,7 @@ const QuestionBlock = memo(function QuestionBlock({
               color={isOtherSelected ? tokens.colors.text.primary : tokens.colors.text.secondary}
               mb={isOtherSelected ? 1.5 : 0}
             >
-              Other
+              {t('chat.otherOption')}
             </Text>
             {isOtherSelected && (
               <Input
@@ -191,7 +192,7 @@ const QuestionBlock = memo(function QuestionBlock({
                 size="sm"
                 fontSize="12px"
                 fontFamily={tokens.fontFamily.ui}
-                placeholder="Type your answer..."
+                placeholder={t('chat.otherPlaceholder')}
                 value={otherText}
                 onChange={(e) => onOtherTextChange(e.target.value)}
                 bg="rgba(0, 0, 0, 0.2)"

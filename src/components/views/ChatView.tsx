@@ -66,6 +66,10 @@ function ChatView() {
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
   const streamingVersion = useChatStore(s => s.streamingVersion)
+  // conversationVersion bumps on compaction. Without subscribing here, the
+  // useMemo for lastBoundaryIndex sees the same `rawMessages` reference
+  // (appendTextDelta mutates in-place) and returns a cached stale value.
+  const conversationVersion = useChatStore(s => s.conversationVersion)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const rawMessages = session?.messages || []
@@ -93,7 +97,9 @@ function ChatView() {
       }
     }
     return -1
-  }, [rawMessages])
+  // conversationVersion forces recalculation after compaction even when
+  // rawMessages is the same array reference (appendTextDelta mutates in-place).
+  }, [rawMessages, conversationVersion])
   const messages = (lastBoundaryIndex === -1 || revealPreBoundary)
     ? rawMessages
     : rawMessages.slice(lastBoundaryIndex)

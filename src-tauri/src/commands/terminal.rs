@@ -927,6 +927,16 @@ pub async fn start_pty_shell(
     active_project: State<'_, ActiveProjectState>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
+    // Idempotency guard: if the session already exists (e.g. React StrictMode
+    // double-effect), return Ok without creating a duplicate PTY. This prevents
+    // orphaned PTYs and Tauri callback ID errors from concurrent invocations.
+    {
+        let map = pty_map.lock().map_err(|_| "Failed to lock PTY map")?;
+        if map.contains_key(&session_id) {
+            return Ok(session_id);
+        }
+    }
+
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
     let pty_system = native_pty_system();

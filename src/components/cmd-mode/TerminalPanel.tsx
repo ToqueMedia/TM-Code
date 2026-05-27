@@ -358,11 +358,10 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       if (unlistenOutput) unlistenOutput()
       if (unlistenExit) unlistenExit()
       // Do NOT kill PTY here — the store owns PTY lifecycle.
-      // - Tab close: removeTerminal() in the store is the trigger; React
-      //   unmounts this component, this cleanup runs, but PTY is already dead.
-      // - Panel close (Esc/Ctrl+X): close() hides the panel, instances stay
-      //   alive, this cleanup does NOT run (components stay mounted via CSS).
-      // - /exit: killAll() explicitly kills all PTYs before unmounting.
+      // In StrictMode, the effect runs twice with the same sessionId.
+      // start_pty_shell is idempotent (Rust): if the session already exists
+      // it returns Ok without creating a duplicate. This prevents both the
+      // orphaned-PTY race and Tauri callback ID errors.
       term.dispose()
       termRef.current = null
       fitRef.current = null
