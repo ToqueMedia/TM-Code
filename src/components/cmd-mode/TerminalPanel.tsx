@@ -13,7 +13,7 @@
  *   - close button or store.close() → invoke kill_pty_session → unmount
  *   - unmount cleanup → store.close() (in case the parent unmounts us first)
  */
-import { memo, useEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiX } from 'react-icons/fi'
 import { invoke } from '@/utils/invokeMetrics'
@@ -24,7 +24,9 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { tokens } from '@/theme/tokens'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
+import TerminalService from '../../services/terminalService'
 import { logger } from '../../utils/logger'
+import { TerminalAutocomplete } from './TerminalAutocomplete'
 
 interface TerminalPanelProps {
   projectPath: string
@@ -51,6 +53,69 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
   const sessionIdRef = useRef<string | null>(null)
   const close = useTerminalPanelStore(s => s.close)
   const setSessionId = useTerminalPanelStore(s => s.setSessionId)
+
+  // Autocomplete state
+  const [completions, setCompletions] = useState<string[]>([])
+  const [selectedIdx, setSelectedIdx] = useState(0)
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
+  const completionsRef = useRef<string[]>([])
+  const selectedIdxRef = useRef(0)
+  const wordRef = useRef('')
+  const completionSeq = useRef(0)
+
+  // Keep refs in sync with state for use in onData callback
+  useEffect(() => { completionsRef.current = completions }, [completions])
+  useEffect(() => { selectedIdxRef.current = selectedIdx }, [selectedIdx])
+
+  /** Read the current word being typed from the xterm buffer. */
+  const getCurrentWord = useCallback((term: Terminal): string => {
+    const buffer = term.buffer.active
+    const absRow = buffer.baseY + buffer.cursorY
+    const line = buffer.getLine(absRow)
+    if (!line) return ''
+    const text = line.translateToString(true)
+    const col = buffer.cursorX
+    const before = text.slice(0, col)
+    const lastSpace = before.lastIndexOf(' ')
+    return before.slice(lastSpace + 1)
+  }, [])
+
+  /** Get pixel position for the autocomplete menu based on cursor position. */
+  const getMenuPosition = useCallback((term: Terminal): { top: number; left: number } => {
+    const el = term.element
+    if (!el) return { top: 0, left: 0 }
+    const cellW = el.clientWidth / term.cols
+    const cellH = el.clientHeight / term.rows
+    const buffer = term.buffer.active
+    return {
+      top: (buffer.cursorY + 1) * cellH + 4,
+      left: buffer.cursorX * cellW,
+    }
+  }, [])
+
+  /** Close the autocomplete menu. Invalidates in-flight completion requests. */
+  const closeMenu = useCallback(() => {
+    completionSeq.current++
+    setCompletions([])
+    setSelectedIdx(0)
+    setMenuPos(null)
+    completionsRef.current = []
+    selectedIdxRef.current = 0
+  }, [])
+
+  /** Apply a completion: erase the partial word and write the completed text. */
+  const applyCompletion = useCallback((term: Terminal, sessionId: string, completion: string, word: string) => {
+    closeMenu()
+    // Send backspaces to erase the partial word, then send the completion.
+    // \x7f is DEL, the default erase character for most shells (stty erase).
+    // Append a trailing space for commands/files; directories already end with '/'.
+    const backspaces = '\x7f'.repeat(word.length)
+    const separator = completion.endsWith('/') ? '' : ' '
+    invoke('write_to_pty', { sessionId, data: backspaces + completion + separator }).catch((err) => {
+      logger.warn('terminal-panel', 'applyCompletion write_to_pty failed:', err)
+    })
+    term.focus()
+  }, [closeMenu])
 
   // Boot xterm + PTY once on mount. The effect runs once (projectPath change is
   // handled at the parent level by remount via key).
@@ -114,8 +179,78 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
       })
     })
 
-    // Frontend → PTY: forward keystrokes
+    // Frontend → PTY: forward keystrokes with autocomplete interception
     const onDataDisposable = term.onData((data: string) => {
+      const hasMenu = completionsRef.current.length > 0
+
+      // Tab key
+      if (data === '\t') {
+        if (hasMenu) {
+          // Confirm the selected completion
+          const selected = completionsRef.current[selectedIdxRef.current]
+          if (selected) applyCompletion(term, sessionId, selected, wordRef.current)
+          return
+        }
+        // Request completions from backend
+        const word = getCurrentWord(term)
+        if (!word) {
+          // No partial word — send Tab to shell
+          invoke('write_to_pty', { sessionId, data: '\t' }).catch(() => {})
+          return
+        }
+        wordRef.current = word
+        const seq = ++completionSeq.current
+        TerminalService.shared.getCompletions(word, projectPath).then((results) => {
+          if (completionSeq.current !== seq) return // stale response
+          if (!results || results.length === 0) {
+            // No completions — fall through to shell Tab
+            invoke('write_to_pty', { sessionId, data: '\t' }).catch(() => {})
+            return
+          }
+          if (results.length === 1) {
+            // Single match — auto-complete inline
+            applyCompletion(term, sessionId, results[0], word)
+            return
+          }
+          // Multiple matches — show dropdown
+          setCompletions(results)
+          setSelectedIdx(0)
+          setMenuPos(getMenuPosition(term))
+        }).catch(() => {
+          if (completionSeq.current !== seq) return
+          // On error, fall through to shell Tab
+          invoke('write_to_pty', { sessionId, data: '\t' }).catch(() => {})
+        })
+        return
+      }
+
+      // When menu is open, handle navigation keys
+      if (hasMenu) {
+        // Arrow Down
+        if (data === '\x1b[B') {
+          setSelectedIdx((prev) => (prev + 1) % completionsRef.current.length)
+          return
+        }
+        // Arrow Up
+        if (data === '\x1b[A') {
+          setSelectedIdx((prev) => (prev - 1 + completionsRef.current.length) % completionsRef.current.length)
+          return
+        }
+        // Enter — confirm selection
+        if (data === '\r' || data === '\n') {
+          const sel = completionsRef.current[selectedIdxRef.current]
+          if (sel) applyCompletion(term, sessionId, sel, wordRef.current)
+          return
+        }
+        // Esc — close menu
+        if (data === '\x1b') {
+          closeMenu()
+          return
+        }
+        // Any other key — close menu and pass through
+        closeMenu()
+      }
+
       invoke('write_to_pty', { sessionId, data }).catch((err) => {
         logger.warn('terminal-panel', 'write_to_pty failed:', err)
       })
@@ -131,6 +266,10 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
       if (disposed) return
       if (event.payload.session_id !== sessionId) return
       term.write(event.payload.data)
+      // Close autocomplete menu when the shell sends output (user typed, or
+      // the shell itself responded to something). Keeps the overlay in sync
+      // with the actual terminal content.
+      if (completionsRef.current.length > 0) closeMenu()
     }).then((fn) => {
       if (disposed) {
         fn()
@@ -209,6 +348,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
       fitRef.current = null
       sessionIdRef.current = null
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectPath, close, setSessionId])
 
   const folderName = projectPath.split(/[\/\\]/).filter(Boolean).pop() || projectPath
@@ -265,7 +405,20 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
       </Flex>
 
       {/* xterm container — fills remaining height */}
-      <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" />
+      <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative">
+        {completions.length > 0 && menuPos && (
+          <TerminalAutocomplete
+            completions={completions}
+            selectedIndex={selectedIdx}
+            position={menuPos}
+            onSelect={(item) => {
+              if (termRef.current && sessionIdRef.current) {
+                applyCompletion(termRef.current, sessionIdRef.current, item, wordRef.current)
+              }
+            }}
+          />
+        )}
+      </Box>
     </Flex>
   )
 })

@@ -18,6 +18,7 @@ import MessageBubble from '../chat/MessageBubble'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ContextWindowIndicator from '../chat/ContextWindowIndicator'
+import PostCompactSurvey from '../chat/PostCompactSurvey'
 import ChatSkeleton from '../chat/ChatSkeleton'
 import ModelIndicator from '../chat/ModelIndicator'
 import SessionDropdown from './SessionDropdown'
@@ -29,6 +30,7 @@ function ChatView() {
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
+  const postCompactSurveyPending = useChatStore(s => s.postCompactSurveyPending)
   const isStreaming = useChatStore(s => s.isStreaming)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
   const currentProject = useProjectStore(s => s.currentProject)
@@ -610,6 +612,7 @@ function ChatView() {
                   />
                 ))}
                 <AgentActivityIndicator />
+                {postCompactSurveyPending && !isStreaming && <PostCompactSurvey />}
               </Box>
             )}
           </Box>

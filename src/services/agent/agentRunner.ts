@@ -359,16 +359,18 @@ async function runAgentInternal(
         logger.info('agent', `→ Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out`)
         useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
       },
-      onContextCompression: (beforeTokens, signal) => {
-        if (signal === 0) {
-          // Compression starting
-          logger.info('agent', `⟳ Context compression starting (current: ${beforeTokens} tokens)...`)
+      onContextCompression: (event) => {
+        if (event.type === 'hooks_start') {
+          agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')
+        } else if (event.type === 'compact_start') {
+          logger.info('agent', `⟳ Context compression starting (current: ${event.beforeTokens} tokens, trigger: ${event.trigger})...`)
+          agentStore.setCompactPhase('compressing')
           agentStore.setStatus('compressing')
-        } else if (signal === -1) {
-          // Compression complete — insert compact boundary marker
+        } else if (event.type === 'compact_end') {
           logger.info('agent', '✓ Context compression complete')
+          agentStore.setCompactPhase('idle')
           agentStore.setStatus('awaiting_response')
-          useChatStore.getState().addCompactBoundaryMessage(beforeTokens)
+          useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized)
         }
       },
     })

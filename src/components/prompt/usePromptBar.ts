@@ -835,22 +835,16 @@ export function usePromptBar() {
         onUsageUpdate: (inputTokens, outputTokens) => {
           useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
         },
-        onContextCompression: (beforeTokens, signal) => {
-          if (signal === 0) {
-            // Compression starting — AgentActivityIndicator already renders
-            // the 'compressing' status with its own animated row, so we no
-            // longer push a persistent system message that would linger in
-            // the transcript after compression finished.
+        onContextCompression: (event) => {
+          if (event.type === 'hooks_start') {
+            agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')
+          } else if (event.type === 'compact_start') {
+            agentStore.setCompactPhase('compressing')
             agentStore.setStatus('compressing')
-          } else if (signal === -1) {
-            // Compression complete. The boundary action drops a single
-            // claude-vaz-style marker AND folds the pre-compression history
-            // out of the visible transcript (ChatView slices on the latest
-            // boundary). It also zeroes `totalTokensUsed.input` so the
-            // ContextWindowIndicator releases the pre-compression peak that
-            // `addTokenUsage`'s Math.max had been holding.
+          } else if (event.type === 'compact_end') {
+            agentStore.setCompactPhase('idle')
             agentStore.setStatus('awaiting_response')
-            useChatStore.getState().addCompactBoundaryMessage(beforeTokens)
+            useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized)
           }
         },
       })

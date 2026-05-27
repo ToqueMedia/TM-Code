@@ -170,6 +170,13 @@ export type SystemMessageLevel = 'info' | 'success' | 'error' | 'warn'
  */
 export type SystemMessageKind = 'compact_boundary'
 
+/** Metadata stored on compact_boundary messages for richer rendering. */
+export interface CompactMetadata {
+  trigger: 'auto' | 'manual' | 'reactive'
+  beforeTokens: number
+  messagesSummarized?: number
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
@@ -179,6 +186,8 @@ export interface ChatMessage {
   kind?: SystemMessageKind
   /** Optional pre-compression token count, set on compact_boundary messages. */
   compactBeforeTokens?: number
+  /** Richer metadata for compact_boundary messages (trigger, token count, messages summarized). */
+  compactMetadata?: CompactMetadata
   content: string
   timestamp: number
   codeBlocks?: CodeBlock[]

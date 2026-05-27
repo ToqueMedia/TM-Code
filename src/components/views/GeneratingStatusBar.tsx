@@ -23,7 +23,7 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   reasoning: { color: tokens.colors.accent.purple, label: 'A pensar...' },
   generating: { color: tokens.colors.accent.primary, label: 'Generating...' },
   applying: { color: tokens.colors.accent.green, label: 'Applying changes...' },
-  compressing: { color: tokens.colors.accent.orange, label: 'Compressing context...' },
+  compressing: { color: tokens.colors.accent.orange, label: 'Compacting conversation...' },
   error: { color: tokens.colors.accent.red, label: 'Error' },
 }
 

@@ -29,11 +29,18 @@ const STATUS_LABELS: Record<string, string> = {
   reasoning: 'Reasoning',
   generating: 'Writing',
   applying: 'Applying changes',
-  compressing: 'Compressing context',
+  compressing: 'Compacting conversation',
+}
+
+const COMPACT_PHASE_LABELS: Record<string, string> = {
+  hooks_pre: 'Running pre-compact hooks',
+  hooks_post: 'Running post-compact hooks',
+  compressing: 'Compacting conversation',
 }
 
 function AgentActivityIndicator() {
   const status = useAgentStore(s => s.status)
+  const compactPhase = useAgentStore(s => s.compactPhase)
   const isStreaming = useChatStore(s => s.isStreaming)
   const totalTokensUsed = useChatStore(s => s.totalTokensUsed)
   // Session-mode elapsed: total wall time per request, freezes during permission waits.
@@ -70,7 +77,9 @@ function AgentActivityIndicator() {
 
   if (!isStreaming) return null
 
-  const label = STATUS_LABELS[status] || 'Working'
+  const label = status === 'compressing'
+    ? (COMPACT_PHASE_LABELS[compactPhase] || STATUS_LABELS[status] || 'Working')
+    : (STATUS_LABELS[status] || 'Working')
   // chatStore.addTokenUsage:
   //   - input  is REPLACED with max(prev, newInput) — represents the CURRENT
   //              context size on the wire (turn N's input already contains

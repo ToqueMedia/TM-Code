@@ -487,10 +487,21 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     // pre-compression turns disappear from view; this is the visual
     // checkpoint the user sees at the top of the post-compression history.
     if (message.kind === 'compact_boundary') {
+      const meta = message.compactMetadata
       const beforeK =
         typeof message.compactBeforeTokens === 'number'
           ? Math.round(message.compactBeforeTokens / 1000)
-          : null
+          : meta
+            ? Math.round(meta.beforeTokens / 1000)
+            : null
+      const triggerLabel = meta?.trigger === 'manual'
+        ? ' — Solicitado pelo utilizador'
+        : meta?.trigger === 'reactive'
+          ? ' — Reativo (janela de contexto excedida)'
+          : ''
+      const summarizedLabel = meta?.messagesSummarized
+        ? ` ${meta.messagesSummarized} mensagens resumidas.`
+        : ''
       return (
         <Box py={3} px={3} mb={2} role="separator" aria-label="Conversation compacted">
           <Flex align="center" gap={2} mb={1.5}>
@@ -503,7 +514,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
               letterSpacing="0.05em"
               textTransform="uppercase"
             >
-              ✻ Conversa comprimida
+              ✻ Conversa comprimida{triggerLabel}
             </Text>
             <Box flex="1" h="1px" bg={tokens.colors.border.panel} opacity={0.5} />
           </Flex>
@@ -514,7 +525,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             textAlign="center"
             lineHeight="1.5"
           >
-            Mensagens anteriores foram resumidas{beforeK != null ? ` (${beforeK}K tokens)` : ''}. Skills invocados re-injectados — o agente continua com as regras CRITICAL intactas.
+            {summarizedLabel ? `${summarizedLabel} ` : ''}Mensagens anteriores foram resumidas{beforeK != null ? ` (${beforeK}K tokens)` : ''}. Skills invocados re-injectados — o agente continua com as regras CRITICAL intactas.
           </Text>
         </Box>
       )

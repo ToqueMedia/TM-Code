@@ -10,7 +10,7 @@ import { buildCompactPrompt, buildPostCompactionSummaryMessage, formatCompactSum
 import { archivePreCompactTranscript } from './compactTranscriptArchive'
 import { streamLocalChat } from './byokLocalStream'
 import { anthropicToOpenAIBody } from './anthropicToOpenai'
-import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
+import { createDiffApprovalPromise, generateId, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useByokStore } from '../../stores/byokStore'
@@ -257,7 +257,7 @@ export interface AgentCallbacks {
   onUsageUpdate: (inputTokens: number, outputTokens: number) => void
 
   // Context was compressed to fit within model limits (optional)
-  onContextCompression?: (estimatedTokens: number, compressedTokens: number) => void
+  onContextCompression?: (event: import('@/types/agent').CompactProgressEvent) => void
 }
 
 // === Turn result ===
@@ -575,6 +575,11 @@ class AgentService {
     }
   }
 
+  /** Public accessor for the running state — used by /compact and other commands. */
+  isAgentRunning(): boolean {
+    return this.isRunning
+  }
+
   async runAgentLoop(
     userMessage: string | ContentPart[],
     conversationHistory: Array<{ role: string; content: string | AnthropicContentBlock[] | null }>,
@@ -739,7 +744,9 @@ class AgentService {
         const compressionThreshold = getAutoCompactThreshold(this.contextWindowSize)
         if (this.lastPromptTokens > compressionThreshold) {
           const before = this.lastPromptTokens
-          callbacks.onContextCompression?.(before, 0) // signal start
+          callbacks.onContextCompression?.({ type: 'hooks_start', hookType: 'pre_compact' })
+          callbacks.onContextCompression?.({ type: 'compact_start', beforeTokens: before, trigger: 'auto' })
+          const messagesBeforeCompact = messages.length
           try {
             // Extract tool ops log BEFORE compaction discards old messages —
             // this captures commands run, searches performed, diagnostics
@@ -799,7 +806,9 @@ class AgentService {
           }
 
           this.lastPromptTokens = 0 // reset — next API call will report the real new count
-          callbacks.onContextCompression?.(before, -1) // signal done
+          const messagesSummarized = Math.max(0, messagesBeforeCompact - messages.length)
+          callbacks.onContextCompression?.({ type: 'hooks_start', hookType: 'post_compact' })
+          callbacks.onContextCompression?.({ type: 'compact_end', beforeTokens: before, trigger: 'auto', messagesSummarized })
         }
 
         // Layer 1: Microcompact old tool results before sending to API.
@@ -1048,7 +1057,10 @@ class AgentService {
           } catch { /* chatStore may be torn down */ }
 
           try {
+            callbacks.onContextCompression?.({ type: 'hooks_start', hookType: 'pre_compact' })
+            callbacks.onContextCompression?.({ type: 'compact_start', beforeTokens: 0, trigger: 'reactive' })
             const toolOpsLog = this.extractToolOpsLog(messages)
+            const messagesBeforeCompact = messages.length
 
             // Aggressive: force keep only 4 turns (the minimum).
             const compressedMessages = await this.compressContext(messages, 4)
@@ -1081,7 +1093,9 @@ class AgentService {
             }
 
             this.lastPromptTokens = 0
-            callbacks.onContextCompression?.(0, -1)
+            const messagesSummarized = Math.max(0, messagesBeforeCompact - messages.length)
+            callbacks.onContextCompression?.({ type: 'hooks_start', hookType: 'post_compact' })
+            callbacks.onContextCompression?.({ type: 'compact_end', beforeTokens: 0, trigger: 'reactive', messagesSummarized })
 
             // Retry the same turn — don't count as a new iteration.
             continue
@@ -2433,6 +2447,128 @@ Developer message: ${displayText}
       role: 'user',
       content: parts.join('\n'),
     })
+  }
+
+  /**
+   * Manual compact: compress the current conversation on demand (via /compact command).
+   * Reuses the same compressContext + injectFileReReadings pipeline as auto-compact.
+   */
+  async runManualCompact(
+    _customInstructions?: string,
+    onProgress?: (event: import('@/types/agent').CompactProgressEvent) => void,
+  ): Promise<{ beforeTokens: number; afterTokens: number }> {
+    if (this.isRunning) {
+      throw new Error('Cannot compact while agent is running')
+    }
+
+    // Build messages in Anthropic format from the chat store
+    const chatStore = useChatStore.getState()
+    const session = chatStore.getActiveSession()
+    if (!session || session.messages.length < 4) {
+      throw new Error('Not enough messages to compact')
+    }
+
+    // Convert chat store messages to Anthropic format
+    const anthropicMessages = this.buildAnthropicMessagesFromSession(session)
+    if (anthropicMessages.length < 4) {
+      throw new Error('Not enough messages to compact')
+    }
+
+    const beforeTokens = anthropicMessages.reduce((sum, m) => {
+      const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+      return sum + Math.ceil(content.length / 4)
+    }, 0)
+
+    onProgress?.({ type: 'compact_start', beforeTokens, trigger: 'manual' })
+
+    try {
+      // Extract tool ops log before compaction
+      const toolOpsLog = this.extractToolOpsLog(anthropicMessages)
+
+      // Compress
+      const compressed = await this.compressContext(anthropicMessages)
+
+      // Re-inject file readings, skills, tool ops
+      await this.injectFileReReadings(compressed, toolOpsLog)
+
+      const afterTokens = compressed.reduce((sum, m) => {
+        const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+        return sum + Math.ceil(content.length / 4)
+      }, 0)
+
+      // Replace messages in chat store: remove all except last N recent,
+      // add compact boundary + summary
+      const boundaryId = generateId('msg')
+      const boundaryMessage: import('@/types/chat').ChatMessage = {
+        id: boundaryId,
+        role: 'system',
+        kind: 'compact_boundary',
+        compactBeforeTokens: beforeTokens,
+        compactMetadata: { trigger: 'manual', beforeTokens, messagesSummarized: anthropicMessages.length - compressed.length },
+        level: 'info',
+        content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens). Skills invocados re-injectados — o agente continua com regras CRITICAL intactas.`,
+        timestamp: Date.now(),
+      }
+
+      // Convert compressed Anthropic messages back to chat store format
+      const summaryContent = this.extractSummaryFromCompressed(compressed)
+      const summaryMessage: import('@/types/chat').ChatMessage = {
+        id: generateId('msg'),
+        role: 'user',
+        content: summaryContent,
+        timestamp: Date.now(),
+      }
+
+      // Update the chat store: replace all messages with boundary + summary
+      chatStore.replaceMessages([boundaryMessage, summaryMessage])
+      chatStore.resetTokenCounters()
+
+      onProgress?.({ type: 'compact_end', beforeTokens, trigger: 'manual' })
+
+      return { beforeTokens, afterTokens }
+    } catch (err) {
+      onProgress?.({ type: 'compact_end', beforeTokens, trigger: 'manual' })
+      throw err
+    }
+  }
+
+  /**
+   * Build Anthropic-format messages from a chat store session.
+   * Used by runManualCompact to feed into compressContext.
+   */
+  private buildAnthropicMessagesFromSession(session: import('@/types/chat').ChatSession): AnthropicMessage[] {
+    const messages: AnthropicMessage[] = []
+
+    // First message as system (if it's a system message)
+    const firstMsg = session.messages[0]
+    if (firstMsg?.role === 'system' && firstMsg.kind !== 'compact_boundary') {
+      messages.push({ role: 'user', content: firstMsg.content })
+    }
+
+    for (const msg of session.messages) {
+      if (msg.role === 'system') continue // skip system messages
+      if (msg.kind === 'compact_boundary') continue // skip boundaries
+      messages.push({
+        role: msg.role as 'user' | 'assistant',
+        content: msg.content,
+      })
+    }
+
+    return messages
+  }
+
+  /**
+   * Extract the summary text from compressed Anthropic messages.
+   * The summary is the user message right after the system message.
+   */
+  private extractSummaryFromCompressed(messages: AnthropicMessage[]): string {
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+        return content
+      }
+    }
+    return 'Context was compressed.'
   }
 
   /** Returns the current abort controller (for sub-agent abort propagation). */

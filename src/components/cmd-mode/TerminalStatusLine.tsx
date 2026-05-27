@@ -62,7 +62,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
       case 'reasoning':         return { color: tokens.colors.accent.purple,        label: 'reasoning', pulse: true }
       case 'generating':        return { color: tokens.colors.accent.primary,       label: 'writing', pulse: true }
       case 'applying':          return { color: tokens.colors.accent.green,         label: 'applying', pulse: true }
-      case 'compressing':       return { color: tokens.colors.accent.orange,        label: 'compressing', pulse: true }
+      case 'compressing':       return { color: tokens.colors.accent.orange,        label: 'compacting', pulse: true }
       case 'error':             return { color: tokens.colors.accent.red,           label: error || 'error', pulse: false }
       default:                  return { color: tokens.colors.text.disabled,        label: 'ready', pulse: false }
     }
