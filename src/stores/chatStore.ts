@@ -518,6 +518,22 @@ export async function createDiffApprovalPromise(toolCallId: string): Promise<boo
     return true
   }
 
+  // CMD mode guard: the tool executor writes files directly to disk and
+  // marks diffStatus='approved' via updateToolCallWithResult (alreadyApplied=true)
+  // BEFORE this promise is created. Since CMD mode never populates pendingDiffs
+  // and never shows an approval UI, nobody would call resolveDiffApproval —
+  // the promise would block for 30 min. Check the toolCall's diffStatus and
+  // resolve immediately if already approved.
+  const session = useChatStore.getState().getActiveSession()
+  if (session) {
+    for (const msg of session.messages) {
+      const tc = msg.toolCalls?.find(t => t.id === toolCallId)
+      if (tc?.diffStatus === 'approved') {
+        return true
+      }
+    }
+  }
+
   return new Promise(resolve => {
     pendingDiffApprovals.set(toolCallId, resolve)
     // Set timeout — auto-reject after 30 minutes to prevent the agent
