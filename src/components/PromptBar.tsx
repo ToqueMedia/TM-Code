@@ -27,13 +27,11 @@ function PromptBar() {
     isDisabled,
     hasPendingCredential,
     viewMode,
-    hasPreview,
     handleSend,
     handleStop,
     handleKeyDown,
     handleBlur,
     toggleEditor,
-    togglePreview,
     showCommandMenu,
     filteredCommands,
     selectedCommandIndex,
@@ -147,9 +145,7 @@ function PromptBar() {
             viewMode={viewMode}
             isStreaming={isStreaming}
             hasInput={(hasInputContent || draftAttachments.length > 0) && !isSendBlocked}
-            hasPreview={hasPreview}
             onToggleEditor={toggleEditor}
-            onTogglePreview={togglePreview}
             onSend={handleSend}
             onStop={handleStop}
             onAttach={handleAttachFiles}

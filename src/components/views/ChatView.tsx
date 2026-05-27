@@ -1,7 +1,7 @@
 import { memo, lazy, Suspense, useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiDatabase } from 'react-icons/fi'
+import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiDatabase, FiEye } from 'react-icons/fi'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -290,8 +290,8 @@ function ChatView() {
               as="button"
               display="flex"
               alignItems="center"
-              justifyContent="center"
-              w="28px"
+              gap="5px"
+              px="8px"
               h="28px"
               borderRadius="6px"
               color={tokens.colors.text.secondary}
@@ -299,10 +299,10 @@ function ChatView() {
               transition={`all ${tokens.transition.fast}`}
               _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
               onClick={() => useLayoutStore.getState().setViewMode('data')}
-              aria-label={t('dataViewer.title')}
-              title={t('dataViewer.title')}
+              aria-label={t('view.dataManager')}
             >
-              <FiDatabase size={14} />
+              <FiDatabase size={13} />
+              <Text fontSize="11px" fontWeight="500">{t('view.dataManager')}</Text>
             </Box>
           )}
         </Flex>
@@ -355,6 +355,24 @@ function ChatView() {
               servers={mcpServers}
               isInitializing={mcpIsInitializing}
             />
+            <Box
+              as="button"
+              display="flex"
+              alignItems="center"
+              gap="5px"
+              px="8px"
+              h="28px"
+              borderRadius="6px"
+              color={tokens.colors.text.secondary}
+              cursor="pointer"
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+              onClick={() => useLayoutStore.getState().setViewMode('preview')}
+              aria-label={t('view.preview')}
+            >
+              <FiEye size={13} />
+              <Text fontSize="11px" fontWeight="500">{t('view.preview')}</Text>
+            </Box>
           </HStack>
         )}
       </Flex>

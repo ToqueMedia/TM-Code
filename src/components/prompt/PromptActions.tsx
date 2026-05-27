@@ -1,7 +1,6 @@
 import { memo, useMemo } from 'react'
-import { Box, Flex, IconButton, Text } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiMonitor, FiPaperclip } from 'react-icons/fi'
-import { useLayoutStore } from '../../stores/layoutStore'
+import { Flex, IconButton, Text } from '@chakra-ui/react'
+import { FiSend, FiSquare, FiCode, FiImage } from 'react-icons/fi'
 import { useBillingStore } from '../../stores/billingStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useByokStore } from '../../stores/byokStore'
@@ -12,9 +11,7 @@ interface PromptActionsProps {
   viewMode: string
   isStreaming: boolean
   hasInput: boolean
-  hasPreview: boolean
   onToggleEditor: () => void
-  onTogglePreview: () => void
   onSend: () => void
   onStop: () => void
   onAttach: () => void
@@ -25,16 +22,12 @@ function PromptActions({
   viewMode,
   isStreaming,
   hasInput,
-  hasPreview,
   onToggleEditor,
-  onTogglePreview,
   onSend,
   onStop,
   onAttach,
   attachmentCount,
 }: PromptActionsProps) {
-  const isPreviewActive = viewMode === 'preview'
-  const isPreviewLoading = useLayoutStore(s => s.isPreviewServerLoading)
   const billingPlan = useBillingStore(s => s.plan)
   // Plan label via i18n — falls back to raw plan name for unknown plans.
   // Welcome plan shows the model name instead of the plan label.
@@ -126,56 +119,28 @@ function PromptActions({
             onClick={onAttach}
             title={attachHint || undefined}
           >
-            <FiPaperclip size={15} />
+            <FiImage size={15} />
           </IconButton>
         )}
 
         {/* Editor toggle */}
-        <IconButton
-          aria-label={t("prompt.toggleEditor")}
-          size="sm"
-          variant="ghost"
-          color={viewMode === 'editor' ? tokens.colors.accent.primary : tokens.colors.text.secondary}
-          _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
+        <Flex
+          align="center"
+          gap="4px"
+          px="8px"
+          h="28px"
           borderRadius="8px"
+          cursor="pointer"
+          color={viewMode === 'editor' ? tokens.colors.accent.primary : tokens.colors.text.secondary}
+          transition={`all ${tokens.transition.fast}`}
+          _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
           onClick={onToggleEditor}
+          aria-label={t("prompt.toggleEditor")}
+          role="button"
         >
-          <FiCode size={15} />
-        </IconButton>
-
-        {/* Preview toggle — only visible when a preview is available */}
-        {hasPreview && (
-          <Flex align="center" gap={0}>
-            <IconButton
-              aria-label={isPreviewLoading ? t('prompt.startingServer') : isPreviewActive ? t('prompt.hidePreview') : t('prompt.showPreview')}
-              size="sm"
-              variant="ghost"
-              color={isPreviewActive ? tokens.colors.accent.primary : tokens.colors.text.secondary}
-              _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
-              borderRadius="8px"
-              onClick={onTogglePreview}
-            >
-              {isPreviewLoading ? (
-                <Box
-                  w="15px"
-                  h="15px"
-                  borderRadius="full"
-                  border="2px solid transparent"
-                  borderTopColor={tokens.colors.accent.primary}
-                  borderRightColor={tokens.colors.accent.primary}
-                  css={{
-                    animation: 'previewSpin 0.7s linear infinite',
-                    '@keyframes previewSpin': {
-                      to: { transform: 'rotate(360deg)' },
-                    },
-                  }}
-                />
-              ) : (
-                <FiMonitor size={15} />
-              )}
-            </IconButton>
-          </Flex>
-        )}
+          <FiCode size={14} />
+          <Text fontSize="11px" fontWeight="500">{t('prompt.sourceCode')}</Text>
+        </Flex>
       </Flex>
 
       {/* Send / Stop / Queue button */}
