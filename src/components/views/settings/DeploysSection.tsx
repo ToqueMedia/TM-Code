@@ -510,7 +510,6 @@ function UrlRow({
       </Flex>
       {(lastDeployedAt || provider) && (
         <Text fontSize="11px" color={tokens.colors.text.muted}>
-          {provider && <>Provider: <Text as="span" color={tokens.colors.text.secondary}>{provider}</Text></>}
           {provider && lastDeployedAt && ' · '}
           {lastDeployedAt && (
             <>
