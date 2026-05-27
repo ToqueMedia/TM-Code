@@ -26,6 +26,8 @@ interface TerminalPanelActions {
 
   addTerminal: () => void
   removeTerminal: (id: string) => void
+  renameTerminal: (id: string, name: string) => void
+  closeAll: () => void
   setActiveTerminal: (id: string) => void
 
   getActiveSessionId: () => string | null
@@ -37,7 +39,7 @@ interface TerminalPanelActions {
 const DEFAULT_WIDTH_PX = 480
 const MIN_WIDTH_PX = 320
 const MAX_WIDTH_PX = 900
-const MAX_TERMINALS = 3
+const MAX_TERMINALS = 5
 
 function clampWidth(px: number): number {
   return Math.max(MIN_WIDTH_PX, Math.min(MAX_WIDTH_PX, px))
@@ -133,6 +135,21 @@ export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelAc
       ? remaining[remaining.length - 1].id
       : activeInstanceId
     set({ instances: remaining, activeInstanceId: newActiveId })
+  },
+
+  renameTerminal: (id, name) => {
+    const { instances } = get()
+    set({
+      instances: instances.map(i => i.id === id ? { ...i, name } : i),
+    })
+  },
+
+  closeAll: () => {
+    const { instances } = get()
+    for (const inst of instances) {
+      invoke('kill_pty_session', { sessionId: inst.id }).catch(() => {})
+    }
+    set({ isOpen: false, instances: [], activeInstanceId: null, _nextTerminalNum: 1 })
   },
 
   setActiveTerminal: (id) => {

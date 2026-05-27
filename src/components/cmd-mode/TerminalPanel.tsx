@@ -2,15 +2,16 @@
  * TerminalPanel — multi-instance PTY terminal with tab bar.
  *
  * Architecture:
- *  - Store manages up to 3 TerminalInstance objects (id + name).
+ *  - Store manages up to 5 TerminalInstance objects (id + name).
  *  - All terminals are always mounted (CSS display toggle for active/inactive).
  *  - Each SingleTerminal owns its xterm lifecycle; the store owns PTY lifecycle.
  *  - Tab bar replaces the old single header.
  *  - close() hides panel (PTYs alive); killAll() destroys everything (/exit).
+ *  - Right-click context menu on tabs: Rename, Close, Close All.
  */
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { Box, Flex, HStack, Text } from '@chakra-ui/react'
-import { FiPlus, FiX } from 'react-icons/fi'
+import { Box, Flex, HStack, Text, Input } from '@chakra-ui/react'
+import { FiPlus } from 'react-icons/fi'
 import { invoke } from '@/utils/invokeMetrics'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Terminal } from '@xterm/xterm'
@@ -39,60 +40,136 @@ interface PtyExitEvent {
   exit_code: number
 }
 
-const TAB_BAR_HEIGHT_PX = 28
+const TAB_BAR_HEIGHT_PX = 36
 
 // ─── Tab Bar ────────────────────────────────────────────────────────────────
 
+// ─── Context Menu ────────────────────────────────────────────────────────────
+
+interface ContextMenuState {
+  x: number
+  y: number
+  tabId: string
+  tabName: string
+}
+
+function TabContextMenu({
+  x,
+  y,
+  tabName,
+  onRename,
+  onClose,
+  onCloseAll,
+  onCloseMenu,
+}: {
+  x: number
+  y: number
+  tabName: string
+  onRename: () => void
+  onClose: () => void
+  onCloseAll: () => void
+  onCloseMenu: () => void
+}) {
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onCloseMenu()
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [onCloseMenu])
+
+  const itemStyle = {
+    px: 3,
+    py: 1.5,
+    fontSize: '12px',
+    fontFamily: tokens.fontFamily.mono,
+    cursor: 'pointer',
+    color: tokens.colors.text.primary,
+    _hover: { bg: 'rgba(254,16,99,0.15)' },
+    transition: 'background 0.1s ease',
+    whiteSpace: 'nowrap' as const,
+  }
+
+  return (
+    <Box
+      ref={menuRef}
+      position="fixed"
+      left={`${x}px`}
+      top={`${y}px`}
+      zIndex={10000}
+      bg="rgba(30,30,30,0.95)"
+      border={`1px solid ${tokens.colors.border.glass}`}
+      borderRadius="6px"
+      py={1}
+      minW="160px"
+      boxShadow="0 8px 24px rgba(0,0,0,0.5)"
+      backdropFilter="blur(12px)"
+      onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
+    >
+      <Box px={3} py={1} fontSize="11px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.text.disabled} borderBottom="1px solid rgba(255,255,255,0.06)" mb={1}>
+        {tabName}
+      </Box>
+      <Box {...itemStyle} onClick={() => { onRename(); onCloseMenu() }}>
+        Renomear
+      </Box>
+      <Box {...itemStyle} onClick={() => { onClose(); onCloseMenu() }}>
+        Fechar
+      </Box>
+      <Box h="1px" bg="rgba(255,255,255,0.06)" mx={2} my={1} />
+      <Box {...itemStyle} onClick={() => { onCloseAll(); onCloseMenu() }} color={tokens.colors.text.muted}>
+        Fechar todas
+      </Box>
+    </Box>
+  )
+}
+
+// ─── Tab Item ────────────────────────────────────────────────────────────────
+
 function TabItem({
+  id,
   name,
   isActive,
   onClick,
-  onClose,
+  onContextMenu,
 }: {
+  id: string
   name: string
   isActive: boolean
   onClick: () => void
-  onClose: () => void
+  onContextMenu: (e: React.MouseEvent, tabId: string, tabName: string) => void
 }) {
   return (
     <Flex
       align="center"
-      gap={1}
-      px={2}
+      px={3}
       h="100%"
       cursor="pointer"
-      bg={isActive ? 'rgba(255,255,255,0.04)' : 'transparent'}
+      bg={isActive ? 'rgba(255,255,255,0.06)' : 'transparent'}
       borderBottom={isActive ? `2px solid ${tokens.colors.accent.primary}` : '2px solid transparent'}
-      _hover={{ bg: isActive ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)' }}
+      _hover={{
+        bg: isActive ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.03)',
+      }}
       onClick={onClick}
+      onContextMenu={(e: React.MouseEvent) => onContextMenu(e, id, name)}
       flexShrink={0}
+      transition="background 0.15s ease, border-color 0.15s ease"
     >
       <Text
-        fontSize="10px"
-        color={isActive ? tokens.colors.text.primary : tokens.colors.text.disabled}
+        fontSize="12px"
+        color={isActive ? tokens.colors.text.primary : tokens.colors.text.muted}
         fontFamily={tokens.fontFamily.mono}
-        fontWeight="600"
-        letterSpacing="0.04em"
+        fontWeight={isActive ? '600' : '500'}
+        letterSpacing="0.03em"
         whiteSpace="nowrap"
         userSelect="none"
+        transition="color 0.15s ease"
       >
         {name}
       </Text>
-      <Box
-        as="button"
-        onClick={(e: React.MouseEvent) => { e.stopPropagation(); onClose() }}
-        aria-label={`Close ${name}`}
-        p="1px"
-        borderRadius="2px"
-        color={tokens.colors.text.disabled}
-        _hover={{ color: tokens.colors.text.primary, bg: 'rgba(255,255,255,0.06)' }}
-        display="flex"
-        alignItems="center"
-        justifyContent="center"
-        transition="color 0.12s, background 0.12s"
-      >
-        <FiX size={11} />
-      </Box>
     </Flex>
   )
 }
@@ -394,8 +471,45 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
   const activeInstanceId = useTerminalPanelStore(s => s.activeInstanceId)
   const addTerminal = useTerminalPanelStore(s => s.addTerminal)
   const removeTerminal = useTerminalPanelStore(s => s.removeTerminal)
+  const renameTerminal = useTerminalPanelStore(s => s.renameTerminal)
+  const closeAll = useTerminalPanelStore(s => s.closeAll)
   const setActiveTerminal = useTerminalPanelStore(s => s.setActiveTerminal)
-  const close = useTerminalPanelStore(s => s.close)
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  // Inline rename state
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string, tabName: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ x: e.clientX, y: e.clientY, tabId, tabName })
+  }, [])
+
+  const handleCloseMenu = useCallback(() => setContextMenu(null), [])
+
+  const handleRenameStart = useCallback(() => {
+    if (!contextMenu) return
+    setRenamingId(contextMenu.tabId)
+    setRenameValue(contextMenu.tabName)
+    // Focus the input after render
+    requestAnimationFrame(() => renameInputRef.current?.select())
+  }, [contextMenu])
+
+  const handleRenameCommit = useCallback(() => {
+    if (renamingId && renameValue.trim()) {
+      renameTerminal(renamingId, renameValue.trim())
+    }
+    setRenamingId(null)
+    setRenameValue('')
+  }, [renamingId, renameValue, renameTerminal])
+
+  const handleRenameCancel = useCallback(() => {
+    setRenamingId(null)
+    setRenameValue('')
+  }, [])
 
   return (
     <Flex
@@ -404,7 +518,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
       flexShrink={0}
       height="100%"
       bg={tokens.colors.terminal.background}
-      borderLeft="1px solid rgba(255,255,255,0.06)"
+      borderLeft="1px solid rgba(255,255,255,0.08)"
       minH={0}
     >
       {/* Tab bar */}
@@ -412,65 +526,84 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
         height={`${TAB_BAR_HEIGHT_PX}px`}
         flexShrink={0}
         align="stretch"
-        bg="rgba(0,0,0,0.3)"
-        borderBottom="1px solid rgba(255,255,255,0.04)"
+        bg="rgba(0,0,0,0.25)"
+        borderBottom="1px solid rgba(255,255,255,0.05)"
         data-tauri-drag-region
       >
         <HStack gap={0} h="100%" overflow="hidden" flex="1" minW={0}>
-          {instances.map((inst) => (
-            <TabItem
-              key={inst.id}
-              name={inst.name}
-              isActive={inst.id === activeInstanceId}
-              onClick={() => setActiveTerminal(inst.id)}
-              onClose={() => removeTerminal(inst.id)}
-            />
-          ))}
+          {instances.map((inst) =>
+            renamingId === inst.id ? (
+              <Flex key={inst.id} align="center" px={2} h="100%" flexShrink={0}>
+                <Input
+                  ref={renameInputRef}
+                  size="xs"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleRenameCommit()
+                    if (e.key === 'Escape') handleRenameCancel()
+                  }}
+                  onBlur={handleRenameCommit}
+                  bg="rgba(255,255,255,0.08)"
+                  border={`1px solid ${tokens.colors.accent.primary}`}
+                  borderRadius="4px"
+                  color={tokens.colors.text.primary}
+                  fontFamily={tokens.fontFamily.mono}
+                  fontSize="12px"
+                  h="24px"
+                  px={2}
+                  _focus={{ outline: 'none' }}
+                  autoFocus
+                />
+              </Flex>
+            ) : (
+              <TabItem
+                key={inst.id}
+                id={inst.id}
+                name={inst.name}
+                isActive={inst.id === activeInstanceId}
+                onClick={() => setActiveTerminal(inst.id)}
+                onContextMenu={handleContextMenu}
+              />
+            )
+          )}
 
           {/* Add terminal button */}
-          {instances.length < 3 && (
+          {instances.length < 5 && (
             <Box
               as="button"
               onClick={addTerminal}
               aria-label="Add terminal"
-              title="Add terminal (max 3)"
-              p="3px"
+              title="Add terminal (max 5)"
+              p="4px"
               ml={1}
-              borderRadius="3px"
+              borderRadius="4px"
               color={tokens.colors.text.disabled}
               _hover={{ color: tokens.colors.text.primary, bg: 'rgba(255,255,255,0.06)' }}
               display="flex"
               alignItems="center"
               justifyContent="center"
-              transition="color 0.12s, background 0.12s"
+              transition="color 0.15s ease, background 0.15s ease"
               flexShrink={0}
             >
-              <FiPlus size={12} />
+              <FiPlus size={13} />
             </Box>
           )}
         </HStack>
-
-        {/* Close panel button */}
-        <Box
-          as="button"
-          onClick={close}
-          aria-label="Close terminal panel"
-          title="Close (Esc or Ctrl+X)"
-          p="2px"
-          mr={1}
-          borderRadius="3px"
-          color={tokens.colors.text.disabled}
-          _hover={{ color: tokens.colors.text.primary, bg: 'rgba(255,255,255,0.06)' }}
-          display="flex"
-          alignItems="center"
-          justifyContent="center"
-          transition="color 0.12s, background 0.12s"
-          flexShrink={0}
-          data-tauri-drag-region={false}
-        >
-          <FiX size={13} />
-        </Box>
       </Flex>
+
+      {/* Context menu */}
+      {contextMenu && (
+        <TabContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          tabName={contextMenu.tabName}
+          onRename={handleRenameStart}
+          onClose={() => removeTerminal(contextMenu.tabId)}
+          onCloseAll={closeAll}
+          onCloseMenu={handleCloseMenu}
+        />
+      )}
 
       {/* All terminals — only the active one is visible. Inactive terminals
           are kept alive (PTY running, xterm mounted) so tab switching is

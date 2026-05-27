@@ -236,7 +236,6 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
             oldContent={toolCall.diffOldContent || ''}
             newContent={toolCall.diffNewContent || ''}
             isNewFile={toolCall.isNewFile}
-            maxLines={20}
           />
         )}
 
