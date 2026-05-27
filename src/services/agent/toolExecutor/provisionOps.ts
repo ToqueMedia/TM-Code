@@ -458,11 +458,17 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       // upload routes), so the deploy record doesn't exist. After the first
       // publish, the worker will pin to the actual deploy slug regardless
       // of what we send here.
+      //
+      // Algorithm must match the backend's slugify() + the frontend's
+      // slugSuggest() exactly — /[^a-z0-9-]+/g strips non-alnum chars
+      // (does NOT replace with hyphens). Mismatched algorithms produce
+      // different slugs for the same project name, leading to two
+      // subdomain entries being registered.
       const candidateSlug = project.name
         .toLowerCase()
         .normalize('NFD')
-        .replace(/[̀-ͯ]/g, '')
-        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9-]+/g, '')
         .replace(/^-+|-+$/g, '')
         .slice(0, 63) || project.id.slice(0, 32)
 
@@ -655,6 +661,21 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       // (quota gated, idempotent on re-run). No DB provisioning — the
       // platform database is a shared default with per-app path scoping;
       // nothing to physically create up front.
+      //
+      // Pass customSubdomain so the backend's resolveAndReserveSubdomain
+      // takes the explicit-slug path (step 1) instead of deriving from
+      // projectName (step 3). Without this, the backend always creates
+      // a slug from projectName — if the user later changes the slug via
+      // the PublishModal, both the suggested and custom slugs end up
+      // registered. The slug algorithm here MUST match slugSuggest() +
+      // the backend's slugify() exactly.
+      const deploySlug = project.name
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9-]+/g, '')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 63) || project.id.slice(0, 32)
       let initRes: Awaited<ReturnType<typeof tauriFetch>>
       try {
         initRes = await tauriFetch(`${workerUrl}/v1/projects/deploy/init`, {
@@ -666,6 +687,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
           body: JSON.stringify({
             projectId: project.id,
             projectName: project.name,
+            customSubdomain: deploySlug,
           }),
         })
       } catch (err) {

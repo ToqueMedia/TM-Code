@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Box, Button, Dialog, Flex, Input, Portal, Text } from '@chakra-ui/react'
 import {
   FiCheckCircle,
@@ -73,13 +73,19 @@ function PublishModal({ isOpen, onClose }: PublishModalProps) {
 
   // Seed subdomain when modal opens. Prefer existingSlug from summary when
   // this is a re-deploy so the user doesn't accidentally type a new slug.
+  // Use a ref to avoid overwriting user edits — once the user changes the
+  // input we stop auto-seeding.
+  const userEditedRef = useRef(false)
   useEffect(() => {
     if (isOpen && project) {
       const seed = summary?.existingSlug ?? slugSuggest(project.name)
-      setSubdomain((prev) => prev || seed)
+      if (!userEditedRef.current) {
+        setSubdomain(seed)
+      }
     }
     if (!isOpen) {
       setSubmitting(false)
+      userEditedRef.current = false
     }
   }, [isOpen, project, summary?.existingSlug])
 
@@ -212,7 +218,7 @@ function PublishModal({ isOpen, onClose }: PublishModalProps) {
               {phase === 'configure' && (
                 <ConfigureStep
                   subdomain={subdomain}
-                  onSubdomainChange={setSubdomain}
+                  onSubdomainChange={(v) => { userEditedRef.current = true; setSubdomain(v) }}
                   onPublish={handlePublish}
                   onCancel={handleClose}
                   submitting={submitting}

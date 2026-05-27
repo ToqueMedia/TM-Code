@@ -394,7 +394,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       void logPermission(`✓ Permitiste \`${pendingPermission.toolName}\` (sempre neste projeto)`, 'success')
       const toolAllowlist = new Set(get().projectToolAllowlist)
       toolAllowlist.add(pendingPermission.toolName)
-      set({ pendingPermission: null, projectToolAllowlist: toolAllowlist })
+      set({ pendingPermission: null, projectToolAllowlist: toolAllowlist, autoDenyAll: false })
       persistPermissions()
       advanceQueue(set, get)
     }
@@ -413,7 +413,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       const globalAllowlist = new Set(get().globalToolAllowlist)
       globalAllowlist.add(pendingPermission.toolName)
       saveGlobalToolAllowlist(globalAllowlist)
-      set({ pendingPermission: null, globalToolAllowlist: globalAllowlist })
+      set({ pendingPermission: null, globalToolAllowlist: globalAllowlist, autoDenyAll: false })
       advanceQueue(set, get)
     }
   },

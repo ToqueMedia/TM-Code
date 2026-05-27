@@ -29,6 +29,7 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
   }, [status, messageId])
 
   const handleApprove = useCallback(async () => {
+    useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'approved')
     try {
       await handlePlanApprove(projectPath)
@@ -41,16 +42,23 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
   }, [messageId, projectPath])
 
   const handleChanges = useCallback(() => {
+    useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'changes_requested')
     handlePlanRequestChanges(projectPath)
   }, [messageId, projectPath])
 
   const handleReject = useCallback(() => {
+    useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'rejected')
     handlePlanReject()
   }, [messageId])
 
   const handleViewPlan = useCallback(async () => {
+    const layout = useLayoutStore.getState()
+    if (layout.isPlanViewerOpen) {
+      layout.setPlanViewerOpen(false)
+      return
+    }
     const planPath = `${projectPath}/PLAN.md`
     try {
       await FileService.readFile(planPath)
@@ -60,7 +68,7 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
       )
       return
     }
-    useLayoutStore.getState().setPlanViewerOpen(true)
+    layout.setPlanViewerOpen(true)
   }, [projectPath])
 
   // ── Approved state ──

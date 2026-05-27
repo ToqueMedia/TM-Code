@@ -150,10 +150,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   useEffect(() => {
     if (!projectPath) return
     let cancelled = false
-    import('@tauri-apps/api/core').then(({ invoke }) => {
-      if (!cancelled) invoke('open_project', { path: projectPath }).catch(() => {})
+    const promise = import('@tauri-apps/api/core').then(({ invoke }) => {
+      if (!cancelled) return invoke('open_project', { path: projectPath })
     })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      // Await the promise so the callback stays alive until Rust responds.
+      promise?.catch(() => {})
+    }
   }, [projectPath])
 
   // Scroll follow — auto-sticks to bottom while user is near bottom; pauses on manual scroll up.

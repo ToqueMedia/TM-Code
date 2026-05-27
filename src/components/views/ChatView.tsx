@@ -37,7 +37,8 @@ function ChatView() {
   const currentProject = useProjectStore(s => s.currentProject)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const viewMode = useLayoutStore(s => s.viewMode)
-  const isSidebarMode = viewMode === 'preview'
+  const isPlanViewerOpen = useLayoutStore(s => s.isPlanViewerOpen)
+  const isSidebarMode = viewMode === 'preview' || isPlanViewerOpen
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)

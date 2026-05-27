@@ -275,162 +275,166 @@ function MainLayout() {
           )}
         </AnimatePresence>
 
-        {/* Content + prompt column */}
-        <Flex direction="column" flex="1" overflow="hidden">
-          {/* Content area */}
-          <Flex flex="1" overflow="hidden" position="relative">
-            {/* Sidebar overlay (file tree) */}
-            {isSidebarVisible && (
-              <>
-                <Box
-                  position="absolute"
-                  inset={0}
-                  bg={tokens.colors.bg.sidebarBackdrop}
-                  zIndex={19}
-                  onClick={() => useLayoutStore.getState().toggleSidebar()}
-                />
-                <Box
-                  position="absolute"
-                  left={0}
-                  top={0}
-                  bottom={0}
-                  width="260px"
-                  bg={tokens.colors.bg.mainLayout}
-                  borderRight={`1px solid ${tokens.colors.border.sidebarPanel}`}
-                  zIndex={20}
-                  boxShadow={tokens.shadow.sidebarOverlay}
-                  css={{
-                    animation: 'slideIn 0.2s ease-out',
-                    '@keyframes slideIn': {
-                      from: { transform: 'translateX(-100%)' },
-                      to: { transform: 'translateX(0)' },
-                    },
-                  }}
-                >
-                  <ExplorerPanel onFileSelect={(path) => {
-                    handleFileSelect(path)
-                    const layout = useLayoutStore.getState()
-                    if (layout.viewMode !== 'editor') {
-                      layout.setViewMode('editor')
-                    }
-                    layout.toggleSidebar()
-                  }} />
-                </Box>
-              </>
-            )}
-
-            {/* Plan Viewer side panel */}
-            <PlanViewerPanel />
-
-            {/* Main view content */}
-            {viewMode === 'editor' ? (
-              <ErrorBoundary>
-                <EditorView />
-              </ErrorBoundary>
-            ) : viewMode === 'settings' ? (
-              <ErrorBoundary>
-                <SettingsView />
-              </ErrorBoundary>
-            ) : viewMode === 'data' ? (
-              <ErrorBoundary>
-                <DataViewerView />
-              </ErrorBoundary>
-            ) : viewMode === 'generating' && !previewMounted ? (
-              <ErrorBoundary>
-                <GeneratingView />
-              </ErrorBoundary>
-            ) : (
-              <Flex flex="1" overflow="hidden">
-                <Box
-                  w={viewMode === 'preview' ? `${previewChatWidth}px` : '100%'}
-                  h="100%"
-                  flexShrink={0}
-                  overflow="hidden"
-                  display="flex"
-                  flexDirection="column"
-                  transition={isResizing ? 'none' : 'width 0.3s ease'}
-                >
-                  <ErrorBoundary>
-                    <ChatView />
-                  </ErrorBoundary>
-                  {viewMode === 'preview' && (
-                    pendingPermission ? (
-                      <PermissionDialog
-                        toolName={pendingPermission.toolName}
-                        args={pendingPermission.args}
-                        promptReason={pendingPermission.promptReason ?? null}
-                        approve={approve}
-                        approveAlwaysInProject={approveAlwaysInProject}
-                        approveAlwaysGlobal={approveAlwaysGlobal}
-                        deny={deny}
-                        denyWith={denyWith}
-                      />
-                    ) : (
-                      <PromptBar />
-                    )
-                  )}
-                </Box>
-                {viewMode === 'preview' && (
+        {/* Content + prompt area — row flex with PlanViewerPanel on the right.
+            The column wrapper holds content + prompt; the plan panel is a
+            sibling so it pushes BOTH the content and the prompt bar. */}
+        <Flex flex="1" minH={0} overflow="hidden">
+          {/* Column: content area + prompt bar */}
+          <Flex direction="column" flex="1" minW={0} minH={0} overflow="hidden">
+            {/* Content area */}
+            <Flex flex="1" minH={0} overflow="hidden" position="relative">
+              {/* Sidebar overlay (file tree) */}
+              {isSidebarVisible && (
+                <>
                   <Box
-                    ref={resizeHandleRef}
-                    role="separator"
-                    aria-label="Resize chat panel"
-                    aria-orientation="vertical"
-                    w="4px"
-                    cursor="col-resize"
-                    flexShrink={0}
-                    bg={isResizing ? tokens.colors.accent.primary : 'transparent'}
-                    transition={isResizing ? 'none' : 'background 0.15s ease'}
-                    _hover={{ bg: tokens.colors.accent.primary }}
-                    onPointerDown={handleResizeStart}
-                    position="relative"
-                    zIndex={2}
+                    position="absolute"
+                    inset={0}
+                    bg={tokens.colors.bg.sidebarBackdrop}
+                    zIndex={19}
+                    onClick={() => useLayoutStore.getState().toggleSidebar()}
                   />
-                )}
-                <AnimatePresence>
-                  {viewMode === 'preview' && (
-                    <motion.div
-                      key="preview-pane"
-                      style={{ flex: 1, overflow: 'hidden', display: 'flex' }}
-                      initial={{ opacity: 0, x: 40 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: 40 }}
-                      transition={{ duration: 0.25, ease: 'easeOut' }}
+                  <Box
+                    position="absolute"
+                    left={0}
+                    top={0}
+                    bottom={0}
+                    width="260px"
+                    bg={tokens.colors.bg.mainLayout}
+                    borderRight={`1px solid ${tokens.colors.border.sidebarPanel}`}
+                    zIndex={20}
+                    boxShadow={tokens.shadow.sidebarOverlay}
+                    css={{
+                      animation: 'slideIn 0.2s ease-out',
+                      '@keyframes slideIn': {
+                        from: { transform: 'translateX(-100%)' },
+                        to: { transform: 'translateX(0)' },
+                      },
+                    }}
+                  >
+                    <ExplorerPanel onFileSelect={(path) => {
+                      handleFileSelect(path)
+                      const layout = useLayoutStore.getState()
+                      if (layout.viewMode !== 'editor') {
+                        layout.setViewMode('editor')
+                      }
+                      layout.toggleSidebar()
+                    }} />
+                  </Box>
+                </>
+              )}
+
+              {/* Main view content */}
+              <Box flex="1" minW={0} overflow="hidden" display="flex" flexDirection="column">
+                {viewMode === 'editor' ? (
+                  <ErrorBoundary>
+                    <EditorView />
+                  </ErrorBoundary>
+                ) : viewMode === 'settings' ? (
+                  <ErrorBoundary>
+                    <SettingsView />
+                  </ErrorBoundary>
+                ) : viewMode === 'data' ? (
+                  <ErrorBoundary>
+                    <DataViewerView />
+                  </ErrorBoundary>
+                ) : viewMode === 'generating' && !previewMounted ? (
+                  <ErrorBoundary>
+                    <GeneratingView />
+                  </ErrorBoundary>
+                ) : (
+                  <Flex flex="1" overflow="hidden">
+                    <Box
+                      w={viewMode === 'preview' ? `${previewChatWidth}px` : '100%'}
+                      h="100%"
+                      flexShrink={0}
+                      overflow="hidden"
+                      display="flex"
+                      flexDirection="column"
+                      transition={isResizing ? 'none' : 'width 0.3s ease'}
                     >
                       <ErrorBoundary>
-                        <PreviewView />
+                        <ChatView />
                       </ErrorBoundary>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </Flex>
+                      {viewMode === 'preview' && (
+                        pendingPermission ? (
+                          <PermissionDialog
+                            toolName={pendingPermission.toolName}
+                            args={pendingPermission.args}
+                            promptReason={pendingPermission.promptReason ?? null}
+                            approve={approve}
+                            approveAlwaysInProject={approveAlwaysInProject}
+                            approveAlwaysGlobal={approveAlwaysGlobal}
+                            deny={deny}
+                            denyWith={denyWith}
+                          />
+                        ) : (
+                          <PromptBar />
+                        )
+                      )}
+                    </Box>
+                    {viewMode === 'preview' && (
+                      <Box
+                        ref={resizeHandleRef}
+                        role="separator"
+                        aria-label="Resize chat panel"
+                        aria-orientation="vertical"
+                        w="4px"
+                        cursor="col-resize"
+                        flexShrink={0}
+                        bg={isResizing ? tokens.colors.accent.primary : 'transparent'}
+                        transition={isResizing ? 'none' : 'background 0.15s ease'}
+                        _hover={{ bg: tokens.colors.accent.primary }}
+                        onPointerDown={handleResizeStart}
+                        position="relative"
+                        zIndex={2}
+                      />
+                    )}
+                    <AnimatePresence>
+                      {viewMode === 'preview' && (
+                        <motion.div
+                          key="preview-pane"
+                          style={{ flex: 1, overflow: 'hidden', display: 'flex' }}
+                          initial={{ opacity: 0, x: 40 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          exit={{ opacity: 0, x: 40 }}
+                          transition={{ duration: 0.25, ease: 'easeOut' }}
+                        >
+                          <ErrorBoundary>
+                            <PreviewView />
+                          </ErrorBoundary>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </Flex>
+                )}
+              </Box>
+            </Flex>
+
+            {/* Permission dialog / PromptBar — in preview mode, rendered inside the chat sidebar wrapper */}
+            {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && viewMode !== 'data' && (
+              pendingPermission ? (
+                <PermissionDialog
+                  toolName={pendingPermission.toolName}
+                  args={pendingPermission.args}
+                  promptReason={pendingPermission.promptReason ?? null}
+                  approve={approve}
+                  approveAlwaysInProject={approveAlwaysInProject}
+                  approveAlwaysGlobal={approveAlwaysGlobal}
+                  deny={deny}
+                  denyWith={denyWith}
+                />
+              ) : (
+                <PromptBar />
+              )
             )}
           </Flex>
 
-          {/* Permission dialog / PromptBar — in preview mode, rendered inside the chat sidebar wrapper */}
-          {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && viewMode !== 'data' && (
-            pendingPermission ? (
-              <PermissionDialog
-                toolName={pendingPermission.toolName}
-                args={pendingPermission.args}
-                promptReason={pendingPermission.promptReason ?? null}
-                approve={approve}
-                approveAlwaysInProject={approveAlwaysInProject}
-                approveAlwaysGlobal={approveAlwaysGlobal}
-                deny={deny}
-                denyWith={denyWith}
-              />
-            ) : (
-              <PromptBar />
-            )
-          )}
+          {/* Plan Viewer side panel — 600px, full height, pushes everything left */}
+          <PlanViewerPanel />
         </Flex>
       </Flex>
 
       {/* Template selector removed — all projects start from scratch */}
-
-      {/* Plan Viewer side panel — slides in from right */}
-      <PlanViewerPanel />
 
       {/* Floating dev server status panel */}
       <DevServerStatus />

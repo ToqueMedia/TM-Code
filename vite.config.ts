@@ -32,6 +32,19 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+    proxy: {
+      // Proxy Firestore emulator requests to avoid CORS in Tauri WebView.
+      // The emulator at 127.0.0.1:8082 doesn't send CORS headers, so we
+      // route through the Vite dev server (same-origin for the WebView).
+      '/google.firestore.v1.Firestore': {
+        target: 'http://127.0.0.1:8082',
+        changeOrigin: true,
+      },
+      '/v1/projects': {
+        target: 'http://127.0.0.1:8082',
+        changeOrigin: true,
+      },
+    },
   },
 
   // Configuration for Monaco Editor workers

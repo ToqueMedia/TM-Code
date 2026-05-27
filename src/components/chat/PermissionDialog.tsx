@@ -49,8 +49,7 @@ export default function PermissionDialog({
 
   const isDangerous =
     promptReason === 'dangerous_command' ||
-    toolName === 'delete_file' ||
-    toolName === 'execute_command'
+    toolName === 'delete_file'
 
   // Reset on new permission
   useEffect(() => {
@@ -67,8 +66,8 @@ export default function PermissionDialog({
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // Don't intercept when typing in textarea
-      if (e.target instanceof HTMLTextAreaElement) {
+      // Don't intercept when typing in form elements
+      if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) {
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
           e.preventDefault()
           e.stopPropagation()
@@ -98,7 +97,8 @@ export default function PermissionDialog({
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
-  })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, isDangerous, showReason])
 
   const handleSubmit = () => {
     if (selected === 'once') approve()
@@ -115,10 +115,13 @@ export default function PermissionDialog({
 
   const label =
     toolName === 'browser_action'
-      ? args.action as string
+      ? (typeof args.action === 'string' ? args.action : toolName)
       : toolName === 'execute_command'
-        ? (args.command as string || toolName)
-        : (args.file_path as string || args.path as string || args.url as string || toolName)
+        ? (typeof args.command === 'string' ? args.command : toolName)
+        : (typeof args.file_path === 'string' ? args.file_path
+          : typeof args.path === 'string' ? args.path
+          : typeof args.url === 'string' ? args.url
+          : toolName)
 
   const isCommand = toolName === 'execute_command' || promptReason === 'dangerous_command'
 

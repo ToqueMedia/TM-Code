@@ -189,7 +189,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
               const isSelected = i === index
               const isActive = item.id === activeSessionId
               const n = String(i + 1).padStart(2, ' ')
-              const name = item.name || t('terminalMode.picker.unnamed')
+              const name = item.name || item.lastMessage || t('terminalMode.picker.unnamed')
               return (
                 <Flex
                   key={item.id}

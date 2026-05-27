@@ -169,7 +169,9 @@ function connectEmulatorsIfNeeded() {
     connectAuthEmulator(getFirebaseAuth(), `http://${EMULATOR_CONFIG.AUTH.HOST}:${EMULATOR_CONFIG.AUTH.PORT}`, {
       disableWarnings: true,
     })
-    connectFirestoreEmulator(getFirebaseDb(), EMULATOR_CONFIG.FIRESTORE.HOST, EMULATOR_CONFIG.FIRESTORE.PORT)
+    // In dev, route Firestore through Vite proxy (localhost:1420) to avoid
+    // CORS blocks from the Tauri WebView — the emulator doesn't send headers.
+    connectFirestoreEmulator(getFirebaseDb(), 'localhost', 1420)
   } catch {
     // Emulator connection failed — non-fatal, will use production services
   }
