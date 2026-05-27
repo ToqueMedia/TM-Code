@@ -72,7 +72,7 @@ export function getCmdClosedLoopSection(): string {
  - When you installed dependencies, **CONFIRM** exit code 0 before writing code that depends on them.
 
 **Verification before completion:**
- - For code changes: **RUN** the type checker or linter (e.g., \`npx tsc --noEmit\`) and **CONFIRM** zero errors.
+ - When finishing a coding session or after significant changes, **CONSIDER** running the type checker via \`execute_command_background({ command: "./node_modules/.bin/tsc --noEmit" })\` (background, non-blocking). If \`tsc\` is not installed, try \`npx tsc --noEmit\` via \`execute_command\` with a generous timeout.
  - **FIX** errors and repeat until clean.
  - **SAY SO EXPLICITLY** when verification is not possible (no test, no type checker).
 
@@ -151,7 +151,7 @@ Files:
 
 Verification (Terminal mode — do NOT run dev servers):
  - **DO NOT** invoke \`npm run dev\`, \`yarn dev\`, \`pnpm dev\`, or \`start_dev_server\`. Terminal mode is a terminal session — long-running background processes are hard for the user to terminate cleanly and leave orphaned ports.
- - To validate changes, prefer **non-blocking** checks: \`get_diagnostics\` (TS/JS), \`tsc --noEmit\`, \`eslint\`, \`npm run build\` / \`yarn build\` (one-shot, exits on its own), unit/integration tests (\`npm test\`, \`pytest\`, \`cargo test\`, etc.).
+ - To validate changes, prefer **non-blocking** checks: \`tsc --noEmit\` (via execute_command_background), \`eslint\`, \`npm run build\` / \`yarn build\` (one-shot, exits on its own), unit/integration tests (\`npm test\`, \`pytest\`, \`cargo test\`, etc.).
  - When the user wants to see the app running, ASK them to run the dev command themselves — don't start it yourself.
 
 Safety:

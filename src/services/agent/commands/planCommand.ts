@@ -9,7 +9,7 @@ import ToolExecutor from '../toolExecutor'
 import { preprocessHashtags } from '../hashtagRegistry'
 import { detectAiAgentIntent, buildAiAgentPlatformLine } from '../aiAgentIntent'
 import {
-  READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES, GET_DIAGNOSTICS,
+  READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES,
   READ_SKILL, WRITE_FILE, EDIT_FILE, CREATE_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
   PROVISION_AUTH, REQUEST_CREDENTIALS, UPDATE_TASKS,
@@ -344,7 +344,7 @@ Read ${projectPath}/TODO.md and work through the tasks under the first \`## Phas
 
 The tracker and TODO.md must stay in sync — the developer's UI watches the tracker, TODO.md is the persistent record. Skipping the tracker update means the UI shows nothing happening even though work is progressing.
 
-Once every Phase 1 task is checked off (in BOTH TODO.md and the tracker), verify the phase produces a working state with the check that fits its scope. For frontend or fullstack work, start_dev_server then read_dev_server_logs to confirm no errors, and briefly describe what the developer can now see or click in the preview. For backend or library work, get_diagnostics plus the relevant build or test command. For schema-only or migration-only phases, confirm the migration applied without errors.
+Once every Phase 1 task is checked off (in BOTH TODO.md and the tracker), verify the phase produces a working state with the check that fits its scope. For frontend or fullstack work, start_dev_server then read_dev_server_logs to confirm no errors, and briefly describe what the developer can now see or click in the preview. For backend or library work, run tsc --noEmit (via execute_command) plus the relevant build or test command. For schema-only or migration-only phases, confirm the migration applied without errors.
 
 ### Auth-route smoke test (REQUIRED if the phase touched /api/auth/*)
 
@@ -556,7 +556,7 @@ After step 4, do NOT call any more tools — the executor enforces this. Begin i
 function getAllowedToolsSection(): string {
   return `# Allowed tools
 
-For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${GET_DIAGNOSTICS}\`, \`${READ_SKILL}\`. For research: \`${DELEGATE}\` — delegate a research or exploration sub-task (e.g., \`delegate({ subagent_type: "Research", description: "Find WebSocket libraries for Deno", prompt: "..." })\`). Call \`${COLLECT_RESULTS}\` to collect results. For structured clarifying questions: \`${ASK_USER_QUESTION}\` — see "Clarifying questions" below. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
+For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. For research: \`${DELEGATE}\` — delegate a research or exploration sub-task (e.g., \`delegate({ subagent_type: "Research", description: "Find WebSocket libraries for Deno", prompt: "..." })\`). Call \`${COLLECT_RESULTS}\` to collect results. For structured clarifying questions: \`${ASK_USER_QUESTION}\` — see "Clarifying questions" below. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
 
 You MUST NOT call: \`${PROVISION_AUTH}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
 }
@@ -1186,7 +1186,7 @@ You are the Architect, not the coder. This turn writes ONE artefact (PLAN.md, pl
 - The model then retries with slightly different arguments, also blocked, also wasted.
 - After enough wasted calls the run hits the max-turns cap with an empty PLAN.md.
 
-Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${GET_DIAGNOSTICS}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, provisioning, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
+Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, provisioning, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
 }
 
 function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat'): string {

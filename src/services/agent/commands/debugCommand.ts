@@ -78,7 +78,7 @@ Follow this loop. Do not skip steps.
 
 5. **Propose the minimum fix.** The smallest change that addresses the verified cause. No surrounding refactor. No "while I'm here" cleanup. If the fix is in a different layer than the symptom (e.g. UI symptom but backend bug), say so before editing.
 
-6. **Verify the fix.** After applying the change, re-run the failing scenario. Confirm the symptom is gone AND no new errors appear in dev-server logs / get_diagnostics. Say so explicitly when verification is impossible.
+6. **Verify the fix.** After applying the change, re-run the failing scenario. Confirm the symptom is gone AND no new errors appear in dev-server logs or type-check output. Say so explicitly when verification is impossible.
 
 7. **Report.** State: cause, fix applied, files changed, verification result. If you couldn't verify, say so. If you suspect the fix only masks a deeper issue, say so.
 </protocol>

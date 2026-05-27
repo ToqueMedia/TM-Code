@@ -2,7 +2,7 @@
  * Explore agent — read-only codebase search.
  *
  * Port of claude-vaz's exploreAgent.ts with TM Code tool names.
- * Tools: read_file, list_directory, search_files, glob, get_diagnostics.
+ * Tools: read_file, list_directory, search_files, glob.
  */
 
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
@@ -10,7 +10,7 @@ import type { SubAgentDefinition, SubAgentParentContext } from './types'
 export const EXPLORE_AGENT: SubAgentDefinition = {
   agentType: 'Explore',
   whenToUse: 'Find usages, definitions, file patterns, or code structure in the project',
-  tools: ['read_file', 'list_directory', 'search_files', 'glob', 'get_diagnostics', 'read_large_result'],
+  tools: ['read_file', 'list_directory', 'search_files', 'glob', 'read_large_result'],
   maxTurns: 30,
   maxWallClockMs: 5 * 60 * 1000,
   color: '#3fb8af',
@@ -37,8 +37,6 @@ ${depthGuide}
 - **glob** — file pattern matching. Use for finding files by name/extension.
 - **read_file** — read a file's contents. Use after search_files/glob to read the relevant code.
 - **list_directory** — list files in a directory. Use for understanding project structure.
-- **get_diagnostics** — get TypeScript/IDE diagnostics for a file.
-
 ## Rules
 - You are READ-ONLY. You cannot write, edit, create, or delete files.
 - Be specific. Name the file path and line number when reporting findings.

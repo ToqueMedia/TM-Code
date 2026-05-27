@@ -13,7 +13,7 @@ export const VERIFY_AGENT: SubAgentDefinition = {
   whenToUse: 'Verify implementation correctness by running tests, type checks, and diagnostics',
   tools: [
     'read_file', 'list_directory', 'search_files', 'glob',
-    'get_diagnostics', 'execute_command', 'read_dev_server_logs',
+    'execute_command', 'read_dev_server_logs',
     'read_large_result',
   ],
   disallowedTools: ['write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'],

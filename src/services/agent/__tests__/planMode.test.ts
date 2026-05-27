@@ -28,7 +28,7 @@ describe('checkPlanModeAccess', () => {
     })
 
     test('allows read tools without a filePath check', () => {
-      const allowed = ['read_file', 'list_directory', 'glob', 'search_files', 'get_diagnostics', 'read_skill', 'read_large_result']
+      const allowed = ['read_file', 'list_directory', 'glob', 'search_files', 'read_skill', 'read_large_result']
       for (const tool of allowed) {
         // Read tools should pass even with arbitrary paths — they only consume.
         expect(checkPlanModeAccess(tool, 'src/components/App.tsx', ROOT)).toBeNull()
@@ -56,7 +56,6 @@ describe('checkPlanModeAccess', () => {
         'create_file',
         'delegate',
         'edit_file',
-        'get_diagnostics',
         'glob',
         'list_directory',
         'read_file',

@@ -14,7 +14,7 @@ import { MONOREPO_DIRS } from '../../../projectTypeDetector'
 import { useLayoutStore } from '../../../../stores/layoutStore'
 import SkillService from '../../skillService'
 import {
-  READ_FILE, GET_DIAGNOSTICS,
+  READ_FILE,
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
@@ -76,7 +76,7 @@ export function getSystemSection(): string {
 
  - **Output text** outside of tool use is shown to the developer. Use it to communicate status, ask questions, or explain decisions.
  - File changes (write_file, edit_file, create_file) produce diffs requiring developer approval. **DO NOT** treat a write as committed until the diff result confirms approval. When the developer rejects a change, **ASK** what they want instead.
- - **Emit ONE diff-producing tool per turn**, not a batch. After calling \`write_file\`/\`edit_file\`/\`create_file\`, stop the turn and let the developer review. The next file change goes in the next turn after they approve. Batching multiple file mutations in a single turn forces the developer to triage parallel pending diffs and breaks the review cadence. Read-only tools (\`read_file\`, \`glob\`, \`search_files\`, \`get_diagnostics\`) can still be batched in parallel within the same turn — only diff-producing writes are one-per-turn.
+ - **Emit ONE diff-producing tool per turn**, not a batch. After calling \`write_file\`/\`edit_file\`/\`create_file\`, stop the turn and let the developer review. The next file change goes in the next turn after they approve. Batching multiple file mutations in a single turn forces the developer to triage parallel pending diffs and breaks the review cadence. Read-only tools (\`read_file\`, \`glob\`, \`search_files\`) can still be batched in parallel within the same turn — only diff-producing writes are one-per-turn.
  - Tool results and user messages may include \`<system-reminder>\` or other tags. Tags contain information from the system — automatically added, and bear **no direct relation** to the specific tool result or user message in which they appear. They are IDE signals, not text the developer wrote. Specific tags you'll encounter:
    - [DEV_SERVER_FEEDBACK]: build errors detected after your file changes — **fix before continuing**.
    - [TOOL_RESULT]: boundary markers wrapping tool output.
@@ -195,10 +195,9 @@ ${totalTools} tools available. Key behaviors not obvious from tool schemas:
  - \`${WRITE_FILE}\` replaces the entire file — omitted code is deleted. Use \`${EDIT_FILE}\` for small changes (~20 lines).
  - \`${WRITE_FILE}\` and \`${EDIT_FILE}\` require you to \`${READ_FILE}\` first. The system will block writes to files you haven't read.
  - \`${READ_DEV_SERVER_LOGS}\` reads output from the running dev server AND runtime errors from the live preview (browser console). Entries prefixed [runtime] are from the browser. Use after file changes or when asked about preview/browser errors. The buffer is CUMULATIVE — old errors persist after a fix; pass the response's \`next_since\` cursor as \`since_timestamp\` on the follow-up call to verify whether your fix landed (otherwise you keep seeing the same stale entry).
- - \`${GET_DIAGNOSTICS}\` checks TypeScript/JavaScript errors without a build step. Use after modifying TS/JS files.
  - \`${READ_LARGE_RESULT}\` retrieves large tool outputs that were too big to return inline. Use the reference ID from the "Output too large" message.
  - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background while you continue working. Available team members:
-   - **Explore** — Read-only codebase search (glob, grep, read_file, get_diagnostics). Use for "find all usages of X", "where is Y defined".
+   - **Explore** — Read-only codebase search (glob, grep, read_file). Use for "find all usages of X", "where is Y defined".
    - **Research** — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X".
    - **Verify** — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API) to catch bugs. Returns PASS, FAIL, or PARTIAL.
    All tasks run in parallel. After delegating:

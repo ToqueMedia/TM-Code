@@ -21,7 +21,6 @@ export const READ_FILE = 'read_file'
 export const LIST_DIRECTORY = 'list_directory'
 export const SEARCH_FILES = 'search_files'
 export const GLOB = 'glob'
-export const GET_DIAGNOSTICS = 'get_diagnostics'
 export const READ_SKILL = 'read_skill'
 export const READ_LARGE_RESULT = 'read_large_result'
 export const READ_DEV_SERVER_LOGS = 'read_dev_server_logs'
@@ -74,7 +73,7 @@ export const DISTILL_MEMORY = 'distill_memory'
  * verifier walks both surfaces and reports drift in either direction.
  */
 export const TOOL_NAMES = [
-  READ_FILE, LIST_DIRECTORY, SEARCH_FILES, GLOB, GET_DIAGNOSTICS,
+  READ_FILE, LIST_DIRECTORY, SEARCH_FILES, GLOB,
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,

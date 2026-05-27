@@ -35,7 +35,6 @@ import { resolveWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
-// TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
 import type { AgentCallbacks } from './agentService'
@@ -2097,64 +2096,6 @@ ${preview}
       }
     })
 
-    // === get_diagnostics ===
-    this.tools.set('get_diagnostics', {
-      definition: {
-        name: 'get_diagnostics',
-        description: 'Get TypeScript/JavaScript diagnostics for the developer\'s project. Runs "npx tsc --noEmit" with a 15-second timeout. For faster checks on a single file, prefer running "npx tsc --noEmit path/to/file.ts" via execute_command.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            file_path: { type: 'string', description: 'Absolute path to a TS/JS file or the project root. If a file, checks only that file. If a directory, checks the whole project.' }
-          },
-          required: ['file_path']
-        },
-        // Spawns `npx tsc --noEmit` via execute_command. Read-only — no side effects on
-        // the user's project. Safe to run in parallel with other read-only tools.
-        concurrencySafe: true,
-      },
-      execute: async (input) => {
-        const filePath = input.file_path as string
-        this.validatePathWithinProject(filePath)
-
-        // Use tsc --noEmit directly instead of the IDE's internal LSP
-        // (the LSP is configured for the IDE, not the developer's project)
-        const projectRoot = this.getProjectRoot()
-        const isFile = filePath.includes('.') && !filePath.endsWith('/')
-        const cmd = isFile
-          ? `npx tsc --noEmit "${filePath}" 2>&1 || true`
-          : `npx tsc --noEmit 2>&1 || true`
-        const cwd = isFile ? projectRoot : filePath
-
-        try {
-          const result = await invoke<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }>('execute_command', {
-            command: cmd,
-            cwd,
-            timeoutSecs: 15,
-          })
-
-          if (result.timedOut) {
-            return `Diagnostics timed out after 15s. The project may not have TypeScript configured. Try running "npx tsc --noEmit" manually via execute_command with a longer timeout.`
-          }
-
-          const output = (result.stdout + '\n' + result.stderr).trim()
-          if (!output || result.exitCode === 0) {
-            return `No type errors found.`
-          }
-
-          // Limit output to prevent context bloat
-          const lines = output.split('\n')
-          if (lines.length > 30) {
-            return lines.slice(0, 30).join('\n') + `\n\n[... ${lines.length - 30} more lines — run tsc manually for full output]`
-          }
-          return output
-        } catch (error) {
-          const msg = error instanceof Error ? error.message : String(error)
-          return `Diagnostics failed: ${msg}. Try running "npx tsc --noEmit" via execute_command as a fallback.`
-        }
-      }
-    })
-
 
 
     // === read_dev_server_logs ===
@@ -2297,7 +2238,7 @@ ${preview}
     this.tools.set('delegate', {
       definition: {
         name: 'delegate',
-        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, grep, read_file, list_directory, get_diagnostics). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
+        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, grep, read_file, list_directory). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2703,7 +2644,7 @@ ${preview}
         // execute_command gets a modified description warning about read-only restrictions.
         const verifierToolNames = new Set([
           'read_file', 'list_directory', 'search_files', 'glob',
-          'get_diagnostics', 'execute_command', 'read_dev_server_logs',
+          'execute_command', 'read_dev_server_logs',
           'read_large_result',
         ])
         const verifierTools = this.getToolDefinitions()

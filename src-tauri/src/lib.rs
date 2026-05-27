@@ -429,6 +429,21 @@ fn close_preview_webview() -> std::result::Result<(), String> {
 }
 
 #[tauri::command]
+fn navigate_preview_webview(action: String) -> std::result::Result<(), String> {
+    let script = match action.as_str() {
+        "back" => "history.back();",
+        "forward" => "history.forward();",
+        "reload" => "location.reload();",
+        other => return Err(format!("Unsupported preview navigation action: {}", other)),
+    };
+
+    let store = preview().lock().map_err(|e| format!("{}", e))?;
+    let wv = store.get().ok_or("No preview webview")?;
+    wv.evaluate_script(script).map_err(|e| format!("{}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn resize_preview_webview(
     x: f64,
     y: f64,
@@ -1298,6 +1313,7 @@ pub fn run() {
             byok_has_key,
             byok_local_chat_stream,
             open_preview_webview,
+            navigate_preview_webview,
             close_preview_webview,
             resize_preview_webview,
             get_app_version,

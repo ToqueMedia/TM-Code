@@ -187,7 +187,6 @@ export async function executeReview(
     'list_directory',
     'search_files',
     'glob',
-    'get_diagnostics',
     'read_skill',
     'read_dev_server_logs',
     'read_large_result',

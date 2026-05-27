@@ -78,7 +78,6 @@ describe('Explore agent prompt', () => {
     expect(prompt).toContain('glob')
     expect(prompt).toContain('read_file')
     expect(prompt).toContain('list_directory')
-    expect(prompt).toContain('get_diagnostics')
   })
 
   it('includes project root', () => {

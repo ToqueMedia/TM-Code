@@ -46,7 +46,6 @@ const TOOL_LABELS: Record<string, string> = {
   glob: 'Finding files',
   execute_command: 'Running',
   start_dev_server: 'Starting server',
-  get_diagnostics: 'Checking types',
   read_dev_server_logs: 'Reading server logs',
   read_large_result: 'Reading output',
   web_fetch: 'Fetching',
@@ -114,8 +113,6 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       const type = input.server_type === 'backend' ? 'backend' : 'frontend'
       return `${type} server`
     }
-    case 'get_diagnostics':
-      return fileName(fp)
     case 'read_dev_server_logs':
       return `last ${input.lines || 50} lines`
     case 'glob':

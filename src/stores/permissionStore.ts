@@ -82,7 +82,6 @@ const SAFE_TOOLS = new Set([
   'list_directory',
   'search_files',
   'glob',
-  'get_diagnostics',
   'read_dev_server_logs',
   'read_large_result',
   'check_background_agents',

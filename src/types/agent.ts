@@ -36,7 +36,6 @@ export type AgentToolName =
   | 'glob'
   | 'execute_command'
   | 'start_dev_server'
-  | 'get_diagnostics'
   | 'web_fetch'
 
 export interface AgentToolCall {

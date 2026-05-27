@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Flex, Box, Text, IconButton, HStack, Button } from '@chakra-ui/react'
 import { IS_MAC } from '@/utils/platform'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap, FiSend, FiUpload, FiCamera, FiDatabase } from 'react-icons/fi'
+import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap, FiSend, FiUpload, FiCamera, FiDatabase } from 'react-icons/fi'
 import { useChatStore, generateId } from '../../stores/chatStore'
 import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
@@ -20,7 +20,7 @@ import PermissionDialog from '../chat/PermissionDialog'
 import HttpClientPanel from '../http-client/HttpClientPanel'
 import DataViewerView from './DataViewerView'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
-import TauriWebview, { closePreviewWebview } from '../ui/TauriWebview'
+import TauriWebview, { closePreviewWebview, type TauriWebviewHandle } from '../ui/TauriWebview'
 import AgentLogo from '../ui/AgentLogo'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -63,6 +63,7 @@ function PreviewView() {
   const isLoaded = useBillingStore(s => s.isLoaded)
   const canUseVision = isLoaded && billingPlan !== 'explorer'
   const previewContainerRef = useRef<HTMLDivElement>(null)
+  const previewWebviewRef = useRef<TauriWebviewHandle>(null)
   const [isCapturing, setIsCapturing] = useState(false)
   const frontendUrl = useLayoutStore(selectFrontendUrl)
   const backendUrl = useLayoutStore(selectBackendUrl)
@@ -333,6 +334,20 @@ function PreviewView() {
       useLayoutStore.getState().reloadPreview()
     }
   }, [previewMode, previewSourcePath])
+
+  const handlePreviewBack = useCallback(async () => {
+    const didNavigate = await previewWebviewRef.current?.goBack()
+    if (!didNavigate) {
+      useToastStore.getState().addToast('warning', 'Preview navigation is not available for this render yet.')
+    }
+  }, [])
+
+  const handlePreviewForward = useCallback(async () => {
+    const didNavigate = await previewWebviewRef.current?.goForward()
+    if (!didNavigate) {
+      useToastStore.getState().addToast('warning', 'Preview navigation is not available for this render yet.')
+    }
+  }, [])
 
   const handleOpenExternal = async () => {
     if (!previewUrl) return
@@ -753,17 +768,46 @@ function PreviewView() {
           {/* Navigation + reload */}
           <HStack gap={0}>
             {previewMode !== 'api' && (
-              <IconButton
-                aria-label={t("view.reloadPreview")}
-                size="xs"
-                variant="ghost"
-                color={tokens.colors.text.secondary}
-                _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-                borderRadius="6px"
-                onClick={handleReload}
-              >
-                <FiRefreshCw size={13} />
-              </IconButton>
+              <>
+                <IconButton
+                  aria-label="Go back in preview"
+                  title="Back"
+                  size="xs"
+                  variant="ghost"
+                  color={tokens.colors.text.secondary}
+                  disabled={!hasPreview || !showIframe}
+                  _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                  borderRadius="6px"
+                  onClick={() => void handlePreviewBack()}
+                >
+                  <FiArrowLeft size={13} />
+                </IconButton>
+                <IconButton
+                  aria-label="Go forward in preview"
+                  title="Forward"
+                  size="xs"
+                  variant="ghost"
+                  color={tokens.colors.text.secondary}
+                  disabled={!hasPreview || !showIframe}
+                  _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                  borderRadius="6px"
+                  onClick={() => void handlePreviewForward()}
+                >
+                  <FiArrowRight size={13} />
+                </IconButton>
+                <IconButton
+                  aria-label={t("view.reloadPreview")}
+                  title={t("view.reloadPreview")}
+                  size="xs"
+                  variant="ghost"
+                  color={tokens.colors.text.secondary}
+                  _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                  borderRadius="6px"
+                  onClick={handleReload}
+                >
+                  <FiRefreshCw size={13} />
+                </IconButton>
+              </>
             )}
           </HStack>
 
@@ -1016,6 +1060,7 @@ function PreviewView() {
             {hasPreview && showIframe ? (
               <Box ref={previewContainerRef} position="relative" w="100%" h="100%">
                 <TauriWebview
+                  ref={previewWebviewRef}
                   url={previewMode === 'static' ? undefined : previewUrl!}
                   html={previewMode === 'static' ? previewHtmlContent! : undefined}
                   reloadKey={previewReloadKey}

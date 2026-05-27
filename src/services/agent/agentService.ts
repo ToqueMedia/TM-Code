@@ -1230,7 +1230,7 @@ class AgentService {
           const hasReadDevLogs = namesThisTurn.includes('read_dev_server_logs')
           const hasReads = namesThisTurn.some(n =>
             n === 'read_file' || n === 'list_directory' || n === 'search_files'
-            || n === 'glob' || n === 'get_diagnostics' || n === 'read_large_result'
+            || n === 'glob' || n === 'read_large_result'
           )
           this.cumulativeToolCalls += validResults.length
           if (hasReadDevLogs) this.writesWithoutDevServerLogs = 0
@@ -2210,8 +2210,6 @@ Developer message: ${displayText}
       }
       case 'web_fetch':
         return `[Fetched: ${args.url ?? '?'} (${result.length} chars)]`
-      case 'get_diagnostics':
-        return `[Diagnostics: ${args.file_path ?? '?'} — ${result.split('\n')[0] || 'no issues'}]`
       case 'edit_file':
         return `[Edit: ${args.file_path ?? '?'} (${lineCount} lines)]`
       case 'write_file':
@@ -2304,9 +2302,6 @@ Developer message: ${displayText}
             break
           case 'glob':
             entry = `glob "${input.pattern ?? '?'}"`
-            break
-          case 'get_diagnostics':
-            entry = `diagnostics: ${input.file_path ?? '?'}`
             break
           case 'web_search':
             entry = `web search: "${input.query ?? '?'}"`

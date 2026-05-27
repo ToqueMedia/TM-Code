@@ -7,6 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{canonicalize_path, normalize_path_for_frontend};
 
+/// Directories always excluded from the file tree to avoid massive context waste.
+/// Matches the exclusion list in `filesystem.rs:has_excluded` (glob tool).
+const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "__pycache__", ".next", ".nuxt", ".output"];
+
 // File tree node types
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -337,6 +341,15 @@ fn build_tree_node(
                     if name.starts_with('.') {
                         continue;
                     }
+                }
+            }
+        }
+
+        // Skip excluded directories (node_modules, .git, dist, build, etc.)
+        if file_type.is_dir() {
+            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
+                if EXCLUDED_DIRS.contains(&name) {
+                    continue;
                 }
             }
         }
