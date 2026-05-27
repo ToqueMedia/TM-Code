@@ -137,7 +137,7 @@ export function useCmdPromptLogic() {
   useEffect(() => {
     const unsubscribe = useTerminalPanelStore.subscribe((state) => {
       const cmd = pendingShellCmdRef.current
-      if (cmd && state.ptySessionId) {
+      if (cmd && state.activeInstanceId) {
         pendingShellCmdRef.current = null
         state.writeToPty(cmd + '\r')
       }
@@ -218,10 +218,10 @@ export function useCmdPromptLogic() {
       if (!tpStore.isOpen) {
         tpStore.toggle()
       }
-      // If PTY session is already ready, write immediately.
+      // If a terminal is already active, write immediately.
       // Otherwise, store in ref — the useEffect subscription will consume it
-      // as soon as ptySessionId becomes available.
-      if (tpStore.ptySessionId) {
+      // as soon as a terminal becomes active.
+      if (tpStore.getActiveSessionId()) {
         tpStore.writeToPty(command + '\r')
       } else {
         pendingShellCmdRef.current = command

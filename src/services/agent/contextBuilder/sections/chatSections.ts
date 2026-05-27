@@ -197,7 +197,7 @@ ${totalTools} tools available. Key behaviors not obvious from tool schemas:
  - \`${READ_DEV_SERVER_LOGS}\` reads output from the running dev server AND runtime errors from the live preview (browser console). Entries prefixed [runtime] are from the browser. Use after file changes or when asked about preview/browser errors. The buffer is CUMULATIVE — old errors persist after a fix; pass the response's \`next_since\` cursor as \`since_timestamp\` on the follow-up call to verify whether your fix landed (otherwise you keep seeing the same stale entry).
  - \`${READ_LARGE_RESULT}\` retrieves large tool outputs that were too big to return inline. Use the reference ID from the "Output too large" message.
  - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background while you continue working. Available team members:
-   - **Explore** — Read-only codebase search (glob, grep, read_file). Use for "find all usages of X", "where is Y defined".
+   - **Explore** — Read-only codebase search (glob, search_files, read_file). Use for "find all usages of X", "where is Y defined".
    - **Research** — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X".
    - **Verify** — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API) to catch bugs. Returns PASS, FAIL, or PARTIAL.
    All tasks run in parallel. After delegating:
@@ -712,7 +712,7 @@ export function getMemorySection(ctx: PromptContext): string | null {
     parts.push(
       `**Freshness:** some entries below are tagged with their age (e.g. _(45d old)_). ` +
       `For old entries that cite specific file paths, function names, env vars, or flags, ` +
-      `verify the citation against current code (\`read_file\` / grep) before recommending. ` +
+      `verify the citation against current code (\`read_file\` / \`search_files\`) before recommending. ` +
       `The rule the memory captures is usually still valid; the *concrete identifiers* may have moved.`,
     )
   }
@@ -925,7 +925,7 @@ These exclusions apply **even when the developer explicitly asks you to save.** 
 A memory that names a specific function, file, or flag is a claim that it existed *when the memory was written*. It may have been renamed, removed, or never merged. Before recommending it:
 
 - If the memory names a file path → check the file exists (\`read_file\` or \`list_directory\`).
-- If the memory names a function or flag → grep for it.
+- If the memory names a function or flag → search_files for it.
 - If the developer is about to act on your recommendation, verify first.
 
 "The memory says X exists" is not the same as "X exists now." If a recalled memory conflicts with what you observe, trust what you observe and update or forget the stale memory.`

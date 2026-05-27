@@ -4,6 +4,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useAgentElapsed } from '../../hooks/useAgentElapsed'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n/useTranslation'
 
 function formatElapsed(ms: number): string {
   const secs = Math.floor(ms / 1000)
@@ -33,9 +34,9 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 const COMPACT_PHASE_LABELS: Record<string, string> = {
-  hooks_pre: 'Running pre-compact hooks',
-  hooks_post: 'Running post-compact hooks',
-  compressing: 'Compacting conversation',
+  hooks_pre: t('chat.compact.preHooks'),
+  hooks_post: t('chat.compact.postHooks'),
+  compressing: t('chat.compact.compacting'),
 }
 
 function AgentActivityIndicator() {

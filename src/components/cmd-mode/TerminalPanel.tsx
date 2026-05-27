@@ -1,21 +1,16 @@
 /**
- * TerminalPanel — interactive PTY shell rendered with xterm.js v6.
+ * TerminalPanel — multi-instance PTY terminal with tab bar.
  *
  * Architecture:
- *  - Frontend: xterm Terminal + FitAddon + WebLinksAddon.
- *  - Backend: Rust `start_pty_shell` / `write_to_pty` / `resize_pty` / `kill_pty_session`.
- *  - Multiplex: a single global `pty-output` event carries `{ session_id, data }`
- *    payloads — we filter by `session_id` so future multi-terminal support is a
- *    drop-in. `pty-exit` mirrors the same envelope.
- *
- *  Lifecycle (single source of truth = terminalPanelStore):
- *   - mount → invoke start_pty_shell → store session id → wire events
- *   - close button or store.close() → invoke kill_pty_session → unmount
- *   - unmount cleanup → store.close() (in case the parent unmounts us first)
+ *  - Store manages up to 3 TerminalInstance objects (id + name).
+ *  - All terminals are always mounted (CSS display toggle for active/inactive).
+ *  - Each SingleTerminal owns its xterm lifecycle; the store owns PTY lifecycle.
+ *  - Tab bar replaces the old single header.
+ *  - close() hides panel (PTYs alive); killAll() destroys everything (/exit).
  */
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiX } from 'react-icons/fi'
+import { Box, Flex, HStack, Text } from '@chakra-ui/react'
+import { FiPlus, FiX } from 'react-icons/fi'
 import { invoke } from '@/utils/invokeMetrics'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Terminal } from '@xterm/xterm'
@@ -44,15 +39,77 @@ interface PtyExitEvent {
   exit_code: number
 }
 
-const HEADER_HEIGHT_PX = 28
+const TAB_BAR_HEIGHT_PX = 28
 
-export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx, onReady }: TerminalPanelProps) {
+// ─── Tab Bar ────────────────────────────────────────────────────────────────
+
+function TabItem({
+  name,
+  isActive,
+  onClick,
+  onClose,
+}: {
+  name: string
+  isActive: boolean
+  onClick: () => void
+  onClose: () => void
+}) {
+  return (
+    <Flex
+      align="center"
+      gap={1}
+      px={2}
+      h="100%"
+      cursor="pointer"
+      bg={isActive ? 'rgba(255,255,255,0.04)' : 'transparent'}
+      borderBottom={isActive ? `2px solid ${tokens.colors.accent.primary}` : '2px solid transparent'}
+      _hover={{ bg: isActive ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)' }}
+      onClick={onClick}
+      flexShrink={0}
+    >
+      <Text
+        fontSize="10px"
+        color={isActive ? tokens.colors.text.primary : tokens.colors.text.disabled}
+        fontFamily={tokens.fontFamily.mono}
+        fontWeight="600"
+        letterSpacing="0.04em"
+        whiteSpace="nowrap"
+        userSelect="none"
+      >
+        {name}
+      </Text>
+      <Box
+        as="button"
+        onClick={(e: React.MouseEvent) => { e.stopPropagation(); onClose() }}
+        aria-label={`Close ${name}`}
+        p="1px"
+        borderRadius="2px"
+        color={tokens.colors.text.disabled}
+        _hover={{ color: tokens.colors.text.primary, bg: 'rgba(255,255,255,0.06)' }}
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        transition="color 0.12s, background 0.12s"
+      >
+        <FiX size={11} />
+      </Box>
+    </Flex>
+  )
+}
+
+// ─── Single Terminal Instance ────────────────────────────────────────────────
+
+interface SingleTerminalProps {
+  sessionId: string
+  projectPath: string
+  onReady?: () => void
+}
+
+const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, onReady }: SingleTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
-  const sessionIdRef = useRef<string | null>(null)
-  const close = useTerminalPanelStore(s => s.close)
-  const setSessionId = useTerminalPanelStore(s => s.setSessionId)
+  const removeTerminal = useTerminalPanelStore(s => s.removeTerminal)
 
   // Autocomplete state
   const [completions, setCompletions] = useState<string[]>([])
@@ -67,7 +124,6 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
   useEffect(() => { completionsRef.current = completions }, [completions])
   useEffect(() => { selectedIdxRef.current = selectedIdx }, [selectedIdx])
 
-  /** Read the current word being typed from the xterm buffer. */
   const getCurrentWord = useCallback((term: Terminal): string => {
     const buffer = term.buffer.active
     const absRow = buffer.baseY + buffer.cursorY
@@ -80,7 +136,6 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
     return before.slice(lastSpace + 1)
   }, [])
 
-  /** Get pixel position for the autocomplete menu based on cursor position. */
   const getMenuPosition = useCallback((term: Terminal): { top: number; left: number } => {
     const el = term.element
     if (!el) return { top: 0, left: 0 }
@@ -93,7 +148,6 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
     }
   }, [])
 
-  /** Close the autocomplete menu. Invalidates in-flight completion requests. */
   const closeMenu = useCallback(() => {
     completionSeq.current++
     setCompletions([])
@@ -103,27 +157,19 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
     selectedIdxRef.current = 0
   }, [])
 
-  /** Apply a completion: erase the partial word and write the completed text. */
-  const applyCompletion = useCallback((term: Terminal, sessionId: string, completion: string, word: string) => {
+  const applyCompletion = useCallback((term: Terminal, sid: string, completion: string, word: string) => {
     closeMenu()
-    // Send backspaces to erase the partial word, then send the completion.
-    // \x7f is DEL, the default erase character for most shells (stty erase).
-    // Append a trailing space for commands/files; directories already end with '/'.
     const backspaces = '\x7f'.repeat(word.length)
     const separator = completion.endsWith('/') ? '' : ' '
-    invoke('write_to_pty', { sessionId, data: backspaces + completion + separator }).catch((err) => {
+    invoke('write_to_pty', { sessionId: sid, data: backspaces + completion + separator }).catch((err) => {
       logger.warn('terminal-panel', 'applyCompletion write_to_pty failed:', err)
     })
     term.focus()
   }, [closeMenu])
 
-  // Boot xterm + PTY once on mount. The effect runs once (projectPath change is
-  // handled at the parent level by remount via key).
+  // Boot xterm + PTY
   useEffect(() => {
     if (!containerRef.current) return
-
-    const sessionId = crypto.randomUUID()
-    sessionIdRef.current = sessionId
 
     const term = new Terminal({
       cursorBlink: true,
@@ -166,8 +212,6 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
     termRef.current = term
     fitRef.current = fit
 
-    // Initial fit + focus — double rAF so the container has final dimensions
-    // before we measure. Single rAF can fire before layout is computed.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         try {
@@ -183,71 +227,57 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
     const onDataDisposable = term.onData((data: string) => {
       const hasMenu = completionsRef.current.length > 0
 
-      // Tab key
       if (data === '\t') {
         if (hasMenu) {
-          // Confirm the selected completion
           const selected = completionsRef.current[selectedIdxRef.current]
           if (selected) applyCompletion(term, sessionId, selected, wordRef.current)
           return
         }
-        // Request completions from backend
         const word = getCurrentWord(term)
         if (!word) {
-          // No partial word — send Tab to shell
           invoke('write_to_pty', { sessionId, data: '\t' }).catch(() => {})
           return
         }
         wordRef.current = word
         const seq = ++completionSeq.current
         TerminalService.shared.getCompletions(word, projectPath).then((results) => {
-          if (completionSeq.current !== seq) return // stale response
+          if (completionSeq.current !== seq) return
           if (!results || results.length === 0) {
-            // No completions — fall through to shell Tab
             invoke('write_to_pty', { sessionId, data: '\t' }).catch(() => {})
             return
           }
           if (results.length === 1) {
-            // Single match — auto-complete inline
             applyCompletion(term, sessionId, results[0], word)
             return
           }
-          // Multiple matches — show dropdown
           setCompletions(results)
           setSelectedIdx(0)
           setMenuPos(getMenuPosition(term))
         }).catch(() => {
           if (completionSeq.current !== seq) return
-          // On error, fall through to shell Tab
           invoke('write_to_pty', { sessionId, data: '\t' }).catch(() => {})
         })
         return
       }
 
-      // When menu is open, handle navigation keys
       if (hasMenu) {
-        // Arrow Down
         if (data === '\x1b[B') {
           setSelectedIdx((prev) => (prev + 1) % completionsRef.current.length)
           return
         }
-        // Arrow Up
         if (data === '\x1b[A') {
           setSelectedIdx((prev) => (prev - 1 + completionsRef.current.length) % completionsRef.current.length)
           return
         }
-        // Enter — confirm selection
         if (data === '\r' || data === '\n') {
           const sel = completionsRef.current[selectedIdxRef.current]
           if (sel) applyCompletion(term, sessionId, sel, wordRef.current)
           return
         }
-        // Esc — close menu
         if (data === '\x1b') {
           closeMenu()
           return
         }
-        // Any other key — close menu and pass through
         closeMenu()
       }
 
@@ -256,48 +286,40 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
       })
     })
 
-    // PTY → frontend: stream output. Single global event channel for now;
-    // filter by session id so we ignore noise from other future panels.
+    // PTY → frontend: stream output
     let unlistenOutput: UnlistenFn | null = null
     let unlistenExit: UnlistenFn | null = null
     let disposed = false
+    let shellStarted = false
 
     listen<PtyOutputEvent>('pty-output', (event) => {
       if (disposed) return
       if (event.payload.session_id !== sessionId) return
       term.write(event.payload.data)
-      // Close autocomplete menu when the shell sends output (user typed, or
-      // the shell itself responded to something). Keeps the overlay in sync
-      // with the actual terminal content.
       if (completionsRef.current.length > 0) closeMenu()
     }).then((fn) => {
-      if (disposed) {
-        fn()
-      } else {
-        unlistenOutput = fn
-      }
+      if (disposed) fn()
+      else unlistenOutput = fn
     })
 
     listen<PtyExitEvent>('pty-exit', (event) => {
       if (disposed) return
       if (event.payload.session_id !== sessionId) return
-      // Shell exited (user typed `exit`, or process died) — close the panel.
-      close()
+      // Guard: ignore pty-exit if start_pty_shell hasn't resolved yet.
+      // This prevents a race where the shell dies before the frontend
+      // confirms the session was created (e.g. StrictMode double-invoke).
+      if (!shellStarted) return
+      removeTerminal(sessionId)
     }).then((fn) => {
-      if (disposed) {
-        fn()
-      } else {
-        unlistenExit = fn
-      }
+      if (disposed) fn()
+      else unlistenExit = fn
     })
 
-    // Spawn the shell. `cwd` is clamped to the project on the Rust side when
-    // an active project is set (it is — `open_project` was invoked by the
-    // parent TerminalView).
+    // Spawn the shell
     invoke<string>('start_pty_shell', { sessionId, cwd: projectPath })
       .then(() => {
         if (disposed) return
-        setSessionId(sessionId)
+        shellStarted = true
         onReady?.()
       })
       .catch((err) => {
@@ -305,11 +327,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
         term.writeln('\x1b[31mFailed to start shell. See logs.\x1b[0m')
       })
 
-    // ResizeObserver: keep xterm sized to its container, and inform the PTY.
-    // `fit()` is cheap and we want xterm to react every observer tick (no
-    // visual lag during drag). `resize_pty` is the expensive call — debounce
-    // it to one IPC per 120 ms drag burst, and skip the IPC entirely when
-    // cols/rows are unchanged (e.g. layout reflow without a real size change).
+    // ResizeObserver
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     let lastCols = -1
     let lastRows = -1
@@ -339,19 +357,46 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
       onDataDisposable.dispose()
       if (unlistenOutput) unlistenOutput()
       if (unlistenExit) unlistenExit()
-      // Best-effort PTY shutdown. Store.close() (called by /terminal toggle or
-      // exit button) is the authoritative kill — this is just defence-in-depth
-      // for the unmount-without-close-action case.
-      invoke('kill_pty_session', { sessionId }).catch(() => {})
+      // Do NOT kill PTY here — the store owns PTY lifecycle.
+      // - Tab close: removeTerminal() in the store is the trigger; React
+      //   unmounts this component, this cleanup runs, but PTY is already dead.
+      // - Panel close (Esc/Ctrl+X): close() hides the panel, instances stay
+      //   alive, this cleanup does NOT run (components stay mounted via CSS).
+      // - /exit: killAll() explicitly kills all PTYs before unmounting.
       term.dispose()
       termRef.current = null
       fitRef.current = null
-      sessionIdRef.current = null
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectPath, close, setSessionId])
+  }, [sessionId, projectPath])
 
-  const folderName = projectPath.split(/[\/\\]/).filter(Boolean).pop() || projectPath
+  return (
+    <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative">
+      {completions.length > 0 && menuPos && (
+        <TerminalAutocomplete
+          completions={completions}
+          selectedIndex={selectedIdx}
+          position={menuPos}
+          onSelect={(item) => {
+            if (termRef.current) {
+              applyCompletion(termRef.current, sessionId, item, wordRef.current)
+            }
+          }}
+        />
+      )}
+    </Box>
+  )
+})
+
+// ─── Terminal Panel ─────────────────────────────────────────────────────────
+
+export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx, onReady }: TerminalPanelProps) {
+  const instances = useTerminalPanelStore(s => s.instances)
+  const activeInstanceId = useTerminalPanelStore(s => s.activeInstanceId)
+  const addTerminal = useTerminalPanelStore(s => s.addTerminal)
+  const removeTerminal = useTerminalPanelStore(s => s.removeTerminal)
+  const setActiveTerminal = useTerminalPanelStore(s => s.setActiveTerminal)
+  const close = useTerminalPanelStore(s => s.close)
 
   return (
     <Flex
@@ -363,35 +408,57 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
       borderLeft="1px solid rgba(255,255,255,0.06)"
       minH={0}
     >
-      {/* Header */}
+      {/* Tab bar */}
       <Flex
-        height={`${HEADER_HEIGHT_PX}px`}
+        height={`${TAB_BAR_HEIGHT_PX}px`}
         flexShrink={0}
-        align="center"
-        justify="space-between"
-        px={2}
+        align="stretch"
         bg="rgba(0,0,0,0.3)"
         borderBottom="1px solid rgba(255,255,255,0.04)"
         data-tauri-drag-region
       >
-        <Text
-          fontSize="10px"
-          color={tokens.colors.text.muted}
-          fontFamily={tokens.fontFamily.mono}
-          fontWeight="600"
-          letterSpacing="0.05em"
-          overflow="hidden"
-          textOverflow="ellipsis"
-          whiteSpace="nowrap"
-        >
-          terminal · {folderName}
-        </Text>
+        <HStack gap={0} h="100%" overflow="hidden" flex="1" minW={0}>
+          {instances.map((inst) => (
+            <TabItem
+              key={inst.id}
+              name={inst.name}
+              isActive={inst.id === activeInstanceId}
+              onClick={() => setActiveTerminal(inst.id)}
+              onClose={() => removeTerminal(inst.id)}
+            />
+          ))}
+
+          {/* Add terminal button */}
+          {instances.length < 3 && (
+            <Box
+              as="button"
+              onClick={addTerminal}
+              aria-label="Add terminal"
+              title="Add terminal (max 3)"
+              p="3px"
+              ml={1}
+              borderRadius="3px"
+              color={tokens.colors.text.disabled}
+              _hover={{ color: tokens.colors.text.primary, bg: 'rgba(255,255,255,0.06)' }}
+              display="flex"
+              alignItems="center"
+              justifyContent="center"
+              transition="color 0.12s, background 0.12s"
+              flexShrink={0}
+            >
+              <FiPlus size={12} />
+            </Box>
+          )}
+        </HStack>
+
+        {/* Close panel button */}
         <Box
           as="button"
           onClick={close}
           aria-label="Close terminal panel"
           title="Close (Esc or Ctrl+X)"
           p="2px"
+          mr={1}
           borderRadius="3px"
           color={tokens.colors.text.disabled}
           _hover={{ color: tokens.colors.text.primary, bg: 'rgba(255,255,255,0.06)' }}
@@ -399,25 +466,32 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
           alignItems="center"
           justifyContent="center"
           transition="color 0.12s, background 0.12s"
+          flexShrink={0}
+          data-tauri-drag-region={false}
         >
           <FiX size={13} />
         </Box>
       </Flex>
 
-      {/* xterm container — fills remaining height */}
-      <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative">
-        {completions.length > 0 && menuPos && (
-          <TerminalAutocomplete
-            completions={completions}
-            selectedIndex={selectedIdx}
-            position={menuPos}
-            onSelect={(item) => {
-              if (termRef.current && sessionIdRef.current) {
-                applyCompletion(termRef.current, sessionIdRef.current, item, wordRef.current)
-              }
-            }}
-          />
-        )}
+      {/* All terminals — only the active one is visible. Inactive terminals
+          are kept alive (PTY running, xterm mounted) so tab switching is
+          instant and background pty-exit events are still received. */}
+      <Box flex="1" minH={0} position="relative">
+        {instances.map((inst) => (
+          <Box
+            key={inst.id}
+            position="absolute"
+            inset={0}
+            display={inst.id === activeInstanceId ? 'flex' : 'none'}
+            flexDirection="column"
+          >
+            <SingleTerminal
+              sessionId={inst.id}
+              projectPath={projectPath}
+              onReady={inst.id === activeInstanceId ? onReady : undefined}
+            />
+          </Box>
+        ))}
       </Box>
     </Flex>
   )

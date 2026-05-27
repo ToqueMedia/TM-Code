@@ -317,9 +317,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     stickToBottom()
   }, [messages.length, stickToBottom])
 
-  // Close the terminal panel automatically when leaving the project.
+  // Kill all PTY sessions when leaving the project (unmount TerminalView).
   useEffect(() => {
-    return () => { useTerminalPanelStore.getState().close() }
+    return () => { useTerminalPanelStore.getState().killAll() }
   }, [])
 
   // Track outer container width so we can clamp the panel to max 50% of the IDE.

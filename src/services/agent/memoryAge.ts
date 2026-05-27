@@ -66,7 +66,7 @@ export function memoryAgeWarning(mtimeMs: number, nowMs: number = Date.now()): s
     `> ⚠️ This memory is ${days} day${days === 1 ? '' : 's'} old. ` +
     `Memories are point-in-time observations, not live state — file paths, ` +
     `function names, and env-var names it cites may have moved. ` +
-    `Verify identifiers against current code (grep / list_directory / read_file) ` +
+    `Verify identifiers against current code (search_files / list_directory / read_file) ` +
     `before asserting them as fact.\n\n`
   )
 }

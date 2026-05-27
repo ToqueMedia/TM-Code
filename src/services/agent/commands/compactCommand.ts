@@ -1,7 +1,9 @@
 import { useChatStore } from '@/stores/chatStore'
 import AgentService from '../agentService'
 import { useAgentStore } from '@/stores/agentStore'
+import type { CompactProgressEvent } from '@/types/agent'
 import type { SlashCommandMode } from '../slashCommandRegistry'
+import { t } from '@/i18n/useTranslation'
 
 export async function executeCompact(
   args: string,
@@ -9,29 +11,43 @@ export async function executeCompact(
   _mode: SlashCommandMode = 'chat',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
+  const agentStore = useAgentStore.getState()
   const agentService = AgentService.getInstance()
 
   // Guard: check if agent is currently running
   if (agentService.isAgentRunning()) {
-    chatStore.addSystemMessage('Não é possível comprimir enquanto o agente está a processar.', 'warn')
+    chatStore.addSystemMessage(t('chat.compact.busy'), 'warn')
     return
   }
 
   // Guard: check minimum message count
   const history = chatStore.conversationHistory
   if (history.length < 4) {
-    chatStore.addSystemMessage('Poucas mensagens para comprimir.', 'warn')
+    chatStore.addSystemMessage(t('chat.compact.notEnough'), 'warn')
     return
   }
 
   const customInstructions = args.trim() || undefined
 
+  // Progress callback — drives compactPhase in agentStore so the UI
+  // shows phased status labels (pre-hooks, compressing, post-hooks).
+  const onProgress = (event: CompactProgressEvent) => {
+    if (event.type === 'hooks_start') {
+      agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')
+    } else if (event.type === 'compact_start') {
+      agentStore.setCompactPhase('compressing')
+    } else if (event.type === 'compact_end') {
+      agentStore.setCompactPhase('idle')
+    }
+  }
+
   try {
-    useAgentStore.getState().setStatus('compressing')
-    await agentService.runManualCompact(customInstructions)
-    useAgentStore.getState().setStatus('idle')
+    agentStore.setStatus('compressing')
+    await agentService.runManualCompact(customInstructions, onProgress)
+    agentStore.setStatus('idle')
   } catch (err) {
-    useAgentStore.getState().setStatus('idle')
+    agentStore.setCompactPhase('idle')
+    agentStore.setStatus('idle')
     chatStore.addSystemMessage(
       `Erro na compressão: ${err instanceof Error ? err.message : String(err)}`,
       'error',

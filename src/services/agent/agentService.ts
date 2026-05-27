@@ -2479,6 +2479,8 @@ Developer message: ${displayText}
       return sum + Math.ceil(content.length / 4)
     }, 0)
 
+    // Emit phased progress events so the UI shows pre-hooks → compressing → post-hooks
+    onProgress?.({ type: 'hooks_start', hookType: 'pre_compact' })
     onProgress?.({ type: 'compact_start', beforeTokens, trigger: 'manual' })
 
     try {
@@ -2514,15 +2516,17 @@ Developer message: ${displayText}
       const summaryContent = this.extractSummaryFromCompressed(compressed)
       const summaryMessage: import('@/types/chat').ChatMessage = {
         id: generateId('msg'),
-        role: 'user',
-        content: summaryContent,
+        role: 'assistant',
+        content: `Contexto compactado de ${Math.round(beforeTokens / 1000)}K para ~${Math.round(afterTokens / 1000)}K tokens.\n\n${summaryContent}`,
         timestamp: Date.now(),
       }
 
       // Update the chat store: replace all messages with boundary + summary
       chatStore.replaceMessages([boundaryMessage, summaryMessage])
       chatStore.resetTokenCounters()
+      chatStore.setPostCompactSurveyPending(true)
 
+      onProgress?.({ type: 'hooks_start', hookType: 'post_compact' })
       onProgress?.({ type: 'compact_end', beforeTokens, trigger: 'manual' })
 
       return { beforeTokens, afterTokens }

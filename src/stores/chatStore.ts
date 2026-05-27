@@ -2278,11 +2278,24 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     resetTokenCounters: () => {
-      set(state => ({
-        totalTokensUsed: { input: 0, output: state.totalTokensUsed.output },
-        currentPromptTokens: 0,
-        currentResponseTokens: 0,
-      }))
+      set(state => {
+        // Also reset lastPromptTokens on the active session so the
+        // ContextWindowIndicator doesn't fall back to stale pre-compact values.
+        const sessionId = state.activeSessionId
+        const sessions = sessionId ? new Map(state.sessions) : state.sessions
+        if (sessionId) {
+          const session = sessions.get(sessionId)
+          if (session) {
+            sessions.set(sessionId, { ...session, lastPromptTokens: 0 })
+          }
+        }
+        return {
+          totalTokensUsed: { input: 0, output: state.totalTokensUsed.output },
+          currentPromptTokens: 0,
+          currentResponseTokens: 0,
+          sessions,
+        }
+      })
     },
 
     updateConversationHistory: (messages: ConversationMessage[]) => {

@@ -347,6 +347,7 @@ async function runAgentInternal(
       onError: (error) => {
         flushBufferedDeltas()
         resolveAllPendingDiffApprovals(false)
+        agentStore.setCompactPhase('idle')
         agentStore.setStatus('error')
         agentStore.setError(error.message)
         logger.info('agent', `✗ Agent error: ${error.message}`)
@@ -379,6 +380,10 @@ async function runAgentInternal(
     if (cmdOnlyMode && cmdCwd) {
       toolExecutor.disableCmdMode()
     }
+    // Reset compact phase in case compression was in-flight when the loop
+    // exited (error, stop, or unexpected break). Without this, stale phases
+    // like 'compressing' persist in the UI after the agent goes idle.
+    agentStore.setCompactPhase('idle')
     // Restore the preview pane if a browser-driven session hid it. Safe
     // when no session was active (no-op).
     browserSession.endSession()

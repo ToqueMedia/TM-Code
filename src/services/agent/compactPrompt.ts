@@ -160,7 +160,7 @@ export function buildPostCompactionSummaryMessage(
       `If you need specific details from before compaction (exact code snippets, verbatim error messages, the developer's literal wording), use \`read_file\` on the pre-compaction transcript at:`,
       options.transcriptPath,
       '',
-      'The transcript is a JSONL file — one Anthropic-shape message per line, with full tool_use and tool_result blocks intact. Grep it for the symbol or phrase you need; do not page through the whole file.',
+      'The transcript is a JSONL file — one Anthropic-shape message per line, with full tool_use and tool_result blocks intact. Use search_files on it for the symbol or phrase you need; do not page through the whole file.',
     )
   }
 
