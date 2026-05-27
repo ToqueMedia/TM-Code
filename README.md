@@ -21,6 +21,23 @@
 
 ---
 
+### Sponsored by
+
+<table align="center">
+  <tr>
+    <td align="center" width="200" height="80">
+      <a href="https://platform.xiaomimimo.com/">
+        <img src="https://mimo.xiaomi.com/mimo-v2-pro/assets/logo.svg" alt="Xiaomi MiMo logo" width="136">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://platform.xiaomimimo.com/"><strong>Xiaomi MiMo</strong></a></td>
+  </tr>
+</table>
+
+---
+
 <!-- Replace with real screenshots when available -->
 <!-- ![TM Code Screenshot](docs/screenshots/chat-view.png) -->
 
@@ -35,7 +52,7 @@ TM Code is a **chat-first desktop IDE** where the AI agent is the primary interf
 - **Chat-First UX** — Start in chat, the agent writes code, you review. Switch to editor mode when needed.
 - **Live Preview** — See your app running in real-time as the agent builds it.
 - **Inline Diffs** — Accept or reject code changes one by one, directly in the chat.
-- **Multi-Model Support** — DeepSeek V3.2, GLM-5, Kimi K2.5, Qwen3 Coder, MiniMax M2.5, Gemini 3 Flash, and more.
+- **Powered by MiMo** — Xiaomi's MiMo V2.5 models with native 1M-token context windows and strong agentic capabilities.
 - **MCP Integration** — Connect external tools via Model Context Protocol servers.
 - **Built-in Terminal** — xterm.js v6 with full PTY support.
 - **Monaco Editor** — Full VS Code editing experience with split panes, breadcrumbs, and formatting.
@@ -44,21 +61,13 @@ TM Code is a **chat-first desktop IDE** where the AI agent is the primary interf
 - **Slash Commands** — `/plan` for architecture docs, `/init` for project setup.
 - **Auto-Updates** — Seamless in-app updates via GitHub Releases.
 
-## Architecture
+### MiMo Models
 
-```
-Frontend (React 19 + TypeScript)  ──Tauri IPC──>  Backend (Rust)  ──>  OS/Filesystem
-         │                                              │
-         └── Agent Service ── SSE ──> Cloudflare Worker ──> AI Providers (DashScope, Google, OpenRouter)
-```
+**MiMo-V2.5-Pro** — Xiaomi's strongest model yet. Native 1M-token context window, specially enhanced for general agentic capabilities, complex software engineering, and long-horizon tasks. It can autonomously complete professional tasks involving 1,000+ tool calls, work that would take human experts days.
 
-Built with:
-- **Tauri 2** — Native desktop shell (macOS, Windows, Linux)
-- **React 19** + **Chakra UI v3** — Frontend UI
-- **Zustand** — State management (19 stores)
-- **Monaco Editor** — Code editing
-- **xterm.js v6** — Terminal emulator
-- **Cloudflare Workers** — API proxy with billing, rate limiting, and queue
+**MiMo-V2.5** — Native omnimodal with strong agentic capabilities. Pro-level agent performance at roughly half the cost. Improved multimodal perception across image, video, audio, text understanding, native 1M-token context window, and significantly more efficient inference.
+
+Learn more at [platform.xiaomimimo.com](https://platform.xiaomimimo.com/)
 
 ## Download
 
@@ -72,7 +81,7 @@ Built with:
 
 | | Free | Pro | Business |
 |---|---|---|---|
-| **Models** | MiMo V2 Flash | All models | All models |
+| **Model** | MiMo V2.5 | MiMo V2.5 Pro | MiMo V2.5 Pro |
 | **Credits** | 10/day | Monthly pool | Monthly pool (4x/8x) |
 | **Queue** | Max 5 concurrent | Unlimited | Unlimited |
 | **Price** | $0 | Coming soon | Coming soon |
@@ -118,5 +127,5 @@ npm test
 ---
 
 <p align="center">
-  Built by <a href="https://toquemedia.com">Toque Media</a>
+  Built by <a href="https://toquemedia.com">Toque Media</a> · Sponsored by <a href="https://platform.xiaomimimo.com/">Xiaomi MiMo</a>
 </p>
