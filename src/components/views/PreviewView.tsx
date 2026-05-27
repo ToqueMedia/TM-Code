@@ -4,28 +4,21 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Flex, Box, Text, IconButton, HStack, Button } from '@chakra-ui/react'
 import { IS_MAC } from '@/utils/platform'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap, FiSend, FiUpload, FiCamera, FiDatabase } from 'react-icons/fi'
+import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiZap, FiSend, FiUpload, FiCamera, FiDatabase } from 'react-icons/fi'
 import { useChatStore, generateId } from '../../stores/chatStore'
 import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
-import { usePermissionStore } from '../../stores/permissionStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useToastStore } from '../../stores/toastStore'
 import { createImageAttachmentFromClipboard } from '../../services/attachmentService'
 import { devServerManager } from '../../services/devServerManager'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
-import MessageBubble from '../chat/MessageBubble'
-import PromptBar from '../PromptBar'
-import PermissionDialog from '../chat/PermissionDialog'
 import HttpClientPanel from '../http-client/HttpClientPanel'
 import DataViewerView from './DataViewerView'
-import { useMessageWindow } from '../../hooks/useMessageWindow'
 import TauriWebview, { closePreviewWebview, type TauriWebviewHandle } from '../ui/TauriWebview'
-import AgentLogo from '../ui/AgentLogo'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
-const STORAGE_KEY = 'preview-chat-width'
 const CONSOLE_STORAGE_KEY = 'preview-console-height'
 const HTTP_DRAWER_OPEN_KEY = 'preview-http-drawer-open'
 const DATA_DRAWER_HEIGHT_KEY = 'preview-data-drawer-height'
@@ -33,9 +26,6 @@ const DATA_DRAWER_OPEN_KEY = 'preview-data-drawer-open'
 const MIN_DATA_DRAWER_HEIGHT = 260
 const MAX_DATA_DRAWER_HEIGHT = 720
 const DEFAULT_DATA_DRAWER_HEIGHT = 420
-const MIN_WIDTH = 280
-const MAX_WIDTH = 640
-const DEFAULT_WIDTH = 380
 const MIN_CONSOLE_HEIGHT = 80
 const MAX_CONSOLE_HEIGHT = 400
 const DEFAULT_CONSOLE_HEIGHT = 180
@@ -47,9 +37,6 @@ const LOG_COLORS: Record<string, string> = {
 }
 
 function PreviewView() {
-  const activeSessionId = useChatStore(s => s.activeSessionId)
-  const sessions = useChatStore(s => s.sessions)
-  const streamingMessageId = useChatStore(s => s.streamingMessageId)
   const billingPlan = useBillingStore(s => s.plan)
   // Gate matches the BACKEND's multimodal-preprocessing condition exactly:
   //   proxy.ts: `if (planConfig.planId !== 'explorer' && ...) processMultimodal()`
@@ -72,7 +59,6 @@ function PreviewView() {
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const previewSourcePath = useLayoutStore(s => s.previewSourcePath)
   const previewReloadKey = useLayoutStore(s => s.previewReloadKey)
-  const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const devServerLogs = useLayoutStore(s => s.devServerLogs)
   const isConsoleVisible = useLayoutStore(s => s.isConsoleVisible)
   const isHttpDrawerOpen = useLayoutStore(s => s.isHttpDrawerOpen)
@@ -113,49 +99,9 @@ function PreviewView() {
   const isFullstack = projectKind === 'fullstack'
   const previewUrl = showHttpClientMain ? backendUrl : frontendUrl
 
-  const [isChatCollapsed, setIsChatCollapsed] = useState(false)
-  // True while the chat sidebar's width is animating (CSS transition 0.25s).
-  // During that window the ResizeObserver on the iframe container fires every
-  // animation frame, each one moves the macOS native wry webview a few pixels,
-  // and the user sees a visible tremor as the NSView chases the DOM rect frame
-  // by frame. Parking the webview off-screen while the animation runs and
-  // restoring its position at the end produces a clean "snap to new size"
-  // instead of frame-by-frame jitter.
-  const [isChatAnimating, setIsChatAnimating] = useState(false)
-  const chatSidebarRef = useRef<HTMLDivElement>(null)
-  const toggleChatCollapsed = useCallback(() => {
-    setIsChatAnimating(true)
-    setIsChatCollapsed(v => !v)
-  }, [])
-  // React's `onTransitionEnd` fires per CSS property — width, min-width,
-  // max-width and opacity all transition on the sidebar. We only care about
-  // `width` (the one that drives the ResizeObserver and the webview rect
-  // recalc), so we filter to that property and unfreeze precisely when the
-  // browser confirms it's done. No fallback timer: the event is reliable
-  // in practice and if it's ever dropped the worst case is the webview
-  // stays parked until the next toggle (one extra click), which is better
-  // than the timer prematurely unfreezing during a long animation.
-  const handleSidebarTransitionEnd = useCallback((e: React.TransitionEvent<HTMLDivElement>) => {
-    if (e.propertyName !== 'width') return
-    if (e.target !== chatSidebarRef.current) return
-    setIsChatAnimating(false)
-  }, [])
-
-  const chatScrollRef = useRef<HTMLDivElement>(null)
-  const handleRef = useRef<HTMLDivElement>(null)
   const consoleHandleRef = useRef<HTMLDivElement>(null)
   const consoleScrollRef = useRef<HTMLDivElement>(null)
 
-  const [chatWidth, setChatWidth] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY)
-      if (saved) {
-        const parsed = parseInt(saved, 10)
-        if (parsed >= MIN_WIDTH && parsed <= MAX_WIDTH) return parsed
-      }
-    } catch { /* ignore */ }
-    return DEFAULT_WIDTH
-  })
   const [consoleHeight, setConsoleHeight] = useState<number>(() => {
     try {
       const saved = localStorage.getItem(CONSOLE_STORAGE_KEY)
@@ -166,7 +112,6 @@ function PreviewView() {
     } catch { /* ignore */ }
     return DEFAULT_CONSOLE_HEIGHT
   })
-  const [isResizing, setIsResizing] = useState(false)
   const [isResizingConsole, setIsResizingConsole] = useState(false)
 
   // Data Viewer drawer — local state (not in layoutStore) because it's
@@ -217,48 +162,6 @@ function PreviewView() {
     } catch { /* ignore */ }
   }, [isHttpDrawerOpen])
 
-  const session = activeSessionId ? sessions.get(activeSessionId) : null
-  const messages = session?.messages || []
-
-  // Pagination — same shape used by ChatView / ChatPanel / TerminalView.
-  // Render the last 30 messages; expand the window when the user scrolls
-  // the chat sidebar toward the top. Reset on session switch so a new
-  // conversation starts at the bottom.
-  const { visibleItems: visibleChatItems, canLoadMore: chatCanLoadMore, loadMore: chatLoadMore, hiddenCount: chatHiddenCount } = useMessageWindow(messages, {
-    resetKey: activeSessionId,
-    pageSize: 2,
-  })
-  const chatLoadMoreSentinelRef = useRef<HTMLDivElement>(null)
-  const isChatLoadingMoreRef = useRef(false)
-  useEffect(() => {
-    if (!chatCanLoadMore) return
-    const sentinel = chatLoadMoreSentinelRef.current
-    const scrollEl = chatScrollRef.current
-    if (!sentinel || !scrollEl) return
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry.isIntersecting) return
-        if (isChatLoadingMoreRef.current) return
-        isChatLoadingMoreRef.current = true
-        const beforeHeight = scrollEl.scrollHeight
-        const beforeTop = scrollEl.scrollTop
-        chatLoadMore()
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            const delta = scrollEl.scrollHeight - beforeHeight
-            if (delta > 0) scrollEl.scrollTop = beforeTop + delta
-            setTimeout(() => { isChatLoadingMoreRef.current = false }, 200)
-          })
-        })
-      },
-      { root: scrollEl, rootMargin: '120px 0px 0px 0px', threshold: 0 },
-    )
-    observer.observe(sentinel)
-    return () => observer.disconnect()
-    // chatScrollRef is a stable useRef; reading .current inside the effect
-    // doesn't need it in the dep array.
-  }, [chatCanLoadMore, chatLoadMore])
-
   // Single pass over logs; memoized so subscribers that re-render the
   // wrapping component (e.g. on unrelated layoutStore changes) don't
   // re-scan the whole log list.
@@ -283,16 +186,6 @@ function PreviewView() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [projectKind])
-
-  // Auto-scroll chat
-  useEffect(() => {
-    const el = chatScrollRef.current
-    if (!el) return
-    const rafId = requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight
-    })
-    return () => cancelAnimationFrame(rafId)
-  }, [messages, messages.length])
 
   // Auto-scroll console
   useEffect(() => {
@@ -499,45 +392,6 @@ function PreviewView() {
     }
   }, [canUseVision])
 
-  // Horizontal resize (chat width)
-  const handleResizeStart = useCallback((e: React.PointerEvent) => {
-    e.preventDefault()
-    const handleEl = handleRef.current
-    if (!handleEl) return
-
-    const pid = e.pointerId
-    try { handleEl.setPointerCapture(pid) } catch { /* ignore */ }
-
-    let current = chatWidth
-    const body = document.body
-    const prevCursor = body.style.cursor
-    const prevUserSelect = body.style.userSelect
-    body.style.cursor = 'col-resize'
-    body.style.userSelect = 'none'
-    setIsResizing(true)
-
-    function onPointerMove(pe: PointerEvent) {
-      let next = pe.clientX
-      if (next < MIN_WIDTH) next = MIN_WIDTH
-      if (next > MAX_WIDTH) next = MAX_WIDTH
-      current = next
-      setChatWidth(next)
-    }
-
-    function onPointerUp() {
-      try { localStorage.setItem(STORAGE_KEY, String(current)) } catch { /* ignore */ }
-      try { handleEl?.releasePointerCapture(pid) } catch { /* ignore */ }
-      handleEl?.removeEventListener('pointermove', onPointerMove)
-      handleEl?.removeEventListener('pointerup', onPointerUp)
-      body.style.cursor = prevCursor
-      body.style.userSelect = prevUserSelect
-      setIsResizing(false)
-    }
-
-    handleEl.addEventListener('pointermove', onPointerMove)
-    handleEl.addEventListener('pointerup', onPointerUp)
-  }, [chatWidth])
-
   // Vertical resize (console height)
   const handleConsoleResizeStart = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
@@ -631,124 +485,7 @@ function PreviewView() {
 
   return (
     <Flex flex="1" overflow="hidden">
-      {/* Left: Full chat sidebar (messages + prompt) — collapsible with animation */}
-      <Flex
-        ref={chatSidebarRef}
-        direction="column"
-        w={isChatCollapsed ? '0px' : `${chatWidth}px`}
-        minW={isChatCollapsed ? '0px' : `${MIN_WIDTH}px`}
-        maxW={isChatCollapsed ? '0px' : `${MAX_WIDTH}px`}
-        overflow="hidden"
-        bg={tokens.colors.bg.mainLayout}
-        flexShrink={0}
-        transition="width 0.25s ease, min-width 0.25s ease, max-width 0.25s ease"
-        opacity={isChatCollapsed ? 0 : 1}
-        css={{ transition: 'width 0.25s ease, min-width 0.25s ease, max-width 0.25s ease, opacity 0.2s ease' }}
-        onTransitionEnd={handleSidebarTransitionEnd}
-      >
-        {/* Chat messages */}
-        <Flex
-          ref={chatScrollRef}
-          direction="column"
-          flex="1"
-          overflowY="auto"
-          py={3}
-          px={3}
-          css={{
-            '&::-webkit-scrollbar': { width: '4px' },
-            '&::-webkit-scrollbar-track': { background: 'transparent' },
-            '&::-webkit-scrollbar-thumb': {
-              background: tokens.colors.border.panel,
-              borderRadius: '2px',
-            },
-          }}
-        >
-          {messages.length === 0 ? (
-            <Flex
-              flex="1"
-              direction="column"
-              align="center"
-              justify="center"
-              gap={3}
-            >
-              <AgentLogo size={36} glow />
-              <Flex direction="column" align="center" gap={1}>
-                <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.muted} fontWeight={500}>
-                  Ask the agent to iterate
-                </Text>
-                <Text fontSize="10px" color={tokens.colors.text.disabled} textAlign="center" px={3} lineHeight="1.4">
-                  Describe changes and see them live
-                </Text>
-              </Flex>
-            </Flex>
-          ) : (
-            <Box maxW="600px" mx="auto" w="100%">
-              {chatCanLoadMore && (
-                <Box
-                  as="button"
-                  ref={chatLoadMoreSentinelRef}
-                  w="100%"
-                  textAlign="center"
-                  fontSize={tokens.fontSize.xs}
-                  fontWeight="500"
-                  color={tokens.colors.text.muted}
-                  py={2}
-                  px={3}
-                  mb={2}
-                  borderRadius="6px"
-                  bg={tokens.colors.bg.hoverSubtle}
-                  border={`1px solid ${tokens.colors.border.panel}`}
-                  cursor="pointer"
-                  transition={`all ${tokens.transition.fast}`}
-                  _hover={{
-                    color: tokens.colors.text.primary,
-                    borderColor: tokens.colors.border.glass,
-                    bg: tokens.colors.bg.overlay,
-                  }}
-                  onClick={() => chatLoadMore()}
-                >
-                  ↑ Load earlier — {chatHiddenCount} hidden
-                </Box>
-              )}
-              {visibleChatItems.map(msg => (
-                <MessageBubble
-                  key={msg.id}
-                  message={msg}
-                  isStreaming={msg.id === streamingMessageId}
-                />
-              ))}
-            </Box>
-          )}
-        </Flex>
-
-        {/* Permission dialog above prompt */}
-        {pendingPermission && (
-          <PermissionDialog />
-        )}
-
-        {/* PromptBar at bottom of chat sidebar */}
-        <PromptBar />
-      </Flex>
-
-      {/* Resize handle (horizontal) — hidden when chat is collapsed */}
-      <Box
-        ref={handleRef}
-        role="separator"
-        aria-label="Resize chat panel"
-        aria-orientation="vertical"
-        w={isChatCollapsed ? '0px' : '4px'}
-        cursor="col-resize"
-        flexShrink={0}
-        bg={isResizing ? tokens.colors.accent.primary : 'transparent'}
-        transition={isResizing ? 'none' : `all ${tokens.transition.fast}`}
-        _hover={!isChatCollapsed ? { bg: tokens.colors.accent.primary } : {}}
-        onPointerDown={isChatCollapsed ? undefined : handleResizeStart}
-        position="relative"
-        zIndex={2}
-        overflow="hidden"
-      />
-
-      {/* Right: Preview webview + console */}
+      {/* Preview webview + console */}
       <Flex
         direction="column"
         flex="1"
@@ -842,19 +579,6 @@ function PreviewView() {
 
           {/* Right actions */}
           <HStack gap={0}>
-            {/* Expand/collapse chat sidebar */}
-            <IconButton
-              aria-label={isChatCollapsed ? 'Show chat' : 'Full preview'}
-              size="xs"
-              variant="ghost"
-              color={isChatCollapsed ? tokens.colors.accent.primary : tokens.colors.text.secondary}
-              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-              borderRadius="6px"
-              onClick={toggleChatCollapsed}
-            >
-              {isChatCollapsed ? <FiMinimize2 size={13} /> : <FiMaximize2 size={13} />}
-            </IconButton>
-
             {/* HTTP Client drawer toggle — only visible for fullstack projects */}
             {isFullstack && (
               <IconButton
@@ -1075,9 +799,7 @@ function PreviewView() {
                   // the upper iframe while the bottom shows the table viewer.
                   frozen={
                     !isPreviewActiveView
-                    || isResizing
                     || isResizingConsole
-                    || isChatAnimating
                     || (isFullstack && isHttpDrawerOpen)
                   }
                   // Data Viewer drawer takes the lower portion of the preview
@@ -1088,7 +810,7 @@ function PreviewView() {
                   // simultaneously visible" intent the drawer was added for.
                   bottomReserveHeight={isDataDrawerOpen ? dataDrawerHeight + 4 : 0}
                 />
-                {(isResizing || isResizingConsole) && (
+                {isResizingConsole && (
                   <Box
                     position="absolute"
                     inset={0}

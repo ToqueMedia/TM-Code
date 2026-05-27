@@ -1,5 +1,6 @@
 import { memo, useState, useCallback, useEffect, useMemo } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
+import { useLayoutStore } from '../../stores/layoutStore'
 import {
   FiRotateCcw, FiChevronDown, FiChevronRight, FiClock,
   FiFile, FiFilePlus, FiTrash2, FiEdit3, FiGitCommit, FiAlertTriangle
@@ -47,6 +48,7 @@ function CheckpointPanel() {
   const isLoadingDiff = useCheckpointStore(s => s.isLoadingDiff)
   const loadSessionDiff = useCheckpointStore(s => s.loadSessionDiff)
   const isStreaming = useChatStore(s => s.isStreaming)
+  const isSidebarMode = useLayoutStore(s => s.viewMode) === 'preview'
   const [isExpanded, setIsExpanded] = useState(false)
   const [showSessionDiff, setShowSessionDiff] = useState(false)
   const [confirmRevertId, setConfirmRevertId] = useState<string | null>(null)
@@ -190,7 +192,7 @@ function CheckpointPanel() {
             display="flex"
             alignItems="center"
             gap="4px"
-            px="8px"
+            px={isSidebarMode ? "6px" : "8px"}
             py="3px"
             borderRadius={tokens.radius.md}
             fontSize="10px"
@@ -207,7 +209,7 @@ function CheckpointPanel() {
             aria-label={t("checkpoint.viewDiff")}
           >
             <FiGitCommit size={10} />
-            Diff
+            {!isSidebarMode && 'Diff'}
           </Box>
 
           {/* Undo button */}
@@ -216,7 +218,7 @@ function CheckpointPanel() {
             display="flex"
             alignItems="center"
             gap="4px"
-            px="8px"
+            px={isSidebarMode ? "6px" : "8px"}
             py="3px"
             borderRadius={tokens.radius.md}
             fontSize="10px"
@@ -237,7 +239,7 @@ function CheckpointPanel() {
             aria-label={t("checkpoint.undoLast")}
           >
             <FiRotateCcw size={10} />
-            Undo
+            {!isSidebarMode && 'Undo'}
           </Box>
 
           {/* Revert All button */}
@@ -246,7 +248,7 @@ function CheckpointPanel() {
             display="flex"
             alignItems="center"
             gap="4px"
-            px="8px"
+            px={isSidebarMode ? "6px" : "8px"}
             py="3px"
             borderRadius={tokens.radius.md}
             fontSize="10px"
@@ -267,7 +269,7 @@ function CheckpointPanel() {
             aria-label={t("checkpoint.revertAll")}
           >
             <FiRotateCcw size={10} />
-            {t("checkpoint.revertAll")}
+            {!isSidebarMode && t("checkpoint.revertAll")}
           </Box>
         </Flex>
       </Flex>

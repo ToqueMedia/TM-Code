@@ -1,4 +1,4 @@
-import { memo, useRef, useEffect, useState, useCallback, useMemo } from 'react'
+import { memo, lazy, Suspense, useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiDatabase } from 'react-icons/fi'
@@ -23,6 +23,7 @@ import ChatSkeleton from '../chat/ChatSkeleton'
 import ModelIndicator from '../chat/ModelIndicator'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
+const CheckpointPanel = lazy(() => import('../chat/CheckpointPanel'))
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -35,6 +36,8 @@ function ChatView() {
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
   const currentProject = useProjectStore(s => s.currentProject)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
+  const viewMode = useLayoutStore(s => s.viewMode)
+  const isSidebarMode = viewMode === 'preview'
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
@@ -256,7 +259,7 @@ function ChatView() {
         flexShrink={0}
         position="relative"
       >
-        <Flex align="center" gap={2}>
+        <Flex align="center" gap={2} minW={0}>
           <Box
             as="button"
             display="flex"
@@ -274,86 +277,85 @@ function ChatView() {
           >
             <FiSidebar size={15} />
           </Box>
-          <SessionDropdown
-            projectPath={projectPath}
-            activeSessionId={activeSessionId}
-            isStreaming={isStreaming}
-          />
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            justifyContent="center"
-            w="28px"
-            h="28px"
-            borderRadius="6px"
-            color={tokens.colors.text.secondary}
-            cursor="pointer"
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-            onClick={() => useLayoutStore.getState().setViewMode('data')}
-            aria-label={t('dataViewer.title')}
-            title={t('dataViewer.title')}
-          >
-            <FiDatabase size={14} />
+          <Box flex={1} minW={0}>
+            <SessionDropdown
+              projectPath={projectPath}
+              activeSessionId={activeSessionId}
+              isStreaming={isStreaming}
+            />
           </Box>
+          {!isSidebarMode && (
+            <Box
+              as="button"
+              display="flex"
+              alignItems="center"
+              justifyContent="center"
+              w="28px"
+              h="28px"
+              borderRadius="6px"
+              color={tokens.colors.text.secondary}
+              cursor="pointer"
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+              onClick={() => useLayoutStore.getState().setViewMode('data')}
+              aria-label={t('dataViewer.title')}
+              title={t('dataViewer.title')}
+            >
+              <FiDatabase size={14} />
+            </Box>
+          )}
         </Flex>
 
-        {/* Credits + Isolation + MCP indicators */}
-        <HStack gap={1.5}>
-          <ContextWindowIndicator />
-          {/* Mandatory-thinking badge — static, only when model thinks
-              unconditionally. The interactive toggle was removed (claude-vaz
-              parity) — thinking now follows the model's default and is
-              forced ON only by slash commands via X-Request-Type. */}
-          {thinkingMandatory && (
-            <Flex
-              align="center"
-              gap="4px"
-              px="6px"
-              py="3px"
-              borderRadius="5px"
-              bg="rgba(163, 113, 247, 0.1)"
-              border="1px solid rgba(163, 113, 247, 0.25)"
-              color={tokens.colors.accent.purple}
-              title="Thinking is always-on for this model"
-            >
-              <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
-                ⚡ Thinking
-              </Text>
-            </Flex>
-          )}
-          {/* ModelIndicator always renders once the backend has reported a
-              model name — the developer wants to know which model the IDE is
-              talking to regardless of BYOK state. CreditIndicator stays
-              hidden when BYOK is in effect because billing differs. */}
-          <ModelIndicator />
-          {!showModelIndicator && (
-            <CreditIndicator
-              plan={billingPlan}
-              noCredits={noCredits}
-              isStreaming={isStreaming}
-              consumedPct={consumedPct}
-              tokensConsumed={tokensConsumed}
-              tokenBudget={tokenBudget}
-              cycleEnd={cycleEnd}
-              status={billingStatus}
-              tmsRemaining={tmsRemaining}
+        {/* Credits + Isolation + MCP indicators — hidden in sidebar mode
+            because 380px can't fit them all. */}
+        {!isSidebarMode && (
+          <HStack gap={1.5}>
+            <ContextWindowIndicator />
+            {thinkingMandatory && (
+              <Flex
+                align="center"
+                gap="4px"
+                px="6px"
+                py="3px"
+                borderRadius="5px"
+                bg="rgba(163, 113, 247, 0.1)"
+                border="1px solid rgba(163, 113, 247, 0.25)"
+                color={tokens.colors.accent.purple}
+                title="Thinking is always-on for this model"
+              >
+                <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
+                  ⚡ Thinking
+                </Text>
+              </Flex>
+            )}
+            <ModelIndicator />
+            {!showModelIndicator && (
+              <CreditIndicator
+                plan={billingPlan}
+                noCredits={noCredits}
+                isStreaming={isStreaming}
+                consumedPct={consumedPct}
+                tokensConsumed={tokensConsumed}
+                tokenBudget={tokenBudget}
+                cycleEnd={cycleEnd}
+                status={billingStatus}
+                tmsRemaining={tmsRemaining}
+              />
+            )}
+            {sandboxEnabled && (
+              <IsolationPill
+                icon={FiShield}
+                label={t('chat.sandboxMode')}
+                color={tokens.colors.accent.orange}
+                onClick={() => useLayoutStore.getState().setViewMode('settings')}
+              />
+            )}
+            <McpIndicator
+              servers={mcpServers}
+              isInitializing={mcpIsInitializing}
             />
-          )}
-          {sandboxEnabled && (
-            <IsolationPill
-              icon={FiShield}
-              label={t('chat.sandboxMode')}
-              color={tokens.colors.accent.orange}
-              onClick={() => useLayoutStore.getState().setViewMode('settings')}
-            />
-          )}
-          <McpIndicator
-            servers={mcpServers}
-            isInitializing={mcpIsInitializing}
-          />
-        </HStack>
+          </HStack>
+        )}
       </Flex>
 
       {/* Scaffold pipeline status banner */}
@@ -619,6 +621,9 @@ function ChatView() {
                 ))}
                 <AgentActivityIndicator />
                 {postCompactSurveyPending && !isStreaming && <PostCompactSurvey />}
+                <Suspense fallback={null}>
+                  <CheckpointPanel />
+                </Suspense>
               </Box>
             )}
           </Box>
