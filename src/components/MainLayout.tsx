@@ -35,6 +35,11 @@ function MainLayout() {
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
+  const approve = usePermissionStore(s => s.approve)
+  const approveAlwaysInProject = usePermissionStore(s => s.approveAlwaysInProject)
+  const approveAlwaysGlobal = usePermissionStore(s => s.approveAlwaysGlobal)
+  const deny = usePermissionStore(s => s.deny)
+  const denyWith = usePermissionStore(s => s.denyWith)
   const currentProject = useCurrentProject()
   const { handleFileSelect } = useCodeEditorState()
 
@@ -345,10 +350,20 @@ function MainLayout() {
                     <ChatView />
                   </ErrorBoundary>
                   {viewMode === 'preview' && (
-                    <>
-                      {pendingPermission && <PermissionDialog />}
+                    pendingPermission ? (
+                      <PermissionDialog
+                        toolName={pendingPermission.toolName}
+                        args={pendingPermission.args}
+                        promptReason={pendingPermission.promptReason ?? null}
+                        approve={approve}
+                        approveAlwaysInProject={approveAlwaysInProject}
+                        approveAlwaysGlobal={approveAlwaysGlobal}
+                        deny={deny}
+                        denyWith={denyWith}
+                      />
+                    ) : (
                       <PromptBar />
-                    </>
+                    )
                   )}
                 </Box>
                 {viewMode === 'preview' && (
@@ -388,13 +403,23 @@ function MainLayout() {
             )}
           </Flex>
 
-          {/* Permission dialog — in preview mode, rendered inside the chat sidebar wrapper */}
-          {pendingPermission && viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'data' && (
-            <PermissionDialog />
+          {/* Permission dialog / PromptBar — in preview mode, rendered inside the chat sidebar wrapper */}
+          {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && viewMode !== 'data' && (
+            pendingPermission ? (
+              <PermissionDialog
+                toolName={pendingPermission.toolName}
+                args={pendingPermission.args}
+                promptReason={pendingPermission.promptReason ?? null}
+                approve={approve}
+                approveAlwaysInProject={approveAlwaysInProject}
+                approveAlwaysGlobal={approveAlwaysGlobal}
+                deny={deny}
+                denyWith={denyWith}
+              />
+            ) : (
+              <PromptBar />
+            )
           )}
-
-          {/* PromptBar — in preview mode, rendered inside the chat sidebar wrapper */}
-          {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && viewMode !== 'data' && <PromptBar />}
         </Flex>
       </Flex>
 

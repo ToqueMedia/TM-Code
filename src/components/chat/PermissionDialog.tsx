@@ -1,67 +1,94 @@
 import { useEffect, useRef, useState } from 'react'
-import { Box, Button, Flex, Text, Textarea } from '@chakra-ui/react'
-import { FiAlertTriangle, FiLock, FiChevronDown, FiChevronUp } from 'react-icons/fi'
+import { Box, Flex, Text, Textarea } from '@chakra-ui/react'
+import { FiAlertTriangle, FiLock } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
-import { usePermissionStore } from '@/stores/permissionStore'
 import { t } from '@/i18n'
 
 /**
- * Modal dialog that asks the user to approve or deny a tool invocation.
+ * Inline permission prompt that replaces the PromptBar when a tool
+ * invocation requires user approval.
  *
- * Two layouts depending on risk:
- *  - **Dangerous** (dangerous_command): only [Sim] [Nao] — no bulk actions.
- *  - **Normal** (sensitive_file, browser_action, null):
- *    [Sim] [Sim para todos] [Nao] [Nao para todos] [Justificar] —
- *    "Justificar" opens a textarea so the user can explain their denial;
- *    "Nao" is a simple deny without explanation.
+ * Four options for normal tools:
+ *  1. Yes, allow this time
+ *  2. Yes, and always allow 'X' in this project
+ *  3. Yes, and always allow 'X' (global)
+ *  4. No (tell the agent what to do instead)
+ *
+ * Two options for dangerous tools:
+ *  1. Yes, allow this time
+ *  4. No (tell the agent what to do instead)
  */
-export default function PermissionDialog() {
-  const pending = usePermissionStore(s => s.pendingPermission)
-  const approve = usePermissionStore(s => s.approve)
-  const approveAll = usePermissionStore(s => s.approveAll)
-  const deny = usePermissionStore(s => s.deny)
-  const denyAll = usePermissionStore(s => s.denyAll)
-  const denyWith = usePermissionStore(s => s.denyWith)
+interface PermissionDialogProps {
+  toolName: string
+  args: Record<string, unknown>
+  promptReason: string | null
+  approve: () => void
+  approveAlwaysInProject: () => void
+  approveAlwaysGlobal: () => void
+  deny: () => void
+  denyWith: (reason: string) => void
+}
 
+type OptionKey = 'once' | 'project' | 'global' | 'deny'
+
+export default function PermissionDialog({
+  toolName,
+  args,
+  promptReason,
+  approve,
+  approveAlwaysInProject,
+  approveAlwaysGlobal,
+  deny,
+  denyWith,
+}: PermissionDialogProps) {
+  const [selected, setSelected] = useState<OptionKey>('once')
   const [showReason, setShowReason] = useState(false)
   const [reason, setReason] = useState('')
-  const [showArgs, setShowArgs] = useState(false)
   const reasonRef = useRef<HTMLTextAreaElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
 
-  // Reset local state when a new permission request arrives
-  useEffect(() => {
-    if (pending) {
-      setShowReason(false)
-      setReason('')
-      setShowArgs(false)
-    }
-  }, [pending?.id])
+  const isDangerous =
+    promptReason === 'dangerous_command' ||
+    toolName === 'delete_file' ||
+    toolName === 'execute_command'
 
-  // Focus the reason textarea when it becomes visible
+  // Reset on new permission
   useEffect(() => {
-    if (showReason && reasonRef.current) {
-      reasonRef.current.focus()
-    }
+    setSelected('once')
+    setShowReason(false)
+    setReason('')
+  }, [toolName, JSON.stringify(args)])
+
+  // Focus reason textarea when visible
+  useEffect(() => {
+    if (showReason && reasonRef.current) reasonRef.current.focus()
   }, [showReason])
 
-  // Keyboard shortcuts: Enter = approve, Escape = deny
+  // Keyboard shortcuts
   useEffect(() => {
-    if (!pending) return
     const handler = (e: KeyboardEvent) => {
-      // Don't intercept when user is typing in the reason textarea
+      // Don't intercept when typing in textarea
       if (e.target instanceof HTMLTextAreaElement) {
-        // Cmd/Ctrl+Enter still approves from within the textarea
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
           e.preventDefault()
           e.stopPropagation()
-          approve()
+          handleSubmit()
         }
         return
       }
-      if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+
+      if (e.key === '1') { e.preventDefault(); setSelected('once') }
+      if (!isDangerous && e.key === '2') { e.preventDefault(); setSelected('project') }
+      if (!isDangerous && e.key === '3') { e.preventDefault(); setSelected('global') }
+      if (e.key === '4' || (isDangerous && e.key === '2')) {
+        e.preventDefault()
+        setSelected('deny')
+        setShowReason(true)
+      }
+      if (e.key === 'Enter') {
         e.preventDefault()
         e.stopPropagation()
-        approve()
+        handleSubmit()
       }
       if (e.key === 'Escape') {
         e.preventDefault()
@@ -71,325 +98,222 @@ export default function PermissionDialog() {
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
-  }, [pending?.id, approve, deny])
+  })
 
-  if (!pending) return null
-
-  // Dangerous tools get the simplified Y/N layout.
-  // Matches: destructive commands (promptReason) and always-risky tool
-  // names. Sensitive files and browser actions get the full button set
-  // so the user can "approve all" when the agent reads many files.
-  const isDangerous =
-    pending.promptReason === 'dangerous_command' ||
-    pending.toolName === 'delete_file' ||
-    pending.toolName === 'execute_command'
-  const icon = isDangerous ? <FiAlertTriangle /> : <FiLock />
-  const iconColor = isDangerous ? tokens.colors.accent.orange : tokens.colors.accent.purple
-
-  const handleDeny = () => {
-    if (reason.trim()) {
-      denyWith(reason.trim())
-    } else {
-      deny()
+  const handleSubmit = () => {
+    if (selected === 'once') approve()
+    else if (selected === 'project') approveAlwaysInProject()
+    else if (selected === 'global') approveAlwaysGlobal()
+    else if (selected === 'deny') {
+      if (reason.trim()) denyWith(reason.trim())
+      else deny()
     }
   }
 
-  const reasonTag =
-    pending.promptReason === 'sensitive_file' ? t('perm.sensitiveFile') :
-    pending.promptReason === 'dangerous_command' ? t('perm.dangerousCommand') :
-    pending.promptReason === 'browser_action' ? t('perm.browserAction') :
-    null
+  const icon = isDangerous ? <FiAlertTriangle /> : <FiLock />
+  const iconColor = isDangerous ? tokens.colors.accent.orange : tokens.colors.accent.purple
 
   const label =
-    pending.toolName === 'browser_action'
-      ? pending.args.action as string
-      : pending.toolName === 'execute_command'
-        ? (pending.args.command as string || pending.toolName as string)
-        : pending.args.file_path as string
-          || pending.args.path as string
-          || pending.args.url as string
-          || pending.toolName as string
+    toolName === 'browser_action'
+      ? args.action as string
+      : toolName === 'execute_command'
+        ? (args.command as string || toolName)
+        : (args.file_path as string || args.path as string || args.url as string || toolName)
+
+  const isCommand = toolName === 'execute_command' || promptReason === 'dangerous_command'
+
+  const reasonTag =
+    promptReason === 'sensitive_file' ? t('perm.sensitiveFile') :
+    promptReason === 'dangerous_command' ? t('perm.dangerousCommand') :
+    promptReason === 'browser_action' ? t('perm.browserAction') :
+    null
 
   return (
     <Box
-      position="fixed"
-      bottom="60px"
-      left="50%"
-      transform="translateX(-50%)"
-      zIndex={10000}
-      bg={tokens.colors.bg.overlay}
-      borderRadius="12px"
-      boxShadow="0 8px 32px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.08)"
-      backdropFilter="blur(20px)"
-      overflow="hidden"
-      maxW="480px"
-      w="calc(100% - 160px)"
-      animation="slideUp 0.2s ease-out"
-      css={{
-        '@keyframes slideUp': {
-          from: { opacity: 0, transform: 'translateX(-50%) translateY(10px)' },
-          to: { opacity: 1, transform: 'translateX(-50%) translateY(0)' },
-        },
-      }}
+      ref={containerRef}
+      px={4}
+      pt={3}
+      pb={3}
+      bg={tokens.colors.bg.mainLayout}
+      flexShrink={0}
+      borderTop="1px solid rgba(255, 255, 255, 0.06)"
     >
-      {/* Header */}
-      <Flex align="center" gap={2} px={4} pt={3} pb={2}>
-        <Box as="span" color={iconColor} display="flex" alignItems="center" flexShrink={0}>
-          {icon}
-        </Box>
-        <Text fontSize="13px" fontWeight={600} color={tokens.colors.text.primary}>
-          {isDangerous ? t('perm.dangerousTitle') : t('perm.approveTitle')}
-        </Text>
-      </Flex>
-
-      {/* Tool label + reason */}
-      <Box px={4} pb={3}>
-        <Text
-          fontSize="12px"
-          fontFamily="mono"
-          color={tokens.colors.text.secondary}
-          truncate
-          title={label}
-          mb={reasonTag ? 1 : 0}
-        >
-          {label}
-        </Text>
-        {reasonTag && (
-          <Text fontSize="11px" color={iconColor}>
-            {reasonTag}
+      <Box maxW="680px" mx="auto">
+        {/* Header */}
+        <Flex align="center" gap={2} mb={2}>
+          <Box as="span" color={iconColor} display="flex" alignItems="center" flexShrink={0}>
+            {icon}
+          </Box>
+          <Text fontSize="13px" fontWeight={600} color={tokens.colors.text.primary}>
+            {isCommand ? t('perm.allowCommand') : t('perm.allowAction')}
           </Text>
-        )}
-      </Box>
+        </Flex>
 
-      {/* Args toggle */}
-      {hasDisplayableArgs(pending.toolName, pending.args) && (
-        <Box px={4} pb={2}>
-          <Button
-            variant="ghost"
-            size="xs"
-            onClick={() => setShowArgs(!showArgs)}
-            color={tokens.colors.text.muted}
-            fontSize="11px"
-            h="24px"
-            px={1}
-            gap={1}
-            _hover={{ color: tokens.colors.text.secondary, bg: 'transparent' }}
+        {/* Tool label */}
+        <Flex align="center" gap={2} mb={3}>
+          <Text
+            fontSize="12px"
+            fontFamily="mono"
+            color={tokens.colors.text.secondary}
+            truncate
+            title={label}
+            flex={1}
           >
-            {showArgs ? <FiChevronUp size={12} /> : <FiChevronDown size={12} />}
-            {showArgs ? t('perm.hideArgs') : t('perm.showArgs')}
-          </Button>
-          {showArgs && (
-            <Box
-              mt={1}
-              p={2}
-              bg="rgba(0,0,0,0.3)"
-              borderRadius="8px"
-              fontSize="11px"
-              fontFamily="mono"
-              color={tokens.colors.text.muted}
-              maxH="160px"
-              overflowY="auto"
-              whiteSpace="pre-wrap"
-              wordBreak="break-all"
-            >
-              {formatArgsForDisplay(pending.args)}
-            </Box>
-          )}
-        </Box>
-      )}
-
-      {/* Reason textarea (non-dangerous only, when "Nao" is about to be clicked) */}
-      {showReason && !isDangerous && (
-        <Box px={4} pb={2}>
-          <Textarea
-            ref={reasonRef}
-            value={reason}
-            onChange={e => setReason(e.target.value)}
-            placeholder={t('perm.reasonPlaceholder')}
-            size="xs"
-            fontSize="11px"
-            bg="rgba(0,0,0,0.3)"
-            border="1px solid"
-            borderColor="rgba(255,255,255,0.06)"
-            borderRadius="8px"
-            minH="48px"
-            maxH="80px"
-            resize="none"
-            color={tokens.colors.text.primary}
-            _placeholder={{ color: tokens.colors.text.disabled }}
-            _focus={{ borderColor: tokens.colors.accent.purple, boxShadow: 'none' }}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault()
-                handleDeny()
-              }
-            }}
-          />
-          <Text fontSize="10px" color={tokens.colors.text.disabled} mt={1}>
-            {t('perm.reasonHint')}
+            {label}
           </Text>
-        </Box>
-      )}
+          {reasonTag && (
+            <Text fontSize="11px" color={iconColor} flexShrink={0}>
+              {reasonTag}
+            </Text>
+          )}
+        </Flex>
 
-      {/* Buttons */}
-      <Flex
-        gap={2}
-        px={4}
-        py={3}
-        bg="rgba(0,0,0,0.15)"
-        justifyContent={isDangerous ? 'center' : 'flex-end'}
-      >
-        {/* Non-dangerous: full set of buttons */}
-        {!isDangerous && (
-          <>
-            {/* "Nao para todos" — hidden when textarea is open */}
-            {!showReason && (
-              <Button
-                size="xs"
-                variant="ghost"
-                onClick={() => denyAll()}
-                color={tokens.colors.text.muted}
-                fontSize="11px"
-                h="28px"
-                px={2}
-                _hover={{ color: tokens.colors.text.secondary, bg: 'transparent' }}
-              >
-                {t('perm.denyAll')}
-              </Button>
-            )}
+        {/* Options */}
+        <Flex direction="column" gap={1} mb={2}>
+          <OptionRow
+            index={1}
+            label={t('perm.allowThisTime')}
+            selected={selected === 'once'}
+            onClick={() => { setSelected('once'); setShowReason(false) }}
+          />
+          {!isDangerous && (
+            <>
+              <OptionRow
+                index={2}
+                label={t('perm.allowAlwaysProject').replace('{tool}', toolName)}
+                selected={selected === 'project'}
+                onClick={() => { setSelected('project'); setShowReason(false) }}
+              />
+              <OptionRow
+                index={3}
+                label={t('perm.allowAlwaysGlobal').replace('{tool}', toolName)}
+                selected={selected === 'global'}
+                onClick={() => { setSelected('global'); setShowReason(false) }}
+              />
+            </>
+          )}
+          <OptionRow
+            index={isDangerous ? 2 : 4}
+            label={t('perm.denyWithReason')}
+            selected={selected === 'deny'}
+            onClick={() => { setSelected('deny'); setShowReason(true) }}
+          />
+        </Flex>
 
-            {/* "Justificar" / "Enviar" — opens textarea, then submits */}
-            <Button
+        {/* Reason textarea (shown when deny is selected) */}
+        {showReason && selected === 'deny' && (
+          <Box mb={2}>
+            <Textarea
+              ref={reasonRef}
+              value={reason}
+              onChange={e => setReason(e.target.value)}
+              placeholder={t('perm.reasonPlaceholder')}
               size="xs"
-              variant="outline"
-              onClick={() => {
-                if (showReason) {
-                  handleDeny()
-                } else {
-                  setShowReason(true)
+              fontSize="11px"
+              bg="rgba(0,0,0,0.3)"
+              border="1px solid"
+              borderColor="rgba(255,255,255,0.06)"
+              borderRadius="8px"
+              minH="40px"
+              maxH="64px"
+              resize="none"
+              color={tokens.colors.text.primary}
+              _placeholder={{ color: tokens.colors.text.disabled }}
+              _focus={{ borderColor: tokens.colors.accent.purple, boxShadow: 'none' }}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault()
+                  handleSubmit()
                 }
               }}
-              color={tokens.colors.accent.purple}
-              borderColor="rgba(163,113,247,0.3)"
-              fontSize="11px"
-              h="28px"
-              px={3}
-              _hover={{ bg: 'rgba(163,113,247,0.1)', borderColor: 'rgba(163,113,247,0.5)' }}
-            >
-              {showReason ? t('perm.send') : t('perm.justify')}
-            </Button>
-
-            {/* "Nao" — simple deny, hidden when textarea is open */}
-            {!showReason && (
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() => deny()}
-                color={tokens.colors.accent.red}
-                borderColor="rgba(248,81,73,0.3)"
-                fontSize="11px"
-                h="28px"
-                px={3}
-                _hover={{ bg: 'rgba(248,81,73,0.1)', borderColor: 'rgba(248,81,73,0.5)' }}
-              >
-                {t('perm.deny')}
-              </Button>
-            )}
-
-            {/* "Sim" */}
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() => approve()}
-              color={tokens.colors.accent.primary}
-              borderColor="rgba(254,16,99,0.3)"
-              fontSize="11px"
-              h="28px"
-              px={3}
-              _hover={{ bg: 'rgba(254,16,99,0.1)', borderColor: 'rgba(254,16,99,0.5)' }}
-            >
-              {t('perm.approve')}
-            </Button>
-
-            {/* "Sim para todos" */}
-            <Button
-              size="xs"
-              onClick={() => approveAll()}
-              bg={tokens.colors.accent.primary}
-              color="white"
-              fontSize="11px"
-              fontWeight={600}
-              h="28px"
-              px={3}
-              _hover={{ opacity: 0.9 }}
-            >
-              {t('perm.approveAll')}
-            </Button>
-          </>
+            />
+            <Text fontSize="10px" color={tokens.colors.text.disabled} mt={1}>
+              {t('perm.reasonHint')}
+            </Text>
+          </Box>
         )}
 
-        {/* Dangerous: only Sim / Nao */}
-        {isDangerous && (
-          <>
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() => deny()}
-              color={tokens.colors.accent.red}
-              borderColor="rgba(248,81,73,0.3)"
-              fontSize="12px"
-              fontWeight={600}
-              h="32px"
-              px={6}
-              _hover={{ bg: 'rgba(248,81,73,0.1)', borderColor: 'rgba(248,81,73,0.5)' }}
-            >
-              {t('perm.deny')}
-            </Button>
-            <Button
-              size="xs"
-              onClick={() => approve()}
-              bg={tokens.colors.accent.primary}
-              color="white"
-              fontSize="12px"
-              fontWeight={600}
-              h="32px"
-              px={6}
-              _hover={{ opacity: 0.9 }}
-            >
-              {t('perm.approve')}
-            </Button>
-          </>
-        )}
-      </Flex>
+        {/* Bottom bar */}
+        <Flex justify="flex-end" align="center" gap={2}>
+          <Box
+            as="button"
+            px={3}
+            py="5px"
+            borderRadius="6px"
+            fontSize="12px"
+            fontWeight={500}
+            color={tokens.colors.text.muted}
+            cursor="pointer"
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ color: tokens.colors.text.secondary, bg: 'rgba(255,255,255,0.05)' }}
+            onClick={deny}
+          >
+            {t('perm.skip')}
+          </Box>
+          <Box
+            as="button"
+            px={4}
+            py="5px"
+            borderRadius="6px"
+            fontSize="12px"
+            fontWeight={600}
+            bg={tokens.colors.accent.primary}
+            color="white"
+            cursor="pointer"
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ opacity: 0.9 }}
+            onClick={handleSubmit}
+          >
+            {t('perm.submit')}
+          </Box>
+        </Flex>
+      </Box>
     </Box>
   )
 }
 
-/** Args that aren't useful to display to the user */
-const HIDDEN_ARG_KEYS = new Set(['timeout_ms'])
-
-/**
- * Returns true if the tool has args worth displaying.
- * Some tools (read_file) already show the file path as the label.
- */
-function hasDisplayableArgs(toolName: string, args: Record<string, unknown>): boolean {
-  if (toolName === 'browser_action') return false
-  const keys = Object.keys(args).filter(k => !HIDDEN_ARG_KEYS.has(k))
-  if (keys.length === 0) return false
-  // If there's only one key and it's already used as the label, hide
-  if (keys.length === 1 && (keys[0] === 'file_path' || keys[0] === 'path')) return false
-  return true
-}
-
-/** Format args for display, excluding noise */
-function formatArgsForDisplay(args: Record<string, unknown>): string {
-  return Object.entries(args)
-    .filter(([k]) => !HIDDEN_ARG_KEYS.has(k))
-    .map(([k, v]) => {
-      if (typeof v === 'string' && v.length > 200) {
-        return `${k}: ${v.slice(0, 200)}...`
-      }
-      return `${k}: ${typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v)}`
-    })
-    .join('\n')
+/** Single option row: number badge + label text */
+function OptionRow({ index, label, selected, onClick }: {
+  index: number
+  label: string
+  selected: boolean
+  onClick: () => void
+}) {
+  return (
+    <Flex
+      align="center"
+      gap={2}
+      px={2}
+      py="4px"
+      borderRadius="6px"
+      cursor="pointer"
+      transition={`all ${tokens.transition.fast}`}
+      bg={selected ? 'rgba(255, 255, 255, 0.06)' : 'transparent'}
+      _hover={{ bg: 'rgba(255, 255, 255, 0.06)' }}
+      onClick={onClick}
+    >
+      <Box
+        minW="18px"
+        h="18px"
+        borderRadius="4px"
+        bg={selected ? tokens.colors.accent.primary : 'rgba(255, 255, 255, 0.08)'}
+        color={selected ? 'white' : tokens.colors.text.muted}
+        fontSize="10px"
+        fontWeight={600}
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        flexShrink={0}
+      >
+        {index}
+      </Box>
+      <Text
+        fontSize="12px"
+        color={selected ? tokens.colors.text.primary : tokens.colors.text.secondary}
+        fontWeight={selected ? 500 : 400}
+      >
+        {label}
+      </Text>
+    </Flex>
+  )
 }

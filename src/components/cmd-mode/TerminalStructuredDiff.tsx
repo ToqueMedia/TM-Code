@@ -3,6 +3,19 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { structuredPatch } from 'diff'
 import { tokens } from '@/theme/tokens'
 
+/**
+ * For new-file creates, show only the first N lines (matching claude-vaz
+ * FileWriteTool behavior).
+ */
+const MAX_CREATE_LINES = 10
+
+/**
+ * Safety cap for edit diffs — prevents rendering thousands of DOM nodes on
+ * large file rewrites (e.g. renaming a variable across 2000 lines).
+ * Matched to claude-vaz's MAX_LINES_PER_FILE = 400.
+ */
+const MAX_EDIT_LINES = 400
+
 interface TerminalStructuredDiffProps {
   filePath: string
   oldContent: string
@@ -26,24 +39,30 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
   contextLines = 3,
   maxHunks = 8,
 }: TerminalStructuredDiffProps) {
-  const { rows, addedTotal, removedTotal } = useMemo(() => {
+  const { rows, addedTotal, removedTotal, hiddenCount } = useMemo(() => {
     const oldText = (oldContent ?? '').replace(/\r\n/g, '\n')
     const newText = (newContent ?? '').replace(/\r\n/g, '\n')
 
+    // New file: show first MAX_CREATE_LINES, then "+X lines" note
     if (isNewFile || oldText === '') {
       const lines = newText.split('\n')
+      const capped = lines.slice(0, MAX_CREATE_LINES)
       const r: Row[] = []
-      lines.forEach((line, i) => r.push({ kind: 'add', newNo: i + 1, text: line }))
-      return { rows: r, addedTotal: lines.length, removedTotal: 0 }
+      capped.forEach((line, i) => r.push({ kind: 'add', newNo: i + 1, text: line }))
+      return { rows: r, addedTotal: lines.length, removedTotal: 0, hiddenCount: Math.max(0, lines.length - MAX_CREATE_LINES) }
     }
 
+    // File deletion: show first MAX_CREATE_LINES
     if (newText === '') {
       const lines = oldText.split('\n')
+      const capped = lines.slice(0, MAX_CREATE_LINES)
       const r: Row[] = []
-      lines.forEach((line, i) => r.push({ kind: 'remove', oldNo: i + 1, text: line }))
-      return { rows: r, addedTotal: 0, removedTotal: lines.length }
+      capped.forEach((line, i) => r.push({ kind: 'remove', oldNo: i + 1, text: line }))
+      return { rows: r, addedTotal: 0, removedTotal: lines.length, hiddenCount: Math.max(0, lines.length - MAX_CREATE_LINES) }
     }
 
+    // Edit: show full diff with safety cap (MAX_EDIT_LINES) to prevent
+    // WebView freeze on large rewrites.
     const patch = structuredPatch(filePath, filePath, oldText, newText, '', '', { context: contextLines })
     const hunks = patch.hunks
 
@@ -57,7 +76,11 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
     })
 
     const r: Row[] = []
+    let lineCount = 0
+    let capped = false
+
     for (const h of hunks.slice(0, maxHunks)) {
+      if (capped) break
       r.push({
         kind: 'hunkHeader',
         label: `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`,
@@ -65,6 +88,7 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
       let oldNo = h.oldStart
       let newNo = h.newStart
       for (const raw of h.lines as string[]) {
+        if (lineCount >= MAX_EDIT_LINES) { capped = true; break }
         const marker = raw.charAt(0)
         const text = raw.slice(1)
         if (marker === '+') {
@@ -78,10 +102,15 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
           oldNo += 1
           newNo += 1
         }
+        lineCount += 1
       }
     }
 
-    return { rows: r, addedTotal, removedTotal }
+    const hiddenCount = capped
+      ? hunks.reduce((sum, h) => sum + h.lines.length, 0) - lineCount
+      : 0
+
+    return { rows: r, addedTotal, removedTotal, hiddenCount }
   }, [oldContent, newContent, filePath, isNewFile, contextLines, maxHunks])
 
   const gutterDigits = useMemo(() => {
@@ -192,6 +221,16 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
           )
         })}
       </Box>
+
+      {/* Hidden lines notice — only for new-file creates */}
+      {hiddenCount > 0 && (
+        <Flex align="center" gap={1.5} mt="2px">
+          <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} userSelect="none">└</Text>
+          <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
+            … +{hiddenCount} {hiddenCount === 1 ? 'line' : 'lines'}
+          </Text>
+        </Flex>
+      )}
     </Box>
   )
 })

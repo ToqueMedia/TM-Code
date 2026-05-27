@@ -338,8 +338,8 @@ export const useProjectStore = create<ProjectStore>()(
               import('../services/agent/permissionPersistence'),
               import('./permissionStore'),
             ]);
-            const scopes = await loadPermissionsFromDisk(path);
-            hydrateApprovedScopes(scopes, path);
+            const perms = await loadPermissionsFromDisk(path);
+            hydrateApprovedScopes(perms.scopes, path, perms.tools);
           } catch (error) {
             logger.warn('project', 'Failed to hydrate permission grants:', error);
           }

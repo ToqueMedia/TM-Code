@@ -71,6 +71,16 @@ function TabContextMenu({
   onCloseMenu: () => void
 }) {
   const menuRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState({ x, y })
+
+  // Clamp to viewport after mount
+  useEffect(() => {
+    if (!menuRef.current) return
+    const rect = menuRef.current.getBoundingClientRect()
+    const nx = Math.min(x, window.innerWidth - rect.width - 4)
+    const ny = Math.min(y, window.innerHeight - rect.height - 4)
+    if (nx !== x || ny !== y) setPos({ x: Math.max(0, nx), y: Math.max(0, ny) })
+  }, [x, y])
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -98,8 +108,8 @@ function TabContextMenu({
     <Box
       ref={menuRef}
       position="fixed"
-      left={`${x}px`}
-      top={`${y}px`}
+      left={`${pos.x}px`}
+      top={`${pos.y}px`}
       zIndex={10000}
       bg="rgba(30,30,30,0.95)"
       border={`1px solid ${tokens.colors.border.glass}`}
@@ -492,11 +502,14 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
 
   const handleRenameStart = useCallback(() => {
     if (!contextMenu) return
-    setRenamingId(contextMenu.tabId)
-    setRenameValue(contextMenu.tabName)
+    const tabId = contextMenu.tabId
+    const tabName = contextMenu.tabName
+    handleCloseMenu()
+    setRenamingId(tabId)
+    setRenameValue(tabName)
     // Focus the input after render
     requestAnimationFrame(() => renameInputRef.current?.select())
-  }, [contextMenu])
+  }, [contextMenu, handleCloseMenu])
 
   const handleRenameCommit = useCallback(() => {
     if (renamingId && renameValue.trim()) {
@@ -533,10 +546,11 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
         <HStack gap={0} h="100%" overflow="hidden" flex="1" minW={0}>
           {instances.map((inst) =>
             renamingId === inst.id ? (
-              <Flex key={inst.id} align="center" px={2} h="100%" flexShrink={0}>
+              <Flex key={inst.id} align="center" px={2} h="100%" flexShrink={0} data-tauri-drag-region={false}>
                 <Input
                   ref={renameInputRef}
                   size="xs"
+                  data-tauri-drag-region={false}
                   value={renameValue}
                   onChange={(e) => setRenameValue(e.target.value)}
                   onKeyDown={(e) => {
@@ -599,7 +613,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
           y={contextMenu.y}
           tabName={contextMenu.tabName}
           onRename={handleRenameStart}
-          onClose={() => removeTerminal(contextMenu.tabId)}
+          onClose={() => { removeTerminal(contextMenu.tabId); handleCloseMenu() }}
           onCloseAll={closeAll}
           onCloseMenu={handleCloseMenu}
         />

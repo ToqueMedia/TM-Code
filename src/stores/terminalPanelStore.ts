@@ -138,9 +138,11 @@ export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelAc
   },
 
   renameTerminal: (id, name) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
     const { instances } = get()
     set({
-      instances: instances.map(i => i.id === id ? { ...i, name } : i),
+      instances: instances.map(i => i.id === id ? { ...i, name: trimmed } : i),
     })
   },
 
