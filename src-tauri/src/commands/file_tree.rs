@@ -9,7 +9,16 @@ use super::{canonicalize_path, normalize_path_for_frontend};
 
 /// Directories always excluded from the file tree to avoid massive context waste.
 /// Matches the exclusion list in `filesystem.rs:has_excluded` (glob tool).
-const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "__pycache__", ".next", ".nuxt", ".output"];
+const EXCLUDED_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    "__pycache__",
+    ".next",
+    ".nuxt",
+    ".output",
+];
 
 // File tree node types
 #[derive(Debug, Serialize, Deserialize, Clone)]
