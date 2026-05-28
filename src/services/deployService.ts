@@ -23,10 +23,22 @@
 import { invoke } from '@/utils/invokeMetrics'
 import FirebaseAuthService from './auth/firebaseAuth'
 import { resolveDeployUrl } from '../utils/devUrls'
+import { IS_VITE_DEV } from '../utils/viteEnv'
 import { useDeployStore, type DeployStep } from '../stores/deployStore'
 import { detectFromProjectPath } from './deploy/runtimeDetector'
 import { loadDeployPlan, saveDeployPlan, type StaticSpaPlan, type CompositePlan } from './deploy/deployPlan'
 import { ensureSupported } from './deploy/planNarrow'
+
+/**
+ * Dev-mode bypass header. The production Worker's `authenticateRequest`
+ * falls back to unsigned JWT decode when it sees `TM-Code: dev-deploy`,
+ * allowing dev Firebase tokens (different project/audience) to pass.
+ * Empty object in production — zero overhead on the wire.
+ */
+const DEV_DEPLOY_HEADER: Record<string, string> = IS_VITE_DEV
+  ? { 'TM-Code': 'dev-deploy' }
+  : {}
+
 
 function frontendOutputDir(plan: StaticSpaPlan | CompositePlan): string {
   if (plan.kind === 'static-spa') return plan.outputDir
@@ -108,6 +120,10 @@ export interface DeploysSummaryResponse {
   isReDeploy: boolean
   overQuota: boolean
   existingSlug: string | null
+  /** Custom domain hostname (e.g. "pool.momenu.online"), if configured and SSL active. */
+  customDomain: string | null
+  /** SSL status of the custom domain — 'active' means the domain is ready to serve. */
+  customDomainSslStatus: string | null
 }
 
 export interface DeploysListItem {
@@ -770,6 +786,7 @@ class DeployService {
     const headers = (token: string): Record<string, string> => ({
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
+      ...DEV_DEPLOY_HEADER,
     })
 
     let res = await fetch(url, { method: 'POST', headers: headers(idToken), body: serialised })
@@ -806,6 +823,7 @@ class DeployService {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${idToken}`,
+        ...DEV_DEPLOY_HEADER,
       },
       body: JSON.stringify({ projectId }),
     })
@@ -822,7 +840,10 @@ class DeployService {
     const url = `${workerUrl}/v1/projects/${encodeURIComponent(projectId)}/deployment`
     const res = await fetch(url, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${idToken}` },
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        ...DEV_DEPLOY_HEADER,
+      },
     })
     if (!res.ok) return { exists: false, projectId }
     return (await res.json()) as DeploymentSummary
@@ -862,7 +883,7 @@ class DeployService {
     if (!initial) throw new Error('Not signed in to TM Code.')
     const first = await fetch(url, {
       ...init,
-      headers: { ...(init.headers || {}), Authorization: `Bearer ${initial}` },
+      headers: { ...DEV_DEPLOY_HEADER, ...(init.headers || {}), Authorization: `Bearer ${initial}` },
     })
     if (first.status !== 401) return first
 
@@ -870,7 +891,7 @@ class DeployService {
     if (!refreshed || refreshed === initial) return first
     return fetch(url, {
       ...init,
-      headers: { ...(init.headers || {}), Authorization: `Bearer ${refreshed}` },
+      headers: { ...DEV_DEPLOY_HEADER, ...(init.headers || {}), Authorization: `Bearer ${refreshed}` },
     })
   }
 
@@ -881,7 +902,10 @@ class DeployService {
     const workerUrl = resolveDeployUrl()
     const res = await fetch(`${workerUrl}/v1/projects/deploys`, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${idToken}` },
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        ...DEV_DEPLOY_HEADER,
+      },
     })
     if (!res.ok) {
       const detail = await res.text().catch(() => '')
@@ -927,6 +951,7 @@ class DeployService {
     const init: RequestInit = {
       method,
       headers: {
+        ...DEV_DEPLOY_HEADER,
         Authorization: `Bearer ${idToken}`,
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
@@ -971,6 +996,7 @@ class DeployService {
     const init: RequestInit = {
       method,
       headers: {
+        ...DEV_DEPLOY_HEADER,
         Authorization: `Bearer ${idToken}`,
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },

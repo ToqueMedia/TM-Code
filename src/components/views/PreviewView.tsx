@@ -254,12 +254,15 @@ function PreviewView() {
 
 
   const handleStopServer = useCallback(async () => {
+    // Read previousViewMode BEFORE any state mutations — stop() calls
+    // clearDevServer() internally which resets store flags.
+    const prev = useLayoutStore.getState().previousViewMode
     closePreviewWebview()
     await devServerManager.stop()
-    const layout = useLayoutStore.getState()
-    layout.clearDevServer()
-    const prev = layout.previousViewMode
-    layout.setViewMode(prev && prev !== 'generating' && prev !== 'preview' ? prev : 'chat')
+    // clearDevServer() already called by devServerManager.stop() — don't
+    // call it again (redundant set() triggers an extra MacWebview re-render
+    // that races with the native webview teardown).
+    useLayoutStore.getState().setViewMode(prev && prev !== 'generating' && prev !== 'preview' ? prev : 'chat')
   }, [])
 
   // ── Preview screenshot → chat attachment ─────────────────────────────

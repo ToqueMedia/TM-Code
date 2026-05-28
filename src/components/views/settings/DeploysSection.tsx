@@ -255,7 +255,15 @@ function DeploysSection() {
         }
       >
         {summary?.exists && summary.serviceUrl && (
-          <UrlRow url={summary.serviceUrl} provider={summary.provider} lastDeployedAt={summary.lastDeployedAt} />
+          <UrlRow
+            url={
+              summary.customDomain && summary.sslStatus === 'active'
+                ? `https://${summary.customDomain}`
+                : summary.serviceUrl
+            }
+            provider={summary.provider}
+            lastDeployedAt={summary.lastDeployedAt}
+          />
         )}
       </Section>
 

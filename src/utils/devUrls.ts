@@ -93,24 +93,16 @@ export function resolveOllamaUrl(): string {
 }
 
 /**
- * Deploy URL — follows the same dev/prod split as `resolveWorkerUrl`:
+ * Deploy URL.
  *
- *   - VITE_DEPLOY_URL set: use it verbatim (explicit override — staging
- *     workers, custom proxies, etc.).
- *   - IDE running under Vite dev: use the same dev worker as everything
- *     else (`resolveWorkerUrl()` — typically `localhost:8787` from
- *     `wrangler dev`). The dev worker's `authenticateRequest` bypasses
- *     strict token verification in `isDev(env)` mode, which is why we
- *     get clean 401s when dev tokens hit the production worker — the
- *     audience mismatch + App Check enforcement combo causes silent
- *     refresh failures, and the prod worker won't accept stale tokens.
- *   - Production build: use the production deploy URL.
- *
- * Side-effect caveat: a dev worker forwards container/build + Cloud Run
- * calls to real GCP using the same service-account secrets as production.
- * R2 + KV writes go to local wrangler state. If you want a fully
- * sandboxed dev deploy, point `VITE_DEPLOY_URL` at a dedicated staging
- * Worker — or just skip Publish in dev.
+ * - VITE_DEPLOY_URL set: explicit override (staging Worker, etc.).
+ * - IDE in Vite dev: uses the dev Worker (`resolveWorkerUrl()`). The dev
+ *   Worker's `isDev(env)` bypass relaxes token verification so dev Firebase
+ *   tokens pass. R2 uploads go through the Cloudflare REST API directly
+ *   (not the miniflare binding) so files land in the real `tm-studio-sites`
+ *   bucket that `*.toquemedia.net` serves from. Requires
+ *   CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN in the Worker's `.dev.vars`.
+ * - Production build: uses the production deploy URL.
  */
 export function resolveDeployUrl(): string {
   if (VITE_DEPLOY_URL) return VITE_DEPLOY_URL

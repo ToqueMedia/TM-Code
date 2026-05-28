@@ -12,7 +12,12 @@ import { useProjectStore } from '../../../stores/projectStore'
 import { PUBLISHING_SKILL_NAME } from '../skillService'
 import { tauriFetch } from '../../tauriFetch'
 import { resolveWorkerUrl, resolveDeployUrl } from '../../../utils/devUrls'
+import { IS_VITE_DEV } from '../../../utils/viteEnv'
 import type { ToolRegistrationContext } from './context'
+
+const DEV_DEPLOY_HEADER: Record<string, string> = IS_VITE_DEV
+  ? { 'TM-Code': 'dev-deploy' }
+  : {}
 import FirebaseAuthService from '../../auth/firebaseAuth'
 
 export function registerProvisionTools(ctx: ToolRegistrationContext): void {
@@ -683,6 +688,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${idToken}`,
+            ...DEV_DEPLOY_HEADER,
           },
           body: JSON.stringify({
             projectId: project.id,
