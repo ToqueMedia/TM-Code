@@ -121,6 +121,30 @@ export {
 }
 export type { PromptContext, CmdPromptContext, MCPToolSummary, PackageSummary }
 
+/**
+ * Helper for CMD-mode memory index loading. Loads the MEMORY.md index
+ * and mtime map in parallel, checks for stale entries.
+ * Consolidates the two identical IIFEs that were previously inline.
+ */
+async function loadCmdMemoryIndex(
+  scope: 'user' | 'project',
+  projectPath?: string,
+): Promise<{ content: string | null; hasStale: boolean }> {
+  try {
+    const { loadMemoryIndex, loadMemoryMtimes } = await import('./memdir')
+    const { isMemoryStale } = await import('./memoryAge')
+    const [result, mtimes] = await Promise.all([
+      loadMemoryIndex(scope, projectPath),
+      loadMemoryMtimes(scope, projectPath),
+    ])
+    if (result.content) {
+      const hasStale = Array.from(mtimes.values()).some(m => isMemoryStale(m))
+      return { content: result.content, hasStale }
+    }
+    return { content: null, hasStale: false }
+  } catch { return { content: null, hasStale: false } }
+}
+
 class ContextBuilder {
   private static instance: ContextBuilder
   private promptCache = new Map<string, PromptCacheEntry>()
@@ -619,38 +643,8 @@ class ContextBuilder {
       })(),
       // Persistent memory indexes — same I/O chat mode does in runMemoryWork,
       // but without the selector (CMD mode is lighter, indexes are cheap).
-      (async () => {
-        try {
-          const { loadMemoryIndex, loadMemoryMtimes, parseIndexEntries } = await import('./memdir')
-          const { isMemoryStale } = await import('./memoryAge')
-          const [result, mtimes] = await Promise.all([
-            loadMemoryIndex('user'),
-            loadMemoryMtimes('user'),
-          ])
-          if (result.content) {
-            const entries = parseIndexEntries(result.content, mtimes)
-            const hasStale = entries.some(e => isMemoryStale(e.mtimeMs))
-            return { content: result.content, hasStale }
-          }
-          return { content: null, hasStale: false }
-        } catch { return { content: null, hasStale: false } }
-      })(),
-      (async () => {
-        try {
-          const { loadMemoryIndex, loadMemoryMtimes, parseIndexEntries } = await import('./memdir')
-          const { isMemoryStale } = await import('./memoryAge')
-          const [result, mtimes] = await Promise.all([
-            loadMemoryIndex('project', normalizedCwd),
-            loadMemoryMtimes('project', normalizedCwd),
-          ])
-          if (result.content) {
-            const entries = parseIndexEntries(result.content, mtimes)
-            const hasStale = entries.some(e => isMemoryStale(e.mtimeMs))
-            return { content: result.content, hasStale }
-          }
-          return { content: null, hasStale: false }
-        } catch { return { content: null, hasStale: false } }
-      })(),
+      loadCmdMemoryIndex('user'),
+      loadCmdMemoryIndex('project', normalizedCwd),
     ])
 
     const memoryHasStale = userMemIdx.hasStale || projectMemIdx.hasStale

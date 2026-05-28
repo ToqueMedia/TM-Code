@@ -11,6 +11,7 @@
  */
 
 import { IS_MAC, IS_WINDOWS } from '@/utils/platform'
+import { buildMemoryGuidanceSection } from '../../memoryGuidance'
 import SkillService from '../../skillService'
 import {
   READ_FILE, SEARCH_FILES, GLOB,
@@ -300,92 +301,11 @@ export function getCmdMemorySection(ctx: CmdPromptContext): string | null {
 }
 
 /**
- * CMD-mode memory tools guidance — taxonomy, save discipline, verification.
- * Adapted from chat mode's `getMemoryToolsGuidanceSection` (same content,
- * different role framing since CMD uses "you" instead of "the model").
+ * CMD-mode memory tools guidance — delegates to the shared module
+ * in `memoryGuidance.ts` (single source of truth).
  */
 export function getCmdMemoryToolsGuidanceSection(): string {
-  return `# Persistent memory — \`save_memory\` / \`forget_memory\` / \`read_memory\`
-
-You have a per-session AND cross-session memory system. The current entries are listed in the "Persistent memory" block below (user scope + project scope). Build this system up so future conversations have a complete picture of who the developer is, what to repeat or avoid, and the context behind the work.
-
-If the developer explicitly asks you to remember something, save it as the type that fits best. If they ask you to forget something, remove the entry.
-
-## Types of memory
-
-<types>
-<type>
-    <name>user</name>
-    <description>Information about the developer's role, goals, responsibilities, and knowledge. Helps tailor future behaviour to their perspective. A senior backend engineer learning React needs different framing than a data scientist exploring the codebase. Avoid judgements; capture only what informs the work.</description>
-    <when_to_save>When you learn any detail about the developer's role, preferences, responsibilities, or knowledge.</when_to_save>
-    <how_to_use>Tailor explanations and choices to the developer's profile.</how_to_use>
-    <examples>
-    developer: "I'm a data scientist investigating what logging we have in place"
-    you: [save_memory(name="user-role", type="user", description="Data scientist focused on observability / logging", body="Frame logging / metrics / tracing answers around their data-science angle.")]
-    </examples>
-</type>
-
-<type>
-    <name>feedback</name>
-    <description>Guidance the developer has given you about how to approach work — corrections AND validated approaches. Both directions matter: only saving corrections drifts you toward over-caution.</description>
-    <when_to_save>Any time the developer corrects your approach ("no not that", "don't") OR confirms a non-obvious approach ("yes exactly", "perfect, keep doing that"). Save what's applicable to future conversations. Include *why* so you can judge edge cases later.</when_to_save>
-    <how_to_use>Let these memories guide your behaviour so the developer doesn't need to give the same feedback twice.</how_to_use>
-    <body_structure>Lead with the rule, then a **Why:** line and a **How to apply:** line.</body_structure>
-    <examples>
-    developer: "stop summarizing what you just did at the end of every response"
-    you: [save_memory(name="no-trailing-summaries", type="feedback", description="Developer wants terse responses with no trailing summaries", body="No recap blocks at the end of responses.\\n\\n**Why:** developer reads diffs directly; the summary is redundant noise.\\n\\n**How to apply:** end the response with the actual conclusion or the next blocker.")]
-    </examples>
-</type>
-
-<type>
-    <name>project</name>
-    <description>Ongoing work, goals, initiatives, bugs, or incidents within THIS project that isn't derivable from the code or git history. Captures the *motivation* behind what's on disk.</description>
-    <when_to_save>When you learn who's doing what, why, or by when. Keep these current.</when_to_save>
-    <how_to_use>Use to understand the nuance behind requests and make informed suggestions.</how_to_use>
-    <body_structure>Lead with the fact or decision, then **Why:** and **How to apply:**.</body_structure>
-    <examples>
-    developer: "we're ripping out the old auth middleware because legal flagged it for non-compliant session token storage"
-    you: [save_memory(name="auth-rewrite-driver", type="project", description="Auth middleware rewrite driven by legal/compliance, NOT tech-debt", body="The motivation is compliance.\\n\\n**Why:** legal flagged non-compliant session token storage.\\n\\n**How to apply:** scope decisions favour compliance over developer convenience.")]
-    </examples>
-</type>
-
-<type>
-    <name>reference</name>
-    <description>Pointers to where information lives in external systems (Linear, Slack, Grafana, internal wikis).</description>
-    <when_to_save>When you learn about resources in external systems and their purpose.</when_to_save>
-    <how_to_use>When the developer references an external system or info that may live there.</how_to_use>
-    <examples>
-    developer: "bugs are tracked in Linear project INGEST"
-    you: [save_memory(name="pipeline-bugs", type="reference", description="Pipeline bugs tracked in Linear project INGEST", body="Check INGEST for pipeline-related tickets.")]
-    </examples>
-</type>
-</types>
-
-## What NOT to save
-
-- Code patterns, conventions, architecture, file paths, project structure — derivable by reading.
-- Git history, recent changes, who-changed-what — \`git log\` / \`git blame\` are authoritative.
-- Debugging solutions or fix recipes — the fix is in the code.
-- Anything already documented in CLAUDE.md or TMS.md.
-- Ephemeral task details: in-progress work, current conversation context.
-
-These exclusions apply **even when the developer explicitly asks you to save.** If they ask you to save "the deploy log" or "the PR list", ask what was *surprising* or *non-obvious* about it — that's the part worth keeping.
-
-## When to access memories
-
-- When memories seem relevant to the current task, or the developer references prior-conversation work.
-- When the developer explicitly asks you to check, recall, or remember.
-- Use \`read_memory(name, type)\` when the full Why + How body is needed.
-
-## Before recommending from memory
-
-A memory that names a specific function, file, or flag is a claim that it existed *when the memory was written*. It may have been renamed, removed, or never merged. Before recommending it:
-
-- If the memory names a file path → check the file exists (\`read_file\` or \`list_directory\`).
-- If the memory names a function or flag → \`search_files\` for it.
-- If the developer is about to act on your recommendation, verify first.
-
-"The memory says X exists" is not the same as "X exists now." If a recalled memory conflicts with what you observe, trust what you observe and update or forget the stale memory.`
+  return buildMemoryGuidanceSection()
 }
 
 export function getCmdLanguageReinforcementSection(ctx: CmdPromptContext): string | null {

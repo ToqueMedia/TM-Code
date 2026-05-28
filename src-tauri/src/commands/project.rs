@@ -1207,10 +1207,12 @@ fn is_system_folder(path: &Path) -> bool {
     // Reject overly broad paths: home directories (/Users/name) and drive roots.
     // Opening these as projects triggers a recursive FSEvents watch and file index
     // over millions of files, causing an immediate app freeze + CPU storm.
-    // A valid project must have ≥ 3 real path components: e.g. Users/name/project
+    // A valid project must have ≥ 3 real path components: e.g. Users/name/project.
+    // On Windows, include Component::Prefix (drive letter like "D:") in the count
+    // so that paths on non-C: drives are correctly depth-evaluated.
     let real_depth: usize = canonical
         .components()
-        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .filter(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::Prefix(_)))
         .count();
     if real_depth < 3 {
         return true;
