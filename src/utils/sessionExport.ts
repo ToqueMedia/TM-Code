@@ -19,6 +19,7 @@
  */
 
 import type { ChatSession, ChatMessage, ToolCallDisplay, Attachment, ByokSessionSnapshot } from '../types/chat'
+import { t } from '@/i18n'
 
 /**
  * Environment context captured at export time. Reconstructed via the same
@@ -134,34 +135,34 @@ export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): s
  */
 function renderPermissionBadge(p: NonNullable<ToolCallDisplay['permission']>): string {
   const kindLabel = p.promptKind === 'dangerous_command'
-    ? ' (dangerous command)'
+    ? ` (${t('export.dangerousCommand')})`
     : p.promptKind === 'sensitive_file'
-      ? ' (sensitive file)'
+      ? ` (${t('export.sensitiveFile')})`
       : ''
   if (!p.approved) {
     const reason = p.denyReason ? ` — "${p.denyReason}"` : ''
-    return `🚫 Permission denied by user${kindLabel}${reason}`
+    return `🚫 ${t('export.permDenied')}${kindLabel}${reason}`
   }
   if (p.source === 'user') {
-    return `🔓 Approved by user${kindLabel}`
+    return `🔓 ${t('export.permApproved')}${kindLabel}`
   }
   if (p.source === 'approved_scope') {
-    return '🔓 Auto-approved (scope: Accept All)'
+    return `🔓 ${t('export.permAutoApproved')}`
   }
   if (p.source === 'has_own_approval') {
-    return '🔓 Approved via inline diff'
+    return `🔓 ${t('export.permInlineDiff')}`
   }
   return ''
 }
 
 function renderToolCallMd(tc: ToolCallDisplay): string {
-  const status = tc.isError ? '❌ failed' : tc.status === 'completed' ? '✅ ok' : `⏳ ${tc.status}`
+  const status = tc.isError ? `❌ ${t('export.failed')}` : tc.status === 'completed' ? `✅ ${t('export.ok')}` : `⏳ ${tc.status}`
   const permissionBadge = tc.permission ? renderPermissionBadge(tc.permission) : ''
   const lines: string[] = []
   lines.push(`<details>`)
   lines.push(`<summary><strong>🔧 ${tc.toolName}</strong> — ${status}${permissionBadge ? ` · ${permissionBadge}` : ''}</summary>`)
   lines.push(``)
-  lines.push(`**Input:**`)
+  lines.push(`**${t('export.input')}**`)
   lines.push('```json')
   try {
     lines.push(JSON.stringify(tc.input, null, 2))
@@ -171,14 +172,14 @@ function renderToolCallMd(tc: ToolCallDisplay): string {
   lines.push('```')
   if (tc.result !== undefined) {
     lines.push(``)
-    lines.push(`**Result:**`)
+    lines.push(`**${t('export.result')}**`)
     lines.push('```')
     lines.push(typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2))
     lines.push('```')
   }
   if (tc.diffOldContent || tc.diffNewContent) {
     lines.push(``)
-    lines.push(`**Diff:** \`${tc.diffStatus ?? 'pending'}\` (${tc.isNewFile ? 'new file' : 'edit'})`)
+    lines.push(`**Diff:** \`${tc.diffStatus ?? 'pending'}\` (${tc.isNewFile ? t('export.newFile') : t('export.edit')})`)
   }
   lines.push(`</details>`)
   return lines.join('\n')
@@ -186,7 +187,7 @@ function renderToolCallMd(tc: ToolCallDisplay): string {
 
 function renderMessageMd(msg: ChatMessage): string {
   const stamp = isoTimestamp(msg.timestamp)
-  const roleLabel = msg.role === 'user' ? '👤 User' : msg.role === 'assistant' ? '🤖 Assistant' : '⚙️ System'
+  const roleLabel = msg.role === 'user' ? `👤 ${t('export.user')}` : msg.role === 'assistant' ? `🤖 ${t('export.assistant')}` : `⚙️ ${t('export.system')}`
   const lines: string[] = []
   lines.push(`### ${roleLabel} — ${stamp}`)
   lines.push(``)
@@ -205,7 +206,7 @@ function renderMessageMd(msg: ChatMessage): string {
   if (msg.reasoningContent && !hasInlineReasoning) {
     const dur = msg.reasoningDurationMs != null ? ` (${Math.round(msg.reasoningDurationMs / 1000)}s)` : ''
     lines.push(`<details>`)
-    lines.push(`<summary>💭 Reasoning${dur}</summary>`)
+    lines.push(`<summary>💭 ${t('export.reasoning')}${dur}</summary>`)
     lines.push(``)
     lines.push('```')
     lines.push(msg.reasoningContent)
@@ -222,7 +223,7 @@ function renderMessageMd(msg: ChatMessage): string {
       } else if (block.type === 'reasoning' && block.text) {
         const dur = block.durationMs != null ? ` (${Math.round(block.durationMs / 1000)}s)` : ''
         lines.push(`<details>`)
-        lines.push(`<summary>💭 Reasoning${dur}</summary>`)
+        lines.push(`<summary>💭 ${t('export.reasoning')}${dur}</summary>`)
         lines.push(``)
         lines.push('```')
         lines.push(block.text)
@@ -295,7 +296,7 @@ function renderEnvironmentMd(env: EnvironmentSnapshot): string {
   out.push(`## Detection signals`)
   out.push(``)
   out.push(`- **Project type:** \`${env.projectType}\``)
-  out.push(`- **Hashtag skills (last user message):** ${env.hashtagSkills.length ? env.hashtagSkills.map(s => `\`${s}\``).join(', ') : '_(none)_'}`)
+  out.push(`- **${t('export.hashtags')}** ${env.hashtagSkills.length ? env.hashtagSkills.map(s => `\`${s}\``).join(', ') : '_(none)_'}`)
   out.push(`- **Available skills:** ${env.availableSkills.length ? env.availableSkills.map(s => `\`${s}\``).join(', ') : '_(none)_'}`)
   out.push(``)
 

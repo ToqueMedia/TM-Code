@@ -178,6 +178,20 @@ async function runAgentInternal(
     logger.info('agent', `→ MCP tools: ${mcpTools.length} tools registered`)
   }
 
+  // Set disk directory for large result persistence (survives session reloads).
+  // Path: <project>/.toquemedia/sessions/<sessionId>.large-results/
+  if (currentProject?.path) {
+    const { useChatStore } = await import('../../stores/chatStore')
+    const sessionId = useChatStore.getState().activeSessionId
+    if (sessionId) {
+      const dir = `${currentProject.path}/.toquemedia/sessions/${sessionId}.large-results`
+      // Ensure directory exists BEFORE setting the dir — prevents race
+      // where persistLargeResultToDisk fires before mkdir completes.
+      await invoke('create_directories_all', { path: dir }).catch(() => {})
+      toolExecutor.setLargeResultsDir(dir)
+    }
+  }
+
   // Enable CLI mode on the executor — direct disk writes, CWD-scoped path validation.
   // Always paired with disableCmdMode() in the finally block below.
   if (cmdOnlyMode && cmdCwd) {
@@ -211,7 +225,7 @@ async function runAgentInternal(
     // userMessageText carries the raw user input so contextBuilder can detect
     // skill-trigger hashtags (#auth-google etc.) and inline the corresponding
     // CRITICAL rules at turn 1.
-    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText)
+    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths())
   }
   logger.info('agent', `✓ System prompt built (${systemPrompt.length} chars, ${Date.now() - promptBuildStart}ms)`)
 

@@ -173,7 +173,7 @@ function DeploysSection() {
         hostnameInput.trim(),
       )
       if (!res.success) {
-        setError(res.error ?? 'Failed to add domain')
+        setError(res.error ?? t('deploys.failedAddDomain'))
       } else {
         setHostnameInput('')
         await loadSummary()
@@ -199,8 +199,8 @@ function DeploysSection() {
   const handleRemoveDomain = useCallback(async () => {
     if (!project) return
     const ok = await tauriConfirm(
-      'Remove the custom domain? Your project will only be reachable at the default subdomain.',
-      { title: 'Remove custom domain', kind: 'warning' },
+      t('deploys.removeDomainConfirm'),
+      { title: t('deploys.removeDomainTitle'), kind: 'warning' },
     )
     if (!ok) return
     await deployService.removeCustomDomain(project.id)
@@ -210,7 +210,7 @@ function DeploysSection() {
   if (!project) {
     return (
       <Text fontSize="13px" color={tokens.colors.text.muted}>
-        Open a project to see its deployment.
+        {t('deploys.openProject')}
       </Text>
     )
   }
@@ -221,7 +221,7 @@ function DeploysSection() {
           per-row suspend / resume / delete. The current project is
           highlighted so the user knows which row is "this one". */}
       <Section
-        title="Your deployments"
+        title={t('deploys.yourDeployments')}
         subtitle={
           deploysList.length === 0
             ? t('deploys.empty')
@@ -650,7 +650,7 @@ function CustomDomainPanel({
           _hover={{ bg: 'rgba(255,255,255,0.05)', color: tokens.colors.text.primary }}
           onClick={onRefresh}
           title="Refresh status"
-          aria-label="Refresh"
+          aria-label={t('deploys.refresh')}
         >
           <Box
             css={refreshing ? {

@@ -176,10 +176,7 @@ function useMenuDefinitions(): MenuDef[] {
 				},
 				{
 					label: t('menu.reportIssue'), async action() {
-						try {
-							const opener = await import('@tauri-apps/plugin-opener')
-							await opener.openUrl('https://github.com/toquemedia/tm-code/issues')
-						} catch { }
+						window.dispatchEvent(new CustomEvent('app:report-issue'))
 					}
 				},
 			]

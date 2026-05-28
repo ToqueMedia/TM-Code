@@ -53,6 +53,11 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     abortController,
   })
 
+  // Set agent type for memory isolation — memory tools will scope
+  // writes to <project>/.toquemedia/memory/<agentType>/ instead of
+  // the shared project memdir.
+  subAgent.setAgentType(definition.agentType)
+
   // Build the sub-agent's system prompt
   const systemPrompt = definition.getSystemPrompt(parentCtx)
   subAgent.setSystemPrompt(systemPrompt)
@@ -108,7 +113,6 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
         input: inputTokens,
         output: outputTokens,
       })
-      // Wake the main agent to collect this result
       maybeWakeMainAgent()
     },
     onError: (error) => {

@@ -119,7 +119,7 @@ function ProjectsSidebar() {
     // All projects start from scratch — open folder dialog directly
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
-      const selected = await open({ directory: true, title: 'Choose project folder' })
+      const selected = await open({ directory: true, title: t('chat.chooseProject') })
       if (selected) {
         const { useProjectStore } = await import('../../stores/projectStore')
         await useProjectStore.getState().openProject(selected as string)

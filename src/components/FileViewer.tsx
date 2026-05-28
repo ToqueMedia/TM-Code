@@ -9,6 +9,7 @@ import Editor, { loader } from '@monaco-editor/react'
 import * as monacoEditor from 'monaco-editor'
 import { invoke } from '@tauri-apps/api/core'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n/useTranslation'
 
 // Use local monaco-editor instead of CDN
 loader.config({ monaco: monacoEditor })
@@ -38,6 +39,7 @@ function getFileName(path: string): string {
 }
 
 function FileViewer({ filePath, onClose }: FileViewerProps) {
+  const t = useTranslation()
   const [content, setContent] = useState<string>('')
   const [isDirty, setIsDirty] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -103,7 +105,7 @@ function FileViewer({ filePath, onClose }: FileViewerProps) {
     return (
       <Flex flex="1" align="center" justify="center" bg={tokens.colors.bg.app}>
         <Text color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} fontSize="13px">
-          Loading {fileName}...
+          {t('fileViewer.loading').replace('{fileName}', fileName)}
         </Text>
       </Flex>
     )
@@ -112,7 +114,7 @@ function FileViewer({ filePath, onClose }: FileViewerProps) {
   if (error) {
     return (
       <Flex flex="1" direction="column" align="center" justify="center" bg={tokens.colors.bg.app} gap={3}>
-        <Text color={tokens.colors.text.secondary} fontSize="13px">Failed to open {fileName}</Text>
+        <Text color={tokens.colors.text.secondary} fontSize="13px">{t('fileViewer.failedOpen').replace('{fileName}', fileName)}</Text>
         <Text color={tokens.colors.text.muted} fontSize="11px" fontFamily={tokens.fontFamily.mono}>{error}</Text>
         <Box
           as="button"
@@ -126,7 +128,7 @@ function FileViewer({ filePath, onClose }: FileViewerProps) {
           cursor="pointer"
           _hover={{ opacity: 0.9 }}
         >
-          Close
+          {t('fileViewer.close')}
         </Box>
       </Flex>
     )

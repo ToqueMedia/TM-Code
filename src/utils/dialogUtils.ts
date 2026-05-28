@@ -1,5 +1,6 @@
 // src/utils/dialogUtils.ts
 import { logger } from './logger';
+import { t } from '@/i18n';
 
 /**
  * Checks if we're running in a Tauri context (Tauri v2 compatible)
@@ -38,7 +39,7 @@ export async function openDirectoryDialog(): Promise<string | null> {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: 'Select project directory'
+      title: t('titlebar.selectProject')
     });
     
     logger.debug('ui', 'Selected path:', selected);

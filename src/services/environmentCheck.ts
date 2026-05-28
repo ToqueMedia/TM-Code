@@ -1,6 +1,7 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { Requirement } from './templateService'
 import { IS_WINDOWS } from '@/utils/platform'
+import { t } from '@/i18n'
 
 export interface CheckResult {
   requirement: Requirement
@@ -63,12 +64,12 @@ async function checkSingle(req: Requirement): Promise<CheckResult> {
             found: true,
             version,
             meetsMinimum,
-            error: meetsMinimum ? null : `Version ${version} is below minimum ${req.minVersion}`,
+            error: meetsMinimum ? null : t('env.versionBelowMin').replace('{version}', version).replace('{min}', req.minVersion),
           }
         }
-        lastError = `Could not parse version from: ${rawOutput}`
+        lastError = t('env.parseFailed').replace('{output}', rawOutput)
       } else {
-        lastError = `Command failed: ${cmd}`
+        lastError = t('env.commandFailed').replace('{command}', cmd)
       }
     } catch (e) {
       lastError = String(e)

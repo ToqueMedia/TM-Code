@@ -221,6 +221,7 @@ interface ChatActions {
   removeDraftAttachment: (id: string) => void
   clearDraftAttachments: () => void
   setPostCompactSurveyPending: (value: boolean) => void
+  setSessionMemory: (memory: string) => void
   clearAllSessions: () => void
   // Card messages (plan approval, todo list)
   addCardMessage: (type: ChatMessageCard['type'], projectPath: string) => void
@@ -992,6 +993,20 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       set({ postCompactSurveyPending: value })
     },
 
+    setSessionMemory: (memory: string) => {
+      set(state => {
+        const sessionId = state.activeSessionId
+        if (!sessionId) return state
+        const sessions = new Map(state.sessions)
+        const session = sessions.get(sessionId)
+        if (session) {
+          sessions.set(sessionId, { ...session, sessionMemory: memory, updatedAt: Date.now() })
+        }
+        return { sessions }
+      })
+      sessionService.markDirty()
+    },
+
     createSession: (projectPath: string) => {
       const sessionId = generateId('session')
       const now = Date.now()
@@ -1136,11 +1151,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const session = sessions.get(activeSessionId)
         if (!session) return state
 
+        const isFirstMessage = session.messages.length === 0 && !session.name
         const updatedSession: ChatSession = {
           ...session,
           messages: [...session.messages, message],
           status: 'running',
           updatedAt: Date.now(),
+          ...(isFirstMessage && { name: content.slice(0, 80) }),
         }
 
         const updatedSessions = new Map(sessions)
@@ -2519,7 +2536,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     saveSessionToDisk: async () => {
       const state = get()
       const session = state.getActiveSession()
-      if (session) {
+      if (session && session.messages.length > 0) {
         await sessionService.saveSession(session, {
           input: state.totalTokensUsed.input,
           output: state.totalTokensUsed.output,
@@ -2882,10 +2899,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     cleanupOnExit: async (projectPath: string) => {
-      // Save current session with token usage
+      // Save current session with token usage (skip empty sessions)
       const state = get()
       const session = state.getActiveSession()
-      if (session) {
+      if (session && session.messages.length > 0) {
         await sessionService.saveSession(session, {
           input: state.totalTokensUsed.input,
           output: state.totalTokensUsed.output,

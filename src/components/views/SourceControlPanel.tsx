@@ -168,36 +168,36 @@ function SourceControlPanel() {
 
   const onStageFile = useCallback(async (path: string) => {
     try { await GitService.stageFile(projectPath, path); await loadStatus(); refreshGutter(path) }
-    catch (e) { showFeedback('error', `Stage: ${e}`) }
+    catch (e) { showFeedback('error', t('sourceControl.stage').replace('{file}', String(e))) }
   }, [projectPath, loadStatus, showFeedback, refreshGutter])
 
   const onUnstageFile = useCallback(async (path: string) => {
     try { await GitService.unstageFile(projectPath, path); await loadStatus(); refreshGutter(path) }
-    catch (e) { showFeedback('error', `Unstage: ${e}`) }
+    catch (e) { showFeedback('error', t('sourceControl.unstage').replace('{file}', String(e))) }
   }, [projectPath, loadStatus, showFeedback, refreshGutter])
 
   const stageAll = useCallback(async () => {
     try { await GitService.stageAll(projectPath); await loadStatus() }
-    catch (e) { showFeedback('error', `Stage all: ${e}`) }
+    catch (e) { showFeedback('error', t('sourceControl.stageAll').replace('{file}', String(e))) }
   }, [projectPath, loadStatus, showFeedback])
 
   const unstageAll = useCallback(async () => {
     try { await GitService.unstageAll(projectPath); await loadStatus() }
-    catch (e) { showFeedback('error', `Unstage all: ${e}`) }
+    catch (e) { showFeedback('error', t('sourceControl.unstageAll').replace('{file}', String(e))) }
   }, [projectPath, loadStatus, showFeedback])
 
   const onDiscardFile = useCallback(async (path: string) => {
-    const ok = await tauriConfirm(`Discard changes in "${path.split('/').pop()}"?\n\nThis cannot be undone.`, { title: 'Discard Changes', kind: 'warning' })
+    const ok = await tauriConfirm(t('sourceControl.discardConfirm').replace('{file}', path.split('/').pop() || path), { title: t('sourceControl.discardTitle'), kind: 'warning' })
     if (!ok) return
     try { await GitService.discardFile(projectPath, path); await loadStatus() }
-    catch (e) { showFeedback('error', `Discard: ${e}`) }
+    catch (e) { showFeedback('error', t('sourceControl.discardFile').replace('{file}', String(e))) }
   }, [projectPath, loadStatus, showFeedback])
 
   const discardAll = useCallback(async () => {
-    const ok = await tauriConfirm('Discard ALL changes?\n\nThis cannot be undone.', { title: 'Discard All', kind: 'warning' })
+    const ok = await tauriConfirm(t('sourceControl.discardAllConfirm'), { title: t('sourceControl.discardAllTitle'), kind: 'warning' })
     if (!ok) return
     try { await GitService.discardAll(projectPath); await loadStatus() }
-    catch (e) { showFeedback('error', `Discard all: ${e}`) }
+    catch (e) { showFeedback('error', t('sourceControl.discardAll').replace('{file}', String(e))) }
   }, [projectPath, loadStatus, showFeedback])
 
   const onOpenFile = useCallback((relPath: string) => {
@@ -208,18 +208,18 @@ function SourceControlPanel() {
   // ── Commit ───────────────────────────────────────────────────────────
 
   const handleCommit = useCallback(async () => {
-    if (!commitMsg.trim()) { showFeedback('error', 'Enter a commit message'); return }
-    if (staged.length === 0) { showFeedback('error', 'Stage files first'); return }
+    if (!commitMsg.trim()) { showFeedback('error', t('sourceControl.enterCommitMessage')); return }
+    if (staged.length === 0) { showFeedback('error', t('sourceControl.stageFilesFirst')); return }
     setCommitting(true)
     try {
       await GitService.commit(projectPath, commitMsg.trim())
       if (!mountedRef.current) return
       setCommitMsg('')
       if (textareaRef.current) textareaRef.current.style.height = '30px'
-      showFeedback('success', `Committed to ${branch}`)
+      showFeedback('success', t('sourceControl.committedTo').replace('{branch}', branch))
       await loadStatus()
     } catch (e) {
-      if (mountedRef.current) showFeedback('error', `Commit: ${e}`)
+      if (mountedRef.current) showFeedback('error', t('sourceControl.commit').replace('{file}', String(e)))
     }
     if (mountedRef.current) setCommitting(false)
   }, [projectPath, commitMsg, staged.length, loadStatus, showFeedback, branch])
@@ -227,7 +227,7 @@ function SourceControlPanel() {
   // ── Stage All & Commit (quick action) ────────────────────────────────
 
   const handleStageAllAndCommit = useCallback(async () => {
-    if (!commitMsg.trim()) { showFeedback('error', 'Enter a commit message'); return }
+    if (!commitMsg.trim()) { showFeedback('error', t('sourceControl.enterCommitMessage')); return }
     setCommitting(true)
     try {
       await GitService.stageAll(projectPath)
@@ -235,10 +235,10 @@ function SourceControlPanel() {
       if (!mountedRef.current) return
       setCommitMsg('')
       if (textareaRef.current) textareaRef.current.style.height = '30px'
-      showFeedback('success', `Committed all to ${branch}`)
+      showFeedback('success', t('sourceControl.committedAllTo').replace('{branch}', branch))
       await loadStatus()
     } catch (e) {
-      if (mountedRef.current) showFeedback('error', `Commit: ${e}`)
+      if (mountedRef.current) showFeedback('error', t('sourceControl.commit').replace('{file}', String(e)))
     }
     if (mountedRef.current) setCommitting(false)
   }, [projectPath, commitMsg, loadStatus, showFeedback, branch])
@@ -250,8 +250,8 @@ function SourceControlPanel() {
     setPushing(true)
     try {
       const result = await GitService.push(projectPath)
-      showFeedback('success', result || `Pushed to ${branch}`)
-    } catch (e) { showFeedback('error', `Push: ${e instanceof Error ? e.message : e}`) }
+      showFeedback('success', result || t('sourceControl.pushedTo').replace('{branch}', branch))
+    } catch (e) { showFeedback('error', t('sourceControl.push').replace('{file}', e instanceof Error ? e.message : String(e))) }
     finally { setPushing(false) }
   }, [projectPath, branch, showFeedback, pushing])
 
@@ -260,9 +260,9 @@ function SourceControlPanel() {
     setPulling(true)
     try {
       const result = await GitService.pull(projectPath)
-      showFeedback('success', result || `Pulled from ${branch}`)
+      showFeedback('success', result || t('sourceControl.pulledFrom').replace('{branch}', branch))
       await loadStatus()
-    } catch (e) { showFeedback('error', `Pull: ${e instanceof Error ? e.message : e}`) }
+    } catch (e) { showFeedback('error', t('sourceControl.pull').replace('{file}', e instanceof Error ? e.message : String(e))) }
     finally { setPulling(false) }
   }, [projectPath, branch, showFeedback, loadStatus, pulling])
 
@@ -289,7 +289,7 @@ function SourceControlPanel() {
       const FirebaseAuthService = (await import('../../services/auth/firebaseAuth')).default
       let token = await FirebaseAuthService.getInstance().getIdToken()
       if (!token) token = await FirebaseAuthService.getInstance().getIdToken(true)
-      if (!token) throw new Error('Not authenticated')
+      if (!token) throw new Error(t('sourceControl.notAuthenticated'))
 
       const { resolveWorkerUrl } = await import('../../utils/devUrls')
       const workerUrl = resolveWorkerUrl()
@@ -367,10 +367,10 @@ ${diffDetail.slice(0, 4000)}`,
           Source Control
         </Text>
         <HStack gap={0}>
-          <button className="sc-btn" title="Pull" onClick={handlePull}>
+          <button className="sc-btn" title={t('sourceControl.pullBtn')} onClick={handlePull}>
             {pulling ? <span className="sc-spin"><VscCloudDownload size={13} /></span> : <VscCloudDownload size={13} />}
           </button>
-          <button className="sc-btn" title="Push" onClick={handlePush}>
+          <button className="sc-btn" title={t('sourceControl.pushBtn')} onClick={handlePush}>
             {pushing ? <span className="sc-spin"><VscCloudUpload size={13} /></span> : <VscCloudUpload size={13} />}
           </button>
           <button className="sc-btn" title={t("view.refresh")} onClick={() => loadStatus(true)}>
@@ -407,7 +407,7 @@ ${diffDetail.slice(0, 4000)}`,
           <button
             className="sc-btn accent"
             style={{ position: 'absolute', right: 14, top: 12 }}
-            title="Generate commit message"
+            title={t('sourceControl.generateCommit')}
             onClick={handleGenerateCommitMsg}
             disabled={generating}
           >
@@ -561,7 +561,7 @@ const VirtualFileList = memo<{
             <div key={vItem.index} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: vItem.size, transform: `translateY(${vItem.start}px)` }}>
               {item.type === 'header' ? (
                 <SectionHeader
-                  label={item.section === 'staged' ? 'Staged Changes' : 'Changes'}
+                  label={item.section === 'staged' ? t('sourceControl.staged') : t('sourceControl.changes')}
                   count={item.count} isOpen={item.isOpen}
                   onToggle={item.section === 'staged' ? onToggleStaged : onToggleChanges}
                   section={item.section}
@@ -653,11 +653,11 @@ const FileRow = memo<{
 
       <div style={{ display: 'flex', flexShrink: 0 }} onClick={e => e.stopPropagation()}>
         {section === 'staged' ? (
-          <button className="sc-btn" title={t("view.unstage")} onClick={() => onUnstageFile(file.path)}><VscRemove size={12} /></button>
+          <button className="sc-btn" title={t('sourceControl.unstageBtn')} onClick={() => onUnstageFile(file.path)}><VscRemove size={12} /></button>
         ) : (
           <>
-            <button className="sc-btn red" title={t("view.discardChanges")} onClick={() => onDiscardFile(file.path)}><VscDiscard size={11} /></button>
-            <button className="sc-btn green" title={t("view.stage")} onClick={() => onStageFile(file.path)}><VscAdd size={12} /></button>
+            <button className="sc-btn red" title={t('sourceControl.discardBtn')} onClick={() => onDiscardFile(file.path)}><VscDiscard size={11} /></button>
+            <button className="sc-btn green" title={t('sourceControl.stageBtn')} onClick={() => onStageFile(file.path)}><VscAdd size={12} /></button>
           </>
         )}
       </div>

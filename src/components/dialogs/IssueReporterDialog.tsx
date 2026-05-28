@@ -100,7 +100,7 @@ async function captureScreenshot(): Promise<string | null> {
     const html2canvas = (await import('html2canvas')).default
     const fullCanvas = await html2canvas(document.documentElement, {
       backgroundColor: '#0a0a0a',
-      scale: 1,
+      scale: window.devicePixelRatio || 1,
       logging: false,
       useCORS: true,
       allowTaint: true,
@@ -269,7 +269,7 @@ function IssueReporterDialog({ isOpen, onClose }: IssueReporterDialogProps) {
         data-issue-reporter-overlay=""
         position="fixed"
         inset={0}
-        zIndex={tokens.zIndex.modal}
+        zIndex={tokens.zIndex.overlay}
         bg={tokens.colors.dialog.backdrop}
         align="center"
         justify="center"

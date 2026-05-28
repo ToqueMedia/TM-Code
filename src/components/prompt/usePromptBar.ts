@@ -10,6 +10,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 import { useProblemsStore } from '../../stores/problemsStore'
 import { devServerManager } from '../../services/devServerManager'
+import { activatePreview } from '../../services/previewActivation'
 import AgentService from '../../services/agent/agentService'
 import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
@@ -1331,60 +1332,18 @@ export function usePromptBar() {
   }, [])
 
   const togglePreview = useCallback(async () => {
-    const layoutStore = useLayoutStore.getState()
-
-    if (layoutStore.viewMode === 'preview') {
-      layoutStore.goBack()
-      return
-    }
-
-    // If server is already running or static preview exists, just switch view
-    if (selectIsPreviewServerRunning(layoutStore) || layoutStore.previewHtmlContent) {
-      layoutStore.setViewMode('preview')
-      return
-    }
-
-    // If server is already starting, don't restart
-    if (devServerManager.isActive()) return
-
-    // No server running — try to start one.
-    // If devCommand is null (detection hasn't run yet or package.json was
-    // created after the last detection), do just-in-time detection now.
-    let cmd = devCommand
-    if (!cmd && currentProject?.path) {
-      cmd = await detectDevCommand(currentProject.path)
-      if (cmd) setDevCommand(cmd)
-    }
-
     const layout = useLayoutStore.getState()
-    layout.setViewMode('preview')
 
-    if (cmd && currentProject?.path) {
-      layout.addDevServerLog(`Starting dev server (${cmd})...`, 'info')
-      // Detect project kind (frontend / backend / fullstack) from package.json
-      // deps. Without this, devServerManager defaults to 'frontend' and the
-      // port-authoritative classifier + dual-port kill behaviour never kick in
-      // for fullstack monorepos — resulting in EADDRINUSE on the backend side.
-      let projectKind: 'frontend' | 'backend' | 'fullstack' | undefined
-      try {
-        const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
-        const cat = await detectProjectCategory(currentProject.path)
-        projectKind = categoryToServerHint(cat)
-      } catch { /* non-fatal — fall through with undefined, start() defaults to frontend */ }
-      try {
-        const { resolveFrontendPortHint } = await import('../../services/templateService')
-        const frontendPortHint = projectKind
-          ? await resolveFrontendPortHint(currentProject.path, projectKind)
-          : undefined
-        await devServerManager.start(currentProject.path, cmd, { projectKind, frontendPortHint })
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        layout.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
-      }
+    // If already in preview → toggle off.
+    if (layout.viewMode === 'preview') {
+      layout.goBack()
+      return
     }
-    // If no cmd found: preview opens with "Waiting..." — user can ask
-    // the agent to set up and start the server.
-  }, [devCommand, currentProject?.path])
+
+    // Delegate to the shared activation function (also used by ChatView's
+    // header button). It handles detection, server start, and view switch.
+    await activatePreview(currentProject?.path ?? null)
+  }, [currentProject?.path])
 
   return {
     hasInputContent,

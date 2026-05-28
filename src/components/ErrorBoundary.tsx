@@ -1,4 +1,5 @@
 import React from 'react';
+import { t } from '@/i18n';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -87,11 +88,11 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
                 fontWeight: 'bold',
               }}
             >
-              🚨 Erro no TM Code
+              🚨 {t('errorBoundary.occurred')}
             </h1>
             
             <p style={{ marginBottom: '16px', color: '#cccccc' }}>
-              Algo deu errado na aplicação. Por favor, veja os detalhes abaixo:
+              {t('errorBoundary.contentError')}
             </p>
             
             {this.state.error && (
@@ -108,14 +109,14 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
                   overflowX: 'auto',
                 }}
               >
-                <strong>Erro:</strong> {this.state.error.message}
+                <strong>{t('errorBoundary.errorPrefix')}</strong> {this.state.error.message}
               </div>
             )}
             
             {this.state.errorInfo && (
               <details style={{ marginBottom: '16px' }}>
                 <summary style={{ color: '#8be9fd', cursor: 'pointer' }}>
-                  Stack trace (clique para expandir)
+                  {t('errorBoundary.stackTrace')}
                 </summary>
                 <pre 
                   style={{
@@ -155,7 +156,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
                   e.currentTarget.style.backgroundColor = '#007acc';
                 }}
               >
-                🔄 Tentar Novamente
+                🔄 {t('errorBoundary.tryAgain')}
               </button>
               
               <button
@@ -176,7 +177,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
                   e.currentTarget.style.backgroundColor = '#2d2d30';
                 }}
               >
-                🔄 Recarregar Página
+                🔄 {t('errorBoundary.reload')}
               </button>
             </div>
           </div>

@@ -2,9 +2,11 @@ import { memo } from 'react'
 import { Box, Flex, HStack, Text } from '@chakra-ui/react'
 import { FiWifiOff, FiRefreshCw, FiAlertTriangle } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n/useTranslation'
 import { useNetworkStatus } from '@/hooks/useNetworkStatus'
 
 function NetworkStatusBanner() {
+  const t = useTranslation()
   const { status, recheck } = useNetworkStatus()
 
   if (status === 'online') return null
@@ -13,8 +15,8 @@ function NetworkStatusBanner() {
   const accent = isOffline ? '#f85149' : tokens.colors.accent.orange
   const Icon = isOffline ? FiWifiOff : FiAlertTriangle
   const title = isOffline
-    ? 'No internet connection'
-    : 'Slow connection — AI responses may take longer'
+    ? t('network.offline')
+    : t('network.slow')
 
   return (
     <Box

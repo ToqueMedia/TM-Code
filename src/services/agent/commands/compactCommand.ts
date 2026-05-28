@@ -27,7 +27,8 @@ export async function executeCompact(
     return
   }
 
-  const customInstructions = args.trim() || undefined
+  const isPartial = args.trim().toLowerCase() === 'partial'
+  const customInstructions = isPartial ? undefined : (args.trim() || undefined)
 
   // Progress callback — drives compactPhase in agentStore so the UI
   // shows phased status labels (pre-hooks, compressing, post-hooks).
@@ -43,7 +44,11 @@ export async function executeCompact(
 
   try {
     agentStore.setStatus('compressing')
-    await agentService.runManualCompact(customInstructions, onProgress)
+    if (isPartial) {
+      await agentService.runPartialCompact(undefined, onProgress)
+    } else {
+      await agentService.runManualCompact(customInstructions, onProgress)
+    }
     agentStore.setStatus('idle')
   } catch (err) {
     agentStore.setCompactPhase('idle')

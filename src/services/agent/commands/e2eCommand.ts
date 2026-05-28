@@ -99,7 +99,7 @@ export async function executeE2E(
   const queryGuard = getQueryGuard()
   if (queryGuard.getSnapshot()) {
     chatStore.addSystemMessage(
-      'An agent turn is in progress. Wait for it to finish (or hit Stop) before running /te2e.'
+      t('e2e.busy')
     )
     return
   }
@@ -122,13 +122,7 @@ export async function executeE2E(
 
   if (!args.trim()) {
     chatStore.addSystemMessage(
-      'Usage: /te2e <what to validate>\n\n' +
-      'Examples:\n' +
-      '  /te2e login flow\n' +
-      '  /te2e signup form validates required fields\n' +
-      '  /te2e clicking the cart icon opens the drawer\n\n' +
-      'The agent will start the browser and click through the flow uninterrupted. ' +
-      'Nothing is written to your project. Hit Stop in the chat if you want to abort.'
+      t('e2e.usage')
     )
     return
   }
@@ -144,7 +138,7 @@ export async function executeE2E(
   chatStore.addUserMessage(`/te2e ${args}`)
   chatStore.startAssistantMessage()
   agentStore.setStatus('awaiting_response')
-  chatStore.appendTextDelta('_Starting browser session…_\n\n')
+  chatStore.appendTextDelta('_' + t('e2e.starting') + '_\n\n')
 
   // Eagerly boot the MCP server so its tools are registered before the
   // agent's first turn. If browser detection fails, the dialog surfaces

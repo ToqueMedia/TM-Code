@@ -753,6 +753,27 @@ export function getPendingMemoryProposalsSection(ctx: PromptContext): string | n
   return ctx.pendingMemoryProposals
 }
 
+/**
+ * Session-scoped memory notes that the agent maintains via
+ * `update_session_memory`. These notes survive context compaction but
+ * reset on new session — the agent uses them to track in-progress work,
+ * decisions made, and pending next steps so it can resume after compact
+ * without losing context.
+ *
+ * Returns null when no session memory has been recorded yet.
+ */
+export function getSessionMemorySection(ctx: PromptContext): string | null {
+  if (!ctx.sessionMemory) return null
+  return [
+    '# Session memory',
+    'Notes the agent has recorded for this session to survive context compaction. ' +
+    'These reflect in-progress work, decisions made, and pending next steps. ' +
+    'Treat as authoritative for "where was I" after compaction.',
+    '',
+    ctx.sessionMemory,
+  ].join('\n')
+}
+
 export function getActivePlanSection(ctx: PromptContext): string | null {
   if (!ctx.planContent) return null
   const truncated = ctx.planContent.length > 4000

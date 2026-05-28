@@ -419,14 +419,11 @@ function UpgradeStep({ onClose }: { onClose: () => void }) {
           Publishing is a paid feature
         </Text>
         <Text fontSize="12px" color={tokens.colors.text.secondary} lineHeight="1.55">
-          The Explorer plan covers chat, preview, and local development. Going live — the
-          provisioned subdomain, managed hosting, and built-in authentication — needs a
-          paid plan so we can attribute the usage to your account.
+          {t('publish.explorerPlanNote')}
         </Text>
       </Box>
       <Text fontSize="11.5px" color={tokens.colors.text.muted} lineHeight="1.55" mb={4}>
-        Upgrade in <strong>Settings → Billing</strong>. Vibe covers small projects;
-        Pro and Max scale up with traffic and storage.
+        {t('publish.upgradeHint')}
       </Text>
       <Flex justify="flex-end" gap={2}>
         <Button
@@ -435,7 +432,7 @@ function UpgradeStep({ onClose }: { onClose: () => void }) {
           color={tokens.colors.text.secondary}
           onClick={onClose}
         >
-          Close
+          {t('misc.close')}
         </Button>
       </Flex>
     </Box>
@@ -593,7 +590,7 @@ function ConfigureStep({
           </Flex>
         </Flex>
         <Text fontSize="11px" color={tokens.colors.text.muted} mt="6px">
-          Letters, numbers, and hyphens only.
+          {t('deploys.lettersNumbersHyphens')}
         </Text>
       </Box>
 
@@ -1039,7 +1036,7 @@ function CopyButton({ text }: { text: string }) {
       color={copied ? tokens.colors.accent.greenBright : tokens.colors.text.muted}
       _hover={{ bg: 'rgba(255,255,255,0.05)', color: tokens.colors.text.primary }}
       onClick={handleCopy}
-      aria-label="Copy URL"
+      aria-label={t('publish.copyUrl')}
     >
       {copied ? <FiCheckCircle size={13} /> : <FiCopy size={13} />}
     </Box>

@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Box, HStack, Text, Icon, Input } from '@chakra-ui/react';
 import { FiChevronRight, FiChevronDown } from 'react-icons/fi';
 import { tokens } from '@/theme/tokens';
+import { useTranslation } from '@/i18n';
 import { useFileTreeRepository } from '@/stores/fileTreeStore';
 import { useEditorRepository } from '@/stores/editorStore';
 import type { TreeNodeProps } from './types';
@@ -14,6 +15,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   setAlert,
   onOpenContextMenu,
 }) => {
+  const t = useTranslation()
   const toggleNode = useFileTreeRepository((s) => s.toggleNode);
   const selectNode = useFileTreeRepository((s) => s.selectNode);
   const renameNode = useFileTreeRepository((s) => s.renameNode);
@@ -89,7 +91,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
           await lsp.renameFileModel(node.path, newPath);
         } catch { /* ignore */ }
       } else {
-        setAlert({ show: true, title: 'Error', description: `Failed to rename ${node.name}`, status: 'error' });
+        setAlert({ show: true, title: t('misc.error'), description: t('fileTree.renameFailed').replace('{name}', node.name), status: 'error' });
       }
     }
     setIsRenaming(false);

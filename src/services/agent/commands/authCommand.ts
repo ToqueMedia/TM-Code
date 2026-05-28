@@ -1,4 +1,5 @@
 import { invoke } from '@/utils/invokeMetrics'
+import { t } from '../../../i18n'
 import { useChatStore } from '../../../stores/chatStore'
 import { useAgentStore } from '../../../stores/agentStore'
 import { runAgentWithCallbacks } from '../agentRunner'
@@ -167,18 +168,18 @@ export async function runAuthFlow(
 
   if (!authProxySkill) {
     chatStore.addSystemMessage(
-      'Could not load the auth-proxy skill. The bundled resources may be missing — reinstall TM Code if this persists.'
+      t('auth.proxySkillMissing')
     )
     return
   }
   if (wantsGoogle && !googleSigninSkill) {
     chatStore.addSystemMessage(
-      'Could not load the google-signin skill. Proceeding with email/password only — re-add `#auth-google` once the skill is available.'
+      t('auth.googleSkillMissing')
     )
   }
   if (withDesign && !designSkill) {
     chatStore.addSystemMessage(
-      'Could not load the frontend-design skill. Proceeding without it — the UI will use the model\'s default aesthetics.'
+      t('auth.designSkillMissing')
     )
   }
 
@@ -244,7 +245,7 @@ export async function runDesignFlow(
 
   if (!designSkill) {
     chatStore.addSystemMessage(
-      'Could not load the frontend-design skill. Continuing without it — the UI will use the model\'s default aesthetics.'
+      t('auth.designSkillMissing')
     )
     // Still run the agent with the cleaned text — user's request shouldn't be lost.
     await runAgentWithCallbacks(instructions || userMessageText, {

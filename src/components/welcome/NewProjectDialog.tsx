@@ -34,11 +34,11 @@ interface NewProjectDialogProps {
 
 const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ dialog }) => {
   const templates = [
-    { label: 'React TypeScript', value: 'react-ts' },
-    { label: 'Node.js Express', value: 'node-express' },
-    { label: 'Python FastAPI', value: 'python-fastapi' },
-    { label: 'Vue.js', value: 'vue' },
-    { label: 'Rust', value: 'rust' },
+    { label: t('newProject.reactTs'), value: 'react-ts' },
+    { label: t('newProject.nodeExpress'), value: 'node-express' },
+    { label: t('newProject.pythonFastapi'), value: 'python-fastapi' },
+    { label: t('newProject.vue'), value: 'vue' },
+    { label: t('newProject.rust'), value: 'rust' },
     { label: t('misc.emptyProject'), value: 'empty' },
   ]
 

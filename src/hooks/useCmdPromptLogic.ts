@@ -280,7 +280,7 @@ export function useCmdPromptLogic() {
       // provision_auth or scaffolding tools which fail with cryptic errors.
       if (!path) {
         useChatStore.getState().addSystemMessage(
-          'No project open. Open a project before using skill hashtags.',
+          t('hook.noProjectOpen'),
           'error',
         )
         return
@@ -327,7 +327,7 @@ export function useCmdPromptLogic() {
     // ── Agent prompt ──
     const { isAuthenticated } = useAuthStore.getState()
     if (!isAuthenticated) {
-      useChatStore.getState().addSystemMessage('You must be signed in to use the agent.', 'error')
+      useChatStore.getState().addSystemMessage(t('hook.signInRequired'), 'error')
       return
     }
 

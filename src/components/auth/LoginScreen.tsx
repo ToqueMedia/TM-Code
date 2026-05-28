@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n/useTranslation'
 import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import { useAuthStore } from '../../stores/authStore'
 import WindowControls from '../ui/WindowControls'
@@ -23,6 +24,7 @@ function getErrorMessage(err: unknown): string {
 }
 
 function LoginScreen() {
+  const t = useTranslation()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -50,12 +52,12 @@ function LoginScreen() {
 
   const handleDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
-    const t = e.target as HTMLElement
-    const tag = t.tagName?.toLowerCase() || ''
+    const el = e.target as HTMLElement
+    const tag = el.tagName?.toLowerCase() || ''
     if (['button', 'input', 'label', 'svg', 'path', 'a'].includes(tag)) return
-    if (t.getAttribute?.('role') === 'button') return
+    if (el.getAttribute?.('role') === 'button') return
     // Don't drag when interacting with the form card
-    if (t.closest?.('[data-login-card]')) return
+    if (el.closest?.('[data-login-card]')) return
     getCurrentWindow().startDragging().catch(() => {})
   }, [])
 
@@ -177,14 +179,14 @@ function LoginScreen() {
             letterSpacing="-0.5px"
             lineHeight="1.2"
           >
-            Bem-vindo de volta
+            {t('login.welcomeBack')}
           </Text>
           <Text
             fontSize="13px"
             color={tokens.colors.text.secondary}
             mt={2}
           >
-            Entre para continuar a desenvolver
+            {t('login.signInContinue')}
           </Text>
         </Box>
 
@@ -204,14 +206,14 @@ function LoginScreen() {
             <Box mb={3}>
               <label>
                 <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1.5} fontWeight="500">
-                  Email
+                  {t('login.email')}
                 </Text>
                 <input
                   type="email"
                   className="auth-input"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="nome@email.com"
+                  placeholder={t('login.emailPlaceholder')}
                   autoComplete="email"
                   autoFocus
                   disabled={anyLoading}
@@ -224,14 +226,14 @@ function LoginScreen() {
             <Box mb={4}>
               <label>
                 <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1.5} fontWeight="500">
-                  Password
+                  {t('login.password')}
                 </Text>
                 <input
                   type="password"
                   className="auth-input"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="A sua password"
+                  placeholder={t('login.passwordPlaceholder')}
                   autoComplete="current-password"
                   disabled={anyLoading}
                   style={inputStyle}

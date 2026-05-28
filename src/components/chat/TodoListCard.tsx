@@ -8,6 +8,7 @@ import { handleStartExecution } from '../../services/agent/commands/planCommand'
 import { useChatStore } from '../../stores/chatStore'
 import { computeSlidingWindow } from '../../utils/taskWindow'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n/useTranslation'
 import type { ChatMessageCard } from '../../types/chat'
 
 interface TodoTask {
@@ -21,6 +22,7 @@ interface TodoListCardProps {
 }
 
 function TodoListCard({ card }: TodoListCardProps) {
+  const t = useTranslation()
   const { projectPath, status } = card
   const isStreaming = useChatStore(s => s.isStreaming)
   const [tasks, setTasks] = useState<TodoTask[]>([])
@@ -134,11 +136,11 @@ function TodoListCard({ card }: TodoListCardProps) {
           window — they're structural and bloat 3 slots — but the task
           IDs (e.g. "Task 1.1") already encode the phase. */}
       {loading ? (
-        <Text fontSize="12px" color={tokens.colors.text.muted} py={2}>Loading tasks...</Text>
+        <Text fontSize="12px" color={tokens.colors.text.muted} py={2}>{t('todoList.loading')}</Text>
       ) : (() => {
         const realTasks = tasks.filter(t => !t.isPhaseHeader)
         if (realTasks.length === 0) {
-          return <Text fontSize="12px" color={tokens.colors.text.muted} py={2}>No tasks parsed from TODO.md.</Text>
+          return <Text fontSize="12px" color={tokens.colors.text.muted} py={2}>{t('todoList.noTasks')}</Text>
         }
 
         // In-progress = first non-completed task. Heuristic, but matches the

@@ -2,6 +2,7 @@ import { memo, useEffect, useState } from 'react'
 import { Box, Flex, HStack, Text, VStack } from '@chakra-ui/react'
 import { FiAlertTriangle, FiExternalLink, FiX, FiRefreshCw } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import {
   checkStartupRequirements,
   clearStartupRequirementsCache,
@@ -100,13 +101,13 @@ function StartupRequirementsBanner() {
           <Flex align="center" justify="space-between" gap={2}>
             <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
               {missing.length === 1
-                ? 'A required tool is missing or outdated'
-                : `${missing.length} required tools are missing or outdated`}
+                ? t('startup.toolMissing')
+                : t('startup.toolsMissing').replace('{count}', String(missing.length))}
             </Text>
             <HStack gap={1}>
               <Box
                 as="button"
-                aria-label="Re-check"
+                aria-label={t('startup.recheck')}
                 display="flex"
                 alignItems="center"
                 justifyContent="center"
@@ -126,7 +127,7 @@ function StartupRequirementsBanner() {
               </Box>
               <Box
                 as="button"
-                aria-label="Dismiss"
+                aria-label={t('startup.dismiss')}
                 display="flex"
                 alignItems="center"
                 justifyContent="center"

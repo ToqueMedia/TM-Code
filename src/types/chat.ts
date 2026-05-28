@@ -279,6 +279,11 @@ export interface ChatSession {
    *  a char-based estimate from the message history. */
   lastPromptTokens?: number
   lastResponseTokens?: number
+  /** Session-scoped memory notes maintained by the agent via
+   *  `update_session_memory`. Survives context compaction but resets on
+   *  new session creation. The agent uses these to track in-progress work,
+   *  decisions made, and pending next steps. */
+  sessionMemory?: string
 }
 
 /** Per-session frozen reference to the BYOK selection at creation time.
@@ -377,4 +382,5 @@ export interface PersistedSession {
   tokenUsage?: SessionTokenUsage
   lastTurnSnapshot?: SessionTurnSnapshot
   byokSnapshot?: ByokSessionSnapshot | null
+  sessionMemory?: string
 }

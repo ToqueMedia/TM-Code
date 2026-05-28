@@ -11,6 +11,7 @@ import {
   getWarningThreshold,
 } from '../../utils/contextWindow'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n/useTranslation'
 
 /**
  * Per-turn context-pressure pill. Mirrors claude-vaz's status-line
@@ -51,6 +52,7 @@ function formatTokens(n: number): string {
 }
 
 function ContextWindowIndicator() {
+  const t = useTranslation()
   // Read the per-turn input count, but fall back to the active session's
   // last-known prompt size when the per-turn counter is 0. `resetTokenUsage`
   // zeroes `currentPromptTokens` at the start of every new request
@@ -223,26 +225,26 @@ function ContextWindowIndicator() {
               </Text>
             </Flex>
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Last response</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.lastResponse')}</Text>
               <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
                 {formatTokens(outputTokens)}
               </Text>
             </Flex>
             <Box h="1px" bg="rgba(255,255,255,0.06)" my="2px" />
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Effective window</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.effectiveWindow')}</Text>
               <Text fontSize="10px" color={tokens.colors.text.primary} fontFamily={tokens.fontFamily.mono}>
                 {formatTokens(effectiveWindow)}
               </Text>
             </Flex>
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Raw window</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.rawWindow')}</Text>
               <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
                 {formatTokens(rawContextWindow)}
               </Text>
             </Flex>
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Pressure</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.pressure')}</Text>
               <Text
                 fontSize="10px"
                 fontFamily={tokens.fontFamily.mono}

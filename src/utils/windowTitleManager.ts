@@ -1,6 +1,7 @@
 import { useProjectStore } from '../stores/projectStore';
 import { useEditorRepository } from '../stores/editorStore';
 import { logger } from './logger';
+import { t } from '@/i18n';
 
 export class WindowTitleManager {
   private static instance: WindowTitleManager;
@@ -47,12 +48,12 @@ export class WindowTitleManager {
 
       if (cmdModeProjectPath) {
         const folderName = cmdModeProjectPath.split(/[\/\\]/).pop() || cmdModeProjectPath;
-        document.title = `${folderName} [Terminal Mode] - TM Code`;
+        document.title = `${folderName} [Terminal Mode] - ${t('window.baseTitle')}`;
         return;
       }
 
       if (!currentProject) {
-        document.title = 'TM Code';
+        document.title = t('window.baseTitle');
         return;
       }
 
@@ -75,12 +76,12 @@ export class WindowTitleManager {
       if (hasUnsavedChanges) {
         title = `• ${title}`;
       }
-      title = `${title} - TM Code`;
+      title = `${title} - ${t('window.baseTitle')}`;
 
       document.title = title;
     } catch (error: unknown) {
       logger.error('ui', 'Error updating window title:', error);
-      document.title = 'TM Code';
+      document.title = t('window.baseTitle');
     }
   }
 }

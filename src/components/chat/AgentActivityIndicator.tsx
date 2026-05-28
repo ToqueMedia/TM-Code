@@ -31,6 +31,8 @@ const STATUS_LABELS: Record<string, string> = {
   generating: 'Writing',
   applying: 'Applying changes',
   compressing: 'Compacting conversation',
+  error: 'Error',
+  idle: 'Idle',
 }
 
 const COMPACT_PHASE_LABELS: Record<string, string> = {

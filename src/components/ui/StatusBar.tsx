@@ -109,6 +109,7 @@ McpStatusPill.displayName = 'McpStatusPill'
 // ─── Container Status Pill ──────────────────────────────────────────────────
 
 const ContainerStatusPill = memo(() => {
+	const t = useTranslation()
 	const sandboxActive = useSettingsStore(s => s.sandboxEnabled)
 
 	if (!sandboxActive) return null
@@ -121,11 +122,11 @@ const ContainerStatusPill = memo(() => {
 				borderRadius={tokens.radius.full}
 				bg="rgba(255, 255, 255, 0.04)"
 				cursor="default"
-				title="Modo Sandbox activo — comandos isolados ao projecto"
+				title={t('sandbox.active')}
 			>
 				<VscShield size={10} color={tokens.colors.accent.orange} />
 				<Text fontSize="10px" color={tokens.colors.accent.orange} fontWeight="600" fontFamily={tokens.fontFamily.mono}>
-					Modo Sandbox
+					{t('sandbox.title')}
 				</Text>
 			</HStack>
 		</>

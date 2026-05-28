@@ -9,6 +9,7 @@ import { tokens } from '@/theme/tokens'
 import { handleClose, handleMinimize, handleFullToggle, handleMouseDown } from './titlebar/useWindowControls'
 import { useQuickOpen } from './titlebar/useQuickOpen'
 import { IS_MAC } from '../../utils/platform'
+import { t } from '@/i18n'
 
 // NOTE: this is the legacy full title bar. MainLayout actually renders
 // MinimalTitleBar — that's where the Publish button + Cmd+Shift+D shortcut
@@ -37,7 +38,7 @@ function TitleBar() {
 	async function handleOpenFolder(): Promise<void> {
 		try {
 			const { open } = await import('@tauri-apps/plugin-dialog')
-			const selected = await open({ directory: true, multiple: false, title: 'Select project directory' })
+			const selected = await open({ directory: true, multiple: false, title: t('titlebar.selectProject') })
 			if (selected) {
 				await openProject(String(selected))
 			}

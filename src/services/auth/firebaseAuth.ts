@@ -13,9 +13,12 @@ import {
   getFirestore,
   connectFirestoreEmulator,
   doc,
+  collection,
   getDoc,
   setDoc,
   onSnapshot,
+  query,
+  where,
   Timestamp,
 } from 'firebase/firestore'
 import {
@@ -28,6 +31,7 @@ import {
 import { useAuthStore } from '../../stores/authStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useFeaturesStore } from '../../stores/featuresStore'
+import { usePromotionsStore } from '../../stores/promotionsStore'
 import { useByokStore } from '../../stores/byokStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
 import { tauriFetch } from '../tauriFetch'
@@ -183,6 +187,7 @@ class FirebaseAuthService {
   private unsubscribeAuth: (() => void) | null = null
   private unsubscribeUserDoc: (() => void) | null = null
   private unsubscribeSubscription: (() => void) | null = null
+  private unsubscribePromotions: (() => void) | null = null
   private lastBillingFetchMs = 0
   private authGeneration = 0
   /** Tracks the uid for which device registration was last attempted.
@@ -193,7 +198,6 @@ class FirebaseAuthService {
    *  fetchBillingInfo → checkTimeManipulation → write again = infinite loop.
    *  Setting this flag after the first write breaks the cycle. */
   private blockedSynced = false  // set true on first fetchBillingInfo if Firestore says blocked
-
   static getInstance(): FirebaseAuthService {
     if (!FirebaseAuthService.instance) {
       FirebaseAuthService.instance = new FirebaseAuthService()
@@ -218,6 +222,7 @@ class FirebaseAuthService {
         this.lastRegisteredUid = null // allow re-registration on next login
         this.unsubscribeUserDocListener()
         this.unsubscribeSubscriptionDocListener()
+        this.unsubscribePromotionsListener()
         return
       }
 
@@ -300,6 +305,10 @@ class FirebaseAuthService {
       // immediately (<1s) instead of waiting for the onSubscriptionExpired
       // Cloud Function to write userPlan='explorer' to the user doc (1-3s).
       this.subscribeToSubscriptionDoc(user.uid)
+
+      // Real-time promotions listener — updates PromoBanner instantly when
+      // admin creates/edits/deletes promotions in the web admin.
+      this.subscribeToPromotions()
 
       // Register device fingerprint for anti-abuse tracking (fire-and-forget).
       // Skip if already registered for this uid (prevents redundant calls on
@@ -392,6 +401,43 @@ class FirebaseAuthService {
     }
   }
 
+  /**
+   * Attach an onSnapshot listener to the promotions collection.
+   * Updates promotionsStore in real-time when admin creates/edits/deletes promotions.
+   */
+  private subscribeToPromotions(): void {
+    this.unsubscribePromotionsListener()
+
+    const expectedGen = this.authGeneration
+    const q = query(collection(getFirebaseDb(), 'promotions'), where('active', '==', true))
+    this.unsubscribePromotions = onSnapshot(
+      q,
+      (snapshot) => {
+        if (expectedGen !== this.authGeneration) return
+        const now = Date.now()
+        const promotions = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as import('../../stores/promotionsStore').Promotion))
+          .filter(p => {
+            const start = new Date(p.startsAt).getTime()
+            const end = new Date(p.endsAt).getTime()
+            return now >= start && now <= end
+          })
+          .sort((a, b) => b.priority - a.priority)
+        usePromotionsStore.getState().updateFromMe(promotions)
+      },
+      (err) => {
+        console.warn('[promotions] listener error:', err)
+      }
+    )
+  }
+
+  private unsubscribePromotionsListener(): void {
+    if (this.unsubscribePromotions) {
+      this.unsubscribePromotions()
+      this.unsubscribePromotions = null
+    }
+  }
+
   private unsubscribeUserDocListener(): void {
     if (this.unsubscribeUserDoc) {
       this.unsubscribeUserDoc()
@@ -436,6 +482,7 @@ class FirebaseAuthService {
     }
     this.unsubscribeUserDocListener()
     this.unsubscribeSubscriptionDocListener()
+    this.unsubscribePromotionsListener()
   }
 
   private async loadProfile(uid: string) {
@@ -524,19 +571,6 @@ class FirebaseAuthService {
           `Extra: ${data.billing.extraUsageBalance}, Status: ${data.billing.status}`
         )
 
-        // Check if the welcome plan has expired — downgrade to explorer
-        // if the user's welcomePlanExpiresAt is in the past.
-        if (data.plan === 'welcome') {
-          const downgraded = await this.downgradeExpiredWelcomePlan()
-          if (downgraded) {
-            data.plan = 'explorer'
-            data.billing.tokenBudget = 1_500_000 // Explorer: 1.5M
-            data.billing.tokensConsumed = 0
-            data.billing.consumedPct = 0
-            data.billing.status = 'allowed'
-          }
-        }
-
         // Time manipulation guard — detect clock rollback and block abuse.
         try {
           const { getDeviceFingerprint } = await import('./deviceFingerprint')
@@ -556,7 +590,7 @@ class FirebaseAuthService {
                   updatedAt: Timestamp.now(),
                 })
               }
-              // Downgrade non-explorer/non-welcome plans to explorer.
+              // Downgrade paid plans to explorer (time manipulation).
               if (timeCheck.downgradeToExplorer) {
                 data.plan = 'explorer'
                 data.billing.tokenBudget = EXPLORER_TOKEN_BUDGET
@@ -576,6 +610,7 @@ class FirebaseAuthService {
 
         useBillingStore.getState().updateFromMe(data)
         useFeaturesStore.getState().updateFromMe(data.features)
+        usePromotionsStore.getState().updateFromMe(data.promotions)
 
         // BYOK catalog: load ONCE per session. BYOK is always available
         // (no feature flag, no per-plan check) so we kick off the catalog
@@ -681,83 +716,6 @@ class FirebaseAuthService {
     setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid), fields, { merge: true }).catch(() => {})
   }
 
-  /**
-   * Persist the welcome plan claim to the user's Firestore document.
-   * Called once after activation so the backend `/v1/me` can read the plan
-   * on subsequent app launches — even if the activation endpoint is not
-   * yet deployed.
-   *
-   * Returns a promise so callers can await it before triggering a
-   * billing re-sync, ensuring IDE/Web/Backend stay in sync.
-   */
-  async claimWelcomePlan(fingerprint: string): Promise<void> {
-    if (!this.currentUser) throw new Error('Not authenticated — cannot claim welcome plan')
-    await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, this.currentUser.uid), {
-      userPlan: 'welcome',
-      welcomePlanClaimed: true,
-      welcomePlanFingerprint: fingerprint,
-      welcomePlanClaimedAt: Timestamp.now(),
-      welcomePlanExpiresAt: '2026-05-28',
-      updatedAt: Timestamp.now(),
-    }, { merge: true })
-  }
-
-  /**
-   * If the user's plan was set by the welcome promo and the expiry date
-   * has passed, downgrade to 'explorer' in Firestore so the backend
-   * returns the correct plan on the next /v1/me call.
-   *
-   * Reads the user doc once, checks `welcomePlanExpiresAt`, and writes
-   * back `userPlan: 'explorer'` if expired. Silent no-op on errors.
-   */
-  private async downgradeExpiredWelcomePlan(): Promise<boolean> {
-    if (!this.currentUser) return false
-    try {
-      const snap = await getDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, this.currentUser.uid))
-      if (!snap.exists()) return false
-      const data = snap.data() as Record<string, unknown>
-      if (data.welcomePlanClaimed !== true) return false
-      const expiresAt = data.welcomePlanExpiresAt as string | undefined
-      if (!expiresAt) return false
-      if (new Date(expiresAt) >= new Date()) return false
-
-      // Expired — downgrade to explorer. Reset tokenBudget so the backend
-      // doesn't return stale vibe-level tokensConsumed against the 1.5M
-      // explorer budget (which would make the user appear permanently
-      // over-budget). Cycle dates use the same anchor-based calculation as
-      // the backend's computeCycleDates() to stay consistent.
-      const now = new Date()
-      const anchorDay = Math.min(28, Math.max(1, now.getUTCDate()))
-      const todayDay = now.getUTCDate()
-      let startYear = now.getUTCFullYear()
-      let startMonth = now.getUTCMonth()
-      if (todayDay < anchorDay) {
-        startMonth -= 1
-        if (startMonth < 0) { startMonth = 11; startYear -= 1 }
-      }
-      const fmtUtc = (d: Date) => d.toISOString().slice(0, 10)
-      const cycleStart = fmtUtc(new Date(Date.UTC(startYear, startMonth, anchorDay)))
-      const cycleEnd = fmtUtc(new Date(new Date(Date.UTC(startYear, startMonth + 1, anchorDay)).getTime() - 86400000))
-      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, this.currentUser.uid), {
-        userPlan: 'explorer',
-        welcomePlanExpired: true,
-        tokenBudget: {
-          tokensConsumed: 0,
-          cycleStart,
-          cycleEnd,
-          billingAnchorDay: anchorDay,
-          extraUsageBalance: 0,
-        },
-        updatedAt: Timestamp.now(),
-      }, { merge: true })
-      console.info('[billing] Welcome plan expired — downgraded to explorer')
-      return true
-    } catch {
-      // Silent — worst case the user stays on 'vibe' until next /v1/me
-      // call with a backend-side check.
-      return false
-    }
-  }
 }
 
 export default FirebaseAuthService

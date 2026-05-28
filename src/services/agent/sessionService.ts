@@ -297,6 +297,7 @@ class SessionService {
         createdAt: persisted.createdAt,
         updatedAt: persisted.updatedAt,
         byokSnapshot: persisted.byokSnapshot ?? null,
+        sessionMemory: persisted.sessionMemory,
       } as ChatSession & { lastTurnSnapshot?: SessionTurnSnapshot }
       if (persisted.lastTurnSnapshot) out.lastTurnSnapshot = persisted.lastTurnSnapshot
       return out
@@ -335,6 +336,7 @@ class SessionService {
           .map(msg => this.sanitizeMessageForSave(msg))
           .filter((m): m is ChatMessage => m !== null),
         byokSnapshot: session.byokSnapshot ?? null,
+        sessionMemory: session.sessionMemory,
       }
 
       if (tokenUsage) {
@@ -477,6 +479,13 @@ class SessionService {
     try {
       const session = this.getSessionFn()
       if (session) {
+        // Skip saving empty sessions — prevents repeated writes when the
+        // user opens a project but doesn't type anything. Initial creation
+        // (createSession) uses saveSession directly, so it's unaffected.
+        if (session.messages.length === 0) {
+          this.dirty = false
+          return
+        }
         const tokenUsage = this.getTokenUsageFn?.()
         await this.saveSession(session, tokenUsage ?? undefined)
         this.dirty = false

@@ -232,10 +232,10 @@ function AgentStatusBar() {
             borderRadius="4px"
             bg="rgba(163, 113, 247, 0.08)"
             color={tokens.colors.accent.purple}
-            title="Thinking is always-on for this model"
+            title={t('chat.thinkingAlwaysOn')}
           >
             <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
-              ⚡ Thinking
+              ⚡ {t('chat.thinkingLabel')}
             </Text>
           </Flex>
         )}

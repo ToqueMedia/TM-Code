@@ -68,8 +68,7 @@ export async function executePlan(
 
   if (!args.trim()) {
     chatStore.addSystemMessage(
-      'Usage: /plan <description of what you want to build>\n\n' +
-      'Example: /plan user authentication with email, Google login, and role-based access'
+      t('plan.usage'),
     )
     return
   }
@@ -139,10 +138,10 @@ export async function executePlan(
     const reason = readiness.reason
     const message =
       reason === 'missing'
-        ? 'Plan generation did not finish — PLAN.md was not written. Run /plan again to retry.'
+        ? t('plan.notFinished')
         : reason === 'draft'
-        ? 'Plan generation was cut off — PLAN.md is still in DRAFT. Type "Continue" to resume from the next unfilled section.'
-        : 'Plan generation did not complete — PLAN.md is on disk but has no PENDING APPROVAL marker. Type "Continue" to let the architect finish, or run /plan again to retry from scratch.'
+        ? t('plan.cutOff')
+        : t('plan.notComplete')
     chatStore.addSystemMessage(message)
     return
   }
@@ -186,7 +185,7 @@ export async function handlePlanApprove(projectPath: string): Promise<void> {
   if (useAgentStore.getState().status === 'error') return
   if (!(await fileExists(`${projectPath}/TODO.md`))) {
     chatStore.addSystemMessage(
-      'Task list generation did not finish — TODO.md was not written. Approve the plan again to retry.',
+      t('plan.tasksNotFinished'),
     )
     return
   }
@@ -203,7 +202,7 @@ export function handlePlanRequestChanges(projectPath: string): void {
   // bolted onto the implementation. The flag is the routing signal.
   chatStore.setPlanRevisionPending(projectPath)
   chatStore.addSystemMessage(
-    'What changes would you like? Describe in the chat and the architect will revise the plan.'
+    t('plan.requestChanges')
   )
 }
 
@@ -232,7 +231,7 @@ export async function executePlanRevision(
     currentPlan = await FileService.readFile(`${projectPath}/PLAN.md`)
   } catch {
     chatStore.addSystemMessage(
-      'PLAN.md is missing — restarting plan from your feedback as a new idea.',
+      t('plan.missing'),
     )
     await executePlan(feedback, projectPath, mode)
     return
@@ -271,8 +270,8 @@ export async function executePlanRevision(
   if (!readiness.ready) {
     chatStore.addSystemMessage(
       readiness.reason === 'draft'
-        ? 'Revision cut off — PLAN.md is back in DRAFT. Type "Continue" to resume.'
-        : 'Revision did not complete. Type "Continue" or describe further changes to retry.',
+        ? t('plan.revisionCutOff')
+        : t('plan.revisionNotComplete'),
     )
     return
   }
@@ -314,13 +313,13 @@ ${currentPlan}
 
 export function handlePlanReject(): void {
   const chatStore = useChatStore.getState()
-  chatStore.addSystemMessage('Plan rejected. You can start a new plan with /plan.')
+  chatStore.addSystemMessage(t('plan.rejected'))
 }
 
 export async function handleStartExecution(projectPath: string): Promise<void> {
   const chatStore = useChatStore.getState()
 
-  chatStore.addSystemMessage('Starting plan execution...')
+  chatStore.addSystemMessage(t('plan.executing'))
 
   // Phase-gated execution. The previous version of this prompt told the
   // agent to march through every task in order — for an 18-task FULLSTACK

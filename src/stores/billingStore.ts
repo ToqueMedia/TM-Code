@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { Promotion } from './promotionsStore'
 
 // ── Types (mirrored from backend types.ts) ──
 
@@ -57,6 +58,8 @@ export interface MeResponse {
   features?: {
     byokEnabled?: boolean
   }
+  /** Active promotions from Firestore (filtered by time window + surface=ide). */
+  promotions?: Promotion[]
 }
 
 // ── Store ──

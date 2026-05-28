@@ -144,7 +144,17 @@ export function registerTaskTools(ctx: ToolRegistrationContext): void {
     },
     execute: async (input) => {
       const id = input.id as string
-      const content = ctx.largeResults.get(id)
+      // L1: in-memory Map (fast path)
+      let content: string | undefined = ctx.largeResults.get(id)
+      // L2: disk fallback (survives session reload)
+      if (!content) {
+        const diskContent = await ctx.readLargeResultFromDisk(id)
+        if (diskContent) {
+          content = diskContent
+          // Re-populate the Map so subsequent reads are fast
+          ctx.largeResults.set(id, content)
+        }
+      }
       if (!content) {
         return `Error: Large result "${id}" not found. It may have been cleared from memory. Available results: ${Array.from(ctx.largeResults.keys()).join(', ') || 'none'}`
       }

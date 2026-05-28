@@ -18,6 +18,7 @@ import PreviewView from './views/PreviewView'
 import EditorView from './views/EditorView'
 import PermissionDialog from './chat/PermissionDialog'
 import PlanViewerPanel from './chat/PlanViewerPanel'
+import { useTranslation } from '@/i18n'
 import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
 // RequirementsDialog removed — templates disabled
@@ -32,6 +33,7 @@ import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 
 function MainLayout() {
+  const t = useTranslation()
   const viewMode = useLayoutStore(s => s.viewMode)
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
@@ -376,7 +378,7 @@ function MainLayout() {
                       <Box
                         ref={resizeHandleRef}
                         role="separator"
-                        aria-label="Resize chat panel"
+                        aria-label={t('mainLayout.resizeChat')}
                         aria-orientation="vertical"
                         w="4px"
                         cursor="col-resize"

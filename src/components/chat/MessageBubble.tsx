@@ -380,7 +380,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     if (!text) return
     navigator.clipboard.writeText(text).catch((err) => {
       console.error('[messageCopy] clipboard write failed:', err)
-      useToastStore.getState().addToast('error', 'Could not copy message to clipboard')
+      useToastStore.getState().addToast('error', t('chat.copyFailed'))
     })
     setMessageCopied(true)
     setTimeout(() => setMessageCopied(false), 2000)
@@ -392,7 +392,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     if (!session) return
     navigator.clipboard.writeText(sessionToMarkdown(session)).catch((err) => {
       console.error('[sessionCopy] clipboard write failed:', err)
-      useToastStore.getState().addToast('error', 'Could not copy session to clipboard')
+      useToastStore.getState().addToast('error', t('chat.exportSessionFailed'))
     })
     setMessageCopied(true)
     setTimeout(() => setMessageCopied(false), 2000)
@@ -434,7 +434,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       // errors hit this branch.
       const msg = err instanceof Error ? err.message : String(err)
       console.error('[sessionExport] save failed:', err)
-      useToastStore.getState().addToast('error', `Export failed: ${msg}`)
+      useToastStore.getState().addToast('error', t('chat.exportFailed').replace('{message}', msg))
     }
   }, [])
 

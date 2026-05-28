@@ -2,6 +2,7 @@ import { memo, useState, useCallback } from 'react'
 import { Flex, Text, Button, HStack } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { useChatStore } from '@/stores/chatStore'
+import { useTranslation } from '@/i18n/useTranslation'
 
 /**
  * Post-compact survey: appears 20% of the time after a compact boundary
@@ -9,6 +10,7 @@ import { useChatStore } from '@/stores/chatStore'
  * Auto-hides after selection or after 30 seconds.
  */
 function PostCompactSurvey() {
+  const t = useTranslation()
   const [selected, setSelected] = useState<string | null>(null)
   const [visible, setVisible] = useState(true)
   const setPostCompactSurveyPending = useChatStore(s => s.setPostCompactSurveyPending)
@@ -38,9 +40,9 @@ function PostCompactSurvey() {
   if (!visible) return null
 
   const options = [
-    { value: 'good', label: 'Bom', color: tokens.colors.accent.green },
-    { value: 'ok', label: 'OK', color: tokens.colors.accent.orange },
-    { value: 'bad', label: 'Mau', color: tokens.colors.accent.red },
+    { value: 'good', label: t('compactSurvey.good'), color: tokens.colors.accent.green },
+    { value: 'ok', label: t('compactSurvey.ok'), color: tokens.colors.accent.orange },
+    { value: 'bad', label: t('compactSurvey.bad'), color: tokens.colors.accent.red },
   ]
 
   return (
@@ -56,7 +58,7 @@ function PostCompactSurvey() {
       border="1px solid rgba(255, 255, 255, 0.06)"
     >
       <Text fontSize="12px" color={tokens.colors.text.muted} whiteSpace="nowrap">
-        Como foi a compressão?
+        {t('compactSurvey.howWasIt')}
       </Text>
       <HStack gap={2}>
         {selected ? (

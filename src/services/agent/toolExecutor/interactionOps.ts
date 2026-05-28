@@ -9,6 +9,7 @@
 import { useChatStore } from '../../../stores/chatStore'
 import { describePlatformManagedField } from './checks'
 import type { ToolRegistrationContext } from './context'
+import { t } from '@/i18n'
 
 export function registerInteractionTools(ctx: ToolRegistrationContext): void {
 
@@ -222,15 +223,15 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
       }>
 
       if (!questionsRaw || !Array.isArray(questionsRaw) || questionsRaw.length === 0) {
-        return 'Error: must provide at least one question.'
+        return t('tool.minQuestions')
       }
       if (questionsRaw.length > 4) {
-        return 'Error: maximum 4 questions per call.'
+        return t('tool.maxQuestions')
       }
 
       for (const q of questionsRaw) {
         if (!q.question || !q.header || !q.options || q.options.length < 2) {
-          return `Error: each question needs "question", "header" (max 12 chars), and 2-4 options.`
+          return t('tool.questionValidation')
         }
         if (q.options.length > 4) {
           return `Error: maximum 4 options per question. "${q.header}" has ${q.options.length}.`

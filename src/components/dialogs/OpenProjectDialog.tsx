@@ -34,7 +34,7 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
       // Validate project before opening
       const validation = await ProjectValidator.validateProjectPath(projectPath);
       if (!validation.valid) {
-        setError(validation.error || 'Invalid project directory. Please select a valid project folder.');
+        setError(validation.error || t('openProject.invalidDir'));
         setIsLoading(false);
         return;
       }
@@ -45,9 +45,9 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open project:', error);
       if (error instanceof Error) {
-        setError(error.message || 'Failed to open project. Please try again.');
+        setError(error.message || t('openProject.failed'));
       } else {
-        setError('Failed to open project. Please try again.');
+        setError(t('openProject.failed'));
       }
     } finally {
       setIsLoading(false);
@@ -59,7 +59,7 @@ export function OpenProjectDialog({ isOpen, onClose }: OpenProjectDialogProps) {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: 'Select project directory'
+        title: t('titlebar.selectProject')
       });
       if (selected) {
         setProjectPath(selected as string);

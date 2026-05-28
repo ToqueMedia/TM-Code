@@ -139,7 +139,7 @@ function SearchResultsList({
           {!hasContentResults && !hasFileNameResults && searchTerm && !isSearching && (
             <Flex align="center" justify="center" p={6} direction="column" color="text.muted">
               <FiSearch size={32} />
-              <Text fontSize="sm" mt={2} textAlign="center">No results found for "{searchTerm}"</Text>
+              <Text fontSize="sm" mt={2} textAlign="center">{t('search.noResultsFor').replace('{term}', searchTerm)}</Text>
             </Flex>
           )}
 

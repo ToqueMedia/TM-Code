@@ -1,4 +1,5 @@
 import { invoke } from '@/utils/invokeMetrics'
+import { t } from '../i18n'
 import { listen } from '@tauri-apps/api/event'
 import { useProjectStore } from '../stores/projectStore'
 import { useLayoutStore } from '../stores/layoutStore'
@@ -40,19 +41,19 @@ async function postScaffoldPipeline(
   const devCmd = adaptCommand(template.devCommand, pm)
 
   // === Phase 1: Install dependencies ===
-  layoutStore.setScaffoldPhase('installing', `Installing dependencies (${installCmd})...`)
-  layoutStore.addDevServerLog(`Installing dependencies (${installCmd})...`, 'info')
+  layoutStore.setScaffoldPhase('installing', t('postScaffold.installing').replace('{command}', installCmd))
+  layoutStore.addDevServerLog(t('postScaffold.installing').replace('{command}', installCmd), 'info')
 
   const installSuccess = await runInstall(projectPath, installCmd)
 
   if (!installSuccess) {
-    layoutStore.setScaffoldPhase('error', 'Failed to install dependencies')
+    layoutStore.setScaffoldPhase('error', t('postScaffold.installFailed'))
     return
   }
 
   // === Phase 2: Start dev server ===
-  layoutStore.setScaffoldPhase('starting', `Starting dev server (${devCmd})...`)
-  layoutStore.addDevServerLog(`Starting dev server (${devCmd})...`, 'info')
+  layoutStore.setScaffoldPhase('starting', t('postScaffold.startingDev').replace('{command}', devCmd))
+  layoutStore.addDevServerLog(t('postScaffold.startingDev').replace('{command}', devCmd), 'info')
 
   try {
     // Preserve fullstack category from the template so dual-port kill and
@@ -67,7 +68,7 @@ async function postScaffoldPipeline(
     // the explicit port hint nor the content-type signal.
     const frontendPortHint = await resolveFrontendPortHint(projectPath, projectKind)
     await devServerManager.start(projectPath, devCmd, { projectKind, frontendPortHint })
-    layoutStore.setScaffoldPhase('ready', 'Dev server is running')
+    layoutStore.setScaffoldPhase('ready', t('postScaffold.devRunning'))
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     layoutStore.addDevServerLog(
@@ -172,8 +173,7 @@ async function runInstall(
         try { await invoke('kill_process', { pid: targetPid }) } catch {}
       }
       layoutStore.addDevServerLog(
-        `Install timed out after 5 minutes and was cancelled.\n` +
-        `Run manually in the terminal:\n  cd ${projectPath}\n  ${installCommand}`,
+        t('postScaffold.installTimeout').replace('{path}', projectPath).replace('{command}', installCommand),
         'error',
       )
       logger.error('postScaffold', 'Install timed out after 5 minutes')
@@ -182,22 +182,20 @@ async function runInstall(
 
     if (exitCode !== 0) {
       layoutStore.addDevServerLog(
-        `Failed to install dependencies (exit code ${exitCode}).\n` +
-        `Run manually in the terminal:\n  cd ${projectPath}\n  ${installCommand}`,
+        t('postScaffold.installExitCode').replace('{code}', String(exitCode)).replace('{path}', projectPath).replace('{command}', installCommand),
         'error',
       )
       logger.error('postScaffold', `Install failed with exit code ${exitCode}`)
       return false
     }
 
-    layoutStore.addDevServerLog('Dependencies installed successfully', 'info')
+    layoutStore.addDevServerLog(t('postScaffold.installSuccess'), 'info')
     return true
   } catch (error) {
     cleanup()
     const msg = error instanceof Error ? error.message : String(error)
     layoutStore.addDevServerLog(
-      `Failed to install dependencies: ${msg}\n` +
-      `Run manually in the terminal:\n  cd ${projectPath}\n  ${installCommand}`,
+      t('postScaffold.installError').replace('{message}', msg).replace('{path}', projectPath).replace('{command}', installCommand),
       'error',
     )
     logger.error('postScaffold', 'Install failed:', error)

@@ -6,6 +6,7 @@ import { useChatStore } from '../stores/chatStore';
 import { useSettingsStore, matchesBinding } from '../stores/settingsStore';
 import { useEditorRepository } from '../stores/editorStore';
 import MonacoBridge from '../utils/monacoBridge';
+import { t } from '@/i18n';
 
 export function useKeyboardShortcuts() {
   const { currentProject } = useProjectStore();
@@ -35,7 +36,7 @@ export function useKeyboardShortcuts() {
         e.preventDefault();
         try {
           const { open } = await import('@tauri-apps/plugin-dialog');
-          const selected = await open({ directory: true, multiple: false, title: 'Select project directory' });
+          const selected = await open({ directory: true, multiple: false, title: t('titlebar.selectProject') });
           if (selected) {
             const { useProjectStore } = await import('../stores/projectStore');
             await useProjectStore.getState().openProject(selected as string);

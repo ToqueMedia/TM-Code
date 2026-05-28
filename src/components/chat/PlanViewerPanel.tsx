@@ -113,7 +113,7 @@ function PlanViewerPanel() {
             transition={`all ${tokens.transition.fast}`}
             _hover={{ bg: 'rgba(255, 255, 255, 0.08)', color: tokens.colors.text.primary }}
             onClick={handleClose}
-            aria-label="Close plan viewer"
+            aria-label={t('misc.close')}
           >
             <FiX size={14} />
           </Box>

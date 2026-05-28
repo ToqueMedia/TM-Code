@@ -1,4 +1,5 @@
 import { useChatStore } from '../../../stores/chatStore'
+import { t } from '../../../i18n'
 import { runAgentWithCallbacks } from '../agentRunner'
 import AgentService from '../agentService'
 import type { SlashCommandMode } from '../slashCommandRegistry'
@@ -25,11 +26,7 @@ export async function executeDebug(
 
   if (!args.trim()) {
     chatStore.addSystemMessage(
-      'Usage: /debug <symptom or error message>\n\n' +
-      'Examples:\n' +
-      '  /debug login button does nothing on click\n' +
-      '  /debug TypeError: Cannot read properties of undefined (reading "uid")\n' +
-      '  /debug tests pass locally but fail in CI'
+      t('debug.usage')
     )
     return
   }

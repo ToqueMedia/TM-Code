@@ -231,14 +231,14 @@ function PreviewView() {
   const handlePreviewBack = useCallback(async () => {
     const didNavigate = await previewWebviewRef.current?.goBack()
     if (!didNavigate) {
-      useToastStore.getState().addToast('warning', 'Preview navigation is not available for this render yet.')
+      useToastStore.getState().addToast('warning', t('preview.navUnavailable'))
     }
   }, [])
 
   const handlePreviewForward = useCallback(async () => {
     const didNavigate = await previewWebviewRef.current?.goForward()
     if (!didNavigate) {
-      useToastStore.getState().addToast('warning', 'Preview navigation is not available for this render yet.')
+      useToastStore.getState().addToast('warning', t('preview.navUnavailable'))
     }
   }, [])
 
@@ -248,7 +248,7 @@ function PreviewView() {
       const { openUrl } = await import('@tauri-apps/plugin-opener')
       await openUrl(previewUrl)
     } catch {
-      useToastStore.getState().addToast('error', 'Could not open URL in browser. Copy it manually from the address bar.')
+      useToastStore.getState().addToast('error', t('preview.copyUrlManually'))
     }
   }
 
@@ -507,8 +507,8 @@ function PreviewView() {
             {previewMode !== 'api' && (
               <>
                 <IconButton
-                  aria-label="Go back in preview"
-                  title="Back"
+                  aria-label={t('preview.goBack')}
+                  title={t('preview.back')}
                   size="xs"
                   variant="ghost"
                   color={tokens.colors.text.secondary}
@@ -520,8 +520,8 @@ function PreviewView() {
                   <FiArrowLeft size={13} />
                 </IconButton>
                 <IconButton
-                  aria-label="Go forward in preview"
-                  title="Forward"
+                  aria-label={t('preview.goForward')}
+                  title={t('preview.forward')}
                   size="xs"
                   variant="ghost"
                   color={tokens.colors.text.secondary}
@@ -582,14 +582,14 @@ function PreviewView() {
             {/* HTTP Client drawer toggle — only visible for fullstack projects */}
             {isFullstack && (
               <IconButton
-                aria-label={isHttpDrawerOpen ? 'Close HTTP Client' : 'Open HTTP Client'}
+                aria-label={isHttpDrawerOpen ? t('preview.closeHttpClient') : t('preview.toggleHttpClient')}
                 size="xs"
                 variant="ghost"
                 color={isHttpDrawerOpen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
                 _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
                 borderRadius="6px"
                 onClick={() => useLayoutStore.getState().toggleHttpDrawer()}
-                title="Toggle HTTP Client"
+                title={t('preview.toggleHttpClient')}
               >
                 <FiZap size={13} />
               </IconButton>
@@ -667,20 +667,31 @@ function PreviewView() {
               </IconButton>
             )}
 
-            {/* Stop server */}
-            {previewMode !== 'static' && previewUrl && (
-              <IconButton
-                aria-label={t("misc.stopServer")}
-                size="xs"
-                variant="ghost"
-                color={tokens.colors.text.secondary}
-                _hover={{ bg: 'rgba(248, 81, 73, 0.12)', color: '#f85149' }}
-                borderRadius="6px"
-                onClick={handleStopServer}
-              >
-                <FiSquare size={12} />
-              </IconButton>
-            )}
+            {/* Stop server — always visible so users can close the preview
+                without searching for the action. Red accent on hover makes
+                the destructive intent clear. Stops the dev server and
+                navigates back, not just hides the view. */}
+            <Flex
+              align="center"
+              gap="4px"
+              px="8px"
+              h="24px"
+              borderRadius="6px"
+              cursor="pointer"
+              color="#fff"
+              fontSize="11px"
+              fontWeight="500"
+              bg="rgba(248, 81, 73, 0.15)"
+              border={`1px solid rgba(248, 81, 73, 0.25)`}
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{ bg: 'rgba(248, 81, 73, 0.25)', borderColor: 'rgba(248, 81, 73, 0.4)' }}
+              onClick={handleStopServer}
+              aria-label={t("misc.stopServer")}
+              role="button"
+            >
+              <FiSquare size={10} color="#f85149" />
+              <Text fontSize="11px" fontWeight="500" color="#f85149">{t("misc.stopServer")}</Text>
+            </Flex>
 
             {/* Data Viewer — toggles a bottom slide-up drawer rather than
                 navigating to the standalone Data Viewer view, so the user
@@ -703,7 +714,7 @@ function PreviewView() {
             {/* Publish — opens the deploy modal. Free plan sees an upgrade
                 CTA inside the modal rather than the deploy flow. */}
             <Button
-              aria-label="Publish project"
+              aria-label={t('preview.publishProject')}
               size="xs"
               variant="solid"
               bg={tokens.colors.accent.primary}
@@ -919,7 +930,7 @@ function PreviewView() {
               <Box
                 ref={dataDrawerHandleRef}
                 role="separator"
-                aria-label="Resize data viewer"
+                aria-label={t('preview.resizeDataViewer')}
                 aria-orientation="horizontal"
                 h="4px"
                 cursor="row-resize"
@@ -947,7 +958,7 @@ function PreviewView() {
                   </Text>
                 </HStack>
                 <IconButton
-                  aria-label="Close Data Viewer"
+                  aria-label={t('preview.closeDataViewer')}
                   size="xs"
                   variant="ghost"
                   color={tokens.colors.text.disabled}
@@ -1010,7 +1021,7 @@ function PreviewView() {
                   )}
                 </HStack>
                 <IconButton
-                  aria-label="Close HTTP Client"
+                  aria-label={t('preview.closeHttpClient')}
                   size="xs"
                   variant="ghost"
                   color={tokens.colors.text.disabled}
@@ -1048,7 +1059,7 @@ function PreviewView() {
               <Box
                 ref={consoleHandleRef}
                 role="separator"
-                aria-label="Resize console panel"
+                aria-label={t('preview.resizeConsole')}
                 aria-orientation="horizontal"
                 h="4px"
                 cursor="row-resize"

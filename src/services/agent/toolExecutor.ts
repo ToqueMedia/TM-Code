@@ -1,5 +1,6 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { listen } from '@tauri-apps/api/event'
+import { t } from '@/i18n'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -172,6 +173,15 @@ class ToolExecutor {
   private planMode: boolean = false
 
   /**
+   * Memory scope — set per-invocation by execute() when a sub-agent
+   * passes its agentType. Memory tools read from execInput._memoryScope
+   * (via getMemoryScope(input) helper in memoryOps.ts), which is set
+   * from this field at the start of each execute() call.
+   * No shared mutable state between concurrent sub-agents.
+   */
+  private memoryScopeAgentType: string | null = null
+
+  /**
    * Plan-mode progress flags. Together they enforce the architect contract:
    *
    *   1. update_tasks is BLOCKED until PLAN.md is written (no task list without a plan).
@@ -211,7 +221,9 @@ class ToolExecutor {
       validatePathWithinProject: (p: string) => { this.validatePathWithinProject(p); return p },
       readFileTimestamps: this.readFileTimestamps,
       largeResults: this.largeResults,
+      readLargeResultFromDisk: (id) => this.readLargeResultFromDisk(id),
       getCmdModeCwd: () => this.cmdModeCwd,
+      getMemoryScopeAgentType: () => this.memoryScopeAgentType,
       getPlanMode: () => this.planMode,
       getPlanFileWritten: () => this.planFileWritten,
       setPlanTasksSeeded: (v: boolean) => { this.planTasksSeeded = v },
@@ -309,11 +321,18 @@ class ToolExecutor {
     input: Record<string, unknown>,
     toolCallId?: string,
     signal?: AbortSignal,
+    memoryScope?: string | null,
   ): Promise<string> {
     const tool = this.tools.get(toolName)
     if (!tool) {
       throw new Error(`Unknown tool: ${toolName}`)
     }
+
+    // Per-invocation memory scope — passed by SafeToolPool via execute().
+    // Memory tools read from execInput._memoryScope (via getMemoryScope(input)
+    // helper in memoryOps.ts). Always reset to prevent leakage between
+    // main-agent and sub-agent tool calls.
+    this.memoryScopeAgentType = memoryScope ?? null
 
     // Phase B: pre-check abort signal at entry. If the loop already cancelled
     // before this tool got dispatched (e.g., user hit ESC during streaming),
@@ -433,6 +452,9 @@ class ToolExecutor {
     const execInput: Record<string, unknown> = { ...input }
     if (toolCallId) execInput._toolCallId = toolCallId
     if (signal) execInput._abortSignal = signal
+    // Per-call memory scope — sub-agent runner passes this so memory tools
+    // scope writes correctly without shared mutable state.
+    if (memoryScope) execInput._memoryScope = memoryScope
 
     const result = await tool.execute(execInput)
     // Diff results must never be truncated — the UI needs full JSON for InlineDiff,
@@ -528,6 +550,10 @@ class ToolExecutor {
   /** Large result storage — maps reference IDs to full content for later retrieval. */
   private largeResults: Map<string, string> = new Map()
   private largeResultCounter = 0
+  /** Disk directory for persisting large results across session reloads.
+   *  Set by setLargeResultsDir() when a session is loaded. When null,
+   *  disk persistence is disabled (in-memory only). */
+  private largeResultsDir: string | null = null
   /** Incremental byte counter kept in sync with `largeResults` set/delete
    *  ops. Avoids the O(N) `for ... values()` total-scan that the byte-cap
    *  eviction loop used to do on every `truncateResult` call. */
@@ -545,6 +571,43 @@ class ToolExecutor {
   private static readonly LARGE_RESULT_MAX_ENTRIES = 20
 
   /**
+   * Set the disk directory for large result persistence. Called when a
+   * session is loaded so that large results survive session reloads.
+   * Pass null to disable disk persistence (in-memory only).
+   */
+  setLargeResultsDir(dir: string | null): void {
+    this.largeResultsDir = dir
+  }
+
+  /**
+   * Persist a large result to disk (fire-and-forget). Writes to
+   * `<largeResultsDir>/<refId>.txt`. Errors are silently ignored —
+   * the in-memory Map is the primary store, disk is a fallback.
+   */
+  private persistLargeResultToDisk(refId: string, content: string): void {
+    if (!this.largeResultsDir) return
+    const path = `${this.largeResultsDir}/${refId}.txt`
+    import('@/utils/invokeMetrics')
+      .then(({ invoke }) => invoke('write_file', { path, content }))
+      .catch(() => { /* disk persistence is best-effort */ })
+  }
+
+  /**
+   * Read a large result from disk (async). Returns null if not found
+   * or if disk persistence is disabled.
+   */
+  async readLargeResultFromDisk(refId: string): Promise<string | null> {
+    if (!this.largeResultsDir) return null
+    try {
+      const { invoke } = await import('@/utils/invokeMetrics')
+      const path = `${this.largeResultsDir}/${refId}.txt`
+      return await invoke<string>('read_file', { path })
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * Handles large tool results: if the result exceeds the threshold,
    * stores the full output in memory and returns a reference with a preview.
    * The model can retrieve the full output via read_large_result tool.
@@ -558,6 +621,9 @@ class ToolExecutor {
     const refId = `large_result_${++this.largeResultCounter}`
     this.largeResults.set(refId, result)
     this.largeResultsTotalBytes += result.length
+
+    // Persist to disk (fire-and-forget) so large results survive session reloads.
+    this.persistLargeResultToDisk(refId, result)
 
     // S2: byte-budget eviction. Pop oldest until we fit under the cap.
     // O(K) where K is the number of entries evicted, not O(N) like before.
@@ -1628,9 +1694,9 @@ ${preview}
             })
           }).catch(() => { /* never block on telemetry */ })
           if (wrongName) {
-            return `Error: this tool expects \`old_string\` (and \`new_string\`). You passed: ${passedKeys.join(', ')}. Rename your field to old_string / new_string and retry.`
+            return `${t('tool.wrongFieldNames').replace('{fields}', passedKeys.join(', '))}`
           }
-          return 'Error: old_string cannot be empty. Provide the exact text you want to replace.'
+          return t('tool.emptyOldString')
         }
 
         this.validatePathWithinProject(path)
@@ -1810,7 +1876,7 @@ ${preview}
         const idToken = await firebaseAuth.getIdToken()
 
         if (!idToken) {
-          return 'Error: Not authenticated. Cannot fetch web content.'
+          return t('tool.notAuthenticated')
         }
 
         const workerUrl = resolveWorkerUrl()

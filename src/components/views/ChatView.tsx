@@ -7,6 +7,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
+import { activatePreview } from '../../services/previewActivation'
 import { invoke } from '@/utils/invokeMetrics'
 import { projectHasMeaningfulContent } from '../../utils/projectHasContent'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -322,7 +323,7 @@ function ChatView() {
                 bg="rgba(163, 113, 247, 0.1)"
                 border="1px solid rgba(163, 113, 247, 0.25)"
                 color={tokens.colors.accent.purple}
-                title="Thinking is always-on for this model"
+                title={t('chat.thinkingAlwaysOn')}
               >
                 <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
                   ⚡ Thinking
@@ -367,7 +368,7 @@ function ChatView() {
               cursor="pointer"
               transition={`all ${tokens.transition.fast}`}
               _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-              onClick={() => useLayoutStore.getState().setViewMode('preview')}
+              onClick={() => void activatePreview(projectPath)}
               aria-label={t('view.preview')}
             >
               <FiEye size={13} />
@@ -480,7 +481,7 @@ function ChatView() {
               useAgentStore.getState().setError(null)
               useAgentStore.getState().setStatus('idle')
             }}
-            aria-label="Dismiss error"
+            aria-label={t('chat.dismissError')}
           >
             <Text fontSize="14px" lineHeight="1">×</Text>
           </Box>

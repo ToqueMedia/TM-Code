@@ -1,5 +1,6 @@
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { tauriFetch } from '../tauriFetch'
+import { t } from '@/i18n'
 
 /**
  * Remote MCP transport — proxies JSON-RPC requests through the Worker API
@@ -39,7 +40,7 @@ export async function sendRemoteMCPRequest(request: RemoteMCPRequest): Promise<u
   const idToken = await firebaseAuth.getIdToken()
 
   if (!idToken) {
-    throw new Error('Not authenticated — cannot proxy MCP request')
+    throw new Error(t('mcp.notAuthenticated'))
   }
 
   let lastError: Error | null = null
@@ -62,7 +63,7 @@ export async function sendRemoteMCPRequest(request: RemoteMCPRequest): Promise<u
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '')
-        const err = new Error(`MCP proxy error (${response.status}): ${errorBody}`)
+        const err = new Error(t('mcp.proxyError').replace('{status}', String(response.status)).replace('{body}', errorBody))
         if (isRetryableStatus(response.status) && attempt < MAX_RETRIES) {
           lastError = err
           await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]))
@@ -74,13 +75,15 @@ export async function sendRemoteMCPRequest(request: RemoteMCPRequest): Promise<u
       const data = (await response.json()) as RemoteMCPResponse
 
       if (data.error) {
-        throw new Error(`Remote MCP error: ${data.error.message} (code: ${data.error.code})`)
+        const err = new Error(t('mcp.remoteError').replace('{message}', data.error.message).replace('{code}', String(data.error.code)))
+        ;(err as any).__mcpRemote = true
+        throw err
       }
 
       return data.result ?? data
     } catch (e) {
       // Network/timeout errors from tauriFetch surface as thrown Errors — retry.
-      if (attempt < MAX_RETRIES && !(e instanceof Error && e.message.startsWith('Remote MCP error:'))) {
+      if (attempt < MAX_RETRIES && !(e instanceof Error && (e as any).__mcpRemote)) {
         lastError = e instanceof Error ? e : new Error(String(e))
         await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]))
         continue
@@ -89,7 +92,7 @@ export async function sendRemoteMCPRequest(request: RemoteMCPRequest): Promise<u
     }
   }
 
-  throw lastError ?? new Error('MCP proxy: exhausted retries')
+  throw lastError ?? new Error(t('mcp.proxyExhausted'))
 }
 
 /**
