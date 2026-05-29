@@ -163,9 +163,19 @@ jobs:
           mkdir -p sigs
           gh release download "$VERSION" --repo "$REPO" --pattern "*.sig" --dir sigs 2>/dev/null || true
 
-          # Read signature file content (empty string if missing)
+          # Read signature and ensure it is base64-encoded
           read_sig() {
-            if [ -f "sigs/$1" ]; then cat "sigs/$1" | tr -d '\r\n '; else echo ""; fi
+            if [ -f "sigs/$1" ]; then
+              if head -n 1 "sigs/$1" | grep -q "^untrusted"; then
+                # Raw minisign block: base64 encode it
+                base64 "sigs/$1" | tr -d '\r\n '
+              else
+                # Already base64-encoded: strip whitespaces
+                cat "sigs/$1" | tr -d '\r\n '
+              fi
+            else
+              echo ""
+            fi
           }
 
           LINUX_SIG=$(read_sig "TM.Code_${BARE_VERSION}_amd64.AppImage.sig")
