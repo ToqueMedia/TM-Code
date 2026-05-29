@@ -11,6 +11,7 @@ import { getVersion } from '@tauri-apps/api/app'
 import { useUpdateStore, type UpdateInfo } from '../stores/updateStore'
 import { IS_VITE_DEV } from '../utils/viteEnv'
 import { compareSemver } from '../utils/semver'
+import { t } from '../i18n'
 
 let checkedThisSession = false
 
@@ -71,7 +72,7 @@ export async function installUpdate(): Promise<void> {
   }
 
   const update = await check()
-  if (!update) throw new Error('No update available')
+  if (!update) throw new Error(t('update.noUpdate'))
 
   await update.downloadAndInstall((progress) => {
     if (progress.event === 'Started' && progress.data.contentLength) {

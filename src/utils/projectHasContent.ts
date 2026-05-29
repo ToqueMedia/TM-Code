@@ -1,8 +1,7 @@
 /**
  * "Does this project have real content worth analyzing?" filter.
  *
- * Gates the `noTmsFile` system message (`Execute /init...`) on
- * project open. Suggesting /init on a freshly-created empty folder is
+ * Gates the `/init` button in ChatView on project open. Suggesting /init on a freshly-created empty folder is
  * noise — TMS.md gets bootstrapped organically as the agent works.
  *
  * Pure function so the rules are testable without Tauri / store mocks.

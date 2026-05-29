@@ -1,59 +1,171 @@
 import { create } from 'zustand'
 import { invoke } from '@/utils/invokeMetrics'
-import { logger } from '../utils/logger'
 
-const DEFAULT_WIDTH_PX = 480
-const MIN_WIDTH_PX = 320
+// ── Types ──
+
+interface TerminalInstance {
+  id: string    // crypto.randomUUID() — PTY session id
+  name: string  // "Terminal 1", "Terminal 2", etc.
+}
 
 interface TerminalPanelState {
   isOpen: boolean
-  /** User-preferred width. Clamped at render time to min(MIN_WIDTH_PX, 50% of IDE width). */
   widthPx: number
-  /** Active PTY session id when the panel is open. */
-  ptySessionId: string | null
+  instances: TerminalInstance[]
+  activeInstanceId: string | null
+  _nextTerminalNum: number
 }
 
 interface TerminalPanelActions {
   toggle: () => void
   setOpen: (open: boolean) => void
-  /** Closes the panel and kills the active PTY (idempotent on Rust side). */
+  open: () => void
   close: () => void
+  killAll: () => void
   setWidth: (px: number) => void
-  setSessionId: (id: string | null) => void
-  /** Write raw data to the active PTY session (e.g. Ctrl+C → \x03). */
+
+  addTerminal: () => void
+  removeTerminal: (id: string) => void
+  renameTerminal: (id: string, name: string) => void
+  closeAll: () => void
+  setActiveTerminal: (id: string) => void
+
+  getActiveSessionId: () => string | null
   writeToPty: (data: string) => void
 }
 
-export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelActions>((set, get) => ({
+// ── Helpers ──
+
+const DEFAULT_WIDTH_PX = 480
+const MIN_WIDTH_PX = 320
+const MAX_WIDTH_PX = 900
+const MAX_TERMINALS = 5
+
+function clampWidth(px: number): number {
+  return Math.max(MIN_WIDTH_PX, Math.min(MAX_WIDTH_PX, px))
+}
+
+export { MIN_WIDTH_PX as TERMINAL_PANEL_MIN_WIDTH }
+
+// ── Store ──
+
+export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelActions>()((set, get) => ({
+  // ── State ──
   isOpen: false,
   widthPx: DEFAULT_WIDTH_PX,
-  ptySessionId: null,
+  instances: [],
+  activeInstanceId: null,
+  _nextTerminalNum: 1,
+
+  // ── Panel lifecycle ──
   toggle: () => {
-    if (get().isOpen) {
+    const { isOpen } = get()
+    if (isOpen) {
       get().close()
+    } else {
+      get().open()
+    }
+  },
+
+  setOpen: (open) => {
+    if (open) get().open()
+    else get().close()
+  },
+
+  open: () => {
+    const { instances } = get()
+    if (instances.length === 0) {
+      // First open — create initial terminal
+      const id = crypto.randomUUID()
+      const num = get()._nextTerminalNum
+      set({
+        isOpen: true,
+        instances: [{ id, name: `Terminal ${num}` }],
+        activeInstanceId: id,
+        _nextTerminalNum: num + 1,
+      })
     } else {
       set({ isOpen: true })
     }
   },
-  setOpen: (open) => set({ isOpen: open }),
+
   close: () => {
-    const id = get().ptySessionId
-    if (id) {
-      invoke('kill_pty_session', { sessionId: id }).catch((err) => {
-        logger.warn('terminal-panel', 'kill_pty_session failed:', err)
-      })
-    }
-    set({ isOpen: false, ptySessionId: null })
+    // Hide panel only — PTYs stay alive. On reopen, open() reuses existing
+    // instances. This is the default action for Esc, Ctrl+X, and toggle-close.
+    set({ isOpen: false })
   },
-  setWidth: (px) => set({ widthPx: Math.max(MIN_WIDTH_PX, px) }),
-  setSessionId: (id) => set({ ptySessionId: id }),
-  writeToPty: (data) => {
-    const id = get().ptySessionId
-    if (!id) return
-    invoke('write_to_pty', { sessionId: id, data }).catch((err) => {
-      logger.warn('terminal-panel', 'write_to_pty failed:', err)
+
+  killAll: () => {
+    // Hide panel + kill every PTY session. Use only on /exit (leaving CMD mode).
+    const { instances } = get()
+    for (const inst of instances) {
+      invoke('kill_pty_session', { sessionId: inst.id }).catch(() => {})
+    }
+    set({ isOpen: false, instances: [], activeInstanceId: null })
+  },
+
+  setWidth: (px) => set({ widthPx: clampWidth(px) }),
+
+  // ── Terminal instance management ──
+  addTerminal: () => {
+    const { instances, _nextTerminalNum } = get()
+    if (instances.length >= MAX_TERMINALS) return
+    const id = crypto.randomUUID()
+    const num = _nextTerminalNum
+    set({
+      instances: [...instances, { id, name: `Terminal ${num}` }],
+      activeInstanceId: id,
+      _nextTerminalNum: num + 1,
     })
   },
-}))
 
-export const TERMINAL_PANEL_MIN_WIDTH = MIN_WIDTH_PX
+  removeTerminal: (id) => {
+    const { instances, activeInstanceId } = get()
+    const remaining = instances.filter(i => i.id !== id)
+    // Kill the PTY for this terminal. The store owns PTY lifecycle —
+    // SingleTerminal's cleanup does NOT kill (it only disposes xterm).
+    invoke('kill_pty_session', { sessionId: id }).catch(() => {})
+    if (remaining.length === 0) {
+      // Last terminal removed — close panel and reset counter
+      set({ isOpen: false, instances: [], activeInstanceId: null, _nextTerminalNum: 1 })
+      return
+    }
+    // If we removed the active terminal, select the last one
+    const newActiveId = activeInstanceId === id
+      ? remaining[remaining.length - 1].id
+      : activeInstanceId
+    set({ instances: remaining, activeInstanceId: newActiveId })
+  },
+
+  renameTerminal: (id, name) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    const { instances } = get()
+    set({
+      instances: instances.map(i => i.id === id ? { ...i, name: trimmed } : i),
+    })
+  },
+
+  closeAll: () => {
+    const { instances } = get()
+    for (const inst of instances) {
+      invoke('kill_pty_session', { sessionId: inst.id }).catch(() => {})
+    }
+    set({ isOpen: false, instances: [], activeInstanceId: null, _nextTerminalNum: 1 })
+  },
+
+  setActiveTerminal: (id) => {
+    set({ activeInstanceId: id })
+  },
+
+  getActiveSessionId: () => {
+    return get().activeInstanceId
+  },
+
+  // ── PTY I/O ──
+  writeToPty: (data: string) => {
+    const { activeInstanceId } = get()
+    if (!activeInstanceId) return
+    invoke('write_to_pty', { sessionId: activeInstanceId, data }).catch(() => {})
+  },
+}))

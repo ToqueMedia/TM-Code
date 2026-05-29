@@ -4,6 +4,7 @@ import { executeDebug } from './commands/debugCommand'
 import { executePayments } from './commands/paymentsCommand'
 import { executeE2E } from './commands/e2eCommand'
 import { executeReview } from './commands/reviewCommand'
+import { executeCompact } from './commands/compactCommand'
 
 /** A canonical argument value the user can pick after the command name. */
 export interface SlashCommandArg {
@@ -115,6 +116,14 @@ class SlashCommandRegistry {
       enabled: true,
       execute: executeReview,
       argHint: '[optional: focus area or path]',
+    })
+
+    this.register({
+      name: '/compact',
+      description: 'Compact conversation context — compress old messages into a summary to free tokens',
+      enabled: true,
+      execute: executeCompact,
+      argHint: '[optional: custom instructions for summarization]',
     })
 
     // Note: `/auth` was removed in favour of the `#auth-email-password` and

@@ -1,9 +1,20 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useMemo } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { structuredPatch } from 'diff'
 import { tokens } from '@/theme/tokens'
 
-const DEFAULT_MAX_LINES = 40
+/**
+ * For new-file creates, show only the first N lines (matching claude-vaz
+ * FileWriteTool behavior).
+ */
+const MAX_CREATE_LINES = 10
+
+/**
+ * Safety cap for edit diffs — prevents rendering thousands of DOM nodes on
+ * large file rewrites (e.g. renaming a variable across 2000 lines).
+ * Matched to claude-vaz's MAX_LINES_PER_FILE = 400.
+ */
+const MAX_EDIT_LINES = 400
 
 interface TerminalStructuredDiffProps {
   filePath: string
@@ -12,8 +23,6 @@ interface TerminalStructuredDiffProps {
   isNewFile?: boolean
   contextLines?: number
   maxHunks?: number
-  /** Max visible code rows before truncation (default 40). */
-  maxLines?: number
 }
 
 type Row =
@@ -29,35 +38,31 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
   isNewFile = false,
   contextLines = 3,
   maxHunks = 8,
-  maxLines = DEFAULT_MAX_LINES,
 }: TerminalStructuredDiffProps) {
-  const [showFull, setShowFull] = useState(false)
-  // Reset expand state when the diff content changes so a new diff doesn't
-  // inherit the previous one's "expanded" choice.
-  useEffect(() => { setShowFull(false) }, [filePath, oldContent, newContent])
-  const effectiveMaxLines = showFull ? Infinity : maxLines
-  const { rows, addedTotal, removedTotal, overflowCount } = useMemo(() => {
-    // Normalize CRLF → LF so Windows files don't render with stray \r glyphs
-    // and so the line counter matches what the user sees in the editor.
+  const { rows, addedTotal, removedTotal, hiddenCount } = useMemo(() => {
     const oldText = (oldContent ?? '').replace(/\r\n/g, '\n')
     const newText = (newContent ?? '').replace(/\r\n/g, '\n')
 
+    // New file: show first MAX_CREATE_LINES, then "+X lines" note
     if (isNewFile || oldText === '') {
       const lines = newText.split('\n')
-      const capped = lines.slice(0, effectiveMaxLines)
+      const capped = lines.slice(0, MAX_CREATE_LINES)
       const r: Row[] = []
       capped.forEach((line, i) => r.push({ kind: 'add', newNo: i + 1, text: line }))
-      return { rows: r, addedTotal: lines.length, removedTotal: 0, overflowCount: Math.max(0, lines.length - effectiveMaxLines) }
+      return { rows: r, addedTotal: lines.length, removedTotal: 0, hiddenCount: Math.max(0, lines.length - MAX_CREATE_LINES) }
     }
 
+    // File deletion: show first MAX_CREATE_LINES
     if (newText === '') {
       const lines = oldText.split('\n')
-      const capped = lines.slice(0, effectiveMaxLines)
+      const capped = lines.slice(0, MAX_CREATE_LINES)
       const r: Row[] = []
       capped.forEach((line, i) => r.push({ kind: 'remove', oldNo: i + 1, text: line }))
-      return { rows: r, addedTotal: 0, removedTotal: lines.length, overflowCount: Math.max(0, lines.length - effectiveMaxLines) }
+      return { rows: r, addedTotal: 0, removedTotal: lines.length, hiddenCount: Math.max(0, lines.length - MAX_CREATE_LINES) }
     }
 
+    // Edit: show full diff with safety cap (MAX_EDIT_LINES) to prevent
+    // WebView freeze on large rewrites.
     const patch = structuredPatch(filePath, filePath, oldText, newText, '', '', { context: contextLines })
     const hunks = patch.hunks
 
@@ -71,8 +76,7 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
     })
 
     const r: Row[] = []
-    let codeLineCount = 0
-    let overflowCount = 0
+    let lineCount = 0
     let capped = false
 
     for (const h of hunks.slice(0, maxHunks)) {
@@ -84,10 +88,7 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
       let oldNo = h.oldStart
       let newNo = h.newStart
       for (const raw of h.lines as string[]) {
-        if (codeLineCount >= effectiveMaxLines) {
-          capped = true
-          break
-        }
+        if (lineCount >= MAX_EDIT_LINES) { capped = true; break }
         const marker = raw.charAt(0)
         const text = raw.slice(1)
         if (marker === '+') {
@@ -101,17 +102,16 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
           oldNo += 1
           newNo += 1
         }
-        codeLineCount += 1
+        lineCount += 1
       }
     }
 
-    if (capped) {
-      const totalCodeLines = hunks.reduce((sum, h) => sum + h.lines.length, 0)
-      overflowCount = totalCodeLines - codeLineCount
-    }
+    const hiddenCount = capped
+      ? hunks.reduce((sum, h) => sum + h.lines.length, 0) - lineCount
+      : 0
 
-    return { rows: r, addedTotal, removedTotal, overflowCount }
-  }, [oldContent, newContent, filePath, isNewFile, contextLines, maxHunks, effectiveMaxLines])
+    return { rows: r, addedTotal, removedTotal, hiddenCount }
+  }, [oldContent, newContent, filePath, isNewFile, contextLines, maxHunks])
 
   const gutterDigits = useMemo(() => {
     let max = 1
@@ -123,7 +123,6 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
     return Math.max(2, String(max).length)
   }, [rows])
 
-  // Build summary like Claude Code: "Added 3 lines, removed 1 line"
   const summary = useMemo(() => {
     const parts: string[] = []
     if (addedTotal > 0) parts.push(`Added ${addedTotal} line${addedTotal !== 1 ? 's' : ''}`)
@@ -133,7 +132,7 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
 
   return (
     <Box mt="2px" mb={1}>
-      {/* Summary line: └ Added X lines, removed Y lines */}
+      {/* Summary line */}
       {summary && (
         <Flex align="center" gap={1.5} mb="2px">
           <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} userSelect="none">└</Text>
@@ -221,47 +220,17 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
             </Flex>
           )
         })}
-
-        {/* Overflow indicator / show-full toggle */}
-        {overflowCount > 0 && (
-          <Box
-            as="button"
-            w="100%"
-            px={2}
-            py="3px"
-            bg="rgba(255,255,255,0.02)"
-            borderTop="1px solid rgba(255,255,255,0.04)"
-            cursor="pointer"
-            textAlign="left"
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: 'rgba(255,255,255,0.04)' }}
-            onClick={() => setShowFull(true)}
-          >
-            <Text fontSize="10px" color={tokens.colors.accent.purple} fontFamily={tokens.fontFamily.mono}>
-              … {overflowCount} more line{overflowCount !== 1 ? 's' : ''} — click to expand
-            </Text>
-          </Box>
-        )}
-        {showFull && overflowCount === 0 && addedTotal + removedTotal > maxLines && (
-          <Box
-            as="button"
-            w="100%"
-            px={2}
-            py="3px"
-            bg="rgba(255,255,255,0.02)"
-            borderTop="1px solid rgba(255,255,255,0.04)"
-            cursor="pointer"
-            textAlign="left"
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: 'rgba(255,255,255,0.04)' }}
-            onClick={() => setShowFull(false)}
-          >
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-              Collapse
-            </Text>
-          </Box>
-        )}
       </Box>
+
+      {/* Hidden lines notice — only for new-file creates */}
+      {hiddenCount > 0 && (
+        <Flex align="center" gap={1.5} mt="2px">
+          <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} userSelect="none">└</Text>
+          <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
+            … +{hiddenCount} {hiddenCount === 1 ? 'line' : 'lines'}
+          </Text>
+        </Flex>
+      )}
     </Box>
   )
 })

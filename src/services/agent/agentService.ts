@@ -1,4 +1,5 @@
 import ToolExecutor, { OpenAIToolDefinition } from './toolExecutor'
+import { t } from '../../i18n'
 import DiffService from './diffService'
 import { devServerManager } from '../devServerManager'
 import FirebaseAuthService from '../auth/firebaseAuth'
@@ -10,7 +11,7 @@ import { buildCompactPrompt, buildPostCompactionSummaryMessage, formatCompactSum
 import { archivePreCompactTranscript } from './compactTranscriptArchive'
 import { streamLocalChat } from './byokLocalStream'
 import { anthropicToOpenAIBody } from './anthropicToOpenai'
-import { createDiffApprovalPromise, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
+import { createDiffApprovalPromise, generateId, resolveAllPendingDiffApprovals, useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useByokStore } from '../../stores/byokStore'
@@ -67,12 +68,24 @@ const MAX_CONTINUATIONS = 3
 // Max retries when the upstream→worker SSE drops mid-stream
 // (worker emits `upstream_stream_interrupted` typed event). Separate from
 // MAX_CONTINUATIONS because the trigger is network-side, not model-side.
-// 1 retry = 2 total attempts. With the 90 s stream-idle watchdog in
-// streamParser.ts, the worst case before surfacing to the user is
-// 2 × 90 s = 3 min — bounded enough that the user gets feedback instead
-// of staring at a frozen UI. Was 2 retries (4.5 min worst case) before
-// the watchdog made the per-attempt cap reliable.
-const MAX_INTERRUPT_RETRIES = 1
+// 3 retries = 4 total streaming attempts, matching claude-vaz's withRetry
+// pattern. Exponential backoff between retries (500ms → 1s → 2s) prevents
+// thundering-herd on transient upstream blips. If all 4 streaming attempts
+// fail, the loop falls back to a non-streaming request before surfacing
+// the error — the same 3-layer recovery as claude-vaz (stream retry →
+// non-streaming fallback → surface error).
+const MAX_INTERRUPT_RETRIES = 3
+const INTERRUPT_BACKOFF_BASE_MS = 500
+// Non-streaming fallback timeout (5 min — claude-vaz uses 300s for the
+// same path). Non-streaming requests wait for the full response before
+// returning, so they need a longer timeout than streaming.
+const NON_STREAMING_TIMEOUT_MS = 300_000
+
+// Stall timeout for SSE streams — if no event arrives for this long, the
+// stream is considered hung. The worker has its own upstream timeout, but
+// if the worker itself stalls (e.g. process stuck), the client sees no data.
+// 120s matches claude-vaz's read timeout and covers slow tool-heavy models.
+const STREAM_STALL_TIMEOUT_MS = 120_000
 
 // Re-inject the top-violation-cost reminders into the tool_result user
 // message every N tool-bearing turns. The full reminder lives at the top of
@@ -251,7 +264,7 @@ export interface AgentCallbacks {
   onUsageUpdate: (inputTokens: number, outputTokens: number) => void
 
   // Context was compressed to fit within model limits (optional)
-  onContextCompression?: (estimatedTokens: number, compressedTokens: number) => void
+  onContextCompression?: (event: import('@/types/agent').CompactProgressEvent) => void
 }
 
 // === Turn result ===
@@ -284,6 +297,10 @@ class AgentService {
   private isRunning = false
   private toolExecutor: ToolExecutor
   private tools: OpenAIToolDefinition[]
+  /** Agent type name for sub-agents (e.g., 'research', 'verify').
+   *  Used by memory tools to scope writes to agent-specific directories.
+   *  null for the main agent. Set via setAgentType() when creating lightweight instances. */
+  private agentType: string | null = null
   private systemPrompt: string = ''
   /** Request type header — e.g. 'plan' for /plan command to use reasoning model.
    *  Only sent on the FIRST API call of the loop, then auto-cleared.
@@ -309,6 +326,10 @@ class AgentService {
   private lastResponseShape: 'anthropic' | 'openai' = 'anthropic'
   /** Files accessed during the current agent session, ordered by recency. */
   private fileAccessLog: Array<{ path: string; action: 'read' | 'modified'; timestamp: number }> = []
+  /** Public read-only accessor for file access log (used by context builder for path-scoped rules). */
+  getAccessedFilePaths(): string[] {
+    return this.fileAccessLog.map(e => e.path)
+  }
   /** Circuit breaker: consecutive LLM summarization failures. After 3, skip LLM and go straight to mechanical. */
   private summarizationFailures = 0
   /** Options for lightweight sub-agents (null for the main singleton). */
@@ -335,6 +356,10 @@ class AgentService {
   /** Tool-bearing turns since the last critical-reminder re-injection.
    *  Counter advances per turn; reaches REMINDER_REINJECT_INTERVAL_TURNS → fire + reset. */
   private turnsSinceLastReminder = 0
+  /** Tracks repeated tool call failures per user message. Key: "toolName:firstArg".
+   *  Reset when the user sends a new message. Used to inject retry context
+   *  so the model knows it already tried the same thing and should pivot. */
+  private recentToolFailures: Map<string, { count: number; lastError: string }> = new Map()
 
   private constructor(options?: LightweightAgentOptions) {
     this.toolExecutor = ToolExecutor.getInstance()
@@ -370,6 +395,17 @@ class AgentService {
 
   setRequestType(type: string | null) {
     this.requestType = type
+  }
+
+  /** Get the agent type name (null for main agent). Used by memory tools
+   *  to scope writes to agent-specific directories. */
+  getAgentType(): string | null {
+    return this.agentType
+  }
+
+  /** Set the agent type name. Called when creating a lightweight sub-agent. */
+  setAgentType(type: string | null) {
+    this.agentType = type
   }
 
   /**
@@ -569,6 +605,11 @@ class AgentService {
     }
   }
 
+  /** Public accessor for the running state — used by /compact and other commands. */
+  isAgentRunning(): boolean {
+    return this.isRunning
+  }
+
   async runAgentLoop(
     userMessage: string | ContentPart[],
     conversationHistory: Array<{ role: string; content: string | AnthropicContentBlock[] | null }>,
@@ -599,6 +640,11 @@ class AgentService {
       if (myGeneration === null) {
         logger.warn('agent', 'tryStart() returned null — concurrent runAgentLoop detected, aborting')
         this.isRunning = false
+        useChatStore.getState().addSystemMessage(
+          t('chat.concurrencyGuard'),
+          'warn',
+          { ephemeral: true, timeoutMs: 8000 },
+        )
         return
       }
       logger.info('agent', `→ QueryGuard acquired (gen: ${myGeneration})`)
@@ -699,11 +745,23 @@ class AgentService {
     }
     messages.push({ role: 'user', content: userMessage as string })
 
+    // Reset per-message tracking state
+    this.recentToolFailures = new Map()
+
     let turnCount = 0
     let continuationCount = 0
     let interruptRetryCount = 0
     let enforcementRetries = 0
     const MAX_ENFORCEMENT_RETRIES = 3
+    let earlyExit = false  // true when the loop breaks due to an already-reported error
+    // Per-turn tracking for non-streaming fallback dedup (BUG2 + RISK1).
+    // Emitted text length: onTextDelta was already called with this many
+    // chars during streaming, so the fallback must skip the prefix.
+    // Dispatched tool IDs: tools already executed during streaming partial
+    // so the fallback must not re-dispatch them.
+    let emittedTextLen = 0
+    let emittedReasoningLen = 0
+    let dispatchedToolIds = new Set<string>()
 
     try {
       const maxTurns = this.lightweightOptions?.maxTurns ?? Infinity
@@ -713,6 +771,11 @@ class AgentService {
         turnCount++
         // turnCount tracked for telemetry and max-turns enforcement
 
+        // Reset per-turn dedup tracking for non-streaming fallback
+        emittedTextLen = 0
+        emittedReasoningLen = 0
+        dispatchedToolIds = new Set<string>()
+
         // Layer 2: Compress context if approaching token limit.
         // Token-absolute (claude-vaz pattern): threshold = effective − 13K,
         // effective = raw − 20K (summary headroom). Same math the ctx
@@ -721,12 +784,15 @@ class AgentService {
         const compressionThreshold = getAutoCompactThreshold(this.contextWindowSize)
         if (this.lastPromptTokens > compressionThreshold) {
           const before = this.lastPromptTokens
-          callbacks.onContextCompression?.(before, 0) // signal start
+          callbacks.onContextCompression?.({ type: 'hooks_start', hookType: 'pre_compact' })
+          callbacks.onContextCompression?.({ type: 'compact_start', beforeTokens: before, trigger: 'auto' })
+          const messagesBeforeCompact = messages.length
           try {
             // Extract tool ops log BEFORE compaction discards old messages —
             // this captures commands run, searches performed, diagnostics
             // seen, etc. that the summary may drop. Injected post-compaction
             // so the model remembers what it already tried.
+            this.autoSaveSessionMemory(messages)
             const toolOpsLog = this.extractToolOpsLog(messages)
 
             // Back-pressure loop (claude-vaz pattern): after compaction,
@@ -741,6 +807,10 @@ class AgentService {
 
               // Layer 2b: Re-read recent files + inject tool ops log
               await this.injectFileReReadings(messages, toolOpsLog)
+
+              // Layer 2c: Sweep stale caches (memory selector, skills, scaffolding)
+              const { runPostCompactCleanup } = await import('./compactCleanup')
+              await runPostCompactCleanup()
 
               // Re-estimate: count tokens in the compacted messages by
               // serializing and estimating. If below threshold, done.
@@ -778,10 +848,17 @@ class AgentService {
           } catch (compErr) {
             // Compression failed — continue with existing messages rather than stopping
             logger.error('agent', 'Context compression failed, continuing with uncompressed context:', compErr)
+            useChatStore.getState().addSystemMessage(
+              t('chat.compressionFailed'),
+              'warn',
+              { ephemeral: true, timeoutMs: 8000 },
+            )
           }
 
           this.lastPromptTokens = 0 // reset — next API call will report the real new count
-          callbacks.onContextCompression?.(before, -1) // signal done
+          const messagesSummarized = Math.max(0, messagesBeforeCompact - messages.length)
+          callbacks.onContextCompression?.({ type: 'hooks_start', hookType: 'post_compact' })
+          callbacks.onContextCompression?.({ type: 'compact_end', beforeTokens: before, trigger: 'auto', messagesSummarized })
         }
 
         // Layer 1: Microcompact old tool results before sending to API.
@@ -869,10 +946,12 @@ class AgentService {
           (tc, raw, isError) => {
             callbacks.onToolResult(tc.id, tc.name, raw, isError)
           },
+          undefined, undefined,
+          this.agentType,
         )
 
         // Process the stream (text deltas + tool dispatch emitted during this call)
-        const turnResult = await this.processStreamedTurn(response, callbacks, streamingPool)
+        let turnResult = await this.processStreamedTurn(response, callbacks, streamingPool)
 
         // Stamp the assistant-turn timestamp so the NEXT API call can compute
         // gap-since-last-turn for time-based microcompaction. We update
@@ -935,6 +1014,24 @@ class AgentService {
         // "network blip, model may or may not have actually emitted anything".
         if (turnResult.finishReason === 'stream_interrupted' && interruptRetryCount < MAX_INTERRUPT_RETRIES) {
           interruptRetryCount++
+          // Exponential backoff: 500ms, 1s, 2s — prevents thundering-herd
+          // on transient upstream blips. Same formula as claude-vaz
+          // (POST_BASE_DELAY_MS * 2^(attempt-1), capped at POST_MAX_DELAY_MS).
+          const backoffMs = INTERRUPT_BACKOFF_BASE_MS * Math.pow(2, interruptRetryCount - 1)
+          logger.info('agent', `[stream] retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES}: waiting ${backoffMs}ms before retrying`)
+          try {
+            useChatStore.getState().addSystemMessage(
+              `Retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES} — waiting ${backoffMs}ms...`,
+              undefined,
+              { ephemeral: true },
+            )
+          } catch { /* chatStore may be torn down */ }
+          await new Promise(resolve => setTimeout(resolve, backoffMs))
+          if (this.abortController?.signal.aborted) {
+            earlyExit = true
+            break
+          }
+
           const partialBlocks: AnthropicContentBlock[] = []
           if (this.preserveReasoningBetweenTurns && turnResult.reasoningContent) {
             partialBlocks.push({ type: 'thinking', thinking: turnResult.reasoningContent })
@@ -948,6 +1045,11 @@ class AgentService {
           if (partialBlocks.length === 0) {
             logger.info('agent', `[stream] retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES}: empty partial, re-issuing same turn`)
           } else {
+            // Track what the fallback will need to deduplicate
+            if (turnResult.textContent) emittedTextLen = turnResult.textContent.length
+            if (turnResult.reasoningContent) emittedReasoningLen = turnResult.reasoningContent.length
+            for (const tc of turnResult.toolCalls) dispatchedToolIds.add(tc.id)
+
             messages.push({
               role: 'assistant',
               content: partialBlocks,
@@ -958,28 +1060,39 @@ class AgentService {
             })
             logger.info('agent', `[stream] retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES}: appended partial (${(turnResult.textContent || '').length} chars text, reasoning=${!!turnResult.reasoningContent})`)
           }
-          // Visible feedback so the user knows the retry is firing.
-          try {
-            useChatStore.getState().addSystemMessage(
-              `Retry ${interruptRetryCount}/${MAX_INTERRUPT_RETRIES} — resuming from where the stream dropped.`,
-              undefined,
-              { ephemeral: true },
-            )
-          } catch { /* chatStore may be torn down */ }
           callbacks.onTurnComplete(turnCount)
           continue
         }
         if (turnResult.finishReason === 'stream_interrupted' && interruptRetryCount >= MAX_INTERRUPT_RETRIES) {
-          // Exhausted retries — propagate the failure to the UI so the user
-          // can take over. The conversation state is preserved; they can
-          // type a new prompt or click Stop.
-          logger.error('agent', `[stream] exhausted ${MAX_INTERRUPT_RETRIES} retries — surfacing to user`)
-          callbacks.onError(new ServiceError(
-            `Model stream was interrupted ${MAX_INTERRUPT_RETRIES + 1} times in a row. Check your connection and try again.`,
-            'STREAM_INTERRUPTED_EXHAUSTED',
-            false,
-          ))
-          break
+          // Streaming retries exhausted — fall back to non-streaming request
+          // before surfacing the error. Same pattern as claude-vaz:
+          // stream fails → non-streaming fallback → surface error.
+          logger.warn('agent', `[stream] exhausted ${MAX_INTERRUPT_RETRIES} streaming retries — attempting non-streaming fallback`)
+          try {
+            useChatStore.getState().addSystemMessage(
+              t('agent.streamUnstable'),
+              undefined,
+              { ephemeral: true },
+            )
+          } catch { /* chatStore may be torn down */ }
+
+          const fallbackResult = await this.tryNonStreamingFallback(messages, callbacks, emittedTextLen, emittedReasoningLen, dispatchedToolIds)
+          if (fallbackResult) {
+            logger.info('agent', '[stream] non-streaming fallback succeeded')
+            turnResult = fallbackResult
+            interruptRetryCount = 0  // Reset for next turn
+            // Fall through to normal post-turn handling
+          } else {
+            // Non-streaming also failed — surface the error
+            logger.error('agent', `[stream] exhausted ${MAX_INTERRUPT_RETRIES} retries + non-streaming fallback — surfacing to user`)
+            earlyExit = true
+            callbacks.onError(new ServiceError(
+              `Model stream was interrupted ${MAX_INTERRUPT_RETRIES + 1} times in a row and non-streaming fallback also failed. Check your connection and try again.`,
+              'STREAM_INTERRUPTED_EXHAUSTED',
+              false,
+            ))
+            break
+          }
         }
 
         // Reactive compact (claude-vaz pattern): when the upstream model
@@ -990,14 +1103,18 @@ class AgentService {
           logger.warn('agent', `[reactive-compact] prompt too long — attempting compaction and retry`)
           try {
             useChatStore.getState().addSystemMessage(
-              'Context window exceeded — compacting and retrying automatically…',
+              t('chat.compactingAndRetrying'),
               undefined,
               { ephemeral: true },
             )
           } catch { /* chatStore may be torn down */ }
 
           try {
+            callbacks.onContextCompression?.({ type: 'hooks_start', hookType: 'pre_compact' })
+            callbacks.onContextCompression?.({ type: 'compact_start', beforeTokens: 0, trigger: 'reactive' })
+            this.autoSaveSessionMemory(messages)
             const toolOpsLog = this.extractToolOpsLog(messages)
+            const messagesBeforeCompact = messages.length
 
             // Aggressive: force keep only 4 turns (the minimum).
             const compressedMessages = await this.compressContext(messages, 4)
@@ -1030,14 +1147,17 @@ class AgentService {
             }
 
             this.lastPromptTokens = 0
-            callbacks.onContextCompression?.(0, -1)
+            const messagesSummarized = Math.max(0, messagesBeforeCompact - messages.length)
+            callbacks.onContextCompression?.({ type: 'hooks_start', hookType: 'post_compact' })
+            callbacks.onContextCompression?.({ type: 'compact_end', beforeTokens: 0, trigger: 'reactive', messagesSummarized })
 
             // Retry the same turn — don't count as a new iteration.
             continue
           } catch (compactErr) {
             logger.error('agent', '[reactive-compact] failed:', compactErr)
+            earlyExit = true
             callbacks.onError(new ServiceError(
-              'Context window exceeded and automatic compaction failed. Please start a new session.',
+              t('chat.compactionFailed'),
               'CONTEXT_EXCEEDED',
               false,
             ))
@@ -1119,7 +1239,22 @@ class AgentService {
             const { toolCall, rawResult, isError, parsedDiff } = entry
 
             if (isError) {
-              return { toolCall, content: `Error: ${rawResult}`, isError: true }
+              // Track repeated failures so the model knows it already tried
+              // the same thing and should pivot to a different approach.
+              const failKey = `${toolCall.name}:${String(toolCall.args.file_path || toolCall.args.command || toolCall.args.pattern || toolCall.args.query || '').slice(0, 80)}`
+              const existing = this.recentToolFailures.get(failKey)
+              const count = (existing?.count ?? 0) + 1
+              const prevError = existing?.lastError
+              this.recentToolFailures.set(failKey, { count, lastError: String(rawResult).slice(0, 200) })
+
+              let content = `Error: ${rawResult}`
+              if (count > 1) {
+                const prevHint = prevError
+                  ? `\n  Previous error: "${prevError.slice(0, 120)}"`
+                  : ''
+                content = `[RETRY CONTEXT] This is attempt #${count} for ${toolCall.name}("${failKey.split(':').slice(1).join(':')}").${prevHint}\nConsider a different approach — the same call has failed ${count} times.\n\nError: ${rawResult}`
+              }
+              return { toolCall, content, isError: true }
             }
 
             if (parsedDiff && !this.lightweightOptions?.readOnly) {
@@ -1178,7 +1313,7 @@ class AgentService {
           const hasReadDevLogs = namesThisTurn.includes('read_dev_server_logs')
           const hasReads = namesThisTurn.some(n =>
             n === 'read_file' || n === 'list_directory' || n === 'search_files'
-            || n === 'glob' || n === 'get_diagnostics' || n === 'read_large_result'
+            || n === 'glob' || n === 'read_large_result'
           )
           this.cumulativeToolCalls += validResults.length
           if (hasReadDevLogs) this.writesWithoutDevServerLogs = 0
@@ -1534,11 +1669,13 @@ Developer message: ${displayText}
         callbacks.onTurnComplete(turnCount)
       }
 
-      callbacks.onError(new ServiceError(
-        `Agent exceeded maximum turns (${maxTurns})`,
-        'TURN_LIMIT',
-        false,
-      ))
+      if (!earlyExit) {
+        callbacks.onError(new ServiceError(
+          `Agent exceeded maximum turns (${maxTurns})`,
+          'TURN_LIMIT',
+          false,
+        ))
+      }
     } catch (error) {
       // Clean exit on abort — don't treat as error
       if (this.abortController?.signal.aborted) return
@@ -1596,6 +1733,53 @@ Developer message: ${displayText}
    *   back-pressure retries to force more aggressive summarization when the
    *   previous compaction didn't free enough space.
    */
+  /**
+   * Auto-save a working snapshot to session memory before compaction.
+   * This is a safety net: if the model never called `update_session_memory`,
+   * we capture what it was doing so the post-compaction context isn't empty.
+   * Does NOT overwrite the model's own notes (those are always preferred).
+   */
+  private autoSaveSessionMemory(messages: AnthropicMessage[]): void {
+    try {
+      const session = useChatStore.getState().getActiveSession()
+      if (!session) return
+      // Don't overwrite the model's own session memory notes
+      if (session.sessionMemory) return
+
+      // Scan last 3 assistant messages for tool_use and text blocks
+      const assistantMsgs = messages.filter(m => m.role === 'assistant').slice(-3)
+      const toolNames: string[] = []
+      let lastText = ''
+
+      for (const msg of assistantMsgs) {
+        if (!Array.isArray(msg.content)) continue
+        for (const block of msg.content) {
+          if (block.type === 'tool_use') {
+            const name = (block as { name: string }).name
+            const args = ((block as { input?: Record<string, unknown> }).input ?? {}) as Record<string, unknown>
+            const arg = (args.file_path || args.command || args.pattern || args.query || '') as string
+            toolNames.push(arg ? `${name}(${String(arg).slice(0, 60)})` : name)
+          }
+          if (block.type === 'text' && (block as { text: string }).text) {
+            lastText = (block as { text: string }).text.slice(0, 200)
+          }
+        }
+      }
+
+      if (toolNames.length === 0 && !lastText) return
+
+      const parts = ['[Auto-saved before compaction]']
+      if (toolNames.length > 0) {
+        parts.push(`Last actions: ${toolNames.slice(-8).join(', ')}`)
+      }
+      if (lastText) {
+        parts.push(`Last text: "${lastText}"`)
+      }
+
+      useChatStore.getState().setSessionMemory(parts.join('\n'))
+    } catch { /* non-critical — session memory is a best-effort safety net */ }
+  }
+
   private async compressContext(
     messages: AnthropicMessage[],
     maxTurnsToKeep?: number,
@@ -1654,7 +1838,7 @@ Developer message: ${displayText}
         if (this.summarizationFailures === 3 && !this.lightweightOptions) {
           try {
             useChatStore.getState().addSystemMessage(
-              'Compaction is using a mechanical fallback after 3 LLM-summarize failures. Recovered context may be lower-quality from now on. Open a new chat for a fresh start, or wait for the upstream to recover.',
+              t('agent.compactionFallback'),
             )
           } catch { /* chatStore may be torn down */ }
         }
@@ -2156,8 +2340,6 @@ Developer message: ${displayText}
       }
       case 'web_fetch':
         return `[Fetched: ${args.url ?? '?'} (${result.length} chars)]`
-      case 'get_diagnostics':
-        return `[Diagnostics: ${args.file_path ?? '?'} — ${result.split('\n')[0] || 'no issues'}]`
       case 'edit_file':
         return `[Edit: ${args.file_path ?? '?'} (${lineCount} lines)]`
       case 'write_file':
@@ -2250,9 +2432,6 @@ Developer message: ${displayText}
             break
           case 'glob':
             entry = `glob "${input.pattern ?? '?'}"`
-            break
-          case 'get_diagnostics':
-            entry = `diagnostics: ${input.file_path ?? '?'}`
             break
           case 'web_search':
             entry = `web search: "${input.query ?? '?'}"`
@@ -2352,7 +2531,10 @@ Developer message: ${displayText}
     const { buildPostCompactionSkillsBlock } = await import('./skillService')
     const skillsBlock = buildPostCompactionSkillsBlock()
 
-    if (fileContents.length === 0 && !devServerNote && !skillsBlock && !toolOpsLog) return
+    // Note: early-return removed — session memory injection below may
+    // produce content even when all other recovery payloads are empty.
+    // The final `if (parts.length === 0) return` guard handles the
+    // truly-empty case.
 
     const parts = []
     if (skillsBlock) {
@@ -2367,6 +2549,20 @@ Developer message: ${displayText}
     if (devServerNote) {
       parts.push(devServerNote)
     }
+
+    // Session memory recovery — agent-maintained notes that survive compaction.
+    // This is a safety net: the session memory also appears in the system prompt
+    // via getSessionMemorySection(), but injecting it here ensures the model
+    // sees it even if the context builder isn't re-invoked mid-loop.
+    try {
+      const { useChatStore } = await import('../../stores/chatStore')
+      const sessionMemory = useChatStore.getState().getActiveSession()?.sessionMemory
+      if (sessionMemory) {
+        parts.push(`[Session memory — recorded earlier this session]\n\n${sessionMemory}`)
+      }
+    } catch { /* non-critical */ }
+
+    if (parts.length === 0) return
 
     // Anthropic requires strictly alternating user/assistant messages.
     // If the last message is already user (e.g., tool_results from the
@@ -2384,6 +2580,267 @@ Developer message: ${displayText}
       role: 'user',
       content: parts.join('\n'),
     })
+  }
+
+  /**
+   * Manual compact: compress the current conversation on demand (via /compact command).
+   * Reuses the same compressContext + injectFileReReadings pipeline as auto-compact.
+   */
+  async runManualCompact(
+    _customInstructions?: string,
+    onProgress?: (event: import('@/types/agent').CompactProgressEvent) => void,
+  ): Promise<{ beforeTokens: number; afterTokens: number }> {
+    if (this.isRunning) {
+      throw new Error('Cannot compact while agent is running')
+    }
+
+    // Build messages in Anthropic format from the chat store
+    const chatStore = useChatStore.getState()
+    const session = chatStore.getActiveSession()
+    if (!session || session.messages.length < 4) {
+      throw new Error('Not enough messages to compact')
+    }
+
+    // Convert chat store messages to Anthropic format
+    const anthropicMessages = this.buildAnthropicMessagesFromSession(session)
+    if (anthropicMessages.length < 4) {
+      throw new Error('Not enough messages to compact')
+    }
+
+    const beforeTokens = anthropicMessages.reduce((sum, m) => {
+      const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+      return sum + Math.ceil(content.length / 4)
+    }, 0)
+
+    // Emit phased progress events so the UI shows pre-hooks → compressing → post-hooks
+    onProgress?.({ type: 'hooks_start', hookType: 'pre_compact' })
+    onProgress?.({ type: 'compact_start', beforeTokens, trigger: 'manual' })
+
+    try {
+      // Extract tool ops log before compaction
+      this.autoSaveSessionMemory(anthropicMessages)
+      const toolOpsLog = this.extractToolOpsLog(anthropicMessages)
+
+      // Compress
+      const compressed = await this.compressContext(anthropicMessages)
+
+      // Re-inject file readings, skills, tool ops
+      await this.injectFileReReadings(compressed, toolOpsLog)
+
+      // Sweep stale caches post-compact
+      const { runPostCompactCleanup } = await import('./compactCleanup')
+      await runPostCompactCleanup()
+
+      const afterTokens = compressed.reduce((sum, m) => {
+        const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+        return sum + Math.ceil(content.length / 4)
+      }, 0)
+
+      // Replace messages in chat store: remove all except last N recent,
+      // add compact boundary + summary
+      const boundaryId = generateId('msg')
+      const boundaryMessage: import('@/types/chat').ChatMessage = {
+        id: boundaryId,
+        role: 'system',
+        kind: 'compact_boundary',
+        compactBeforeTokens: beforeTokens,
+        compactMetadata: { trigger: 'manual', beforeTokens, messagesSummarized: anthropicMessages.length - compressed.length },
+        level: 'info',
+        content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens). Skills invocados re-injectados — o agente continua com regras CRITICAL intactas.`,
+        timestamp: Date.now(),
+      }
+
+      // Convert compressed Anthropic messages back to chat store format
+      const summaryContent = this.extractSummaryFromCompressed(compressed)
+      const summaryMessage: import('@/types/chat').ChatMessage = {
+        id: generateId('msg'),
+        role: 'assistant',
+        content: `Contexto compactado de ${Math.round(beforeTokens / 1000)}K para ~${Math.round(afterTokens / 1000)}K tokens.\n\n${summaryContent}`,
+        timestamp: Date.now(),
+      }
+
+      // Update the chat store: replace all messages with boundary + summary
+      chatStore.replaceMessages([boundaryMessage, summaryMessage])
+      chatStore.resetTokenCounters()
+      chatStore.setPostCompactSurveyPending(true)
+
+      onProgress?.({ type: 'hooks_start', hookType: 'post_compact' })
+      onProgress?.({ type: 'compact_end', beforeTokens, trigger: 'manual' })
+
+      return { beforeTokens, afterTokens }
+    } catch (err) {
+      onProgress?.({ type: 'compact_end', beforeTokens, trigger: 'manual' })
+      throw err
+    }
+  }
+
+  /**
+   * Partial compact: summarize only the oldest portion of the conversation,
+   * keeping recent messages intact. Useful for long sessions (40+ turns)
+   * where full compact would lose too much recent context.
+   *
+   * @param keepRecentCount Number of recent messages to preserve (default: 30% of total, min 10)
+   * @param onProgress Progress callback for UI updates
+   */
+  async runPartialCompact(
+    keepRecentCount?: number,
+    onProgress?: (event: import('@/types/agent').CompactProgressEvent) => void,
+  ): Promise<{ beforeTokens: number; afterTokens: number }> {
+    if (this.isRunning) {
+      throw new Error('Cannot compact while agent is running')
+    }
+
+    const chatStore = useChatStore.getState()
+    const session = chatStore.getActiveSession()
+    if (!session || session.messages.length < 4) {
+      throw new Error('Not enough messages to compact')
+    }
+
+    const anthropicMessages = this.buildAnthropicMessagesFromSession(session)
+    if (anthropicMessages.length < 4) {
+      throw new Error('Not enough messages to compact')
+    }
+
+    const beforeTokens = anthropicMessages.reduce((sum, m) => {
+      const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+      return sum + Math.ceil(content.length / 4)
+    }, 0)
+
+    // Determine how many messages to keep
+    const defaultKeep = Math.max(10, Math.ceil(anthropicMessages.length * 0.3))
+    const keep = keepRecentCount ?? defaultKeep
+
+    // Split: old messages go to summarization, recent messages are preserved
+    const splitPoint = Math.max(0, anthropicMessages.length - keep)
+    const oldMessages = anthropicMessages.slice(0, splitPoint)
+    const recentMessages = anthropicMessages.slice(splitPoint)
+
+    if (oldMessages.length === 0) {
+      throw new Error('Nothing to compact — recent messages fill the entire conversation')
+    }
+
+    onProgress?.({ type: 'hooks_start', hookType: 'pre_compact' })
+    onProgress?.({ type: 'compact_start', beforeTokens, trigger: 'manual' })
+
+    try {
+      // Extract tool ops log from old messages
+      this.autoSaveSessionMemory(oldMessages)
+      const toolOpsLog = this.extractToolOpsLog(oldMessages)
+
+      // Summarize old messages only
+      let summary: string
+      if (this.summarizationFailures >= 3) {
+        summary = this.mechanicalFallback(oldMessages)
+      } else {
+        try {
+          summary = await this.callSummarizationAPI(oldMessages)
+          this.summarizationFailures = 0
+        } catch (err) {
+          this.summarizationFailures++
+          summary = this.mechanicalFallback(oldMessages)
+        }
+      }
+
+      // Build compressed array: system + summary + recent messages
+      const systemMsg = anthropicMessages[0]
+      const summaryMsg: AnthropicMessage = {
+        role: 'assistant',
+        content: `[Partial compact — ${oldMessages.length} older messages summarized]\n\n${summary}`,
+      }
+      const compressed = [systemMsg, summaryMsg, ...recentMessages]
+
+      // Re-inject file readings, skills, tool ops
+      await this.injectFileReReadings(compressed, toolOpsLog)
+
+      // Sweep stale caches post-compact
+      const { runPostCompactCleanup } = await import('./compactCleanup')
+      await runPostCompactCleanup()
+
+      const afterTokens = compressed.reduce((sum, m) => {
+        const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+        return sum + Math.ceil(content.length / 4)
+      }, 0)
+
+      // Replace messages in chat store
+      const boundaryMessage: import('@/types/chat').ChatMessage = {
+        id: generateId('msg'),
+        role: 'system',
+        kind: 'compact_boundary',
+        compactBeforeTokens: beforeTokens,
+        compactMetadata: { trigger: 'manual', beforeTokens, messagesSummarized: oldMessages.length },
+        level: 'info',
+        content: `Compactação parcial (${Math.round(beforeTokens / 1000)}K → ~${Math.round(afterTokens / 1000)}K tokens). ${oldMessages.length} mensagens antigas resumidas, ${recentMessages.length} recentes preservadas.`,
+        timestamp: Date.now(),
+      }
+
+      const summaryContent = this.extractSummaryFromCompressed(compressed)
+      const summaryMessage: import('@/types/chat').ChatMessage = {
+        id: generateId('msg'),
+        role: 'assistant',
+        content: `Compactação parcial: ${oldMessages.length} mensagens resumidas, ${recentMessages.length} preservadas.\n\n${summaryContent}`,
+        timestamp: Date.now(),
+      }
+
+      // Convert recent AnthropicMessage[] back to ChatMessage[] so the chat
+      // store preserves the messages that partial compact was supposed to keep.
+      const recentChatMessages: import('@/types/chat').ChatMessage[] = recentMessages.map(m => ({
+        id: generateId('msg'),
+        role: m.role as 'user' | 'assistant',
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+        timestamp: Date.now(),
+      }))
+
+      chatStore.replaceMessages([boundaryMessage, summaryMessage, ...recentChatMessages])
+      chatStore.resetTokenCounters()
+      chatStore.setPostCompactSurveyPending(true)
+
+      onProgress?.({ type: 'hooks_start', hookType: 'post_compact' })
+      onProgress?.({ type: 'compact_end', beforeTokens, trigger: 'manual' })
+
+      return { beforeTokens, afterTokens }
+    } catch (err) {
+      onProgress?.({ type: 'compact_end', beforeTokens, trigger: 'manual' })
+      throw err
+    }
+  }
+
+  /**
+   * Build Anthropic-format messages from a chat store session.
+   * Used by runManualCompact to feed into compressContext.
+   */
+  private buildAnthropicMessagesFromSession(session: import('@/types/chat').ChatSession): AnthropicMessage[] {
+    const messages: AnthropicMessage[] = []
+
+    // First message as system (if it's a system message)
+    const firstMsg = session.messages[0]
+    if (firstMsg?.role === 'system' && firstMsg.kind !== 'compact_boundary') {
+      messages.push({ role: 'user', content: firstMsg.content })
+    }
+
+    for (const msg of session.messages) {
+      if (msg.role === 'system') continue // skip system messages
+      if (msg.kind === 'compact_boundary') continue // skip boundaries
+      messages.push({
+        role: msg.role as 'user' | 'assistant',
+        content: msg.content,
+      })
+    }
+
+    return messages
+  }
+
+  /**
+   * Extract the summary text from compressed Anthropic messages.
+   * The summary is the user message right after the system message.
+   */
+  private extractSummaryFromCompressed(messages: AnthropicMessage[]): string {
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+        return content
+      }
+    }
+    return 'Context was compressed.'
   }
 
   /** Returns the current abort controller (for sub-agent abort propagation). */
@@ -2500,7 +2957,7 @@ Developer message: ${displayText}
     const firebaseToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!firebaseToken) {
       throw new ServiceError(
-        'Sessão expirada. Faz login novamente.',
+        t('chat.authExpired'),
         'AUTH_EXPIRED',
         false
       )
@@ -2888,6 +3345,193 @@ Developer message: ${displayText}
   }
 
   /**
+   * Non-streaming fallback — same pattern as claude-vaz's
+   * executeNonStreamingRequest. When streaming retries are exhausted, we
+   * re-send the same messages with `X-Non-Streaming-Fallback: true` header.
+   * The backend makes a blocking request to the upstream provider (no SSE)
+   * and returns the full JSON response. This avoids the SSE connection that
+   * keeps dropping while still getting a valid model response.
+   *
+   * Returns a TurnResult on success, or null if the fallback also failed.
+   */
+  private async tryNonStreamingFallback(
+    messages: AnthropicMessage[],
+    callbacks: AgentCallbacks,
+    /** Text chars already emitted via onTextDelta during streaming retries. */
+    emittedTextLen: number,
+    /** Reasoning chars already emitted via onReasoningDelta during streaming retries. */
+    emittedReasoningLen: number,
+    /** Tool IDs already dispatched during streaming retries. */
+    dispatchedToolIds: Set<string>,
+  ): Promise<TurnResult | null> {
+    try {
+      const url = `${WORKER_URL}/v1/messages`
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Non-Streaming-Fallback': 'true',
+      }
+
+      const firebaseToken = await FirebaseAuthService.getInstance().getIdToken()
+      if (!firebaseToken) {
+        logger.error('agent', '[non-streaming-fallback] no auth token')
+        throw new ServiceError(t('chat.authExpired'), 'AUTH_EXPIRED', true)
+      }
+      headers['Authorization'] = `Bearer ${firebaseToken}`
+
+      const activeSession = useChatStore.getState().getActiveSession?.()
+      if (activeSession?.id) {
+        headers['X-Session-Id'] = activeSession.id
+      }
+
+      const body = await this.buildRequestBody(messages)
+      const requestBody = JSON.stringify(body)
+
+      logger.info('agent', `[non-streaming-fallback] sending blocking request to ${url}`)
+
+      // RISK2 fix: AbortSignal.any() requires Safari 17.4+ / Chrome 116+.
+      // Tauri 2 WKWebView on older macOS may not support it. Use
+      // Promise.race + manual abort instead — works everywhere.
+      const timeoutController = new AbortController()
+      const timeoutId = setTimeout(() => timeoutController.abort(), NON_STREAMING_TIMEOUT_MS)
+
+      let response: Response
+      try {
+        const fetchPromise = fetch(url, {
+          method: 'POST',
+          headers,
+          body: requestBody,
+          signal: timeoutController.signal,
+        })
+
+        // Race the fetch against caller abort (if any)
+        if (this.abortController?.signal) {
+          if (this.abortController.signal.aborted) {
+            timeoutController.abort()
+            throw new Error('aborted')
+          }
+          const onAbort = () => timeoutController.abort()
+          this.abortController.signal.addEventListener('abort', onAbort, { once: true })
+          try {
+            response = await fetchPromise
+          } finally {
+            this.abortController.signal.removeEventListener('abort', onAbort)
+          }
+        } else {
+          response = await fetchPromise
+        }
+      } finally {
+        clearTimeout(timeoutId)
+      }
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => 'unknown')
+        logger.error('agent', `[non-streaming-fallback] failed: ${response.status} ${errText.slice(0, 200)}`)
+        return null
+      }
+
+      useBillingStore.getState().updateFromHeaders(response.headers)
+
+      const data = await response.json() as any
+
+      // Try Anthropic shape first (the primary path)
+      if (data.content && Array.isArray(data.content)) {
+        let textContent = ''
+        let reasoningContent = ''
+        const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
+
+        for (const block of data.content) {
+          if (block.type === 'text') {
+            textContent += block.text || ''
+          } else if (block.type === 'thinking') {
+            reasoningContent += block.thinking || ''
+          } else if (block.type === 'tool_use') {
+            // RISK1 fix: skip tool calls already dispatched during streaming retries
+            if (!dispatchedToolIds.has(block.id)) {
+              toolCalls.push({
+                id: block.id,
+                name: block.name,
+                args: typeof block.input === 'string' ? JSON.parse(block.input) : (block.input || {}),
+              })
+            }
+          }
+        }
+
+        // BUG2 fix: skip text chars already emitted via onTextDelta during
+        // streaming retries. The UI already has the prefix; we only emit the
+        // new portion. If the model restarted (different prefix), we still
+        // skip — the UI partial is already committed and emitting both would
+        // create a worse duplication.
+        const newText = emittedTextLen > 0 ? textContent.slice(emittedTextLen) : textContent
+        if (newText) callbacks.onTextDelta(newText)
+        const newReasoning = emittedReasoningLen > 0 ? reasoningContent.slice(emittedReasoningLen) : reasoningContent
+        if (newReasoning) callbacks.onReasoningDelta(newReasoning)
+        if (data.usage) {
+          callbacks.onUsageUpdate(data.usage.input_tokens || 0, data.usage.output_tokens || 0)
+        }
+
+        return {
+          textContent,
+          reasoningContent,
+          toolCalls,
+          finishReason: data.stop_reason || 'end_turn',
+          usage: data.usage ? { promptTokens: data.usage.input_tokens || 0, completionTokens: data.usage.output_tokens || 0 } : null,
+        }
+      }
+
+      // Try OpenAI shape (BYOK with OpenAI-compatible providers)
+      if (data.choices && Array.isArray(data.choices)) {
+        const choice = data.choices[0]
+        let textContent = ''
+        let reasoningContent = ''
+        const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
+
+        if (choice?.message?.content) {
+          textContent = choice.message.content
+        }
+        if (choice?.message?.reasoning_content) {
+          reasoningContent = choice.message.reasoning_content
+        }
+        if (choice?.message?.tool_calls) {
+          for (const tc of choice.message.tool_calls) {
+            // RISK1 fix: skip tool calls already dispatched during streaming retries
+            if (!dispatchedToolIds.has(tc.id)) {
+              toolCalls.push({
+                id: tc.id,
+                name: tc.function?.name || '',
+                args: typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {}),
+              })
+            }
+          }
+        }
+
+        // BUG2 fix: same dedup for OpenAI shape
+        const newTextOai = emittedTextLen > 0 ? textContent.slice(emittedTextLen) : textContent
+        if (newTextOai) callbacks.onTextDelta(newTextOai)
+        const newReasoningOai = emittedReasoningLen > 0 ? reasoningContent.slice(emittedReasoningLen) : reasoningContent
+        if (newReasoningOai) callbacks.onReasoningDelta(newReasoningOai)
+        if (data.usage) {
+          callbacks.onUsageUpdate(data.usage.prompt_tokens || 0, data.usage.completion_tokens || 0)
+        }
+
+        return {
+          textContent,
+          reasoningContent,
+          toolCalls,
+          finishReason: choice?.finish_reason || 'stop',
+          usage: data.usage ? { promptTokens: data.usage.prompt_tokens || 0, completionTokens: data.usage.completion_tokens || 0 } : null,
+        }
+      }
+
+      logger.error('agent', '[non-streaming-fallback] unrecognised response shape:', JSON.stringify(data).slice(0, 300))
+      return null
+    } catch (err) {
+      logger.error('agent', '[non-streaming-fallback] error:', err)
+      return null
+    }
+  }
+
+  /**
    * Process a streaming Anthropic SSE response.
    *
    * Anthropic events: message_start → content_block_start → content_block_delta
@@ -2928,8 +3572,25 @@ Developer message: ${displayText}
     const parser = this.lastResponseShape === 'openai' ? parseOpenAISSEStream : parseSSEStream
     logger.info('agent', '→ Processing stream...')
 
+    // Stall watchdog — if no SSE event arrives for STREAM_STALL_TIMEOUT_MS,
+    // abort the stream so the user sees an error instead of an infinite spinner.
+    // Resets on every event. Cleared when the parser finishes.
+    // Uses a flag so the catch handler distinguishes stall from user-cancel.
+    let stallTimer: ReturnType<typeof setTimeout> | null = null
+    let stallTimedOut = false
+    const resetStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer)
+      stallTimer = setTimeout(() => {
+        stallTimedOut = true
+        logger.warn('agent', `[stream] stall timeout — no events for ${STREAM_STALL_TIMEOUT_MS}ms`)
+        this.abortController?.abort()
+      }, STREAM_STALL_TIMEOUT_MS)
+    }
+    resetStallTimer()
+
     await parser(response, {
       onEvent: (event: StreamEvent) => {
+        resetStallTimer()
         switch (event.type) {
           case 'content_block_start': {
             blocks.set(event.index, {
@@ -3061,7 +3722,7 @@ Developer message: ${displayText}
               // without needing dev tools. Ephemeral — auto-removes ~8s.
               try {
                 useChatStore.getState().addSystemMessage(
-                  'Response interrupted by the network. Retrying automatically…',
+                  t('chat.streamTimeout'),
                   undefined,
                   { ephemeral: true },
                 )
@@ -3086,7 +3747,20 @@ Developer message: ${displayText}
             break
         }
       },
-    }, this.abortController?.signal)
+    }, this.abortController?.signal).catch((err) => {
+      // AbortError from the parser — could be user-cancel or stall timeout.
+      // If stallTimedOut is set, surface the timeout error via onError so the
+      // user sees "Request timed out" instead of "Cancelled".
+      if (stallTimedOut) {
+        logger.warn('agent', '[stream] stall timeout detected — surfacing timeout error')
+        finishReason = 'stream_interrupted'
+      } else {
+        throw err  // re-throw user-initiated abort
+      }
+    })
+
+    // Stall watchdog cleanup — clear the timer now that the parser finished.
+    if (stallTimer) clearTimeout(stallTimer)
 
     return {
       textContent,

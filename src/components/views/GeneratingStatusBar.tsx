@@ -2,6 +2,7 @@ import { memo, useState, useEffect, type ReactNode } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiArrowDown, FiArrowUp } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 
 function formatTokens(count: number): string {
   if (count === 0) return '0'
@@ -17,16 +18,6 @@ function formatElapsed(ms: number): string {
   return `${min}m ${sec}s`
 }
 
-const statusConfig: Record<string, { color: string; label: string }> = {
-  idle: { color: tokens.colors.text.disabled, label: 'Ready' },
-  awaiting_response: { color: tokens.colors.toolCall.runningText, label: 'Awaiting response...' },
-  reasoning: { color: tokens.colors.accent.purple, label: 'A pensar...' },
-  generating: { color: tokens.colors.accent.primary, label: 'Generating...' },
-  applying: { color: tokens.colors.accent.green, label: 'Applying changes...' },
-  compressing: { color: tokens.colors.accent.orange, label: 'Compressing context...' },
-  error: { color: tokens.colors.accent.red, label: 'Error' },
-}
-
 interface GeneratingStatusBarProps {
   status: string
   isStreaming: boolean
@@ -40,6 +31,15 @@ interface GeneratingStatusBarProps {
 }
 
 function GeneratingStatusBar({ status, isStreaming, inputTokens, outputTokens, currentTurnCount, agentStartTime }: GeneratingStatusBarProps) {
+  const statusConfig: Record<string, { color: string; label: string }> = {
+    idle: { color: tokens.colors.text.disabled, label: t('generating.ready') },
+    awaiting_response: { color: tokens.colors.toolCall.runningText, label: t('generating.awaitingResponse') },
+    reasoning: { color: tokens.colors.accent.purple, label: t('generating.thinking') },
+    generating: { color: tokens.colors.accent.primary, label: t('generating.generating') },
+    applying: { color: tokens.colors.accent.green, label: t('generating.applying') },
+    compressing: { color: tokens.colors.accent.orange, label: t('generating.compacting') },
+    error: { color: tokens.colors.accent.red, label: t('generating.error') },
+  }
   const config = statusConfig[status] || statusConfig.idle
   const [elapsed, setElapsed] = useState(0)
 

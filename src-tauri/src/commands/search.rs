@@ -438,7 +438,7 @@ async fn search_with_grep(
             continue;
         }
 
-        let file_path = parts[0].to_string();
+        let file_path = normalize_str_for_frontend(parts[0]);
         let line_number = parts[1].parse::<u32>().unwrap_or(0);
         let text_raw = parts[2];
         let text = if text_raw.len() > MAX_LINE_LENGTH {
@@ -563,6 +563,8 @@ async fn search_with_findstr(
         } else {
             continue;
         };
+
+        let file_path = normalize_str_for_frontend(&file_path);
 
         let text = if text.len() > MAX_LINE_LENGTH {
             match text.char_indices().nth(MAX_LINE_LENGTH) {

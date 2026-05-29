@@ -27,21 +27,7 @@ jobs:
 
   build:
     needs: create-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-            label: macOS-ARM
-          - platform: ubuntu-22.04
-            args: ''
-            label: Linux
-          - platform: windows-latest
-            args: ''
-            label: Windows
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -53,8 +39,6 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -62,38 +46,9 @@ jobs:
           workspaces: './src-tauri -> target'
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - name: Import Apple certificate for code signing + notarization
-        if: matrix.platform == 'macos-latest'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          CERT_PATH=$RUNNER_TEMP/certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERT_PATH
-          security create-keychain -p "" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "" $KEYCHAIN_PATH
-          security import $CERT_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple: -k "" $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-
-      - name: Import Windows certificate
-        if: matrix.platform == 'windows-latest'
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          New-Item -ItemType directory -Path certificate
-          Set-Content -Path certificate/tempCert.txt -Value $env:WINDOWS_CERTIFICATE
-          certutil -decode certificate/tempCert.txt certificate/certificate.pfx
-          Remove-Item -path certificate -include tempCert.txt
-          Import-PfxCertificate -FilePath certificate/certificate.pfx -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText)
 
       - name: Install frontend dependencies
         run: yarn install --frozen-lockfile
@@ -103,13 +58,6 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
-          # Apple code signing + notarization (macOS only)
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: 'Developer ID Application: TOQUE MEDIA - PRESTACAO DE SERVICOS, LDA (D39GPSWXDH)'
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VITE_USE_EMULATORS: 'false'
           VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
           VITE_DASHSCOPE_API_KEY: ${{ secrets.VITE_DASHSCOPE_API_KEY }}
@@ -122,7 +70,6 @@ jobs:
           VITE_FIREBASE_MEASUREMENT_ID: 'G-S6V1T01G96'
         with:
           # Build only — no release upload (we upload to the public repo separately)
-          args: ${{ matrix.args }}
           includeUpdaterJson: true
 
       - name: Upload artifacts to public repo release
@@ -131,31 +78,17 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ needs.create-release.outputs.version }}"
-          ARGS="${{ matrix.args }}"
 
           # Find release artifacts + signatures ONLY inside bundle directories.
           # Tauri places installers under target/**/release/bundle/ — restricting to
           # */bundle/* avoids uploading build tools (WiX), build scripts, and raw binaries.
           find src-tauri/target -path "*/bundle/*" -type f \( \
-            -name "*.dmg" -o -name "*.exe" -o -name "*.msi" -o \
             -name "*.deb" -o -name "*.AppImage" -o \
-            -name "*.nsis.zip" -o -name "*.nsis.zip.sig" -o \
-            -name "*.AppImage.sig" -o -name "*.exe.sig" -o \
-            -name "*.msi.sig" -o -name "*.deb.sig" \
+            -name "*.AppImage.sig" -o -name "*.deb.sig" \
           \) | while read file; do
             echo "Uploading: $file"
             gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
           done
-
-          # macOS updater artifact (.app.tar.gz + .sig) — only ARM build now
-          TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
-          TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
-          if [ -n "$TAR_GZ" ]; then
-            gh release upload "$VERSION" "$TAR_GZ" --repo ToqueMedia/TM-Code --clobber
-            if [ -n "$TAR_SIG" ]; then
-              gh release upload "$VERSION" "$TAR_SIG" --repo ToqueMedia/TM-Code --clobber
-            fi
-          fi
 
   generate-updater:
     # Runs AFTER all platform builds complete.
@@ -184,33 +117,22 @@ jobs:
             if [ -f "sigs/$1" ]; then cat "sigs/$1"; else echo ""; fi
           }
 
-          # Find the macOS .app.tar.gz.sig filename (no longer renamed per-arch)
-          MAC_SIG_FILE=$(ls sigs/*.app.tar.gz.sig 2>/dev/null | head -1)
-          MAC_SIG=$(if [ -n "$MAC_SIG_FILE" ]; then cat "$MAC_SIG_FILE"; else echo ""; fi)
-          # Resolve the actual .app.tar.gz asset name uploaded to the release
-          MAC_TAR_NAME=$(gh release view "$VERSION" --repo "$REPO" --json assets --jq '.assets[].name | select(endswith(".app.tar.gz"))' | head -1)
           LINUX_APPIMAGE_SIG=$(read_sig "TM.Code_${BARE_VERSION}_amd64.AppImage.sig")
-          WIN_NSIS_SIG=$(read_sig "TM.Code_${BARE_VERSION}_x64-setup.exe.sig")
 
           # Build latest.json using jq to properly escape signatures (multi-line base64)
           jq -n \
             --arg ver "$BARE_VERSION" \
             --arg notes "TM Code $VERSION" \
             --arg date "$PUB_DATE" \
-            --arg mac_sig "$MAC_SIG" \
             --arg linux_sig "$LINUX_APPIMAGE_SIG" \
-            --arg win_sig "$WIN_NSIS_SIG" \
             --arg base "$BASE_URL" \
             --arg bv "$BARE_VERSION" \
-            --arg mac_tar "$MAC_TAR_NAME" \
             '{
               version: $ver,
               notes: $notes,
               pub_date: $date,
               platforms: {
-                "darwin-aarch64": { signature: $mac_sig, url: ($base + "/" + $mac_tar) },
-                "linux-x86_64":   { signature: $linux_sig,   url: ($base + "/TM.Code_" + $bv + "_amd64.AppImage") },
-                "windows-x86_64": { signature: $win_sig,     url: ($base + "/TM.Code_" + $bv + "_x64-setup.exe") }
+                "linux-x86_64":   { signature: $linux_sig,   url: ($base + "/TM.Code_" + $bv + "_amd64.AppImage") }
               }
             }' > latest.json
 

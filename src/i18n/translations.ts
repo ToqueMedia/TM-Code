@@ -399,7 +399,22 @@ const en = {
   'chat.generating': 'Generating...',
   'chat.applying': 'Applying changes...',
   'chat.compressing': 'Compressing context...',
-  'chat.recoverableUpstreamError': 'The service returned a temporary error. Your message wasn’t processed. Send "Continue" to resume from where you stopped — the agent picks up from the last step.',
+  'chat.compact.preHooks': 'Running pre-compact hooks...',
+  'chat.compact.postHooks': 'Running post-compact hooks...',
+  'chat.compact.compacting': 'Compacting conversation...',
+  'chat.compact.done': 'Conversation compacted',
+  'chat.compact.busy': 'Cannot compact while agent is working. Wait for it to finish.',
+  'chat.compact.notEnough': 'Not enough messages to compact.',
+  'chat.compact.smaller': 'smaller',
+  'chat.compact.autoSummary': 'Context compacted',
+  'chat.compact.manualSummary': 'Context compacted (manual)',
+  'chat.compact.trigger': 'Trigger',
+  'chat.compact.size': 'Size',
+  'chat.compact.and': 'and',
+  'chat.compact.summary': 'Summary',
+  'chat.compact.expand': 'Show summary',
+  'chat.compact.collapse': 'Hide summary',
+  'chat.recoverableUpstreamError': "The service returned a temporary error. Your message wasn't processed. Send \"Continue\" to resume from where you stopped — the agent picks up from the last step.",
   'chat.noCredits': 'No credits',
   'chat.accountInactive': 'Account inactive — contact support',
   'chat.credits': 'credits',
@@ -426,12 +441,20 @@ const en = {
   'chat.downloadMarkdown': 'Download as Markdown',
   'chat.sandboxMode': 'Sandbox Mode',
   'chat.refreshCredits': 'Refresh credits',
+  'chat.concurrencyGuard': 'Another request is already in progress — please wait for it to finish.',
+  'chat.compressionFailed': 'Context compression failed — continuing with uncompressed context.',
+  'chat.compactionFailed': 'Automatic compaction failed. Please start a new session or try /compact manually.',
+  'chat.compactingAndRetrying': 'Context window exceeded — compacting and retrying automatically…',
+  'chat.streamTimeout': 'Request timed out. The server may be temporarily unavailable — please try again.',
+  'chat.authExpired': 'Session expired. Please sign in again.',
   'chat.skills': 'skills',
   'chat.mcpStarting': 'MCP starting...',
   'chat.tokens': 'tokens',
   'chat.turns': 'turns',
   'chat.stopGeneration': 'Stop generation',
   'chat.messages': 'Chat messages',
+  'chat.otherOption': 'Other',
+  'chat.otherPlaceholder': 'Type your answer...',
   'perm.readSensitive': 'Read sensitive file',
   'perm.dangerousCommand': 'Run dangerous command',
   'perm.dangerousWarning': 'This command can modify or delete files, change system state, or have other destructive effects. Review carefully before approving.',
@@ -450,6 +473,14 @@ const en = {
   'perm.browserAction': 'Browser action',
   'perm.approve': 'Approve',
   'perm.approveAll': 'Approve All',
+  'perm.allowThisTime': 'Yes, allow this time',
+  'perm.allowAlwaysProject': "Yes, and always allow '{tool}' in this project",
+  'perm.allowAlwaysGlobal': "Yes, and always allow '{tool}'",
+  'perm.denyWithReason': 'No (tell the agent what to do instead)',
+  'perm.allowCommand': 'Allow running this command?',
+  'perm.allowAction': 'Allow this action?',
+  'perm.skip': 'Skip',
+  'perm.submit': 'Submit',
   'perm.deny': 'Deny',
   'perm.denyAll': 'Deny All',
   'perm.justify': 'Justify',
@@ -482,6 +513,14 @@ const en = {
   'checkpoint.created': 'created',
   'checkpoint.deleted': 'deleted',
   'checkpoint.modified': 'modified',
+  'checkpoint.revertAll': 'Revert all',
+  'checkpoint.revertAllConfirm': 'Revert all changes?',
+  'checkpoint.revertAllDescription': '{count} file(s) will be restored to their pre-agent state. Terminal commands are not reverted.',
+  'checkpoint.revertAllDirtyWarning': 'You have unsaved editor changes that will be overwritten.',
+  'checkpoint.revertAllFailed': 'Revert failed',
+  'checkpoint.reverting': 'Reverting...',
+  'checkpoint.count': 'Checkpoints ({count})',
+  'checkpoint.undoN': 'Undo {count} changes?',
   'plan.readyForReview': 'Plan Ready for Review',
   'plan.description': 'The architect has generated a complete development plan. Review PLAN.md and decide how to proceed.',
   'plan.viewFull': 'View Full Plan',
@@ -512,6 +551,7 @@ const en = {
   'prompt.toSend': 'to send',
   'prompt.queueHint': 'to queue for agent',
   'prompt.toggleEditor': 'Toggle editor',
+  'prompt.sourceCode': 'Source Code',
   'prompt.startingServer': 'Starting server...',
   'prompt.hidePreview': 'Hide preview',
   'prompt.showPreview': 'Show preview',
@@ -528,6 +568,9 @@ const en = {
   'prompt.planLabel.vibe': 'Vibe',
   'prompt.planLabel.pro': 'Pro',
   'prompt.planLabel.max': 'Max',
+  'prompt.subAgents.running': '{count} sub-agent running...',
+  'prompt.subAgents.running.plural': '{count} sub-agents running...',
+  'prompt.subAgents.cancel': 'Cancel',
 
   // ── Terminal Mode Attachments ──────────────────────
   'terminalMode.attach': 'Attach',
@@ -572,6 +615,7 @@ const en = {
   'publish.updating': 'Updating…',
   'publish.update.intro': 'A new build of your project will be sent to the live site. The deploy reuses the existing public address — visitors keep using the same URL.',
   'publish.update.liveUrlLabel': 'Live URL',
+  'publish.update.customDomainLabel': 'Custom Domain',
   'publish.update.subdomainHint': 'To change the subdomain, take this deploy offline in Settings → Deploys and publish a fresh one.',
 
   // ── Deploys section (Settings) ─────────────────────
@@ -599,6 +643,49 @@ const en = {
   'terminalMode.picker.daysAgo': '{n}d ago',
   'terminalMode.picker.message': 'msg',
   'terminalMode.picker.messages': 'msgs',
+
+  // ── Terminal Mode Extra / Audit ───────────────────
+  'terminalMode.view.loadingSession': '⟳ loading session…',
+  'terminalMode.view.loadEarlier': '⟳ load earlier — {hiddenCount} hidden',
+  'terminalMode.view.resizePanel': 'Resize terminal panel',
+  'terminalMode.titlebar.thinkingAlwaysOn': 'Thinking is always-on for this model',
+  'terminalMode.titlebar.exitAria': 'Exit Terminal mode (Esc)',
+  'terminalMode.titlebar.exitTooltip': 'Exit (Esc)',
+  'terminalMode.titlebar.exitLabel': 'exit',
+  'terminalMode.greeting.title': '◆ TM Code · terminal mode',
+  'terminalMode.greeting.navigateHistory': 'navigate history',
+  'terminalMode.greeting.mentionFile': 'mention a file',
+  'terminalMode.greeting.runShell': 'run shell',
+  'terminalMode.greeting.sandboxActive': 'sandbox mode active',
+  'terminalMode.status.awaiting': 'awaiting',
+  'terminalMode.status.reasoning': 'reasoning',
+  'terminalMode.status.writing': 'writing',
+  'terminalMode.status.applying': 'applying',
+  'terminalMode.status.compacting': 'compacting',
+  'terminalMode.status.ready': 'ready',
+  'terminalMode.status.contextEffective': 'effective',
+  'terminalMode.status.autoCompact': 'auto-compact next turn',
+  'terminalMode.status.missingTools': 'Missing: {missing}. Some artifact skills (PDF/Word/Excel/PPTX/Slidev) will need installs.',
+  'terminalMode.status.allToolsAvailable': 'All artifact-generation tooling available.',
+  'terminalMode.status.autoApprove': 'auto-approve',
+  'terminalMode.status.skills': 'skills',
+  'terminalMode.status.running': 'running',
+  'terminalMode.status.done': 'done',
+  'terminalMode.status.err': 'err',
+  'terminalMode.status.tasks': 'tasks',
+  'terminalMode.status.earlierTask': 'earlier task',
+  'terminalMode.status.earlierTasks': 'earlier tasks',
+  'terminalMode.status.moreTask': 'more task',
+  'terminalMode.status.moreTasks': 'more tasks',
+  'terminalMode.permission.sensitiveFile': 'sensitive file',
+  'terminalMode.permission.destructiveCommand': 'destructive command',
+  'terminalMode.permission.irreversible': 'irreversible',
+  'terminalMode.permission.escCancels': 'esc cancels',
+  'terminalMode.permission.send': 'send',
+  'terminalMode.permission.cancel': 'cancel',
+  'terminalMode.permission.shiftEnterHint': 'shift+↵ for newline',
+  'terminalMode.billing.overBudget': 'usage over budget — agent may be throttled',
+  'terminalMode.picker.ariaLabel': 'Pick a session to resume',
 
   // ── Views ──────────────────────────────────────────
   'view.toggleProjects': 'Toggle projects sidebar',
@@ -644,6 +731,8 @@ const en = {
   'view.goBack': 'Go back',
   'view.goForward': 'Go forward',
   'view.gitComingSoon': 'Git integration coming soon',
+  'view.preview': 'Preview',
+  'view.dataManager': 'Data Manager',
   'view.extensionsComingSoon': 'Extension marketplace coming soon',
   'explorer.title': 'Explorer',
   'explorer.noFolder': 'No folder opened',
@@ -682,6 +771,7 @@ const en = {
   'search.filesToInclude': 'Files to include (e.g., *.tsx, *.ts)',
   'search.filesToExclude': 'Files to exclude (e.g., node_modules/**)',
   'search.expand': 'Expand',
+  'search.searching': 'Searching...',
 
   // ── Misc UI ────────────────────────────────────────
   'misc.stopProcess': 'Stop process',
@@ -785,6 +875,9 @@ const en = {
   'common.noTerminalSessions': 'No terminal sessions',
   'common.clickToCreate': 'Click + to create a new terminal',
   'common.noTmsFile': 'This project has no TMS.md yet. Run /init so the agent can analyze the project and provide better assistance.',
+  'common.tmsBootstrapStart': 'Analyzing project and creating TMS.md...',
+  'common.tmsBootstrapComplete': 'Project setup complete. Processing your request...',
+  'common.tmsBootstrapFailed': 'Could not create TMS.md automatically. Please use /init to set up manually.',
   'common.user': 'User',
   'common.selectProjectDir': 'Select project directory',
   'common.minimizePanel': 'Minimize panel',
@@ -810,18 +903,20 @@ const en = {
   'onboarding.config.uiLanguage': 'Interface language',
   'onboarding.config.agentLanguage': 'Agent responds in',
   // Step 4 — Tools
-  'onboarding.tools.title': 'Faster dependency installs',
-  'onboarding.tools.subtitle': 'pnpm is a fast, disk-efficient package manager. It installs dependencies up to 3x faster than npm.',
+  'onboarding.tools.title': 'Required Developer Tools',
+  'onboarding.tools.subtitle': 'TM Code requires Python, Node.js, and Git to execute commands, build projects, and manage repositories.',
   'onboarding.tools.detected': 'Detected on your system',
   'onboarding.tools.notInstalled': 'Not installed',
-  'onboarding.tools.install': 'Install pnpm',
+  'onboarding.tools.install': 'Install',
   'onboarding.tools.installing': 'Installing...',
   'onboarding.tools.installed': 'Installed',
   'onboarding.tools.failedHint': 'Run manually in terminal:',
-  'onboarding.tools.skip': 'Continue with npm',
-  'onboarding.tools.benefit1': '3x faster installs',
-  'onboarding.tools.benefit2': 'Saves disk space with hard links',
-  'onboarding.tools.benefit3': 'Strict dependency resolution',
+  'onboarding.tools.skip': 'Continue',
+  'onboarding.tools.benefit1': 'Python 3 — Required for data operations and agent logic',
+  'onboarding.tools.benefit2': 'Node.js — Required for package management and dev servers',
+  'onboarding.tools.benefit3': 'Git — Required for source control and repository tracking',
+  'onboarding.tools.blockingWarning': 'Please install all required tools to proceed.',
+  'onboarding.tools.redetect': 'Re-detect',
   // Step 5 — Features
   'onboarding.features.title': 'What you can do',
   'onboarding.features.subtitle': 'Everything you need in one place.',
@@ -980,34 +1075,464 @@ const en = {
   'dataViewer.noProject': 'No project open',
   'dataViewer.noProjectHint': 'Open a project to inspect its data.',
 
-  // ── Welcome Plan Banner ───────────────────────────
-  'welcomePlan.title': 'Welcome TM Code by Xiaomi Mimo',
-  'welcomePlan.description': 'Exclusive welcome plan with all Vibe benefits powered by Mimo V2.5 Pro.',
-  'welcomePlan.badge': 'Vibe',
-  'welcomePlan.model': 'Mimo V2.5 Pro',
-  'welcomePlan.tokens': 'Extensive usage',
-  'welcomePlan.validUntil': 'May 28, 2026',
-  'welcomePlan.activate': 'Activate Plan',
-  'welcomePlan.activating': 'Activating...',
-  'welcomePlan.activated': 'Plan activated!',
-  'welcomePlan.error': 'Could not activate plan. Try again.',
-  'welcomePlan.sectionLabel': 'Choose your plan',
-  'welcomePlan.explorerName': 'Explorer',
-  'welcomePlan.explorerBadge': 'Free',
-  'welcomePlan.explorerDesc': 'Minimum usage plan, renewable every 30 days. Perfect for exploring TM Code.',
-  'welcomePlan.explorerModel': 'DeepSeek V4 Flash',
-  'welcomePlan.explorerTokens': '1.5M tokens/month',
-  'welcomePlan.explorerFeature1': 'AI-powered coding assistant',
-  'welcomePlan.explorerFeature2': 'Chat, code generation & preview',
-  'welcomePlan.free': 'Free',
-  'welcomePlan.promoNote': 'Welcome promo',
-  'welcomePlan.vibName': 'Vibe',
-  'welcomePlan.current': 'Current',
-  'welcomePlan.activeNow': 'Active now',
-  'welcomePlan.confirmTitle': 'Dismiss offer?',
-  'welcomePlan.confirmDesc': 'This is a one-time welcome promotion. If you close it, you may not see this offer again.',
-  'welcomePlan.confirmCancel': 'Go back',
-  'welcomePlan.confirmClose': 'Dismiss',
+  // ── Error Boundary ────────────────────────────────
+  'errorBoundary.title': 'Something went wrong',
+  'errorBoundary.description': 'The application encountered an unexpected error.',
+  'errorBoundary.reload': 'Reload',
+  'errorBoundary.details': 'Details',
+  'errorBoundary.reloadHint': 'Try clicking "Reload" to restart the application.',
+  'errorBoundary.errorPrefix': 'Error:',
+  'errorBoundary.occurred': 'An error occurred',
+  'errorBoundary.contentError': 'Something went wrong while rendering this content.',
+  'errorBoundary.errorDetails': 'Error details',
+  'errorBoundary.tryAgain': 'Try again',
+  'errorBoundary.stackTrace': 'Stack trace (click to expand)',
+  'errorBoundary.unexpected': 'An unexpected error occurred',
+
+  // ── Login Screen ──────────────────────────────────
+  'login.welcomeBack': 'Welcome back',
+  'login.signInContinue': 'Sign in to continue developing',
+  'login.email': 'Email',
+  'login.emailPlaceholder': 'name@email.com',
+  'login.password': 'Password',
+  'login.passwordPlaceholder': 'Your password',
+
+  // ── Source Control ────────────────────────────────
+  'sourceControl.stage': 'Stage: {file}',
+  'sourceControl.unstage': 'Unstage: {file}',
+  'sourceControl.stageAll': 'Stage all: {file}',
+  'sourceControl.unstageAll': 'Unstage all: {file}',
+  'sourceControl.discardConfirm': 'Discard changes in {file}?',
+  'sourceControl.discardTitle': 'Discard Changes',
+  'sourceControl.discardFile': 'Discard: {file}',
+  'sourceControl.discardAllConfirm': 'Discard ALL changes?\n\nThis cannot be undone.',
+  'sourceControl.discardAllTitle': 'Discard All',
+  'sourceControl.discardAll': 'Discard all: {file}',
+  'sourceControl.enterCommitMessage': 'Enter a commit message',
+  'sourceControl.stageFilesFirst': 'Stage files first',
+  'sourceControl.committedTo': 'Committed to {branch}',
+  'sourceControl.commit': 'Commit: {file}',
+  'sourceControl.committedAllTo': 'Committed all to {branch}',
+  'sourceControl.pushedTo': 'Pushed to {branch}',
+  'sourceControl.push': 'Push: {file}',
+  'sourceControl.pulledFrom': 'Pulled from {branch}',
+  'sourceControl.pull': 'Pull: {file}',
+  'sourceControl.notAuthenticated': 'Not authenticated',
+  'sourceControl.pullBtn': 'Pull',
+  'sourceControl.pushBtn': 'Push',
+  'sourceControl.generateCommit': 'Generate commit message',
+  'sourceControl.stageBtn': 'Stage',
+  'sourceControl.unstageBtn': 'Unstage',
+  'sourceControl.discardBtn': 'Discard',
+  'sourceControl.staged': 'Staged Changes',
+  'sourceControl.changes': 'Changes',
+
+  // ── Generating Status Bar ─────────────────────────
+  'generating.ready': 'Ready',
+  'generating.awaitingResponse': 'Awaiting response...',
+  'generating.thinking': 'Thinking...',
+  'generating.generating': 'Generating...',
+  'generating.applying': 'Applying changes...',
+  'generating.compacting': 'Compacting conversation...',
+  'generating.error': 'Error',
+
+  // ── Sandbox ───────────────────────────────────────
+  'sandbox.title': 'Sandbox',
+  'sandbox.active': 'Sandbox mode active',
+  'sandbox.description': 'Isolates agent commands to the project directory.',
+
+  // ── Settings (extra) ─────────────────────────────
+  'settings.engine': 'Engine',
+  'settings.state': 'State',
+  'settings.active': 'Active',
+  'settings.inactive': 'Inactive',
+  'settings.emptyJson': 'Empty JSON',
+  'settings.invalidJson': 'Invalid JSON',
+  'settings.topLevelObject': 'Top-level value must be an object',
+  'settings.setNameField': 'Set the Name field when pasting a bare entry',
+  'settings.readOnly': 'read-only',
+  'settings.globalSkills': 'Global (~/.toquemedia-studio/skills/)',
+  'settings.contentMarkdown': 'Content (Markdown)',
+
+  // ── File Viewer ───────────────────────────────────
+  'fileViewer.loading': 'Loading {fileName}...',
+  'fileViewer.failedOpen': 'Failed to open {fileName}',
+  'fileViewer.close': 'Close',
+
+  // ── Network Status ────────────────────────────────
+  'network.offline': 'No internet connection',
+  'network.slow': 'Slow connection — AI responses may take longer',
+
+  // ── Preview (extra) ──────────────────────────────
+  'preview.navUnavailable': 'Preview navigation is not available for this render yet.',
+  'preview.copyUrlManually': 'Could not open URL in browser. Copy it manually from the address bar.',
+  'preview.goBack': 'Go back in preview',
+  'preview.goForward': 'Go forward in preview',
+  'preview.back': 'Back',
+  'preview.forward': 'Forward',
+  'preview.toggleHttpClient': 'Toggle HTTP Client',
+  'preview.publishProject': 'Publish project',
+  'preview.resizeDataViewer': 'Resize data viewer',
+  'preview.closeDataViewer': 'Close Data Viewer',
+  'preview.closeHttpClient': 'Close HTTP Client',
+  'preview.resizeConsole': 'Resize console panel',
+
+  // ── Tool Labels ───────────────────────────────────
+  'toolLabel.editing': 'Editing',
+  'toolLabel.deleting': 'Deleting',
+  'toolLabel.renaming': 'Renaming',
+  'toolLabel.exploring': 'Exploring',
+  'toolLabel.creatingFolder': 'Creating folder',
+  'toolLabel.writing': 'Writing',
+  'toolLabel.creating': 'Creating',
+  'toolLabel.searching': 'Searching',
+  'toolLabel.findingFiles': 'Finding files',
+  'toolLabel.running': 'Running',
+  'toolLabel.startingServer': 'Starting server',
+  'toolLabel.readingLogs': 'Reading server logs',
+  'toolLabel.readingOutput': 'Reading output',
+  'toolLabel.fetching': 'Fetching',
+  'toolLabel.researching': 'Researching',
+  'toolLabel.backgroundTask': 'Background task',
+  'toolLabel.checkingAgents': 'Checking agents',
+  'toolLabel.verifying': 'Verifying',
+  'toolLabel.updatingTasks': 'Updating tasks',
+  'toolLabel.activatingReasoning': 'Activating reasoning',
+  'toolLabel.loadingGuide': 'Loading guide',
+  'toolLabel.publishGuide': "Loaded TM Code's publish-readiness guide for backends",
+  'toolLabel.authGuide': "Loaded TM Code's authentication guide",
+  'toolLabel.googleGuide': "Loaded TM Code's Google sign-in guide",
+  'toolLabel.designGuide': "Loaded TM Code's design system guide",
+  'toolLabel.genericGuide': 'Loaded a TM Code guide',
+
+  // ── Chat Suggestions ──────────────────────────────
+  'suggestions.reactTs': 'React + TypeScript app',
+  'suggestions.reactTsPrompt': 'Create a React application with TypeScript and Tailwind CSS',
+  'suggestions.express': 'REST API with Express',
+  'suggestions.expressPrompt': 'Create an Express.js REST API server with TypeScript',
+  'suggestions.nextjs': 'Full-stack Next.js app',
+  'suggestions.nextjsPrompt': 'Create a full-stack Next.js application with authentication',
+  'suggestions.fixBug': 'Fix a bug',
+  'suggestions.fixBugPrompt': 'Help me fix a bug in my code',
+  'suggestions.addTests': 'Add tests',
+  'suggestions.addTestsPrompt': 'Add unit tests to my project',
+  'suggestions.explain': 'Explain code',
+  'suggestions.explainPrompt': 'Explain how this codebase works',
+
+  // ── Context Window Indicator ──────────────────────
+  'contextInfo.lastResponse': 'Last response',
+  'contextInfo.effectiveWindow': 'Effective window',
+  'contextInfo.rawWindow': 'Raw window',
+  'contextInfo.pressure': 'Pressure',
+
+  // ── Compact Survey ────────────────────────────────
+  'compactSurvey.howWasIt': 'How was the compaction?',
+  'compactSurvey.good': 'Good',
+  'compactSurvey.ok': 'OK',
+  'compactSurvey.bad': 'Bad',
+
+  // ── Todo List Card ────────────────────────────────
+  'todoList.loading': 'Loading tasks...',
+  'todoList.noTasks': 'No tasks parsed from TODO.md.',
+
+  // ── Read Output Batch ─────────────────────────────
+  'readOutput.more': '+{count} more',
+  'readOutput.overlapping': 'Overlapping ranges — the model re-read content it already saw',
+
+  // ── Chat (extra) ─────────────────────────────────
+  'chat.thinkingAlwaysOn': 'Thinking is always-on for this model',
+  'chat.thinkingLabel': 'Thinking',
+  'chat.dismissError': 'Dismiss error',
+  'chat.copyFailed': 'Could not copy message to clipboard',
+  'chat.exportSessionFailed': 'Could not copy session to clipboard',
+  'chat.exportFailed': 'Export failed: {message}',
+  'chat.chooseProject': 'Choose project folder',
+
+  // ── Chat (context window) ─────────────────────────
+  'chat.unknownModel': 'unknown model',
+  'chat.closeToLimit': 'close to limit',
+  'chat.atLimit': 'at limit',
+  'chat.blocked': 'blocked',
+  'chat.compressingHistory': 'compressing history',
+  'chat.compactSummaryAvailable': 'compact summary available',
+  'chat.contextWillCompress': 'context will compress on next turn',
+  'chat.memoryAvailable': 'memory available',
+  'chat.memoryFull': 'memory full',
+  'chat.noModelInfo': 'No model information available. Start a conversation to detect the active model.',
+  'chat.unableLoadStatus': 'Unable to load model status.',
+  'chat.checkConnection': 'Check your connection and try again.',
+
+  // ── New Project Dialog ────────────────────────────
+  'newProject.projectName': 'Project Name',
+  'newProject.template': 'Template',
+  'newProject.reactTs': 'React TypeScript',
+  'newProject.nodeExpress': 'Node.js Express',
+  'newProject.pythonFastapi': 'Python FastAPI',
+  'newProject.vue': 'Vue.js',
+  'newProject.rust': 'Rust',
+
+  // ── Open Project Dialog ──────────────────────────
+  'openProject.invalidDir': 'Invalid project directory. Please select a valid project folder.',
+  'openProject.failed': 'Failed to open project. Please try again.',
+
+  // ── Startup Requirements ──────────────────────────
+  'startup.toolMissing': 'A required tool is missing or outdated',
+  'startup.toolsMissing': '{count} required tools are missing or outdated',
+  'startup.recheck': 'Re-check',
+  'startup.dismiss': 'Dismiss',
+
+  // ── Unsaved Changes ──────────────────────────────
+  'unsaved.title': 'Unsaved Changes',
+  'unsaved.message': 'You have unsaved changes.',
+  'unsaved.description': 'Your changes will be lost if you don\'t save them.',
+  'unsaved.dontSave': 'Don\'t Save',
+  'unsaved.save': 'Save',
+  'unsaved.saved': 'Saved',
+  'unsaved.failedSave': 'Failed to save',
+
+  // ── Hooks ─────────────────────────────────────────
+  'hook.connectionLost': 'Connection Lost',
+  'hook.connectionLostMsg': 'You\'re offline. Changes won\'t be saved to cloud until connection is restored.',
+  'hook.connectionRestored': 'Connection Restored',
+  'hook.connectionRestoredMsg': 'You\'re back online.',
+  'hook.fileModified': 'File Modified',
+  'hook.fileModifiedMsg': '{fileName} was modified on disk. Reload to see changes.',
+  'hook.fileDeleted': 'File Deleted',
+  'hook.fileDeletedMsg': '{fileName} was deleted from disk.',
+  'hook.refreshCreditsFailed': 'Couldn\'t refresh credits',
+  'hook.checkConnection': 'Check your connection and try again.',
+  'hook.noProjectOpen': 'No project open. Open a project before using skill hashtags.',
+  'hook.signInRequired': 'You must be signed in to use the agent.',
+
+  // ── Plan Command ──────────────────────────────────
+  'plan.usage': 'Usage: /plan <description of what you want to build>\n\nExample: /plan user authentication with email, Google login, and role-based access',
+  'plan.notFinished': 'Plan generation did not finish — PLAN.md was not written. Run /plan again to retry.',
+  'plan.cutOff': 'Plan generation was cut off — PLAN.md is still in DRAFT. Type "Continue" to resume from the next unfilled section.',
+  'plan.notComplete': 'Plan generation did not complete — PLAN.md is on disk but has no PENDING APPROVAL marker. Type "Continue" to let the architect finish, or run /plan again to retry from scratch.',
+  'plan.tasksNotFinished': 'Task list generation did not finish — TODO.md was not written. Approve the plan again to retry.',
+  'plan.revisionCutOff': 'Revision cut off — PLAN.md is back in DRAFT. Type "Continue" to resume.',
+  'plan.revisionNotComplete': 'Revision did not complete. Type "Continue" or describe further changes to retry.',
+  'plan.executing': 'Starting plan execution...',
+
+  // ── Review Command ────────────────────────────────
+  'review.noProject': 'No project open. Open a project before running /review.',
+  'review.busy': 'An agent turn is in progress. Wait for it to finish (or hit Stop) before running /review.',
+  'review.budgetWarning': 'Heads up: you\'re at {pct}% of your plan\'s token budget. /review uses reasoning ON across multiple turns and typically consumes 10-30K tokens. If you\'d rather not risk overage, hit Stop now and run /review after the next billing cycle.',
+  'review.usage': 'Usage: /review [scope]\n\nExamples:\n  /review                    review files touched in this session\n  /review @src/auth.ts       review a specific file',
+  'review.emptyPath': 'Empty file path. Use `/review @path/to/file`.',
+  'review.fileNotFound': 'File not found: `{filePath}`. Path is resolved relative to the project root. Use a path like `@src/auth/login.ts` (no leading slash).',
+  'review.noFiles': 'No files have been modified in this session yet — nothing to review. Either edit some files first, or pass an explicit scope (`/review @file` or `/review <description>`).',
+
+  // ── E2E Command ───────────────────────────────────
+  'e2e.busy': 'An agent turn is in progress. Wait for it to finish (or hit Stop) before running /te2e.',
+  'e2e.usage': 'Usage: /te2e <what to validate>\n\nExamples:\n  /te2e login flow\n  /te2e signup form validates required fields\n  /te2e clicking the cart icon opens the drawer\n\nThe agent will start the browser and click through the flow uninterrupted. Nothing is written to your project. Hit Stop in the chat if you want to abort.',
+  'e2e.starting': 'Starting browser session...',
+
+  // ── Auth Command ──────────────────────────────────
+  'auth.proxySkillMissing': 'Could not load the auth-proxy skill. The bundled resources may be missing — reinstall TM Code if this persists.',
+  'auth.googleSkillMissing': 'Could not load the google-signin skill. Proceeding with email/password only — re-add `#auth-google` once the skill is available.',
+  'auth.designSkillMissing': 'Could not load the frontend-design skill. Proceeding without it — the UI will use the model\'s default aesthetics.',
+
+  // ── Debug Command ─────────────────────────────────
+  'debug.usage': 'Usage: /debug <symptom or error message>\n\nExamples:\n  /debug login button does nothing on click\n  /debug TypeError: Cannot read properties of undefined (reading "uid")\n  /debug tests pass locally but fail in CI',
+
+  // ── Init Command ──────────────────────────────────
+  'init.alreadyExists': 'TMS.md already exists. The agent will update it with fresh analysis.',
+  'init.analyzing': 'Analyzing project to generate TMS.md...',
+
+  // ── Payments Command ──────────────────────────────
+  'payments.usage': 'Usage: /payments <what you want to implement>\n\nExamples:\n  /payments integrate Multicaixa Express\n  /payments add all payment methods with webhooks\n  /payments setup testing environment for payments',
+  'payments.loadFailed': 'Failed to load payment skills. Check your internet connection and try again.',
+  'payments.noneFound': 'Could not fetch any payment skills from the repository.',
+
+  // ── Post Scaffold ─────────────────────────────────
+  'postScaffold.installing': 'Installing dependencies ({command})...',
+  'postScaffold.installFailed': 'Failed to install dependencies',
+  'postScaffold.startingDev': 'Starting dev server ({command})...',
+  'postScaffold.devRunning': 'Dev server is running',
+  'postScaffold.devFailed': 'Could not start dev server: {message}. You can start it manually: {command}',
+  'postScaffold.devStartFailed': 'Dev server failed to start',
+  'postScaffold.installTimeout': 'Install timed out after 5 minutes and was cancelled.\nRun manually in the terminal:\n  cd {path}\n  {command}',
+  'postScaffold.installExitCode': 'Failed to install dependencies (exit code {code}).\nRun manually in the terminal:\n  cd {path}\n  {command}',
+  'postScaffold.installSuccess': 'Dependencies installed successfully',
+  'postScaffold.installError': 'Failed to install dependencies: {message}\nRun manually in the terminal:\n  cd {path}\n  {command}',
+
+  // ── Template Service ──────────────────────────────
+  'template.starterTemplates': 'TM Code starter templates',
+  'template.blankDesc': 'Blank project with minimal setup',
+  'template.blankLongDesc': 'A blank canvas ready for your ideas. Starts with a minimal project structure.',
+  'template.minimal': 'Minimal',
+  'template.emptyProject': 'Empty Project',
+
+  // ── Deploy Service ────────────────────────────────
+  'deploy.unsupportedType': 'Unsupported project type: {type}',
+  'deploy.buildTimeout': 'Build timed out',
+  'deploy.cancelled': 'Deploy was cancelled',
+  'deploy.noFiles': 'No files to upload. Make sure your project has files.',
+  'deploy.tooManyFiles': 'Too many files ({count} > {max})',
+  'deploy.uploadFailed': 'Upload failed: {status}',
+  'deploy.noBackendUrl': 'No backend URL in deploy result',
+  'deploy.verifyTimeout': 'Verify timed out',
+  'deploy.longBuild': 'Backend build is taking longer than expected (15 min ceiling). Try again or contact support if this persists.',
+  'deploy.superseded': 'Deploy superseded by a newer attempt',
+  'deploy.buildFailed': 'Build failed: {message}',
+  'deploy.notSignedIn': 'Not signed in to TM Code.',
+  'deploy.listFailed': 'Deploys list failed: {status}',
+
+  // ── Agent Service ─────────────────────────────────
+  'agent.retry': 'Retry {count}/{max} — waiting {ms}ms...',
+  'agent.streamUnstable': 'Streaming unstable — switching to non-streaming mode...',
+  'agent.streamInterrupted': 'Model stream was interrupted {count} times in a row and non-streaming fallback also failed. Check your connection and try again.',
+  'agent.compactionFallback': 'Compaction is using a mechanical fallback after 3 LLM-summarize failures. Recovered context may be lower-quality from now on. Open a new chat for a fresh start, or wait for the upstream to recover.',
+
+  // ── Stream Parser ─────────────────────────────────
+  'stream.idleTimeout': 'Stream idle timeout — no bytes from upstream for {seconds}s. Treating as interrupted; the agent loop will retry.',
+  'stream.connectionDropped': 'Connection dropped mid-stream ({message}). Treating as interrupted; the agent loop will retry.',
+
+  // ── Update Service ────────────────────────────────
+  'update.alreadyInProgress': 'Update already in progress',
+  'update.installInProgress': 'Install already in progress',
+  'update.checkFailed': 'Could not check for updates',
+  'update.noUpdate': 'No update available',
+  'update.alreadyDownloaded': 'Update already downloaded',
+
+  // ── Git Service ───────────────────────────────────
+  'git.notAvailable': 'Git not available',
+  'git.notRepository': 'Not a git repository',
+
+  // ── Environment Check ─────────────────────────────
+  'env.versionBelowMin': 'Version {version} is below minimum {min}',
+  'env.parseFailed': 'Could not parse version from: {output}',
+  'env.commandFailed': 'Command failed: {command}',
+  'env.commandNotFound': 'Command not found: {command}',
+
+  // ── MCP Service ───────────────────────────────────
+  'mcp.serverNotRunning': 'MCP server \'{name}\' is not running',
+  'mcp.noUrl': 'No URL stored for remote server \'{name}\'',
+  'mcp.needsCommand': 'MCP server \'{name}\' requires a command for stdio transport',
+  'mcp.discoveryFailed': 'Server started but tool discovery failed: {message}',
+  'mcp.proxyExhausted': 'MCP proxy: exhausted retries',
+  'mcp.needsUrl': 'MCP server \'{name}\' requires a url for remote transport',
+
+  // ── MCP Remote ────────────────────────────────────
+  'mcp.notAuthenticated': 'Not authenticated — cannot proxy MCP request',
+  'mcp.proxyError': 'MCP proxy error ({status}): {body}',
+  'mcp.remoteError': 'Remote MCP error: {message} (code: {code})',
+
+  // ── Browser Session ───────────────────────────────
+  'browser.noChromium': 'No Chromium-based browser available. Install Chrome and retry.',
+
+  // ── Tool Executor ─────────────────────────────────
+  'tool.wrongFieldNames': 'Error: this tool expects `old_string` (and `new_string`). You passed: {fields}. Rename your field to old_string / new_string and retry.',
+  'tool.emptyOldString': 'Error: old_string cannot be empty. Provide the exact text you want to replace.',
+  'tool.notAuthenticated': 'Error: Not authenticated. Cannot fetch web content.',
+  'tool.minQuestions': 'Error: must provide at least one question.',
+  'tool.maxQuestions': 'Error: maximum 4 questions per call.',
+  'tool.questionValidation': 'Error: each question needs "question", "header" (max 12 chars), and 2-4 options.',
+
+  // ── App ───────────────────────────────────────────
+  'app.failedOpenProject': 'Failed to open project: {message}',
+  'app.initializing': 'Initializing...',
+  'app.baseTitle': 'TM Code',
+
+  // ── Session Export ─────────────────────────────────
+  'export.dangerousCommand': ' (dangerous command)',
+  'export.sensitiveFile': ' (sensitive file)',
+  'export.permDenied': 'Permission denied by user',
+  'export.permApproved': 'Approved by user',
+  'export.permAutoApproved': 'Auto-approved (scope: Accept All)',
+  'export.permInlineDiff': 'Approved via inline diff',
+  'export.failed': 'failed',
+  'export.ok': 'ok',
+  'export.input': 'Input:',
+  'export.result': 'Result:',
+  'export.newFile': 'new file',
+  'export.edit': 'edit',
+  'export.user': 'User',
+  'export.assistant': 'Assistant',
+  'export.system': 'System',
+  'export.reasoning': 'Reasoning',
+  'export.projectRoot': 'Project root',
+  'export.noProjectPath': 'No project path',
+  'export.skills': 'Skills (at export time):',
+  'export.hashtags': 'Hashtag skills:',
+
+  // ── Errors (utils) ────────────────────────────────
+  'error.default': 'Error',
+  'error.unknown': 'Unknown error',
+
+  // ── Unsaved Changes (dialog) ──────────────────────
+  'unsaved.changesExist': 'You have unsaved changes in {file}. Save before closing?',
+  'unsaved.confirmTitle': 'confirm',
+
+  // ── Slash Commands ─────────────────────────────────
+  'slash.dcExecute': 'Execute SQL queries against your project\'s DataConnect schema',
+  'slash.dcExecuteShort': 'execute SQL queries',
+  'slash.e2e': 'Run end-to-end tests by clicking through your app in a real browser',
+  'slash.e2eShort': 'run end-to-end tests',
+  'slash.dcInspect': 'Inspect the current DataConnect schema',
+  'slash.dcInspectShort': 'inspect DataConnect schema',
+
+  // ── Hashtag Skills ─────────────────────────────────
+  'hashtag.googleSignIn': 'Add Google sign-in with OAuth2 flow and session persistence',
+  'hashtag.googleSignInShort': 'Google sign-in via OAuth2',
+  'hashtag.auth': 'Restrict access to authenticated users. Includes auth guards, protected routes, and session persistence.',
+  'hashtag.authShort': 'Login page and auth guard',
+  'hashtag.stripe': 'Set up a Stripe-based payment flow with a checkout session',
+  'hashtag.stripeShort': 'Stripe payment integration',
+  'hashtag.contactForm': 'Add a contact form with validation and email delivery',
+  'hashtag.contactFormShort': 'Contact form with email',
+  'hashtag.paidAccess': 'Restrict content to paid or subscribed users',
+  'hashtag.paidAccessShort': 'Paid or subscribed user access',
+  'hashtag.designShort': 'Polished UI with bold aesthetic direction',
+
+  // ── Deploys (extra) ──────────────────────────────
+  'deploys.failedAddDomain': 'Failed to add domain',
+  'deploys.removeDomainConfirm': 'Remove the custom domain? Your project will only be reachable at the default subdomain.',
+  'deploys.removeDomainTitle': 'Remove custom domain',
+  'deploys.openProject': 'Open a project to see its deployment.',
+  'deploys.yourDeployments': 'Your deployments',
+  'deploys.lettersNumbersHyphens': 'Letters, numbers, and hyphens only.',
+  'deploys.refresh': 'Refresh',
+
+  // ── Publish (extra) ──────────────────────────────
+  'publish.explorerPlanNote': 'The Explorer plan covers chat, preview, and local development. Publishing requires a paid plan.',
+  'publish.upgradeHint': 'Upgrade in Settings → Billing. Vibe covers small projects; Pro and Max scale up with traffic and storage.',
+  'publish.copyUrl': 'Copy URL',
+
+  // ── Preferences (extra) ──────────────────────────
+  'preferences.myConventions': 'my-conventions',
+  'preferences.contentPlaceholder': '# My Conventions...',
+  'preferences.conventionsName': 'my-conventions',
+
+  // ── File Tree ─────────────────────────────────────
+  'fileTree.refreshed': 'Refreshed',
+  'fileTree.updated': 'File tree updated',
+  'fileTree.refreshFailed': 'Failed to refresh file tree',
+  'fileTree.renameFailed': 'Failed to rename {name}',
+
+  // ── Search Results ────────────────────────────────
+  'search.noResultsFor': 'No results found for "{term}"',
+
+  // ── Generating View ──────────────────────────────
+  'generating.waitingForChanges': 'Waiting for file changes...',
+  'generating.noPending': 'No pending changes',
+
+  // ── HTTP Client ──────────────────────────────────
+  'httpClient.pathPlaceholder': 'api/tasks',
+
+  // ── Issue Reporter (extra) ────────────────────────
+  'issueReporter.emailPlaceholder': 'email@example.com',
+
+  // ── Title Bar (extra) ────────────────────────────
+  'titlebar.selectProject': 'Select project directory',
+
+  // ── Main Layout ──────────────────────────────────
+  'mainLayout.resizeChat': 'Resize chat panel',
+
+  // ── Window Title ─────────────────────────────────
+  'window.baseTitle': 'TM Code',
+
 } as const
 
 const pt: Record<keyof typeof en, string> = {
@@ -1408,6 +1933,21 @@ const pt: Record<keyof typeof en, string> = {
   'chat.generating': 'A gerar...',
   'chat.applying': 'A aplicar alterações...',
   'chat.compressing': 'A comprimir contexto...',
+  'chat.compact.preHooks': 'A executar hooks pré-compactação...',
+  'chat.compact.postHooks': 'A executar hooks pós-compactação...',
+  'chat.compact.compacting': 'A compactar conversa...',
+  'chat.compact.done': 'Conversa compactada',
+  'chat.compact.busy': 'Não é possível compactar enquanto o agente está a trabalhar.',
+  'chat.compact.notEnough': 'Mensagens insuficientes para compactar.',
+  'chat.compact.smaller': 'menor',
+  'chat.compact.autoSummary': 'Contexto compactado',
+  'chat.compact.manualSummary': 'Contexto compactado (manual)',
+  'chat.compact.trigger': 'Gatilho',
+  'chat.compact.size': 'Tamanho',
+  'chat.compact.and': 'e',
+  'chat.compact.summary': 'Resumo',
+  'chat.compact.expand': 'Mostrar resumo',
+  'chat.compact.collapse': 'Ocultar resumo',
   'chat.recoverableUpstreamError': 'O serviço retornou um erro temporário. A tua mensagem não foi processada. Envia "Continue" para retomares de onde estavas — o agente continua a partir do último passo.',
   'chat.noCredits': 'Sem consumo',
   'chat.accountInactive': 'Conta inactiva — contacte o suporte',
@@ -1435,12 +1975,20 @@ const pt: Record<keyof typeof en, string> = {
   'chat.downloadMarkdown': 'Baixar como Markdown',
   'chat.sandboxMode': 'Modo Sandbox',
   'chat.refreshCredits': 'Actualizar Consumo',
+  'chat.concurrencyGuard': 'Outro pedido já está em curso — aguarde que termine.',
+  'chat.compressionFailed': 'Falha na compressão do contexto — a continuar com contexto não comprimido.',
+  'chat.compactionFailed': 'Compactação automática falhou. Inicie uma nova sessão ou tente /compact manualmente.',
+  'chat.compactingAndRetrying': 'Janela de contexto excedida — a compactar e repetir automaticamente…',
+  'chat.streamTimeout': 'Pedido expirou. O servidor pode estar temporariamente indisponível — tente novamente.',
+  'chat.authExpired': 'Sessão expirada. Inicie sessão novamente.',
   'chat.skills': 'skills',
   'chat.mcpStarting': 'MCP a iniciar...',
   'chat.tokens': 'tokens',
   'chat.turns': 'turnos',
   'chat.stopGeneration': 'Parar geração',
   'chat.messages': 'Mensagens do chat',
+  'chat.otherOption': 'Outro',
+  'chat.otherPlaceholder': 'Escreve a tua resposta...',
   'perm.readSensitive': 'Ler ficheiro sensível',
   'perm.dangerousCommand': 'Executar comando perigoso',
   'perm.dangerousWarning': 'Este comando pode modificar ou apagar ficheiros, alterar o estado do sistema, ou ter outros efeitos destrutivos. Revise com atenção antes de aprovar.',
@@ -1459,6 +2007,14 @@ const pt: Record<keyof typeof en, string> = {
   'perm.browserAction': 'Ação do browser',
   'perm.approve': 'Sim',
   'perm.approveAll': 'Sim para todos',
+  'perm.allowThisTime': 'Sim, permitir desta vez',
+  'perm.allowAlwaysProject': "Sim, e sempre permitir '{tool}' neste projeto",
+  'perm.allowAlwaysGlobal': "Sim, e sempre permitir '{tool}'",
+  'perm.denyWithReason': 'Não (dizer ao agente o que fazer em vez disso)',
+  'perm.allowCommand': 'Permitir executar este comando?',
+  'perm.allowAction': 'Permitir esta ação?',
+  'perm.skip': 'Saltar',
+  'perm.submit': 'Submeter',
   'perm.deny': 'Não',
   'perm.denyAll': 'Não para todos',
   'perm.justify': 'Justificar',
@@ -1491,6 +2047,14 @@ const pt: Record<keyof typeof en, string> = {
   'checkpoint.created': 'criado',
   'checkpoint.deleted': 'eliminado',
   'checkpoint.modified': 'modificado',
+  'checkpoint.revertAll': 'Reverter tudo',
+  'checkpoint.revertAllConfirm': 'Reverter todas as alterações?',
+  'checkpoint.revertAllDescription': '{count} ficheiro(s) serão restaurados ao estado anterior. Comandos de terminal não são revertidos.',
+  'checkpoint.revertAllDirtyWarning': 'Tens alterações não guardadas no editor que serão sobrescritas.',
+  'checkpoint.revertAllFailed': 'Falha ao reverter',
+  'checkpoint.reverting': 'A reverter...',
+  'checkpoint.count': 'Checkpoints ({count})',
+  'checkpoint.undoN': 'Desfazer {count} alterações?',
   'plan.readyForReview': 'Plano Pronto para Revisão',
   'plan.description': 'O arquiteto gerou um plano de desenvolvimento completo. Reveja o PLAN.md e decida como proceder.',
   'plan.viewFull': 'Ver Plano Completo',
@@ -1519,6 +2083,7 @@ const pt: Record<keyof typeof en, string> = {
   'prompt.toSend': 'para enviar',
   'prompt.queueHint': 'para enfileirar para o agente',
   'prompt.toggleEditor': 'Alternar editor',
+  'prompt.sourceCode': 'Código-fonte',
   'prompt.startingServer': 'A iniciar servidor...',
   'prompt.hidePreview': 'Ocultar pré-visualização',
   'prompt.showPreview': 'Mostrar pré-visualização',
@@ -1535,6 +2100,9 @@ const pt: Record<keyof typeof en, string> = {
   'prompt.planLabel.vibe': 'Vibe',
   'prompt.planLabel.pro': 'Pro',
   'prompt.planLabel.max': 'Max',
+  'prompt.subAgents.running': '{count} sub-agente a correr...',
+  'prompt.subAgents.running.plural': '{count} sub-agentes a correr...',
+  'prompt.subAgents.cancel': 'Cancelar',
   'terminalMode.attach': 'Anexar',
   'terminalMode.attachTooltip': 'Anexar ficheiros ou imagens',
   'terminalMode.dropToAttach': 'Largar para anexar',
@@ -1577,6 +2145,7 @@ const pt: Record<keyof typeof en, string> = {
   'publish.updating': 'A actualizar…',
   'publish.update.intro': 'Uma nova build do teu projecto vai ser enviada para o site ao vivo. O deploy reutiliza o endereço público existente — os visitantes continuam a usar o mesmo URL.',
   'publish.update.liveUrlLabel': 'URL ao vivo',
+  'publish.update.customDomainLabel': 'Domínio personalizado',
   'publish.update.subdomainHint': 'Para mudar o subdomínio, pôr este deploy offline em Settings → Deploys e publicar um novo.',
 
   // ── Deploys (Definições) ──────────────────────────
@@ -1603,6 +2172,49 @@ const pt: Record<keyof typeof en, string> = {
   'terminalMode.picker.daysAgo': 'há {n}d',
   'terminalMode.picker.message': 'msg',
   'terminalMode.picker.messages': 'msgs',
+
+  // ── Terminal Mode Extra / Audit ───────────────────
+  'terminalMode.view.loadingSession': '⟳ a carregar sessão…',
+  'terminalMode.view.loadEarlier': '⟳ carregar anteriores — {hiddenCount} ocultas',
+  'terminalMode.view.resizePanel': 'Redimensionar painel do terminal',
+  'terminalMode.titlebar.thinkingAlwaysOn': 'O raciocínio está sempre ativo para este modelo',
+  'terminalMode.titlebar.exitAria': 'Sair do modo Terminal (Esc)',
+  'terminalMode.titlebar.exitTooltip': 'Sair (Esc)',
+  'terminalMode.titlebar.exitLabel': 'sair',
+  'terminalMode.greeting.title': '◆ TM Code · modo terminal',
+  'terminalMode.greeting.navigateHistory': 'navegar no histórico',
+  'terminalMode.greeting.mentionFile': 'mencionar ficheiro',
+  'terminalMode.greeting.runShell': 'executar shell',
+  'terminalMode.greeting.sandboxActive': 'modo sandbox ativo',
+  'terminalMode.status.awaiting': 'a aguardar',
+  'terminalMode.status.reasoning': 'a pensar',
+  'terminalMode.status.writing': 'a escrever',
+  'terminalMode.status.applying': 'a aplicar',
+  'terminalMode.status.compacting': 'a compactar',
+  'terminalMode.status.ready': 'pronto',
+  'terminalMode.status.contextEffective': 'efetivos',
+  'terminalMode.status.autoCompact': 'auto-compactação no próximo turno',
+  'terminalMode.status.missingTools': 'Falta: {missing}. Algumas capacidades de artefactos (PDF/Word/Excel/PPTX/Slidev) necessitam de instalações.',
+  'terminalMode.status.allToolsAvailable': 'Todas as ferramentas de geração de artefactos disponíveis.',
+  'terminalMode.status.autoApprove': 'auto-aprovar',
+  'terminalMode.status.skills': 'capacidades',
+  'terminalMode.status.running': 'em execução',
+  'terminalMode.status.done': 'concluído',
+  'terminalMode.status.err': 'erro',
+  'terminalMode.status.tasks': 'tarefas',
+  'terminalMode.status.earlierTask': 'tarefa anterior',
+  'terminalMode.status.earlierTasks': 'tarefas anteriores',
+  'terminalMode.status.moreTask': 'mais tarefa',
+  'terminalMode.status.moreTasks': 'mais tarefas',
+  'terminalMode.permission.sensitiveFile': 'ficheiro sensível',
+  'terminalMode.permission.destructiveCommand': 'comando destrutivo',
+  'terminalMode.permission.irreversible': 'irreversível',
+  'terminalMode.permission.escCancels': 'esc cancela',
+  'terminalMode.permission.send': 'enviar',
+  'terminalMode.permission.cancel': 'cancelar',
+  'terminalMode.permission.shiftEnterHint': 'shift+↵ para quebra de linha',
+  'terminalMode.billing.overBudget': 'utilização fora do orçamento — o agente pode sofrer restrições',
+  'terminalMode.picker.ariaLabel': 'Escolha uma sessão para retomar',
   'view.toggleProjects': 'Alternar barra de projetos',
   'view.newChat': 'Novo Chat',
   'view.toggleSessions': 'Alternar lista de sessões',
@@ -1646,6 +2258,8 @@ const pt: Record<keyof typeof en, string> = {
   'view.goBack': 'Retroceder',
   'view.goForward': 'Avançar',
   'view.gitComingSoon': 'Integração Git em breve',
+  'view.preview': 'Pré-visualização',
+  'view.dataManager': 'Gestor de Dados',
   'view.extensionsComingSoon': 'Marketplace de extensões em breve',
   'explorer.title': 'Explorador',
   'explorer.noFolder': 'Nenhuma pasta aberta',
@@ -1682,6 +2296,7 @@ const pt: Record<keyof typeof en, string> = {
   'search.filesToInclude': 'Ficheiros a incluir (ex: *.tsx, *.ts)',
   'search.filesToExclude': 'Ficheiros a excluir (ex: node_modules/**)',
   'search.expand': 'Expandir',
+  'search.searching': 'A pesquisar...',
   'misc.stopProcess': 'Parar processo',
   'misc.stop': 'Parar',
   'misc.close': 'Fechar',
@@ -1783,6 +2398,9 @@ const pt: Record<keyof typeof en, string> = {
   'common.noTerminalSessions': 'Sem sessões de terminal',
   'common.clickToCreate': 'Clique em + para criar um novo terminal',
   'common.noTmsFile': 'Este projeto ainda não tem TMS.md. Execute /init para que o agente analise o projeto e ofereça melhor assistência.',
+  'common.tmsBootstrapStart': 'A analisar o projeto e a criar TMS.md...',
+  'common.tmsBootstrapComplete': 'Configuração do projeto concluída. A processar o teu pedido...',
+  'common.tmsBootstrapFailed': 'Não foi possível criar o TMS.md automaticamente. Usa /init para configurar manualmente.',
   'common.user': 'Utilizador',
   'common.selectProjectDir': 'Selecionar pasta do projeto',
   'common.minimizePanel': 'Minimizar painel',
@@ -1808,18 +2426,20 @@ const pt: Record<keyof typeof en, string> = {
   'onboarding.config.uiLanguage': 'Idioma da interface',
   'onboarding.config.agentLanguage': 'O agente responde em',
   // Step 4 — Tools
-  'onboarding.tools.title': 'Instalação de dependências mais rápida',
-  'onboarding.tools.subtitle': 'O pnpm é um gestor de pacotes rápido e eficiente. Instala dependências até 3x mais rápido que o npm.',
+  'onboarding.tools.title': 'Ferramentas de Desenvolvimento Obrigatórias',
+  'onboarding.tools.subtitle': 'O TM Code necessita de Python, Node.js e Git para executar comandos, compilar projectos e gerir repositórios.',
   'onboarding.tools.detected': 'Detectado no sistema',
   'onboarding.tools.notInstalled': 'Não instalado',
-  'onboarding.tools.install': 'Instalar pnpm',
+  'onboarding.tools.install': 'Instalar',
   'onboarding.tools.installing': 'A instalar...',
   'onboarding.tools.installed': 'Instalado',
   'onboarding.tools.failedHint': 'Execute manualmente no terminal:',
-  'onboarding.tools.skip': 'Continuar com npm',
-  'onboarding.tools.benefit1': '3x mais rápido a instalar',
-  'onboarding.tools.benefit2': 'Poupa espaço com hard links',
-  'onboarding.tools.benefit3': 'Resolução de dependências rigorosa',
+  'onboarding.tools.skip': 'Continuar',
+  'onboarding.tools.benefit1': 'Python 3 — Necessário para operações de dados e lógica do agente',
+  'onboarding.tools.benefit2': 'Node.js — Necessário para gestão de pacotes e servidores dev',
+  'onboarding.tools.benefit3': 'Git — Necessário para controlo de versões e repositórios',
+  'onboarding.tools.blockingWarning': 'Por favor, instale todas as ferramentas obrigatórias para continuar.',
+  'onboarding.tools.redetect': 'Re-detectar',
   // Step 5 — Features
   'onboarding.features.title': 'O que pode fazer',
   'onboarding.features.subtitle': 'Tudo o que precisa num único lugar.',
@@ -1975,34 +2595,463 @@ const pt: Record<keyof typeof en, string> = {
   'dataViewer.noProject': 'Nenhum projeto aberto',
   'dataViewer.noProjectHint': 'Abre um projeto para inspecionar os seus dados.',
 
-  // ── Welcome Plan Banner ───────────────────────────
-  'welcomePlan.title': 'Welcome TM Code by Xiaomi Mimo',
-  'welcomePlan.description': 'Plano exclusivo de boas-vindas com todos os benefícios Vibe powered by Mimo V2.5 Pro.',
-  'welcomePlan.badge': 'Vibe',
-  'welcomePlan.model': 'Mimo V2.5 Pro',
-  'welcomePlan.tokens': 'Consumo extensivo',
-  'welcomePlan.validUntil': '28 de Maio de 2026',
-  'welcomePlan.activate': 'Activar Plano',
-  'welcomePlan.activating': 'A activar...',
-  'welcomePlan.activated': 'Plano activado!',
-  'welcomePlan.error': 'Não foi possível activar o plano. Tenta novamente.',
-  'welcomePlan.sectionLabel': 'Escolhe o teu plano',
-  'welcomePlan.explorerName': 'Explorer',
-  'welcomePlan.explorerBadge': 'Gratuito',
-  'welcomePlan.explorerDesc': 'Plano de uso mínimo, renovável a cada 30 dias. Perfeito para explorar o TM Code.',
-  'welcomePlan.explorerModel': 'DeepSeek V4 Flash',
-  'welcomePlan.explorerTokens': '1.5M tokens/mês',
-  'welcomePlan.explorerFeature1': 'Assistente de código com IA',
-  'welcomePlan.explorerFeature2': 'Chat, geração de código e preview',
-  'welcomePlan.free': 'Gratuito',
-  'welcomePlan.promoNote': 'Promoção de boas-vindas',
-  'welcomePlan.vibName': 'Vibe',
-  'welcomePlan.current': 'Actual',
-  'welcomePlan.activeNow': 'Activo agora',
-  'welcomePlan.confirmTitle': 'Fechar oferta?',
-  'welcomePlan.confirmDesc': 'Esta é uma promoção de boas-vindas única. Se fechar, poderá não voltar a ver esta oferta.',
-  'welcomePlan.confirmCancel': 'Voltar',
-  'welcomePlan.confirmClose': 'Fechar',
+  // ── Error Boundary ────────────────────────────────
+  'errorBoundary.title': 'Algo correu mal',
+  'errorBoundary.description': 'A aplicação encontrou um erro inesperado.',
+  'errorBoundary.reload': 'Recarregar',
+  'errorBoundary.details': 'Detalhes',
+  'errorBoundary.reloadHint': 'Tenta clicar em "Recarregar" para reiniciar a aplicação.',
+  'errorBoundary.errorPrefix': 'Erro:',
+  'errorBoundary.occurred': 'Ocorreu um erro',
+  'errorBoundary.contentError': 'Algo deu errado ao renderizar este conteúdo.',
+  'errorBoundary.errorDetails': 'Detalhes do erro',
+  'errorBoundary.tryAgain': 'Tentar novamente',
+  'errorBoundary.stackTrace': 'Stack trace (clique para expandir)',
+  'errorBoundary.unexpected': 'Ocorreu um erro inesperado',
+
+  // ── Login Screen ──────────────────────────────────
+  'login.welcomeBack': 'Bem-vindo de volta',
+  'login.signInContinue': 'Entre para continuar a desenvolver',
+  'login.email': 'Email',
+  'login.emailPlaceholder': 'nome@email.com',
+  'login.password': 'Password',
+  'login.passwordPlaceholder': 'A sua password',
+
+  // ── Source Control ────────────────────────────────
+  'sourceControl.stage': 'Adicionar: {file}',
+  'sourceControl.unstage': 'Remover: {file}',
+  'sourceControl.stageAll': 'Adicionar tudo: {file}',
+  'sourceControl.unstageAll': 'Remover tudo: {file}',
+  'sourceControl.discardConfirm': 'Descartar alterações em {file}?',
+  'sourceControl.discardTitle': 'Descartar Alterações',
+  'sourceControl.discardFile': 'Descartar: {file}',
+  'sourceControl.discardAllConfirm': 'Descartar TODAS as alterações?\n\nEsta ação não pode ser desfeita.',
+  'sourceControl.discardAllTitle': 'Descartar Tudo',
+  'sourceControl.discardAll': 'Descartar tudo: {file}',
+  'sourceControl.enterCommitMessage': 'Introduza uma mensagem de commit',
+  'sourceControl.stageFilesFirst': 'Adicione ficheiros primeiro',
+  'sourceControl.committedTo': 'Commit em {branch}',
+  'sourceControl.commit': 'Commit: {file}',
+  'sourceControl.committedAllTo': 'Commit de tudo em {branch}',
+  'sourceControl.pushedTo': 'Push para {branch}',
+  'sourceControl.push': 'Push: {file}',
+  'sourceControl.pulledFrom': 'Pull de {branch}',
+  'sourceControl.pull': 'Pull: {file}',
+  'sourceControl.notAuthenticated': 'Não autenticado',
+  'sourceControl.pullBtn': 'Pull',
+  'sourceControl.pushBtn': 'Push',
+  'sourceControl.generateCommit': 'Gerar mensagem de commit',
+  'sourceControl.stageBtn': 'Adicionar',
+  'sourceControl.unstageBtn': 'Remover',
+  'sourceControl.discardBtn': 'Descartar',
+  'sourceControl.staged': 'Alterações Preparadas',
+  'sourceControl.changes': 'Alterações',
+
+  // ── Generating Status Bar ─────────────────────────
+  'generating.ready': 'Pronto',
+  'generating.awaitingResponse': 'A aguardar resposta...',
+  'generating.thinking': 'A pensar...',
+  'generating.generating': 'A gerar...',
+  'generating.applying': 'A aplicar alterações...',
+  'generating.compacting': 'A compactar conversa...',
+  'generating.error': 'Erro',
+
+  // ── Sandbox ───────────────────────────────────────
+  'sandbox.title': 'Sandbox',
+  'sandbox.active': 'Modo Sandbox ativo',
+  'sandbox.description': 'Isola os comandos do agente ao diretório do projeto.',
+
+  // ── Settings (extra) ─────────────────────────────
+  'settings.engine': 'Motor',
+  'settings.state': 'Estado',
+  'settings.active': 'Ativo',
+  'settings.inactive': 'Inativo',
+  'settings.emptyJson': 'JSON vazio',
+  'settings.invalidJson': 'JSON inválido',
+  'settings.topLevelObject': 'O valor de nível superior deve ser um objeto',
+  'settings.setNameField': 'Preencha o campo Name ao colar uma entrada avulsa',
+  'settings.readOnly': 'apenas leitura',
+  'settings.globalSkills': 'Global (~/.toquemedia-studio/skills/)',
+  'settings.contentMarkdown': 'Conteúdo (Markdown)',
+
+  // ── File Viewer ───────────────────────────────────
+  'fileViewer.loading': 'A carregar {fileName}...',
+  'fileViewer.failedOpen': 'Falha ao abrir {fileName}',
+  'fileViewer.close': 'Fechar',
+
+  // ── Network Status ────────────────────────────────
+  'network.offline': 'Sem ligação à internet',
+  'network.slow': 'Ligação lenta — as respostas da IA podem demorar mais',
+
+  // ── Preview (extra) ──────────────────────────────
+  'preview.navUnavailable': 'A navegação da pré-visualização ainda não está disponível para este render.',
+  'preview.copyUrlManually': 'Não foi possível abrir o URL no navegador. Copie manualmente da barra de endereço.',
+  'preview.goBack': 'Voltar na pré-visualização',
+  'preview.goForward': 'Avançar na pré-visualização',
+  'preview.back': 'Voltar',
+  'preview.forward': 'Avançar',
+  'preview.toggleHttpClient': 'Alternar HTTP Client',
+  'preview.publishProject': 'Publicar projeto',
+  'preview.resizeDataViewer': 'Redimensionar visualizador de dados',
+  'preview.closeDataViewer': 'Fechar Data Viewer',
+  'preview.closeHttpClient': 'Fechar HTTP Client',
+  'preview.resizeConsole': 'Redimensionar painel da consola',
+
+  // ── Tool Labels ───────────────────────────────────
+  'toolLabel.editing': 'A editar',
+  'toolLabel.deleting': 'A eliminar',
+  'toolLabel.renaming': 'A renomear',
+  'toolLabel.exploring': 'A explorar',
+  'toolLabel.creatingFolder': 'A criar pasta',
+  'toolLabel.writing': 'A escrever',
+  'toolLabel.creating': 'A criar',
+  'toolLabel.searching': 'A pesquisar',
+  'toolLabel.findingFiles': 'A procurar ficheiros',
+  'toolLabel.running': 'A executar',
+  'toolLabel.startingServer': 'A iniciar servidor',
+  'toolLabel.readingLogs': 'A ler logs do servidor',
+  'toolLabel.readingOutput': 'A ler resultado',
+  'toolLabel.fetching': 'A obter',
+  'toolLabel.researching': 'A pesquisar',
+  'toolLabel.backgroundTask': 'Tarefa em segundo plano',
+  'toolLabel.checkingAgents': 'A verificar agentes',
+  'toolLabel.verifying': 'A verificar',
+  'toolLabel.updatingTasks': 'A atualizar tarefas',
+  'toolLabel.activatingReasoning': 'A ativar raciocínio',
+  'toolLabel.loadingGuide': 'A carregar guia',
+  'toolLabel.publishGuide': 'Guia de preparação para publicação do TM Code carregado',
+  'toolLabel.authGuide': 'Guia de autenticação do TM Code carregado',
+  'toolLabel.googleGuide': 'Guia de login Google do TM Code carregado',
+  'toolLabel.designGuide': 'Guia do sistema de design do TM Code carregado',
+  'toolLabel.genericGuide': 'Guia do TM Code carregado',
+
+  // ── Chat Suggestions ──────────────────────────────
+  'suggestions.reactTs': 'App React + TypeScript',
+  'suggestions.reactTsPrompt': 'Criar uma aplicação React com TypeScript e Tailwind CSS',
+  'suggestions.express': 'REST API com Express',
+  'suggestions.expressPrompt': 'Criar um servidor REST API com Express.js e TypeScript',
+  'suggestions.nextjs': 'App full-stack Next.js',
+  'suggestions.nextjsPrompt': 'Criar uma aplicação full-stack Next.js com autenticação',
+  'suggestions.fixBug': 'Corrigir um bug',
+  'suggestions.fixBugPrompt': 'Ajudar a corrigir um bug no meu código',
+  'suggestions.addTests': 'Adicionar testes',
+  'suggestions.addTestsPrompt': 'Adicionar testes unitários ao meu projeto',
+  'suggestions.explain': 'Explicar código',
+  'suggestions.explainPrompt': 'Explicar como este código funciona',
+
+  // ── Context Window Indicator ──────────────────────
+  'contextInfo.lastResponse': 'Última resposta',
+  'contextInfo.effectiveWindow': 'Janela efetiva',
+  'contextInfo.rawWindow': 'Janela bruta',
+  'contextInfo.pressure': 'Pressão',
+
+  // ── Compact Survey ────────────────────────────────
+  'compactSurvey.howWasIt': 'Como foi a compactação?',
+  'compactSurvey.good': 'Bom',
+  'compactSurvey.ok': 'OK',
+  'compactSurvey.bad': 'Mau',
+
+  // ── Todo List Card ────────────────────────────────
+  'todoList.loading': 'A carregar tarefas...',
+  'todoList.noTasks': 'Nenhuma tarefa encontrada no TODO.md.',
+
+  // ── Read Output Batch ─────────────────────────────
+  'readOutput.more': '+{count} mais',
+  'readOutput.overlapping': 'Intervalos sobrepostos — o modelo releu conteúdo que já tinha visto',
+
+  // ── Chat (extra) ─────────────────────────────────
+  'chat.thinkingAlwaysOn': 'O raciocínio está sempre ativo para este modelo',
+  'chat.thinkingLabel': 'A pensar',
+  'chat.dismissError': 'Dispensar erro',
+  'chat.copyFailed': 'Não foi possível copiar a mensagem',
+  'chat.exportSessionFailed': 'Não foi possível copiar a sessão',
+  'chat.exportFailed': 'Falha na exportação: {message}',
+  'chat.chooseProject': 'Escolher pasta do projeto',
+
+  // ── Chat (context window) ─────────────────────────
+  'chat.unknownModel': 'modelo desconhecido',
+  'chat.closeToLimit': 'perto do limite',
+  'chat.atLimit': 'no limite',
+  'chat.blocked': 'bloqueado',
+  'chat.compressingHistory': 'a comprimir histórico',
+  'chat.compactSummaryAvailable': 'resumo compacto disponível',
+  'chat.contextWillCompress': 'o contexto será comprimido no próximo turno',
+  'chat.memoryAvailable': 'memória disponível',
+  'chat.memoryFull': 'memória cheia',
+  'chat.noModelInfo': 'Sem informação do modelo. Inicie uma conversa para detetar o modelo ativo.',
+  'chat.unableLoadStatus': 'Não foi possível carregar o estado do modelo.',
+  'chat.checkConnection': 'Verifique a sua ligação e tente novamente.',
+
+  // ── New Project Dialog ────────────────────────────
+  'newProject.projectName': 'Nome do Projeto',
+  'newProject.template': 'Modelo',
+  'newProject.reactTs': 'React TypeScript',
+  'newProject.nodeExpress': 'Node.js Express',
+  'newProject.pythonFastapi': 'Python FastAPI',
+  'newProject.vue': 'Vue.js',
+  'newProject.rust': 'Rust',
+
+  // ── Open Project Dialog ──────────────────────────
+  'openProject.invalidDir': 'Diretório de projeto inválido. Selecione uma pasta de projeto válida.',
+  'openProject.failed': 'Falha ao abrir projeto. Tente novamente.',
+
+  // ── Startup Requirements ──────────────────────────
+  'startup.toolMissing': 'Uma ferramenta obrigatória está em falta ou desatualizada',
+  'startup.toolsMissing': '{count} ferramentas obrigatórias estão em falta ou desatualizadas',
+  'startup.recheck': 'Verificar novamente',
+  'startup.dismiss': 'Dispensar',
+
+  // ── Unsaved Changes ──────────────────────────────
+  'unsaved.title': 'Alterações Não Guardadas',
+  'unsaved.message': 'Tem alterações não guardadas.',
+  'unsaved.description': 'As suas alterações serão perdidas se não as guardar.',
+  'unsaved.dontSave': 'Não Guardar',
+  'unsaved.save': 'Guardar',
+  'unsaved.saved': 'Guardado',
+  'unsaved.failedSave': 'Falha ao guardar',
+
+  // ── Hooks ─────────────────────────────────────────
+  'hook.connectionLost': 'Ligação Perdida',
+  'hook.connectionLostMsg': 'Está offline. As alterações não serão guardadas na nuvem até a ligação ser restaurada.',
+  'hook.connectionRestored': 'Ligação Restaurada',
+  'hook.connectionRestoredMsg': 'Está online novamente.',
+  'hook.fileModified': 'Ficheiro Modificado',
+  'hook.fileModifiedMsg': '{fileName} foi modificado no disco. Recarregue para ver as alterações.',
+  'hook.fileDeleted': 'Ficheiro Eliminado',
+  'hook.fileDeletedMsg': '{fileName} foi eliminado do disco.',
+  'hook.refreshCreditsFailed': 'Não foi possível atualizar créditos',
+  'hook.checkConnection': 'Verifique a sua ligação e tente novamente.',
+  'hook.noProjectOpen': 'Nenhum projeto aberto. Abra um projeto antes de usar hashtags de skills.',
+  'hook.signInRequired': 'Precisa de iniciar sessão para usar o agente.',
+
+  // ── Plan Command ──────────────────────────────────
+  'plan.usage': 'Uso: /plan <descrição do que pretende construir>\n\nExemplo: /plan autenticação com email, Google login e controlo de acessos',
+  'plan.notFinished': 'A geração do plano não terminou — o PLAN.md não foi escrito. Execute /plan novamente.',
+  'plan.cutOff': 'A geração do plano foi interrompida — o PLAN.md está em RASCUNHO. Escreva "Continue" para retomar.',
+  'plan.notComplete': 'A geração do plano não ficou completa — o PLAN.md está no disco mas sem marcador de APROVAÇÃO PENDENTE. Escreva "Continue" ou execute /plan novamente.',
+  'plan.tasksNotFinished': 'A geração de tarefas não terminou — o TODO.md não foi escrito. Aprove o plano novamente.',
+  'plan.revisionCutOff': 'Revisão interrompida — o PLAN.md voltou a RASCUNHO. Escreva "Continue" para retomar.',
+  'plan.revisionNotComplete': 'A revisão não ficou completa. Escreva "Continue" ou descreva mais alterações.',
+  'plan.executing': 'A iniciar execução do plano...',
+
+  // ── Review Command ────────────────────────────────
+  'review.noProject': 'Nenhum projeto aberto. Abra um projeto antes de executar /review.',
+  'review.busy': 'O agente está a processar. Aguarde que termine (ou prima Stop) antes de executar /review.',
+  'review.budgetWarning': 'Atenção: está a {pct}% do orçamento de tokens do seu plano. /review usa raciocínio ativado em múltiplos turnos e tipicamente consome 10-30K tokens. Se preferir não arriscar, prima Stop agora e execute /review no próximo ciclo de faturação.',
+  'review.usage': 'Uso: /review [âmbito]\n\nExemplos:\n  /review                    rever ficheiros tocados nesta sessão\n  /review @src/auth.ts       rever um ficheiro específico',
+  'review.emptyPath': 'Caminho vazio. Use `/review @caminho/para/ficheiro`.',
+  'review.fileNotFound': 'Ficheiro não encontrado: `{filePath}`. O caminho é relativo à raiz do projeto. Use um caminho como `@src/auth/login.ts` (sem barra inicial).',
+  'review.noFiles': 'Nenhum ficheiro foi modificado nesta sessão — nada a rever. Edite ficheiros primeiro ou passe um âmbito explícito (`/review @ficheiro` ou `/review <descrição>`).',
+
+  // ── E2E Command ───────────────────────────────────
+  'e2e.busy': 'O agente está a processar. Aguarde que termine (ou prima Stop) antes de executar /te2e.',
+  'e2e.usage': 'Uso: /te2e <o que validar>\n\nExemplos:\n  /te2e fluxo de login\n  /te2e formulário de registo valida campos obrigatórios\n  /te2e clicar no ícone do carrinho abre o drawer\n\nO agente iniciará o navegador e navegará pelo fluxo sem interrupções. Nada é escrito no seu projeto. Prima Stop no chat para abortar.',
+  'e2e.starting': 'A iniciar sessão do navegador...',
+
+  // ── Auth Command ──────────────────────────────────
+  'auth.proxySkillMissing': 'Não foi possível carregar a skill auth-proxy. Os recursos podem estar em falta — reinstale o TM Code.',
+  'auth.googleSkillMissing': 'Não foi possível carregar a skill google-signin. A prosseguir apenas com email/password — re-adicione `#auth-google` quando a skill estiver disponível.',
+  'auth.designSkillMissing': 'Não foi possível carregar a skill frontend-design. A prosseguir sem ela — a UI usará a estética padrão do modelo.',
+
+  // ── Debug Command ─────────────────────────────────
+  'debug.usage': 'Uso: /debug <sintoma ou mensagem de erro>\n\nExemplos:\n  /debug botão de login não faz nada ao clicar\n  /debug TypeError: Cannot read properties of undefined\n  /testes passam localmente mas falham no CI',
+
+  // ── Init Command ──────────────────────────────────
+  'init.alreadyExists': 'O TMS.md já existe. O agente irá atualizá-lo com uma nova análise.',
+  'init.analyzing': 'A analisar projeto para gerar TMS.md...',
+
+  // ── Payments Command ──────────────────────────────
+  'payments.usage': 'Utilização: /payments <o que pretende implementar>\n\nExemplos:\n  /payments integrar Multicaixa Express\n  /payments adicionar todos os métodos de pagamento com webhooks\n  /payments configurar ambiente de testes para pagamentos',
+  'payments.loadFailed': 'Falha ao carregar skills de pagamento. Verifique a sua ligação e tente novamente.',
+  'payments.noneFound': 'Não foi possível obter skills de pagamento do repositório.',
+
+  // ── Post Scaffold ─────────────────────────────────
+  'postScaffold.installing': 'A instalar dependências ({command})...',
+  'postScaffold.installFailed': 'Falha ao instalar dependências',
+  'postScaffold.startingDev': 'A iniciar servidor de desenvolvimento ({command})...',
+  'postScaffold.devRunning': 'O servidor de desenvolvimento está a correr',
+  'postScaffold.devFailed': 'Não foi possível iniciar o servidor: {message}. Pode iniciá-lo manualmente: {command}',
+  'postScaffold.devStartFailed': 'Falha ao iniciar o servidor de desenvolvimento',
+  'postScaffold.installTimeout': 'A instalação excedeu 5 minutos e foi cancelada.\nExecute manualmente no terminal:\n  cd {path}\n  {command}',
+  'postScaffold.installExitCode': 'Falha ao instalar dependências (código {code}).\nExecute manualmente no terminal:\n  cd {path}\n  {command}',
+  'postScaffold.installSuccess': 'Dependências instaladas com sucesso',
+  'postScaffold.installError': 'Falha ao instalar dependências: {message}\nExecute manualmente no terminal:\n  cd {path}\n  {command}',
+
+  // ── Template Service ──────────────────────────────
+  'template.starterTemplates': 'Modelos iniciais do TM Code',
+  'template.blankDesc': 'Projeto vazio com configuração mínima',
+  'template.blankLongDesc': 'Uma tela em branco pronta para as suas ideias. Começa com uma estrutura mínima de projeto.',
+  'template.minimal': 'Mínimo',
+  'template.emptyProject': 'Projeto Vazio',
+
+  // ── Deploy Service ────────────────────────────────
+  'deploy.unsupportedType': 'Tipo de projeto não suportado: {type}',
+  'deploy.buildTimeout': 'A build excedeu o tempo limite',
+  'deploy.cancelled': 'O deploy foi cancelado',
+  'deploy.noFiles': 'Sem ficheiros para enviar. Certifique-se de que o projeto tem ficheiros.',
+  'deploy.tooManyFiles': 'Demasiados ficheiros ({count} > {max})',
+  'deploy.uploadFailed': 'Falha no envio: {status}',
+  'deploy.noBackendUrl': 'Sem URL de backend no resultado do deploy',
+  'deploy.verifyTimeout': 'A verificação excedeu o tempo limite',
+  'deploy.longBuild': 'A build do backend está a demorar mais que o esperado (limite de 15 min). Tente novamente ou contacte o suporte.',
+  'deploy.superseded': 'Deploy substituído por uma tentativa mais recente',
+  'deploy.buildFailed': 'Build falhou: {message}',
+  'deploy.notSignedIn': 'Não iniciou sessão no TM Code.',
+  'deploy.listFailed': 'Falha ao listar deploys: {status}',
+
+  // ── Agent Service ─────────────────────────────────
+  'agent.retry': 'Tentativa {count}/{max} — a aguardar {ms}ms...',
+  'agent.streamUnstable': 'Stream instável — a mudar para modo não-streaming...',
+  'agent.streamInterrupted': 'O stream do modelo foi interrompido {count} vezes seguidas e o fallback não-streaming também falhou. Verifique a sua ligação.',
+  'agent.compactionFallback': 'A compactação está a usar fallback mecânico após 3 falhas de resumo LLM. O contexto recuperado pode ter menor qualidade. Abra um novo chat para recomeçar.',
+
+  // ── Stream Parser ─────────────────────────────────
+  'stream.idleTimeout': 'Timeout de inatividade do stream — sem dados por {seconds}s. A tratar como interrompido; o agente irá tentar novamente.',
+  'stream.connectionDropped': 'Ligação perdida a meio do stream ({message}). A tratar como interrompido; o agente irá tentar novamente.',
+
+  // ── Update Service ────────────────────────────────
+  'update.alreadyInProgress': 'Atualização já em curso',
+  'update.installInProgress': 'Instalação já em curso',
+  'update.checkFailed': 'Não foi possível verificar atualizações',
+  'update.noUpdate': 'Sem atualizações disponíveis',
+  'update.alreadyDownloaded': 'Atualização já descarregada',
+
+  // ── Git Service ───────────────────────────────────
+  'git.notAvailable': 'Git não disponível',
+  'git.notRepository': 'Não é um repositório git',
+
+  // ── Environment Check ─────────────────────────────
+  'env.versionBelowMin': 'Versão {version} está abaixo do mínimo {min}',
+  'env.parseFailed': 'Não foi possível analisar a versão de: {output}',
+  'env.commandFailed': 'Comando falhou: {command}',
+  'env.commandNotFound': 'Comando não encontrado: {command}',
+
+  // ── MCP Service ───────────────────────────────────
+  'mcp.serverNotRunning': 'Servidor MCP \'{name}\' não está a correr',
+  'mcp.noUrl': 'Sem URL para o servidor remoto \'{name}\'',
+  'mcp.needsCommand': 'Servidor MCP \'{name}\' requer um comando para transporte stdio',
+  'mcp.discoveryFailed': 'Servidor iniciado mas a descoberta de tools falhou: {message}',
+  'mcp.proxyExhausted': 'MCP proxy: tentativas esgotadas',
+  'mcp.needsUrl': 'Servidor MCP \'{name}\' requer um URL para transporte remoto',
+
+  // ── MCP Remote ────────────────────────────────────
+  'mcp.notAuthenticated': 'Não autenticado — não é possível fazer proxy do pedido MCP',
+  'mcp.proxyError': 'Erro de proxy MCP ({status}): {body}',
+  'mcp.remoteError': 'Erro MCP remoto: {message} (código: {code})',
+
+  // ── Browser Session ───────────────────────────────
+  'browser.noChromium': 'Nenhum navegador Chromium disponível. Instale o Chrome e tente novamente.',
+
+  // ── Tool Executor ─────────────────────────────────
+  'tool.wrongFieldNames': 'Erro: esta tool espera `old_string` (e `new_string`). Passou: {fields}. Renomeie o campo para old_string / new_string e tente novamente.',
+  'tool.emptyOldString': 'Erro: old_string não pode estar vazio. Forneça o texto exato que pretende substituir.',
+  'tool.notAuthenticated': 'Erro: Não autenticado. Não é possível obter conteúdo web.',
+  'tool.minQuestions': 'Erro: deve fornecer pelo menos uma pergunta.',
+  'tool.maxQuestions': 'Erro: máximo 4 perguntas por chamada.',
+  'tool.questionValidation': 'Erro: cada pergunta precisa de "question", "header" (máx 12 caracteres) e 2-4 opções.',
+
+  // ── App ───────────────────────────────────────────
+  'app.failedOpenProject': 'Falha ao abrir projeto: {message}',
+  'app.initializing': 'A inicializar...',
+  'app.baseTitle': 'TM Code',
+
+  // ── Session Export ─────────────────────────────────
+  'export.dangerousCommand': ' (comando perigoso)',
+  'export.sensitiveFile': ' (ficheiro sensível)',
+  'export.permDenied': 'Permissão negada pelo utilizador',
+  'export.permApproved': 'Aprovado pelo utilizador',
+  'export.permAutoApproved': 'Aprovado automaticamente (âmbito: Aceitar Tudo)',
+  'export.permInlineDiff': 'Aprovado via diff inline',
+  'export.failed': 'falhou',
+  'export.ok': 'ok',
+  'export.input': 'Entrada:',
+  'export.result': 'Resultado:',
+  'export.newFile': 'novo ficheiro',
+  'export.edit': 'edição',
+  'export.user': 'Utilizador',
+  'export.assistant': 'Assistente',
+  'export.system': 'Sistema',
+  'export.reasoning': 'Raciocínio',
+  'export.projectRoot': 'Raiz do projeto',
+  'export.noProjectPath': 'Sem caminho do projeto',
+  'export.skills': 'Skills (no momento da exportação):',
+  'export.hashtags': 'Skills de hashtag:',
+
+  // ── Errors (utils) ────────────────────────────────
+  'error.default': 'Erro',
+  'error.unknown': 'Erro desconhecido',
+
+  // ── Unsaved Changes (dialog) ──────────────────────
+  'unsaved.changesExist': 'Tem alterações não guardadas em {file}. Guardar antes de fechar?',
+  'unsaved.confirmTitle': 'confirmar',
+
+  // ── Slash Commands ─────────────────────────────────
+  'slash.dcExecute': 'Executar consultas SQL contra o schema DataConnect do seu projeto',
+  'slash.dcExecuteShort': 'executar consultas SQL',
+  'slash.e2e': 'Executar testes end-to-end navegando na sua aplicação num navegador real',
+  'slash.e2eShort': 'executar testes end-to-end',
+  'slash.dcInspect': 'Inspecionar o schema DataConnect atual',
+  'slash.dcInspectShort': 'inspecionar schema DataConnect',
+
+  // ── Hashtag Skills ─────────────────────────────────
+  'hashtag.googleSignIn': 'Adicionar login Google com fluxo OAuth2 e persistência de sessão',
+  'hashtag.googleSignInShort': 'Login Google via OAuth2',
+  'hashtag.auth': 'Restringir acesso a utilizadores autenticados. Inclui guards de autenticação, rotas protegidas e persistência de sessão.',
+  'hashtag.authShort': 'Página de login e guard de autenticação',
+  'hashtag.stripe': 'Configurar fluxo de pagamento Stripe com sessão de checkout',
+  'hashtag.stripeShort': 'Integração de pagamento Stripe',
+  'hashtag.contactForm': 'Adicionar formulário de contacto com validação e envio de email',
+  'hashtag.contactFormShort': 'Formulário de contacto com email',
+  'hashtag.paidAccess': 'Restringir conteúdo a utilizadores pagos ou subscritos',
+  'hashtag.paidAccessShort': 'Acesso para utilizadores pagos ou subscritos',
+  'hashtag.designShort': 'UI polida com direção estética ousada',
+
+  // ── Deploys (extra) ──────────────────────────────
+  'deploys.failedAddDomain': 'Falha ao adicionar domínio',
+  'deploys.removeDomainConfirm': 'Remover o domínio personalizado? O seu projeto só será acessível no subdomínio predefinido.',
+  'deploys.removeDomainTitle': 'Remover domínio personalizado',
+  'deploys.openProject': 'Abra um projeto para ver o seu deploy.',
+  'deploys.yourDeployments': 'Os seus deploys',
+  'deploys.lettersNumbersHyphens': 'Apenas letras, números e hífenes.',
+  'deploys.refresh': 'Atualizar',
+
+  // ── Publish (extra) ──────────────────────────────
+  'publish.explorerPlanNote': 'O plano Explorer inclui chat, pré-visualização e desenvolvimento local. Publicar requer um plano pago.',
+  'publish.upgradeHint': 'Faça upgrade em Definições → Faturação. Vibe cobre projetos pequenos; Pro e Max escalam com tráfego e armazenamento.',
+  'publish.copyUrl': 'Copiar URL',
+
+  // ── Preferences (extra) ──────────────────────────
+  'preferences.myConventions': 'my-conventions',
+  'preferences.contentPlaceholder': '# As Minhas Convenções...',
+  'preferences.conventionsName': 'my-conventions',
+
+  // ── File Tree ─────────────────────────────────────
+  'fileTree.refreshed': 'Atualizado',
+  'fileTree.updated': 'Árvore de ficheiros atualizada',
+  'fileTree.refreshFailed': 'Falha ao atualizar árvore de ficheiros',
+  'fileTree.renameFailed': 'Falha ao renomear {name}',
+
+  // ── Search Results ────────────────────────────────
+  'search.noResultsFor': 'Sem resultados para "{term}"',
+
+  // ── Generating View ──────────────────────────────
+  'generating.waitingForChanges': 'A aguardar alterações de ficheiros...',
+  'generating.noPending': 'Sem alterações pendentes',
+
+  // ── HTTP Client ──────────────────────────────────
+  'httpClient.pathPlaceholder': 'api/tarefas',
+
+  // ── Issue Reporter (extra) ────────────────────────
+  'issueReporter.emailPlaceholder': 'email@exemplo.com',
+
+  // ── Title Bar (extra) ────────────────────────────
+  'titlebar.selectProject': 'Selecionar diretório do projeto',
+
+  // ── Main Layout ──────────────────────────────────
+  'mainLayout.resizeChat': 'Redimensionar painel do chat',
+
+  // ── Window Title ─────────────────────────────────
+  'window.baseTitle': 'TM Code',
 }
 
 export type TranslationKey = keyof typeof en

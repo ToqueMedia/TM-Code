@@ -7,12 +7,12 @@ import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
 const suggestions = [
-  { label: 'React + TypeScript app', prompt: 'Create a React application with TypeScript and Tailwind CSS' },
-  { label: 'REST API with Express', prompt: 'Create an Express.js REST API server with TypeScript' },
-  { label: 'Full-stack Next.js app', prompt: 'Create a full-stack Next.js application with authentication' },
-  { label: 'Fix a bug', prompt: 'Help me fix a bug in my code' },
-  { label: 'Add tests', prompt: 'Add unit tests to my project' },
-  { label: 'Explain code', prompt: 'Explain how this codebase works' },
+  { label: t('suggestions.reactTs'), prompt: t('suggestions.reactTsPrompt') },
+  { label: t('suggestions.express'), prompt: t('suggestions.expressPrompt') },
+  { label: t('suggestions.nextjs'), prompt: t('suggestions.nextjsPrompt') },
+  { label: t('suggestions.fixBug'), prompt: t('suggestions.fixBugPrompt') },
+  { label: t('suggestions.addTests'), prompt: t('suggestions.addTestsPrompt') },
+  { label: t('suggestions.explain'), prompt: t('suggestions.explainPrompt') },
 ]
 
 function ChatSuggestions() {

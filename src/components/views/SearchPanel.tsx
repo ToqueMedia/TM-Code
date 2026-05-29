@@ -101,7 +101,7 @@ function SearchPanel() {
         borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
       >
         <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.secondary} textTransform="uppercase" letterSpacing="0.05em">
-          Search
+          {t('search.title')}
         </Text>
       </Flex>
 
@@ -166,7 +166,7 @@ function SearchPanel() {
       {/* Results list */}
       <Box flex={1} overflowY="auto">
         {searching && (
-          <Text fontSize="11px" color={tokens.colors.text.muted} px={3} py={4}>Searching...</Text>
+          <Text fontSize="11px" color={tokens.colors.text.muted} px={3} py={4}>{t('search.searching')}</Text>
         )}
         {results && results.files.length === 0 && !searching && (
           <Text fontSize="12px" color={tokens.colors.text.muted} px={3} py={6} textAlign="center">

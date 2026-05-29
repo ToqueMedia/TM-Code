@@ -768,7 +768,7 @@ function App() {
 		} catch (error) {
 			logger.error('app', 'Failed to open project:', error);
 			const { useToastStore } = await import('./stores/toastStore');
-			useToastStore.getState().addToast('error', `Failed to open project: ${(error as Error).message || 'Unknown error'}`);
+			useToastStore.getState().addToast('error', t('app.failedOpenProject').replace('{message}', (error as Error).message || t('error.unknown')));
 		} finally {
 			setIsOpeningProject(false);
 		}
@@ -787,7 +787,7 @@ function App() {
 				height="100vh"
 				bg={tokens.colors.bg.welcome}
 			>
-				<LoadingSpinner size="lg" label="Initializing..." />
+				<LoadingSpinner size="lg" label={t('app.initializing')} />
 			</Flex>
 		);
 	}

@@ -54,6 +54,10 @@ export interface MemoryFrontmatter {
   name: string
   description: string
   type: MemoryType
+  /** Optional glob patterns for conditional activation. When set, this
+   *  memory entry is only loaded when the agent has accessed files matching
+   *  one of these patterns. Empty/undefined = always active. */
+  paths?: string[]
 }
 
 export interface MemoryFile {
@@ -101,6 +105,10 @@ export interface MemoryIndexEntry {
    *  mtime map (via `loadMemoryMtimes`). 0 when unknown; downstream age
    *  helpers treat 0 as "fresh" (no annotation). */
   mtimeMs: number
+  /** Optional glob patterns for conditional activation. When set, this
+   *  entry is only included when the agent has accessed files matching
+   *  one of these patterns. Undefined = always active. */
+  paths?: string[]
 }
 
 /** filename → mtime (epoch ms). Used to enrich index entries with age. */
@@ -126,12 +134,14 @@ interface MemoryListEntryDTO {
 export async function loadMemoryMtimes(
   scope: MemoryScope,
   projectPath?: string,
+  subdirectory?: string,
 ): Promise<MemoryMtimeMap> {
   const map: MemoryMtimeMap = new Map()
   try {
     const entries = await invoke<MemoryListEntryDTO[]>('list_memory_files', {
       scope,
       projectPath: scope === 'project' ? projectPath : null,
+      subdirectory: subdirectory || undefined,
     })
     for (const entry of entries) {
       if (entry && typeof entry.filename === 'string' && typeof entry.mtimeMs === 'number') {
@@ -144,7 +154,47 @@ export async function loadMemoryMtimes(
   return map
 }
 
-const INDEX_LINE_REGEX = /^-\s+\[([^\]]+)\]\(([^)]+\.md)\)\s+—\s+(.+)$/
+const INDEX_LINE_REGEX = /^-\s+\[([^\]]+)\]\(([^)]+\.md)\)\s+—\s+(.+?)(?:\s*\|\s*paths:\s*(.+))?$/
+// Captures: [1] name, [2] filename, [3] description, [4] optional paths string
+
+/**
+ * Convert a simple glob pattern to a RegExp.
+ * Supports: `**` (any depth), `*` (single segment), `?` (single char).
+ * Example: `src/auth/**` → `/^src\/auth\/.*$/`
+ */
+export function globToRegex(glob: string): RegExp {
+  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  const regexStr = escaped
+    // Step 1: Replace `**/` (globstar + separator) with a placeholder.
+    // This matches zero or more directory segments (including none),
+    // so `src/**/*.ts` matches both `src/file.ts` and `src/a/b/file.ts`.
+    .replace(/\*\*\//g, '⟨GLOBSTAR_SLASH⟩')
+    // Step 2: Replace remaining `**` (at end or standalone) with a placeholder.
+    .replace(/\*\*/g, '⟨GLOBSTAR⟩')
+    // Step 3: Replace single `*` (matches one segment, no slashes).
+    .replace(/\*/g, '[^/]*')
+    // Step 4: Replace `?` (matches one character).
+    .replace(/\?/g, '.')
+    // Step 5: Resolve placeholders to actual regex.
+    .replace(/⟨GLOBSTAR_SLASH⟩/g, '(?:.*/)?')
+    .replace(/⟨GLOBSTAR⟩/g, '.*')
+  return new RegExp(`^${regexStr}$`)
+}
+
+/**
+ * Check whether any path in `accessedPaths` matches at least one glob
+ * pattern. Returns true when `patterns` is empty (no restriction).
+ */
+export function matchesAccessedPaths(
+  patterns: string[] | undefined,
+  accessedPaths: string[],
+): boolean {
+  if (!patterns || patterns.length === 0) return true
+  // No files accessed yet (turn 1) — don't filter; include everything
+  if (accessedPaths.length === 0) return true
+  const regexes = patterns.map(globToRegex)
+  return accessedPaths.some(p => regexes.some(rx => rx.test(p)))
+}
 
 function inferTypeFromFilename(filename: string): MemoryType {
   if (filename.startsWith('user_')) return 'user'
@@ -171,7 +221,7 @@ export function parseIndexEntries(
     if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('>')) continue
     const m = trimmed.match(INDEX_LINE_REGEX)
     if (!m) continue
-    const [, name, filename, description] = m
+    const [, name, filename, description, pathsStr] = m
     entries.push({
       name,
       type: inferTypeFromFilename(filename),
@@ -181,6 +231,8 @@ export function parseIndexEntries(
       // 0 = unknown (caller didn't pass mtimes, or file missing from listing).
       // Downstream age helpers treat 0 as fresh, so the worst case is "no annotation".
       mtimeMs: mtimes?.get(filename) ?? 0,
+      // Optional path-scoped activation: only include when matching files accessed.
+      paths: pathsStr ? pathsStr.split(',').map(p => p.trim()).filter(Boolean) : undefined,
     })
   }
   return entries
@@ -229,12 +281,14 @@ export function projectIndexEntries(
 export async function loadMemoryIndex(
   scope: MemoryScope,
   projectPath?: string,
+  subdirectory?: string,
 ): Promise<MemoryIndexResult> {
   try {
     const raw = await invoke<string | null>('read_memory_file', {
       scope,
       projectPath: scope === 'project' ? projectPath : null,
       filename: MEMORY_INDEX_FILENAME,
+      subdirectory: subdirectory || undefined,
     })
     if (!raw) {
       return {
@@ -308,12 +362,14 @@ export async function loadMemoryFile(
   scope: MemoryScope,
   filename: string,
   projectPath?: string,
+  subdirectory?: string,
 ): Promise<MemoryFile | null> {
   try {
     const raw = await invoke<string | null>('read_memory_file', {
       scope,
       projectPath: scope === 'project' ? projectPath : null,
       filename,
+      subdirectory: subdirectory || undefined,
     })
     if (!raw) return null
     const { frontmatter, body } = parseFrontmatter(raw)
@@ -377,7 +433,9 @@ export function parseFrontmatter(raw: string): { frontmatter: MemoryFrontmatter 
   let name = ''
   let description = ''
   let type: MemoryType | '' = ''
+  let paths: string[] | undefined
   let inMetadata = false
+  let inPaths = false
   for (const line of yaml.split('\n')) {
     const trimmed = line.trimEnd()
     if (!trimmed) continue
@@ -406,12 +464,36 @@ export function parseFrontmatter(raw: string): { frontmatter: MemoryFrontmatter 
       description = descMatch[1].trim()
       continue
     }
+    // paths: inline list — paths: ["src/auth/**", "src/api/**"]
+    const pathsInlineMatch = trimmed.match(/^paths:\s*\[(.+)\]/)
+    if (pathsInlineMatch) {
+      paths = pathsInlineMatch[1]
+        .split(',')
+        .map(s => s.trim().replace(/^['"]|['"]$/g, ''))
+        .filter(Boolean)
+      continue
+    }
+    // paths: YAML list header — next lines with "  - pattern" are items
+    if (/^paths:\s*$/.test(trimmed)) {
+      inPaths = true
+      paths = []
+      continue
+    }
+    if (inPaths) {
+      const itemMatch = trimmed.match(/^\s+-\s+(.+)$/)
+      if (itemMatch) {
+        paths!.push(itemMatch[1].trim().replace(/^['"]|['"]$/g, ''))
+        continue
+      }
+      // Non-list-item line means we left the paths block
+      inPaths = false
+    }
   }
 
   if (!name || !description || !type) {
     return { frontmatter: null, body: raw }
   }
-  return { frontmatter: { name, description, type }, body }
+  return { frontmatter: { name, description, type, paths }, body }
 }
 
 /**
@@ -420,17 +502,18 @@ export function parseFrontmatter(raw: string): { frontmatter: MemoryFrontmatter 
  * disk regardless of how the model formatted its input.
  */
 export function buildMemoryFileContent(frontmatter: MemoryFrontmatter, body: string): string {
-  return [
+  const lines = [
     '---',
     `name: ${frontmatter.name}`,
     `description: ${frontmatter.description}`,
     'metadata:',
     `  type: ${frontmatter.type}`,
-    '---',
-    '',
-    body.trim(),
-    '',
-  ].join('\n')
+  ]
+  if (frontmatter.paths && frontmatter.paths.length > 0) {
+    lines.push(`paths: [${frontmatter.paths.map(p => `"${p}"`).join(', ')}]`)
+  }
+  lines.push('---', '', body.trim(), '')
+  return lines.join('\n')
 }
 
 /**

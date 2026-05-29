@@ -10,7 +10,9 @@ import { TerminalCodeBlock } from './TerminalCodeBlock'
 import { TerminalCredentialPrompt } from './TerminalCredentialPrompt'
 import { TerminalAskUserQuestion } from './TerminalAskUserQuestion'
 import { TerminalPlanApprovalCard } from './TerminalPlanApprovalCard'
+import SubAgentCard from '../chat/SubAgentCard'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
+import { useChatStore } from '../../stores/chatStore'
 
 // ─── Special card renderer (plan_approval, credential_request, ask_user_question) ───
 
@@ -64,6 +66,8 @@ function ContentBlocksRenderer({
   toolCalls?: ToolCallDisplay[]
   isStreaming?: boolean
 }) {
+  const streamingVersion = useChatStore(s => s.streamingVersion)
+
   const toolCallMap = useMemo(
     () => new Map(toolCalls?.map(tc => [tc.id, tc]) || []),
     [toolCalls],
@@ -81,16 +85,55 @@ function ContentBlocksRenderer({
       }
     }
     return -1
-  }, [blocks, isStreaming])
+  }, [blocks, isStreaming, streamingVersion])
+
+  // Preprocess blocks to:
+  // 1. Hide trivial reasoning blocks (durationMs < 150ms or empty text).
+  // 2. Coalesce adjacent/consecutive text blocks to heal split words and sentences (no line breaks).
+  // 3. Hide any blocks after an active in-flight reasoning block during streaming.
+  const optimizedBlocks = useMemo(() => {
+    const result: ContentBlock[] = []
+
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i]
+
+      // Hide text/tool_call blocks after an in-flight reasoning block during streaming.
+      if (activeReasoningIdx !== -1 && i > activeReasoningIdx) {
+        continue
+      }
+
+      if (block.type === 'reasoning') {
+        const isActiveStreaming = isStreaming && block.durationMs === undefined
+        const isTrivial = (
+          (!isActiveStreaming && block.durationMs !== undefined && block.durationMs < 150) ||
+          !block.text.trim()
+        )
+        if (isTrivial) {
+          continue
+        }
+      }
+
+      if (block.type === 'text') {
+        const last = result[result.length - 1]
+        if (last && last.type === 'text') {
+          // Merge adjacent text blocks to heal split words/sentences
+          result[result.length - 1] = {
+            ...last,
+            text: last.text + block.text,
+          }
+          continue
+        }
+      }
+
+      result.push({ ...block })
+    }
+
+    return result
+  }, [blocks, activeReasoningIdx, isStreaming, streamingVersion])
 
   return (
     <>
-      {blocks.map((block, i) => {
-        // Hide text/tool_call blocks after an in-flight reasoning block during streaming.
-        // Reasoning blocks themselves are always rendered (they show the thinking UI).
-        if (activeReasoningIdx !== -1 && i > activeReasoningIdx) {
-          return null
-        }
+      {optimizedBlocks.map((block, i) => {
         if (block.type === 'reasoning') {
           return (
             <TerminalReasoningBlock
@@ -110,6 +153,9 @@ function ContentBlocksRenderer({
               color={tokens.colors.terminal.foreground}
               lineHeight="1.55"
               css={{ '& > span:last-child': { marginBottom: 0 } }}
+              maxW="100%"
+              wordBreak="break-word"
+              overflowWrap="anywhere"
             >
               <ReactMarkdown components={terminalMarkdownComponents}>{block.text}</ReactMarkdown>
             </Box>
@@ -224,13 +270,15 @@ function TerminalMessageRendererInner({
           >
             ❯
           </Text>
-          <Box flex="1">
+          <Box flex="1" minW={0}>
             <Text
               fontSize="14px"
               color="#ffffff"
               whiteSpace="pre-wrap"
               lineHeight="1.55"
               fontWeight="500"
+              wordBreak="break-word"
+              overflowWrap="anywhere"
             >
               {renderHighlightedPrompt(message.content)}
             </Text>
@@ -268,12 +316,23 @@ function TerminalMessageRendererInner({
     const prefix = level === 'error' ? '✗' : level === 'success' ? '✓' : '◇'
 
     return (
-      <Box mb={3} py="2px">
-        <Flex gap={1.5} align="flex-start">
+      <Box mb={3} py="2px" maxW="100%">
+        <Flex gap={1.5} align="flex-start" maxW="100%">
           <Text fontSize="12px" color={color} fontFamily={tokens.fontFamily.mono} flexShrink={0} lineHeight="1.55" userSelect="none">
             {prefix}
           </Text>
-          <Text fontSize="13px" color={color} fontFamily={tokens.fontFamily.mono} whiteSpace="pre-wrap" lineHeight="1.55" opacity={0.9}>
+          <Text
+            fontSize="13px"
+            color={color}
+            fontFamily={tokens.fontFamily.mono}
+            whiteSpace="pre-wrap"
+            lineHeight="1.55"
+            opacity={0.9}
+            wordBreak="break-word"
+            overflowWrap="anywhere"
+            flex="1"
+            minW={0}
+          >
             {text}
           </Text>
         </Flex>
@@ -285,7 +344,13 @@ function TerminalMessageRendererInner({
   const hasContentBlocks = message.contentBlocks && message.contentBlocks.length > 0
 
   return (
-    <Box mb={4}>
+    <Box
+      mb={4}
+      maxW="100%"
+      overflowX="hidden"
+      wordBreak="break-word"
+      style={{ overflowWrap: 'anywhere' }}
+    >
       {/* Waiting dots — only when streaming with no visible content yet */}
       {isStreaming && !message.content && (!message.toolCalls || message.toolCalls.length === 0) && (
         <Flex gap="5px" align="center" py={1.5}>
@@ -328,6 +393,11 @@ function TerminalMessageRendererInner({
       {/* Special cards (credential requests, etc.) */}
       <TerminalSpecialCards message={message} />
 
+      {/* Sub-agent team activity cards */}
+      {message.subAgentRunIds && message.subAgentRunIds.length > 0 && (
+        <SubAgentCard runIds={message.subAgentRunIds} />
+      )}
+
       {/* Content — hide text/narration while reasoning is in-flight to prevent race */}
       {hasContentBlocks ? (
         // Content blocks already contain all text + tool call refs — don't also render message.content
@@ -343,6 +413,9 @@ function TerminalMessageRendererInner({
               color={tokens.colors.terminal.foreground}
               lineHeight="1.55"
               css={{ '& > span:last-child': { marginBottom: 0 } }}
+              maxW="100%"
+              wordBreak="break-word"
+              overflowWrap="anywhere"
             >
               <ReactMarkdown components={terminalMarkdownComponents}>{message.content}</ReactMarkdown>
             </Box>
@@ -517,6 +590,7 @@ function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
           display={isStreaming ? 'flex' : 'block'}
           flexDirection={isStreaming ? 'column' : undefined}
           justifyContent={isStreaming ? 'flex-end' : undefined}
+          maxW="100%"
         >
           <Text
             fontSize="12px"
@@ -525,6 +599,8 @@ function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
             lineHeight="1.6"
             whiteSpace="pre-wrap"
             fontStyle="italic"
+            wordBreak="break-word"
+            overflowWrap="anywhere"
           >
             {content}
           </Text>

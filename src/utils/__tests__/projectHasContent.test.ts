@@ -1,6 +1,6 @@
 /**
  * Tests for the "does this project have meaningful content" gate that
- * controls the noTmsFile system message ("Execute /init…").
+ * controls the /init button visibility in ChatView.
  *
  * Regression context (May 2026): the gate was firing on freshly-opened
  * empty projects because the Rust `glob_files('*')` returns dot-files

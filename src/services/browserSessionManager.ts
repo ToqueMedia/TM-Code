@@ -4,6 +4,7 @@ import { useMcpStore } from '../stores/mcpStore'
 import { useLayoutStore, type ViewMode } from '../stores/layoutStore'
 import { ensureTestBrowser } from './e2eService'
 import { logger } from '../utils/logger'
+import { t } from '@/i18n'
 
 /**
  * On-demand lifecycle for the agent's headless browser session.
@@ -171,7 +172,7 @@ class BrowserSessionManager {
     // the user a path forward; if they cancel, we abort cleanly.
     const browser = await ensureTestBrowser()
     if (!browser) {
-      throw new Error('No Chromium-based browser available. Install Chrome and retry.')
+      throw new Error(t('browser.noChromium'))
     }
 
     const configPath = await this.ensureConfigFile()

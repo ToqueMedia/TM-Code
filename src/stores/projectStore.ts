@@ -13,12 +13,12 @@ import WindowService from '../services/windowService';
 import { sessionService } from '../services/agent/sessionService';
 import CheckpointService from '../services/agent/checkpointService';
 import { useChatStore } from './chatStore';
-import { projectHasMeaningfulContent } from '../utils/projectHasContent';
+
 import { useProblemsStore } from './problemsStore';
 import { IS_VITE_DEV } from '../utils/viteEnv';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
-import { t } from '../i18n';
+
 
 /**
  * Dedupe a recent-projects list by `path`. Rust's `get_recent_projects`
@@ -61,6 +61,15 @@ interface ProjectStore {
   welcomeScreen: 'hero' | 'settings' | null;
   hasHydrated: boolean;
 
+  /**
+   * True when the current project lacks TMS.md AND has meaningful content.
+   * Set during openProject(); cleared after bootstrap creates TMS.md.
+   * Used by usePromptBar to gate the TMS.md bootstrap flow.
+   */
+  noTmsFile: boolean;
+  /** Transient guard — prevents re-entrant bootstrap while one is running. */
+  tmsBootstrapping: boolean;
+
   // Actions
   openProject: (path: string, options?: { initGit?: boolean }) => Promise<void>;
   createProject: (path: string, template: string) => Promise<void>;
@@ -80,6 +89,8 @@ interface ProjectStore {
   removeCmdModePath: (path: string) => void;
   setWelcomeScreen: (screen: 'hero' | 'settings' | null) => void;
   setHasHydrated: (hydrated: boolean) => void;
+  setNoTmsFile: (value: boolean) => void;
+  setTmsBootstrapping: (value: boolean) => void;
 }
 
 // File watcher instance
@@ -171,6 +182,8 @@ export const useProjectStore = create<ProjectStore>()(
       cmdModeProjectPaths: [],
       welcomeScreen: null,
       hasHydrated: false,
+      noTmsFile: false,
+      tmsBootstrapping: false,
 
       setHasHydrated: (hydrated: boolean) => {
         set({ hasHydrated: hydrated });
@@ -179,6 +192,9 @@ export const useProjectStore = create<ProjectStore>()(
       setWelcomeScreen: (screen) => {
         set({ welcomeScreen: screen });
       },
+
+      setNoTmsFile: (value) => set({ noTmsFile: value }),
+      setTmsBootstrapping: (value) => set({ tmsBootstrapping: value }),
 
       setCmdModeProjectPath: (path: string | null) => {
         if (path) {
@@ -322,8 +338,8 @@ export const useProjectStore = create<ProjectStore>()(
               import('../services/agent/permissionPersistence'),
               import('./permissionStore'),
             ]);
-            const scopes = await loadPermissionsFromDisk(path);
-            hydrateApprovedScopes(scopes, path);
+            const perms = await loadPermissionsFromDisk(path);
+            hydrateApprovedScopes(perms.scopes, path, perms.tools);
           } catch (error) {
             logger.warn('project', 'Failed to hydrate permission grants:', error);
           }
@@ -391,26 +407,37 @@ export const useProjectStore = create<ProjectStore>()(
           // `.toquemedia/` on every freshly-opened empty project.
           try {
             await invoke('read_file', { path: `${path}/TMS.md` });
+            // TMS.md exists — ensure flag is cleared (covers re-open after bootstrap)
+            set({ noTmsFile: false });
           } catch {
-            let projectHasContent = false;
+            // TMS.md not found — show system message suggesting /init.
+            const { projectHasMeaningfulContent } = await import('../utils/projectHasContent');
+            let hasContent = false;
             try {
               const entries = await invoke<string[]>('glob_files', {
                 pattern: '*',
                 directory: path,
               });
-              projectHasContent = projectHasMeaningfulContent(entries);
+              hasContent = projectHasMeaningfulContent(entries);
             } catch {
-              // glob_files failed — fail open (don't suggest) so we don't
-              // nag on a transient FS hiccup.
-              projectHasContent = false;
+              hasContent = false;
             }
-            if (projectHasContent) {
-              setTimeout(() => {
-                const chatState = useChatStore.getState();
+            set({ noTmsFile: hasContent });
+            if (hasContent) {
+              const { t } = await import('../i18n');
+              // The session is created async by App.tsx (restoreLastSession →
+              // createNewSession). A fixed 600ms timeout races with session
+              // creation — poll for activeSessionId instead.
+              const deadline = Date.now() + 5000
+              const poll = () => {
+                const chatState = useChatStore.getState()
                 if (chatState.activeSessionId) {
-                  chatState.addSystemMessage(t('common.noTmsFile'));
+                  chatState.addSystemMessage(t('common.noTmsFile'))
+                } else if (Date.now() < deadline) {
+                  setTimeout(poll, 100)
                 }
-              }, 600);
+              }
+              setTimeout(poll, 100)
             }
           }
         } catch (error: unknown) {
@@ -590,7 +617,7 @@ export const useProjectStore = create<ProjectStore>()(
         tearDownProject();
         // User is now back on Welcome — remember that so a restart doesn't
         // auto-reopen the project they just closed.
-        set({ welcomeScreen: 'hero' });
+        set({ welcomeScreen: 'hero', noTmsFile: false, tmsBootstrapping: false });
       },
 
       saveProjectState: async () => {

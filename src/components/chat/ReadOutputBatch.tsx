@@ -3,6 +3,7 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiCheck, FiLoader, FiX, FiChevronRight, FiChevronDown, FiAlertTriangle } from 'react-icons/fi'
 import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n/useTranslation'
 
 /**
  * Consolidated row for a streak of consecutive `read_large_result` tool
@@ -56,6 +57,7 @@ function hasOverlap(ranges: ParsedRead[]): boolean {
 }
 
 function ReadOutputBatchComponent({ calls }: ReadOutputBatchProps) {
+  const t = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const id = String(calls[0]?.input?.id ?? 'unknown')
   const reads = calls.map(parseRead)
@@ -149,11 +151,11 @@ function ReadOutputBatchComponent({ calls }: ReadOutputBatchProps) {
           ))}
           {extraCount > 0 && (
             <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} flexShrink={0}>
-              +{extraCount} more
+              {t('readOutput.more').replace('{count}', String(extraCount))}
             </Text>
           )}
           {overlap && (
-            <Box color={tokens.colors.accent.orange} flexShrink={0} title="Overlapping ranges — the model re-read content it already saw">
+            <Box color={tokens.colors.accent.orange} flexShrink={0} title={t('readOutput.overlapping')}>
               <FiAlertTriangle size={11} />
             </Box>
           )}

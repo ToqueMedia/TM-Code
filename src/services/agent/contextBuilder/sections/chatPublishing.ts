@@ -29,7 +29,7 @@ When you scaffold or write any backend code for a fullstack project (presence of
 
 **Pre-call mechanical check (before any \`write_file\` / \`edit_file\` on \`db.ts\`)** — do not infer from the user's prompt whether persistence is already provisioned. Walk this exact sequence:
 
-  1. Read the project's \`.env\` (via the env-read tool or \`grep\`). Search for \`TMDB_URL=\` and \`TMDB_TOKEN=\`.
+  1. Read the project's \`.env\` (via the env-read tool or \`search_files\`). Search for \`TMDB_URL=\` and \`TMDB_TOKEN=\`.
   2. If **both** are present and non-empty → skip provisioning. Already done; \`db.ts\` can be written referencing \`process.env.TMDB_URL\` / \`process.env.TMDB_TOKEN\` safely.
   3. If **either** is missing or empty → call \`provision_database()\` NOW. The tool is idempotent — calling on an already-provisioned project returns the same credentials with zero side-effect; calling when missing is the only way the prod path will work. Cost of redundant call: zero. Cost of skipping when missing: the project crashes with \`TMDB_URL must be set\` on first request and the failure is invisible until the deploy smoke test.
 

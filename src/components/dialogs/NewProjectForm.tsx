@@ -7,6 +7,7 @@ import {
   Select,
 } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import { ProjectTemplate } from '../../types/project'
 import { templateCollection } from './useNewProjectDialog'
 
@@ -48,7 +49,7 @@ export function NewProjectForm({
           fontWeight="600"
           fontSize={tokens.fontSize.lg}
         >
-          Project Name
+          {t('newProject.projectName')}
         </Field.Label>
         <Input
           value={projectName}
@@ -71,7 +72,7 @@ export function NewProjectForm({
           fontWeight="600"
           fontSize={tokens.fontSize.lg}
         >
-          Template
+          {t('newProject.template')}
         </Field.Label>
         <Select.Root
           collection={templateCollection}

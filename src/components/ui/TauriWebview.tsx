@@ -18,7 +18,7 @@
  * webview's DNS resolver (Chromium Happy Eyeballs handles localhost), and
  * respects z-index like any other element.
  */
-import { memo, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import { memo, forwardRef, useEffect, useLayoutEffect, useRef, useCallback, useImperativeHandle } from 'react'
 import { Box } from '@chakra-ui/react'
 import { invoke } from '@/utils/invokeMetrics'
 import { useLayoutStore } from '@/stores/layoutStore'
@@ -40,6 +40,12 @@ interface TauriWebviewProps {
   bottomReserveHeight?: number
 }
 
+export interface TauriWebviewHandle {
+  goBack: () => Promise<boolean>
+  goForward: () => Promise<boolean>
+  reload: () => Promise<boolean>
+}
+
 function htmlToDataUri(html: string): string {
   return `data:text/html;base64,${btoa(unescape(encodeURIComponent(html)))}`
 }
@@ -48,13 +54,33 @@ function htmlToDataUri(html: string): string {
 // Windows / Linux — plain iframe
 // ═══════════════════════════════════════════════════════════════
 
-const IframePreview = memo(function IframePreview({ url, html, reloadKey = 0 }: TauriWebviewProps) {
+const IframePreview = memo(forwardRef<TauriWebviewHandle, TauriWebviewProps>(function IframePreview({ url, html, reloadKey = 0 }, ref) {
   const resolvedUrl = url || (html ? htmlToDataUri(html) : '')
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  const navigate = useCallback((script: (win: Window) => void): boolean => {
+    const win = iframeRef.current?.contentWindow
+    if (!win) return false
+    try {
+      script(win)
+      return true
+    } catch (err) {
+      logger.warn('preview', 'Iframe navigation unavailable:', err)
+      return false
+    }
+  }, [])
+
+  useImperativeHandle(ref, () => ({
+    goBack: async () => navigate(win => win.history.back()),
+    goForward: async () => navigate(win => win.history.forward()),
+    reload: async () => navigate(win => win.location.reload()),
+  }), [navigate])
 
   return (
     <Box width="100%" height="100%" bg="#0a0a0a" data-preview-webview position="relative">
       {resolvedUrl && (
         <iframe
+          ref={iframeRef}
           // key forces remount-on-reload when reloadKey changes (hard reload)
           key={`${resolvedUrl}-${reloadKey}`}
           src={resolvedUrl}
@@ -75,7 +101,7 @@ const IframePreview = memo(function IframePreview({ url, html, reloadKey = 0 }: 
       )}
     </Box>
   )
-})
+}))
 
 // ═══════════════════════════════════════════════════════════════
 // macOS — native wry child webview
@@ -84,7 +110,7 @@ const IframePreview = memo(function IframePreview({ url, html, reloadKey = 0 }: 
 // Module-level state for the native webview — survives component unmount/remount
 let nativePreviewUrl = ''
 
-function MacWebview({ url, html, reloadKey = 0, frozen = false, bottomReserveHeight = 0 }: TauriWebviewProps) {
+const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function MacWebview({ url, html, reloadKey = 0, frozen = false, bottomReserveHeight = 0 }, ref) {
   const containerRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number>(0)
   // Last rect actually sent to the Rust side. Skipping IPCs when the rect
@@ -99,6 +125,23 @@ function MacWebview({ url, html, reloadKey = 0, frozen = false, bottomReserveHei
   const maskedByOverlay = overlayCount > 0
 
   const resolvedUrl = url || (html ? htmlToDataUri(html) : '')
+
+  const navigate = useCallback(async (action: 'back' | 'forward' | 'reload'): Promise<boolean> => {
+    if (!nativePreviewUrl) return false
+    try {
+      await invoke('navigate_preview_webview', { action })
+      return true
+    } catch (err) {
+      logger.warn('preview', `Native webview ${action} failed:`, err)
+      return false
+    }
+  }, [])
+
+  useImperativeHandle(ref, () => ({
+    goBack: () => navigate('back'),
+    goForward: () => navigate('forward'),
+    reload: () => navigate('reload'),
+  }), [navigate])
 
   // Capturing in a ref so `getRect` (a stable callback) reads the current
   // value without invalidating the useCallback dep array — the function
@@ -230,16 +273,18 @@ function MacWebview({ url, html, reloadKey = 0, frozen = false, bottomReserveHei
   }, [frozen, maskedByOverlay, syncPosition])
 
   return <Box ref={containerRef} width="100%" height="100%" bg="#0a0a0a" data-preview-webview />
-}
+})
 
 // ═══════════════════════════════════════════════════════════════
 // Entry — branch by platform
 // ═══════════════════════════════════════════════════════════════
 
-export default function TauriWebview(props: TauriWebviewProps) {
-  if (IS_MAC) return <MacWebview {...props} />
-  return <IframePreview {...props} />
-}
+const TauriWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function TauriWebview(props, ref) {
+  if (IS_MAC) return <MacWebview ref={ref} {...props} />
+  return <IframePreview ref={ref} {...props} />
+})
+
+export default TauriWebview
 
 /** Explicitly close the preview webview (e.g., stop server).
  *  No-op on non-macOS (iframe just unmounts with the React tree). */

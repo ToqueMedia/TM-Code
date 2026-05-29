@@ -38,6 +38,8 @@ const inlineCodeStyle: React.CSSProperties = {
   fontFamily: tokens.fontFamily.mono,
   color: '#e6a1c0',
   border: '1px solid rgba(255, 255, 255, 0.05)',
+  wordBreak: 'break-word',
+  overflowWrap: 'anywhere',
 }
 
 export const terminalMarkdownComponents: Components = {
@@ -50,7 +52,15 @@ export const terminalMarkdownComponents: Components = {
     return <code {...rest} className={className}>{children}</code>
   },
   pre: ({ children }) => (
-    <pre style={{ margin: '4px 0', padding: '6px', background: 'rgba(0,0,0,0.3)', borderRadius: '3px', overflowX: 'auto' }}>
+    <pre style={{
+      margin: '4px 0',
+      padding: '6px',
+      background: 'rgba(0,0,0,0.3)',
+      borderRadius: '3px',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-all',
+      overflowWrap: 'anywhere',
+    }}>
       {children}
     </pre>
   ),

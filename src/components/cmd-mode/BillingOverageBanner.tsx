@@ -5,8 +5,10 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useByokStore } from '../../stores/byokStore'
 import { useChatStore } from '../../stores/chatStore'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n/useTranslation'
 
 export const BillingOverageBanner = memo(function BillingOverageBanner() {
+  const t = useTranslation()
   const consumedPct = useBillingStore(s => s.consumedPct)
   // Mirror ChatView's BYOK gating so the message tells the truth: when BYOK
   // routes the request, "agent may be throttled" is wrong — the user's own
@@ -38,8 +40,8 @@ export const BillingOverageBanner = memo(function BillingOverageBanner() {
       <Text fontSize="11px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} fontWeight="700">!</Text>
       <Text fontSize="11px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} opacity={0.9}>
         {byokInUse
-          ? 'plan budget exhausted — using your BYOK key'
-          : 'usage over budget — agent may be throttled'}
+          ? t('chat.byokOverBudget')
+          : t('terminalMode.billing.overBudget')}
       </Text>
     </Flex>
   )

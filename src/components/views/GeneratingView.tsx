@@ -11,6 +11,7 @@ import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
 import DiffActionsBar from './DiffActionsBar'
 import GeneratingStatusBar from './GeneratingStatusBar'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n'
 
 const scrollbarCss = (width: string) => ({
   '&::-webkit-scrollbar': { width },
@@ -19,6 +20,7 @@ const scrollbarCss = (width: string) => ({
 })
 
 function GeneratingView() {
+  const t = useTranslation()
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
@@ -206,7 +208,7 @@ function GeneratingView() {
           {activeDiffs.length === 0 ? (
             <Flex direction="column" align="center" justify="center" height="100%" color={tokens.colors.text.disabled}>
               <Text fontSize={tokens.fontSize.lg}>
-                {isStreaming ? 'Waiting for file changes...' : 'No pending changes'}
+                {isStreaming ? t('generating.waitingForChanges') : t('generating.noPending')}
               </Text>
             </Flex>
           ) : (

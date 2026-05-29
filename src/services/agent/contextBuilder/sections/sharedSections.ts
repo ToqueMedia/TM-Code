@@ -9,6 +9,14 @@
  * gets stitched into the recency block. The pair survives the U-Curve
  * middle-attention dip even when long project content pushes the section
  * itself toward the middle of the prompt.
+ *
+ * Position as eval variable (technique #5): when documenting eval results,
+ * ALWAYS note if the change was position-only (moved from nested bullet to
+ * section header) vs phrasing-only (same position, different words).
+ * Position and phrasing are independent variables — conflating them makes
+ * future repositioning decisions ungrounded. Example:
+ *   "Moved H4 from nested bullet under 'When to use' to its own section
+ *    header: 0/3 → 3/3 — position change only, body text unchanged."
  */
 
 import type { MCPToolSummary } from '../types'

@@ -4,13 +4,14 @@ import { FiAlertOctagon, FiAlertTriangle, FiArchive } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { getProfileForPlan } from '../../services/agent/modelProfiles'
+import { getProfileForPlan, MODEL_PROFILES } from '../../services/agent/modelProfiles'
 import {
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
   getWarningThreshold,
 } from '../../utils/contextWindow'
 import { tokens } from '@/theme/tokens'
+import { useTranslation } from '@/i18n/useTranslation'
 
 /**
  * Per-turn context-pressure pill. Mirrors claude-vaz's status-line
@@ -51,6 +52,7 @@ function formatTokens(n: number): string {
 }
 
 function ContextWindowIndicator() {
+  const t = useTranslation()
   // Read the per-turn input count, but fall back to the active session's
   // last-known prompt size when the per-turn counter is 0. `resetTokenUsage`
   // zeroes `currentPromptTokens` at the start of every new request
@@ -68,10 +70,12 @@ function ContextWindowIndicator() {
   const outputTokens = useChatStore((s) => s.currentResponseTokens)
   const plan = useBillingStore((s) => s.plan)
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
+  const modelName = useAgentStore((s) => s.modelName)
   const [hovered, setHovered] = useState(false)
 
-  // Profile lookup is a static map read — no useMemo needed.
-  const profile = getProfileForPlan(plan)
+  // Profile lookup is dynamic (using the active model reported by backend)
+  // with fallback to the plan's default profile for pre-handshake state.
+  const profile = modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName] : getProfileForPlan(plan)
   // Header is authoritative; profile is fallback ONLY for the brief
   // window before the first response lands. This intentionally mirrors
   // the compression heuristic so the pill and the IDE agree.
@@ -223,26 +227,26 @@ function ContextWindowIndicator() {
               </Text>
             </Flex>
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Last response</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.lastResponse')}</Text>
               <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
                 {formatTokens(outputTokens)}
               </Text>
             </Flex>
             <Box h="1px" bg="rgba(255,255,255,0.06)" my="2px" />
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Effective window</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.effectiveWindow')}</Text>
               <Text fontSize="10px" color={tokens.colors.text.primary} fontFamily={tokens.fontFamily.mono}>
                 {formatTokens(effectiveWindow)}
               </Text>
             </Flex>
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Raw window</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.rawWindow')}</Text>
               <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
                 {formatTokens(rawContextWindow)}
               </Text>
             </Flex>
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Pressure</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.pressure')}</Text>
               <Text
                 fontSize="10px"
                 fontFamily={tokens.fontFamily.mono}

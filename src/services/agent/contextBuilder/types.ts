@@ -32,6 +32,16 @@ export interface CmdPromptContext {
   // Memory
   globalTmsContent: string | null
   claudeMdContent: string | null
+  /** Session-scoped memory notes (same source as chat mode). */
+  sessionMemory: string | null
+  /** Pre-loaded user-scope MEMORY.md index content (cross-project facts).
+   *  Null when no user memory exists yet. */
+  userMemoryIndex: string | null
+  /** Pre-loaded project-scope MEMORY.md index content (project-bound facts).
+   *  Null when none exists yet. */
+  projectMemoryIndex: string | null
+  /** True iff at least one injected memory file is past the stale threshold. */
+  memoryHasStale: boolean
   // Runtime config
   langInstruction: string
   mcpTools: { name: string; description: string; serverName: string }[]
@@ -103,6 +113,13 @@ export interface PromptContext {
    *  into a real `save_memory` call. Null when there are no pending
    *  proposals (the common case). */
   pendingMemoryProposals: string | null
+  /** Session-scoped memory notes maintained by the agent via
+   *  `update_session_memory`. Survives context compaction but resets on
+   *  new session. Null when no notes have been recorded yet. */
+  sessionMemory: string | null
+  /** File paths accessed during the current session. Used to filter
+   *  path-scoped memory entries (entries with `paths:` frontmatter). */
+  accessedFilePaths?: string[]
 }
 
 export interface PromptCacheEntry {

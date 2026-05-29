@@ -49,9 +49,9 @@ const FileTree: React.FC<FileTreeProps> = ({ rootPath, onFileSelect, onRefresh }
     try {
       await refresh();
       if (onRefresh) onRefresh();
-      setAlert({ show: true, title: 'Refreshed', description: 'File tree updated', status: 'success' });
+      setAlert({ show: true, title: t('fileTree.refreshed'), description: t('fileTree.updated'), status: 'success' });
     } catch {
-      setAlert({ show: true, title: 'Error', description: 'Failed to refresh file tree', status: 'error' });
+      setAlert({ show: true, title: t('misc.error'), description: t('fileTree.refreshFailed'), status: 'error' });
     }
   };
 

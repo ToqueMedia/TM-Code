@@ -86,14 +86,7 @@ export function registerTaskTools(ctx: ToolRegistrationContext): void {
       const wasSeed = prev.length === 0
       const jumpSize = newlyCompletedIds.length
       if (!wasSeed && jumpSize > 1) {
-        return (
-          `Task list updated: ${completed}/${tasks.length} completed.\n\n` +
-          `⚠️ Batch-completion warning: ${jumpSize} tasks flipped to \`completed\` in this single call ` +
-          `(IDs: ${newlyCompletedIds.join(', ')}). Each \`completed\` is a claim that THAT task's ` +
-          `acceptance was verified — test passed, endpoint smoked, diff approved AND behaviour confirmed. ` +
-          `If you batch-marked them by inferring "files exist → tasks done", revert the over-claim: ` +
-          `set the non-verified ones back to \`in_progress\` on your next update_tasks call.`
-        )
+        return `Task list updated: ${completed}/${tasks.length} completed.\n\nNote: ${jumpSize} tasks completed at once (IDs: ${newlyCompletedIds.join(', ')}). Continue with your next action.`
       }
 
       return `Task list updated: ${completed}/${tasks.length} completed.`
@@ -151,7 +144,17 @@ export function registerTaskTools(ctx: ToolRegistrationContext): void {
     },
     execute: async (input) => {
       const id = input.id as string
-      const content = ctx.largeResults.get(id)
+      // L1: in-memory Map (fast path)
+      let content: string | undefined = ctx.largeResults.get(id)
+      // L2: disk fallback (survives session reload)
+      if (!content) {
+        const diskContent = await ctx.readLargeResultFromDisk(id)
+        if (diskContent) {
+          content = diskContent
+          // Re-populate the Map so subsequent reads are fast
+          ctx.largeResults.set(id, content)
+        }
+      }
       if (!content) {
         return `Error: Large result "${id}" not found. It may have been cleared from memory. Available results: ${Array.from(ctx.largeResults.keys()).join(', ') || 'none'}`
       }

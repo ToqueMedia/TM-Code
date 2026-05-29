@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, ContentBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, CompactMetadata, ContentBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService, captureByokSnapshot } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
@@ -21,6 +21,10 @@ interface ChatState {
   streamingMessageId: string | null
   /** Incremented on each streaming flush — triggers re-renders for the active message */
   streamingVersion: number
+  /** Incremented when a compact boundary is inserted — forces React key changes in message list */
+  conversationVersion: number
+  /** True after a compact boundary when the post-compact survey should be shown (20% sampling) */
+  postCompactSurveyPending: boolean
   error: string | null
   conversationHistory: ConversationMessage[]
   currentTurnCount: number
@@ -123,7 +127,7 @@ interface ChatActions {
    * ContextWindowIndicator no longer pins to the pre-compression peak that
    * `addTokenUsage` had cached via `Math.max`.
    */
-  addCompactBoundaryMessage: (beforeTokens: number) => void
+  addCompactBoundaryMessage: (beforeTokens: number, trigger?: import('@/types/chat').CompactMetadata['trigger'], messagesSummarized?: number) => void
   /**
    * Re-capture the current BYOK selection (provider/model/baseURL/caps)
    * from byokStore and store it as the active session's byokSnapshot.
@@ -151,6 +155,12 @@ interface ChatActions {
   clearSession: (sessionId: string) => void
   /** Clear messages within a session but keep the session alive. Also resets tokens and turn count. */
   clearSessionMessages: (sessionId: string) => void
+  /** Replace all messages in the active session (used by /compact). */
+  replaceMessages: (messages: ChatMessage[]) => void
+  /** Replace conversation history after manual compaction — updates session messages + rebuilds history. */
+  replaceConversationHistory: (newHistory: ConversationMessage[]) => void
+  /** Reset token counters to zero (used after compaction). */
+  resetTokenCounters: () => void
   // Streaming actions
   appendTextDelta: (delta: string) => void
   appendReasoningDelta: (delta: string) => void
@@ -210,6 +220,8 @@ interface ChatActions {
   addDraftAttachment: (attachment: Attachment) => void
   removeDraftAttachment: (id: string) => void
   clearDraftAttachments: () => void
+  setPostCompactSurveyPending: (value: boolean) => void
+  setSessionMemory: (memory: string) => void
   clearAllSessions: () => void
   // Card messages (plan approval, todo list)
   addCardMessage: (type: ChatMessageCard['type'], projectPath: string) => void
@@ -235,6 +247,10 @@ interface ChatActions {
    *  the card is a transient UI element, not a permanent log entry, and stacking
    *  several at the end of the chat displaces the actual conversation flow. */
   removeMessage: (messageId: string) => void
+  /** Append a sub-agent run ID to a message's subAgentRunIds array.
+   *  Called by the task tool after spawning a sub-agent so the UI can
+   *  render SubAgentCard for that run. */
+  appendSubAgentRunId: (messageId: string, runId: string) => void
 }
 
 let idCounter = 0
@@ -501,6 +517,22 @@ export async function createDiffApprovalPromise(toolCallId: string): Promise<boo
     // not happen, but be safe: still return true to avoid blocking the agent).
     logger.warn('chat', `Auto-approve: no diff found for toolCallId ${toolCallId}`)
     return true
+  }
+
+  // CMD mode guard: the tool executor writes files directly to disk and
+  // marks diffStatus='approved' via updateToolCallWithResult (alreadyApplied=true)
+  // BEFORE this promise is created. Since CMD mode never populates pendingDiffs
+  // and never shows an approval UI, nobody would call resolveDiffApproval —
+  // the promise would block for 30 min. Check the toolCall's diffStatus and
+  // resolve immediately if already approved.
+  const session = useChatStore.getState().getActiveSession()
+  if (session) {
+    for (const msg of session.messages) {
+      const tc = msg.toolCalls?.find(t => t.id === toolCallId)
+      if (tc?.diffStatus === 'approved') {
+        return true
+      }
+    }
   }
 
   return new Promise(resolve => {
@@ -914,6 +946,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     isLoadingSession: false,
     streamingMessageId: null,
     streamingVersion: 0,
+    conversationVersion: 0,
+    postCompactSurveyPending: false,
     error: null,
     conversationHistory: [],
     currentTurnCount: 0,
@@ -953,6 +987,24 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     clearDraftAttachments: () => {
       set({ draftAttachments: [] })
       scheduleDraftPersist()
+    },
+
+    setPostCompactSurveyPending: (value: boolean) => {
+      set({ postCompactSurveyPending: value })
+    },
+
+    setSessionMemory: (memory: string) => {
+      set(state => {
+        const sessionId = state.activeSessionId
+        if (!sessionId) return state
+        const sessions = new Map(state.sessions)
+        const session = sessions.get(sessionId)
+        if (session) {
+          sessions.set(sessionId, { ...session, sessionMemory: memory, updatedAt: Date.now() })
+        }
+        return { sessions }
+      })
+      sessionService.markDirty()
     },
 
     createSession: (projectPath: string) => {
@@ -1099,11 +1151,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const session = sessions.get(activeSessionId)
         if (!session) return state
 
+        const isFirstMessage = session.messages.length === 0 && !session.name
         const updatedSession: ChatSession = {
           ...session,
           messages: [...session.messages, message],
           status: 'running',
           updatedAt: Date.now(),
+          ...(isFirstMessage && { name: content.slice(0, 80) }),
         }
 
         const updatedSessions = new Map(sessions)
@@ -1294,17 +1348,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
     },
 
-    addCompactBoundaryMessage: (beforeTokens: number) => {
+    addCompactBoundaryMessage: (beforeTokens: number, trigger: CompactMetadata['trigger'] = 'auto', messagesSummarized?: number) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
         role: 'system',
         kind: 'compact_boundary',
         compactBeforeTokens: beforeTokens,
+        compactMetadata: { trigger, beforeTokens, messagesSummarized },
         level: 'info',
-        // content is the fallback label for code paths that still rely on
-        // `message.content` (export-to-markdown, session-to-text); the
-        // bubble itself reads `kind` to render the dedicated UI.
         content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens). Skills invocados re-injectados — o agente continua com regras CRITICAL intactas.`,
         timestamp: Date.now(),
       }
@@ -1345,6 +1397,16 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           newMessages = [...session.messages, message]
         }
 
+        // Trim pre-boundary messages from the store so the UI updates
+        // immediately without relying on ChatView's slice logic (which
+        // can lag behind during active streaming). Keep the boundary
+        // message itself and everything after it (including the in-flight
+        // streaming assistant message).
+        const boundaryIdx = newMessages.findIndex(m => m.id === messageId)
+        if (boundaryIdx > 0) {
+          newMessages = newMessages.slice(boundaryIdx)
+        }
+
         const updatedSession: ChatSession = {
           ...session,
           messages: newMessages,
@@ -1366,15 +1428,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
         return {
           sessions: updatedSessions,
-          // Reset only the input counter: `addTokenUsage` uses Math.max for
-          // input (max-across-turns), which after compression keeps the
-          // pre-compression peak. Zeroing it lets the next turn's reported
-          // promptTokens replace the value cleanly and the indicator hides
-          // until that next turn lands (per ContextWindowIndicator's
-          // `inputTokens <= 0` early-return).
           totalTokensUsed: { input: 0, output: state.totalTokensUsed.output },
           currentPromptTokens: 0,
           currentResponseTokens: 0,
+          conversationVersion: state.conversationVersion + 1,
+          postCompactSurveyPending: Math.random() < 0.2,
         }
       })
     },
@@ -2209,6 +2267,80 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       sessionService.markDirty()
     },
 
+    replaceMessages: (messages: ChatMessage[]) => {
+      set(state => {
+        const sessionId = state.activeSessionId
+        if (!sessionId) return state
+        const sessions = new Map(state.sessions)
+        const session = sessions.get(sessionId)
+        if (session) {
+          sessions.set(sessionId, {
+            ...session,
+            messages,
+            updatedAt: Date.now(),
+          })
+        }
+        return { sessions, currentTurnCount: 0 }
+      })
+      sessionService.markDirty()
+    },
+
+    replaceConversationHistory: (newHistory: ConversationMessage[]) => {
+      set(state => {
+        const sessionId = state.activeSessionId
+        if (!sessionId) return state
+        const sessions = new Map(state.sessions)
+        const session = sessions.get(sessionId)
+        if (!session) return state
+
+        // Convert ConversationMessage[] → ChatMessage[]
+        const chatMessages: ChatMessage[] = newHistory.map((m, i) => ({
+          id: generateId('msg'),
+          role: m.role as 'user' | 'assistant',
+          content: typeof m.content === 'string'
+            ? m.content
+            : Array.isArray(m.content)
+              ? m.content.map(b => ('text' in b ? b.text : '')).join('')
+              : '',
+          timestamp: Date.now() + i,
+        }))
+
+        sessions.set(sessionId, {
+          ...session,
+          messages: chatMessages,
+          updatedAt: Date.now(),
+        })
+
+        return {
+          sessions,
+          conversationHistory: newHistory,
+          currentTurnCount: 0,
+        }
+      })
+      sessionService.markDirty()
+    },
+
+    resetTokenCounters: () => {
+      set(state => {
+        // Also reset lastPromptTokens on the active session so the
+        // ContextWindowIndicator doesn't fall back to stale pre-compact values.
+        const sessionId = state.activeSessionId
+        const sessions = sessionId ? new Map(state.sessions) : state.sessions
+        if (sessionId) {
+          const session = sessions.get(sessionId)
+          if (session) {
+            sessions.set(sessionId, { ...session, lastPromptTokens: 0 })
+          }
+        }
+        return {
+          totalTokensUsed: { input: 0, output: state.totalTokensUsed.output },
+          currentPromptTokens: 0,
+          currentResponseTokens: 0,
+          sessions,
+        }
+      })
+    },
+
     updateConversationHistory: (messages: ConversationMessage[]) => {
       set({ conversationHistory: messages })
     },
@@ -2404,7 +2536,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     saveSessionToDisk: async () => {
       const state = get()
       const session = state.getActiveSession()
-      if (session) {
+      if (session && session.messages.length > 0) {
         await sessionService.saveSession(session, {
           input: state.totalTokensUsed.input,
           output: state.totalTokensUsed.output,
@@ -2767,10 +2899,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     cleanupOnExit: async (projectPath: string) => {
-      // Save current session with token usage
+      // Save current session with token usage (skip empty sessions)
       const state = get()
       const session = state.getActiveSession()
-      if (session) {
+      if (session && session.messages.length > 0) {
         await sessionService.saveSession(session, {
           input: state.totalTokensUsed.input,
           output: state.totalTokensUsed.output,
@@ -2820,6 +2952,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         isLoadingSession: false,
         streamingMessageId: null,
         streamingVersion: 0,
+        conversationVersion: 0,
+        postCompactSurveyPending: false,
         error: null,
         agentStartTime: null,
         currentTurnCount: 0,
@@ -3010,6 +3144,27 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
 
       debouncedSave()
+    },
+
+    appendSubAgentRunId: (messageId, runId) => {
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const messages = session.messages.map(msg => {
+          if (msg.id !== messageId) return msg
+          const existing = msg.subAgentRunIds || []
+          if (existing.includes(runId)) return msg
+          return { ...msg, subAgentRunIds: [...existing, runId] }
+        })
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        return { sessions: updatedSessions }
+      })
     },
   }
 })

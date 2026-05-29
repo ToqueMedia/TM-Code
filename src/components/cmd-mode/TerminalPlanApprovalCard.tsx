@@ -1,8 +1,7 @@
-import { memo, useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { useChatStore } from '../../stores/chatStore'
-import { useEditorRepository } from '../../stores/editorStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { handlePlanApprove, handlePlanRequestChanges, handlePlanReject } from '../../services/agent/commands/planCommand'
 import { FileService } from '../../services/fileService'
@@ -14,27 +13,11 @@ interface TerminalPlanApprovalCardProps {
   card: ChatMessageCard
 }
 
-/** Strip YAML frontmatter (--- ... ---) from plan content. */
-function stripFrontmatter(content: string): string {
-  const trimmed = content.replace(/^\s*\n/, '')
-  if (trimmed.startsWith('---')) {
-    const end = trimmed.indexOf('\n---', 3)
-    if (end !== -1) {
-      return trimmed.slice(end + 4).replace(/^\s*\n/, '')
-    }
-  }
-  return content
-}
-
 export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
   messageId,
   card,
 }: TerminalPlanApprovalCardProps) {
   const { projectPath, status } = card
-
-  const [viewingPlan, setViewingPlan] = useState(false)
-  const [planContent, setPlanContent] = useState<string>('')
-  const [loadingPlan, setLoadingPlan] = useState(false)
 
   // Auto-remove after terminal state
   useEffect(() => {
@@ -46,6 +29,7 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
   }, [status, messageId])
 
   const handleApprove = useCallback(async () => {
+    useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'approved')
     try {
       await handlePlanApprove(projectPath)
@@ -58,39 +42,33 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
   }, [messageId, projectPath])
 
   const handleChanges = useCallback(() => {
+    useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'changes_requested')
     handlePlanRequestChanges(projectPath)
   }, [messageId, projectPath])
 
   const handleReject = useCallback(() => {
+    useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'rejected')
     handlePlanReject()
   }, [messageId])
 
   const handleViewPlan = useCallback(async () => {
-    if (viewingPlan) {
-      setViewingPlan(false)
+    const layout = useLayoutStore.getState()
+    if (layout.isPlanViewerOpen) {
+      layout.setPlanViewerOpen(false)
       return
     }
     const planPath = `${projectPath}/PLAN.md`
     try {
-      setLoadingPlan(true)
-      const content = await FileService.readFile(planPath)
-      setPlanContent(stripFrontmatter(content))
-      setViewingPlan(true)
+      await FileService.readFile(planPath)
     } catch {
       useChatStore.getState().addSystemMessage(
         t('plan.missing') ?? 'PLAN.md is missing. Run /plan again to regenerate it.',
       )
-    } finally {
-      setLoadingPlan(false)
+      return
     }
-  }, [projectPath, viewingPlan])
-
-  const handleOpenInEditor = useCallback(() => {
-    const planPath = `${projectPath}/PLAN.md`
-    useEditorRepository.getState().openFile(planPath)
-    useLayoutStore.getState().setViewMode('editor')
+    layout.setPlanViewerOpen(true)
   }, [projectPath])
 
   // ── Approved state ──
@@ -173,25 +151,6 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
         {t('plan.description')}
       </Text>
 
-      {/* Plan preview (expandable) */}
-      {viewingPlan && (
-        <Box
-          maxH="300px"
-          overflowY="auto"
-          bg="rgba(0, 0, 0, 0.3)"
-          p={3}
-          borderRadius="4px"
-          mb={3}
-          whiteSpace="pre-wrap"
-          color="rgba(255, 255, 255, 0.6)"
-          fontSize="12px"
-          fontFamily={tokens.fontFamily.mono}
-          lineHeight="1.5"
-        >
-          {planContent}
-        </Box>
-      )}
-
       {/* Action buttons */}
       <Flex gap={2} flexWrap="wrap">
         {/* Approve */}
@@ -250,27 +209,7 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
           onClick={handleViewPlan}
         >
           <Text fontSize="12px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono} fontWeight="500">
-            {loadingPlan ? '...' : viewingPlan ? t('plan.hidePlan') : t('plan.viewFull')}
-          </Text>
-        </Flex>
-
-        {/* Open in Editor */}
-        <Flex
-          as="button"
-          align="center"
-          gap="5px"
-          px={3}
-          py="5px"
-          borderRadius="4px"
-          bg="rgba(255, 255, 255, 0.05)"
-          border="1px solid rgba(255, 255, 255, 0.08)"
-          cursor="pointer"
-          transition="all 0.15s"
-          _hover={{ bg: 'rgba(255, 255, 255, 0.08)' }}
-          onClick={handleOpenInEditor}
-        >
-          <Text fontSize="12px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono} fontWeight="500">
-            {t('plan.openInEditor')}
+            {t('plan.viewFull')}
           </Text>
         </Flex>
 

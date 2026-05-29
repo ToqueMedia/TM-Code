@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { AgentStatus } from '../types/agent'
+import { AgentStatus, type CompactPhase } from '../types/agent'
 
 export type AgentTaskStatus = 'pending' | 'in_progress' | 'completed'
 
@@ -11,6 +11,7 @@ export interface AgentTask {
 
 interface AgentState {
   status: AgentStatus
+  compactPhase: CompactPhase
   error: string | null
   /** Tasks the agent is tracking for the current message. Displayed in the chat UI. */
   tasks: AgentTask[]
@@ -68,6 +69,7 @@ interface AgentState {
 
 interface AgentActions {
   setStatus: (status: AgentStatus) => void
+  setCompactPhase: (phase: CompactPhase) => void
   setError: (error: string | null) => void
   // Model metadata from backend response headers
   setModelInfo: (name: string | null, provider: string | null, thinkingMode?: 'none' | 'toggleable' | 'mandatory' | null, contextWindow?: number | null) => void
@@ -88,6 +90,7 @@ interface AgentActions {
 
 export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   status: 'idle',
+  compactPhase: 'idle',
   error: null,
   tasks: [],
   modelName: null,
@@ -101,6 +104,10 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
 
   setStatus: (status: AgentStatus) => {
     set({ status })
+  },
+
+  setCompactPhase: (phase: CompactPhase) => {
+    set({ compactPhase: phase })
   },
 
   setError: (error: string | null) => {

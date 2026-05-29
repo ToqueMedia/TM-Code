@@ -1,4 +1,5 @@
 import { useChatStore } from '../../../stores/chatStore'
+import { t } from '../../../i18n'
 import { runAgentWithCallbacks } from '../agentRunner'
 import AgentService from '../agentService'
 import type { SlashCommandMode } from '../slashCommandRegistry'
@@ -25,11 +26,7 @@ export async function executeDebug(
 
   if (!args.trim()) {
     chatStore.addSystemMessage(
-      'Usage: /debug <symptom or error message>\n\n' +
-      'Examples:\n' +
-      '  /debug login button does nothing on click\n' +
-      '  /debug TypeError: Cannot read properties of undefined (reading "uid")\n' +
-      '  /debug tests pass locally but fail in CI'
+      t('debug.usage')
     )
     return
   }
@@ -70,7 +67,7 @@ Follow this loop. Do not skip steps.
 
    **If \`read_dev_server_logs\` returns "No dev server is running"**, call \`start_dev_server\` FIRST and wait for the "Server ready" line before continuing — diagnosing a runtime bug without runtime evidence is guessing. After the server is up, re-run the failing scenario (open the preview, click the broken button, hit the broken endpoint) so the dev-server logs actually capture the symptom you're chasing. Skipping this step is the most common reason /debug spirals into a multi-turn file-reading marathon with no resolution.
 
-2. **Identify the affected files.** Use the stack trace, error message, recent edits, or dev-server output to locate the code path. Read those files in full — never propose a fix to code you have not read.
+2. **Identify the affected files.** Use the stack trace, error message, recent edits, or dev-server output to locate the code path. Read those files in full — never propose a fix to code you have not read. If the codebase is large and the bug spans multiple areas, delegate exploration with \`task({ subagent_type: "Explore", description: "...", prompt: "..." })\` then collect results with \`check_team()\`.
 
 3. **Form 2–3 hypotheses.** State each hypothesis with the evidence that supports OR contradicts it. Reject hypotheses you can't tie to the observable behavior.
 
@@ -78,7 +75,7 @@ Follow this loop. Do not skip steps.
 
 5. **Propose the minimum fix.** The smallest change that addresses the verified cause. No surrounding refactor. No "while I'm here" cleanup. If the fix is in a different layer than the symptom (e.g. UI symptom but backend bug), say so before editing.
 
-6. **Verify the fix.** After applying the change, re-run the failing scenario. Confirm the symptom is gone AND no new errors appear in dev-server logs / get_diagnostics. Say so explicitly when verification is impossible.
+6. **Verify the fix.** After applying the change, re-run the failing scenario. Confirm the symptom is gone AND no new errors appear in dev-server logs or type-check output. Say so explicitly when verification is impossible.
 
 7. **Report.** State: cause, fix applied, files changed, verification result. If you couldn't verify, say so. If you suspect the fix only masks a deeper issue, say so.
 </protocol>

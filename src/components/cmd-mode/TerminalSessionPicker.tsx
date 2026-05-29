@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import { useTranslation } from '@/i18n/useTranslation'
 import type { SessionSummary } from '../../types/chat'
 
 interface TerminalSessionPickerProps {
@@ -37,6 +38,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
   onSelect,
   onClose,
 }: TerminalSessionPickerProps) {
+  const t = useTranslation()
   const [index, setIndex] = useState(() => {
     const i = items.findIndex(s => s.id === activeSessionId)
     return i >= 0 ? i : 0
@@ -112,7 +114,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
       data-no-focus-steal
       tabIndex={-1}
       role="dialog"
-      aria-label="Pick a session to resume"
+      aria-label={t('terminalMode.picker.ariaLabel')}
       onKeyDown={handleKeyDown}
       position="absolute"
       top={0}
@@ -189,7 +191,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
               const isSelected = i === index
               const isActive = item.id === activeSessionId
               const n = String(i + 1).padStart(2, ' ')
-              const name = item.name || t('terminalMode.picker.unnamed')
+              const name = item.name || item.lastMessage || t('terminalMode.picker.unnamed')
               return (
                 <Flex
                   key={item.id}

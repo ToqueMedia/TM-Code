@@ -1,12 +1,10 @@
 /**
  * Per-project permission grants persistence.
  *
- * The `permissionStore.approvedScopes` Set tracks which tool scopes
- * (`'core'` and/or `'mcp'`) the user clicked "Accept All" on. Without
- * persistence, every app restart drops these grants — the user has to
- * re-approve the same tools on every reopen, training them to click
- * fast through dialogs (and eventually approving things they shouldn't
- * because the friction taught them prompts are noise).
+ * Tracks two kinds of trust:
+ *  - **Scopes** (`'core'` / `'mcp'`): user clicked "Approve All" for a scope.
+ *  - **Tools** (e.g. `'execute_command'`): user clicked "Always allow" for a
+ *    specific tool in this project.
  *
  * The grants live at `<project>/.toquemedia/permissions.json` —
  * **project-scoped on purpose**: trust scales with the project, not
@@ -26,56 +24,86 @@ const PERMISSIONS_FILENAME = 'permissions.json'
 
 export type ApprovedScope = 'core' | 'mcp'
 
-interface PermissionsFileV1 {
-  /** Schema version — bumped if the on-disk shape ever changes. */
-  schemaVersion: 1
-  /** ISO timestamp of the last write. */
+export interface PermissionsFileV2 {
+  schemaVersion: 2
   updatedAt: string
-  /** Scopes the user has approved en-masse for this project. */
   approvedScopes: ApprovedScope[]
+  /** Tool names the user clicked "Always allow in this project" for. */
+  approvedTools: string[]
+}
+
+export interface LoadedPermissions {
+  scopes: Set<ApprovedScope>
+  tools: Set<string>
 }
 
 /**
- * Read the approved-scopes set for a project. Returns an empty set when
- * the file doesn't exist or is unparseable — first-open behaviour falls
- * back to the existing per-tool prompt flow.
+ * Read the approved-scopes and approved-tools sets for a project.
+ * Returns empty sets when the file doesn't exist or is unparseable —
+ * first-open behaviour falls back to the existing per-tool prompt flow.
+ *
+ * Backward compat: v1 files (no `approvedTools`) load with an empty
+ * tool set. The next save will upgrade the file to v2.
  */
-export async function loadPermissionsFromDisk(projectPath: string): Promise<Set<ApprovedScope>> {
-  if (!projectPath) return new Set()
+export async function loadPermissionsFromDisk(projectPath: string): Promise<LoadedPermissions> {
+  const empty: LoadedPermissions = { scopes: new Set(), tools: new Set() }
+  if (!projectPath) return empty
   try {
     const raw = await invoke<string | null>('read_agent_state', {
       projectPath,
       filename: PERMISSIONS_FILENAME,
     })
-    if (!raw) return new Set()
-    const parsed = JSON.parse(raw) as Partial<PermissionsFileV1>
-    if (!parsed || parsed.schemaVersion !== 1 || !Array.isArray(parsed.approvedScopes)) {
-      console.warn('[permissionPersistence] permissions.json present but unrecognised shape; ignoring')
-      return new Set()
+    if (!raw) return empty
+    // Use a loose shape — the discriminated union of v1/v2 makes
+    // Partial<...> collapse to `never` on shared keys with different
+    // literal types. Parse generically then branch on schemaVersion.
+    const parsed = JSON.parse(raw) as { schemaVersion?: number; approvedScopes?: unknown; approvedTools?: unknown }
+
+    // v2 file — preferred
+    if (parsed.schemaVersion === 2 && Array.isArray(parsed.approvedScopes)) {
+      return {
+        scopes: new Set(
+          (parsed.approvedScopes as string[]).filter((s): s is ApprovedScope => s === 'core' || s === 'mcp'),
+        ),
+        tools: new Set(Array.isArray(parsed.approvedTools) ? (parsed.approvedTools as string[]) : []),
+      }
     }
-    return new Set(
-      parsed.approvedScopes.filter((s): s is ApprovedScope => s === 'core' || s === 'mcp'),
-    )
+
+    // v1 file — backward compat (no approvedTools)
+    if (parsed.schemaVersion === 1 && Array.isArray(parsed.approvedScopes)) {
+      return {
+        scopes: new Set(
+          (parsed.approvedScopes as string[]).filter((s): s is ApprovedScope => s === 'core' || s === 'mcp'),
+        ),
+        tools: new Set(),
+      }
+    }
+
+    console.warn('[permissionPersistence] permissions.json present but unrecognised shape; ignoring')
+    return empty
   } catch (err) {
     console.warn('[permissionPersistence] failed to read permissions.json:', err)
-    return new Set()
+    return empty
   }
 }
 
 /**
- * Write the approved-scopes set to disk. Fire-and-forget — failures are
- * logged but do not interrupt the permission flow (the in-memory grant
- * remains live; the next mutation will retry the persist).
+ * Write the approved-scopes and approved-tools sets to disk.
+ * Fire-and-forget — failures are logged but do not interrupt the
+ * permission flow (the in-memory grants remain live; the next
+ * mutation will retry the persist).
  */
 export async function savePermissionsToDisk(
   projectPath: string,
   approvedScopes: Set<ApprovedScope>,
+  approvedTools: Set<string>,
 ): Promise<void> {
   if (!projectPath) return
-  const payload: PermissionsFileV1 = {
-    schemaVersion: 1,
+  const payload: PermissionsFileV2 = {
+    schemaVersion: 2,
     updatedAt: new Date().toISOString(),
     approvedScopes: Array.from(approvedScopes),
+    approvedTools: Array.from(approvedTools),
   }
   try {
     await invoke('write_agent_state', {

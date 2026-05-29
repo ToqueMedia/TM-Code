@@ -261,6 +261,50 @@ const MIMO_V2_5_PRO: ModelProfile = {
   counterweights: [],
 }
 
+// Gemini 3.5 Flash — Google's high-performance frontier model.
+// Excellent for near-Pro reasoning, coding proficiency, and agentic workflows.
+const GEMINI_35_FLASH: ModelProfile = {
+  id: 'gemini-3.5-flash',
+  name: 'Gemini 3.5 Flash',
+  persona: {
+    name: 'Gemini 3.5 Flash',
+    tagline: 'Velocidade e inteligência "near-Pro" — excelente para coding e execução de agentes paralelos. Custo: 1.5x',
+  },
+  modelId: 'google/gemini-3.5-flash',
+  // Upstream supports massive 1M+ context windows.
+  contextWindow: 1_000_000,
+  maxOutputTokens: 8192,
+
+  // Google strongly recommends not changing the default values for temperature, top_p, and top_k.
+  // Standard recommended values are left at default (1.0 for temperature and topP).
+  temperature: 1.0,
+  reasoningTemperature: null,
+  topP: 1.0,
+  topK: null,
+
+  // OpenRouter reasoning structure using 'reasoning' (normalized for Google models on OpenRouter).
+  // Includes automatic handling of thought signatures to maintain multi-turn continuity.
+  thinkingMode: 'toggleable',
+  supportsThinking: true,
+  thinkingParam: 'reasoning',
+  thinkingBudget: null,
+  thinkingMandatory: false,
+
+  // Google and OpenRouter strongly recommend preserving the reasoning context (thought signatures/reasoning_details)
+  // in multi-turn conversations to maintain reasoning continuity and context.
+  preserveReasoning: true,
+  supportsAttachments: true, // Natively multimodal (images and files)
+  supportsSearch: true,      // Natively supports web search
+  counterweights: [
+    {
+      rule: 'You are the coding agent inside TM Code, built by Toque Media. Identify yourself as such when asked — never as Claude, ChatGPT, or any other model or provider.',
+      addedFor: 'Gemini 3.5 Flash identity contamination from training data',
+      addedOn: '2026-05-29',
+      reviewAfter: '2026-08-29',
+    },
+  ],
+}
+
 // ─────────────────────────────────────────────────
 // Registry
 // ─────────────────────────────────────────────────
@@ -283,6 +327,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'deepseek-v4-flash': DEEPSEEK_V4_FLASH,
   'glm-5.1':           GLM_5_1,
   'mimo-v2.5-pro':     MIMO_V2_5_PRO,
+  'gemini-3.5-flash':  GEMINI_35_FLASH,
 }
 
 export const DEFAULT_MODEL_ID = 'deepseek-v4-flash'

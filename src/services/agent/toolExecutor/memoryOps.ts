@@ -12,6 +12,20 @@ import type { ToolRegistrationContext } from './context'
 
 export function registerMemoryTools(ctx: ToolRegistrationContext): void {
 
+  /**
+   * Resolve memory scope for the current invocation.
+   * Reads `_memoryScope` from the per-call input (set by ToolExecutor.execute()
+   * when a sub-agent passes its agentType). Falls back to the ToolExecutor's
+   * shared state for the main agent path.
+   *
+   * This per-invocation resolution prevents race conditions when multiple
+   * sub-agents call memory tools concurrently — each invocation carries its
+   * own scope rather than relying on shared mutable state.
+   */
+  function getMemoryScope(input: Record<string, unknown>): string | null {
+    return (input._memoryScope as string | null) ?? ctx.getMemoryScopeAgentType()
+  }
+
   // === save_memory ===
   ctx.tools.set('save_memory', {
     definition: {
@@ -38,6 +52,11 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
             type: 'string',
             description: 'Full memory content. For `feedback` and `project` types, structure as: Lead with the rule/fact, then a `**Why:**` line (the motivation — incident or strong preference) and a `**How to apply:**` line (when/where this kicks in). For `user` and `reference` types, plain prose is fine. Use [[other-name]] to link related memories.',
           },
+          paths: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional glob patterns for conditional activation. When set, this memory is only loaded when the agent has accessed files matching one of these patterns. Example: ["src/auth/**", "src/api/**"].',
+          },
         },
         required: ['name', 'type', 'description', 'body'],
       },
@@ -61,6 +80,10 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       const scope = defaultScopeForType(type)
       const filename = memoryFilenameFor(type, name)
       const projectPath = useProjectStore.getState().currentProject?.path
+      // Sub-agent memory isolation: reads scope from ToolExecutor state.
+      // Safe because JS is single-threaded and the runner sets/clears
+      // the scope synchronously around each agent turn.
+      const memoryScope = getMemoryScope(input)
       if (scope === 'project' && !projectPath) {
         return 'save_memory failed: project-scope memories require an open project. Try `type: "user"` for a cross-project fact.'
       }
@@ -73,6 +96,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
           projectPath: scope === 'project' ? projectPath : null,
           filename,
           content: buildMemoryFileContent({ name, type, description }, body),
+          subdirectory: memoryScope ?? undefined,
         })
       } catch (err) {
         return `save_memory failed to write topic file: ${err instanceof Error ? err.message : String(err)}`
@@ -81,7 +105,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       // Update MEMORY.md — read existing, replace the line for this
       // name if present, otherwise append.
       try {
-        const existingIndex = await loadMemoryIndex(scope, projectPath)
+        const existingIndex = await loadMemoryIndex(scope, projectPath, memoryScope ?? undefined)
         const lineToWrite = `- [${name}](${filename}) — ${description}`
         let lines = (existingIndex.content ?? '').split('\n')
         const warningIdx = lines.findIndex(l => l.startsWith('> ⚠️ MEMORY.md'))
@@ -98,6 +122,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
           projectPath: scope === 'project' ? projectPath : null,
           filename: 'MEMORY.md',
           content: merged,
+          subdirectory: memoryScope ?? undefined,
         })
       } catch (err) {
         console.warn('[save_memory] index update failed:', err)
@@ -152,12 +177,14 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       const scope = defaultScopeForType(type)
       const filename = memoryFilenameFor(type, name)
       const projectPath = useProjectStore.getState().currentProject?.path
+      const memoryScope = getMemoryScope(input)
 
       // Delete the topic file (idempotent).
       try {
         await invoke('delete_memory_file', {
           scope,
           projectPath: scope === 'project' ? projectPath : null,
+          subdirectory: memoryScope ?? undefined,
           filename,
         })
       } catch (err) {
@@ -166,7 +193,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
 
       // Strip the line from MEMORY.md.
       try {
-        const existingIndex = await loadMemoryIndex(scope, projectPath)
+        const existingIndex = await loadMemoryIndex(scope, projectPath, memoryScope ?? undefined)
         if (existingIndex.content) {
           let lines = existingIndex.content.split('\n')
           const warningIdx = lines.findIndex(l => l.startsWith('> ⚠️ MEMORY.md'))
@@ -177,6 +204,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
             projectPath: scope === 'project' ? projectPath : null,
             filename: 'MEMORY.md',
             content: filtered.join('\n'),
+            subdirectory: memoryScope ?? undefined,
           })
         }
       } catch (err) {
@@ -228,11 +256,12 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       const scope = defaultScopeForType(type)
       const filename = memoryFilenameFor(type, name)
       const projectPath = useProjectStore.getState().currentProject?.path
+      const memoryScope = getMemoryScope(input)
       const { loadMemoryMtimes } = await import('../memdir')
       const { memoryAgeWarning } = await import('../memoryAge')
       const [file, mtimes] = await Promise.all([
-        loadMemoryFile(scope, filename, projectPath),
-        loadMemoryMtimes(scope, projectPath),
+        loadMemoryFile(scope, filename, projectPath, memoryScope ?? undefined),
+        loadMemoryMtimes(scope, projectPath, memoryScope ?? undefined),
       ])
       if (!file) {
         return `Memory not found: ${scope}/${filename}. Check MEMORY.md for the current list of names + types.`
@@ -255,7 +284,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
         required: [],
       },
     },
-    execute: async () => {
+    execute: async (input: Record<string, unknown>) => {
       const [
         { distillMemories },
         { loadMemoryFile, loadMemoryIndex, parseIndexEntries, memoryFilenameFor },
@@ -266,28 +295,30 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
 
       const projectPath = useProjectStore.getState().currentProject?.path
 
+      const memoryScopeDistill = getMemoryScope(input)
       const [userIdx, projectIdx] = await Promise.all([
         loadMemoryIndex('user'),
         projectPath
-          ? loadMemoryIndex('project', projectPath)
+          ? loadMemoryIndex('project', projectPath, memoryScopeDistill ?? undefined)
           : Promise.resolve({ content: null } as { content: string | null }),
       ])
 
       const userEntries = userIdx.content ? parseIndexEntries(userIdx.content) : []
       const projectEntries = projectIdx.content ? parseIndexEntries(projectIdx.content) : []
 
+      const memoryScope = getMemoryScope(input)
       const files: import('../memdir').MemoryFile[] = []
       const loadOps: Promise<unknown>[] = []
       for (const e of userEntries) {
         loadOps.push(
-          loadMemoryFile('user', memoryFilenameFor(e.type, e.name)).then(f => {
+          loadMemoryFile('user', memoryFilenameFor(e.type, e.name), undefined, memoryScope ?? undefined).then(f => {
             if (f) files.push(f)
           }),
         )
       }
       for (const e of projectEntries) {
         loadOps.push(
-          loadMemoryFile('project', memoryFilenameFor(e.type, e.name), projectPath).then(f => {
+          loadMemoryFile('project', memoryFilenameFor(e.type, e.name), projectPath, memoryScope ?? undefined).then(f => {
             if (f) files.push(f)
           }),
         )
@@ -349,6 +380,60 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
         lines.push(`> Note: the input was truncated to fit the model's window. Re-run distill_memory after applying a first batch — the remaining entries will be considered next time.`)
       }
       return lines.join('\n')
+    },
+  })
+
+  // === update_session_memory ===
+  ctx.tools.set('update_session_memory', {
+    definition: {
+      name: 'update_session_memory',
+      description: 'Update session-scoped memory notes that survive context compaction but do not persist across sessions. Use for: in-progress work state, decisions made this session, partial results, things to remember after compact. The notes are injected into the system prompt after compaction so you can resume without loss. Write in bullet-point markdown. Each call REPLACES the previous notes (not appends).',
+      input_schema: {
+        type: 'object',
+        properties: {
+          notes: {
+            type: 'string',
+            description: 'Complete session memory notes in markdown. Replaces previous. Include: current task status, key decisions, files being worked on, pending next steps, any blockers.',
+          },
+        },
+        required: ['notes'],
+      },
+    },
+    execute: async (args) => {
+      const notes = String(args.notes || '').trim()
+      if (!notes) return 'update_session_memory failed: `notes` is required.'
+
+      try {
+        const { useChatStore } = await import('../../../stores/chatStore')
+        useChatStore.getState().setSessionMemory(notes)
+        return `Session memory updated (${notes.length} chars). These notes will survive context compaction.`
+      } catch {
+        return 'update_session_memory failed: could not access chat store.'
+      }
+    },
+  })
+
+  // === read_session_memory ===
+  ctx.tools.set('read_session_memory', {
+    definition: {
+      name: 'read_session_memory',
+      description: 'Read the current session memory notes. Use to check what was recorded earlier in this session — especially useful after compaction when earlier conversation context was summarized.',
+      input_schema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    execute: async () => {
+      try {
+        const { useChatStore } = await import('../../../stores/chatStore')
+        const session = useChatStore.getState().getActiveSession()
+        if (!session?.sessionMemory) {
+          return '(no session memory recorded yet — call update_session_memory to start tracking session state)'
+        }
+        return session.sessionMemory
+      } catch {
+        return 'read_session_memory failed: could not access chat store.'
+      }
     },
   })
 }

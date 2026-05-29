@@ -1,4 +1,5 @@
 import { useChatStore } from '../../../stores/chatStore'
+import { t } from '../../../i18n'
 import { runAgentWithCallbacks } from '../agentRunner'
 import { logger } from '../../../utils/logger'
 import type { SlashCommandMode } from '../slashCommandRegistry'
@@ -49,13 +50,7 @@ export async function executePayments(
   const chatStore = useChatStore.getState()
 
   if (!args.trim()) {
-    chatStore.addSystemMessage(
-      'Usage: /payments <what you want to implement>\n\n' +
-      'Examples:\n' +
-      '  /payments integrate Multicaixa Express\n' +
-      '  /payments add all payment methods with webhooks\n' +
-      '  /payments setup testing environment for payments'
-    )
+    chatStore.addSystemMessage(t('payments.usage'))
     return
   }
 
@@ -66,14 +61,14 @@ export async function executePayments(
   } catch (err) {
     logger.error('payments', 'Failed to fetch skills:', err)
     chatStore.addSystemMessage(
-      'Failed to load payment skills. Check your internet connection and try again.'
+      t('payments.loadFailed')
     )
     return
   }
 
   if (!skillsContent) {
     chatStore.addSystemMessage(
-      'Could not fetch any payment skills from the repository.'
+      t('payments.noneFound')
     )
     return
   }

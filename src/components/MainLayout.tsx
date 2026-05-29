@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Flex, Box } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -17,9 +17,11 @@ import GeneratingView from './views/GeneratingView'
 import PreviewView from './views/PreviewView'
 import EditorView from './views/EditorView'
 import PermissionDialog from './chat/PermissionDialog'
+import PlanViewerPanel from './chat/PlanViewerPanel'
+import { useTranslation } from '@/i18n'
 import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
-// RequirementsDialog removed — templates disabled
+
 import SettingsView from './views/SettingsView'
 import DataViewerView from './views/DataViewerView'
 import { useCodeEditorState } from '../hooks/useEditorState'
@@ -31,10 +33,16 @@ import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 
 function MainLayout() {
+  const t = useTranslation()
   const viewMode = useLayoutStore(s => s.viewMode)
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
+  const approve = usePermissionStore(s => s.approve)
+  const approveAlwaysInProject = usePermissionStore(s => s.approveAlwaysInProject)
+  const approveAlwaysGlobal = usePermissionStore(s => s.approveAlwaysGlobal)
+  const deny = usePermissionStore(s => s.deny)
+  const denyWith = usePermissionStore(s => s.denyWith)
   const currentProject = useCurrentProject()
   const { handleFileSelect } = useCodeEditorState()
 
@@ -49,6 +57,56 @@ function MainLayout() {
   useEffect(() => {
     if (viewMode === 'preview' && !previewMounted) setPreviewMounted(true)
   }, [viewMode, previewMounted])
+
+  // Chat panel width when preview is active (resizable, persisted)
+  const MIN_CHAT_W = 320
+  const MAX_CHAT_W = 640
+  const DEFAULT_CHAT_W = 380
+  const [previewChatWidth, setPreviewChatWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('main-chat-panel-width')
+      if (saved) {
+        const parsed = parseInt(saved, 10)
+        if (parsed >= MIN_CHAT_W && parsed <= MAX_CHAT_W) return parsed
+      }
+    } catch { /* ignore */ }
+    return DEFAULT_CHAT_W
+  })
+  const [isResizing, setIsResizing] = useState(false)
+  const resizeHandleRef = useRef<HTMLDivElement>(null)
+
+  const handleResizeStart = useCallback((e: React.PointerEvent) => {
+    e.preventDefault()
+    const handleEl = resizeHandleRef.current
+    if (!handleEl) return
+    const pid = e.pointerId
+    try { handleEl.setPointerCapture(pid) } catch { /* ignore */ }
+    let current = previewChatWidth
+    const body = document.body
+    const prevCursor = body.style.cursor
+    const prevUserSelect = body.style.userSelect
+    body.style.cursor = 'col-resize'
+    body.style.userSelect = 'none'
+    setIsResizing(true)
+    function onPointerMove(pe: PointerEvent) {
+      let next = pe.clientX
+      if (next < MIN_CHAT_W) next = MIN_CHAT_W
+      if (next > MAX_CHAT_W) next = MAX_CHAT_W
+      current = next
+      setPreviewChatWidth(next)
+    }
+    function onPointerUp() {
+      try { localStorage.setItem('main-chat-panel-width', String(current)) } catch { /* ignore */ }
+      try { handleEl?.releasePointerCapture(pid) } catch { /* ignore */ }
+      handleEl?.removeEventListener('pointermove', onPointerMove)
+      handleEl?.removeEventListener('pointerup', onPointerUp)
+      body.style.cursor = prevCursor
+      body.style.userSelect = prevUserSelect
+      setIsResizing(false)
+    }
+    handleEl.addEventListener('pointermove', onPointerMove)
+    handleEl.addEventListener('pointerup', onPointerUp)
+  }, [previewChatWidth])
 
   // Initialize services
   const lspServiceRef = useMemo(() => TypeScriptLspService.getInstance(), [])
@@ -219,94 +277,162 @@ function MainLayout() {
           )}
         </AnimatePresence>
 
-        {/* Content + prompt column */}
-        <Flex direction="column" flex="1" overflow="hidden">
-          {/* Content area */}
-          <Flex flex="1" overflow="hidden" position="relative">
-            {/* Sidebar overlay (file tree) */}
-            {isSidebarVisible && (
-              <>
-                <Box
-                  position="absolute"
-                  inset={0}
-                  bg={tokens.colors.bg.sidebarBackdrop}
-                  zIndex={19}
-                  onClick={() => useLayoutStore.getState().toggleSidebar()}
-                />
-                <Box
-                  position="absolute"
-                  left={0}
-                  top={0}
-                  bottom={0}
-                  width="260px"
-                  bg={tokens.colors.bg.mainLayout}
-                  borderRight={`1px solid ${tokens.colors.border.sidebarPanel}`}
-                  zIndex={20}
-                  boxShadow={tokens.shadow.sidebarOverlay}
-                  css={{
-                    animation: 'slideIn 0.2s ease-out',
-                    '@keyframes slideIn': {
-                      from: { transform: 'translateX(-100%)' },
-                      to: { transform: 'translateX(0)' },
-                    },
-                  }}
-                >
-                  <ExplorerPanel onFileSelect={(path) => {
-                    handleFileSelect(path)
-                    const layout = useLayoutStore.getState()
-                    if (layout.viewMode !== 'editor') {
-                      layout.setViewMode('editor')
-                    }
-                    layout.toggleSidebar()
-                  }} />
-                </Box>
-              </>
-            )}
+        {/* Content + prompt area — row flex with PlanViewerPanel on the right.
+            The column wrapper holds content + prompt; the plan panel is a
+            sibling so it pushes BOTH the content and the prompt bar. */}
+        <Flex flex="1" minH={0} overflow="hidden">
+          {/* Column: content area + prompt bar */}
+          <Flex direction="column" flex="1" minW={0} minH={0} overflow="hidden">
+            {/* Content area */}
+            <Flex flex="1" minH={0} overflow="hidden" position="relative">
+              {/* Sidebar overlay (file tree) */}
+              {isSidebarVisible && (
+                <>
+                  <Box
+                    position="absolute"
+                    inset={0}
+                    bg={tokens.colors.bg.sidebarBackdrop}
+                    zIndex={19}
+                    onClick={() => useLayoutStore.getState().toggleSidebar()}
+                  />
+                  <Box
+                    position="absolute"
+                    left={0}
+                    top={0}
+                    bottom={0}
+                    width="260px"
+                    bg={tokens.colors.bg.mainLayout}
+                    borderRight={`1px solid ${tokens.colors.border.sidebarPanel}`}
+                    zIndex={20}
+                    boxShadow={tokens.shadow.sidebarOverlay}
+                    css={{
+                      animation: 'slideIn 0.2s ease-out',
+                      '@keyframes slideIn': {
+                        from: { transform: 'translateX(-100%)' },
+                        to: { transform: 'translateX(0)' },
+                      },
+                    }}
+                  >
+                    <ExplorerPanel onFileSelect={(path) => {
+                      handleFileSelect(path)
+                      const layout = useLayoutStore.getState()
+                      if (layout.viewMode !== 'editor') {
+                        layout.setViewMode('editor')
+                      }
+                      layout.toggleSidebar()
+                    }} />
+                  </Box>
+                </>
+              )}
 
-            {/* Main view content */}
-            {/* ChatView stays mounted (hidden via CSS) to preserve session, messages and scroll position */}
-            <Box display={viewMode === 'chat' ? 'flex' : 'none'} flex="1" overflow="hidden">
-              <ErrorBoundary>
-                <ChatView />
-              </ErrorBoundary>
-            </Box>
-            {viewMode === 'generating' && (
-              <ErrorBoundary>
-                <GeneratingView />
-              </ErrorBoundary>
-            )}
-            {previewMounted && (
-              <Box display={viewMode === 'preview' ? 'flex' : 'none'} flex="1" overflow="hidden">
-                <ErrorBoundary>
-                  <PreviewView />
-                </ErrorBoundary>
+              {/* Main view content */}
+              <Box flex="1" minW={0} overflow="hidden" display="flex" flexDirection="column">
+                {viewMode === 'editor' ? (
+                  <ErrorBoundary>
+                    <EditorView />
+                  </ErrorBoundary>
+                ) : viewMode === 'settings' ? (
+                  <ErrorBoundary>
+                    <SettingsView />
+                  </ErrorBoundary>
+                ) : viewMode === 'data' ? (
+                  <ErrorBoundary>
+                    <DataViewerView />
+                  </ErrorBoundary>
+                ) : viewMode === 'generating' && !previewMounted ? (
+                  <ErrorBoundary>
+                    <GeneratingView />
+                  </ErrorBoundary>
+                ) : (
+                  <Flex flex="1" overflow="hidden">
+                    <Box
+                      w={viewMode === 'preview' ? `${previewChatWidth}px` : '100%'}
+                      h="100%"
+                      flexShrink={0}
+                      overflow="hidden"
+                      display="flex"
+                      flexDirection="column"
+                      transition={isResizing ? 'none' : 'width 0.3s ease'}
+                    >
+                      <ErrorBoundary>
+                        <ChatView />
+                      </ErrorBoundary>
+                      {viewMode === 'preview' && (
+                        pendingPermission ? (
+                          <PermissionDialog
+                            toolName={pendingPermission.toolName}
+                            args={pendingPermission.args}
+                            promptReason={pendingPermission.promptReason ?? null}
+                            approve={approve}
+                            approveAlwaysInProject={approveAlwaysInProject}
+                            approveAlwaysGlobal={approveAlwaysGlobal}
+                            deny={deny}
+                            denyWith={denyWith}
+                          />
+                        ) : (
+                          <PromptBar />
+                        )
+                      )}
+                    </Box>
+                    {viewMode === 'preview' && (
+                      <Box
+                        ref={resizeHandleRef}
+                        role="separator"
+                        aria-label={t('mainLayout.resizeChat')}
+                        aria-orientation="vertical"
+                        w="4px"
+                        cursor="col-resize"
+                        flexShrink={0}
+                        bg={isResizing ? tokens.colors.accent.primary : 'transparent'}
+                        transition={isResizing ? 'none' : 'background 0.15s ease'}
+                        _hover={{ bg: tokens.colors.accent.primary }}
+                        onPointerDown={handleResizeStart}
+                        position="relative"
+                        zIndex={2}
+                      />
+                    )}
+                    <AnimatePresence>
+                      {viewMode === 'preview' && (
+                        <motion.div
+                          key="preview-pane"
+                          style={{ flex: 1, overflow: 'hidden', display: 'flex' }}
+                          initial={{ opacity: 0, x: 40 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          exit={{ opacity: 0, x: 40 }}
+                          transition={{ duration: 0.25, ease: 'easeOut' }}
+                        >
+                          <ErrorBoundary>
+                            <PreviewView />
+                          </ErrorBoundary>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </Flex>
+                )}
               </Box>
-            )}
-            {viewMode === 'editor' && (
-              <ErrorBoundary>
-                <EditorView />
-              </ErrorBoundary>
-            )}
-            {viewMode === 'settings' && (
-              <ErrorBoundary>
-                <SettingsView />
-              </ErrorBoundary>
-            )}
-            {viewMode === 'data' && (
-              <ErrorBoundary>
-                <DataViewerView />
-              </ErrorBoundary>
+            </Flex>
+
+            {/* Permission dialog / PromptBar — in preview mode, rendered inside the chat sidebar wrapper */}
+            {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && viewMode !== 'data' && (
+              pendingPermission ? (
+                <PermissionDialog
+                  toolName={pendingPermission.toolName}
+                  args={pendingPermission.args}
+                  promptReason={pendingPermission.promptReason ?? null}
+                  approve={approve}
+                  approveAlwaysInProject={approveAlwaysInProject}
+                  approveAlwaysGlobal={approveAlwaysGlobal}
+                  deny={deny}
+                  denyWith={denyWith}
+                />
+              ) : (
+                <PromptBar />
+              )
             )}
           </Flex>
 
-          {/* Permission dialog - shown above PromptBar when agent needs approval */}
-          {/* In preview mode, PermissionDialog is rendered inside PreviewView */}
-          {pendingPermission && viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'data' && (
-            <PermissionDialog />
-          )}
-
-          {/* PromptBar - hidden in editor, preview, settings, and data viewer */}
-          {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && viewMode !== 'data' && <PromptBar />}
+          {/* Plan Viewer side panel — 600px, full height, pushes everything left */}
+          <PlanViewerPanel />
         </Flex>
       </Flex>
 

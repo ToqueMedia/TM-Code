@@ -10,9 +10,9 @@
 
 import {
   READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES,
-  GET_DIAGNOSTICS, READ_SKILL, READ_LARGE_RESULT,
-  UPDATE_TASKS, CHECK_BACKGROUND_AGENTS,
-  WEB_SEARCH, WEB_FETCH, RESEARCH,
+  READ_SKILL, READ_LARGE_RESULT,
+  UPDATE_TASKS, COLLECT_RESULTS,
+  WEB_SEARCH, WEB_FETCH, DELEGATE,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   ASK_USER_QUESTION,
 } from './toolNames'
@@ -22,11 +22,11 @@ import {
 export const PLAN_MODE_ALLOWED_TOOLS: ReadonlySet<string> = new Set<string>([
   // Reading the project — every architect operation depends on these
   READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES,
-  GET_DIAGNOSTICS, READ_SKILL, READ_LARGE_RESULT,
+  READ_SKILL, READ_LARGE_RESULT,
   // Internal task list (not project files)
-  UPDATE_TASKS, CHECK_BACKGROUND_AGENTS,
-  // Research while drafting the plan
-  WEB_SEARCH, WEB_FETCH, RESEARCH,
+  UPDATE_TASKS, COLLECT_RESULTS,
+  // Delegation + research while drafting the plan
+  WEB_SEARCH, WEB_FETCH, DELEGATE,
   // Writing the deliverable. Path-restricted to PLAN.md / TODO.md below.
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   // Structured clarifying questions — blocks the agent loop until the developer answers
@@ -79,7 +79,7 @@ export function checkPlanModeAccess(
 ): string | null {
   if (!PLAN_MODE_ALLOWED_TOOLS.has(toolName)) {
     const allowedList = [
-      READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES, GET_DIAGNOSTICS, READ_SKILL,
+      READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES, READ_SKILL,
       UPDATE_TASKS, WEB_SEARCH, WEB_FETCH, ASK_USER_QUESTION,
     ].join(', ')
     return `Blocked in /plan architect mode: ${toolName} is an implementation tool. Document what this step would do in PLAN.md's Implementation Phases section — the coding agent will run it after the user approves the plan. Allowed in this mode: ${allowedList}, ${WRITE_FILE}/${CREATE_FILE}/${EDIT_FILE} (PLAN.md or TODO.md only).`

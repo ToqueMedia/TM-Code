@@ -11,6 +11,7 @@
  */
 
 import { IS_MAC, IS_WINDOWS } from '@/utils/platform'
+import { buildMemoryGuidanceSection } from '../../memoryGuidance'
 import SkillService from '../../skillService'
 import {
   READ_FILE, SEARCH_FILES, GLOB,
@@ -72,7 +73,7 @@ export function getCmdClosedLoopSection(): string {
  - When you installed dependencies, **CONFIRM** exit code 0 before writing code that depends on them.
 
 **Verification before completion:**
- - For code changes: **RUN** the type checker or linter (e.g., \`npx tsc --noEmit\`) and **CONFIRM** zero errors.
+ - When finishing a coding session or after significant changes, **CONSIDER** running the type checker via \`execute_command_background({ command: "./node_modules/.bin/tsc --noEmit" })\` (background, non-blocking). If \`tsc\` is not installed, try \`npx tsc --noEmit\` via \`execute_command\` with a generous timeout.
  - **FIX** errors and repeat until clean.
  - **SAY SO EXPLICITLY** when verification is not possible (no test, no type checker).
 
@@ -113,9 +114,8 @@ export function getCmdToolsSection(): string {
  - Use dedicated tools (\`${READ_FILE}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`) instead of shell commands for file operations. Reserve \`${EXECUTE_COMMAND}\` for system commands and terminal operations only.
  - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. Mark each task as completed as soon as you are done with it.
  - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
- - \`research\`: parallel sub-agent with read+write access. Blocks your turn until complete. **Caller-parameterized effort**: pass \`thoroughness: "quick"\` (1-3 tool calls), \`"medium"\` (3-8 calls, default), or \`"thorough"\` (comprehensive multi-location search). Pick the smallest that answers the question.
- - \`spawn_background_agent\`: read-only sub-agent (enforced at harness level — the agent literally cannot write or execute commands, regardless of what it attempts). Runs independently, results via \`check_background_agents\`. **Caller-parameterized effort**: same \`thoroughness\` parameter as \`research\`.
- - \`verify\`: optional verification agent that checks your work by running tests, type checks, and diagnostics. **Read-only enforced at harness level** — edit/write tools are disallowed by the runtime, not just by the prompt. Returns PASS, FAIL, or PARTIAL.`
+ - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel. After delegating, if you have no other work, end your turn — results will be available on next interaction.
+ - \`collect_results\`: collect results from team members. Returns immediately with finished results — does NOT block. The system auto-wakes you when new results arrive.`
 }
 
 export function getCmdEnvironmentSection(ctx: CmdPromptContext): string {
@@ -152,7 +152,7 @@ Files:
 
 Verification (Terminal mode — do NOT run dev servers):
  - **DO NOT** invoke \`npm run dev\`, \`yarn dev\`, \`pnpm dev\`, or \`start_dev_server\`. Terminal mode is a terminal session — long-running background processes are hard for the user to terminate cleanly and leave orphaned ports.
- - To validate changes, prefer **non-blocking** checks: \`get_diagnostics\` (TS/JS), \`tsc --noEmit\`, \`eslint\`, \`npm run build\` / \`yarn build\` (one-shot, exits on its own), unit/integration tests (\`npm test\`, \`pytest\`, \`cargo test\`, etc.).
+ - To validate changes, prefer **non-blocking** checks: \`tsc --noEmit\` (via execute_command_background), \`eslint\`, \`npm run build\` / \`yarn build\` (one-shot, exits on its own), unit/integration tests (\`npm test\`, \`pytest\`, \`cargo test\`, etc.).
  - When the user wants to see the app running, ASK them to run the dev command themselves — don't start it yourself.
 
 Safety:
@@ -237,6 +237,75 @@ export function getCmdClaudeMdSection(ctx: CmdPromptContext): string | null {
     ? ctx.claudeMdContent.slice(0, 8000) + '\n\n[... truncated — read CLAUDE.md for full content]'
     : ctx.claudeMdContent
   return `# claudeMd\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of ${ctx.normalizedCwd}/CLAUDE.md (project instructions):\n${sanitizeProjectContent(truncated)}`
+}
+
+/**
+ * CMD-mode session memory. Reads from CmdPromptContext.sessionMemory
+ * (loaded in the gather phase alongside TMS.md and CLAUDE.md).
+ * Returns null when no session memory has been recorded yet.
+ */
+export function getCmdSessionMemorySection(ctx: CmdPromptContext): string | null {
+  if (!ctx.sessionMemory) return null
+  return [
+    '# Session memory',
+    'Notes the agent has recorded for this session to survive context compaction. ' +
+    'These reflect in-progress work, decisions made, and pending next steps. ' +
+    'Treat as authoritative for "where was I" after compaction.',
+    '',
+    ctx.sessionMemory,
+  ].join('\n')
+}
+
+/**
+ * CMD-mode persistent memory — user-scope + project-scope MEMORY.md indexes.
+ *
+ * Parity with chat mode's `getMemorySection`. The indexes are short (one
+ * line per entry) so injecting both in full is cheap — CMD mode doesn't
+ * run the relevance selector (it's a lighter interface), but the indexes
+ * themselves give the model cross-session context it otherwise lacks.
+ */
+export function getCmdMemorySection(ctx: CmdPromptContext): string | null {
+  const user = ctx.userMemoryIndex
+  const project = ctx.projectMemoryIndex
+  if (!user && !project) return null
+
+  const parts: string[] = ['# Persistent memory']
+  parts.push(
+    `Cross-session facts the developer and prior sessions established. ` +
+    `**Treat as authoritative**: when a memory contradicts your prior, the memory wins. ` +
+    `Each entry below is a one-line summary — use \`read_memory(name, type)\` to load the full body when you need the *Why* / *How to apply* detail.`,
+  )
+
+  if (ctx.memoryHasStale) {
+    parts.push(
+      `**Freshness:** some entries below are old. For entries that cite specific file paths, ` +
+      `function names, or flags, verify against current code (\`read_file\` / \`search_files\`) before recommending.`,
+    )
+  }
+
+  if (user) {
+    parts.push('## User memory (cross-project)')
+    parts.push(user)
+  }
+  if (project) {
+    parts.push('## Project memory (this project)')
+    parts.push(project)
+  }
+
+  parts.push(
+    `When you learn something new about the developer, the project, or how to do work here, ` +
+    `call \`save_memory\` to persist it. When a memory turns out to be wrong, call \`forget_memory\`.`,
+  )
+
+  return parts.join('\n\n')
+}
+
+/**
+ * CMD-mode memory tools guidance — delegates to the shared module
+ * in `memoryGuidance.ts` (single source of truth).
+ */
+export function getCmdMemoryToolsGuidanceSection(): string {
+  return buildMemoryGuidanceSection()
 }
 
 export function getCmdLanguageReinforcementSection(ctx: CmdPromptContext): string | null {

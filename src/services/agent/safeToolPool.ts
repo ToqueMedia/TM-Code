@@ -141,6 +141,9 @@ export interface ExecutePoolOptions {
   toolExecutor: ToolExecutor
   /** Loop-level abort signal — pool stops dispatching once aborted. */
   abortSignal: AbortSignal | null | undefined
+  /** Per-invocation memory scope for sub-agents. Passed to toolExecutor.execute()
+   *  so memory tools write to the correct scoped directory without shared state. */
+  memoryScope?: string | null
   /** Per-tool execution timeout. Default: 5 minutes. */
   toolTimeoutMs?: number
   /**
@@ -197,6 +200,7 @@ export async function executeToolCalls(
     toolCalls,
     toolExecutor,
     abortSignal,
+    memoryScope,
     toolTimeoutMs = DEFAULT_TOOL_TIMEOUT_MS,
     maxParallel = DEFAULT_MAX_PARALLEL,
     onToolStart,
@@ -316,7 +320,7 @@ export async function executeToolCalls(
       // createPermissionAwareTimeout for the rationale.
       const timer = createPermissionAwareTimeout(toolCall.name, toolTimeoutMs)
       const raw = await Promise.race([
-        toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id, abortSignal ?? undefined),
+        toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id, abortSignal ?? undefined, memoryScope),
         timer.promise,
       ]).finally(timer.cleanup)
 
@@ -501,6 +505,7 @@ export class StreamingSafeToolPool {
     onToolResult?: (toolCall: PoolToolCall, rawResult: string, isError: boolean) => void | Promise<void>,
     maxParallel = 10,
     toolTimeoutMs = 300_000,
+    private memoryScope?: string | null,
   ) {
     this.toolExecutor = toolExecutor
     this.abortSignal = abortSignal
@@ -633,7 +638,7 @@ export class StreamingSafeToolPool {
     try {
       const timer = createPermissionAwareTimeout(toolCall.name, this.toolTimeoutMs)
       const raw = await Promise.race([
-        this.toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id, this.abortSignal ?? undefined),
+        this.toolExecutor.execute(toolCall.name, toolCall.args, toolCall.id, this.abortSignal ?? undefined, this.memoryScope),
         timer.promise,
       ]).finally(timer.cleanup)
 

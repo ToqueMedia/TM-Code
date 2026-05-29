@@ -13,9 +13,10 @@ interface OnboardingNavProps {
   backLabel?: string
   nextLabel?: string
   delay?: number
+  nextDisabled?: boolean
 }
 
-function OnboardingNav({ onBack, onNext, backLabel = 'Back', nextLabel = 'Continue', delay = 0.4 }: OnboardingNavProps) {
+function OnboardingNav({ onBack, onNext, backLabel = 'Back', nextLabel = 'Continue', delay = 0.4, nextDisabled = false }: OnboardingNavProps) {
   return (
     <MotionFlex
       initial={{ y: 20, opacity: 0 }}
@@ -39,10 +40,16 @@ function OnboardingNav({ onBack, onNext, backLabel = 'Back', nextLabel = 'Contin
       <button
         type="button"
         className="ob-btn ob-btn-primary"
-        onClick={onNext}
-        style={{ ...primaryBtnStyle, padding: '11px 36px' }}
-        onMouseEnter={primaryHoverEnter}
-        onMouseLeave={primaryHoverLeave}
+        onClick={nextDisabled ? undefined : onNext}
+        disabled={nextDisabled}
+        style={{
+          ...primaryBtnStyle,
+          padding: '11px 36px',
+          opacity: nextDisabled ? 0.4 : 1,
+          cursor: nextDisabled ? 'not-allowed' : 'pointer',
+        }}
+        onMouseEnter={nextDisabled ? undefined : primaryHoverEnter}
+        onMouseLeave={nextDisabled ? undefined : primaryHoverLeave}
       >
         {nextLabel}
       </button>

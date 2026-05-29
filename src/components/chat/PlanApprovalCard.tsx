@@ -2,7 +2,6 @@ import { memo, useCallback } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiFileText, FiCheck, FiEdit2, FiX } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
-import { useEditorRepository } from '../../stores/editorStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { handlePlanApprove, handlePlanRequestChanges, handlePlanReject } from '../../services/agent/commands/planCommand'
 import { FileService } from '../../services/fileService'
@@ -19,27 +18,29 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
   const { projectPath, status } = card
 
   const handleApprove = useCallback(async () => {
-    // Once the user clicks Approve, the card commits to the terminal
-    // 'approved' state — the buttons are gone for good. A failure in TODO
-    // generation surfaces as a separate error system message in the
-    // transcript; reverting the card to 'pending' (the prior behaviour)
-    // made it look like nothing had happened and let the user double-click
-    // an already-decided plan, which the user flagged as broken UX.
+    useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'approved')
     await handlePlanApprove(projectPath)
   }, [messageId, projectPath])
 
   const handleChanges = useCallback(() => {
+    useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'changes_requested')
     handlePlanRequestChanges(projectPath)
   }, [messageId, projectPath])
 
   const handleReject = useCallback(() => {
+    useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'rejected')
     handlePlanReject()
   }, [messageId])
 
   const handleViewPlan = useCallback(async () => {
+    const layout = useLayoutStore.getState()
+    if (layout.isPlanViewerOpen) {
+      layout.setPlanViewerOpen(false)
+      return
+    }
     const planPath = `${projectPath}/PLAN.md`
     try {
       await FileService.readFile(planPath)
@@ -49,8 +50,7 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
       )
       return
     }
-    useEditorRepository.getState().openFile(planPath)
-    useLayoutStore.getState().setViewMode('editor')
+    layout.setPlanViewerOpen(true)
   }, [projectPath])
 
   return (

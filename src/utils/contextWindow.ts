@@ -48,10 +48,17 @@ export function getEffectiveContextWindowSize(
   maxOutputTokens?: number | null,
 ): number {
   if (contextWindow <= 0) return 0
-  const reserved = Math.min(
-    maxOutputTokens && maxOutputTokens > 0 ? maxOutputTokens : MAX_OUTPUT_TOKENS_FOR_SUMMARY,
-    MAX_OUTPUT_TOKENS_FOR_SUMMARY,
-  )
+  const baseReserved = maxOutputTokens && maxOutputTokens > 0
+    ? Math.min(maxOutputTokens, MAX_OUTPUT_TOKENS_FOR_SUMMARY)
+    : MAX_OUTPUT_TOKENS_FOR_SUMMARY
+
+  // Adaptive reserved headroom: if the context window is small (<= 64K),
+  // we scale down the headroom to be at most 20% of the context window.
+  // This ensures effective context window is never choked or negative.
+  const reserved = contextWindow <= 64_000
+    ? Math.min(baseReserved, Math.floor(contextWindow * 0.20))
+    : baseReserved
+
   return Math.max(0, contextWindow - reserved)
 }
 
@@ -68,8 +75,14 @@ export function getAutoCompactThreshold(
   // Adaptive buffer: floor of 13K on small windows (≤256K), scales to 5% of
   // effective on larger windows. On 1M: buffer = max(13K, 49K) = 49K, giving
   // the next turn ~49K of breathing room instead of a dangerously tight 13K.
+  // If the effective window itself is small (<= 64K), we scale down the floor
+  // buffer to 15% of the effective window to prevent it from choking the space.
+  const baseBufferFloor = effective <= 64_000
+    ? Math.floor(effective * 0.15)
+    : AUTOCOMPACT_BUFFER_FLOOR
+
   const buffer = Math.max(
-    AUTOCOMPACT_BUFFER_FLOOR,
+    baseBufferFloor,
     Math.floor(effective * AUTOCOMPACT_BUFFER_PCT),
   )
   return Math.max(0, effective - buffer)
@@ -88,8 +101,14 @@ export function getWarningThreshold(
 ): number {
   const effective = getEffectiveContextWindowSize(contextWindow, maxOutputTokens)
   const trigger = getAutoCompactThreshold(contextWindow, maxOutputTokens)
+
+  // Adaptive warning buffer: scale down floor if effective window is small (<= 64K)
+  const baseWarningFloor = effective <= 64_000
+    ? Math.floor(effective * 0.10)
+    : WARNING_THRESHOLD_BUFFER_FLOOR
+
   const buffer = Math.max(
-    WARNING_THRESHOLD_BUFFER_FLOOR,
+    baseWarningFloor,
     Math.floor(effective * WARNING_THRESHOLD_BUFFER_PCT),
   )
   return Math.max(0, trigger - buffer)

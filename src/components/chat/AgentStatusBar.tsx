@@ -9,7 +9,7 @@ import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { useBillingStore, isInOverageState } from '../../stores/billingStore'
 import { useThinkingToggle } from '../../hooks/useThinkingToggle'
-import { useBackgroundAgentStore } from '../../stores/backgroundAgentStore'
+import { useSubAgentStore } from '../../stores/subAgentStore'
 import { useBackgroundCommandStore } from '../../stores/backgroundCommandStore'
 import { getCommandQueueSnapshot } from '../../services/agent/messageQueue'
 import AgentService from '../../services/agent/agentService'
@@ -43,7 +43,7 @@ function AgentStatusBar() {
   // Overage UI fires for either explicit overage status OR cycle exhausted (spillover)
   const usingTmsOverage = isInOverageState(billingStatus, consumedPct)
   const isBudgetBlocked = billingStatus === 'rejected'
-  const bgAgents = useBackgroundAgentStore(s => s.agents)
+  const subAgentRuns = useSubAgentStore(s => s.runs)
   const bgCommands = useBackgroundCommandStore(s => s.commands)
   const agentTasks = useAgentStore(s => s.tasks)
   const queueLength = getCommandQueueSnapshot().length
@@ -52,6 +52,8 @@ function AgentStatusBar() {
     usePermissionStore.getState().clearPending()
     usePermissionStore.getState().resetAutoApprove()
     resolveAllPendingDiffApprovals(false)
+    // Abort all running sub-agents before stopping the main agent
+    useSubAgentStore.getState().abortAll()
     AgentService.getInstance().cancelLoop()
     useAgentStore.getState().setStatus('idle')
     useChatStore.getState().finalizeAssistantMessage()
@@ -102,8 +104,8 @@ function AgentStatusBar() {
 
   // Build info segments — derive counts from raw store data (avoids infinite re-render loop)
   const runningServers = mcpServers.filter(s => s.status === 'running')
-  const bgTotal = bgAgents.size
-  const bgRunning = Array.from(bgAgents.values()).filter(a => a.status === 'running').length
+  const bgTotal = subAgentRuns.size
+  const bgRunning = Array.from(subAgentRuns.values()).filter(a => a.status === 'running').length
   const bgCmdRunning = Array.from(bgCommands.values()).filter(c => c.status === 'running').length
   const bgCmdCompleted = Array.from(bgCommands.values()).filter(c => c.status === 'completed').length
   const bgCmdErrored = Array.from(bgCommands.values()).filter(c => c.status === 'error').length
@@ -230,10 +232,10 @@ function AgentStatusBar() {
             borderRadius="4px"
             bg="rgba(163, 113, 247, 0.08)"
             color={tokens.colors.accent.purple}
-            title="Thinking is always-on for this model"
+            title={t('chat.thinkingAlwaysOn')}
           >
             <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
-              ⚡ Thinking
+              ⚡ {t('chat.thinkingLabel')}
             </Text>
           </Flex>
         )}

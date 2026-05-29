@@ -29,7 +29,6 @@ const TOOL_DISPLAY: Record<string, ToolDisplay> = {
   execute_command: { running: 'Running', done: 'Ran', failed: 'Command failed' },
   start_dev_server: { running: 'Starting dev server', done: 'Dev server started', failed: 'Dev server failed' },
   read_dev_server_logs: { running: 'Reading logs', done: 'Logs read', failed: 'Log read failed' },
-  get_diagnostics: { running: 'Inspecting diagnostics', done: 'Diagnostics ready', failed: 'Diagnostics failed' },
   read_large_result: { running: 'Reading slice', done: 'Read slice', failed: 'Slice read failed' },
   web_search: { running: 'Searching the web', done: 'Web results', failed: 'Web search failed' },
   web_fetch: { running: 'Fetching', done: 'Fetched', failed: 'Fetch failed' },

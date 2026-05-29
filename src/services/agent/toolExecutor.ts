@@ -1,5 +1,6 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { listen } from '@tauri-apps/api/event'
+import { t } from '@/i18n'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -35,7 +36,6 @@ import { resolveWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
-// TypeScriptLspService removed — get_diagnostics now uses npx tsc directly
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
 import type { AgentCallbacks } from './agentService'
@@ -97,7 +97,7 @@ interface ToolEntry {
  * When the parent fires, the child fires too. If the parent is already
  * aborted at call time, the child is aborted immediately.
  *
- * Used by research, verify, and spawn_background_agent to propagate
+ * Used by sub-agents to propagate
  * the per-call abort signal to sub-agent loops without duplicating the
  * 5-line linking pattern at each call site.
  */
@@ -173,6 +173,15 @@ class ToolExecutor {
   private planMode: boolean = false
 
   /**
+   * Memory scope — set per-invocation by execute() when a sub-agent
+   * passes its agentType. Memory tools read from execInput._memoryScope
+   * (via getMemoryScope(input) helper in memoryOps.ts), which is set
+   * from this field at the start of each execute() call.
+   * No shared mutable state between concurrent sub-agents.
+   */
+  private memoryScopeAgentType: string | null = null
+
+  /**
    * Plan-mode progress flags. Together they enforce the architect contract:
    *
    *   1. update_tasks is BLOCKED until PLAN.md is written (no task list without a plan).
@@ -212,7 +221,9 @@ class ToolExecutor {
       validatePathWithinProject: (p: string) => { this.validatePathWithinProject(p); return p },
       readFileTimestamps: this.readFileTimestamps,
       largeResults: this.largeResults,
+      readLargeResultFromDisk: (id) => this.readLargeResultFromDisk(id),
       getCmdModeCwd: () => this.cmdModeCwd,
+      getMemoryScopeAgentType: () => this.memoryScopeAgentType,
       getPlanMode: () => this.planMode,
       getPlanFileWritten: () => this.planFileWritten,
       setPlanTasksSeeded: (v: boolean) => { this.planTasksSeeded = v },
@@ -310,11 +321,18 @@ class ToolExecutor {
     input: Record<string, unknown>,
     toolCallId?: string,
     signal?: AbortSignal,
+    memoryScope?: string | null,
   ): Promise<string> {
     const tool = this.tools.get(toolName)
     if (!tool) {
       throw new Error(`Unknown tool: ${toolName}`)
     }
+
+    // Per-invocation memory scope — passed by SafeToolPool via execute().
+    // Memory tools read from execInput._memoryScope (via getMemoryScope(input)
+    // helper in memoryOps.ts). Always reset to prevent leakage between
+    // main-agent and sub-agent tool calls.
+    this.memoryScopeAgentType = memoryScope ?? null
 
     // Phase B: pre-check abort signal at entry. If the loop already cancelled
     // before this tool got dispatched (e.g., user hit ESC during streaming),
@@ -399,13 +417,14 @@ class ToolExecutor {
     }
 
     // Agent-internal tools + tools that surface their own confirmation UI:
-    // bypass the generic permission dialog. update_tasks/check_background_agents
+    // bypass the generic permission dialog. update_tasks/check_team/task
     // are autonomous; request_credentials renders a secure form in the chat
     // (Save/Skip is the gate, not the permission dialog); ask_user_question
     // renders an interactive question card (Submit/Cancel is the gate).
     const PERMISSION_EXEMPT_TOOLS = new Set([
       'update_tasks',
-      'check_background_agents',
+      'collect_results',
+      'delegate',
       'check_background_commands',
       'request_credentials',
       'ask_user_question',
@@ -433,6 +452,9 @@ class ToolExecutor {
     const execInput: Record<string, unknown> = { ...input }
     if (toolCallId) execInput._toolCallId = toolCallId
     if (signal) execInput._abortSignal = signal
+    // Per-call memory scope — sub-agent runner passes this so memory tools
+    // scope writes correctly without shared mutable state.
+    if (memoryScope) execInput._memoryScope = memoryScope
 
     const result = await tool.execute(execInput)
     // Diff results must never be truncated — the UI needs full JSON for InlineDiff,
@@ -528,6 +550,10 @@ class ToolExecutor {
   /** Large result storage — maps reference IDs to full content for later retrieval. */
   private largeResults: Map<string, string> = new Map()
   private largeResultCounter = 0
+  /** Disk directory for persisting large results across session reloads.
+   *  Set by setLargeResultsDir() when a session is loaded. When null,
+   *  disk persistence is disabled (in-memory only). */
+  private largeResultsDir: string | null = null
   /** Incremental byte counter kept in sync with `largeResults` set/delete
    *  ops. Avoids the O(N) `for ... values()` total-scan that the byte-cap
    *  eviction loop used to do on every `truncateResult` call. */
@@ -545,6 +571,43 @@ class ToolExecutor {
   private static readonly LARGE_RESULT_MAX_ENTRIES = 20
 
   /**
+   * Set the disk directory for large result persistence. Called when a
+   * session is loaded so that large results survive session reloads.
+   * Pass null to disable disk persistence (in-memory only).
+   */
+  setLargeResultsDir(dir: string | null): void {
+    this.largeResultsDir = dir
+  }
+
+  /**
+   * Persist a large result to disk (fire-and-forget). Writes to
+   * `<largeResultsDir>/<refId>.txt`. Errors are silently ignored —
+   * the in-memory Map is the primary store, disk is a fallback.
+   */
+  private persistLargeResultToDisk(refId: string, content: string): void {
+    if (!this.largeResultsDir) return
+    const path = `${this.largeResultsDir}/${refId}.txt`
+    import('@/utils/invokeMetrics')
+      .then(({ invoke }) => invoke('write_file', { path, content }))
+      .catch(() => { /* disk persistence is best-effort */ })
+  }
+
+  /**
+   * Read a large result from disk (async). Returns null if not found
+   * or if disk persistence is disabled.
+   */
+  async readLargeResultFromDisk(refId: string): Promise<string | null> {
+    if (!this.largeResultsDir) return null
+    try {
+      const { invoke } = await import('@/utils/invokeMetrics')
+      const path = `${this.largeResultsDir}/${refId}.txt`
+      return await invoke<string>('read_file', { path })
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * Handles large tool results: if the result exceeds the threshold,
    * stores the full output in memory and returns a reference with a preview.
    * The model can retrieve the full output via read_large_result tool.
@@ -558,6 +621,9 @@ class ToolExecutor {
     const refId = `large_result_${++this.largeResultCounter}`
     this.largeResults.set(refId, result)
     this.largeResultsTotalBytes += result.length
+
+    // Persist to disk (fire-and-forget) so large results survive session reloads.
+    this.persistLargeResultToDisk(refId, result)
 
     // S2: byte-budget eviction. Pop oldest until we fit under the cap.
     // O(K) where K is the number of entries evicted, not O(N) like before.
@@ -779,7 +845,6 @@ ${preview}
   }
 
   private getProjectRoot(): string {
-    if (this.cmdModeCwd) return this.cmdModeCwd
     const project = useProjectStore.getState().currentProject
     if (project?.path) return project.path
     // CMD-mode fallback: TerminalView never populates currentProject
@@ -787,6 +852,7 @@ ${preview}
     // by the WelcomeScreen and persists for the entire CMD session.
     const cmdPath = useProjectStore.getState().cmdModeProjectPath
     if (cmdPath) return cmdPath
+    if (this.cmdModeCwd) return this.cmdModeCwd
     throw new Error('No project is open. Cannot perform file operations without an active project.')
   }
 
@@ -1628,9 +1694,9 @@ ${preview}
             })
           }).catch(() => { /* never block on telemetry */ })
           if (wrongName) {
-            return `Error: this tool expects \`old_string\` (and \`new_string\`). You passed: ${passedKeys.join(', ')}. Rename your field to old_string / new_string and retry.`
+            return `${t('tool.wrongFieldNames').replace('{fields}', passedKeys.join(', '))}`
           }
-          return 'Error: old_string cannot be empty. Provide the exact text you want to replace.'
+          return t('tool.emptyOldString')
         }
 
         this.validatePathWithinProject(path)
@@ -1810,7 +1876,7 @@ ${preview}
         const idToken = await firebaseAuth.getIdToken()
 
         if (!idToken) {
-          return 'Error: Not authenticated. Cannot fetch web content.'
+          return t('tool.notAuthenticated')
         }
 
         const workerUrl = resolveWorkerUrl()
@@ -1898,9 +1964,9 @@ ${preview}
         const cmd = (input.command as string).trim()
         this.validateCommand(cmd)
 
-        // Scope cwd to project root
+        // Scope cwd to project root or dynamic terminal directory
         const projectRoot = this.getProjectRoot()
-        const cwd = (input.cwd as string) || projectRoot
+        const cwd = (input.cwd as string) || (this.cmdModeCwd || projectRoot)
         this.validatePathWithinProject(cwd)
 
         // Detect package-manager install commands so they get the streaming
@@ -2096,64 +2162,6 @@ ${preview}
       }
     })
 
-    // === get_diagnostics ===
-    this.tools.set('get_diagnostics', {
-      definition: {
-        name: 'get_diagnostics',
-        description: 'Get TypeScript/JavaScript diagnostics for the developer\'s project. Runs "npx tsc --noEmit" with a 15-second timeout. For faster checks on a single file, prefer running "npx tsc --noEmit path/to/file.ts" via execute_command.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            file_path: { type: 'string', description: 'Absolute path to a TS/JS file or the project root. If a file, checks only that file. If a directory, checks the whole project.' }
-          },
-          required: ['file_path']
-        },
-        // Spawns `npx tsc --noEmit` via execute_command. Read-only — no side effects on
-        // the user's project. Safe to run in parallel with other read-only tools.
-        concurrencySafe: true,
-      },
-      execute: async (input) => {
-        const filePath = input.file_path as string
-        this.validatePathWithinProject(filePath)
-
-        // Use tsc --noEmit directly instead of the IDE's internal LSP
-        // (the LSP is configured for the IDE, not the developer's project)
-        const projectRoot = this.getProjectRoot()
-        const isFile = filePath.includes('.') && !filePath.endsWith('/')
-        const cmd = isFile
-          ? `npx tsc --noEmit "${filePath}" 2>&1 || true`
-          : `npx tsc --noEmit 2>&1 || true`
-        const cwd = isFile ? projectRoot : filePath
-
-        try {
-          const result = await invoke<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }>('execute_command', {
-            command: cmd,
-            cwd,
-            timeoutSecs: 15,
-          })
-
-          if (result.timedOut) {
-            return `Diagnostics timed out after 15s. The project may not have TypeScript configured. Try running "npx tsc --noEmit" manually via execute_command with a longer timeout.`
-          }
-
-          const output = (result.stdout + '\n' + result.stderr).trim()
-          if (!output || result.exitCode === 0) {
-            return `No type errors found.`
-          }
-
-          // Limit output to prevent context bloat
-          const lines = output.split('\n')
-          if (lines.length > 30) {
-            return lines.slice(0, 30).join('\n') + `\n\n[... ${lines.length - 30} more lines — run tsc manually for full output]`
-          }
-          return output
-        } catch (error) {
-          const msg = error instanceof Error ? error.message : String(error)
-          return `Diagnostics failed: ${msg}. Try running "npx tsc --noEmit" via execute_command as a fallback.`
-        }
-      }
-    })
-
 
 
     // === read_dev_server_logs ===
@@ -2292,357 +2300,123 @@ ${preview}
       }
     })
 
-    // === research (sub-agent) ===
-    this.tools.set('research', {
+    // === delegate (sub-agent delegation — v0.7.0) ===
+    this.tools.set('delegate', {
       definition: {
-        name: 'research',
-        description: 'Delegate a task to a parallel sub-agent that can read, create, edit, search files, AND search the internet. Use to investigate code, refactor in parallel, research technical topics online, or handle independent sub-tasks. Multiple research calls run concurrently. The sub-agent returns a text summary of what it did.',
+        name: 'delegate',
+        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, grep, read_file, list_directory). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
         input_schema: {
           type: 'object',
           properties: {
-            question: { type: 'string', description: 'The task or question for the sub-agent' },
-            context: { type: 'string', description: 'Optional context to help the sub-agent (e.g., relevant file paths, what you already know)' },
+            subagent_type: {
+              type: 'string',
+              enum: ['Explore', 'Research', 'Verify'],
+              description: 'Which team member to delegate to.'
+            },
+            description: {
+              type: 'string',
+              description: 'Short label (3-5 words) for the task. Shown in the team activity indicator.'
+            },
+            prompt: {
+              type: 'string',
+              description: 'Self-contained task description. The team member sees nothing from your conversation. Be specific about what you need back as a final summary.'
+            },
             thoroughness: {
               type: 'string',
               enum: ['quick', 'medium', 'thorough'],
-              description: 'How much effort the sub-agent should spend. "quick" = single targeted lookup (1-3 tool calls, one location); "medium" = moderate exploration (3-8 tool calls, a few related locations); "thorough" = comprehensive search across multiple locations and naming conventions. You have the context to pick — choose the smallest that will answer the question. Defaults to "medium" when omitted.'
+              description: 'Controls search depth. "quick" = first match, stop. "medium" = check 2-3 locations. "thorough" = comprehensive sweep across naming conventions and edge cases. Default: medium.'
             }
           },
-          required: ['question']
-        }
+          required: ['subagent_type', 'description', 'prompt']
+        },
+        concurrencySafe: true,
       },
       execute: async (input) => {
-        const question = input.question as string
-        const context = (input.context as string) || ''
-        const thoroughness = (input.thoroughness as 'quick' | 'medium' | 'thorough' | undefined) ?? 'medium'
+        const subagentType = input.subagent_type as string
+        const description = (input.description as string) || 'delegation'
+        const prompt = input.prompt as string
+        const thoroughness = (input.thoroughness as string as 'quick' | 'medium' | 'thorough') || 'medium'
 
-        // Lazy import to avoid circular dependency
-        const { default: AgentService } = await import('./agentService')
+        // Resolve the definition (concurrent limit is checked atomically inside startRun)
+        const { getAgentDefinition } = await import('./subAgents/builtInAgents')
+        const def = getAgentDefinition(subagentType as 'Explore' | 'Research' | 'Verify')
+        if (!def) {
+          return `Blocked: unknown sub-agent type '${subagentType}'. Available: Explore, Research, Verify.`
+        }
 
-        // Sub-agent tools: read, write, create, edit, search, glob, diagnostics + web research
-        const subAgentToolNames = new Set([
-          'read_file', 'write_file', 'create_file', 'edit_file',
-          'list_directory', 'search_files', 'glob', 'get_diagnostics',
-          'web_search',   // native on DashScope models, side-car to Qwen on GLM-5.1
-          'web_fetch',    // frontend fetches a specific URL
-        ])
-        const subAgentTools = this.getToolDefinitions().filter(t =>
-          subAgentToolNames.has(t.function.name)
-        )
-
-        // Phase B: derive the sub-agent's abort from the per-call signal.
-        const subAbort = createLinkedAbortController(input._abortSignal as AbortSignal | undefined)
-        const subAgent = AgentService.createLightweight({
-          tools: subAgentTools,
-          readOnly: false,
-          abortController: subAbort,
-        })
-
-        const projectRoot = this.getProjectRoot()
-        // Caller-parameterized verbosity (technique #17). The parent agent
-        // knows whether this is a quick "where is X defined" probe or a
-        // deep refactor investigation — pass it through so the sub-agent
-        // calibrates effort accordingly. Wrong-sized effort is the most
-        // expensive failure mode: "thorough" on a 1-file question wastes
-        // turns; "quick" on a refactor question misses the bug.
-        const effortDirective = thoroughness === 'quick'
-          ? '**Effort: QUICK** — single targeted lookup. Stop after 1-3 tool calls. Do not branch into related questions — answer the literal question and return.'
-          : thoroughness === 'thorough'
-            ? '**Effort: THOROUGH** — comprehensive search. Cover multiple locations and naming conventions, follow related references, read full files (not snippets) when relevant. Report what you searched, not just what you found.'
-            : '**Effort: MEDIUM** — moderate exploration. Check 2-3 likely locations, follow references one hop deep, then synthesise. Do not exhaustively enumerate; do not stop at the first plausible match.'
-        const systemPrompt = `You are a sub-agent inside TM Code. Complete the task using the available tools. You can read, create, edit, and search files, AND search the internet for information.
-
-${effortDirective}
-
-Available tools:
-- File operations: read_file, write_file, create_file, edit_file
-- Search: search_files (ripgrep), glob, list_directory
-- Web research:
-  - web_search — takes a natural-language query and returns ranked results with titles, snippets, and URLs. This is how you discover what pages exist on a topic.
-  - web_fetch — takes one complete target URL you already know and returns the contents of that single page. This is how you read the body of a specific article, doc, or API reference.
-  - Typical flow: start with web_search to find relevant URLs, then web_fetch on the most promising result to read its full content.
-- Diagnostics: get_diagnostics
-
-Project root: ${projectRoot}`
-
-        subAgent.setSystemPrompt(systemPrompt)
-
-        const prompt = context
-          ? `${question}\n\nContext: ${context}`
-          : question
-
-        let result = ''
-        let totalTokens = 0
-        let toolsCalled = 0
-        const toolCallId = input._toolCallId as string | undefined
-
-        const updateProgress = (status: string) => {
-          if (toolCallId) {
-            const tokenStr = totalTokens > 0 ? ` | ${Math.round(totalTokens / 1000)}K tokens` : ''
-            useChatStore.getState().updateToolCallProgress(toolCallId, `${status}${tokenStr}`)
+        // Build filtered tools — only the sub-agent's allowed tools
+        const allowedTools = new Set(def.tools)
+        const disallowedTools = new Set(def.disallowedTools ?? [])
+        const filteredTools: OpenAIToolDefinition[] = []
+        for (const [name, entry] of this.tools) {
+          if (name === 'delegate' || name === 'collect_results') continue // block recursive delegation
+          if (disallowedTools.has(name)) continue
+          if (allowedTools.has(name)) {
+            filteredTools.push({
+              type: 'function' as const,
+              function: {
+                name: entry.definition.name,
+                description: entry.definition.description,
+                parameters: entry.definition.input_schema,
+              },
+            })
           }
         }
 
-        updateProgress('Starting research...')
+        // Build parent context
+        const settingsStore = (await import('../../stores/settingsStore')).useSettingsStore.getState()
+        const parentCtx = {
+          cmdOnlyMode: !!this.ctx.getCmdModeCwd(),
+          workingPath: this.ctx.getProjectRoot(),
+          agentLanguage: settingsStore.agentLanguage ?? 'en',
+          thoroughness,
+        }
 
-        // Forward every sub-agent event to the main chatStore so the user sees
-        // the FULL activity in real-time. Visibility logic extracted to a pure
-        // helper — see src/services/agent/subAgentVisibility.ts.
-        const chatStore = useChatStore.getState()
-        const { useAgentStore } = await import('../../stores/agentStore')
-        const agentStore = useAgentStore.getState()
-        const { createSubAgentVisibility } = await import('./subAgentVisibility')
+        // Get parent message ID — find the USER message that triggered
+        // this turn, not the streaming assistant message (which is last).
+        const { useChatStore } = await import('../../stores/chatStore')
+        const chatState = useChatStore.getState()
+        const activeSessionId = chatState.activeSessionId
+        const session = activeSessionId ? chatState.sessions.get(activeSessionId) : null
+        const messages = session?.messages || []
+        let parentMessageId: string | undefined
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === 'user') {
+            parentMessageId = messages[i].id
+            break
+          }
+        }
 
-        const visibility = createSubAgentVisibility({
-          parentToolCallId: toolCallId,
-          reasoningLabel: 'research sub-agent',
-          hooks: {
-            // Buffered variants — sub-agent SSE bumps streamingVersion at
-            // the same 50ms cadence as the parent agent loop. Without the
-            // swap, every sub-agent token was a fresh re-render of the
-            // streaming bubble even though the parent had already batched
-            // its own.
-            appendTextDelta: appendTextDeltaBuffered,
-            appendReasoningDelta: appendReasoningDeltaBuffered,
-            addPendingToolCall: chatStore.addPendingToolCall,
-            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
-            updateToolCallWithResult: chatStore.updateToolCallWithResult,
-            setStatus: (s) => agentStore.setStatus(s),
-          },
-        })
+        // Fire and forget — returns immediately. Throws if concurrent limit (4) is reached.
+        let runId: string
+        try {
+          const { runSubAgent } = await import('./subAgents/subAgentRunner')
+          runId = await runSubAgent({
+            definition: def,
+            prompt,
+            description,
+            parentMessageId,
+            parentCtx,
+            filteredTools,
+          })
+        } catch (e) {
+          return `Error: ${e instanceof Error ? e.message : String(e)}`
+        }
 
-        await subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => {
-            result += delta
-            visibility.callbacks.onTextDelta(delta)
-          },
-          onReasoningDelta: (delta) => {
-            visibility.callbacks.onReasoningDelta(delta)
-            updateProgress('Thinking...')
-          },
-          onToolCallPending: (childId, toolName) => {
-            toolsCalled++
-            visibility.callbacks.onToolCallPending(childId, toolName)
-            updateProgress(`Using ${toolName}...`)
-          },
-          onToolCallStart: (childId, toolName, args) => {
-            visibility.callbacks.onToolCallStart(childId, toolName, args)
-            const target = (args.file_path as string)?.replace(/\\/g, '/').split('/').pop()
-              || (args.query as string)
-              || (args.pattern as string)
-              || (args.url as string)
-              || ''
-            updateProgress(`${toolName}: ${target}`)
-          },
-          onToolResult: (childId, toolName, res, isError) => {
-            visibility.callbacks.onToolResult(childId, toolName, res, isError)
-          },
-          onTurnComplete: () => {},
-          onDone: (finalText) => {
-            if (finalText && !result) result = finalText
-            updateProgress(`Done — ${toolsCalled} tool calls`)
-          },
-          onError: (error) => {
-            result = `Research error: ${error.message}`
-            visibility.cleanupOrphans(`aborted: research sub-agent failed — ${error.message}`)
-            updateProgress('Error')
-          },
-          onUsageUpdate: (inputTokens, outputTokens) => {
-            totalTokens += inputTokens + outputTokens
-          },
-        } satisfies AgentCallbacks)
+        // Wire subAgentRunIds so SubAgentCard renders in the UI.
+        if (parentMessageId) {
+          chatState.appendSubAgentRunId(parentMessageId, runId)
+        }
 
-        return result || 'No results found.'
+        return `Task ${runId} started (${subagentType}: "${description}"). Results will be available when ready.`
       }
     })
 
-    // === spawn_background_agent ===
-    this.tools.set('spawn_background_agent', {
+    // === collect_results (v0.7.0) ===
+    this.tools.set('collect_results', {
       definition: {
-        name: 'spawn_background_agent',
-        description: 'Start a background sub-agent that works independently while you continue. The sub-agent can read, search, and analyze files but CANNOT write or execute commands. Use for research tasks that do not need immediate results. Returns a tracking ID — use check_background_agents to retrieve results later.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            question: { type: 'string', description: 'The task or question for the background agent' },
-            context: { type: 'string', description: 'Optional context (file paths, prior knowledge)' },
-            thoroughness: {
-              type: 'string',
-              enum: ['quick', 'medium', 'thorough'],
-              description: 'How much effort the background agent should spend. "quick" = single targeted probe; "medium" = moderate exploration; "thorough" = comprehensive multi-location search. Background agents have a 30-turn cap, so "thorough" may still be bounded. Defaults to "medium" when omitted.'
-            },
-          },
-          required: ['question']
-        }
-      },
-      execute: async (input) => {
-        const question = input.question as string
-        const context = (input.context as string) || ''
-        const thoroughness = (input.thoroughness as 'quick' | 'medium' | 'thorough' | undefined) ?? 'medium'
-
-        const { useBackgroundAgentStore } = await import('../../stores/backgroundAgentStore')
-        const bgStore = useBackgroundAgentStore.getState()
-
-        if (bgStore.getRunningCount() >= 4) {
-          return 'Cannot start: maximum 4 background agents running. Wait for one to complete or use check_background_agents.'
-        }
-
-        const { default: AgentService } = await import('./agentService')
-
-        // Read-only tool subset
-        const bgToolNames = new Set([
-          'read_file', 'list_directory', 'search_files', 'glob',
-          'get_diagnostics', 'web_fetch',
-        ])
-        const bgTools = this.getToolDefinitions().filter(t =>
-          bgToolNames.has(t.function.name)
-        )
-
-        // Phase B: derive bg agent abort from the per-call signal.
-        const bgAbort = createLinkedAbortController(input._abortSignal as AbortSignal | undefined)
-
-        const subAgent = AgentService.createLightweight({
-          tools: bgTools,
-          readOnly: true,
-          maxTurns: 30,
-          abortController: bgAbort,
-        })
-
-        const projectRoot = this.getProjectRoot()
-        // Caller-parameterized verbosity (technique #17). Parent picks the
-        // effort level based on what they actually need; the background
-        // agent calibrates rather than always running at full thoroughness.
-        const effortDirective = thoroughness === 'quick'
-          ? '**Effort: QUICK** — single targeted probe. Stop after 1-3 tool calls.'
-          : thoroughness === 'thorough'
-            ? '**Effort: THOROUGH** — comprehensive multi-location search (bounded by the 30-turn cap). Cover alternative naming conventions and follow related references.'
-            : '**Effort: MEDIUM** — moderate exploration. 2-3 likely locations, references one hop deep, then synthesise.'
-        subAgent.setSystemPrompt(
-          `You are a background research agent inside TM Code. Investigate the task using read-only tools and produce a clear summary.\n\n${effortDirective}\n\nProject root: ${projectRoot}`
-        )
-
-        const agentId = `bg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-        const prompt = context ? `${question}\n\nContext: ${context}` : question
-
-        bgStore.addAgent({
-          id: agentId,
-          question,
-          status: 'running',
-          result: null,
-          toolsCalled: 0,
-          totalTokens: 0,
-          progressText: 'Starting...',
-          startedAt: Date.now(),
-          completedAt: null,
-          abortController: bgAbort,
-        })
-
-        // Fire and forget — do NOT await
-        let resultText = ''
-        let tokens = 0
-        let calls = 0
-
-        // Forward events to the main chatStore AND the bg store. The key
-        // difference from research/verify: we capture the active `streamingMessageId`
-        // at spawn time and pass it as `targetMessageId` to every chat-store write.
-        // This keeps the sub-agent's tool calls flowing into the SAME assistant
-        // message even after the main turn finalizes (at which point
-        // `streamingMessageId` becomes null). Without this, bg-agent activity
-        // past the main turn end would be invisible in the chat feed.
-        const parentToolCallId = input._toolCallId as string | undefined
-        const chatStore = useChatStore.getState()
-        const targetMessageId = chatStore.streamingMessageId ?? undefined
-        const { useAgentStore } = await import('../../stores/agentStore')
-        const agentStore = useAgentStore.getState()
-        const { createSubAgentVisibility } = await import('./subAgentVisibility')
-
-        const visibility = createSubAgentVisibility({
-          parentToolCallId,
-          reasoningLabel: 'background sub-agent',
-          targetMessageId,
-          hooks: {
-            // Buffered variants — sub-agent SSE bumps streamingVersion at
-            // the same 50ms cadence as the parent agent loop. Without the
-            // swap, every sub-agent token was a fresh re-render of the
-            // streaming bubble even though the parent had already batched
-            // its own.
-            appendTextDelta: appendTextDeltaBuffered,
-            appendReasoningDelta: appendReasoningDeltaBuffered,
-            addPendingToolCall: chatStore.addPendingToolCall,
-            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
-            updateToolCallWithResult: chatStore.updateToolCallWithResult,
-            setStatus: (s) => agentStore.setStatus(s),
-          },
-        })
-
-        subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => {
-            resultText += delta
-            visibility.callbacks.onTextDelta(delta)
-          },
-          onReasoningDelta: (delta) => {
-            visibility.callbacks.onReasoningDelta(delta)
-            bgStore.updateProgress(agentId, 'Thinking...', calls, tokens)
-          },
-          onToolCallPending: (childId, toolName) => {
-            calls++
-            visibility.callbacks.onToolCallPending(childId, toolName)
-            bgStore.updateProgress(agentId, `Using ${toolName}...`, calls, tokens)
-          },
-          onToolCallStart: (childId, toolName, args) => {
-            visibility.callbacks.onToolCallStart(childId, toolName, args)
-            const target = (args.file_path as string)?.replace(/\\/g, '/').split('/').pop()
-              || (args.query as string)
-              || (args.pattern as string)
-              || ''
-            bgStore.updateProgress(agentId, `${toolName}: ${target}`, calls, tokens)
-          },
-          onToolResult: (childId, toolName, res, isError) => {
-            visibility.callbacks.onToolResult(childId, toolName, res, isError)
-          },
-          onTurnComplete: () => {},
-          onDone: (finalText) => {
-            if (finalText && !resultText) resultText = finalText
-            useBackgroundAgentStore.getState().completeAgent(agentId, resultText || 'No results found.')
-          },
-          onError: (error) => {
-            visibility.cleanupOrphans(`aborted: background sub-agent failed — ${error.message}`)
-            useBackgroundAgentStore.getState().failAgent(agentId, error.message)
-          },
-          onUsageUpdate: (inp, out) => {
-            tokens += inp + out
-          },
-        } satisfies AgentCallbacks).catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err)
-          visibility.cleanupOrphans(`aborted: background sub-agent crashed — ${msg}`)
-          useBackgroundAgentStore.getState().failAgent(agentId, msg)
-        })
-
-        return `Background agent "${agentId}" started for: "${question}". Use check_background_agents to see results when ready.`
-      }
-    })
-
-    // request_thinking tool REMOVED — reasoning is always ON when the
-    // active model supports it (claude-vaz parity). The agent does not
-    // request thinking on demand; profile.supportsThinking is the single
-    // switch and it's evaluated in agentService.buildRequestBody.
-
-
-
-
-
-
-    // ── Domain extractions (SOLID decomposition) ─────────────────────
-    registerTaskTools(this.ctx)
-    registerMemoryTools(this.ctx)
-    registerInteractionTools(this.ctx)
-    registerProvisionTools(this.ctx)
-
-    // === check_background_agents ===
-    this.tools.set('check_background_agents', {
-      definition: {
-        name: 'check_background_agents',
-        description: 'Check the status and results of background agents. Returns all running and recently completed agents with their results.',
+        name: 'collect_results',
+        description: 'Collect results from team members. Returns immediately with all finished results. If some members are still running, their status is shown but results are not yet available — call collect_results again later to get them. This is non-blocking by design.',
         input_schema: {
           type: 'object',
           properties: {},
@@ -2650,33 +2424,67 @@ Project root: ${projectRoot}`
         }
       },
       execute: async () => {
-        const { useBackgroundAgentStore } = await import('../../stores/backgroundAgentStore')
-        const agents = useBackgroundAgentStore.getState().getAll()
+        const { useSubAgentStore } = await import('../../stores/subAgentStore')
+        const store = useSubAgentStore.getState()
 
-        if (agents.length === 0) {
-          return 'No background agents have been started.'
+        // Nothing to check
+        if (store.runs.size === 0) {
+          return 'No team tasks are active. Use the delegate tool to assign work to team members first.'
         }
 
-        const lines: string[] = []
-        for (const agent of agents) {
-          const elapsed = agent.completedAt
-            ? `${Math.round((agent.completedAt - agent.startedAt) / 1000)}s`
-            : `${Math.round((Date.now() - agent.startedAt) / 1000)}s elapsed`
+        const summaries = store.getRunSummaries()
+        const lines: string[] = ['## Team Results\n']
 
-          if (agent.status === 'running') {
-            lines.push(`[RUNNING] ${agent.id}: "${agent.question}" (${elapsed}, ${agent.toolsCalled} tools, ${agent.progressText})`)
-          } else if (agent.status === 'completed') {
-            lines.push(`[DONE] ${agent.id}: "${agent.question}" (${elapsed}, ${agent.toolsCalled} tools)\nResult:\n${agent.result}`)
-          } else if (agent.status === 'error') {
-            lines.push(`[ERROR] ${agent.id}: "${agent.question}" — ${agent.result}`)
-          } else if (agent.status === 'cancelled') {
-            lines.push(`[CANCELLED] ${agent.id}: "${agent.question}"`)
+        let runningCount = 0
+
+        for (const s of summaries) {
+          const duration = (s.duration / 1000).toFixed(0)
+          const icon = s.status === 'completed' ? '✅'
+            : s.status === 'error' ? '❌'
+            : s.status === 'timeout' ? '⏰'
+            : s.status === 'aborted' ? '🛑'
+            : '⏳'
+
+          if (s.status === 'running') {
+            runningCount++
+            lines.push(`### ${icon} ${s.agentType}: "${s.description}" — still running (${duration}s, ${s.toolCallCount} tool calls so far)`)
+          } else {
+            lines.push(`### ${icon} ${s.agentType}: "${s.description}" (${duration}s, ${s.toolCallCount} tool calls)`)
+            if (s.tokenUsage) {
+              lines.push(`Tokens: ${s.tokenUsage.input.toLocaleString()} in / ${s.tokenUsage.output.toLocaleString()} out`)
+            }
+            if (s.status === 'error' && s.errorText) {
+              lines.push(`Error: ${s.errorText}`)
+            } else if (s.finalText) {
+              lines.push(s.finalText)
+            } else if (s.status === 'aborted') {
+              lines.push('Task was aborted.')
+            }
           }
+          lines.push('') // blank separator
         }
 
-        return lines.join('\n\n')
+        if (runningCount > 0) {
+          lines.push(`${runningCount} team member${runningCount > 1 ? 's' : ''} still working. Results will be available when they finish.`)
+        }
+
+        // Only clear completed runs when ALL runs are done (no running left).
+        // If some are still running, keep completed ones so the model can still
+        // reference them in its next turn (the auto-wake will fire again when
+        // the remaining ones finish).
+        if (runningCount === 0) {
+          store.clearCompleted()
+        }
+
+        return lines.join('\n')
       }
     })
+
+    // ── Domain extractions (SOLID decomposition) ─────────────────────
+    registerTaskTools(this.ctx)
+    registerMemoryTools(this.ctx)
+    registerInteractionTools(this.ctx)
+    registerProvisionTools(this.ctx)
 
     // === execute_command_background ===
     this.tools.set('execute_command_background', {
@@ -2698,7 +2506,7 @@ Project root: ${projectRoot}`
         this.validateCommand(cmd)
 
         const projectRoot = this.getProjectRoot()
-        const cwd = (input.cwd as string) || projectRoot
+        const cwd = (input.cwd as string) || (this.cmdModeCwd || projectRoot)
         this.validatePathWithinProject(cwd)
 
         const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
@@ -2902,7 +2710,7 @@ Project root: ${projectRoot}`
         // execute_command gets a modified description warning about read-only restrictions.
         const verifierToolNames = new Set([
           'read_file', 'list_directory', 'search_files', 'glob',
-          'get_diagnostics', 'execute_command', 'read_dev_server_logs',
+          'execute_command', 'read_dev_server_logs',
           'read_large_result',
         ])
         const verifierTools = this.getToolDefinitions()
@@ -2926,7 +2734,7 @@ Project root: ${projectRoot}`
         const subAgent = AgentService.createLightweight({
           tools: verifierTools,
           readOnly: true,
-          maxTurns: 30,
+          maxTurns: 200,
           abortController: verifyAbort,
         })
 

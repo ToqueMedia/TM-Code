@@ -59,7 +59,7 @@ import {
 import {
   getActivePlanSection,
   getAppliedScaffoldingSection,
-  getBackgroundAgentsSection,
+  getBackgroundAgentsSection as getTeamSection,
   getBackgroundCommandsSection,
   getClosedLoopSection,
   getCompletionContractSection,
@@ -78,6 +78,7 @@ import {
   getProjectStructureSection,
   getReadmeSection,
   getReminderSection,
+  getSessionMemorySection,
   getRoleSection,
   getSkillsSection,
   getSystemSection,
@@ -97,7 +98,10 @@ import {
   getCmdExecutingActionsSection,
   getCmdGlobalMemorySection,
   getCmdLanguageReinforcementSection,
+  getCmdMemorySection,
+  getCmdMemoryToolsGuidanceSection,
   getCmdReminderSection,
+  getCmdSessionMemorySection,
   getCmdRoleSection,
   getCmdSecuritySection,
   getCmdSessionGuidanceSection,
@@ -116,6 +120,30 @@ export {
   skillsFromHashtags,
 }
 export type { PromptContext, CmdPromptContext, MCPToolSummary, PackageSummary }
+
+/**
+ * Helper for CMD-mode memory index loading. Loads the MEMORY.md index
+ * and mtime map in parallel, checks for stale entries.
+ * Consolidates the two identical IIFEs that were previously inline.
+ */
+async function loadCmdMemoryIndex(
+  scope: 'user' | 'project',
+  projectPath?: string,
+): Promise<{ content: string | null; hasStale: boolean }> {
+  try {
+    const { loadMemoryIndex, loadMemoryMtimes } = await import('./memdir')
+    const { isMemoryStale } = await import('./memoryAge')
+    const [result, mtimes] = await Promise.all([
+      loadMemoryIndex(scope, projectPath),
+      loadMemoryMtimes(scope, projectPath),
+    ])
+    if (result.content) {
+      const hasStale = Array.from(mtimes.values()).some(m => isMemoryStale(m))
+      return { content: result.content, hasStale }
+    }
+    return { content: null, hasStale: false }
+  } catch { return { content: null, hasStale: false } }
+}
 
 class ContextBuilder {
   private static instance: ContextBuilder
@@ -152,6 +180,7 @@ class ContextBuilder {
   private async runMemoryWork(
     projectPath: string,
     userMessage?: string,
+    accessedPaths?: string[],
   ): Promise<{
     userMemoryIndex: string | null
     projectMemoryIndex: string | null
@@ -183,7 +212,16 @@ class ContextBuilder {
       if (userMessage && combinedBytes > MEMORY_SELECTOR_THRESHOLD_BYTES) {
         const userEntries = userMemoryIndex ? parseIndexEntries(userMemoryIndex, userMtimes) : []
         const projectEntries = projectMemoryIndex ? parseIndexEntries(projectMemoryIndex, projectMtimes) : []
-        const allEntries = [...userEntries, ...projectEntries]
+        let allEntries = [...userEntries, ...projectEntries]
+
+        // Path-scoped filtering: remove entries whose `paths` don't match
+        // any file the agent has accessed this session. Entries without
+        // `paths` are always active (backward compatible).
+        if (accessedPaths && accessedPaths.length > 0) {
+          const { matchesAccessedPaths } = await import('./memdir')
+          allEntries = allEntries.filter(e => matchesAccessedPaths(e.paths, accessedPaths))
+        }
+
         if (allEntries.length > 0) {
           const { selectRelevantMemories } = await import('./memorySelector')
           const { useChatStore } = await import('../../stores/chatStore')
@@ -260,7 +298,7 @@ class ContextBuilder {
     }
   }
 
-  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string): Promise<string> {
+  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[]): Promise<string> {
     // Cache key must include everything that affects the prompt shape.
     // Plan is read below; include it in the key so plan switches bypass the cache.
     let planKey = 'unknown'
@@ -293,7 +331,11 @@ class ContextBuilder {
     // path landed without matching the regex.
     const { getFsVersion } = await import('../fsVersion')
     const fsVersion = getFsVersion()
-    const cacheKey = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}`
+    // Include accessedPaths count in cache key — without this, path-scoped
+    // memory filtering is stale when only reads (not writes) occur between
+    // turns, since reads don't increment fsVersion.
+    const accessedCount = accessedPaths?.length ?? 0
+    const cacheKey = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}`
 
     const now = Date.now()
     const cached = this.promptCache.get(cacheKey)
@@ -322,7 +364,7 @@ class ContextBuilder {
     // shape (Promise.all of disk reads, THEN memory work, THEN render)
     // serialised the selector latency on the critical path; now it
     // hides behind whichever I/O happens to be slowest.
-    const memoryWorkPromise = this.runMemoryWork(projectPath, userMessage)
+    const memoryWorkPromise = this.runMemoryWork(projectPath, userMessage, accessedPaths)
 
     // Gather context in parallel for speed
     const { detectScaffolding } = await import('../scaffoldingDetector')
@@ -353,13 +395,15 @@ class ContextBuilder {
     // Language
     const langInstruction = await getLangInstruction()
 
-    // Load model profile for model-specific behavior (based on plan, not user choice)
+    // Load model profile for model-specific behavior
     let modelProfile: import('./modelProfiles').ModelProfile | null = null
     try {
-      const { getProfileForPlan } = await import('./modelProfiles')
+      const { getProfileForPlan, MODEL_PROFILES } = await import('./modelProfiles')
       const { useBillingStore } = await import('../../stores/billingStore')
+      const { useAgentStore } = await import('../../stores/agentStore')
+      const modelName = useAgentStore.getState().modelName
       const plan = useBillingStore.getState().plan
-      modelProfile = getProfileForPlan(plan)
+      modelProfile = modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName] : getProfileForPlan(plan)
     } catch { /* fallback: no profile */ }
 
     // ═══════════════════════════════════════════════════════════════
@@ -410,6 +454,14 @@ class ContextBuilder {
       pendingMemoryProposals = await buildProposalsReminder(projectPath)
     } catch { /* non-critical */ }
 
+    // Session memory — agent-maintained notes that survive compaction.
+    // Loaded from the active chat session (piggybacks on session persistence).
+    let sessionMemory: string | null = null
+    try {
+      const { useChatStore } = await import('../../stores/chatStore')
+      sessionMemory = useChatStore.getState().getActiveSession()?.sessionMemory ?? null
+    } catch { /* non-critical */ }
+
     const ctx: PromptContext = {
       projectPath,
       normalizedProjectPath: projectPath.replace(/\\/g, '/'),
@@ -436,12 +488,14 @@ class ContextBuilder {
       projectMemoryIndex,
       memoryHasStale,
       pendingMemoryProposals,
+      sessionMemory,
+      accessedFilePaths: accessedPaths,
     }
 
-    // Resolve the async background-agents section once so dynamicSection()
+    // Resolve the async team section once so dynamicSection()
     // can stay synchronous below — the wrapper exists to enforce a
     // declarative `(name, body, reason)` shape, not to host the async I/O.
-    const bgAgentsSection = await getBackgroundAgentsSection()
+    const teamSection = await getTeamSection()
     const bgCommandsSection = await getBackgroundCommandsSection()
 
     const sections = [
@@ -481,6 +535,12 @@ class ContextBuilder {
       // what's there. Mutates on every post-turn extractor run.
       dynamicSection('memory_proposals', () => getPendingMemoryProposalsSection(ctx),
         'extractor proposals mutate post-turn; agent acts on or ignores'),
+      // Session memory — agent-maintained notes that survive compaction.
+      // Placed after memory proposals so the agent reads existing memories
+      // first, then its own session-specific working notes. Mutates when
+      // the agent calls update_session_memory mid-session.
+      dynamicSection('session_memory', () => getSessionMemorySection(ctx),
+        'session memory is updated by update_session_memory tool calls mid-session'),
       // ── Dynamic block (per-session / per-turn) ──────────────────
       // Each section below is wrapped with dynamicSection() and a written
       // reason — cache invalidation is a deliberate architectural choice,
@@ -488,7 +548,7 @@ class ContextBuilder {
       // a regression; if it can be static, move it above the boundary.
       dynamicSection('mcp', () => sharedMcpBlock(ctx.mcpTools, 'developer'),
         'MCP server list changes when developer connects/disconnects servers'),
-      dynamicSection('background_agents', () => bgAgentsSection,
+      dynamicSection('team', () => teamSection,
         'in-flight background agent list changes per turn'),
       dynamicSection('background_commands', () => bgCommandsSection,
         'running/completed background shell commands'),
@@ -531,6 +591,19 @@ class ContextBuilder {
         'cites MCP + skill names captured from current session state'),
     ].filter((s): s is string => s !== null && s !== undefined && s !== '')
 
+    // Per-section byte breakdown for optimization telemetry.
+    // Extracts the first heading (# or ##) as the section name, falls back
+    // to the first 40 chars of content. Top 15 by byte count.
+    const sectionBreakdown = sections
+      .filter(s => !s.includes('__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'))
+      .map(s => {
+        const headingMatch = s.match(/^#{1,2}\s+(.+?)$/m)
+        const name = headingMatch ? headingMatch[1].slice(0, 50) : s.slice(0, 40).replace(/\n/g, ' ')
+        return { name, bytes: s.length, tokens_est: Math.ceil(s.length / 3.5) }
+      })
+      .sort((a, b) => b.bytes - a.bytes)
+      .slice(0, 15)
+
     const full = sections.join('\n\n')
     this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS })
     // Cache-miss telemetry — includes the boundary split bytes so we can
@@ -545,6 +618,7 @@ class ContextBuilder {
       fsVersion,
       mcpToolCount: (mcpTools ?? []).length,
       loadedSkillNames: ctx.loadedSkillNames,
+      sectionBreakdown,
     })
     return full
   }
@@ -558,12 +632,24 @@ class ContextBuilder {
     const normalizedCwd = cwd.replace(/\\/g, '/')
     const normalizedHome = homeDir ? homeDir.replace(/\\/g, '/') : null
 
-    // Parallel gather — language + memory files together
-    const [langInstruction, globalTmsContent, claudeMdContent] = await Promise.all([
+    // Parallel gather — language + memory files + session memory + memdir indexes
+    const [langInstruction, globalTmsContent, claudeMdContent, sessionMemory, userMemIdx, projectMemIdx] = await Promise.all([
       getLangInstruction(),
       normalizedHome ? safeReadFile(`${normalizedHome}/.toquemedia-studio/TMS.md`) : Promise.resolve(null),
       safeReadFile(`${normalizedCwd}/CLAUDE.md`),
+      (async () => {
+        try {
+          const { useChatStore } = await import('../../stores/chatStore')
+          return useChatStore.getState().getActiveSession()?.sessionMemory ?? null
+        } catch { return null }
+      })(),
+      // Persistent memory indexes — same I/O chat mode does in runMemoryWork,
+      // but without the selector (CMD mode is lighter, indexes are cheap).
+      loadCmdMemoryIndex('user'),
+      loadCmdMemoryIndex('project', normalizedCwd),
     ])
+
+    const memoryHasStale = userMemIdx.hasStale || projectMemIdx.hasStale
 
     const ctx: CmdPromptContext = {
       cwd,
@@ -572,6 +658,10 @@ class ContextBuilder {
       normalizedHome,
       globalTmsContent,
       claudeMdContent,
+      sessionMemory,
+      userMemoryIndex: userMemIdx.content,
+      projectMemoryIndex: projectMemIdx.content,
+      memoryHasStale,
       langInstruction,
       mcpTools: mcpTools || [],
     }
@@ -615,6 +705,9 @@ class ContextBuilder {
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
       sharedContextPreservation(),
+      // Memory taxonomy + save/forget discipline — same static block
+      // position as chat mode. The rules are stable across sessions.
+      getCmdMemoryToolsGuidanceSection(),
       // ── Boundary: everything below varies per session / per turn ──
       SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
       // ── Dynamic block (per-session / per-turn) ──────────────────
@@ -640,6 +733,14 @@ class ContextBuilder {
         '~/.toquemedia-studio/TMS.md is user-editable'),
       dynamicSection('claude_md', () => getCmdClaudeMdSection(ctx),
         'CLAUDE.md is per-project and edited by the user'),
+      // Persistent memory — user-scope + project-scope MEMORY.md indexes.
+      // Placed after CLAUDE.md so the model reads project instructions first,
+      // then cross-session memory facts. Same ordering as chat mode.
+      dynamicSection('memory', () => getCmdMemorySection(ctx),
+        'MEMORY.md indexes mutate as save_memory / forget_memory run'),
+      // Session memory — agent-maintained notes that survive compaction.
+      dynamicSection('session_memory', () => getCmdSessionMemorySection(ctx),
+        'session memory is updated by update_session_memory tool calls mid-session'),
       dynamicSection('language_reinforcement', () => getCmdLanguageReinforcementSection(ctx),
         'reinforcement is conditional on detected agent language'),
       // Reminder stays at the very end — U-Curve recency outweighs cache
@@ -648,12 +749,22 @@ class ContextBuilder {
         'cites loaded skill names captured from current session state'),
     ].filter((s): s is string => s !== null && s !== undefined && s !== '')
 
+    const cmdSectionBreakdown = sections
+      .map(s => {
+        const headingMatch = s.match(/^#{1,2}\s+(.+?)$/m)
+        const name = headingMatch ? headingMatch[1].slice(0, 50) : s.slice(0, 40).replace(/\n/g, ' ')
+        return { name, bytes: s.length, tokens_est: Math.ceil(s.length / 3.5) }
+      })
+      .sort((a, b) => b.bytes - a.bytes)
+      .slice(0, 15)
+
     const fullCmd = sections.join('\n\n')
     // CMD mode doesn't have a billing-plan or fsVersion concept (no project
     // is open at the harness level), so we emit "n/a" for the dimensions
     // that don't apply rather than forcing dummy values into the schema.
     emitPromptBuiltTelemetry({
       mode: 'cmd',
+      sectionBreakdown: cmdSectionBreakdown,
       cacheHit: false,
       prompt: fullCmd,
       plan: 'n/a',
@@ -686,6 +797,7 @@ function emitPromptBuiltTelemetry(args: {
   fsVersion: number
   mcpToolCount: number
   loadedSkillNames: string[]
+  sectionBreakdown?: Array<{ name: string; bytes: number; tokens_est: number }>
 }): void {
   const stats = splitOnBoundary(args.prompt)
   import('../../services/analytics').then(({ trackEvent }) =>
@@ -702,6 +814,9 @@ function emitPromptBuiltTelemetry(args: {
       mcp_tool_count: args.mcpToolCount,
       skill_count: args.loadedSkillNames.length,
       skill_names: args.loadedSkillNames.slice(0, 8).join(','),
+      ...(args.sectionBreakdown && {
+        section_breakdown: JSON.stringify(args.sectionBreakdown),
+      }),
     }),
   ).catch(() => { /* analytics failures never block prompt build */ })
 }

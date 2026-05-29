@@ -1,26 +1,15 @@
 // src/hooks/useKeyboardShortcuts.ts
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useProjectStore } from '../stores/projectStore';
 import { useLayoutStore } from '../stores/layoutStore';
 import { useChatStore } from '../stores/chatStore';
 import { useSettingsStore, matchesBinding } from '../stores/settingsStore';
-import { useDialog } from './useDialog';
 import { useEditorRepository } from '../stores/editorStore';
 import MonacoBridge from '../utils/monacoBridge';
+import { t } from '@/i18n';
 
 export function useKeyboardShortcuts() {
-  const { currentProject, closeProject } = useProjectStore();
-  const { open: openProject } = useDialog();
-  const { open: newProject } = useDialog();
-
-  // Stable refs for unstable function identities — prevents useEffect
-  // from re-registering the listener on every render.
-  const openProjectRef = useRef(openProject);
-  const newProjectRef = useRef(newProject);
-  const closeProjectRef = useRef(closeProject);
-  openProjectRef.current = openProject;
-  newProjectRef.current = newProject;
-  closeProjectRef.current = closeProject;
+  const { currentProject } = useProjectStore();
 
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
@@ -42,15 +31,31 @@ export function useKeyboardShortcuts() {
         return;
       }
 
+      // Open File: Cmd+Shift+O (open file dialog)
       if (matchesBinding(e, sc.openFile)) {
         e.preventDefault();
-        openProjectRef.current();
+        try {
+          const { open } = await import('@tauri-apps/plugin-dialog');
+          const selected = await open({ directory: true, multiple: false, title: t('titlebar.selectProject') });
+          if (selected) {
+            const { useProjectStore } = await import('../stores/projectStore');
+            await useProjectStore.getState().openProject(selected as string);
+          }
+        } catch { /* user cancelled */ }
         return;
       }
 
+      // New Project: Cmd+N / Ctrl+N
       if (matchesBinding(e, sc.newProject)) {
         e.preventDefault();
-        newProjectRef.current();
+        try {
+          const { open } = await import('@tauri-apps/plugin-dialog');
+          const selected = await open({ directory: true, title: 'Choose folder' });
+          if (selected) {
+            const { useProjectStore } = await import('../stores/projectStore');
+            await useProjectStore.getState().openProject(selected as string, { initGit: true });
+          }
+        } catch { /* user cancelled */ }
         return;
       }
 
@@ -63,7 +68,7 @@ export function useKeyboardShortcuts() {
             return;
           }
         } catch {}
-        closeProjectRef.current();
+        useProjectStore.getState().closeProject();
         return;
       }
 

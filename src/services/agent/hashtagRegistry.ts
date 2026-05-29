@@ -1,4 +1,5 @@
 import { extractHashtags } from '../../utils/hashtagParser'
+import { t } from '@/i18n'
 import type { Provider } from './commands/authCommand'
 
 /**
@@ -18,9 +19,9 @@ export interface HashtagOption {
 }
 
 export const HASHTAG_OPTIONS: HashtagOption[] = [
-  { tag: '#auth-email-password', description: 'Email + password authentication' },
-  { tag: '#auth-google',         description: 'Sign in with Google' },
-  { tag: '#design',              description: 'Polished UI with bold aesthetic direction — typography, layout, motion' },
+  { tag: '#auth-email-password', description: t('hashtag.authShort') },
+  { tag: '#auth-google',         description: t('hashtag.googleSignInShort') },
+  { tag: '#design',              description: t('hashtag.designShort') },
 ]
 
 /**

@@ -178,6 +178,20 @@ async function runAgentInternal(
     logger.info('agent', `→ MCP tools: ${mcpTools.length} tools registered`)
   }
 
+  // Set disk directory for large result persistence (survives session reloads).
+  // Path: <project>/.toquemedia/sessions/<sessionId>.large-results/
+  if (currentProject?.path) {
+    const { useChatStore } = await import('../../stores/chatStore')
+    const sessionId = useChatStore.getState().activeSessionId
+    if (sessionId) {
+      const dir = `${currentProject.path}/.toquemedia/sessions/${sessionId}.large-results`
+      // Ensure directory exists BEFORE setting the dir — prevents race
+      // where persistLargeResultToDisk fires before mkdir completes.
+      await invoke('create_directories_all', { path: dir }).catch(() => {})
+      toolExecutor.setLargeResultsDir(dir)
+    }
+  }
+
   // Enable CLI mode on the executor — direct disk writes, CWD-scoped path validation.
   // Always paired with disableCmdMode() in the finally block below.
   if (cmdOnlyMode && cmdCwd) {
@@ -211,7 +225,7 @@ async function runAgentInternal(
     // userMessageText carries the raw user input so contextBuilder can detect
     // skill-trigger hashtags (#auth-google etc.) and inline the corresponding
     // CRITICAL rules at turn 1.
-    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText)
+    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths())
   }
   logger.info('agent', `✓ System prompt built (${systemPrompt.length} chars, ${Date.now() - promptBuildStart}ms)`)
 
@@ -347,6 +361,7 @@ async function runAgentInternal(
       onError: (error) => {
         flushBufferedDeltas()
         resolveAllPendingDiffApprovals(false)
+        agentStore.setCompactPhase('idle')
         agentStore.setStatus('error')
         agentStore.setError(error.message)
         logger.info('agent', `✗ Agent error: ${error.message}`)
@@ -359,16 +374,18 @@ async function runAgentInternal(
         logger.info('agent', `→ Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out`)
         useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
       },
-      onContextCompression: (beforeTokens, signal) => {
-        if (signal === 0) {
-          // Compression starting
-          logger.info('agent', `⟳ Context compression starting (current: ${beforeTokens} tokens)...`)
+      onContextCompression: (event) => {
+        if (event.type === 'hooks_start') {
+          agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')
+        } else if (event.type === 'compact_start') {
+          logger.info('agent', `⟳ Context compression starting (current: ${event.beforeTokens} tokens, trigger: ${event.trigger})...`)
+          agentStore.setCompactPhase('compressing')
           agentStore.setStatus('compressing')
-        } else if (signal === -1) {
-          // Compression complete — insert compact boundary marker
+        } else if (event.type === 'compact_end') {
           logger.info('agent', '✓ Context compression complete')
+          agentStore.setCompactPhase('idle')
           agentStore.setStatus('awaiting_response')
-          useChatStore.getState().addCompactBoundaryMessage(beforeTokens)
+          useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized)
         }
       },
     })
@@ -377,6 +394,10 @@ async function runAgentInternal(
     if (cmdOnlyMode && cmdCwd) {
       toolExecutor.disableCmdMode()
     }
+    // Reset compact phase in case compression was in-flight when the loop
+    // exited (error, stop, or unexpected break). Without this, stale phases
+    // like 'compressing' persist in the UI after the agent goes idle.
+    agentStore.setCompactPhase('idle')
     // Restore the preview pane if a browser-driven session hid it. Safe
     // when no session was active (no-op).
     browserSession.endSession()

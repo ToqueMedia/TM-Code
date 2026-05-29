@@ -11,6 +11,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { getFileIconUrl } from '@/utils/fileIcons'
 import { tokens } from '@/theme/tokens'
 import { detectLanguage, highlightLines } from '@/utils/syntaxHighlight'
+import { t } from '@/i18n'
 
 interface ToolCallDisplayProps {
   toolCall: ToolCallDisplayType
@@ -34,29 +35,28 @@ const FILE_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'create_file
 
 /** Human-readable tool labels shown in the chat UI. */
 const TOOL_LABELS: Record<string, string> = {
-  read_file: 'Reading',
-  write_file: 'Writing',
-  create_file: 'Creating',
-  edit_file: 'Editing',
-  delete_file: 'Deleting',
-  rename_file: 'Renaming',
-  list_directory: 'Exploring',
-  create_directory: 'Creating folder',
-  search_files: 'Searching',
-  glob: 'Finding files',
-  execute_command: 'Running',
-  start_dev_server: 'Starting server',
-  get_diagnostics: 'Checking types',
-  read_dev_server_logs: 'Reading server logs',
-  read_large_result: 'Reading output',
-  web_fetch: 'Fetching',
-  research: 'Researching',
-  spawn_background_agent: 'Background task',
-  check_background_agents: 'Checking agents',
-  verify: 'Verifying',
-  update_tasks: 'Updating tasks',
-  request_thinking: 'Activating reasoning',
-  read_skill: 'Loading guide',
+  read_file: t('toolLabel.readingOutput'),
+  write_file: t('toolLabel.writing'),
+  create_file: t('toolLabel.creating'),
+  edit_file: t('toolLabel.editing'),
+  delete_file: t('toolLabel.deleting'),
+  rename_file: t('toolLabel.renaming'),
+  list_directory: t('toolLabel.exploring'),
+  create_directory: t('toolLabel.creatingFolder'),
+  search_files: t('toolLabel.searching'),
+  glob: t('toolLabel.findingFiles'),
+  execute_command: t('toolLabel.running'),
+  start_dev_server: t('toolLabel.startingServer'),
+  read_dev_server_logs: t('toolLabel.readingLogs'),
+  read_large_result: t('toolLabel.readingOutput'),
+  web_fetch: t('toolLabel.fetching'),
+  research: t('toolLabel.researching'),
+  spawn_background_agent: t('toolLabel.backgroundTask'),
+  check_background_agents: t('toolLabel.checkingAgents'),
+  verify: t('toolLabel.verifying'),
+  update_tasks: t('toolLabel.updatingTasks'),
+  request_thinking: t('toolLabel.activatingReasoning'),
+  read_skill: t('toolLabel.loadingGuide'),
 }
 
 /**
@@ -69,14 +69,14 @@ const TOOL_LABELS: Record<string, string> = {
  * label, so a future skill ships without leaking until this map is updated.
  */
 const SKILL_DESCRIPTIONS: Record<string, string> = {
-  'publish-backend': 'Loaded TM Code\'s publish-readiness guide for backends',
-  'auth-proxy': 'Loaded TM Code\'s authentication guide',
-  'google-signin': 'Loaded TM Code\'s Google sign-in guide',
-  'frontend-design': 'Loaded TM Code\'s design system guide',
+  'publish-backend': t('toolLabel.publishGuide'),
+  'auth-proxy': t('toolLabel.authGuide'),
+  'google-signin': t('toolLabel.googleGuide'),
+  'frontend-design': t('toolLabel.designGuide'),
 }
 
 function describeSkill(name: string): string {
-  return SKILL_DESCRIPTIONS[name] || 'Loaded a TM Code guide'
+  return SKILL_DESCRIPTIONS[name] || t('toolLabel.genericGuide')
 }
 
 function getToolLabel(toolName: string): string {
@@ -114,8 +114,6 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       const type = input.server_type === 'backend' ? 'backend' : 'frontend'
       return `${type} server`
     }
-    case 'get_diagnostics':
-      return fileName(fp)
     case 'read_dev_server_logs':
       return `last ${input.lines || 50} lines`
     case 'glob':

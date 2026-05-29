@@ -36,9 +36,16 @@ export interface ToolRegistrationContext {
 
   // ── Large result storage (shared Map) ──────────────────────────────
   largeResults: Map<string, string>
+  /** Read a large result from disk when the in-memory Map has been
+   *  cleared (e.g., after session reload). Returns null if not found. */
+  readLargeResultFromDisk(id: string): Promise<string | null>
 
   // ── CMD mode (getter — reads current value) ────────────────────────
   getCmdModeCwd(): string | null
+
+  // ── Memory scope (getter — reads current value) ────────────────────
+  /** When non-null, memory tools write to a sub-agent–scoped directory. */
+  getMemoryScopeAgentType(): string | null
 
   // ── Plan mode (getters — read current values) ──────────────────────
   getPlanMode(): boolean

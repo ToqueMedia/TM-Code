@@ -51,28 +51,43 @@ function saveAutoApproveDiffs(value: boolean) {
   try { localStorage.setItem(STORAGE_KEY, String(value)) } catch { /* storage unavailable */ }
 }
 
-/** Fire-and-forget write of `approvedScopes` to the current project's
- *  `.toquemedia/permissions.json`. Uses the store's own `projectPath`
- *  so it works in both Chat Mode (set by projectStore.openProject) and
- *  Terminal Mode (set by TerminalView) without depending on projectStore. */
-function persistApprovedScopes(scopes: Set<'core' | 'mcp'>): void {
-  const path = usePermissionStore.getState().projectPath
-  if (!path) return
+/** Fire-and-forget write of `approvedScopes` + `projectToolAllowlist` to
+ *  the current project's `.toquemedia/permissions.json`. Uses the store's
+ *  own `projectPath` so it works in both Chat Mode (set by
+ *  projectStore.openProject) and Terminal Mode (set by TerminalView)
+ *  without depending on projectStore. */
+function persistPermissions(): void {
+  const { projectPath, approvedScopes, projectToolAllowlist } = usePermissionStore.getState()
+  if (!projectPath) return
   void import('../services/agent/permissionPersistence')
-    .then(({ savePermissionsToDisk }) => savePermissionsToDisk(path, scopes))
+    .then(({ savePermissionsToDisk }) => savePermissionsToDisk(projectPath, approvedScopes, projectToolAllowlist))
     .catch(() => { /* persistence failure must not break the permission flow */ })
 }
 
-/** Replace the live `approvedScopes` set — used at project-open time to
- *  hydrate from disk. Exposed as a module function rather than a store
- *  action so the projectStore hook can call it without round-tripping
- *  through React's update queue.
- *  Also sets `projectPath` so `persistApprovedScopes` writes to the
+/** Global tool allowlist — persisted in localStorage (cross-project). */
+const GLOBAL_TOOLS_KEY = 'permission_globalToolAllowlist'
+function loadGlobalToolAllowlist(): Set<string> {
+  try {
+    const raw = localStorage.getItem(GLOBAL_TOOLS_KEY)
+    if (!raw) return new Set()
+    return new Set(JSON.parse(raw) as string[])
+  } catch { return new Set() }
+}
+function saveGlobalToolAllowlist(tools: Set<string>): void {
+  try { localStorage.setItem(GLOBAL_TOOLS_KEY, JSON.stringify(Array.from(tools))) } catch { /* unavailable */ }
+}
+
+/** Replace the live `approvedScopes` and `projectToolAllowlist` sets —
+ *  used at project-open time to hydrate from disk. Exposed as a module
+ *  function rather than a store action so the projectStore hook can call
+ *  it without round-tripping through React's update queue.
+ *  Also sets `projectPath` so `persistPermissions` writes to the
  *  correct project in both Chat Mode and Terminal Mode. */
-export function hydrateApprovedScopes(scopes: Set<'core' | 'mcp'>, projectPath?: string): void {
+export function hydrateApprovedScopes(scopes: Set<'core' | 'mcp'>, projectPath?: string, tools?: Set<string>): void {
   // Set directly — no persistence write here: this IS the load step. The
   // disk file is already canonical; writing back would be a no-op.
   const patch: Partial<PermissionState> = { approvedScopes: scopes }
+  if (tools) patch.projectToolAllowlist = tools
   if (projectPath != null) patch.projectPath = projectPath
   usePermissionStore.setState(patch)
 }
@@ -82,7 +97,6 @@ const SAFE_TOOLS = new Set([
   'list_directory',
   'search_files',
   'glob',
-  'get_diagnostics',
   'read_dev_server_logs',
   'read_large_result',
   'check_background_agents',
@@ -154,11 +168,15 @@ interface PendingPermission {
 
 interface PermissionState {
   /** Current project path — set by whoever opens a project (projectStore
-   *  in Chat Mode, TerminalView in CMD Mode) so persistApprovedScopes
+   *  in Chat Mode, TerminalView in CMD Mode) so persistPermissions
    *  writes to the correct project without depending on projectStore. */
   projectPath: string | null
   /** Scopes where user clicked "Accept All" — 'core' and 'mcp' are independent */
   approvedScopes: Set<'core' | 'mcp'>
+  /** Per-project tool names the user clicked "Always allow in this project" for. */
+  projectToolAllowlist: Set<string>
+  /** Global tool names the user clicked "Always allow" for (cross-project). */
+  globalToolAllowlist: Set<string>
   /** When true, file diffs (write_file/edit_file/create_file) are auto-accepted without user confirmation */
   autoApproveDiffs: boolean
   /** When true, user clicked "Deny All" — auto-deny all non-dangerous queued permissions */
@@ -173,6 +191,10 @@ interface PermissionActions {
   requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason) => Promise<PermissionDecision>
   approve: () => void
   approveAll: () => void
+  /** Approve current + add tool to per-project allowlist (persisted to disk). */
+  approveAlwaysInProject: () => void
+  /** Approve current + add tool to global allowlist (persisted to localStorage). */
+  approveAlwaysGlobal: () => void
   deny: () => void
   /** Deny the current permission and auto-deny all subsequent queued
    *  non-dangerous permissions in the same session. */
@@ -191,10 +213,10 @@ interface PermissionActions {
  * Called after approve/deny resolves the current pending permission.
  */
 function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionState>) => void, get: () => PermissionState & PermissionActions): void {
-  const { permissionQueue, approvedScopes } = get()
+  const { permissionQueue, approvedScopes, projectToolAllowlist, globalToolAllowlist } = get()
   if (permissionQueue.length === 0) return
 
-  // Find the next permission that isn't already auto-approved by scope.
+  // Find the next permission that isn't already auto-approved.
   // Sensitive/flagged permissions ALWAYS show a dialog — never auto-approved.
   const remaining = [...permissionQueue]
   while (remaining.length > 0) {
@@ -203,6 +225,11 @@ function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionSt
       // Flagged command or sensitive file — must show dialog every time
       set(() => ({ pendingPermission: next, permissionQueue: remaining }))
       return
+    }
+    // Check tool-specific allowlists first (more specific than scopes)
+    if (globalToolAllowlist.has(next.toolName) || projectToolAllowlist.has(next.toolName)) {
+      next.resolve({ approved: true, prompted: false, source: 'user' })
+      continue
     }
     const scope = getToolScope(next.toolName)
     if (approvedScopes.has(scope)) {
@@ -221,6 +248,8 @@ function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionSt
 export const usePermissionStore = create<PermissionState & PermissionActions>()((set, get) => ({
   projectPath: null,
   approvedScopes: new Set(),
+  projectToolAllowlist: new Set(),
+  globalToolAllowlist: loadGlobalToolAllowlist(),
   autoApproveDiffs: loadAutoApproveDiffs(),
   autoDenyAll: false,
   pendingPermission: null,
@@ -235,6 +264,14 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       : forcePrompt === true ? 'sensitive_file' : null
 
     if (!forcePrompt) {
+      // Tool-specific allowlists first (more specific than scopes)
+      if (get().globalToolAllowlist.has(toolName)) {
+        return Promise.resolve({ approved: true, prompted: false, source: 'user' })
+      }
+      if (get().projectToolAllowlist.has(toolName)) {
+        return Promise.resolve({ approved: true, prompted: false, source: 'user' })
+      }
+
       const scope = getToolScope(toolName)
 
       // User authorized all tools in this scope (core or mcp)
@@ -290,6 +327,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approve: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
+      set({ pendingPermission: null, autoDenyAll: false })
       pendingPermission.resolve({
         approved: true,
         prompted: true,
@@ -297,7 +335,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       void logPermission(`✓ Autorizaste \`${pendingPermission.toolName}\``, 'success')
-      set({ pendingPermission: null, autoDenyAll: false })
       advanceQueue(set, get)
     }
   },
@@ -305,17 +342,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approveAll: () => {
     const { pendingPermission, permissionQueue } = get()
     if (pendingPermission) {
-      pendingPermission.resolve({
-        approved: true,
-        prompted: true,
-        source: 'user',
-        promptKind: pendingPermission.promptReason,
-      })
       const scope = getToolScope(pendingPermission.toolName)
-      void logPermission(
-        `✓ Autorizaste \`${pendingPermission.toolName}\` e todas as ferramentas ${scope === 'core' ? 'internas' : 'MCP'} para esta sessão`,
-        'success',
-      )
       const scopes = new Set(get().approvedScopes)
       scopes.add(scope)
       // Auto-approve diffs when core tools are approved
@@ -340,7 +367,56 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       }
 
       set({ pendingPermission: null, approvedScopes: scopes, autoApproveDiffs, permissionQueue: remaining })
-      persistApprovedScopes(scopes)
+
+      pendingPermission.resolve({
+        approved: true,
+        prompted: true,
+        source: 'user',
+        promptKind: pendingPermission.promptReason,
+      })
+      void logPermission(
+        `✓ Autorizaste \`${pendingPermission.toolName}\` e todas as ferramentas ${scope === 'core' ? 'internas' : 'MCP'} para esta sessão`,
+        'success',
+      )
+      persistPermissions()
+      advanceQueue(set, get)
+    }
+  },
+
+  approveAlwaysInProject: () => {
+    const { pendingPermission } = get()
+    if (pendingPermission) {
+      const toolAllowlist = new Set(get().projectToolAllowlist)
+      toolAllowlist.add(pendingPermission.toolName)
+      set({ pendingPermission: null, projectToolAllowlist: toolAllowlist, autoDenyAll: false })
+
+      pendingPermission.resolve({
+        approved: true,
+        prompted: true,
+        source: 'user',
+        promptKind: pendingPermission.promptReason,
+      })
+      void logPermission(`✓ Permitiste \`${pendingPermission.toolName}\` (sempre neste projeto)`, 'success')
+      persistPermissions()
+      advanceQueue(set, get)
+    }
+  },
+
+  approveAlwaysGlobal: () => {
+    const { pendingPermission } = get()
+    if (pendingPermission) {
+      const globalAllowlist = new Set(get().globalToolAllowlist)
+      globalAllowlist.add(pendingPermission.toolName)
+      saveGlobalToolAllowlist(globalAllowlist)
+      set({ pendingPermission: null, globalToolAllowlist: globalAllowlist, autoDenyAll: false })
+
+      pendingPermission.resolve({
+        approved: true,
+        prompted: true,
+        source: 'user',
+        promptKind: pendingPermission.promptReason,
+      })
+      void logPermission(`✓ Permitiste \`${pendingPermission.toolName}\` (sempre globalmente)`, 'success')
       advanceQueue(set, get)
     }
   },
@@ -348,6 +424,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   deny: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
+      set({ pendingPermission: null })
       pendingPermission.resolve({
         approved: false,
         prompted: true,
@@ -355,7 +432,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       void logPermission(`✗ Recusaste \`${pendingPermission.toolName}\``, 'warn')
-      set({ pendingPermission: null })
       advanceQueue(set, get)
     }
   },
@@ -363,6 +439,20 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   denyAll: () => {
     const { pendingPermission, permissionQueue } = get()
     if (pendingPermission) {
+      // Deny all queued non-dangerous permissions; keep dangerous ones for
+      // the user to review individually.
+      const remaining: PendingPermission[] = []
+      for (const queued of permissionQueue) {
+        if (queued.promptReason) {
+          // Dangerous — must still show dialog
+          remaining.push(queued)
+        } else {
+          queued.resolve({ approved: false, prompted: false, source: 'user' })
+        }
+      }
+
+      set({ pendingPermission: null, autoDenyAll: true, permissionQueue: remaining })
+
       pendingPermission.resolve({
         approved: false,
         prompted: true,
@@ -370,27 +460,14 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       void logPermission(`✗ Recusaste todos \`${pendingPermission.toolName}\``, 'warn')
+      advanceQueue(set, get)
     }
-
-    // Deny all queued non-dangerous permissions; keep dangerous ones for
-    // the user to review individually.
-    const remaining: PendingPermission[] = []
-    for (const queued of permissionQueue) {
-      if (queued.promptReason) {
-        // Dangerous — must still show dialog
-        remaining.push(queued)
-      } else {
-        queued.resolve({ approved: false, prompted: false, source: 'user' })
-      }
-    }
-
-    set({ pendingPermission: null, autoDenyAll: true, permissionQueue: remaining })
-    advanceQueue(set, get)
   },
 
   denyWith: (reason: string) => {
     const { pendingPermission } = get()
     if (pendingPermission) {
+      set({ pendingPermission: null })
       pendingPermission.resolve({
         approved: false,
         prompted: true,
@@ -405,7 +482,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
           : `✗ Recusaste \`${pendingPermission.toolName}\``,
         'warn',
       )
-      set({ pendingPermission: null })
       advanceQueue(set, get)
     }
   },
@@ -418,8 +494,8 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   resetAutoApprove: () => {
     saveAutoApproveDiffs(false)
     const empty = new Set<'core' | 'mcp'>()
-    set({ approvedScopes: empty, autoApproveDiffs: false, autoDenyAll: false })
-    persistApprovedScopes(empty)
+    set({ approvedScopes: empty, projectToolAllowlist: new Set(), autoApproveDiffs: false, autoDenyAll: false })
+    persistPermissions()
   },
 
   clearPending: () => {

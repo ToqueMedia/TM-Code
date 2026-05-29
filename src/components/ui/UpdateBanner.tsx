@@ -7,7 +7,7 @@ import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
 import { FiDownload, FiClock } from 'react-icons/fi'
 
-const MotionBox = motion(Box)
+const MotionBox = motion.create(Box)
 
 function UpdateBanner() {
   const t = useTranslation()

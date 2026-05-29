@@ -530,7 +530,7 @@ async function executeExit(_args: string, _projectPath: string): Promise<void> {
 
   // Kill the PTY before leaving so we don't strand a shell process when the
   // user comes back to a different project.
-  useTerminalPanelStore.getState().close()
+  useTerminalPanelStore.getState().killAll()
 
   const activeSession = state.getActiveSession()
   if (activeSession && activeSession.messages.length > 0) {

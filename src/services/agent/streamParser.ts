@@ -1,4 +1,5 @@
 // SSE Stream Parser for Anthropic Messages API streaming responses
+import { t } from '../../i18n'
 //
 // Anthropic SSE uses event: + data: lines (unlike OpenAI which is just data:):
 //
@@ -164,7 +165,7 @@ export async function parseSSEStream(
         logger.warn('agent', `[stream-watchdog] anthropic SSE — no upstream bytes for ${STREAM_IDLE_TIMEOUT_MS / 1000}s, emitting upstream_stream_interrupted`)
         callbacks.onEvent({
           type: 'error',
-          message: `Stream idle timeout — no bytes from upstream for ${STREAM_IDLE_TIMEOUT_MS / 1000}s. Treating as interrupted; the agent loop will retry.`,
+          message: t('stream.idleTimeout').replace('{seconds}', String(STREAM_IDLE_TIMEOUT_MS / 1000)),
           errorType: 'upstream_stream_interrupted',
         })
         reader.cancel().catch(() => { /* best-effort, the read may stay pending */ })
@@ -174,7 +175,7 @@ export async function parseSSEStream(
         logger.warn('agent', `[stream] anthropic SSE — reader.read() rejected mid-stream: ${r.error.message}`)
         callbacks.onEvent({
           type: 'error',
-          message: `Connection dropped mid-stream (${r.error.message}). Treating as interrupted; the agent loop will retry.`,
+          message: t('stream.connectionDropped').replace('{message}', r.error.message),
           errorType: 'upstream_stream_interrupted',
         })
         reader.cancel().catch(() => { /* best-effort */ })
@@ -686,7 +687,7 @@ export async function parseOpenAISSEStream(
         logger.warn('agent', `[stream-watchdog] openai SSE — no upstream bytes for ${STREAM_IDLE_TIMEOUT_MS / 1000}s, emitting upstream_stream_interrupted`)
         callbacks.onEvent({
           type: 'error',
-          message: `Stream idle timeout — no bytes from upstream for ${STREAM_IDLE_TIMEOUT_MS / 1000}s. Treating as interrupted; the agent loop will retry.`,
+          message: t('stream.idleTimeout').replace('{seconds}', String(STREAM_IDLE_TIMEOUT_MS / 1000)),
           errorType: 'upstream_stream_interrupted',
         })
         reader.cancel().catch(() => { /* best-effort */ })
@@ -696,7 +697,7 @@ export async function parseOpenAISSEStream(
         logger.warn('agent', `[stream] openai SSE — reader.read() rejected mid-stream: ${r.error.message}`)
         callbacks.onEvent({
           type: 'error',
-          message: `Connection dropped mid-stream (${r.error.message}). Treating as interrupted; the agent loop will retry.`,
+          message: t('stream.connectionDropped').replace('{message}', r.error.message),
           errorType: 'upstream_stream_interrupted',
         })
         reader.cancel().catch(() => { /* best-effort */ })

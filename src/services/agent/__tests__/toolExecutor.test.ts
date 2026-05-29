@@ -103,6 +103,15 @@ jest.mock('../../../stores/chatStore', () => ({
   appendReasoningDeltaBuffered: jest.fn(),
 }))
 
+jest.mock('../../../stores/subAgentStore', () => ({
+  useSubAgentStore: { getState: () => ({
+    runs: new Map(),
+    awaitAllPending: jest.fn().mockResolvedValue([]),
+    clearCompleted: jest.fn(),
+    getRunSummaries: jest.fn().mockReturnValue([]),
+  }) },
+}))
+
 jest.mock('../../auth/firebaseAuth', () => ({
   __esModule: true,
   default: { getInstance: () => ({ getIdToken: jest.fn().mockResolvedValue('mock-token') }) },
@@ -262,11 +271,11 @@ describe('A: execute() orchestration', () => {
     expect(mockRequestPermission).not.toHaveBeenCalled()
   })
 
-  it('bypasses permission for check_background_agents', async () => {
+  it('bypasses permission for collect_results', async () => {
     const exec = freshExecutor()
     mockInvoke.mockResolvedValue('[]' as never)
 
-    await exec.execute('check_background_agents', {})
+    await exec.execute('collect_results', {})
 
     expect(mockRequestPermission).not.toHaveBeenCalled()
   })
@@ -1170,21 +1179,35 @@ describe('J: Path validation', () => {
   })
 
   it('CMD mode uses cmdModeCwd for path validation', async () => {
-    const exec = freshExecutor()
-    exec.enableCmdMode('/other/root')
-    mockInvoke.mockResolvedValue('content' as never)
+    // In actual CMD mode, currentProject is null. Clear mockCurrentProject to simulate.
+    const originalPath = mockCurrentProject.path
+    mockCurrentProject.path = undefined as any
+    try {
+      const exec = freshExecutor()
+      exec.enableCmdMode('/other/root')
+      mockInvoke.mockResolvedValue('content' as never)
 
-    const result = await exec.execute('read_file', { file_path: '/other/root/file.txt' })
-    expect(result).toBe('content')
+      const result = await exec.execute('read_file', { file_path: '/other/root/file.txt' })
+      expect(result).toBe('content')
+    } finally {
+      mockCurrentProject.path = originalPath
+    }
   })
 
   it('CMD mode rejects paths outside cmdModeCwd', async () => {
-    const exec = freshExecutor()
-    exec.enableCmdMode('/other/root')
+    // In actual CMD mode, currentProject is null. Clear mockCurrentProject to simulate.
+    const originalPath = mockCurrentProject.path
+    mockCurrentProject.path = undefined as any
+    try {
+      const exec = freshExecutor()
+      exec.enableCmdMode('/other/root')
 
-    await expect(
-      exec.execute('read_file', { file_path: '/projects/test-app/file.txt' })
-    ).rejects.toThrow('outside the working directory')
+      await expect(
+        exec.execute('read_file', { file_path: '/projects/test-app/file.txt' })
+      ).rejects.toThrow('outside the working directory')
+    } finally {
+      mockCurrentProject.path = originalPath
+    }
   })
 
   it('write_file validates path before writing', async () => {

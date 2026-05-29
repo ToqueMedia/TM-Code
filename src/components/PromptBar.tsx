@@ -11,6 +11,7 @@ import MentionMenu from './prompt/MentionMenu'
 import HashtagMenu from './prompt/HashtagMenu'
 import QueuedMessagesPreview from './prompt/QueuedMessagesPreview'
 import AgentTasksPanel from './chat/AgentTasksPanel'
+import SubAgentStatusBar from './chat/SubAgentStatusBar'
 import { usePromptBar } from './prompt/usePromptBar'
 import KeyBindingDisplay from './ui/KeyBindingDisplay'
 
@@ -26,13 +27,11 @@ function PromptBar() {
     isDisabled,
     hasPendingCredential,
     viewMode,
-    hasPreview,
     handleSend,
     handleStop,
     handleKeyDown,
     handleBlur,
     toggleEditor,
-    togglePreview,
     showCommandMenu,
     filteredCommands,
     selectedCommandIndex,
@@ -146,9 +145,7 @@ function PromptBar() {
             viewMode={viewMode}
             isStreaming={isStreaming}
             hasInput={(hasInputContent || draftAttachments.length > 0) && !isSendBlocked}
-            hasPreview={hasPreview}
             onToggleEditor={toggleEditor}
-            onTogglePreview={togglePreview}
             onSend={handleSend}
             onStop={handleStop}
             onAttach={handleAttachFiles}
@@ -174,6 +171,8 @@ function PromptBar() {
             </>
           )}
         </Flex>
+
+        <SubAgentStatusBar />
       </Box>
     </Box>
   )

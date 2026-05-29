@@ -120,22 +120,36 @@ describe('scaffoldingDetector', () => {
   })
 
   describe('detectScaffolding — auth.google', () => {
-    it('detects via .env VITE_GOOGLE_CLIENT_ID alone', async () => {
+    it('does NOT detect via .env VITE_GOOGLE_CLIENT_ID alone (missing hook file)', async () => {
+      // provision_auth writes VITE_GOOGLE_CLIENT_ID even for email-password-only
+      // scaffolding (the GIP tenant always returns a googleClientId). Without
+      // the hook file, Google sign-in was never actually scaffolded.
       setupInvoke({
         envText: 'VITE_GOOGLE_CLIENT_ID=client-abc.apps.googleusercontent.com\n',
         existingMarkers: [],
       })
       const state = await detectScaffolding(PROJECT)
-      expect(state.applied).toContain('auth.google')
-      expect(state.evidence['auth.google']).toEqual(['.env:VITE_GOOGLE_CLIENT_ID'])
+      expect(state.applied).not.toContain('auth.google')
     })
 
-    it('detects via useGoogleSignIn hook file alone', async () => {
+    it('does NOT detect via useGoogleSignIn hook file alone (missing .env key)', async () => {
       setupInvoke({
         existingMarkers: ['src/hooks/useGoogleSignIn.ts'],
       })
       const state = await detectScaffolding(PROJECT)
+      expect(state.applied).not.toContain('auth.google')
+    })
+
+    it('detects when BOTH .env key AND hook file present', async () => {
+      setupInvoke({
+        envText: 'VITE_GOOGLE_CLIENT_ID=client-abc.apps.googleusercontent.com\n',
+        existingMarkers: ['src/hooks/useGoogleSignIn.ts'],
+      })
+      const state = await detectScaffolding(PROJECT)
       expect(state.applied).toContain('auth.google')
+      expect(state.evidence['auth.google']).toEqual(
+        expect.arrayContaining(['.env:VITE_GOOGLE_CLIENT_ID', 'src/hooks/useGoogleSignIn.ts'])
+      )
     })
 
     it('does NOT detect when neither signal present', async () => {

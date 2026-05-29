@@ -74,7 +74,11 @@ fn validate_memory_filename(filename: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn memory_root(scope: MemoryScope, project_path: Option<&str>) -> Result<PathBuf, String> {
+fn memory_root(
+    scope: MemoryScope,
+    project_path: Option<&str>,
+    subdirectory: Option<&str>,
+) -> Result<PathBuf, String> {
     match scope {
         MemoryScope::Project => {
             let project = project_path.ok_or("Project memory requires projectPath")?;
@@ -84,13 +88,26 @@ fn memory_root(scope: MemoryScope, project_path: Option<&str>) -> Result<PathBuf
             }
             let canonical =
                 canonicalize_path(p).map_err(|e| format!("Invalid project path: {}", e))?;
-            let dir = canonical.join(".toquemedia").join("memory");
+            let mut dir = canonical.join(".toquemedia").join("memory");
+            if let Some(sub) = subdirectory {
+                // Validate subdirectory: alphanumeric, hyphens, underscores only
+                if !sub
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Err(format!("Invalid subdirectory name: {}", sub));
+                }
+                dir = dir.join(sub);
+            }
             if !dir.starts_with(&canonical) {
                 return Err("Resolved memory path escapes project root".to_string());
             }
             Ok(dir)
         }
         MemoryScope::User => {
+            if subdirectory.is_some() {
+                return Err("User-scope memory does not support subdirectory (sub-agents are project-bound)".to_string());
+            }
             let home = dirs::home_dir().ok_or("Could not determine home directory")?;
             Ok(home.join(".toquemedia-studio").join("memory"))
         }
@@ -101,9 +118,10 @@ fn memory_file_path(
     scope: MemoryScope,
     project_path: Option<&str>,
     filename: &str,
+    subdirectory: Option<&str>,
 ) -> Result<PathBuf, String> {
     validate_memory_filename(filename)?;
-    let root = memory_root(scope, project_path)?;
+    let root = memory_root(scope, project_path, subdirectory)?;
     let file = root.join(filename);
     // Defense-in-depth: even after filename validation, confirm the join
     // didn't escape (covers the theoretical case of a Windows-specific
@@ -130,9 +148,15 @@ pub async fn read_memory_file(
     scope: String,
     project_path: Option<String>,
     filename: String,
+    subdirectory: Option<String>,
 ) -> Result<Option<String>, String> {
     let scope = parse_scope(&scope)?;
-    let path = memory_file_path(scope, project_path.as_deref(), &filename)?;
+    let path = memory_file_path(
+        scope,
+        project_path.as_deref(),
+        &filename,
+        subdirectory.as_deref(),
+    )?;
     if !path.exists() {
         return Ok(None);
     }
@@ -149,9 +173,15 @@ pub async fn write_memory_file(
     project_path: Option<String>,
     filename: String,
     content: String,
+    subdirectory: Option<String>,
 ) -> Result<(), String> {
     let scope = parse_scope(&scope)?;
-    let path = memory_file_path(scope, project_path.as_deref(), &filename)?;
+    let path = memory_file_path(
+        scope,
+        project_path.as_deref(),
+        &filename,
+        subdirectory.as_deref(),
+    )?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create memory dir: {}", e))?;
@@ -172,9 +202,15 @@ pub async fn delete_memory_file(
     scope: String,
     project_path: Option<String>,
     filename: String,
+    subdirectory: Option<String>,
 ) -> Result<(), String> {
     let scope = parse_scope(&scope)?;
-    let path = memory_file_path(scope, project_path.as_deref(), &filename)?;
+    let path = memory_file_path(
+        scope,
+        project_path.as_deref(),
+        &filename,
+        subdirectory.as_deref(),
+    )?;
     match std::fs::remove_file(&path) {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -189,9 +225,10 @@ pub async fn delete_memory_file(
 pub async fn list_memory_files(
     scope: String,
     project_path: Option<String>,
+    subdirectory: Option<String>,
 ) -> Result<Vec<MemoryFileEntry>, String> {
     let scope = parse_scope(&scope)?;
-    let root = memory_root(scope, project_path.as_deref())?;
+    let root = memory_root(scope, project_path.as_deref(), subdirectory.as_deref())?;
     if !root.exists() {
         return Ok(Vec::new());
     }

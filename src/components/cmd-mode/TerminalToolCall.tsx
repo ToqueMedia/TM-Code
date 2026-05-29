@@ -14,7 +14,6 @@ const READ_TOOLS = new Set([
   'list_directory',
   'glob',
   'search_files',
-  'get_diagnostics',
   'read_large_result',
   'read_dev_server_logs',
   'check_background_agents',
@@ -72,10 +71,6 @@ function buildReadSummary(toolName: string, result: string | undefined): string 
   if (toolName === 'search_files' || toolName === 'glob') {
     const matches = result.split('\n').filter(Boolean).length
     return `${matches} result${matches !== 1 ? 's' : ''}`
-  }
-  if (toolName === 'get_diagnostics') {
-    const problems = result.split('\n').filter(Boolean).length
-    return `${problems} diagnostic${problems !== 1 ? 's' : ''}`
   }
   return null
 }
@@ -241,7 +236,6 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
             oldContent={toolCall.diffOldContent || ''}
             newContent={toolCall.diffNewContent || ''}
             isNewFile={toolCall.isNewFile}
-            maxLines={20}
           />
         )}
 

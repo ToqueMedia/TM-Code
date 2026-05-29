@@ -1,12 +1,15 @@
-import { memo, useRef, useEffect, useState, useCallback, useMemo } from 'react'
+import { memo, lazy, Suspense, useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiDatabase } from 'react-icons/fi'
+import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiDatabase, FiEye } from 'react-icons/fi'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
+import { activatePreview } from '../../services/previewActivation'
+import { invoke } from '@/utils/invokeMetrics'
+import { projectHasMeaningfulContent } from '../../utils/projectHasContent'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -16,10 +19,12 @@ import MessageBubble from '../chat/MessageBubble'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import ContextWindowIndicator from '../chat/ContextWindowIndicator'
+import PostCompactSurvey from '../chat/PostCompactSurvey'
 import ChatSkeleton from '../chat/ChatSkeleton'
 import ModelIndicator from '../chat/ModelIndicator'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
+const CheckpointPanel = lazy(() => import('../chat/CheckpointPanel'))
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -27,10 +32,14 @@ function ChatView() {
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
+  const postCompactSurveyPending = useChatStore(s => s.postCompactSurveyPending)
   const isStreaming = useChatStore(s => s.isStreaming)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
   const currentProject = useProjectStore(s => s.currentProject)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
+  const viewMode = useLayoutStore(s => s.viewMode)
+  const isPlanViewerOpen = useLayoutStore(s => s.isPlanViewerOpen)
+  const isSidebarMode = viewMode === 'preview' || isPlanViewerOpen
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
@@ -62,6 +71,10 @@ function ChatView() {
   // streamingVersion must be subscribed — it's the ONLY selector that triggers
   // re-renders during streaming (messages are mutated in-place for performance).
   const streamingVersion = useChatStore(s => s.streamingVersion)
+  // conversationVersion bumps on compaction. Without subscribing here, the
+  // useMemo for lastBoundaryIndex sees the same `rawMessages` reference
+  // (appendTextDelta mutates in-place) and returns a cached stale value.
+  const conversationVersion = useChatStore(s => s.conversationVersion)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const rawMessages = session?.messages || []
@@ -89,13 +102,27 @@ function ChatView() {
       }
     }
     return -1
-  }, [rawMessages])
+  // conversationVersion forces recalculation after compaction even when
+  // rawMessages is the same array reference (appendTextDelta mutates in-place).
+  }, [rawMessages, conversationVersion])
   const messages = (lastBoundaryIndex === -1 || revealPreBoundary)
     ? rawMessages
     : rawMessages.slice(lastBoundaryIndex)
   const preBoundaryCount = lastBoundaryIndex === -1 ? 0 : lastBoundaryIndex
   const hasHiddenPreBoundary = preBoundaryCount > 0 && !revealPreBoundary
   const projectPath = currentProject?.path || ''
+
+  // Check if project directory has meaningful content (not just dot-files).
+  // Uses the same glob_files invoke that projectStore uses for the noTmsFile check.
+  const [hasContent, setHasContent] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (!projectPath) { setHasContent(null); return }
+    let cancelled = false
+    invoke<string[]>('glob_files', { pattern: '*', directory: projectPath })
+      .then(entries => { if (!cancelled) setHasContent(projectHasMeaningfulContent(entries)) })
+      .catch(() => { if (!cancelled) setHasContent(true) }) // fail-open: don't show suggestions on FS error
+    return () => { cancelled = true }
+  }, [projectPath])
 
 // use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
   // streaming content, expanding diffs, and dynamic height changes.
@@ -234,7 +261,7 @@ function ChatView() {
         flexShrink={0}
         position="relative"
       >
-        <Flex align="center" gap={2}>
+        <Flex align="center" gap={2} minW={0}>
           <Box
             as="button"
             display="flex"
@@ -252,86 +279,103 @@ function ChatView() {
           >
             <FiSidebar size={15} />
           </Box>
-          <SessionDropdown
-            projectPath={projectPath}
-            activeSessionId={activeSessionId}
-            isStreaming={isStreaming}
-          />
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            justifyContent="center"
-            w="28px"
-            h="28px"
-            borderRadius="6px"
-            color={tokens.colors.text.secondary}
-            cursor="pointer"
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-            onClick={() => useLayoutStore.getState().setViewMode('data')}
-            aria-label={t('dataViewer.title')}
-            title={t('dataViewer.title')}
-          >
-            <FiDatabase size={14} />
+          <Box flex={1} minW={0}>
+            <SessionDropdown
+              projectPath={projectPath}
+              activeSessionId={activeSessionId}
+              isStreaming={isStreaming}
+            />
           </Box>
+          {!isSidebarMode && (
+            <Box
+              as="button"
+              display="flex"
+              alignItems="center"
+              gap="5px"
+              px="8px"
+              h="28px"
+              borderRadius="6px"
+              color={tokens.colors.text.secondary}
+              cursor="pointer"
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+              onClick={() => useLayoutStore.getState().setViewMode('data')}
+              aria-label={t('view.dataManager')}
+            >
+              <FiDatabase size={13} />
+              <Text fontSize="11px" fontWeight="500">{t('view.dataManager')}</Text>
+            </Box>
+          )}
         </Flex>
 
-        {/* Credits + Isolation + MCP indicators */}
-        <HStack gap={1.5}>
-          <ContextWindowIndicator />
-          {/* Mandatory-thinking badge — static, only when model thinks
-              unconditionally. The interactive toggle was removed (claude-vaz
-              parity) — thinking now follows the model's default and is
-              forced ON only by slash commands via X-Request-Type. */}
-          {thinkingMandatory && (
-            <Flex
-              align="center"
-              gap="4px"
-              px="6px"
-              py="3px"
-              borderRadius="5px"
-              bg="rgba(163, 113, 247, 0.1)"
-              border="1px solid rgba(163, 113, 247, 0.25)"
-              color={tokens.colors.accent.purple}
-              title="Thinking is always-on for this model"
+        {/* Credits + Isolation + MCP indicators — hidden in sidebar mode
+            because 380px can't fit them all. */}
+        {!isSidebarMode && (
+          <HStack gap={1.5}>
+            <ContextWindowIndicator />
+            {thinkingMandatory && (
+              <Flex
+                align="center"
+                gap="4px"
+                px="6px"
+                py="3px"
+                borderRadius="5px"
+                bg="rgba(163, 113, 247, 0.1)"
+                border="1px solid rgba(163, 113, 247, 0.25)"
+                color={tokens.colors.accent.purple}
+                title={t('chat.thinkingAlwaysOn')}
+              >
+                <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
+                  ⚡ Thinking
+                </Text>
+              </Flex>
+            )}
+            <ModelIndicator />
+            {!showModelIndicator && (
+              <CreditIndicator
+                plan={billingPlan}
+                noCredits={noCredits}
+                isStreaming={isStreaming}
+                consumedPct={consumedPct}
+                tokensConsumed={tokensConsumed}
+                tokenBudget={tokenBudget}
+                cycleEnd={cycleEnd}
+                status={billingStatus}
+                tmsRemaining={tmsRemaining}
+              />
+            )}
+            {sandboxEnabled && (
+              <IsolationPill
+                icon={FiShield}
+                label={t('chat.sandboxMode')}
+                color={tokens.colors.accent.orange}
+                onClick={() => useLayoutStore.getState().setViewMode('settings')}
+              />
+            )}
+            <McpIndicator
+              servers={mcpServers}
+              isInitializing={mcpIsInitializing}
+            />
+            <Box
+              as="button"
+              display="flex"
+              alignItems="center"
+              gap="5px"
+              px="8px"
+              h="28px"
+              borderRadius="6px"
+              color={tokens.colors.text.secondary}
+              cursor="pointer"
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+              onClick={() => void activatePreview(projectPath)}
+              aria-label={t('view.preview')}
             >
-              <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
-                ⚡ Thinking
-              </Text>
-            </Flex>
-          )}
-          {/* ModelIndicator always renders once the backend has reported a
-              model name — the developer wants to know which model the IDE is
-              talking to regardless of BYOK state. CreditIndicator stays
-              hidden when BYOK is in effect because billing differs. */}
-          <ModelIndicator />
-          {!showModelIndicator && (
-            <CreditIndicator
-              plan={billingPlan}
-              noCredits={noCredits}
-              isStreaming={isStreaming}
-              consumedPct={consumedPct}
-              tokensConsumed={tokensConsumed}
-              tokenBudget={tokenBudget}
-              cycleEnd={cycleEnd}
-              status={billingStatus}
-              tmsRemaining={tmsRemaining}
-            />
-          )}
-          {sandboxEnabled && (
-            <IsolationPill
-              icon={FiShield}
-              label={t('chat.sandboxMode')}
-              color={tokens.colors.accent.orange}
-              onClick={() => useLayoutStore.getState().setViewMode('settings')}
-            />
-          )}
-          <McpIndicator
-            servers={mcpServers}
-            isInitializing={mcpIsInitializing}
-          />
-        </HStack>
+              <FiEye size={13} />
+              <Text fontSize="11px" fontWeight="500">{t('view.preview')}</Text>
+            </Box>
+          </HStack>
+        )}
       </Flex>
 
       {/* Scaffold pipeline status banner */}
@@ -437,7 +481,7 @@ function ChatView() {
               useAgentStore.getState().setError(null)
               useAgentStore.getState().setStatus('idle')
             }}
-            aria-label="Dismiss error"
+            aria-label={t('chat.dismissError')}
           >
             <Text fontSize="14px" lineHeight="1">×</Text>
           </Box>
@@ -518,7 +562,7 @@ function ChatView() {
               <Box maxW="900px" mx="auto" w="100%" py={4}>
                 <ChatSkeleton />
               </Box>
-            ) : messages.length === 0 ? (
+            ) : messages.length === 0 && hasContent === false ? (
               <ChatSuggestions />
             ) : (
               <Box
@@ -596,6 +640,10 @@ function ChatView() {
                   />
                 ))}
                 <AgentActivityIndicator />
+                {postCompactSurveyPending && !isStreaming && <PostCompactSurvey />}
+                <Suspense fallback={null}>
+                  <CheckpointPanel />
+                </Suspense>
               </Box>
             )}
           </Box>

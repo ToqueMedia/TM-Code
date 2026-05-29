@@ -1,4 +1,3 @@
-export { default as ChatPanel } from './ChatPanel'
 export { default as MessageBubble } from './MessageBubble'
 export { default as CodeBlockAction } from './CodeBlockAction'
 export { default as AgentStatusBar } from './AgentStatusBar'

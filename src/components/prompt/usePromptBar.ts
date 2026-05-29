@@ -10,6 +10,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 import { useProblemsStore } from '../../stores/problemsStore'
 import { devServerManager } from '../../services/devServerManager'
+import { activatePreview } from '../../services/previewActivation'
 import AgentService from '../../services/agent/agentService'
 import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
@@ -597,6 +598,53 @@ export function usePromptBar() {
       chatStore.createSession(projectPath)
     }
 
+    // ── TMS.md Bootstrap Gate ──
+    // When an external project lacks TMS.md, run a dedicated bootstrap turn
+    // that creates TMS.md and starts the dev server BEFORE processing the
+    // user's message. The recursive call uses skipUserMessage=true so the
+    // bootstrap prompt is invisible to the user — only the agent's work
+    // (reading files, creating TMS.md) appears in the chat.
+    const pState = useProjectStore.getState()
+    if (pState.noTmsFile && !pState.tmsBootstrapping && !skipUserMessage) {
+      pState.setTmsBootstrapping(true)
+      try {
+        const { getTmsBootstrapPrompt } = await import('../../services/agent/tmsBootstrap')
+        chatStore.addSystemMessage(t('common.tmsBootstrapStart'))
+
+        const bootstrapPrompt = getTmsBootstrapPrompt(projectPath)
+        const bootstrapOk = await runAgentForPrompt(bootstrapPrompt, true)
+
+        // Verify TMS.md was created
+        try {
+          await invoke('read_file', { path: `${projectPath}/TMS.md` })
+          pState.setNoTmsFile(false)
+          // Invalidate cached system prompt so next build picks up TMS.md
+          ContextBuilder.getInstance().invalidatePromptCache(projectPath)
+          if (bootstrapOk) {
+            chatStore.addSystemMessage(t('common.tmsBootstrapComplete'))
+
+            // Show the user's original message in the chat, then replace
+            // the content with a synthetic prompt that asks the agent to
+            // check with the user before proceeding. This prevents the
+            // redundant "run the project" after the bootstrap already did it.
+            const originalDisplay = extractDisplayFromValue(content)
+            chatStore.addUserMessage(originalDisplay.text, originalDisplay.attachments)
+
+            const originalText = typeof content === 'string' ? content : ''
+            content = `Project setup complete (TMS.md created, dev server started). The user's original request was: "${originalText}". Before doing anything else, ask the user if they still want you to carry out this request, since the initial setup is already done.`
+            skipUserMessage = true
+          }
+        } catch {
+          // TMS.md not created — show warning but continue with user's message
+          chatStore.addSystemMessage(t('common.tmsBootstrapFailed'))
+        }
+      } catch (err) {
+        logger.error('prompt', 'TMS bootstrap failed:', err)
+      } finally {
+        pState.setTmsBootstrapping(false)
+      }
+    }
+
     // Render the user's bubble + assistant placeholder BEFORE the async
     // augmentation step (mention resolution + attachment disk reads can
     // take 50–500ms). Display extraction is sync, so we can paint the
@@ -788,22 +836,16 @@ export function usePromptBar() {
         onUsageUpdate: (inputTokens, outputTokens) => {
           useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
         },
-        onContextCompression: (beforeTokens, signal) => {
-          if (signal === 0) {
-            // Compression starting — AgentActivityIndicator already renders
-            // the 'compressing' status with its own animated row, so we no
-            // longer push a persistent system message that would linger in
-            // the transcript after compression finished.
+        onContextCompression: (event) => {
+          if (event.type === 'hooks_start') {
+            agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')
+          } else if (event.type === 'compact_start') {
+            agentStore.setCompactPhase('compressing')
             agentStore.setStatus('compressing')
-          } else if (signal === -1) {
-            // Compression complete. The boundary action drops a single
-            // claude-vaz-style marker AND folds the pre-compression history
-            // out of the visible transcript (ChatView slices on the latest
-            // boundary). It also zeroes `totalTokensUsed.input` so the
-            // ContextWindowIndicator releases the pre-compression peak that
-            // `addTokenUsage`'s Math.max had been holding.
+          } else if (event.type === 'compact_end') {
+            agentStore.setCompactPhase('idle')
             agentStore.setStatus('awaiting_response')
-            useChatStore.getState().addCompactBoundaryMessage(beforeTokens)
+            useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized)
           }
         },
       })
@@ -1290,60 +1332,18 @@ export function usePromptBar() {
   }, [])
 
   const togglePreview = useCallback(async () => {
-    const layoutStore = useLayoutStore.getState()
-
-    if (layoutStore.viewMode === 'preview') {
-      layoutStore.goBack()
-      return
-    }
-
-    // If server is already running or static preview exists, just switch view
-    if (selectIsPreviewServerRunning(layoutStore) || layoutStore.previewHtmlContent) {
-      layoutStore.setViewMode('preview')
-      return
-    }
-
-    // If server is already starting, don't restart
-    if (devServerManager.isActive()) return
-
-    // No server running — try to start one.
-    // If devCommand is null (detection hasn't run yet or package.json was
-    // created after the last detection), do just-in-time detection now.
-    let cmd = devCommand
-    if (!cmd && currentProject?.path) {
-      cmd = await detectDevCommand(currentProject.path)
-      if (cmd) setDevCommand(cmd)
-    }
-
     const layout = useLayoutStore.getState()
-    layout.setViewMode('preview')
 
-    if (cmd && currentProject?.path) {
-      layout.addDevServerLog(`Starting dev server (${cmd})...`, 'info')
-      // Detect project kind (frontend / backend / fullstack) from package.json
-      // deps. Without this, devServerManager defaults to 'frontend' and the
-      // port-authoritative classifier + dual-port kill behaviour never kick in
-      // for fullstack monorepos — resulting in EADDRINUSE on the backend side.
-      let projectKind: 'frontend' | 'backend' | 'fullstack' | undefined
-      try {
-        const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
-        const cat = await detectProjectCategory(currentProject.path)
-        projectKind = categoryToServerHint(cat)
-      } catch { /* non-fatal — fall through with undefined, start() defaults to frontend */ }
-      try {
-        const { resolveFrontendPortHint } = await import('../../services/templateService')
-        const frontendPortHint = projectKind
-          ? await resolveFrontendPortHint(currentProject.path, projectKind)
-          : undefined
-        await devServerManager.start(currentProject.path, cmd, { projectKind, frontendPortHint })
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        layout.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
-      }
+    // If already in preview → toggle off.
+    if (layout.viewMode === 'preview') {
+      layout.goBack()
+      return
     }
-    // If no cmd found: preview opens with "Waiting..." — user can ask
-    // the agent to set up and start the server.
-  }, [devCommand, currentProject?.path])
+
+    // Delegate to the shared activation function (also used by ChatView's
+    // header button). It handles detection, server start, and view switch.
+    await activatePreview(currentProject?.path ?? null)
+  }, [currentProject?.path])
 
   return {
     hasInputContent,

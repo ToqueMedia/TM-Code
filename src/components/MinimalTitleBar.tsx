@@ -44,6 +44,7 @@ function MinimalTitleBar() {
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
+  const handleCloseIssueReporter = useCallback(() => setShowIssueReporter(false), [])
   const avatarRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 })
@@ -377,7 +378,7 @@ function MinimalTitleBar() {
       <Suspense fallback={null}>
         <IssueReporterDialog
           isOpen={showIssueReporter}
-          onClose={() => setShowIssueReporter(false)}
+          onClose={handleCloseIssueReporter}
         />
       </Suspense>
 

@@ -20,13 +20,14 @@ export const SearchInput: React.FC<SearchInputProps> = ({
   value,
   onChange,
   onClear,
-  placeholder = "Search...",
+  placeholder,
   compact = false
 }) => {
+  const resolvedPlaceholder = placeholder ?? t('search.placeholder')
   return (
     <HStack w="100%">
       <Input
-        placeholder={placeholder}
+        placeholder={resolvedPlaceholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         bg={tokens.colors.bg.input}

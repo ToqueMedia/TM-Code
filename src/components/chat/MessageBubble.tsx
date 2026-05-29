@@ -13,11 +13,13 @@ import ToolCallDisplayComponent from './ToolCallDisplay'
 import ReadOutputBatch from './ReadOutputBatch'
 import { groupConsecutiveLargeReads, computeContentBlockBatches } from '../../utils/groupToolCalls'
 import AgentLogo from '../ui/AgentLogo'
+import CompactSummary from './CompactSummary'
 import ReasoningBlock from './ReasoningBlock'
 import PlanApprovalCard from './PlanApprovalCard'
 import TodoListCard from './TodoListCard'
 import CredentialRequestCard from './CredentialRequestCard'
 import { AskUserQuestionCard } from './AskUserQuestionCard'
+import SubAgentCard from './SubAgentCard'
 import {
   sessionToJson,
   sessionToMarkdown,
@@ -76,7 +78,7 @@ interface MessageBubbleProps {
   isStreaming?: boolean
 }
 
-const markdownStyles = {
+export const markdownStyles = {
   // Prevent long unbreakable strings (URLs, file paths, tool output) from
   // causing horizontal scroll on the entire chat view.
   overflowWrap: 'anywhere' as const,
@@ -234,7 +236,7 @@ function CopyMessageButton({ text }: { text: string }) {
   )
 }
 
-const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
+export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || '')
     const codeString = String(children).replace(/\n$/, '')
@@ -378,7 +380,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     if (!text) return
     navigator.clipboard.writeText(text).catch((err) => {
       console.error('[messageCopy] clipboard write failed:', err)
-      useToastStore.getState().addToast('error', 'Could not copy message to clipboard')
+      useToastStore.getState().addToast('error', t('chat.copyFailed'))
     })
     setMessageCopied(true)
     setTimeout(() => setMessageCopied(false), 2000)
@@ -390,7 +392,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     if (!session) return
     navigator.clipboard.writeText(sessionToMarkdown(session)).catch((err) => {
       console.error('[sessionCopy] clipboard write failed:', err)
-      useToastStore.getState().addToast('error', 'Could not copy session to clipboard')
+      useToastStore.getState().addToast('error', t('chat.exportSessionFailed'))
     })
     setMessageCopied(true)
     setTimeout(() => setMessageCopied(false), 2000)
@@ -432,7 +434,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       // errors hit this branch.
       const msg = err instanceof Error ? err.message : String(err)
       console.error('[sessionExport] save failed:', err)
-      useToastStore.getState().addToast('error', `Export failed: ${msg}`)
+      useToastStore.getState().addToast('error', t('chat.exportFailed').replace('{message}', msg))
     }
   }, [])
 
@@ -481,41 +483,18 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       }
     }
 
-    // Compact boundary — claude-vaz parity: horizontal rule + ✻ marker.
-    // ChatView already slices the transcript at the latest boundary so
-    // pre-compression turns disappear from view; this is the visual
-    // checkpoint the user sees at the top of the post-compression history.
+    // Compact boundary — renders via CompactSummary component which shows
+    // phased progress, trigger info, token savings, and expandable summary.
     if (message.kind === 'compact_boundary') {
-      const beforeK =
-        typeof message.compactBeforeTokens === 'number'
-          ? Math.round(message.compactBeforeTokens / 1000)
-          : null
+      const summaryText = message.content || undefined
       return (
-        <Box py={3} px={3} mb={2} role="separator" aria-label="Conversation compacted">
-          <Flex align="center" gap={2} mb={1.5}>
-            <Box flex="1" h="1px" bg={tokens.colors.border.panel} opacity={0.5} />
-            <Text
-              fontSize="11px"
-              color={tokens.colors.accent.primary}
-              fontFamily={tokens.fontFamily.ui}
-              fontWeight="600"
-              letterSpacing="0.05em"
-              textTransform="uppercase"
-            >
-              ✻ Conversa comprimida
-            </Text>
-            <Box flex="1" h="1px" bg={tokens.colors.border.panel} opacity={0.5} />
-          </Flex>
-          <Text
-            fontSize="11px"
-            color={tokens.colors.text.muted}
-            fontFamily={tokens.fontFamily.ui}
-            textAlign="center"
-            lineHeight="1.5"
-          >
-            Mensagens anteriores foram resumidas{beforeK != null ? ` (${beforeK}K tokens)` : ''}. Skills invocados re-injectados — o agente continua com as regras CRITICAL intactas.
-          </Text>
-        </Box>
+        <CompactSummary
+          metadata={message.compactMetadata ?? {
+            trigger: 'auto',
+            beforeTokens: message.compactBeforeTokens ?? 0,
+          }}
+          summaryText={summaryText}
+        />
       )
     }
 
@@ -812,6 +791,11 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                     : <ToolCallDisplayComponent key={group.call.id} toolCall={group.call} messageId={message.id} />
                 ))}
               </Box>
+            )}
+
+            {/* Sub-agent team activity cards */}
+            {message.subAgentRunIds && message.subAgentRunIds.length > 0 && (
+              <SubAgentCard runIds={message.subAgentRunIds} />
             )}
           </>
         )}

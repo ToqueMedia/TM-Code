@@ -1,4 +1,5 @@
 import { invoke } from '@/utils/invokeMetrics'
+import { t } from '../../../i18n'
 import { useChatStore } from '../../../stores/chatStore'
 import { runAgentWithCallbacks } from '../agentRunner'
 import type { SlashCommandMode } from '../slashCommandRegistry'
@@ -22,11 +23,11 @@ export async function executeInit(
 
   if (existingTms) {
     chatStore.addSystemMessage(
-      'TMS.md already exists. The agent will update it with fresh analysis.'
+      t('init.alreadyExists')
     )
   } else {
     chatStore.addSystemMessage(
-      'Analyzing project to generate TMS.md...'
+      t('init.analyzing')
     )
   }
 
@@ -42,7 +43,7 @@ export async function executeInit(
   })
 }
 
-function buildInitPrompt(projectPath: string, existingTms: string | null): string {
+export function buildInitPrompt(projectPath: string, existingTms: string | null): string {
   if (existingTms) {
     return `Analyze this project and UPDATE the existing TMS.md file at ${projectPath}/TMS.md.
 

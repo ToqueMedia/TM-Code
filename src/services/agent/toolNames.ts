@@ -21,7 +21,6 @@ export const READ_FILE = 'read_file'
 export const LIST_DIRECTORY = 'list_directory'
 export const SEARCH_FILES = 'search_files'
 export const GLOB = 'glob'
-export const GET_DIAGNOSTICS = 'get_diagnostics'
 export const READ_SKILL = 'read_skill'
 export const READ_LARGE_RESULT = 'read_large_result'
 export const READ_DEV_SERVER_LOGS = 'read_dev_server_logs'
@@ -41,12 +40,13 @@ export const START_DEV_SERVER = 'start_dev_server'
 // Web / research
 export const WEB_SEARCH = 'web_search'
 export const WEB_FETCH = 'web_fetch'
-export const RESEARCH = 'research'
+
+// Sub-agent delegation (v0.7.0 — replaces research, verify, spawn_background_agent)
+export const DELEGATE = 'delegate'
+export const COLLECT_RESULTS = 'collect_results'
 
 // Internal task tracking
 export const UPDATE_TASKS = 'update_tasks'
-export const CHECK_BACKGROUND_AGENTS = 'check_background_agents'
-export const SPAWN_BACKGROUND_AGENT = 'spawn_background_agent'
 
 // Platform integrations
 export const PROVISION_AUTH = 'provision_auth'
@@ -54,8 +54,7 @@ export const PROVISION_DEPLOY = 'provision_deploy'
 export const REQUEST_CREDENTIALS = 'request_credentials'
 export const ASK_USER_QUESTION = 'ask_user_question'
 
-// Verification sub-agent
-export const VERIFY = 'verify'
+// Verify sub-agent — removed in v0.7.0, replaced by task(subagent_type='Verify')
 
 // Persistent memory (memdir) — see services/agent/memdir.ts
 export const SAVE_MEMORY = 'save_memory'
@@ -74,14 +73,14 @@ export const DISTILL_MEMORY = 'distill_memory'
  * verifier walks both surfaces and reports drift in either direction.
  */
 export const TOOL_NAMES = [
-  READ_FILE, LIST_DIRECTORY, SEARCH_FILES, GLOB, GET_DIAGNOSTICS,
+  READ_FILE, LIST_DIRECTORY, SEARCH_FILES, GLOB,
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
-  WEB_SEARCH, WEB_FETCH, RESEARCH,
-  UPDATE_TASKS, CHECK_BACKGROUND_AGENTS, SPAWN_BACKGROUND_AGENT,
+  WEB_SEARCH, WEB_FETCH,
+  DELEGATE, COLLECT_RESULTS,
+  UPDATE_TASKS,
   PROVISION_AUTH, PROVISION_DEPLOY, REQUEST_CREDENTIALS, ASK_USER_QUESTION,
-  VERIFY,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
 ] as const
 

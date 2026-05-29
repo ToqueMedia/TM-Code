@@ -12,7 +12,12 @@ import { useProjectStore } from '../../../stores/projectStore'
 import { PUBLISHING_SKILL_NAME } from '../skillService'
 import { tauriFetch } from '../../tauriFetch'
 import { resolveWorkerUrl, resolveDeployUrl } from '../../../utils/devUrls'
+import { IS_VITE_DEV } from '../../../utils/viteEnv'
 import type { ToolRegistrationContext } from './context'
+
+const DEV_DEPLOY_HEADER: Record<string, string> = IS_VITE_DEV
+  ? { 'TM-Code': 'dev-deploy' }
+  : {}
 import FirebaseAuthService from '../../auth/firebaseAuth'
 
 export function registerProvisionTools(ctx: ToolRegistrationContext): void {
@@ -93,7 +98,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
               applied: [hasEmailAuth ? 'auth.email-password' : '', hasGoogleAuth ? 'auth.google' : ''].filter(Boolean).join(','),
             })
           }).catch(() => { /* non-critical */ })
-          return `Already provisioned. Detected: ${evidence.join(', ')}.\n\nDO NOT re-run provision_auth on the default path — the .env credentials already exist and the backend is idempotent (returns the same tenant). The default task is to FIX the existing implementation:\n  1. read_file the marker paths above to see what's there.\n  2. Diagnose the actual bug (read_dev_server_logs for runtime errors, get_diagnostics for type errors).\n  3. Edit the broken file with edit_file.\n\nEXCEPTION — explicit re-provisioning. If the developer's CURRENT message includes any of: "re-provision", "rotate credentials", "wipe and start over", "reset the auth", "delete and re-create the tenant", "reprovisiona", "rotaciona credenciais", "apaga e recomeça" — they have OPTED IN. In that case, ack in chat what you'll do, then call provision_auth again (the same call you just received). The platform is idempotent so the tenant won't duplicate; .env is overwritten with the same values; no destructive change to data. If the developer's intent is unclear, ASK before re-running.`
+          return `Already provisioned. Detected: ${evidence.join(', ')}.\n\nDO NOT re-run provision_auth on the default path — the .env credentials already exist and the backend is idempotent (returns the same tenant). The default task is to FIX the existing implementation:\n  1. read_file the marker paths above to see what's there.\n  2. Diagnose the actual bug (read_dev_server_logs for runtime errors, execute_command "npx tsc --noEmit" for type errors).\n  3. Edit the broken file with edit_file.\n\nEXCEPTION — explicit re-provisioning. If the developer's CURRENT message includes any of: "re-provision", "rotate credentials", "wipe and start over", "reset the auth", "delete and re-create the tenant", "reprovisiona", "rotaciona credenciais", "apaga e recomeça" — they have OPTED IN. In that case, ack in chat what you'll do, then call provision_auth again (the same call you just received). The platform is idempotent so the tenant won't duplicate; .env is overwritten with the same values; no destructive change to data. If the developer's intent is unclear, ASK before re-running.`
         }
       } catch { /* non-critical — fall through to normal provisioning */ }
 
@@ -458,11 +463,17 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       // upload routes), so the deploy record doesn't exist. After the first
       // publish, the worker will pin to the actual deploy slug regardless
       // of what we send here.
+      //
+      // Algorithm must match the backend's slugify() + the frontend's
+      // slugSuggest() exactly — /[^a-z0-9-]+/g strips non-alnum chars
+      // (does NOT replace with hyphens). Mismatched algorithms produce
+      // different slugs for the same project name, leading to two
+      // subdomain entries being registered.
       const candidateSlug = project.name
         .toLowerCase()
         .normalize('NFD')
-        .replace(/[̀-ͯ]/g, '')
-        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9-]+/g, '')
         .replace(/^-+|-+$/g, '')
         .slice(0, 63) || project.id.slice(0, 32)
 
@@ -655,6 +666,21 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       // (quota gated, idempotent on re-run). No DB provisioning — the
       // platform database is a shared default with per-app path scoping;
       // nothing to physically create up front.
+      //
+      // Pass customSubdomain so the backend's resolveAndReserveSubdomain
+      // takes the explicit-slug path (step 1) instead of deriving from
+      // projectName (step 3). Without this, the backend always creates
+      // a slug from projectName — if the user later changes the slug via
+      // the PublishModal, both the suggested and custom slugs end up
+      // registered. The slug algorithm here MUST match slugSuggest() +
+      // the backend's slugify() exactly.
+      const deploySlug = project.name
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9-]+/g, '')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 63) || project.id.slice(0, 32)
       let initRes: Awaited<ReturnType<typeof tauriFetch>>
       try {
         initRes = await tauriFetch(`${workerUrl}/v1/projects/deploy/init`, {
@@ -662,10 +688,12 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${idToken}`,
+            ...DEV_DEPLOY_HEADER,
           },
           body: JSON.stringify({
             projectId: project.id,
             projectName: project.name,
+            customSubdomain: deploySlug,
           }),
         })
       } catch (err) {

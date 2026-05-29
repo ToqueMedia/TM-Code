@@ -21,6 +21,7 @@ import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
 import { useCmdScrollFollow } from '../../hooks/useCmdScrollFollow'
 import { useAttachments } from '../../hooks/useAttachments'
+import { useTranslation } from '@/i18n/useTranslation'
 import { tokens } from '@/theme/tokens'
 
 interface TerminalViewProps {
@@ -29,6 +30,7 @@ interface TerminalViewProps {
 }
 
 const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
+  const t = useTranslation()
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
@@ -138,7 +140,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     import('../../stores/permissionStore').then(({ hydrateApprovedScopes }) =>
       import('../../services/agent/permissionPersistence').then(({ loadPermissionsFromDisk }) =>
         loadPermissionsFromDisk(projectPath)
-          .then(scopes => { if (!cancelled) hydrateApprovedScopes(scopes, projectPath) })
+          .then(perms => { if (!cancelled) hydrateApprovedScopes(perms.scopes, projectPath, perms.tools) })
           .catch(() => { /* non-critical — empty grants means re-prompt */ }),
       ),
     )
@@ -150,10 +152,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   useEffect(() => {
     if (!projectPath) return
     let cancelled = false
-    import('@tauri-apps/api/core').then(({ invoke }) => {
-      if (!cancelled) invoke('open_project', { path: projectPath }).catch(() => {})
+    const promise = import('@tauri-apps/api/core').then(({ invoke }) => {
+      if (!cancelled) return invoke('open_project', { path: projectPath })
     })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      // Await the promise so the callback stays alive until Rust responds.
+      promise?.catch(() => {})
+    }
   }, [projectPath])
 
   // Scroll follow — auto-sticks to bottom while user is near bottom; pauses on manual scroll up.
@@ -317,9 +323,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     stickToBottom()
   }, [messages.length, stickToBottom])
 
-  // Close the terminal panel automatically when leaving the project.
+  // Kill all PTY sessions when leaving the project (unmount TerminalView).
   useEffect(() => {
-    return () => { useTerminalPanelStore.getState().close() }
+    return () => { useTerminalPanelStore.getState().killAll() }
   }, [])
 
   // Track outer container width so we can clamp the panel to max 50% of the IDE.
@@ -430,7 +436,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           {isLoadingSession ? (
             <Box mb={2}>
               <Text color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} fontSize="12px">
-                ⟳ loading session…
+                {t('terminalMode.view.loadingSession')}
               </Text>
             </Box>
           ) : messages.length === 0 ? (
@@ -461,7 +467,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
                   }}
                   onClick={() => loadMore()}
                 >
-                  ⟳ load earlier — {hiddenCount} hidden
+                  {t('terminalMode.view.loadEarlier').replace('{hiddenCount}', String(hiddenCount))}
                 </Box>
               )}
               {visibleItems.map(msg => (
@@ -503,7 +509,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         />
       )}
 
-      <Box flexShrink={0}>
+      <Box flexShrink={0} data-tauri-drag-region>
         <TerminalStatusLine />
       </Box>
 
@@ -511,8 +517,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         <CmdModePromptInput ref={promptInputRef} />
       </Box>
     </Flex>
-      {terminalOpen && (
-        <>
+      {/* Keep TerminalPanel mounted when instances exist — CSS display toggle
+          prevents unmount/remount which would call start_pty_shell on existing
+          sessions. Instances persist after non-destructive close(). */}
+      {useTerminalPanelStore.getState().instances.length > 0 && (
+        <Flex display={terminalOpen ? 'flex' : 'none'} flexShrink={0}>
           <Box
             width="4px"
             flexShrink={0}
@@ -524,11 +533,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
             onPointerMove={handleDividerMove}
             onPointerUp={handleDividerUp}
             onPointerCancel={handleDividerUp}
-            aria-label="Resize terminal panel"
+            aria-label={t('terminalMode.view.resizePanel')}
             role="separator"
           />
           <TerminalPanel projectPath={projectPath} widthPx={clampedPanelWidth} onReady={handleTerminalReady} />
-        </>
+        </Flex>
       )}
     </Flex>
   )

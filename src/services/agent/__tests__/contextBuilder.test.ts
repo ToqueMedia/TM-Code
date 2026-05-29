@@ -145,7 +145,12 @@ describe('ContextBuilder', () => {
           }
           throw new Error('File not found')
         }
-        if (cmd === 'path_exists') return false
+        if (cmd === 'path_exists') {
+          const path = (args as Record<string, unknown>)?.path as string
+          // auth.google requires BOTH .env key AND a marker file (useGoogleSignIn)
+          if (path?.includes('useGoogleSignIn')) return true
+          return false
+        }
         return null
       })
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')

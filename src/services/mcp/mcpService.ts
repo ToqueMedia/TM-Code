@@ -1,6 +1,7 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { useMcpStore, McpToolInfo } from '../../stores/mcpStore'
 import { discoverRemoteTools as discoverRemote, callRemoteTool as callRemote } from './remoteTransport'
+import { t } from '@/i18n'
 
 // === Types ===
 
@@ -204,12 +205,12 @@ class MCPService {
     const server = useMcpStore.getState().servers.find((s) => s.name === serverName)
 
     if (!server || server.status !== 'running') {
-      throw new Error(`MCP server '${serverName}' is not running`)
+      throw new Error(t('mcp.serverNotRunning').replace('{name}', serverName))
     }
 
     if (server.transport === 'remote') {
       const serverUrl = this.serverUrls.get(serverName)
-      if (!serverUrl) throw new Error(`No URL stored for remote server '${serverName}'`)
+      if (!serverUrl) throw new Error(t('mcp.noUrl').replace('{name}', serverName))
       return callRemote(serverUrl, toolName, args)
     }
 
@@ -346,7 +347,7 @@ class MCPService {
 
   private async startStdioServer(name: string, config: MCPServerConfig): Promise<void> {
     if (!config.command) {
-      throw new Error(`MCP server '${name}' requires a command for stdio transport`)
+      throw new Error(t('mcp.needsCommand').replace('{name}', name))
     }
 
     // Resolve environment variables
@@ -407,14 +408,14 @@ class MCPService {
       const msg = error instanceof Error ? error.message : String(error)
       useMcpStore.getState().updateServer(name, {
         status: 'error',
-        error: `Server started but tool discovery failed: ${msg}`,
+        error: t('mcp.discoveryFailed').replace('{message}', msg),
       })
     }
   }
 
   private async startRemoteServer(name: string, config: MCPServerConfig): Promise<void> {
     if (!config.url) {
-      throw new Error(`MCP server '${name}' requires a url for remote transport`)
+      throw new Error(t('mcp.needsUrl').replace('{name}', name))
     }
 
     // Store the URL for later tool calls

@@ -170,6 +170,13 @@ export type SystemMessageLevel = 'info' | 'success' | 'error' | 'warn'
  */
 export type SystemMessageKind = 'compact_boundary'
 
+/** Metadata stored on compact_boundary messages for richer rendering. */
+export interface CompactMetadata {
+  trigger: 'auto' | 'manual' | 'reactive'
+  beforeTokens: number
+  messagesSummarized?: number
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
@@ -179,6 +186,8 @@ export interface ChatMessage {
   kind?: SystemMessageKind
   /** Optional pre-compression token count, set on compact_boundary messages. */
   compactBeforeTokens?: number
+  /** Richer metadata for compact_boundary messages (trigger, token count, messages summarized). */
+  compactMetadata?: CompactMetadata
   content: string
   timestamp: number
   codeBlocks?: CodeBlock[]
@@ -237,6 +246,8 @@ export interface ChatMessage {
    * in the conversation history. Not persisted to disk (sanitizer drops them).
    */
   ephemeral?: boolean
+  /** Sub-agent run IDs spawned by task() tool calls in this message. SubAgentCard renders for each. */
+  subAgentRunIds?: string[]
 }
 
 export interface CodeBlock {
@@ -268,6 +279,11 @@ export interface ChatSession {
    *  a char-based estimate from the message history. */
   lastPromptTokens?: number
   lastResponseTokens?: number
+  /** Session-scoped memory notes maintained by the agent via
+   *  `update_session_memory`. Survives context compaction but resets on
+   *  new session creation. The agent uses these to track in-progress work,
+   *  decisions made, and pending next steps. */
+  sessionMemory?: string
 }
 
 /** Per-session frozen reference to the BYOK selection at creation time.
@@ -366,4 +382,5 @@ export interface PersistedSession {
   tokenUsage?: SessionTokenUsage
   lastTurnSnapshot?: SessionTurnSnapshot
   byokSnapshot?: ByokSessionSnapshot | null
+  sessionMemory?: string
 }

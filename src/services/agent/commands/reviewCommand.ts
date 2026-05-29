@@ -8,6 +8,7 @@ import CheckpointService from '../checkpointService'
 import { getQueryGuard } from '../queryGuard'
 import { languageDirective } from './_languageInstruction'
 import { logger } from '../../../utils/logger'
+import { t } from '../../../i18n'
 import type { SlashCommandMode } from '../slashCommandRegistry'
 
 /**
@@ -84,7 +85,7 @@ export async function executeReview(
   // previously this read useProjectStore.currentProject directly and
   // failed in CMD mode where currentProject is never populated.
   if (!projectPath) {
-    chatStore.addSystemMessage('No project open. Open a project before running /review.')
+    chatStore.addSystemMessage(t('review.noProject'))
     return
   }
 
@@ -96,7 +97,7 @@ export async function executeReview(
   const queryGuard = getQueryGuard()
   if (queryGuard.getSnapshot()) {
     chatStore.addSystemMessage(
-      'An agent turn is in progress. Wait for it to finish (or hit Stop) before running /review.'
+      t('review.busy')
     )
     return
   }
@@ -109,9 +110,7 @@ export async function executeReview(
   if (billing.consumedPct > 0.85) {
     const pct = Math.round(billing.consumedPct * 100)
     chatStore.addSystemMessage(
-      `Heads up: you're at ${pct}% of your plan's token budget. /review uses reasoning ` +
-      `ON across multiple turns and typically consumes 10–30K tokens. If you'd rather not ` +
-      `risk overage, hit Stop now and run /review after the next billing cycle.`
+      t('review.budgetWarning').replace('{pct}', String(pct))
     )
   }
 
@@ -120,15 +119,7 @@ export async function executeReview(
   // Empty scope (no args + no checkpoints) → show usage
   if (initialScope.type === 'empty') {
     chatStore.addSystemMessage(
-      'Usage: /review [scope]\n\n' +
-      'Examples:\n' +
-      '  /review                    review files touched in this session\n' +
-      '  /review @src/auth.ts       review a specific file\n' +
-      '  /review last commit        review files in the last git commit\n' +
-      '  /review login flow         review the feature you describe\n\n' +
-      'The review runs in a fresh sub-agent (no chat history) to avoid ' +
-      'confirmation bias. Read-only — no code is modified. Reasoning ON, so ' +
-      'expect higher token use than a normal turn.'
+      t('review.usage')
     )
     return
   }
@@ -187,7 +178,6 @@ export async function executeReview(
     'list_directory',
     'search_files',
     'glob',
-    'get_diagnostics',
     'read_skill',
     'read_dev_server_logs',
     'read_large_result',
@@ -407,7 +397,7 @@ async function resolveScopeFiles(
     case 'file': {
       const filePath = scope.filePath || ''
       if (!filePath) {
-        chatStore.addSystemMessage('Empty file path. Use `/review @path/to/file`.')
+        chatStore.addSystemMessage(t('review.emptyPath'))
         return null
       }
       // Validate existence before spending reasoning tokens on the spawn.
@@ -417,8 +407,7 @@ async function resolveScopeFiles(
         await invoke<string>('read_file', { path: resolveAbsolute(projectPath, filePath) })
       } catch {
         chatStore.addSystemMessage(
-          `File not found: \`${filePath}\`. Path is resolved relative to the ` +
-          `project root. Use a path like \`@src/auth/login.ts\` (no leading slash).`
+          t('review.fileNotFound').replace('{filePath}', filePath)
         )
         return null
       }
@@ -449,9 +438,7 @@ async function resolveScopeFiles(
       const all = await collectSessionFiles()
       if (all.length === 0) {
         chatStore.addSystemMessage(
-          'No files have been modified in this session yet — nothing to review. ' +
-          'Either edit some files first, or pass an explicit scope (`/review @file` ' +
-          'or `/review <description>`).'
+          t('review.noFiles')
         )
         return null
       }

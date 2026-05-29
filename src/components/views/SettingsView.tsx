@@ -29,7 +29,7 @@ import { invoke } from '@/utils/invokeMetrics'
 import { installUpdate, checkForUpdate } from '../../services/updateService'
 import { IS_WINDOWS } from '@/utils/platform'
 import { tokens } from '@/theme/tokens'
-import { useTranslation } from '@/i18n'
+import { useTranslation, t } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
 import ApiKeysSection from './settings/ApiKeysSection'
 import DeploysSection from './settings/DeploysSection'
@@ -609,6 +609,7 @@ function UpdateSection() {
 // ━━━ Editor Section ━━━
 
 function SandboxSection() {
+  const t = useTranslation()
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
   const setSandboxEnabled = useSettingsStore(s => s.setSandboxEnabled)
   const [sandboxAvailable, setSandboxAvailable] = useState(false)
@@ -642,15 +643,15 @@ function SandboxSection() {
 
   return (
     <VStack align="stretch" gap={6}>
-      <SettingsGroup title="Sandbox">
+      <SettingsGroup title={t('sandbox.title')}>
         <Field.Root>
           <HStack justify="space-between">
             <Box>
               <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
-                Sandbox
+                {t('sandbox.title')}
               </Text>
               <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
-                Isola os comandos do agente ao directório do projecto. Protege ficheiros do sistema, SSH keys, credentials e histórico.
+                {t('sandbox.description')}
               </Text>
             </Box>
             {!loading && (
@@ -671,20 +672,20 @@ function SandboxSection() {
 
         <VStack align="stretch" gap={2} px={1}>
           <HStack justify="space-between">
-            <Text fontSize="12px" color={tokens.colors.text.secondary}>Engine</Text>
+            <Text fontSize="12px" color={tokens.colors.text.secondary}>{t('settings.engine')}</Text>
             <Text fontSize="12px" color={tokens.colors.text.primary} fontFamily={tokens.fontFamily.mono}>
               {platformLabel}
             </Text>
           </HStack>
           <HStack justify="space-between">
-            <Text fontSize="12px" color={tokens.colors.text.secondary}>Estado</Text>
+            <Text fontSize="12px" color={tokens.colors.text.secondary}>{t('settings.state')}</Text>
             <HStack gap={1.5}>
               <Box
                 w="6px" h="6px" borderRadius="full"
                 bg={sandboxEnabled ? tokens.colors.accent.green : tokens.colors.text.disabled}
               />
               <Text fontSize="12px" color={sandboxEnabled ? tokens.colors.accent.green : tokens.colors.text.disabled}>
-                {sandboxEnabled ? 'Activo' : 'Inactivo'}
+                {sandboxEnabled ? t('settings.active') : t('settings.inactive')}
               </Text>
             </HStack>
           </HStack>
@@ -1219,7 +1220,7 @@ function SkillsSection() {
               <Box flex={1}>
                 <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1}>{t("settings.name")}</Text>
                 <Input size="sm" value={newSkillName} onChange={function (e) { setNewSkillName(e.target.value) }}
-                  placeholder="my-conventions" bg={tokens.colors.bg.input} borderColor={tokens.colors.border.input}
+                  placeholder={t('preferences.myConventions')} bg={tokens.colors.bg.input} borderColor={tokens.colors.border.input}
                   color={tokens.colors.text.primary} _placeholder={{ color: tokens.colors.text.placeholder }} />
               </Box>
               <Box>
@@ -1411,15 +1412,15 @@ const MCP_JSON_EXAMPLE = `{
  */
 function parseMcpJson(raw: string, fallbackName: string): Record<string, McpEntry> {
   const trimmed = raw.trim()
-  if (!trimmed) throw new Error('Empty JSON')
+  if (!trimmed) throw new Error(t('settings.emptyJson'))
   let parsed: unknown
   try {
     parsed = JSON.parse(trimmed)
   } catch (err) {
-    throw new Error(err instanceof Error ? err.message : 'Invalid JSON')
+    throw new Error(err instanceof Error ? err.message : t('settings.invalidJson'))
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Top-level value must be an object')
+    throw new Error(t('settings.topLevelObject'))
   }
   const obj = parsed as Record<string, unknown>
 
@@ -1436,7 +1437,7 @@ function parseMcpJson(raw: string, fallbackName: string): Record<string, McpEntr
   // Shape C — looks like a bare entry (top-level has `command`).
   if ('command' in obj && typeof obj.command === 'string') {
     const name = fallbackName.trim()
-    if (!name) throw new Error('Set the Name field when pasting a bare entry')
+    if (!name) throw new Error(t('settings.setNameField'))
     return { [name]: validateEntry(name, obj) }
   }
 

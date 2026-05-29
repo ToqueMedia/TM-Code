@@ -4,6 +4,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useAgentElapsed } from '../../hooks/useAgentElapsed'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n/useTranslation'
 
 function formatElapsed(ms: number): string {
   const secs = Math.floor(ms / 1000)
@@ -29,11 +30,20 @@ const STATUS_LABELS: Record<string, string> = {
   reasoning: 'Reasoning',
   generating: 'Writing',
   applying: 'Applying changes',
-  compressing: 'Compressing context',
+  compressing: 'Compacting conversation',
+  error: 'Error',
+  idle: 'Idle',
+}
+
+const COMPACT_PHASE_LABELS: Record<string, string> = {
+  hooks_pre: t('chat.compact.preHooks'),
+  hooks_post: t('chat.compact.postHooks'),
+  compressing: t('chat.compact.compacting'),
 }
 
 function AgentActivityIndicator() {
   const status = useAgentStore(s => s.status)
+  const compactPhase = useAgentStore(s => s.compactPhase)
   const isStreaming = useChatStore(s => s.isStreaming)
   const totalTokensUsed = useChatStore(s => s.totalTokensUsed)
   // Session-mode elapsed: total wall time per request, freezes during permission waits.
@@ -70,7 +80,9 @@ function AgentActivityIndicator() {
 
   if (!isStreaming) return null
 
-  const label = STATUS_LABELS[status] || 'Working'
+  const label = status === 'compressing'
+    ? (COMPACT_PHASE_LABELS[compactPhase] || STATUS_LABELS[status] || 'Working')
+    : (STATUS_LABELS[status] || 'Working')
   // chatStore.addTokenUsage:
   //   - input  is REPLACED with max(prev, newInput) — represents the CURRENT
   //              context size on the wire (turn N's input already contains

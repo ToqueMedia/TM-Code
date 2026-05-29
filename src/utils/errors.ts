@@ -1,4 +1,5 @@
 // src/utils/errors.ts — Standardized error class for all services
+import { t } from '@/i18n'
 
 export class ServiceError extends Error {
   constructor(
@@ -34,11 +35,11 @@ export function formatError(err: unknown): string {
       const causeStr = formatError(cause)
       return `${err.message} (cause: ${causeStr})`
     }
-    return err.message || err.name || 'Error'
+    return err.message || err.name || t('error.default')
   }
   if (typeof err === 'string') return err
   if (typeof err === 'number' || typeof err === 'boolean') return String(err)
-  if (err === null || err === undefined) return 'Unknown error'
+  if (err === null || err === undefined) return t('error.unknown')
   if (typeof err === 'object') {
     const obj = err as Record<string, unknown>
 

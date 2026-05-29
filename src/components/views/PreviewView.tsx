@@ -4,28 +4,21 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Flex, Box, Text, IconButton, HStack, Button } from '@chakra-ui/react'
 import { IS_MAC } from '@/utils/platform'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiMaximize2, FiMinimize2, FiZap, FiSend, FiUpload, FiCamera, FiDatabase } from 'react-icons/fi'
+import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiZap, FiSend, FiUpload, FiCamera, FiDatabase } from 'react-icons/fi'
 import { useChatStore, generateId } from '../../stores/chatStore'
 import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
-import { usePermissionStore } from '../../stores/permissionStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useToastStore } from '../../stores/toastStore'
 import { createImageAttachmentFromClipboard } from '../../services/attachmentService'
 import { devServerManager } from '../../services/devServerManager'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
-import MessageBubble from '../chat/MessageBubble'
-import PromptBar from '../PromptBar'
-import PermissionDialog from '../chat/PermissionDialog'
 import HttpClientPanel from '../http-client/HttpClientPanel'
 import DataViewerView from './DataViewerView'
-import { useMessageWindow } from '../../hooks/useMessageWindow'
-import TauriWebview, { closePreviewWebview } from '../ui/TauriWebview'
-import AgentLogo from '../ui/AgentLogo'
+import TauriWebview, { closePreviewWebview, type TauriWebviewHandle } from '../ui/TauriWebview'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
-const STORAGE_KEY = 'preview-chat-width'
 const CONSOLE_STORAGE_KEY = 'preview-console-height'
 const HTTP_DRAWER_OPEN_KEY = 'preview-http-drawer-open'
 const DATA_DRAWER_HEIGHT_KEY = 'preview-data-drawer-height'
@@ -33,9 +26,6 @@ const DATA_DRAWER_OPEN_KEY = 'preview-data-drawer-open'
 const MIN_DATA_DRAWER_HEIGHT = 260
 const MAX_DATA_DRAWER_HEIGHT = 720
 const DEFAULT_DATA_DRAWER_HEIGHT = 420
-const MIN_WIDTH = 280
-const MAX_WIDTH = 640
-const DEFAULT_WIDTH = 380
 const MIN_CONSOLE_HEIGHT = 80
 const MAX_CONSOLE_HEIGHT = 400
 const DEFAULT_CONSOLE_HEIGHT = 180
@@ -47,9 +37,6 @@ const LOG_COLORS: Record<string, string> = {
 }
 
 function PreviewView() {
-  const activeSessionId = useChatStore(s => s.activeSessionId)
-  const sessions = useChatStore(s => s.sessions)
-  const streamingMessageId = useChatStore(s => s.streamingMessageId)
   const billingPlan = useBillingStore(s => s.plan)
   // Gate matches the BACKEND's multimodal-preprocessing condition exactly:
   //   proxy.ts: `if (planConfig.planId !== 'explorer' && ...) processMultimodal()`
@@ -58,11 +45,12 @@ function PreviewView() {
   // previously a tighter "vibe/pro/max" whitelist hid the button on accounts
   // whose plan string didn't match the literal list (legacy values, hydration
   // races, future tiers added in Firestore before the IDE knows them). When
-  // plan is undefined/null (auth still hydrating), default to visible: at worst
-  // the click surfaces a backend 4xx, which is a clearer signal than a
-  // permanently-missing button.
-  const canUseVision = billingPlan !== 'explorer'
+  // plan is undefined/null (auth still hydrating), hide the button — showing
+  // it prematurely leads to a confusing 4xx when billing isn't ready yet.
+  const isLoaded = useBillingStore(s => s.isLoaded)
+  const canUseVision = isLoaded && billingPlan !== 'explorer'
   const previewContainerRef = useRef<HTMLDivElement>(null)
+  const previewWebviewRef = useRef<TauriWebviewHandle>(null)
   const [isCapturing, setIsCapturing] = useState(false)
   const frontendUrl = useLayoutStore(selectFrontendUrl)
   const backendUrl = useLayoutStore(selectBackendUrl)
@@ -71,7 +59,6 @@ function PreviewView() {
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const previewSourcePath = useLayoutStore(s => s.previewSourcePath)
   const previewReloadKey = useLayoutStore(s => s.previewReloadKey)
-  const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const devServerLogs = useLayoutStore(s => s.devServerLogs)
   const isConsoleVisible = useLayoutStore(s => s.isConsoleVisible)
   const isHttpDrawerOpen = useLayoutStore(s => s.isHttpDrawerOpen)
@@ -112,49 +99,9 @@ function PreviewView() {
   const isFullstack = projectKind === 'fullstack'
   const previewUrl = showHttpClientMain ? backendUrl : frontendUrl
 
-  const [isChatCollapsed, setIsChatCollapsed] = useState(false)
-  // True while the chat sidebar's width is animating (CSS transition 0.25s).
-  // During that window the ResizeObserver on the iframe container fires every
-  // animation frame, each one moves the macOS native wry webview a few pixels,
-  // and the user sees a visible tremor as the NSView chases the DOM rect frame
-  // by frame. Parking the webview off-screen while the animation runs and
-  // restoring its position at the end produces a clean "snap to new size"
-  // instead of frame-by-frame jitter.
-  const [isChatAnimating, setIsChatAnimating] = useState(false)
-  const chatSidebarRef = useRef<HTMLDivElement>(null)
-  const toggleChatCollapsed = useCallback(() => {
-    setIsChatAnimating(true)
-    setIsChatCollapsed(v => !v)
-  }, [])
-  // React's `onTransitionEnd` fires per CSS property — width, min-width,
-  // max-width and opacity all transition on the sidebar. We only care about
-  // `width` (the one that drives the ResizeObserver and the webview rect
-  // recalc), so we filter to that property and unfreeze precisely when the
-  // browser confirms it's done. No fallback timer: the event is reliable
-  // in practice and if it's ever dropped the worst case is the webview
-  // stays parked until the next toggle (one extra click), which is better
-  // than the timer prematurely unfreezing during a long animation.
-  const handleSidebarTransitionEnd = useCallback((e: React.TransitionEvent<HTMLDivElement>) => {
-    if (e.propertyName !== 'width') return
-    if (e.target !== chatSidebarRef.current) return
-    setIsChatAnimating(false)
-  }, [])
-
-  const chatScrollRef = useRef<HTMLDivElement>(null)
-  const handleRef = useRef<HTMLDivElement>(null)
   const consoleHandleRef = useRef<HTMLDivElement>(null)
   const consoleScrollRef = useRef<HTMLDivElement>(null)
 
-  const [chatWidth, setChatWidth] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY)
-      if (saved) {
-        const parsed = parseInt(saved, 10)
-        if (parsed >= MIN_WIDTH && parsed <= MAX_WIDTH) return parsed
-      }
-    } catch { /* ignore */ }
-    return DEFAULT_WIDTH
-  })
   const [consoleHeight, setConsoleHeight] = useState<number>(() => {
     try {
       const saved = localStorage.getItem(CONSOLE_STORAGE_KEY)
@@ -165,7 +112,6 @@ function PreviewView() {
     } catch { /* ignore */ }
     return DEFAULT_CONSOLE_HEIGHT
   })
-  const [isResizing, setIsResizing] = useState(false)
   const [isResizingConsole, setIsResizingConsole] = useState(false)
 
   // Data Viewer drawer — local state (not in layoutStore) because it's
@@ -216,48 +162,6 @@ function PreviewView() {
     } catch { /* ignore */ }
   }, [isHttpDrawerOpen])
 
-  const session = activeSessionId ? sessions.get(activeSessionId) : null
-  const messages = session?.messages || []
-
-  // Pagination — same shape used by ChatView / ChatPanel / TerminalView.
-  // Render the last 30 messages; expand the window when the user scrolls
-  // the chat sidebar toward the top. Reset on session switch so a new
-  // conversation starts at the bottom.
-  const { visibleItems: visibleChatItems, canLoadMore: chatCanLoadMore, loadMore: chatLoadMore, hiddenCount: chatHiddenCount } = useMessageWindow(messages, {
-    resetKey: activeSessionId,
-    pageSize: 2,
-  })
-  const chatLoadMoreSentinelRef = useRef<HTMLDivElement>(null)
-  const isChatLoadingMoreRef = useRef(false)
-  useEffect(() => {
-    if (!chatCanLoadMore) return
-    const sentinel = chatLoadMoreSentinelRef.current
-    const scrollEl = chatScrollRef.current
-    if (!sentinel || !scrollEl) return
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry.isIntersecting) return
-        if (isChatLoadingMoreRef.current) return
-        isChatLoadingMoreRef.current = true
-        const beforeHeight = scrollEl.scrollHeight
-        const beforeTop = scrollEl.scrollTop
-        chatLoadMore()
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            const delta = scrollEl.scrollHeight - beforeHeight
-            if (delta > 0) scrollEl.scrollTop = beforeTop + delta
-            setTimeout(() => { isChatLoadingMoreRef.current = false }, 200)
-          })
-        })
-      },
-      { root: scrollEl, rootMargin: '120px 0px 0px 0px', threshold: 0 },
-    )
-    observer.observe(sentinel)
-    return () => observer.disconnect()
-    // chatScrollRef is a stable useRef; reading .current inside the effect
-    // doesn't need it in the dep array.
-  }, [chatCanLoadMore, chatLoadMore])
-
   // Single pass over logs; memoized so subscribers that re-render the
   // wrapping component (e.g. on unrelated layoutStore changes) don't
   // re-scan the whole log list.
@@ -282,16 +186,6 @@ function PreviewView() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [projectKind])
-
-  // Auto-scroll chat
-  useEffect(() => {
-    const el = chatScrollRef.current
-    if (!el) return
-    const rafId = requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight
-    })
-    return () => cancelAnimationFrame(rafId)
-  }, [messages, messages.length])
 
   // Auto-scroll console
   useEffect(() => {
@@ -334,24 +228,41 @@ function PreviewView() {
     }
   }, [previewMode, previewSourcePath])
 
+  const handlePreviewBack = useCallback(async () => {
+    const didNavigate = await previewWebviewRef.current?.goBack()
+    if (!didNavigate) {
+      useToastStore.getState().addToast('warning', t('preview.navUnavailable'))
+    }
+  }, [])
+
+  const handlePreviewForward = useCallback(async () => {
+    const didNavigate = await previewWebviewRef.current?.goForward()
+    if (!didNavigate) {
+      useToastStore.getState().addToast('warning', t('preview.navUnavailable'))
+    }
+  }, [])
+
   const handleOpenExternal = async () => {
     if (!previewUrl) return
     try {
       const { openUrl } = await import('@tauri-apps/plugin-opener')
       await openUrl(previewUrl)
     } catch {
-      window.open(previewUrl, '_blank')
+      useToastStore.getState().addToast('error', t('preview.copyUrlManually'))
     }
   }
 
 
   const handleStopServer = useCallback(async () => {
+    // Read previousViewMode BEFORE any state mutations — stop() calls
+    // clearDevServer() internally which resets store flags.
+    const prev = useLayoutStore.getState().previousViewMode
     closePreviewWebview()
     await devServerManager.stop()
-    const layout = useLayoutStore.getState()
-    layout.clearDevServer()
-    const prev = layout.previousViewMode
-    layout.setViewMode(prev && prev !== 'generating' && prev !== 'preview' ? prev : 'chat')
+    // clearDevServer() already called by devServerManager.stop() — don't
+    // call it again (redundant set() triggers an extra MacWebview re-render
+    // that races with the native webview teardown).
+    useLayoutStore.getState().setViewMode(prev && prev !== 'generating' && prev !== 'preview' ? prev : 'chat')
   }, [])
 
   // ── Preview screenshot → chat attachment ─────────────────────────────
@@ -369,14 +280,7 @@ function PreviewView() {
   // For high-fidelity content capture (mac native webview / real iframe
   // pixels) a future native path can be added — out of scope for V1.
   const handleScreenshotToChat = useCallback(async () => {
-    console.log('[screenshot] handler invoked', {
-      canUseVision,
-      isMac: IS_MAC,
-      hasContainer: !!previewContainerRef.current,
-      isCapturing,
-    })
     if (!canUseVision) {
-      console.warn('[screenshot] aborting — canUseVision=false (plan blocks vision)')
       useToastStore.getState().addToast(
         'warning',
         t('preview.screenshotPaidOnly'),
@@ -385,7 +289,6 @@ function PreviewView() {
     }
     const container = previewContainerRef.current
     if (!container) {
-      console.warn('[screenshot] previewContainerRef.current is null — aborting')
       useToastStore.getState().addToast(
         'error',
         'Preview area not ready. Reload the preview and try again.',
@@ -422,31 +325,13 @@ function PreviewView() {
         const y = Math.round(windowTopLeftLogicalY + rect.top)
         const w = Math.round(rect.width)
         const h = Math.round(rect.height)
-        console.log('[screenshot] mac native capture invoking', {
-          x, y, w, h,
-          windowOuter: { x: outer.x, y: outer.y },
-          scaleFactor: scale,
-          windowTopLeftLogical: { x: windowTopLeftLogicalX, y: windowTopLeftLogicalY },
-          rectLeft: rect.left,
-          rectTop: rect.top,
-          rectW: rect.width,
-          rectH: rect.height,
-        })
-        const t0 = performance.now()
         const base64 = await invoke<string>('capture_screen_region_macos_native', {
           x, y, width: w, height: h,
-        })
-        const t1 = performance.now()
-        console.log('[screenshot] invoke returned', {
-          elapsedMs: Math.round(t1 - t0),
-          base64Length: base64?.length ?? 0,
-          base64Head: base64?.slice(0, 40),
         })
         const binary = atob(base64)
         const bytes = new Uint8Array(binary.length)
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
         blob = new Blob([bytes], { type: 'image/png' })
-        console.log('[screenshot] blob built', { size: blob.size, type: blob.type })
       } else {
         // Windows / Linux fallback — html2canvas. Iframe is in-DOM on
         // these platforms so the capture works partially (iframe element
@@ -480,26 +365,10 @@ function PreviewView() {
 
       if (!blob) throw new Error('capture produced no image data')
 
-      console.log('[screenshot] building attachment from blob', { size: blob.size, type: blob.type })
       const attachment = await createImageAttachmentFromClipboard(blob)
       const ext = blob.type === 'image/png' ? 'png' : 'jpg'
       attachment.name = `preview-screenshot-${Date.now()}.${ext}`
-      console.log('[screenshot] calling addDraftAttachment', {
-        id: attachment.id,
-        name: attachment.name,
-        type: attachment.type,
-        hasBase64: !!attachment.base64,
-        base64Length: attachment.base64?.length ?? 0,
-      })
       useChatStore.getState().addDraftAttachment(attachment)
-      const draftAfter = useChatStore.getState().draftAttachments
-      console.log('[screenshot] draft after attach', {
-        count: draftAfter.length,
-        last: draftAfter.length > 0 ? {
-          id: draftAfter[draftAfter.length - 1].id,
-          name: draftAfter[draftAfter.length - 1].name,
-        } : null,
-      })
       useToastStore.getState().addToast(
         'success',
         t('preview.screenshotAttached'),
@@ -525,45 +394,6 @@ function PreviewView() {
       setIsCapturing(false)
     }
   }, [canUseVision])
-
-  // Horizontal resize (chat width)
-  const handleResizeStart = useCallback((e: React.PointerEvent) => {
-    e.preventDefault()
-    const handleEl = handleRef.current
-    if (!handleEl) return
-
-    const pid = e.pointerId
-    try { handleEl.setPointerCapture(pid) } catch { /* ignore */ }
-
-    let current = chatWidth
-    const body = document.body
-    const prevCursor = body.style.cursor
-    const prevUserSelect = body.style.userSelect
-    body.style.cursor = 'col-resize'
-    body.style.userSelect = 'none'
-    setIsResizing(true)
-
-    function onPointerMove(pe: PointerEvent) {
-      let next = pe.clientX
-      if (next < MIN_WIDTH) next = MIN_WIDTH
-      if (next > MAX_WIDTH) next = MAX_WIDTH
-      current = next
-      setChatWidth(next)
-    }
-
-    function onPointerUp() {
-      try { localStorage.setItem(STORAGE_KEY, String(current)) } catch { /* ignore */ }
-      try { handleEl?.releasePointerCapture(pid) } catch { /* ignore */ }
-      handleEl?.removeEventListener('pointermove', onPointerMove)
-      handleEl?.removeEventListener('pointerup', onPointerUp)
-      body.style.cursor = prevCursor
-      body.style.userSelect = prevUserSelect
-      setIsResizing(false)
-    }
-
-    handleEl.addEventListener('pointermove', onPointerMove)
-    handleEl.addEventListener('pointerup', onPointerUp)
-  }, [chatWidth])
 
   // Vertical resize (console height)
   const handleConsoleResizeStart = useCallback((e: React.PointerEvent) => {
@@ -658,121 +488,7 @@ function PreviewView() {
 
   return (
     <Flex flex="1" overflow="hidden">
-      {/* Left: Full chat sidebar (messages + prompt) — collapsible with animation */}
-      <Flex
-        ref={chatSidebarRef}
-        direction="column"
-        w={isChatCollapsed ? '0px' : `${chatWidth}px`}
-        minW={isChatCollapsed ? '0px' : `${MIN_WIDTH}px`}
-        maxW={isChatCollapsed ? '0px' : `${MAX_WIDTH}px`}
-        overflow="hidden"
-        bg={tokens.colors.bg.mainLayout}
-        flexShrink={0}
-        transition="width 0.25s ease, min-width 0.25s ease, max-width 0.25s ease"
-        opacity={isChatCollapsed ? 0 : 1}
-        css={{ transition: 'width 0.25s ease, min-width 0.25s ease, max-width 0.25s ease, opacity 0.2s ease' }}
-        onTransitionEnd={handleSidebarTransitionEnd}
-      >
-        {/* Chat messages */}
-        <Flex
-          ref={chatScrollRef}
-          direction="column"
-          flex="1"
-          overflowY="auto"
-          py={3}
-          px={3}
-          css={{
-            '&::-webkit-scrollbar': { width: '4px' },
-            '&::-webkit-scrollbar-track': { background: 'transparent' },
-            '&::-webkit-scrollbar-thumb': {
-              background: tokens.colors.border.panel,
-              borderRadius: '2px',
-            },
-          }}
-        >
-          {messages.length === 0 ? (
-            <Flex
-              flex="1"
-              direction="column"
-              align="center"
-              justify="center"
-              gap={3}
-            >
-              <AgentLogo size={36} glow />
-              <Flex direction="column" align="center" gap={1}>
-                <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.muted} fontWeight={500}>
-                  Ask the agent to iterate
-                </Text>
-                <Text fontSize="10px" color={tokens.colors.text.disabled} textAlign="center" px={3} lineHeight="1.4">
-                  Describe changes and see them live
-                </Text>
-              </Flex>
-            </Flex>
-          ) : (
-            <Box maxW="600px" mx="auto" w="100%">
-              {chatCanLoadMore && (
-                <Box
-                  as="button"
-                  ref={chatLoadMoreSentinelRef}
-                  w="100%"
-                  textAlign="center"
-                  fontSize={tokens.fontSize.xs}
-                  fontWeight="500"
-                  color={tokens.colors.text.muted}
-                  py={2}
-                  px={3}
-                  mb={2}
-                  borderRadius="6px"
-                  bg={tokens.colors.bg.hoverSubtle}
-                  border={`1px solid ${tokens.colors.border.panel}`}
-                  cursor="pointer"
-                  transition={`all ${tokens.transition.fast}`}
-                  _hover={{
-                    color: tokens.colors.text.primary,
-                    borderColor: tokens.colors.border.glass,
-                    bg: tokens.colors.bg.overlay,
-                  }}
-                  onClick={() => chatLoadMore()}
-                >
-                  ↑ Load earlier — {chatHiddenCount} hidden
-                </Box>
-              )}
-              {visibleChatItems.map(msg => (
-                <MessageBubble
-                  key={msg.id}
-                  message={msg}
-                  isStreaming={msg.id === streamingMessageId}
-                />
-              ))}
-            </Box>
-          )}
-        </Flex>
-
-        {/* Permission dialog above prompt */}
-        {pendingPermission && (
-          <PermissionDialog />
-        )}
-
-        {/* PromptBar at bottom of chat sidebar */}
-        <PromptBar />
-      </Flex>
-
-      {/* Resize handle (horizontal) — hidden when chat is collapsed */}
-      <Box
-        ref={handleRef}
-        w={isChatCollapsed ? '0px' : '4px'}
-        cursor="col-resize"
-        flexShrink={0}
-        bg={isResizing ? tokens.colors.accent.primary : 'transparent'}
-        transition={isResizing ? 'none' : `all ${tokens.transition.fast}`}
-        _hover={!isChatCollapsed ? { bg: tokens.colors.accent.primary } : {}}
-        onPointerDown={isChatCollapsed ? undefined : handleResizeStart}
-        position="relative"
-        zIndex={2}
-        overflow="hidden"
-      />
-
-      {/* Right: Preview webview + console */}
+      {/* Preview webview + console */}
       <Flex
         direction="column"
         flex="1"
@@ -792,17 +508,46 @@ function PreviewView() {
           {/* Navigation + reload */}
           <HStack gap={0}>
             {previewMode !== 'api' && (
-              <IconButton
-                aria-label={t("view.reloadPreview")}
-                size="xs"
-                variant="ghost"
-                color={tokens.colors.text.secondary}
-                _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-                borderRadius="6px"
-                onClick={handleReload}
-              >
-                <FiRefreshCw size={13} />
-              </IconButton>
+              <>
+                <IconButton
+                  aria-label={t('preview.goBack')}
+                  title={t('preview.back')}
+                  size="xs"
+                  variant="ghost"
+                  color={tokens.colors.text.secondary}
+                  disabled={!hasPreview || !showIframe}
+                  _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                  borderRadius="6px"
+                  onClick={() => void handlePreviewBack()}
+                >
+                  <FiArrowLeft size={13} />
+                </IconButton>
+                <IconButton
+                  aria-label={t('preview.goForward')}
+                  title={t('preview.forward')}
+                  size="xs"
+                  variant="ghost"
+                  color={tokens.colors.text.secondary}
+                  disabled={!hasPreview || !showIframe}
+                  _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                  borderRadius="6px"
+                  onClick={() => void handlePreviewForward()}
+                >
+                  <FiArrowRight size={13} />
+                </IconButton>
+                <IconButton
+                  aria-label={t("view.reloadPreview")}
+                  title={t("view.reloadPreview")}
+                  size="xs"
+                  variant="ghost"
+                  color={tokens.colors.text.secondary}
+                  _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                  borderRadius="6px"
+                  onClick={handleReload}
+                >
+                  <FiRefreshCw size={13} />
+                </IconButton>
+              </>
             )}
           </HStack>
 
@@ -837,30 +582,17 @@ function PreviewView() {
 
           {/* Right actions */}
           <HStack gap={0}>
-            {/* Expand/collapse chat sidebar */}
-            <IconButton
-              aria-label={isChatCollapsed ? 'Show chat' : 'Full preview'}
-              size="xs"
-              variant="ghost"
-              color={isChatCollapsed ? tokens.colors.accent.primary : tokens.colors.text.secondary}
-              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-              borderRadius="6px"
-              onClick={toggleChatCollapsed}
-            >
-              {isChatCollapsed ? <FiMinimize2 size={13} /> : <FiMaximize2 size={13} />}
-            </IconButton>
-
             {/* HTTP Client drawer toggle — only visible for fullstack projects */}
             {isFullstack && (
               <IconButton
-                aria-label={isHttpDrawerOpen ? 'Close HTTP Client' : 'Open HTTP Client'}
+                aria-label={isHttpDrawerOpen ? t('preview.closeHttpClient') : t('preview.toggleHttpClient')}
                 size="xs"
                 variant="ghost"
                 color={isHttpDrawerOpen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
                 _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
                 borderRadius="6px"
                 onClick={() => useLayoutStore.getState().toggleHttpDrawer()}
-                title="Toggle HTTP Client"
+                title={t('preview.toggleHttpClient')}
               >
                 <FiZap size={13} />
               </IconButton>
@@ -917,14 +649,7 @@ function PreviewView() {
                     color: tokens.colors.accent.primary,
                   }}
                   borderRadius="6px"
-                  onPointerDown={() => console.log('[screenshot] pointerdown on button')}
-                  onClick={(e) => {
-                    console.log('[screenshot] click event fired', {
-                      defaultPrevented: e.defaultPrevented,
-                      isCapturing,
-                    })
-                    void handleScreenshotToChat()
-                  }}
+                  onClick={() => void handleScreenshotToChat()}
                 >
                   <FiCamera size={13} />
                 </IconButton>
@@ -945,20 +670,31 @@ function PreviewView() {
               </IconButton>
             )}
 
-            {/* Stop server */}
-            {previewMode !== 'static' && previewUrl && (
-              <IconButton
-                aria-label={t("misc.stopServer")}
-                size="xs"
-                variant="ghost"
-                color={tokens.colors.text.secondary}
-                _hover={{ bg: 'rgba(248, 81, 73, 0.12)', color: '#f85149' }}
-                borderRadius="6px"
-                onClick={handleStopServer}
-              >
-                <FiSquare size={12} />
-              </IconButton>
-            )}
+            {/* Stop server — always visible so users can close the preview
+                without searching for the action. Red accent on hover makes
+                the destructive intent clear. Stops the dev server and
+                navigates back, not just hides the view. */}
+            <Flex
+              align="center"
+              gap="4px"
+              px="8px"
+              h="24px"
+              borderRadius="6px"
+              cursor="pointer"
+              color="#fff"
+              fontSize="11px"
+              fontWeight="500"
+              bg="rgba(248, 81, 73, 0.15)"
+              border={`1px solid rgba(248, 81, 73, 0.25)`}
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{ bg: 'rgba(248, 81, 73, 0.25)', borderColor: 'rgba(248, 81, 73, 0.4)' }}
+              onClick={handleStopServer}
+              aria-label={t("misc.stopServer")}
+              role="button"
+            >
+              <FiSquare size={10} color="#f85149" />
+              <Text fontSize="11px" fontWeight="500" color="#f85149">{t("misc.stopServer")}</Text>
+            </Flex>
 
             {/* Data Viewer — toggles a bottom slide-up drawer rather than
                 navigating to the standalone Data Viewer view, so the user
@@ -981,7 +717,7 @@ function PreviewView() {
             {/* Publish — opens the deploy modal. Free plan sees an upgrade
                 CTA inside the modal rather than the deploy flow. */}
             <Button
-              aria-label="Publish project"
+              aria-label={t('preview.publishProject')}
               size="xs"
               variant="solid"
               bg={tokens.colors.accent.primary}
@@ -1062,6 +798,7 @@ function PreviewView() {
             {hasPreview && showIframe ? (
               <Box ref={previewContainerRef} position="relative" w="100%" h="100%">
                 <TauriWebview
+                  ref={previewWebviewRef}
                   url={previewMode === 'static' ? undefined : previewUrl!}
                   html={previewMode === 'static' ? previewHtmlContent! : undefined}
                   reloadKey={previewReloadKey}
@@ -1076,9 +813,7 @@ function PreviewView() {
                   // the upper iframe while the bottom shows the table viewer.
                   frozen={
                     !isPreviewActiveView
-                    || isResizing
                     || isResizingConsole
-                    || isChatAnimating
                     || (isFullstack && isHttpDrawerOpen)
                   }
                   // Data Viewer drawer takes the lower portion of the preview
@@ -1089,7 +824,7 @@ function PreviewView() {
                   // simultaneously visible" intent the drawer was added for.
                   bottomReserveHeight={isDataDrawerOpen ? dataDrawerHeight + 4 : 0}
                 />
-                {(isResizing || isResizingConsole) && (
+                {isResizingConsole && (
                   <Box
                     position="absolute"
                     inset={0}
@@ -1197,6 +932,9 @@ function PreviewView() {
                 >
               <Box
                 ref={dataDrawerHandleRef}
+                role="separator"
+                aria-label={t('preview.resizeDataViewer')}
+                aria-orientation="horizontal"
                 h="4px"
                 cursor="row-resize"
                 flexShrink={0}
@@ -1223,7 +961,7 @@ function PreviewView() {
                   </Text>
                 </HStack>
                 <IconButton
-                  aria-label="Close Data Viewer"
+                  aria-label={t('preview.closeDataViewer')}
                   size="xs"
                   variant="ghost"
                   color={tokens.colors.text.disabled}
@@ -1286,7 +1024,7 @@ function PreviewView() {
                   )}
                 </HStack>
                 <IconButton
-                  aria-label="Close HTTP Client"
+                  aria-label={t('preview.closeHttpClient')}
                   size="xs"
                   variant="ghost"
                   color={tokens.colors.text.disabled}
@@ -1323,6 +1061,9 @@ function PreviewView() {
               {/* Resize handle (vertical) */}
               <Box
                 ref={consoleHandleRef}
+                role="separator"
+                aria-label={t('preview.resizeConsole')}
+                aria-orientation="horizontal"
                 h="4px"
                 cursor="row-resize"
                 flexShrink={0}
@@ -1429,6 +1170,15 @@ function PreviewView() {
 }
 
 function sendLogToAgent(entry: DevServerLogEntry): void {
+  // Guard: need an active session to enqueue into
+  const { activeSessionId } = useChatStore.getState()
+  if (!activeSessionId) {
+    useToastStore.getState().addToast(
+      'warning',
+      'Open a chat session first to send logs to the agent.',
+    )
+    return
+  }
   // Wrap the captured output in a fenced code block so the agent can tell
   // it apart from the framing question, and prefix the level so error/warn
   // context isn't lost. entry.text may be MULTI-LINE — the dev-server log

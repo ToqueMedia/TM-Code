@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Box, Button, Dialog, Flex, Input, Portal, Text } from '@chakra-ui/react'
 import {
   FiCheckCircle,
@@ -41,12 +41,13 @@ function slugSuggest(name: string): string {
 function PublishModal({ isOpen, onClose }: PublishModalProps) {
   const project = useProjectStore((s) => s.currentProject)
   const userPlan = useBillingStore((s) => s.plan)
+  const billingLoaded = useBillingStore((s) => s.isLoaded)
 
   const record = useDeployStore((s) =>
     project ? s.records.get(project.id) ?? null : null,
   )
 
-  const isFreeTier = !userPlan || userPlan === 'explorer'
+  const isFreeTier = billingLoaded && (!userPlan || userPlan === 'explorer')
 
   const [subdomain, setSubdomain] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -72,13 +73,19 @@ function PublishModal({ isOpen, onClose }: PublishModalProps) {
 
   // Seed subdomain when modal opens. Prefer existingSlug from summary when
   // this is a re-deploy so the user doesn't accidentally type a new slug.
+  // Use a ref to avoid overwriting user edits — once the user changes the
+  // input we stop auto-seeding.
+  const userEditedRef = useRef(false)
   useEffect(() => {
     if (isOpen && project) {
       const seed = summary?.existingSlug ?? slugSuggest(project.name)
-      setSubdomain((prev) => prev || seed)
+      if (!userEditedRef.current) {
+        setSubdomain(seed)
+      }
     }
     if (!isOpen) {
       setSubmitting(false)
+      userEditedRef.current = false
     }
   }, [isOpen, project, summary?.existingSlug])
 
@@ -211,20 +218,21 @@ function PublishModal({ isOpen, onClose }: PublishModalProps) {
               {phase === 'configure' && (
                 <ConfigureStep
                   subdomain={subdomain}
-                  onSubdomainChange={setSubdomain}
+                  onSubdomainChange={(v) => { userEditedRef.current = true; setSubdomain(v) }}
                   onPublish={handlePublish}
                   onCancel={handleClose}
                   submitting={submitting}
                   warnings={detectWarnings}
                   isUpdate={isUpdate}
                   summary={summary}
+                  customDomain={summary?.customDomain ?? undefined}
                 />
               )}
               {phase === 'publishing' && record && (
                 <PublishingStep record={record} isUpdate={isUpdate} />
               )}
-              {phase === 'success' && record && (
-                <SuccessStep record={record} isUpdate={isUpdate} onClose={handleClose} />
+              {phase === 'success' && record && summary && (
+                <SuccessStep record={record} isUpdate={isUpdate} onClose={handleClose} customDomain={summary.customDomain} />
               )}
               {phase === 'error' && record && (
                 <ErrorStep record={record} onRetry={handlePublish} onClose={handleClose} />
@@ -412,14 +420,11 @@ function UpgradeStep({ onClose }: { onClose: () => void }) {
           Publishing is a paid feature
         </Text>
         <Text fontSize="12px" color={tokens.colors.text.secondary} lineHeight="1.55">
-          The Explorer plan covers chat, preview, and local development. Going live — the
-          provisioned subdomain, managed hosting, and built-in authentication — needs a
-          paid plan so we can attribute the usage to your account.
+          {t('publish.explorerPlanNote')}
         </Text>
       </Box>
       <Text fontSize="11.5px" color={tokens.colors.text.muted} lineHeight="1.55" mb={4}>
-        Upgrade in <strong>Settings → Billing</strong>. Vibe covers small projects;
-        Pro and Max scale up with traffic and storage.
+        {t('publish.upgradeHint')}
       </Text>
       <Flex justify="flex-end" gap={2}>
         <Button
@@ -428,7 +433,7 @@ function UpgradeStep({ onClose }: { onClose: () => void }) {
           color={tokens.colors.text.secondary}
           onClick={onClose}
         >
-          Close
+          {t('misc.close')}
         </Button>
       </Flex>
     </Box>
@@ -444,6 +449,7 @@ function ConfigureStep({
   warnings,
   isUpdate,
   summary,
+  customDomain,
 }: {
   subdomain: string
   onSubdomainChange: (v: string) => void
@@ -453,6 +459,7 @@ function ConfigureStep({
   warnings: string[]
   isUpdate: boolean
   summary: DeploysSummaryResponse | null
+  customDomain?: string
 }) {
   const isValid = subdomain.trim().length > 0
   const counterLine = summary
@@ -471,6 +478,7 @@ function ConfigureStep({
       <UpdateConfigureBody
         warnings={warnings}
         existingSlug={summary?.existingSlug ?? subdomain}
+        customDomain={customDomain}
         counterLine={counterLine}
         submitting={submitting}
         onPublish={onPublish}
@@ -586,7 +594,7 @@ function ConfigureStep({
           </Flex>
         </Flex>
         <Text fontSize="11px" color={tokens.colors.text.muted} mt="6px">
-          Letters, numbers, and hyphens only.
+          {t('deploys.lettersNumbersHyphens')}
         </Text>
       </Box>
 
@@ -631,6 +639,7 @@ function ConfigureStep({
 function UpdateConfigureBody({
   warnings,
   existingSlug,
+  customDomain,
   counterLine,
   submitting,
   onPublish,
@@ -638,12 +647,15 @@ function UpdateConfigureBody({
 }: {
   warnings: string[]
   existingSlug: string
+  customDomain?: string
   counterLine: string | null
   submitting: boolean
   onPublish: () => void
   onCancel: () => void
 }) {
-  const liveUrl = `https://${existingSlug}.toquemedia.net`
+  const liveUrl = customDomain
+    ? `https://${customDomain}`
+    : `https://${existingSlug}.toquemedia.net`
   return (
     <Box>
       {warnings.length > 0 && (
@@ -674,7 +686,7 @@ function UpdateConfigureBody({
         letterSpacing="0.04em"
         mb="6px"
       >
-        {t('publish.update.liveUrlLabel')}
+        {customDomain ? t('publish.update.customDomainLabel') : t('publish.update.liveUrlLabel')}
       </Text>
       <Flex
         align="center"
@@ -876,8 +888,8 @@ function PublishingStep({ record, isUpdate: _isUpdate }: { record: DeployRecord;
   )
 }
 
-function SuccessStep({ record, isUpdate, onClose }: { record: DeployRecord; isUpdate: boolean; onClose: () => void }) {
-  const url = record.serviceUrl ?? ''
+function SuccessStep({ record, isUpdate, onClose, customDomain }: { record: DeployRecord; isUpdate: boolean; onClose: () => void; customDomain?: string | null }) {
+  const url = customDomain ? `https://${customDomain}` : (record.serviceUrl ?? '')
   return (
     <Box>
       <Flex direction="column" align="center" py={3}>
@@ -1032,7 +1044,7 @@ function CopyButton({ text }: { text: string }) {
       color={copied ? tokens.colors.accent.greenBright : tokens.colors.text.muted}
       _hover={{ bg: 'rgba(255,255,255,0.05)', color: tokens.colors.text.primary }}
       onClick={handleCopy}
-      aria-label="Copy URL"
+      aria-label={t('publish.copyUrl')}
     >
       {copied ? <FiCheckCircle size={13} /> : <FiCopy size={13} />}
     </Box>
