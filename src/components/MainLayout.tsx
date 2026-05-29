@@ -21,7 +21,7 @@ import PlanViewerPanel from './chat/PlanViewerPanel'
 import { useTranslation } from '@/i18n'
 import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
-// RequirementsDialog removed — templates disabled
+
 import SettingsView from './views/SettingsView'
 import DataViewerView from './views/DataViewerView'
 import { useCodeEditorState } from '../hooks/useEditorState'
