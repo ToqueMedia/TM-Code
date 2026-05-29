@@ -53,6 +53,7 @@
     "process:allow-restart",
     "process:allow-exit",
     "notification:default",
+    "allow-all-custom-commands",
     {
       "identifier": "fs:scope",
       "allow": [
