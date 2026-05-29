@@ -615,6 +615,7 @@ const en = {
   'publish.updating': 'Updating…',
   'publish.update.intro': 'A new build of your project will be sent to the live site. The deploy reuses the existing public address — visitors keep using the same URL.',
   'publish.update.liveUrlLabel': 'Live URL',
+  'publish.update.customDomainLabel': 'Custom Domain',
   'publish.update.subdomainHint': 'To change the subdomain, take this deploy offline in Settings → Deploys and publish a fresh one.',
 
   // ── Deploys section (Settings) ─────────────────────
@@ -2099,6 +2100,7 @@ const pt: Record<keyof typeof en, string> = {
   'publish.updating': 'A actualizar…',
   'publish.update.intro': 'Uma nova build do teu projecto vai ser enviada para o site ao vivo. O deploy reutiliza o endereço público existente — os visitantes continuam a usar o mesmo URL.',
   'publish.update.liveUrlLabel': 'URL ao vivo',
+  'publish.update.customDomainLabel': 'Domínio personalizado',
   'publish.update.subdomainHint': 'Para mudar o subdomínio, pôr este deploy offline em Settings → Deploys e publicar um novo.',
 
   // ── Deploys (Definições) ──────────────────────────

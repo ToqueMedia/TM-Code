@@ -566,6 +566,10 @@ function AddDomainPanel({
           value={hostname}
           onChange={(e) => onChange(e.target.value)}
           placeholder="app.yourdomain.com"
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="none"
+          spellCheck={false}
           bg="rgba(0, 0, 0, 0.3)"
           border="1px solid"
           // Red border when there's a pre-flight error so the input itself

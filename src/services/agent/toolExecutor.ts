@@ -845,7 +845,6 @@ ${preview}
   }
 
   private getProjectRoot(): string {
-    if (this.cmdModeCwd) return this.cmdModeCwd
     const project = useProjectStore.getState().currentProject
     if (project?.path) return project.path
     // CMD-mode fallback: TerminalView never populates currentProject
@@ -853,6 +852,7 @@ ${preview}
     // by the WelcomeScreen and persists for the entire CMD session.
     const cmdPath = useProjectStore.getState().cmdModeProjectPath
     if (cmdPath) return cmdPath
+    if (this.cmdModeCwd) return this.cmdModeCwd
     throw new Error('No project is open. Cannot perform file operations without an active project.')
   }
 
@@ -1964,9 +1964,9 @@ ${preview}
         const cmd = (input.command as string).trim()
         this.validateCommand(cmd)
 
-        // Scope cwd to project root
+        // Scope cwd to project root or dynamic terminal directory
         const projectRoot = this.getProjectRoot()
-        const cwd = (input.cwd as string) || projectRoot
+        const cwd = (input.cwd as string) || (this.cmdModeCwd || projectRoot)
         this.validatePathWithinProject(cwd)
 
         // Detect package-manager install commands so they get the streaming
@@ -2506,7 +2506,7 @@ ${preview}
         this.validateCommand(cmd)
 
         const projectRoot = this.getProjectRoot()
-        const cwd = (input.cwd as string) || projectRoot
+        const cwd = (input.cwd as string) || (this.cmdModeCwd || projectRoot)
         this.validatePathWithinProject(cwd)
 
         const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
