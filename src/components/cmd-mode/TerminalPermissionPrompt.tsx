@@ -134,6 +134,8 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   const handleSubmitReason = () => {
     if (!onDenyWith) return
     onDenyWith(reason)
+    setReason('')
+    setMode('choose')
   }
 
   const handleCancelWriting = () => {
@@ -179,24 +181,34 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
         <Flex align="center" gap={1} mt={1.5} wrap="wrap">
           {dangerous ? (
             <>
-              <KeyHint label="y" description={t('perm.approve')} color={tokens.colors.terminal.green} />
+              <KeyHint label="y" description={t('perm.approve')} color={tokens.colors.terminal.green} onClick={onApprove} />
               <Sep />
-              <KeyHint label="n" description={t('perm.deny')} color={tokens.colors.accent.red} />
+              <KeyHint label="n" description={t('perm.deny')} color={tokens.colors.accent.red} onClick={onDeny} />
             </>
           ) : (
             <>
-              <KeyHint label="y" description={t('perm.approve')} color={tokens.colors.terminal.green} />
+              <KeyHint label="y" description={t('perm.approve')} color={tokens.colors.terminal.green} onClick={onApprove} />
               <Sep />
-              <KeyHint label="a" description={t('perm.approveAll')} color={tokens.colors.accent.purple} />
+              <KeyHint label="a" description={t('perm.approveAll')} color={tokens.colors.accent.purple} onClick={onApproveAll} />
               <Sep />
-              <KeyHint label="n" description={t('perm.deny')} color={tokens.colors.accent.red} />
+              <KeyHint label="n" description={t('perm.deny')} color={tokens.colors.accent.red} onClick={onDeny} />
               <Sep />
-              <KeyHint label="d" description={t('perm.denyAll')} color={tokens.colors.accent.red} />
+              <KeyHint label="d" description={t('perm.denyAll')} color={tokens.colors.accent.red} onClick={onDenyAll} />
               <Sep />
-              <KeyHint label="w" description={t('perm.justify')} color={tokens.colors.accent.orange} />
+              <KeyHint label="w" description={t('perm.justify')} color={tokens.colors.accent.orange} onClick={() => setMode('writing')} />
             </>
           )}
-          <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} ml={2}>
+          <Text
+            fontSize="10px"
+            color={tokens.colors.text.disabled}
+            fontFamily={tokens.fontFamily.mono}
+            ml={2}
+            cursor="pointer"
+            onClick={onDeny}
+            _hover={{ color: tokens.colors.text.muted }}
+            transition="color 0.1s"
+            userSelect="none"
+          >
             · esc cancels
           </Text>
         </Flex>
@@ -231,10 +243,10 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
             }}
           />
           <Flex align="center" gap={2} mt={1}>
-            <KeyHint label="↵" description="send" color={tokens.colors.accent.orange} />
+            <KeyHint label="↵" description="send" color={tokens.colors.accent.orange} onClick={handleSubmitReason} />
             <Sep />
-            <KeyHint label="esc" description="cancel" color={tokens.colors.text.disabled} />
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} ml={2}>
+            <KeyHint label="esc" description="cancel" color={tokens.colors.text.disabled} onClick={handleCancelWriting} />
+            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} ml={2} userSelect="none">
               · shift+↵ for newline
             </Text>
           </Flex>
@@ -252,15 +264,55 @@ function Sep() {
   )
 }
 
-function KeyHint({ label, description, color }: { label: string; description: string; color: string }) {
+function KeyHint({
+  label,
+  description,
+  color,
+  onClick,
+}: {
+  label: string
+  description: string
+  color: string
+  onClick?: () => void
+}) {
+  const isClickable = !!onClick
   return (
-    <Flex align="center" gap={1}>
+    <Flex
+      align="center"
+      gap={1}
+      onClick={onClick}
+      cursor={isClickable ? 'pointer' : undefined}
+      userSelect="none"
+      transition="all 0.15s ease"
+      _hover={
+        isClickable
+          ? {
+              transform: 'translateY(-0.5px)',
+              filter: 'brightness(1.15)',
+              opacity: 1,
+            }
+          : undefined
+      }
+      role={isClickable ? 'button' : undefined}
+      tabIndex={isClickable ? 0 : undefined}
+      onKeyDown={
+        isClickable
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onClick()
+              }
+            }
+          : undefined
+      }
+    >
       <Box
         px="4px"
         borderRadius="2px"
         border="1px solid"
         borderColor={`${color}55`}
         bg={`${color}12`}
+        transition="all 0.15s ease"
       >
         <Text fontSize="10px" color={color} fontFamily={tokens.fontFamily.mono} fontWeight="700" lineHeight="1.6">
           {label}

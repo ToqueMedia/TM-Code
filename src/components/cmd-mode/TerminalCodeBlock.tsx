@@ -15,12 +15,16 @@ const LazyHighlighter = lazy(async () => {
     <Prism
       language={language}
       style={style}
+      wrapLines={true}
+      wrapLongLines={true}
       customStyle={{
         background: 'transparent',
         margin: 0,
         padding: '6px 8px',
         fontSize: '12px',
         lineHeight: '1.45',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-all',
       }}
     >
       {children}
@@ -46,7 +50,7 @@ export const TerminalCodeBlock = memo(function TerminalCodeBlock({ block }: Term
   const file = block.filePath ? basename(String(block.filePath)) : null
 
   return (
-    <Box my={1.5} pl={2} borderLeft={`2px solid rgba(255,255,255,0.08)`} data-no-focus-steal>
+    <Box my={1.5} pl={2} borderLeft={`2px solid rgba(255,255,255,0.08)`} data-no-focus-steal maxW="100%">
       {/* Header: lang + file + copy */}
       <Flex align="center" justify="space-between" mb="3px">
         <Flex align="center" gap={2}>

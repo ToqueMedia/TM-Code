@@ -760,6 +760,7 @@ class AgentService {
     // Dispatched tool IDs: tools already executed during streaming partial
     // so the fallback must not re-dispatch them.
     let emittedTextLen = 0
+    let emittedReasoningLen = 0
     let dispatchedToolIds = new Set<string>()
 
     try {
@@ -772,6 +773,7 @@ class AgentService {
 
         // Reset per-turn dedup tracking for non-streaming fallback
         emittedTextLen = 0
+        emittedReasoningLen = 0
         dispatchedToolIds = new Set<string>()
 
         // Layer 2: Compress context if approaching token limit.
@@ -1045,6 +1047,7 @@ class AgentService {
           } else {
             // Track what the fallback will need to deduplicate
             if (turnResult.textContent) emittedTextLen = turnResult.textContent.length
+            if (turnResult.reasoningContent) emittedReasoningLen = turnResult.reasoningContent.length
             for (const tc of turnResult.toolCalls) dispatchedToolIds.add(tc.id)
 
             messages.push({
@@ -1073,7 +1076,7 @@ class AgentService {
             )
           } catch { /* chatStore may be torn down */ }
 
-          const fallbackResult = await this.tryNonStreamingFallback(messages, callbacks, emittedTextLen, dispatchedToolIds)
+          const fallbackResult = await this.tryNonStreamingFallback(messages, callbacks, emittedTextLen, emittedReasoningLen, dispatchedToolIds)
           if (fallbackResult) {
             logger.info('agent', '[stream] non-streaming fallback succeeded')
             turnResult = fallbackResult
@@ -3356,6 +3359,8 @@ Developer message: ${displayText}
     callbacks: AgentCallbacks,
     /** Text chars already emitted via onTextDelta during streaming retries. */
     emittedTextLen: number,
+    /** Reasoning chars already emitted via onReasoningDelta during streaming retries. */
+    emittedReasoningLen: number,
     /** Tool IDs already dispatched during streaming retries. */
     dispatchedToolIds: Set<string>,
   ): Promise<TurnResult | null> {
@@ -3459,7 +3464,8 @@ Developer message: ${displayText}
         // create a worse duplication.
         const newText = emittedTextLen > 0 ? textContent.slice(emittedTextLen) : textContent
         if (newText) callbacks.onTextDelta(newText)
-        if (reasoningContent) callbacks.onReasoningDelta(reasoningContent)
+        const newReasoning = emittedReasoningLen > 0 ? reasoningContent.slice(emittedReasoningLen) : reasoningContent
+        if (newReasoning) callbacks.onReasoningDelta(newReasoning)
         if (data.usage) {
           callbacks.onUsageUpdate(data.usage.input_tokens || 0, data.usage.output_tokens || 0)
         }
@@ -3502,7 +3508,8 @@ Developer message: ${displayText}
         // BUG2 fix: same dedup for OpenAI shape
         const newTextOai = emittedTextLen > 0 ? textContent.slice(emittedTextLen) : textContent
         if (newTextOai) callbacks.onTextDelta(newTextOai)
-        if (reasoningContent) callbacks.onReasoningDelta(reasoningContent)
+        const newReasoningOai = emittedReasoningLen > 0 ? reasoningContent.slice(emittedReasoningLen) : reasoningContent
+        if (newReasoningOai) callbacks.onReasoningDelta(newReasoningOai)
         if (data.usage) {
           callbacks.onUsageUpdate(data.usage.prompt_tokens || 0, data.usage.completion_tokens || 0)
         }

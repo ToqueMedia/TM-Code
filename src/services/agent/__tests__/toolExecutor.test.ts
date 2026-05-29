@@ -1179,21 +1179,35 @@ describe('J: Path validation', () => {
   })
 
   it('CMD mode uses cmdModeCwd for path validation', async () => {
-    const exec = freshExecutor()
-    exec.enableCmdMode('/other/root')
-    mockInvoke.mockResolvedValue('content' as never)
+    // In actual CMD mode, currentProject is null. Clear mockCurrentProject to simulate.
+    const originalPath = mockCurrentProject.path
+    mockCurrentProject.path = undefined as any
+    try {
+      const exec = freshExecutor()
+      exec.enableCmdMode('/other/root')
+      mockInvoke.mockResolvedValue('content' as never)
 
-    const result = await exec.execute('read_file', { file_path: '/other/root/file.txt' })
-    expect(result).toBe('content')
+      const result = await exec.execute('read_file', { file_path: '/other/root/file.txt' })
+      expect(result).toBe('content')
+    } finally {
+      mockCurrentProject.path = originalPath
+    }
   })
 
   it('CMD mode rejects paths outside cmdModeCwd', async () => {
-    const exec = freshExecutor()
-    exec.enableCmdMode('/other/root')
+    // In actual CMD mode, currentProject is null. Clear mockCurrentProject to simulate.
+    const originalPath = mockCurrentProject.path
+    mockCurrentProject.path = undefined as any
+    try {
+      const exec = freshExecutor()
+      exec.enableCmdMode('/other/root')
 
-    await expect(
-      exec.execute('read_file', { file_path: '/projects/test-app/file.txt' })
-    ).rejects.toThrow('outside the working directory')
+      await expect(
+        exec.execute('read_file', { file_path: '/projects/test-app/file.txt' })
+      ).rejects.toThrow('outside the working directory')
+    } finally {
+      mockCurrentProject.path = originalPath
+    }
   })
 
   it('write_file validates path before writing', async () => {

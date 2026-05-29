@@ -327,6 +327,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approve: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
+      set({ pendingPermission: null, autoDenyAll: false })
       pendingPermission.resolve({
         approved: true,
         prompted: true,
@@ -334,7 +335,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       void logPermission(`✓ Autorizaste \`${pendingPermission.toolName}\``, 'success')
-      set({ pendingPermission: null, autoDenyAll: false })
       advanceQueue(set, get)
     }
   },
@@ -342,17 +342,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approveAll: () => {
     const { pendingPermission, permissionQueue } = get()
     if (pendingPermission) {
-      pendingPermission.resolve({
-        approved: true,
-        prompted: true,
-        source: 'user',
-        promptKind: pendingPermission.promptReason,
-      })
       const scope = getToolScope(pendingPermission.toolName)
-      void logPermission(
-        `✓ Autorizaste \`${pendingPermission.toolName}\` e todas as ferramentas ${scope === 'core' ? 'internas' : 'MCP'} para esta sessão`,
-        'success',
-      )
       const scopes = new Set(get().approvedScopes)
       scopes.add(scope)
       // Auto-approve diffs when core tools are approved
@@ -377,6 +367,17 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       }
 
       set({ pendingPermission: null, approvedScopes: scopes, autoApproveDiffs, permissionQueue: remaining })
+
+      pendingPermission.resolve({
+        approved: true,
+        prompted: true,
+        source: 'user',
+        promptKind: pendingPermission.promptReason,
+      })
+      void logPermission(
+        `✓ Autorizaste \`${pendingPermission.toolName}\` e todas as ferramentas ${scope === 'core' ? 'internas' : 'MCP'} para esta sessão`,
+        'success',
+      )
       persistPermissions()
       advanceQueue(set, get)
     }
@@ -385,6 +386,10 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approveAlwaysInProject: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
+      const toolAllowlist = new Set(get().projectToolAllowlist)
+      toolAllowlist.add(pendingPermission.toolName)
+      set({ pendingPermission: null, projectToolAllowlist: toolAllowlist, autoDenyAll: false })
+
       pendingPermission.resolve({
         approved: true,
         prompted: true,
@@ -392,9 +397,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       void logPermission(`✓ Permitiste \`${pendingPermission.toolName}\` (sempre neste projeto)`, 'success')
-      const toolAllowlist = new Set(get().projectToolAllowlist)
-      toolAllowlist.add(pendingPermission.toolName)
-      set({ pendingPermission: null, projectToolAllowlist: toolAllowlist, autoDenyAll: false })
       persistPermissions()
       advanceQueue(set, get)
     }
@@ -403,6 +405,11 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approveAlwaysGlobal: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
+      const globalAllowlist = new Set(get().globalToolAllowlist)
+      globalAllowlist.add(pendingPermission.toolName)
+      saveGlobalToolAllowlist(globalAllowlist)
+      set({ pendingPermission: null, globalToolAllowlist: globalAllowlist, autoDenyAll: false })
+
       pendingPermission.resolve({
         approved: true,
         prompted: true,
@@ -410,10 +417,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       void logPermission(`✓ Permitiste \`${pendingPermission.toolName}\` (sempre globalmente)`, 'success')
-      const globalAllowlist = new Set(get().globalToolAllowlist)
-      globalAllowlist.add(pendingPermission.toolName)
-      saveGlobalToolAllowlist(globalAllowlist)
-      set({ pendingPermission: null, globalToolAllowlist: globalAllowlist, autoDenyAll: false })
       advanceQueue(set, get)
     }
   },
@@ -421,6 +424,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   deny: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
+      set({ pendingPermission: null })
       pendingPermission.resolve({
         approved: false,
         prompted: true,
@@ -428,7 +432,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       void logPermission(`✗ Recusaste \`${pendingPermission.toolName}\``, 'warn')
-      set({ pendingPermission: null })
       advanceQueue(set, get)
     }
   },
@@ -436,6 +439,20 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   denyAll: () => {
     const { pendingPermission, permissionQueue } = get()
     if (pendingPermission) {
+      // Deny all queued non-dangerous permissions; keep dangerous ones for
+      // the user to review individually.
+      const remaining: PendingPermission[] = []
+      for (const queued of permissionQueue) {
+        if (queued.promptReason) {
+          // Dangerous — must still show dialog
+          remaining.push(queued)
+        } else {
+          queued.resolve({ approved: false, prompted: false, source: 'user' })
+        }
+      }
+
+      set({ pendingPermission: null, autoDenyAll: true, permissionQueue: remaining })
+
       pendingPermission.resolve({
         approved: false,
         prompted: true,
@@ -443,27 +460,14 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptKind: pendingPermission.promptReason,
       })
       void logPermission(`✗ Recusaste todos \`${pendingPermission.toolName}\``, 'warn')
+      advanceQueue(set, get)
     }
-
-    // Deny all queued non-dangerous permissions; keep dangerous ones for
-    // the user to review individually.
-    const remaining: PendingPermission[] = []
-    for (const queued of permissionQueue) {
-      if (queued.promptReason) {
-        // Dangerous — must still show dialog
-        remaining.push(queued)
-      } else {
-        queued.resolve({ approved: false, prompted: false, source: 'user' })
-      }
-    }
-
-    set({ pendingPermission: null, autoDenyAll: true, permissionQueue: remaining })
-    advanceQueue(set, get)
   },
 
   denyWith: (reason: string) => {
     const { pendingPermission } = get()
     if (pendingPermission) {
+      set({ pendingPermission: null })
       pendingPermission.resolve({
         approved: false,
         prompted: true,
@@ -478,7 +482,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
           : `✗ Recusaste \`${pendingPermission.toolName}\``,
         'warn',
       )
-      set({ pendingPermission: null })
       advanceQueue(set, get)
     }
   },

@@ -13,7 +13,8 @@ describe('modelProfiles', () => {
       expect(ids).toContain('deepseek-v4-flash')
       expect(ids).toContain('glm-5.1')
       expect(ids).toContain('mimo-v2.5-pro')
-      expect(ids.length).toBe(3)
+      expect(ids).toContain('gemini-3.5-flash')
+      expect(ids.length).toBe(4)
     })
 
     it('deepseek-v4-flash has correct specs', () => {
@@ -47,6 +48,22 @@ describe('modelProfiles', () => {
       expect(profile.preserveReasoning).toBe(true)
     })
 
+    it('returns gemini-3.5-flash profile with recommended configurations', () => {
+      const profile = getModelProfile('gemini-3.5-flash')
+      expect(profile.id).toBe('gemini-3.5-flash')
+      expect(profile.name).toBe('Gemini 3.5 Flash')
+      expect(profile.modelId).toBe('google/gemini-3.5-flash')
+      expect(profile.contextWindow).toBe(1_000_000)
+      expect(profile.maxOutputTokens).toBe(8192)
+      expect(profile.temperature).toBe(1.0)
+      expect(profile.topP).toBe(1.0)
+      expect(profile.thinkingMode).toBe('toggleable')
+      expect(profile.thinkingParam).toBe('reasoning')
+      expect(profile.preserveReasoning).toBe(true)
+      expect(profile.supportsAttachments).toBe(true)
+      expect(profile.supportsSearch).toBe(true)
+    })
+
     it('falls back to default model for unknown ID', () => {
       const profile = getModelProfile('nonexistent-model')
       expect(profile.id).toBe(DEFAULT_MODEL_ID)
@@ -56,7 +73,7 @@ describe('modelProfiles', () => {
   describe('getAllModelProfiles', () => {
     it('returns all profiles', () => {
       const all = getAllModelProfiles()
-      expect(all.length).toBe(3)
+      expect(all.length).toBe(4)
     })
   })
 

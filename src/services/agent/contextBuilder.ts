@@ -395,13 +395,15 @@ class ContextBuilder {
     // Language
     const langInstruction = await getLangInstruction()
 
-    // Load model profile for model-specific behavior (based on plan, not user choice)
+    // Load model profile for model-specific behavior
     let modelProfile: import('./modelProfiles').ModelProfile | null = null
     try {
-      const { getProfileForPlan } = await import('./modelProfiles')
+      const { getProfileForPlan, MODEL_PROFILES } = await import('./modelProfiles')
       const { useBillingStore } = await import('../../stores/billingStore')
+      const { useAgentStore } = await import('../../stores/agentStore')
+      const modelName = useAgentStore.getState().modelName
       const plan = useBillingStore.getState().plan
-      modelProfile = getProfileForPlan(plan)
+      modelProfile = modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName] : getProfileForPlan(plan)
     } catch { /* fallback: no profile */ }
 
     // ═══════════════════════════════════════════════════════════════

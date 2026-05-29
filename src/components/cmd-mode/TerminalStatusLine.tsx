@@ -21,7 +21,7 @@ import { stopAgent } from '../../services/agent/cmdModeCommands'
 import { getCommandQueueSnapshot, subscribeToCommandQueue } from '../../services/agent/messageQueue'
 import { usePreflightStatus } from '../../hooks/usePreflightStatus'
 import { countAvailable } from '../../services/preflightService'
-import { getProfileForPlan } from '../../services/agent/modelProfiles'
+import { getProfileForPlan, MODEL_PROFILES } from '../../services/agent/modelProfiles'
 import { getAutoCompactThreshold, getEffectiveContextWindowSize } from '../../utils/contextWindow'
 import { computeSlidingWindow } from '../../utils/taskWindow'
 import { tokens } from '@/theme/tokens'
@@ -41,6 +41,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
     return s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
   })
   const headerContextWindow = useAgentStore(s => s.modelContextWindow)
+  const modelName = useAgentStore(s => s.modelName)
   const agentTasks = useAgentStore(s => s.tasks)
   const skillCount = useSkillStore(s => s.skills.length)
   const mcpServers = useMcpStore(s => s.servers)
@@ -97,7 +98,12 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   //   • Denominator is EFFECTIVE window (raw − 20K summary headroom),
   //     matching claude-vaz's calculateContextPercentages.
   const billingPlan = useBillingStore((s) => s.plan)
-  const activeProfile = useMemo(() => getProfileForPlan(billingPlan), [billingPlan])
+  const activeProfile = useMemo(() => {
+    if (modelName && MODEL_PROFILES[modelName]) {
+      return MODEL_PROFILES[modelName]
+    }
+    return getProfileForPlan(billingPlan)
+  }, [modelName, billingPlan])
   const rawContextWindow = headerContextWindow ?? activeProfile.contextWindow ?? 0
   const effectiveWindow = getEffectiveContextWindowSize(rawContextWindow)
   const compactThreshold = getAutoCompactThreshold(rawContextWindow)

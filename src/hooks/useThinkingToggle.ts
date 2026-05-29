@@ -19,7 +19,7 @@
  */
 import { useAgentStore } from '../stores/agentStore'
 import { useBillingStore } from '../stores/billingStore'
-import { getProfileForPlan } from '../services/agent/modelProfiles'
+import { getProfileForPlan, MODEL_PROFILES } from '../services/agent/modelProfiles'
 
 export interface ThinkingToggleState {
   /** True iff the active model is mandatory-thinking (always-on, can't be
@@ -29,9 +29,10 @@ export interface ThinkingToggleState {
 
 export function useThinkingToggle(): ThinkingToggleState {
   const backendThinkingMode = useAgentStore((s) => s.thinkingMode)
+  const modelName = useAgentStore((s) => s.modelName)
   const billingPlan = useBillingStore((s) => s.plan)
 
-  const fallbackProfile = getProfileForPlan(billingPlan)
+  const fallbackProfile = modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName] : getProfileForPlan(billingPlan)
   const effectiveMode =
     backendThinkingMode
     ?? (fallbackProfile.thinkingMandatory ? 'mandatory' : 'none')

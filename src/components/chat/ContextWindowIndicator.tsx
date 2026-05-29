@@ -4,7 +4,7 @@ import { FiAlertOctagon, FiAlertTriangle, FiArchive } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { getProfileForPlan } from '../../services/agent/modelProfiles'
+import { getProfileForPlan, MODEL_PROFILES } from '../../services/agent/modelProfiles'
 import {
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
@@ -70,10 +70,12 @@ function ContextWindowIndicator() {
   const outputTokens = useChatStore((s) => s.currentResponseTokens)
   const plan = useBillingStore((s) => s.plan)
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
+  const modelName = useAgentStore((s) => s.modelName)
   const [hovered, setHovered] = useState(false)
 
-  // Profile lookup is a static map read — no useMemo needed.
-  const profile = getProfileForPlan(plan)
+  // Profile lookup is dynamic (using the active model reported by backend)
+  // with fallback to the plan's default profile for pre-handshake state.
+  const profile = modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName] : getProfileForPlan(plan)
   // Header is authoritative; profile is fallback ONLY for the brief
   // window before the first response lands. This intentionally mirrors
   // the compression heuristic so the pill and the IDE agree.
