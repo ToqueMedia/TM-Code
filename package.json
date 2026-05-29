@@ -38,6 +38,7 @@
     "firebase": "^12.10.0",
     "framer-motion": "^12.36.0",
     "html2canvas": "^1.4.1",
+    "jose": "^6.2.3",
     "monaco-editor": "^0.55.1",
     "prettier": "^3.8.1",
     "react": "^19.2.4",
