@@ -12,6 +12,7 @@ import { McpIndicator } from '../ui/StatusIndicators'
 import ModelIndicator from '../chat/ModelIndicator'
 import { tokens } from '@/theme/tokens'
 import { IS_MAC, IS_WINDOWS, basename } from '@/utils/platform'
+import { useTranslation } from '@/i18n/useTranslation'
 
 interface TerminalTitleBarProps {
   projectPath: string
@@ -19,6 +20,7 @@ interface TerminalTitleBarProps {
 }
 
 export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, onBack }: TerminalTitleBarProps) {
+  const t = useTranslation()
   const billingPlan = useBillingStore(s => s.plan)
   const noCredits = useBillingStore(s => s.noCredits)
   const consumedPct = useBillingStore(s => s.consumedPct)
@@ -109,7 +111,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
             borderRadius="3px"
             bg="rgba(163,113,247,0.1)"
             border="1px solid rgba(163,113,247,0.2)"
-            title="Thinking is always-on for this model"
+            title={t('terminalMode.titlebar.thinkingAlwaysOn')}
             data-tauri-drag-region
           >
             <Text
@@ -148,8 +150,8 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
         <Box
           as="button"
           onClick={onBack}
-          aria-label="Exit Terminal mode (Esc)"
-          title="Exit (Esc)"
+          aria-label={t('terminalMode.titlebar.exitAria')}
+          title={t('terminalMode.titlebar.exitTooltip')}
           fontSize="9px"
           fontWeight="700"
           color={tokens.colors.text.disabled}
@@ -163,7 +165,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           letterSpacing="0.1em"
           fontFamily={tokens.fontFamily.mono}
         >
-          exit
+          {t('terminalMode.titlebar.exitLabel')}
           <Text as="span" ml="5px" opacity={0.6} fontWeight="500">esc</Text>
         </Box>
       </HStack>

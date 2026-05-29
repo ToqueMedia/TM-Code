@@ -5,12 +5,14 @@ import { CMD_MODE_COMMANDS } from '../../services/agent/cmdModeCommands'
 import { slashCommandRegistry } from '../../services/agent/slashCommandRegistry'
 import { tokens } from '@/theme/tokens'
 import { basename } from '@/utils/platform'
+import { useTranslation } from '@/i18n/useTranslation'
 
 interface TerminalGreetingProps {
   projectPath: string
 }
 
 export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: TerminalGreetingProps) {
+  const t = useTranslation()
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
   const projectName = basename(projectPath) || projectPath
 
@@ -25,7 +27,7 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
   return (
     <Box mb={2} fontFamily={tokens.fontFamily.mono}>
       <Text fontSize="13px" color={tokens.colors.terminal.green} fontWeight="600">
-        ◆ TM Code · terminal mode
+        {t('terminalMode.greeting.title')}
       </Text>
       <Text fontSize="13px" color={tokens.colors.text.disabled} mt="2px">
         {projectName}&nbsp;&nbsp;
@@ -66,7 +68,7 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
             ↑ ↓
           </Text>
           <Text fontFamily={tokens.fontFamily.mono} fontSize="13px" color={tokens.colors.text.disabled}>
-            navigate history  ·  <Text as="span" color={tokens.colors.accent.purple}>@</Text> mention a file  ·  <Text as="span" color={tokens.colors.accent.purple}>!</Text> run shell
+            {t('terminalMode.greeting.navigateHistory')}  ·  <Text as="span" color={tokens.colors.accent.purple}>@</Text> {t('terminalMode.greeting.mentionFile')}  ·  <Text as="span" color={tokens.colors.accent.purple}>!</Text> {t('terminalMode.greeting.runShell')}
           </Text>
         </Flex>
       </Box>
@@ -74,7 +76,7 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
         <Flex align="center" gap={1.5} mt={2}>
           <Text fontSize="10px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono}>⚠</Text>
           <Text fontSize="10px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} opacity={0.8}>
-            sandbox mode active
+            {t('terminalMode.greeting.sandboxActive')}
           </Text>
         </Flex>
       )}

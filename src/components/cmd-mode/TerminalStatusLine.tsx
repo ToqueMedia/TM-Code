@@ -26,8 +26,10 @@ import { getAutoCompactThreshold, getEffectiveContextWindowSize } from '../../ut
 import { computeSlidingWindow } from '../../utils/taskWindow'
 import { tokens } from '@/theme/tokens'
 import { formatElapsed, formatTokens } from './terminalHelpers'
+import { useTranslation } from '@/i18n/useTranslation'
 
 export const TerminalStatusLine = memo(function TerminalStatusLine() {
+  const t = useTranslation()
   const status = useAgentStore(s => s.status)
   const error = useAgentStore(s => s.error)
   const isStreaming = useChatStore(s => s.isStreaming)
@@ -63,15 +65,15 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
 
   const cfg = useMemo(() => {
     switch (status) {
-      case 'awaiting_response': return { color: tokens.colors.toolCall.runningText, label: 'awaiting', pulse: true }
-      case 'reasoning':         return { color: tokens.colors.accent.purple,        label: 'reasoning', pulse: true }
-      case 'generating':        return { color: tokens.colors.accent.primary,       label: 'writing', pulse: true }
-      case 'applying':          return { color: tokens.colors.accent.green,         label: 'applying', pulse: true }
-      case 'compressing':       return { color: tokens.colors.accent.orange,        label: 'compacting', pulse: true }
+      case 'awaiting_response': return { color: tokens.colors.toolCall.runningText, label: t('terminalMode.status.awaiting'), pulse: true }
+      case 'reasoning':         return { color: tokens.colors.accent.purple,        label: t('terminalMode.status.reasoning'), pulse: true }
+      case 'generating':        return { color: tokens.colors.accent.primary,       label: t('terminalMode.status.writing'), pulse: true }
+      case 'applying':          return { color: tokens.colors.accent.green,         label: t('terminalMode.status.applying'), pulse: true }
+      case 'compressing':       return { color: tokens.colors.accent.orange,        label: t('terminalMode.status.compacting'), pulse: true }
       case 'error':             return { color: tokens.colors.accent.red,           label: error || 'error', pulse: false }
-      default:                  return { color: tokens.colors.text.disabled,        label: 'ready', pulse: false }
+      default:                  return { color: tokens.colors.text.disabled,        label: t('terminalMode.status.ready'), pulse: false }
     }
-  }, [status, error])
+  }, [status, error, t])
 
   // Up = context size on the wire (input is replaced with max across turns).
   // Down = output emitted by model (sums across turns). Historically shown as
@@ -117,7 +119,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
     : ctxPct < 90 ? tokens.colors.accent.orange
     : tokens.colors.accent.red
   const ctxTooltip = ctxPct > 0
-    ? `Context: ${currentPromptTokens.toLocaleString()} / ${effectiveWindow.toLocaleString()} effective (${ctxPct.toFixed(1)}%) — ${activeProfile.name}${compactImminent ? ' · auto-compact next turn' : ''}`
+    ? `Context: ${currentPromptTokens.toLocaleString()} / ${effectiveWindow.toLocaleString()} ${t('terminalMode.status.contextEffective')} (${ctxPct.toFixed(1)}%) — ${activeProfile.name}${compactImminent ? ` · ${t('terminalMode.status.autoCompact')}` : ''}`
     : undefined
 
   // Toolkit preflight — small "tk 3/3" indicator. Tooltip lists missing pieces.
@@ -130,17 +132,17 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
     if (!preflight.npx.found) missing.push('npx')
     const label = `tk ${available}/${total}`
     const title = missing.length
-      ? `Missing: ${missing.join(', ')}. Some artifact skills (PDF/Word/Excel/PPTX/Slidev) will need installs.`
-      : 'All artifact-generation tooling available.'
+      ? t('terminalMode.status.missingTools').replace('{missing}', missing.join(', '))
+      : t('terminalMode.status.allToolsAvailable')
     return { label, title, allGreen: missing.length === 0 }
   }, [preflight])
 
   // Info segments — compact, terminal style
   const segments = useMemo(() => {
     const out: string[] = []
-    if (autoApproveDiffs) out.push('auto-approve')
+    if (autoApproveDiffs) out.push(t('terminalMode.status.autoApprove'))
     if (queueLength > 0) out.push(`${queueLength}q`)
-    if (skillCount > 0) out.push(`${skillCount} skills`)
+    if (skillCount > 0) out.push(`${skillCount} ${t('terminalMode.status.skills')}`)
     if (mcpIsInitializing) {
       out.push('mcp…')
     } else {
@@ -158,13 +160,13 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
     const bgCmdErrored = Array.from(bgCommands.values()).filter(c => c.status === 'error').length
     if (bgCmdRunning > 0 || bgCmdCompleted > 0 || bgCmdErrored > 0) {
       const parts: string[] = []
-      if (bgCmdRunning > 0) parts.push(`${bgCmdRunning} running`)
-      if (bgCmdCompleted > 0) parts.push(`${bgCmdCompleted} done`)
-      if (bgCmdErrored > 0) parts.push(`${bgCmdErrored} err`)
+      if (bgCmdRunning > 0) parts.push(`${bgCmdRunning} ${t('terminalMode.status.running')}`)
+      if (bgCmdCompleted > 0) parts.push(`${bgCmdCompleted} ${t('terminalMode.status.done')}`)
+      if (bgCmdErrored > 0) parts.push(`${bgCmdErrored} ${t('terminalMode.status.err')}`)
       out.push(`cmds: ${parts.join(' ')}`)
     }
     return out
-  }, [autoApproveDiffs, queueLength, skillCount, mcpIsInitializing, mcpServers, totalMcpTools, devServer, bgCommands])
+  }, [autoApproveDiffs, queueLength, skillCount, mcpIsInitializing, mcpServers, totalMcpTools, devServer, bgCommands, t])
 
   // Same auto-hide rule the chat-mode AgentTasksPanel uses: once the agent
   // finishes AND every task is completed, stop rendering the strip. This
@@ -207,11 +209,11 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               letterSpacing="0.1em"
               mb="4px"
             >
-              {completed}/{agentTasks.length} tasks
+              {completed}/{agentTasks.length} {t('terminalMode.status.tasks')}
             </Text>
             {hiddenAbove > 0 && (
               <Text fontSize="13px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} py="1px">
-                · {hiddenAbove} earlier {hiddenAbove === 1 ? 'task' : 'tasks'}
+                · {hiddenAbove} {hiddenAbove === 1 ? t('terminalMode.status.earlierTask') : t('terminalMode.status.earlierTasks')}
               </Text>
             )}
             {visible.map((task: AgentTask) => (
@@ -247,7 +249,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
             ))}
             {hiddenBelow > 0 && (
               <Text fontSize="13px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} py="1px">
-                · {hiddenBelow} more {hiddenBelow === 1 ? 'task' : 'tasks'}
+                · {hiddenBelow} {hiddenBelow === 1 ? t('terminalMode.status.moreTask') : t('terminalMode.status.moreTasks')}
               </Text>
             )}
           </Box>
@@ -369,8 +371,8 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               _hover={{ bg: 'rgba(248,81,73,0.1)' }}
               _active={{ transform: 'scale(0.9)' }}
               onClick={handleStop}
-              aria-label="Stop agent (Esc)"
-              title="Stop (Esc)"
+              aria-label={t('misc.stop')}
+              title={`${t('misc.stop')} (Esc)`}
             >
               <FiSquare size={10} />
             </Box>

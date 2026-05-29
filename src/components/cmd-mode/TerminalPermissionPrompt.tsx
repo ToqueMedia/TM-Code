@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import { useTranslation } from '@/i18n/useTranslation'
 
 type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
 
@@ -56,9 +57,9 @@ function getArgPreview(toolName: string, args: Record<string, unknown>): string 
 }
 
 function getWarningText(toolName: string, promptReason?: PromptReason): string | null {
-  if (promptReason === 'sensitive_file') return 'sensitive file'
-  if (promptReason === 'dangerous_command') return 'destructive command'
-  if (toolName === 'delete_file') return 'irreversible'
+  if (promptReason === 'sensitive_file') return t('terminalMode.permission.sensitiveFile')
+  if (promptReason === 'dangerous_command') return t('terminalMode.permission.destructiveCommand')
+  if (toolName === 'delete_file') return t('terminalMode.permission.irreversible')
   return null
 }
 
@@ -79,6 +80,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   onDenyAll,
   onDenyWith,
 }: TerminalPermissionPromptProps) {
+  const t = useTranslation()
   const preview = getArgPreview(toolName, args)
   const warning = getWarningText(toolName, promptReason)
   const dangerous = isDangerous(toolName, promptReason)
@@ -209,7 +211,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
             transition="color 0.1s"
             userSelect="none"
           >
-            · esc cancels
+            · {t('terminalMode.permission.escCancels')}
           </Text>
         </Flex>
       ) : (
@@ -243,11 +245,11 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
             }}
           />
           <Flex align="center" gap={2} mt={1}>
-            <KeyHint label="↵" description="send" color={tokens.colors.accent.orange} onClick={handleSubmitReason} />
+            <KeyHint label="↵" description={t('terminalMode.permission.send')} color={tokens.colors.accent.orange} onClick={handleSubmitReason} />
             <Sep />
-            <KeyHint label="esc" description="cancel" color={tokens.colors.text.disabled} onClick={handleCancelWriting} />
+            <KeyHint label="esc" description={t('terminalMode.permission.cancel')} color={tokens.colors.text.disabled} onClick={handleCancelWriting} />
             <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} ml={2} userSelect="none">
-              · shift+↵ for newline
+              · {t('terminalMode.permission.shiftEnterHint')}
             </Text>
           </Flex>
         </Box>

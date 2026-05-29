@@ -188,11 +188,19 @@ export function useCmdPromptLogic() {
   // ─── Helpers ───
 
   const filterCommands = useCallback((prefix: string, cmds: SlashCommand[]): SlashCommand[] => {
-    return cmds.filter(cmd => cmd.name.startsWith(prefix.toLowerCase()))
+    const lowerPrefix = prefix.toLowerCase()
+    return cmds.filter(cmd => {
+      if (cmd.name.startsWith(lowerPrefix)) return true
+      if (cmd.name === '/exit' && lowerPrefix.startsWith('/q') && '/quit'.startsWith(lowerPrefix)) {
+        return true
+      }
+      return false
+    })
   }, [])
 
   const findCommand = useCallback((input: string, cmds: SlashCommand[]): SlashCommand | null => {
-    const cmd = input.trim().split(' ')[0]
+    const rawCmd = input.trim().split(' ')[0].toLowerCase()
+    const cmd = (rawCmd === '/q' || rawCmd === '/quit') ? '/exit' : rawCmd
     return cmds.find(c => c.name === cmd) || null
   }, [])
 
@@ -589,7 +597,8 @@ export function useCmdPromptLogic() {
     const textForDispatch = typeof value === 'string'
       ? value
       : value.filter(b => b.type === 'text').map(b => b.text).join(' ')
-    const firstToken = textForDispatch.trim().split(/\s+/)[0] || ''
+    const firstTokenRaw = textForDispatch.trim().split(/\s+/)[0] || ''
+    const firstToken = (firstTokenRaw === '/q' || firstTokenRaw === '/quit') ? '/exit' : firstTokenRaw
     const isBypassCommand = CONTROL_COMMANDS_BYPASS_QUEUE.has(firstToken)
 
     // Blocking limit: refuse input when context is nearly full

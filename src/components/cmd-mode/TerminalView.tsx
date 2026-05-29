@@ -21,6 +21,7 @@ import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
 import { useCmdScrollFollow } from '../../hooks/useCmdScrollFollow'
 import { useAttachments } from '../../hooks/useAttachments'
+import { useTranslation } from '@/i18n/useTranslation'
 import { tokens } from '@/theme/tokens'
 
 interface TerminalViewProps {
@@ -29,6 +30,7 @@ interface TerminalViewProps {
 }
 
 const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
+  const t = useTranslation()
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
@@ -434,7 +436,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           {isLoadingSession ? (
             <Box mb={2}>
               <Text color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} fontSize="12px">
-                ⟳ loading session…
+                {t('terminalMode.view.loadingSession')}
               </Text>
             </Box>
           ) : messages.length === 0 ? (
@@ -465,7 +467,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
                   }}
                   onClick={() => loadMore()}
                 >
-                  ⟳ load earlier — {hiddenCount} hidden
+                  {t('terminalMode.view.loadEarlier').replace('{hiddenCount}', String(hiddenCount))}
                 </Box>
               )}
               {visibleItems.map(msg => (
@@ -531,7 +533,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
             onPointerMove={handleDividerMove}
             onPointerUp={handleDividerUp}
             onPointerCancel={handleDividerUp}
-            aria-label="Resize terminal panel"
+            aria-label={t('terminalMode.view.resizePanel')}
             role="separator"
           />
           <TerminalPanel projectPath={projectPath} widthPx={clampedPanelWidth} onReady={handleTerminalReady} />
