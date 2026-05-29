@@ -51,8 +51,9 @@ function copyFiles(src, dest) {
       // We are interested in installer and signature files
       const allowedExts = ['.dmg', '.exe', '.msi', '.deb', '.AppImage', '.sig', '.zip', '.gz'];
       if (allowedExts.includes(ext) || entry.name === 'latest.json') {
-        const destPath = path.join(dest, entry.name);
-        console.log(`Copying: ${entry.name} -> ${destPath}`);
+        const destName = entry.name.replace(/\s+/g, '.');
+        const destPath = path.join(dest, destName);
+        console.log(`Copying: ${entry.name} -> ${destName}`);
         fs.copyFileSync(srcPath, destPath);
       }
     }
