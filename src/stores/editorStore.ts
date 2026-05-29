@@ -155,8 +155,8 @@ const getLanguageFromExtension = (filePath: string): string => {
   }
 };
 
-const unsavedChangesService = UnsavedChangesService.getInstance();
-const autoSaveQueue = AutoSaveQueue.getInstance();
+const getUnsavedChangesService = () => UnsavedChangesService.getInstance();
+const getAutoSaveQueue = () => AutoSaveQueue.getInstance();
 
 /**
  * Apply dirty-buffer overrides loaded from `<project>/.toquemedia/editor-state.json`.
@@ -185,7 +185,7 @@ export function applyDirtyOverrides(dirty: Record<string, string>): void {
     // Also re-mark each restored file as dirty in the UnsavedChangesService
     // so the close-tab confirmation reappears.
     for (const f of openFiles) {
-      if (f.isDirty) unsavedChangesService.markFileAsDirty(f.path)
+      if (f.isDirty) getUnsavedChangesService().markFileAsDirty(f.path)
     }
     return { openFiles }
   })
@@ -393,7 +393,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
               delete cursorPositions[path];
               delete undoStack[path];
               delete redoStack[path];
-              unsavedChangesService.markFileAsClean(path);
+              getUnsavedChangesService().markFileAsClean(path);
               // Notify MonacoEditor to clear cursor cache for this path
               try { window.dispatchEvent(new CustomEvent('editor:clearCursorCache', { detail: path })) } catch {}
             }
@@ -499,10 +499,10 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           delete redoStack[path];
           
           // Mark file as dirty
-          unsavedChangesService.markFileAsDirty(path);
+          getUnsavedChangesService().markFileAsDirty(path);
           
           // Adiciona à queue de auto-save (apenas se realmente mudou)
-          autoSaveQueue.addToQueue(path, content);
+          getAutoSaveQueue().addToQueue(path, content);
 
           // Persist dirty buffer to disk — protects against data loss on
           // crash/reload when autosave is off or hasn't fired yet. The
@@ -636,7 +636,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         
         try {
           // Remove da queue de auto-save já que estamos salvando manualmente
-          autoSaveQueue.removeFromQueue(path);
+          getAutoSaveQueue().removeFromQueue(path);
           
           await FileService.writeFile(path, file.content);
           
@@ -655,7 +655,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           });
 
           // Mark file as clean
-          unsavedChangesService.markFileAsClean(path);
+          getUnsavedChangesService().markFileAsClean(path);
 
           // The dirty-buffer file on disk should drop this path now that
           // the real file has been saved. Schedule a persist — the writer
@@ -678,7 +678,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
         
         try {
           // Remove arquivos da queue de auto-save
-          dirtyFiles.forEach(file => autoSaveQueue.removeFromQueue(file.path));
+          dirtyFiles.forEach(file => getAutoSaveQueue().removeFromQueue(file.path));
           
           // Save all dirty files em batches de 5 para evitar sobrecarga
           // Read fresh content before each write to avoid TOCTOU (user may edit during save)
@@ -718,7 +718,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           dirtyFiles.forEach(file => {
             const current = get().openFiles.find(f => f.path === file.path);
             if (current && !current.isDirty) {
-              unsavedChangesService.markFileAsClean(file.path);
+              getUnsavedChangesService().markFileAsClean(file.path);
             }
           });
 
@@ -836,7 +836,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
               return { ...g, files: g.files.filter(f => f !== existingPreviewPath) };
             });
             if (!stillInOtherGroup) {
-              unsavedChangesService.markFileAsClean(existingPreviewPath);
+              getUnsavedChangesService().markFileAsClean(existingPreviewPath);
             }
             return { openFiles, editorGroups: groups };
           });
@@ -1028,7 +1028,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             const openFiles = stillInGroup ? state.openFiles : state.openFiles.filter(f => f.path !== path);
 
             if (!stillInGroup) {
-              unsavedChangesService.markFileAsClean(path);
+              getUnsavedChangesService().markFileAsClean(path);
             }
 
             // Remove empty split groups

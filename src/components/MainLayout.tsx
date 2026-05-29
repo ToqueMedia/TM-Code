@@ -164,6 +164,90 @@ function MainLayout() {
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       const isMeta = e.metaKey || e.ctrlKey
+      const isShift = e.shiftKey
+      const isAlt = e.altKey
+      const key = e.key ? e.key.toLowerCase() : ''
+
+      // Block default Safari/Chrome browser actions that disrupt the standalone IDE app experience:
+
+      // 1. Reload page: Cmd+R, Ctrl+R, Cmd+Shift+R, Ctrl+Shift+R, F5
+      if ((isMeta && key === 'r') || e.key === 'F5') {
+        e.preventDefault()
+        return
+      }
+
+      // 2. Print page: Cmd+P, Ctrl+P
+      if (isMeta && key === 'p' && !isShift && !isAlt) {
+        e.preventDefault()
+        return
+      }
+
+      // 3. Save page: Cmd+S, Ctrl+S (avoid native browser html saving)
+      if (isMeta && key === 's' && !isShift && !isAlt) {
+        e.preventDefault()
+        const editorRepo = useEditorRepository.getState()
+        if (editorRepo.activeFile) {
+          editorRepo.saveFile(editorRepo.activeFile).catch(() => {})
+        }
+        return
+      }
+
+      // 4. Back/Forward Navigation: Cmd+[, Cmd+], Alt+ArrowLeft, Alt+ArrowRight
+      if (
+        (isMeta && (e.key === '[' || e.key === ']')) ||
+        (isAlt && (e.key === 'ArrowLeft' || e.key === 'ArrowRight'))
+      ) {
+        const tag = document.activeElement?.tagName.toLowerCase()
+        const isEditable = tag === 'input' || tag === 'textarea' || document.activeElement?.hasAttribute('contenteditable')
+        if (isMeta && (e.key === '[' || e.key === ']')) {
+          e.preventDefault()
+          return
+        } else if (!isEditable) {
+          e.preventDefault()
+          return
+        }
+      }
+
+      // 5. New Tab/Window / Open File: Cmd+T, Ctrl+T, Cmd+N, Ctrl+N, Cmd+O, Ctrl+O
+      if (isMeta && (key === 't' || key === 'n' || key === 'o') && !isShift && !isAlt) {
+        e.preventDefault()
+        return
+      }
+
+      // 6. Close Window/Tab: Cmd+W, Ctrl+W
+      if (isMeta && key === 'w' && !isShift && !isAlt) {
+        e.preventDefault()
+        return
+      }
+
+      // 7. Find in Page (browser default search widget): Cmd+F, Ctrl+F
+      if (isMeta && key === 'f' && !isShift && !isAlt) {
+        const isInsideMonaco = document.activeElement?.closest('.monaco-editor')
+        if (!isInsideMonaco) {
+          e.preventDefault()
+          return
+        }
+      }
+
+      // 8. Focus Address Bar: Cmd+L, Ctrl+L, F6
+      if (isMeta && key === 'l' && !isShift && !isAlt) {
+        e.preventDefault()
+        return
+      }
+      if (e.key === 'F6') {
+        e.preventDefault()
+        return
+      }
+
+      // 9. DevTools: Cmd+Alt+I (macOS), Ctrl+Shift+I (Windows/Linux), F12 (All)
+      if (
+        (isMeta && isAlt && key === 'i') ||
+        (isMeta && isShift && key === 'i') ||
+        e.key === 'F12'
+      ) {
+        e.preventDefault()
+        return
+      }
 
       // Cmd+B: Toggle sidebar
       if (isMeta && e.key === 'b' && !e.shiftKey) {

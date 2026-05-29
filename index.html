@@ -11,57 +11,34 @@
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <script>
-      if (window.__TAURI_INTERNALS__) {
-        // Disable browser context menu in production only — keep Reload/Inspect in dev
-        // In dev: Vite runs on port 1420. In prod: tauri-plugin-localhost runs on 14300.
-        if (location.port !== '1420') {
-          document.addEventListener('contextmenu', function(e) {
-            var el = e.target;
-            var tag = el.tagName;
-            if (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable) return;
-            e.preventDefault();
-          });
-        }
-
-        // ── OAuth popup bridge ──────────────────────────────────────────
-        // Tauri WebViews can't create browser popups via window.open().
-        // Rust on_new_window creates a real WebviewWindow for OAuth domains
-        // and injects a bridge script that forwards postMessage via Tauri events.
-        // Here we: (a) return a proxy so Firebase doesn't throw "popup-blocked",
-        // (b) forward the event as a MessageEvent so signInWithPopup completes.
-        var _origOpen = window.open;
-        var _oauthProxy = null;
-
-        window.open = function(url, target, features) {
-          var result = _origOpen.call(window, url, target, features);
-          if (result === null && url) {
-            _oauthProxy = { closed: false, close: function() { this.closed = true; }, focus: function() {} };
-            return _oauthProxy;
-          }
-          return result;
-        };
-
-        // Listen for OAuth result forwarded from popup WebviewWindow
-        window.__TAURI_INTERNALS__.invoke('plugin:event|listen', {
-          event: 'oauth-popup-message',
-          handler: window.__TAURI_INTERNALS__.transformCallback(function(e) {
-            try {
-              var data = JSON.parse(e.payload);
-              window.dispatchEvent(new MessageEvent('message', { data: data }));
-              if (_oauthProxy) _oauthProxy.closed = true;
-            } catch(err) {}
-          })
-        }).catch(function(){});
-
-        // Detect OAuth popup closed/cancelled — tells Firebase the popup is gone
-        // so signInWithPopup rejects with auth/popup-closed-by-user.
-        window.__TAURI_INTERNALS__.invoke('plugin:event|listen', {
-          event: 'oauth-popup-closed',
-          handler: window.__TAURI_INTERNALS__.transformCallback(function() {
-            if (_oauthProxy) _oauthProxy.closed = true;
-          })
-        }).catch(function(){});
+      // Disable browser context menu in production only — keep Reload/Inspect in dev
+      // In dev: Vite runs on port 1420. In prod: tauri-plugin-localhost runs on 14300.
+      if (location.port !== '1420') {
+        document.addEventListener('contextmenu', function(e) {
+          var el = e.target;
+          var tag = el.tagName;
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable) return;
+          e.preventDefault();
+        });
       }
+
+      // ── OAuth popup bridge ──────────────────────────────────────────
+      // Tauri WebViews can't create browser popups via window.open().
+      // Rust on_new_window creates a real WebviewWindow for OAuth domains
+      // and injects a bridge script that forwards postMessage via Tauri events.
+      // Here we: (a) return a proxy so Firebase doesn't throw "popup-blocked",
+      // (b) forward the event as a MessageEvent so signInWithPopup completes.
+      var _origOpen = window.open;
+      window._oauthProxy = null;
+
+      window.open = function(url, target, features) {
+        var result = _origOpen.call(window, url, target, features);
+        if (result === null && url) {
+          window._oauthProxy = { closed: false, close: function() { this.closed = true; }, focus: function() {} };
+          return window._oauthProxy;
+        }
+        return result;
+      };
     </script>
   </body>
 </html>

@@ -96,14 +96,9 @@ interface ProjectStore {
 // File watcher instance
 const fileWatcher = new ProjectFileWatcher();
 
-// Window title manager instance
-const windowTitleManager = WindowTitleManager.getInstance();
-
-// Recovery service instance
-const recoveryService = RecoveryService.getInstance();
-
-// Window service instance
-const windowService = WindowService.getInstance();
+// Lazy getters for services to avoid circular dependency / initialization order issues
+const getRecoveryService = () => RecoveryService.getInstance();
+const getWindowService = () => WindowService.getInstance();
 
 /**
  * Tears down the current project: cancels agent, stops all monitors/watchers,
@@ -129,8 +124,8 @@ function tearDownProject() {
   // Stop project monitors/watchers
   ProjectStatusMonitor.getInstance().stopMonitoring();
   fileWatcher.stopWatching();
-  windowTitleManager.stopManaging();
-  recoveryService.stopRecoveryMonitoring();
+  WindowTitleManager.getInstance().stopManaging();
+  getRecoveryService().stopRecoveryMonitoring();
 
   // Close editor files
   useEditorRepository.getState().closeAllFiles();
@@ -273,7 +268,7 @@ export const useProjectStore = create<ProjectStore>()(
           useProblemsStore.getState().clear()
 
           // Check for recovery state before loading project state
-          const hasRecovery = await recoveryService.hasRecoveryState(projectInfo.id);
+          const hasRecovery = await getRecoveryService().hasRecoveryState(projectInfo.id);
           if (hasRecovery) {
             logger.warn('project', `Recovery state found for project ${projectInfo.id}. Consider recovering before loading.`);
           }
@@ -286,7 +281,7 @@ export const useProjectStore = create<ProjectStore>()(
           fileWatcher.startWatching(path);
 
           // Start managing window title
-          windowTitleManager.startManaging();
+          WindowTitleManager.getInstance().startManaging();
 
           // Activate app-level isolation for this project
           try {
@@ -466,7 +461,7 @@ export const useProjectStore = create<ProjectStore>()(
           fileWatcher.startWatching(path);
 
           // Start managing window title
-          windowTitleManager.startManaging();
+          WindowTitleManager.getInstance().startManaging();
 
           // Activate app-level isolation for this project
           invoke('set_active_project', { projectId: projectInfo.id, projectPath: path }).catch(err => {
@@ -638,10 +633,10 @@ export const useProjectStore = create<ProjectStore>()(
           };
 
           // Save window state
-          await windowService.saveWindowState();
+          await getWindowService().saveWindowState();
 
           // Save recovery state first
-          await recoveryService.saveRecoveryState(currentProject.id, projectState);
+          await getRecoveryService().saveRecoveryState(currentProject.id, projectState);
 
           // Then save the main project state
           await invoke('save_project_state', {
@@ -650,7 +645,7 @@ export const useProjectStore = create<ProjectStore>()(
           });
 
           // Clear recovery state after successful save
-          await recoveryService.clearRecoveryState(currentProject.id);
+          await getRecoveryService().clearRecoveryState(currentProject.id);
         } catch (error) {
           logger.error('project', 'Failed to save project state:', error);
           throw error;
@@ -667,7 +662,7 @@ export const useProjectStore = create<ProjectStore>()(
           });
 
           // Restore window state
-          await windowService.restoreWindowState(state.windowState);
+          await getWindowService().restoreWindowState(state.windowState);
 
           // Restore editor state: open files and set active
           const editorRepo = useEditorRepository.getState();
@@ -702,7 +697,7 @@ export const useProjectStore = create<ProjectStore>()(
 
       updateWindowState: async () => {
         try {
-          const windowState = await windowService.getCurrentWindowState();
+          const windowState = await getWindowService().getCurrentWindowState();
           set({ windowState });
         } catch (error) {
           logger.error('project', 'Failed to update window state:', error);

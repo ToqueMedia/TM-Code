@@ -133,6 +133,35 @@ function App() {
 		});
 	}, []);
 
+	// Listen for OAuth popup messages forwarded from the Rust popup window
+	useEffect(() => {
+		let unlistenMessage: (() => void) | undefined;
+		let unlistenClosed: (() => void) | undefined;
+
+		import('@tauri-apps/api/event').then(({ listen }) => {
+			listen<string>('oauth-popup-message', (e) => {
+				try {
+					const data = JSON.parse(e.payload);
+					window.dispatchEvent(new MessageEvent('message', { data: data }));
+					if ((window as any)._oauthProxy) {
+						(window as any)._oauthProxy.closed = true;
+					}
+				} catch (err) {}
+			}).then(unsub => { unlistenMessage = unsub; });
+
+			listen('oauth-popup-closed', () => {
+				if ((window as any)._oauthProxy) {
+					(window as any)._oauthProxy.closed = true;
+				}
+			}).then(unsub => { unlistenClosed = unsub; });
+		}).catch(() => {});
+
+		return () => {
+			if (unlistenMessage) unlistenMessage();
+			if (unlistenClosed) unlistenClosed();
+		};
+	}, []);
+
 	// Native OS notification when the agent asks for permission while the
 	// IDE window is in the background. The notify() helper itself skips when
 	// the window is focused, so users actively watching the app see only the

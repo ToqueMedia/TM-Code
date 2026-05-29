@@ -25,26 +25,9 @@ jobs:
             --notes "Download the installer for your platform below." \
             --draft || echo "Draft release already exists, continuing."
 
-  build:
+  build-macos-arm:
     needs: create-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-            label: macOS-ARM
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-            label: macOS-Intel
-          - platform: ubuntu-22.04
-            args: ''
-            label: Linux
-          - platform: windows-latest
-            args: ''
-            label: Windows
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -57,21 +40,14 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: aarch64-apple-darwin
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
 
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
       - name: Import Apple certificate for code signing + notarization
-        if: matrix.platform == 'macos-latest'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -86,8 +62,168 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
+      - name: Install frontend dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: 'Developer ID Application: TOQUE MEDIA - PRESTACAO DE SERVICOS, LDA (D39GPSWXDH)'
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VITE_USE_EMULATORS: 'false'
+          VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
+          VITE_DASHSCOPE_API_KEY: ${{ secrets.VITE_DASHSCOPE_API_KEY }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: 'maiplayer-ac56d.firebaseapp.com'
+          VITE_FIREBASE_PROJECT_ID: 'maiplayer-ac56d'
+          VITE_FIREBASE_STORAGE_BUCKET: 'maiplayer-ac56d.firebasestorage.app'
+          VITE_FIREBASE_MESSAGING_SENDER_ID: '113004896685'
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: 'G-S6V1T01G96'
+        with:
+          args: --target aarch64-apple-darwin
+          includeUpdaterJson: true
+
+      - name: Upload artifacts to public repo release
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        shell: bash
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          find src-tauri/target -path "*/bundle/*" -type f \( \
+            -name "*.dmg" -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \
+          \) | while read file; do
+            echo "Uploading: $file"
+            gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
+          done
+
+          TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
+          TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
+          if [ -n "$TAR_GZ" ]; then
+            cp "$TAR_GZ" "TM.Code_aarch64.app.tar.gz"
+            gh release upload "$VERSION" "TM.Code_aarch64.app.tar.gz" --repo ToqueMedia/TM-Code --clobber
+            if [ -n "$TAR_SIG" ]; then
+              cp "$TAR_SIG" "TM.Code_aarch64.app.tar.gz.sig"
+              gh release upload "$VERSION" "TM.Code_aarch64.app.tar.gz.sig" --repo ToqueMedia/TM-Code --clobber
+            fi
+          fi
+
+  build-macos-intel:
+    needs: create-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Import Apple certificate for code signing + notarization
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERT_PATH=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERT_PATH
+          security create-keychain -p "" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "" $KEYCHAIN_PATH
+          security import $CERT_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      - name: Install frontend dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: 'Developer ID Application: TOQUE MEDIA - PRESTACAO DE SERVICOS, LDA (D39GPSWXDH)'
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VITE_USE_EMULATORS: 'false'
+          VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
+          VITE_DASHSCOPE_API_KEY: ${{ secrets.VITE_DASHSCOPE_API_KEY }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: 'maiplayer-ac56d.firebaseapp.com'
+          VITE_FIREBASE_PROJECT_ID: 'maiplayer-ac56d'
+          VITE_FIREBASE_STORAGE_BUCKET: 'maiplayer-ac56d.firebasestorage.app'
+          VITE_FIREBASE_MESSAGING_SENDER_ID: '113004896685'
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: 'G-S6V1T01G96'
+        with:
+          args: --target x86_64-apple-darwin
+          includeUpdaterJson: true
+
+      - name: Upload artifacts to public repo release
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        shell: bash
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          find src-tauri/target -path "*/bundle/*" -type f \( \
+            -name "*.dmg" -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \
+          \) | while read file; do
+            echo "Uploading: $file"
+            gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
+          done
+
+          TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
+          TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
+          if [ -n "$TAR_GZ" ]; then
+            cp "$TAR_GZ" "TM.Code_x64.app.tar.gz"
+            gh release upload "$VERSION" "TM.Code_x64.app.tar.gz" --repo ToqueMedia/TM-Code --clobber
+            if [ -n "$TAR_SIG" ]; then
+              cp "$TAR_SIG" "TM.Code_x64.app.tar.gz.sig"
+              gh release upload "$VERSION" "TM.Code_x64.app.tar.gz.sig" --repo ToqueMedia/TM-Code --clobber
+            fi
+          fi
+
+  build-windows:
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
       - name: Import Windows certificate
-        if: matrix.platform == 'windows-latest'
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -106,13 +242,6 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
-          # Apple code signing + notarization (macOS only)
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: 'Developer ID Application: TOQUE MEDIA - PRESTACAO DE SERVICOS, LDA (D39GPSWXDH)'
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VITE_USE_EMULATORS: 'false'
           VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
           VITE_DASHSCOPE_API_KEY: ${{ secrets.VITE_DASHSCOPE_API_KEY }}
@@ -124,8 +253,6 @@ jobs:
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
           VITE_FIREBASE_MEASUREMENT_ID: 'G-S6V1T01G96'
         with:
-          # Build only — no release upload (we upload to the public repo separately)
-          args: ${{ matrix.args }}
           includeUpdaterJson: true
 
       - name: Upload artifacts to public repo release
@@ -134,48 +261,77 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ needs.create-release.outputs.version }}"
-          ARGS="${{ matrix.args }}"
-
-          # Find release artifacts + signatures ONLY inside bundle directories.
-          # Tauri places installers under target/**/release/bundle/ — restricting to
-          # */bundle/* avoids uploading build tools (WiX), build scripts, and raw binaries.
           find src-tauri/target -path "*/bundle/*" -type f \( \
-            -name "*.dmg" -o -name "*.exe" -o -name "*.msi" -o \
-            -name "*.deb" -o -name "*.AppImage" -o \
-            -name "*.nsis.zip" -o -name "*.nsis.zip.sig" -o \
-            -name "*.AppImage.sig" -o -name "*.exe.sig" -o \
-            -name "*.msi.sig" -o -name "*.deb.sig" \
+            -name "*.exe" -o -name "*.msi" -o -name "*.exe.sig" -o -name "*.msi.sig" \
           \) | while read file; do
             echo "Uploading: $file"
             gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
           done
 
-          # macOS updater artifact (.app.tar.gz + .sig) — rename per-arch to avoid collision.
-          # Both ARM and Intel builds produce "TM.Code.app.tar.gz" — without renaming the
-          # second upload overwrites the first.
-          TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
-          TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
-          if [ -n "$TAR_GZ" ]; then
-            if echo "$ARGS" | grep -q "aarch64"; then
-              ARCH="aarch64"
-            elif echo "$ARGS" | grep -q "x86_64"; then
-              ARCH="x64"
-            else
-              ARCH="unknown"
-            fi
-            cp "$TAR_GZ" "TM.Code_${ARCH}.app.tar.gz"
-            gh release upload "$VERSION" "TM.Code_${ARCH}.app.tar.gz" --repo ToqueMedia/TM-Code --clobber
-            if [ -n "$TAR_SIG" ]; then
-              cp "$TAR_SIG" "TM.Code_${ARCH}.app.tar.gz.sig"
-              gh release upload "$VERSION" "TM.Code_${ARCH}.app.tar.gz.sig" --repo ToqueMedia/TM-Code --clobber
-            fi
-          fi
+  build-linux:
+    needs: create-release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          VITE_USE_EMULATORS: 'false'
+          VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
+          VITE_DASHSCOPE_API_KEY: ${{ secrets.VITE_DASHSCOPE_API_KEY }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: 'maiplayer-ac56d.firebaseapp.com'
+          VITE_FIREBASE_PROJECT_ID: 'maiplayer-ac56d'
+          VITE_FIREBASE_STORAGE_BUCKET: 'maiplayer-ac56d.firebasestorage.app'
+          VITE_FIREBASE_MESSAGING_SENDER_ID: '113004896685'
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: 'G-S6V1T01G96'
+        with:
+          includeUpdaterJson: true
+
+      - name: Upload artifacts to public repo release
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        shell: bash
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          find src-tauri/target -path "*/bundle/*" -type f \( \
+            -name "*.deb" -o -name "*.AppImage" -o -name "*.AppImage.sig" -o -name "*.deb.sig" \
+          \) | while read file; do
+            echo "Uploading: $file"
+            gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
+          done
 
   generate-updater:
     # Runs AFTER all platform builds complete.
     # Builds the latest.json updater manifest from the release assets,
     # so all platforms are included in one file.
-    needs: [create-release, build]
+    needs: [create-release, build-macos-arm, build-macos-intel, build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Generate latest.json from release assets
@@ -242,7 +398,7 @@ jobs:
           gh release upload "$VERSION" latest.json --repo "$REPO" --clobber
 
   publish-release:
-    needs: [create-release, build, generate-updater]
+    needs: [create-release, build-macos-arm, build-macos-intel, build-windows, build-linux, generate-updater]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release (remove draft)
