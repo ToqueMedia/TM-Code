@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'The tag version to build/release (e.g., v0.7.0)'
+        required: false
+        type: string
 
 jobs:
   create-release:
@@ -11,9 +17,14 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Get version from tag
+      - name: Get version from tag or input
         id: version
-        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version_tag }}" ]; then
+            echo "version=${{ inputs.version_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create draft release on public repo
         env:
@@ -23,11 +34,19 @@ jobs:
             --repo ToqueMedia/TM-Code \
             --title "TM Code ${{ steps.version.outputs.version }}" \
             --notes "Download the installer for your platform below." \
-            --draft
+            --draft || echo "Draft release already exists, continuing."
 
   build:
     needs: create-release
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - platform: 'windows-latest'
+            target: 'x86_64-pc-windows-msvc'
+            arch: 'x64'
+
+    runs-on: ${{ matrix.settings.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +58,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -46,6 +67,7 @@ jobs:
           workspaces: './src-tauri -> target'
 
       - name: Install Linux dependencies
+        if: matrix.settings.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
@@ -71,6 +93,7 @@ jobs:
         with:
           # Build only — no release upload (we upload to the public repo separately)
           includeUpdaterJson: true
+          args: '--target ${{ matrix.settings.target }}'
 
       - name: Upload artifacts to public repo release
         env:
@@ -78,17 +101,46 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ needs.create-release.outputs.version }}"
+          BARE_VERSION="${VERSION#v}"
+          TARGET="${{ matrix.settings.target }}"
+          ARCH="${{ matrix.settings.arch }}"
 
-          # Find release artifacts + signatures ONLY inside bundle directories.
+          mkdir -p dist_upload
+
+          # Find release installers + signatures ONLY inside bundle directories.
           # Tauri places installers under target/**/release/bundle/ — restricting to
           # */bundle/* avoids uploading build tools (WiX), build scripts, and raw binaries.
           find src-tauri/target -path "*/bundle/*" -type f \( \
-            -name "*.deb" -o -name "*.AppImage" -o \
-            -name "*.AppImage.sig" -o -name "*.deb.sig" \
+            -name "*.deb" -o -name "*.AppImage" -o -name "*.AppImage.sig" -o -name "*.deb.sig" -o \
+            -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" -o \
+            -name "*.msi" -o -name "*.exe" -o -name "*.zip" -o -name "*.zip.sig" \
           \) | while read file; do
-            echo "Uploading: $file"
-            gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
+            filename=$(basename "$file")
+            
+            # Replace spaces with dots to normalize filenames
+            sanitized_name=$(echo "$filename" | tr ' ' '.')
+
+            # Handle renaming the generic TM.Code.app.tar.gz based on platform/arch
+            if [[ "$sanitized_name" == "TM.Code.app.tar.gz" ]]; then
+              sanitized_name="TM.Code_${BARE_VERSION}_${ARCH}.app.tar.gz"
+            elif [[ "$sanitized_name" == "TM.Code.app.tar.gz.sig" ]]; then
+              sanitized_name="TM.Code_${BARE_VERSION}_${ARCH}.app.tar.gz.sig"
+            fi
+
+            echo "Copying $file to dist_upload/$sanitized_name"
+            cp "$file" "dist_upload/$sanitized_name"
           done
+
+          # Upload files from dist_upload
+          if [ -d "dist_upload" ]; then
+            ls -la dist_upload
+            for file in dist_upload/*; do
+              if [ -f "$file" ]; then
+                echo "Uploading: $file"
+                gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
+              fi
+            done
+          fi
 
   generate-updater:
     # Runs AFTER all platform builds complete.
@@ -107,34 +159,55 @@ jobs:
           BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-          # Read .sig files from the release assets
           # Download all .sig files to get signatures
           mkdir -p sigs
           gh release download "$VERSION" --repo "$REPO" --pattern "*.sig" --dir sigs 2>/dev/null || true
 
           # Read signature file content (empty string if missing)
           read_sig() {
-            if [ -f "sigs/$1" ]; then cat "sigs/$1"; else echo ""; fi
+            if [ -f "sigs/$1" ]; then cat "sigs/$1" | tr -d '\r\n '; else echo ""; fi
           }
 
-          LINUX_APPIMAGE_SIG=$(read_sig "TM.Code_${BARE_VERSION}_amd64.AppImage.sig")
+          LINUX_SIG=$(read_sig "TM.Code_${BARE_VERSION}_amd64.AppImage.sig")
+          DARWIN_ARM64_SIG=$(read_sig "TM.Code_${BARE_VERSION}_aarch64.app.tar.gz.sig")
+          DARWIN_X64_SIG=$(read_sig "TM.Code_${BARE_VERSION}_x64.app.tar.gz.sig")
+
+          # Dynamic lookup for windows setup zip signature file
+          WINDOWS_SIG_FILE=$(find sigs -name "*_x64*.zip.sig" -exec basename {} \; | head -n 1)
+          if [ -n "$WINDOWS_SIG_FILE" ]; then
+            WINDOWS_SIG=$(read_sig "$WINDOWS_SIG_FILE")
+            WINDOWS_ZIP_FILE=$(echo "$WINDOWS_SIG_FILE" | sed 's/\.sig$//')
+          else
+            WINDOWS_SIG=""
+            WINDOWS_ZIP_FILE="TM.Code_${BARE_VERSION}_x64_en-US.msi.zip" # Fallback guess
+          fi
 
           # Build latest.json using jq to properly escape signatures (multi-line base64)
+          # Only include platforms in the manifest if their signatures are present.
           jq -n \
             --arg ver "$BARE_VERSION" \
             --arg notes "TM Code $VERSION" \
             --arg date "$PUB_DATE" \
-            --arg linux_sig "$LINUX_APPIMAGE_SIG" \
             --arg base "$BASE_URL" \
-            --arg bv "$BARE_VERSION" \
+            --arg linux_sig "$LINUX_SIG" \
+            --arg linux_file "TM.Code_${BARE_VERSION}_amd64.AppImage" \
+            --arg macOS_arm_sig "$DARWIN_ARM64_SIG" \
+            --arg macOS_arm_file "TM.Code_${BARE_VERSION}_aarch64.app.tar.gz" \
+            --arg macOS_x64_sig "$DARWIN_X64_SIG" \
+            --arg macOS_x64_file "TM.Code_${BARE_VERSION}_x64.app.tar.gz" \
+            --arg win_sig "$WINDOWS_SIG" \
+            --arg win_file "$WINDOWS_ZIP_FILE" \
             '{
               version: $ver,
               notes: $notes,
               pub_date: $date,
-              platforms: {
-                "linux-x86_64":   { signature: $linux_sig,   url: ($base + "/TM.Code_" + $bv + "_amd64.AppImage") }
-              }
-            }' > latest.json
+              platforms: {}
+            } |
+            if $linux_sig != "" then .platforms["linux-x86_64"] = { signature: $linux_sig, url: ($base + "/" + $linux_file) } else . end |
+            if $macOS_arm_sig != "" then .platforms["darwin-aarch64"] = { signature: $macOS_arm_sig, url: ($base + "/" + $macOS_arm_file) } else . end |
+            if $macOS_x64_sig != "" then .platforms["darwin-x86_64"] = { signature: $macOS_x64_sig, url: ($base + "/" + $macOS_x64_file) } else . end |
+            if $win_sig != "" then .platforms["windows-x86_64"] = { signature: $win_sig, url: ($base + "/" + $win_file) } else . end
+            ' > latest.json
 
           echo "Generated latest.json:"
           cat latest.json
