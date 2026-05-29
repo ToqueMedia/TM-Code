@@ -54,17 +54,36 @@ export interface UseMessageWindowResult<T> {
 
 export function useMessageWindow<T>(
   items: T[],
-  options: { resetKey?: string | null; pageSize?: number } = {},
+  options: { resetKey?: string | null; pageSize?: number; collapseThreshold?: number } = {},
 ): UseMessageWindowResult<T> {
-  const { resetKey, pageSize = 30 } = options
-  const [visibleCount, setVisibleCount] = useState(pageSize)
+  const { resetKey, pageSize = 30, collapseThreshold = 10 } = options
+  const [initialItemsCount, setInitialItemsCount] = useState(items.length)
+  const [visibleCount, setVisibleCount] = useState(() => {
+    const total = items.length
+    return total <= collapseThreshold ? total : pageSize
+  })
 
   // Reset on session / project switch. Without this, opening a fresh
   // conversation would start somewhere mid-history if the previous one had
   // been scrolled up.
   useEffect(() => {
-    setVisibleCount(pageSize)
-  }, [resetKey, pageSize])
+    const total = items.length
+    setInitialItemsCount(total)
+    setVisibleCount(total <= collapseThreshold ? total : pageSize)
+  }, [resetKey, pageSize, collapseThreshold, items.length])
+
+  // Dynamically increase visibleCount as new items are added during the active session.
+  // This ensures messages sent/rendered during the active session are never collapsed/pushed out of view.
+  useEffect(() => {
+    const currentTotal = items.length
+    if (currentTotal > initialItemsCount) {
+      const diff = currentTotal - initialItemsCount
+      setVisibleCount((c) => c + diff)
+      setInitialItemsCount(currentTotal)
+    } else if (currentTotal < initialItemsCount) {
+      setInitialItemsCount(currentTotal)
+    }
+  }, [items.length, initialItemsCount])
 
   const total = items.length
   const clampedCount = Math.min(visibleCount, total)

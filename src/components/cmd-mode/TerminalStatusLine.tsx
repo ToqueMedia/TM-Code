@@ -35,7 +35,11 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   // currentPromptTokens is the per-turn input on the wire (input +
   // cache_read + cache_creation). Same value the ContextWindowIndicator
   // reads — keeps the terminal ctx % in lockstep with the chat-mode pill.
-  const currentPromptTokens = useChatStore(s => s.currentPromptTokens)
+  const currentPromptTokens = useChatStore((s) => {
+    if (s.currentPromptTokens > 0) return s.currentPromptTokens
+    if (!s.activeSessionId) return 0
+    return s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
+  })
   const headerContextWindow = useAgentStore(s => s.modelContextWindow)
   const agentTasks = useAgentStore(s => s.tasks)
   const skillCount = useSkillStore(s => s.skills.length)
@@ -298,18 +302,18 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
 
         {/* Right: elapsed + tokens + stop */}
         <Flex align="center" gap={2} flexShrink={0}>
-          {isStreaming && (
+          {(isStreaming || ctxPct > 0) && (
             <Text fontSize="13px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} whiteSpace="nowrap" title={ctxTooltip}>
-              {formatElapsed(elapsed)}
+              {isStreaming && formatElapsed(elapsed)}
               {ctxPct > 0 && (
                 <>
-                  {' · '}
+                  {isStreaming && ' · '}
                   <Text as="span" color={ctxColor}>
                     {`ctx ${Math.round(ctxPct)}%`}
                   </Text>
                 </>
               )}
-              {combinedTok > 0 && (
+              {isStreaming && combinedTok > 0 && (
                 <>
                   {' · '}
                   {isSending && (
