@@ -174,35 +174,42 @@ fn hide_console_window(cmd: &mut Command) {
 fn pick_interactive_shell() -> (String, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
-        // Try pwsh (PowerShell 7+, cross-platform) first
-        let mut pwsh_probe = Command::new("pwsh");
-        pwsh_probe
-            .arg("-Version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        hide_console_window(&mut pwsh_probe);
-        if pwsh_probe.status().map(|s| s.success()).unwrap_or(false) {
-            return (
-                "pwsh".to_string(),
-                vec!["-NoLogo".to_string(), "-NoExit".to_string()],
-            );
-        }
-        // Fall back to Windows PowerShell (always available on Win 10/11)
-        let mut ps_probe = Command::new("powershell");
-        ps_probe
-            .arg("-Command")
-            .arg("$PSVersionTable.PSVersion")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        hide_console_window(&mut ps_probe);
-        if ps_probe.status().map(|s| s.success()).unwrap_or(false) {
-            return (
-                "powershell".to_string(),
-                vec!["-NoLogo".to_string(), "-NoExit".to_string()],
-            );
-        }
-        // Last resort: cmd.exe with no /C flag (interactive)
-        return ("cmd".to_string(), vec![]);
+        use std::sync::OnceLock;
+        static CACHED_SHELL: OnceLock<(String, Vec<String>)> = OnceLock::new();
+
+        CACHED_SHELL
+            .get_or_init(|| {
+                // Try pwsh (PowerShell 7+, cross-platform) first
+                let mut pwsh_probe = Command::new("pwsh");
+                pwsh_probe
+                    .arg("-Version")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                hide_console_window(&mut pwsh_probe);
+                if pwsh_probe.status().map(|s| s.success()).unwrap_or(false) {
+                    return (
+                        "pwsh".to_string(),
+                        vec!["-NoLogo".to_string(), "-NoExit".to_string()],
+                    );
+                }
+                // Fall back to Windows PowerShell (always available on Win 10/11)
+                let mut ps_probe = Command::new("powershell");
+                ps_probe
+                    .arg("-Command")
+                    .arg("$PSVersionTable.PSVersion")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                hide_console_window(&mut ps_probe);
+                if ps_probe.status().map(|s| s.success()).unwrap_or(false) {
+                    return (
+                        "powershell".to_string(),
+                        vec!["-NoLogo".to_string(), "-NoExit".to_string()],
+                    );
+                }
+                // Last resort: cmd.exe with no /C flag (interactive)
+                ("cmd".to_string(), vec![])
+            })
+            .clone()
     }
     #[cfg(not(target_os = "windows"))]
     {

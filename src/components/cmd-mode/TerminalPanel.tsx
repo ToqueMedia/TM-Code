@@ -192,6 +192,9 @@ interface SingleTerminalProps {
   onReady?: () => void
 }
 
+// Cache of active start_pty_shell invocations to prevent StrictMode concurrency races
+const spawnPromises = new Map<string, Promise<string>>()
+
 const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, onReady }: SingleTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -410,33 +413,46 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
     }
 
     // Spawn the shell
-    invoke<string>('start_pty_shell', { sessionId, cwd: projectPath })
-      .then(() => {
-        if (disposed) return
-        shellStarted = true
-        onReady?.()
+    let p = spawnPromises.get(sessionId)
+    if (!p) {
+      p = invoke<string>('start_pty_shell', { sessionId, cwd: projectPath })
+      spawnPromises.set(sessionId, p)
+    }
 
-        // Sync PTY dimensions with frontend after shell initialization.
-        // Windows' ConPTY frequently discards resize requests received before or during process
-        // spawning. Forcing a resize immediately after the process has started (and a second
-        // deferred resize to absorb any ConPTY engine latency) ensures perfect alignment.
-        if (termRef.current) {
-          const cols = termRef.current.cols
-          const rows = termRef.current.rows
-          if (cols > 10 && rows > 5) {
-            resizePty(cols, rows)
-            setTimeout(() => {
-              if (!disposed && termRef.current) {
-                resizePty(termRef.current.cols, termRef.current.rows)
-              }
-            }, 150)
-          }
+    p.then(() => {
+      if (disposed) return
+      shellStarted = true
+      onReady?.()
+
+      // Sync PTY dimensions with frontend after shell initialization.
+      // Windows' ConPTY frequently discards resize requests received before or during process
+      // spawning. Forcing a resize immediately after the process has started (and a second
+      // deferred resize to absorb any ConPTY engine latency) ensures perfect alignment.
+      if (termRef.current) {
+        const cols = termRef.current.cols
+        const rows = termRef.current.rows
+        if (cols > 10 && rows > 5) {
+          resizePty(cols, rows)
+          setTimeout(() => {
+            if (!disposed && termRef.current) {
+              resizePty(termRef.current.cols, termRef.current.rows)
+            }
+          }, 150)
         }
-      })
-      .catch((err) => {
-        logger.error('terminal-panel', 'start_pty_shell failed:', err)
-        term.writeln('\x1b[31mFailed to start shell. See logs.\x1b[0m')
-      })
+      }
+    })
+    .catch((err) => {
+      if (disposed) return
+      logger.error('terminal-panel', 'start_pty_shell failed:', err)
+      term.writeln('\x1b[31mFailed to start shell. See logs.\x1b[0m')
+    })
+    .finally(() => {
+      // Clean up the promise reference after a short delay to ensure any synchronous unmount/remount
+      // cycles during StrictMode are fully absorbed and reuse the same promise.
+      setTimeout(() => {
+        spawnPromises.delete(sessionId)
+      }, 3000)
+    })
 
     // ResizeObserver
     let resizeTimer: ReturnType<typeof setTimeout> | null = null

@@ -6,10 +6,6 @@ on:
       - 'src-tauri/resources/skills/**'
       - 'scripts/verify-skills.ts'
       - '.github/workflows/verify-skills.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'src-tauri/resources/skills/**'
 
 jobs:
   verify:
