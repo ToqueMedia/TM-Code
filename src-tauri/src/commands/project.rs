@@ -1212,7 +1212,12 @@ fn is_system_folder(path: &Path) -> bool {
     // so that paths on non-C: drives are correctly depth-evaluated.
     let real_depth: usize = canonical
         .components()
-        .filter(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::Prefix(_)))
+        .filter(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::Prefix(_)
+            )
+        })
         .count();
     if real_depth < 3 {
         return true;

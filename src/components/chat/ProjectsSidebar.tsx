@@ -1,6 +1,6 @@
 import { memo, useEffect, useCallback } from 'react'
 import { Box, Flex, Text, VStack } from '@chakra-ui/react'
-import { FiPlus, FiFolder, FiCode, FiClock, FiHome } from 'react-icons/fi'
+import { FiPlus, FiFolder, FiCode, FiClock } from 'react-icons/fi'
 import { Menu, MenuItem, PredefinedMenuItem } from '@tauri-apps/api/menu'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { useProjectStore } from '../../stores/projectStore'
@@ -156,29 +156,6 @@ function ProjectsSidebar() {
           {t('misc.projects')}
         </Text>
         <Flex gap={1}>
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            justifyContent="center"
-            w="24px"
-            h="24px"
-            borderRadius="6px"
-            border={`1px solid ${tokens.colors.border.panel}`}
-            color={tokens.colors.text.secondary}
-            bg="transparent"
-            cursor="pointer"
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{
-              bg: tokens.colors.bg.hoverSubtle,
-              borderColor: tokens.colors.border.glass,
-              color: tokens.colors.text.primary,
-            }}
-            onClick={() => useProjectStore.getState().closeProject()}
-            aria-label={t("explorer.home")}
-          >
-            <FiHome size={12} />
-          </Box>
           <Box
             as="button"
             display="flex"

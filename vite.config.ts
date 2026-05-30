@@ -54,7 +54,14 @@ export default defineConfig(async () => ({
   },
 
   build: {
+    chunkSizeWarningLimit: 1500,
     rollupOptions: {
+      onwarn(warning, warn) {
+        if (warning.code === 'INEFFECTIVE_DYNAMIC_IMPORT') {
+          return;
+        }
+        warn(warning);
+      },
       output: {
         manualChunks(id: string) {
           if (id.includes('monaco-editor')) {
