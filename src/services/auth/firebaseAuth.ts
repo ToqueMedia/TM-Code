@@ -41,13 +41,13 @@ import { resolveWorkerUrl } from '../../utils/devUrls'
 // Lazy initialization: validated on first use (not at import time) so tests
 // and CI that don't set env vars don't crash when importing other modules.
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || 'AIzaSyBaWQpRaCobIHsqSlJ7Aba1qhEZAlqnUJc',
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'maiplayer-ac56d.firebaseapp.com',
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || 'maiplayer-ac56d',
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'maiplayer-ac56d.firebasestorage.app',
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '113004896685',
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || '1:113004896685:web:fbc83072c4f870d92e0124',
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || 'G-S6V1T01G96',
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 }
 
 let _app: ReturnType<typeof initializeApp> | null = null
