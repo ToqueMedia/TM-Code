@@ -402,12 +402,36 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       else unlistenExit = fn
     })
 
+    const resizePty = (cols: number, rows: number) => {
+      if (cols <= 10 || rows <= 5) return
+      invoke('resize_pty', { sessionId, cols, rows }).catch((err) => {
+        logger.warn('terminal-panel', 'resize_pty failed:', err)
+      })
+    }
+
     // Spawn the shell
     invoke<string>('start_pty_shell', { sessionId, cwd: projectPath })
       .then(() => {
         if (disposed) return
         shellStarted = true
         onReady?.()
+
+        // Sync PTY dimensions with frontend after shell initialization.
+        // Windows' ConPTY frequently discards resize requests received before or during process
+        // spawning. Forcing a resize immediately after the process has started (and a second
+        // deferred resize to absorb any ConPTY engine latency) ensures perfect alignment.
+        if (termRef.current) {
+          const cols = termRef.current.cols
+          const rows = termRef.current.rows
+          if (cols > 10 && rows > 5) {
+            resizePty(cols, rows)
+            setTimeout(() => {
+              if (!disposed && termRef.current) {
+                resizePty(termRef.current.cols, termRef.current.rows)
+              }
+            }, 150)
+          }
+        }
       })
       .catch((err) => {
         logger.error('terminal-panel', 'start_pty_shell failed:', err)
@@ -424,12 +448,13 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
         fitRef.current.fit()
         const cols = termRef.current.cols
         const rows = termRef.current.rows
+        if (cols <= 10 || rows <= 5) return // Guard against 0 or invalid sizes
         if (cols === lastCols && rows === lastRows) return
         if (resizeTimer) clearTimeout(resizeTimer)
         resizeTimer = setTimeout(() => {
           lastCols = cols
           lastRows = rows
-          invoke('resize_pty', { sessionId, cols, rows }).catch(() => {})
+          resizePty(cols, rows)
         }, 120)
       } catch {
         // ignored — fit can throw during mount/unmount transitions
