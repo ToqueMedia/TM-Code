@@ -78,7 +78,24 @@ let windowsSig = '';
 let windowsZipFile = `TM.Code_${bareVersion}_x64_en-US.msi.zip`; // fallback default
 
 const files = fs.readdirSync(sigsDir);
-const winSigFile = files.find(file => file.includes('_x64') && file.endsWith('.zip.sig'));
+// 1. Try to find standard .zip.sig first (strongly recommended by Tauri)
+let winSigFile = files.find(file => file.includes('_x64') && file.endsWith('.zip.sig'));
+
+if (!winSigFile) {
+  // 2. Fallback to other potential Windows signatures (.msi.sig or .exe.sig / -setup.exe.sig)
+  winSigFile = files.find(file => 
+    file.includes('_x64') && 
+    (file.endsWith('.msi.sig') || file.endsWith('.exe.sig')) && 
+    !file.endsWith('.app.tar.gz.sig')
+  );
+  if (winSigFile) {
+    console.warn(`\n⚠️  WARNING: Found Windows signature "${winSigFile}" but it is not a ".zip.sig" file!`);
+    console.warn(`   Tauri's auto-updater client on Windows REQUIRES ".zip" bundles (e.g. "TM.Code_${bareVersion}_x64_en-US.msi.zip").`);
+    console.warn(`   Pointing the updater directly to a raw ".msi" or ".exe" will cause the update to fail on client machines.`);
+    console.warn(`   Make sure to build and upload ".zip" and ".zip.sig" files to the release!\n`);
+  }
+}
+
 if (winSigFile) {
   windowsSig = readSig(winSigFile);
   windowsZipFile = winSigFile.replace(/\.sig$/, '');
