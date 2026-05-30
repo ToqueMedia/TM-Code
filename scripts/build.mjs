@@ -18,8 +18,32 @@ if (!process.env.TAURI_SIGNING_PRIVATE_KEY) {
     process.env.TAURI_SIGNING_PRIVATE_KEY = key;
     process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD = '';
   } else {
-    console.warn('\n⚠️ Warning: TAURI_SIGNING_PRIVATE_KEY is not set and no key found at ~/.tauri/toquemedia-studio.key.');
-    console.warn('The build will proceed but WITHOUT auto-update signature generation (.sig).\n');
+    console.warn('\n================================================================================');
+    console.warn('⚠️  WARNING: TAURI_SIGNING_PRIVATE_KEY is not set!');
+    console.warn(`   No signing key found at: ${keyPath}`);
+    console.warn('================================================================================');
+    console.warn('   The build will proceed, but Tauri will NOT generate the auto-update artifacts:');
+    console.warn('   - No ".zip" updater packages (e.g. .msi.zip) will be created.');
+    console.warn('   - No signature (".sig") files will be generated.');
+    console.warn('--------------------------------------------------------------------------------');
+    console.warn('💡  INSTRUCTION FOR FUTURE GENERATIONS / RELEASES:');
+    console.warn('   To automatically generate the updater zip and signatures during the build,');
+    console.warn('   make sure the signing key is available.');
+    console.warn('');
+    if (os.platform() === 'win32') {
+      console.warn('   Option 1: Save your private key content to the file:');
+      console.warn('             %USERPROFILE%\\.tauri\\toquemedia-studio.key');
+      console.warn('');
+      console.warn('   Option 2: Set the environment variable in PowerShell before building:');
+      console.warn('             $env:TAURI_SIGNING_PRIVATE_KEY="your_private_key_here"');
+    } else {
+      console.warn('   Option 1: Save your private key content to the file:');
+      console.warn('             ~/.tauri/toquemedia-studio.key');
+      console.warn('');
+      console.warn('   Option 2: Set the environment variable in terminal before building:');
+      console.warn('             export TAURI_SIGNING_PRIVATE_KEY="your_private_key_here"');
+    }
+    console.warn('================================================================================\n');
   }
 }
 
