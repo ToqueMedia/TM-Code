@@ -32,7 +32,7 @@
 
 import { logger } from '../../utils/logger'
 import { resolveWorkerUrl } from '../../utils/devUrls'
-import FirebaseAuthService from '../auth/firebaseAuth'
+import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import type { MemoryType } from './memdir'
 
 /** Per-call timeout — extractor is fire-and-forget, post-turn, so this
@@ -128,12 +128,14 @@ ${assistantText.slice(-4000)}`
 
     let res: Response
     try {
+      const appCheck = await getAppCheckHeader()
       res = await fetch(`${workerUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${idToken}`,
           'X-Request-Type': 'memory-extractor',
+          ...appCheck,
         },
         body: JSON.stringify({
           messages: [

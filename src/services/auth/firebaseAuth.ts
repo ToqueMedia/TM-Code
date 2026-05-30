@@ -34,7 +34,7 @@ import { useFeaturesStore } from '../../stores/featuresStore'
 import { usePromotionsStore } from '../../stores/promotionsStore'
 import { useByokStore } from '../../stores/byokStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
-import { tauriFetch } from '../tauriFetch'
+import { tauriFetch, registerHeaderProvider } from '../tauriFetch'
 import { resolveWorkerUrl } from '../../utils/devUrls'
 
 // Firebase config from environment variables — no hardcoded fallbacks.
@@ -529,8 +529,12 @@ class FirebaseAuthService {
         if (targetGen !== this.authGeneration) return
 
         const workerUrl = resolveWorkerUrl()
+        const appCheck = await getAppCheckHeader()
         const res = await tauriFetch(`${workerUrl}/v1/me`, {
-          headers: { 'Authorization': `Bearer ${token}` },
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            ...appCheck,
+          },
         })
 
         if (!res.ok) {
@@ -717,5 +721,8 @@ class FirebaseAuthService {
   }
 
 }
+
+// Automatically register our App Check token provider with tauriFetch
+registerHeaderProvider(getAppCheckHeader)
 
 export default FirebaseAuthService

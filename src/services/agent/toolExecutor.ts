@@ -8,7 +8,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
-import FirebaseAuthService from '../auth/firebaseAuth'
+import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import { registerTaskTools } from './toolExecutor/taskOps'
 import { registerMemoryTools } from './toolExecutor/memoryOps'
 import { registerInteractionTools } from './toolExecutor/interactionOps'
@@ -1008,12 +1008,19 @@ ${preview}
     const url = `${resolveWorkerUrl()}/v1/messages`
     let response: Response
     try {
+      let appCheck: Record<string, string> = {}
+      try {
+        appCheck = await getAppCheckHeader()
+      } catch (err) {
+        console.warn('[toolExecutor] failed to get App Check header:', err)
+      }
       response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
           'X-Request-Type': 'web_search',
+          ...appCheck,
         },
         body: JSON.stringify(body),
         signal: abortSignal,

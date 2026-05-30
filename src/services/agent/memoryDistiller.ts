@@ -31,7 +31,7 @@
 
 import { logger } from '../../utils/logger'
 import { resolveWorkerUrl } from '../../utils/devUrls'
-import FirebaseAuthService from '../auth/firebaseAuth'
+import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import type { MemoryFile } from './memdir'
 
 /** Per-call timeout — distiller can run longer than the selector
@@ -152,12 +152,14 @@ The developer will manually approve each proposal before the agent applies it. T
 
     let res: Response
     try {
+      const appCheck = await getAppCheckHeader()
       res = await fetch(`${workerUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${idToken}`,
           'X-Request-Type': 'memory-distiller',
+          ...appCheck,
         },
         body: JSON.stringify({
           messages: [

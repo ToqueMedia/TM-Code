@@ -21,7 +21,7 @@
  *     ErrorStep offers Retry which restarts from init.
  */
 import { invoke } from '@/utils/invokeMetrics'
-import FirebaseAuthService from './auth/firebaseAuth'
+import FirebaseAuthService, { getAppCheckHeader } from './auth/firebaseAuth'
 import { resolveDeployUrl } from '../utils/devUrls'
 import { IS_VITE_DEV } from '../utils/viteEnv'
 import { useDeployStore, type DeployStep } from '../stores/deployStore'
@@ -783,10 +783,17 @@ class DeployService {
     const workerUrl = resolveDeployUrl()
     const url = `${workerUrl}/v1/projects/deploy/${phase}`
     const serialised = JSON.stringify(body)
+    let appCheck: Record<string, string> = {}
+    try {
+      appCheck = await getAppCheckHeader()
+    } catch (err) {
+      console.warn('[deployService] failed to get App Check header:', err)
+    }
     const headers = (token: string): Record<string, string> => ({
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
       ...DEV_DEPLOY_HEADER,
+      ...appCheck,
     })
 
     let res = await fetch(url, { method: 'POST', headers: headers(idToken), body: serialised })
@@ -818,12 +825,19 @@ class DeployService {
     const idToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!idToken) return
     const workerUrl = resolveDeployUrl()
+    let appCheck: Record<string, string> = {}
+    try {
+      appCheck = await getAppCheckHeader()
+    } catch (err) {
+      console.warn('[deployService] failed to get App Check header:', err)
+    }
     await fetch(`${workerUrl}/v1/projects/deploy/cleanup`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${idToken}`,
         ...DEV_DEPLOY_HEADER,
+        ...appCheck,
       },
       body: JSON.stringify({ projectId }),
     })
@@ -838,11 +852,18 @@ class DeployService {
     }
     const workerUrl = resolveDeployUrl()
     const url = `${workerUrl}/v1/projects/${encodeURIComponent(projectId)}/deployment`
+    let appCheck: Record<string, string> = {}
+    try {
+      appCheck = await getAppCheckHeader()
+    } catch (err) {
+      console.warn('[deployService] failed to get App Check header:', err)
+    }
     const res = await fetch(url, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${idToken}`,
         ...DEV_DEPLOY_HEADER,
+        ...appCheck,
       },
     })
     if (!res.ok) return { exists: false, projectId }
@@ -881,9 +902,15 @@ class DeployService {
     const auth = FirebaseAuthService.getInstance()
     const initial = await auth.getIdToken()
     if (!initial) throw new Error('Not signed in to TM Code.')
+    let appCheck: Record<string, string> = {}
+    try {
+      appCheck = await getAppCheckHeader()
+    } catch (err) {
+      console.warn('[deployService] failed to get App Check header:', err)
+    }
     const first = await fetch(url, {
       ...init,
-      headers: { ...DEV_DEPLOY_HEADER, ...(init.headers || {}), Authorization: `Bearer ${initial}` },
+      headers: { ...DEV_DEPLOY_HEADER, ...appCheck, ...(init.headers || {}), Authorization: `Bearer ${initial}` },
     })
     if (first.status !== 401) return first
 
@@ -891,7 +918,7 @@ class DeployService {
     if (!refreshed || refreshed === initial) return first
     return fetch(url, {
       ...init,
-      headers: { ...DEV_DEPLOY_HEADER, ...(init.headers || {}), Authorization: `Bearer ${refreshed}` },
+      headers: { ...DEV_DEPLOY_HEADER, ...appCheck, ...(init.headers || {}), Authorization: `Bearer ${refreshed}` },
     })
   }
 
@@ -900,11 +927,18 @@ class DeployService {
     const idToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!idToken) throw new Error('Not signed in to TM Code.')
     const workerUrl = resolveDeployUrl()
+    let appCheck: Record<string, string> = {}
+    try {
+      appCheck = await getAppCheckHeader()
+    } catch (err) {
+      console.warn('[deployService] failed to get App Check header:', err)
+    }
     const res = await fetch(`${workerUrl}/v1/projects/deploys`, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${idToken}`,
         ...DEV_DEPLOY_HEADER,
+        ...appCheck,
       },
     })
     if (!res.ok) {
@@ -948,10 +982,17 @@ class DeployService {
     const idToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!idToken) throw new Error('Not signed in to TM Code.')
     const workerUrl = resolveDeployUrl()
+    let appCheck: Record<string, string> = {}
+    try {
+      appCheck = await getAppCheckHeader()
+    } catch (err) {
+      console.warn('[deployService] failed to get App Check header:', err)
+    }
     const init: RequestInit = {
       method,
       headers: {
         ...DEV_DEPLOY_HEADER,
+        ...appCheck,
         Authorization: `Bearer ${idToken}`,
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
@@ -993,10 +1034,17 @@ class DeployService {
     }
     const workerUrl = resolveDeployUrl()
     const url = `${workerUrl}/v1/projects/${encodeURIComponent(projectId)}/domains${suffix}`
+    let appCheck: Record<string, string> = {}
+    try {
+      appCheck = await getAppCheckHeader()
+    } catch (err) {
+      console.warn('[deployService] failed to get App Check header:', err)
+    }
     const init: RequestInit = {
       method,
       headers: {
         ...DEV_DEPLOY_HEADER,
+        ...appCheck,
         Authorization: `Bearer ${idToken}`,
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },

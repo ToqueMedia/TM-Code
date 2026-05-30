@@ -2,7 +2,7 @@ import ToolExecutor, { OpenAIToolDefinition } from './toolExecutor'
 import { t } from '../../i18n'
 import DiffService from './diffService'
 import { devServerManager } from '../devServerManager'
-import FirebaseAuthService from '../auth/firebaseAuth'
+import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import { ServiceError } from '../../utils/errors'
 import { parseSSEStream, parseOpenAISSEStream, createThinkingDetector } from './streamParser'
 import { getProfileForPlan } from './modelProfiles'
@@ -2093,11 +2093,13 @@ Developer message: ${displayText}
 
     let response: Response
     try {
+      const appCheck = await getAppCheckHeader()
       response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${firebaseToken}`,
+          ...appCheck,
         },
         body: JSON.stringify({
           max_tokens: 16384,
@@ -2951,6 +2953,13 @@ Developer message: ${displayText}
       'Content-Type': 'application/json',
     }
 
+    try {
+      const appCheck = await getAppCheckHeader()
+      Object.assign(headers, appCheck)
+    } catch (err) {
+      console.warn('[agentService] failed to get App Check header:', err)
+    }
+
     // Clear stale noCredits before each request (may have been resolved server-side)
     useBillingStore.getState().clearNoCredits()
 
@@ -3378,6 +3387,13 @@ Developer message: ${displayText}
         throw new ServiceError(t('chat.authExpired'), 'AUTH_EXPIRED', true)
       }
       headers['Authorization'] = `Bearer ${firebaseToken}`
+
+      try {
+        const appCheck = await getAppCheckHeader()
+        Object.assign(headers, appCheck)
+      } catch (err) {
+        console.warn('[agentService] failed to get App Check header for fallback:', err)
+      }
 
       const activeSession = useChatStore.getState().getActiveSession?.()
       if (activeSession?.id) {

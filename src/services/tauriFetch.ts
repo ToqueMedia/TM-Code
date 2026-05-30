@@ -10,6 +10,14 @@
  */
 
 import { invoke } from '@/utils/invokeMetrics'
+import { resolveWorkerUrl } from '@/utils/devUrls'
+
+type HeaderProvider = () => Promise<Record<string, string>>
+const extraHeaderProviders: HeaderProvider[] = []
+
+export function registerHeaderProvider(provider: HeaderProvider) {
+  extraHeaderProviders.push(provider)
+}
 
 interface TauriFetchOptions {
   method?: string
@@ -25,6 +33,8 @@ interface TauriFetchOptions {
    *
    * Acceptable trade-off: HTTP requests are bounded by `timeoutSecs` (max
    * 30s default), so the wasted background work has a hard cap.
+   *
+   * @ts-expect-error - Used in Promise.race
    */
   signal?: AbortSignal
 }
@@ -48,11 +58,25 @@ export async function tauriFetch(url: string, opts: TauriFetchOptions = {}): Pro
     throw new DOMException('Request aborted before send', 'AbortError')
   }
 
+  const workerUrl = resolveWorkerUrl()
+  const reqHeaders = { ...(opts.headers || {}) }
+
+  if (url.startsWith(workerUrl) && !url.endsWith('/v1/appcheck-token')) {
+    for (const provider of extraHeaderProviders) {
+      try {
+        const extra = await provider()
+        Object.assign(reqHeaders, extra)
+      } catch (err) {
+        console.warn('[tauriFetch] extra header provider failed:', err)
+      }
+    }
+  }
+
   const invokePromise = invoke<RustHttpResponse>('http_client_request', {
     input: {
       method: opts.method || 'GET',
       url,
-      headers: opts.headers || {},
+      headers: reqHeaders,
       body: opts.body || null,
       timeoutSecs: opts.timeoutSecs || 30,
     },
