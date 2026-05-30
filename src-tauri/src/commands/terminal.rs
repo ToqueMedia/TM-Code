@@ -182,7 +182,10 @@ fn pick_interactive_shell() -> (String, Vec<String>) {
             .stderr(Stdio::null());
         hide_console_window(&mut pwsh_probe);
         if pwsh_probe.status().map(|s| s.success()).unwrap_or(false) {
-            return ("pwsh".to_string(), vec!["-NoLogo".to_string()]);
+            return (
+                "pwsh".to_string(),
+                vec!["-NoLogo".to_string(), "-NoExit".to_string()],
+            );
         }
         // Fall back to Windows PowerShell (always available on Win 10/11)
         let mut ps_probe = Command::new("powershell");
@@ -193,7 +196,10 @@ fn pick_interactive_shell() -> (String, Vec<String>) {
             .stderr(Stdio::null());
         hide_console_window(&mut ps_probe);
         if ps_probe.status().map(|s| s.success()).unwrap_or(false) {
-            return ("powershell".to_string(), vec!["-NoLogo".to_string()]);
+            return (
+                "powershell".to_string(),
+                vec!["-NoLogo".to_string(), "-NoExit".to_string()],
+            );
         }
         // Last resort: cmd.exe with no /C flag (interactive)
         return ("cmd".to_string(), vec![]);
