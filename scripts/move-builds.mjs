@@ -51,7 +51,26 @@ function copyFiles(src, dest) {
       // We are interested in installer and signature files
       const allowedExts = ['.dmg', '.exe', '.msi', '.deb', '.AppImage', '.sig', '.zip', '.gz'];
       if (allowedExts.includes(ext) || entry.name === 'latest.json') {
-        const destName = entry.name.replace(/\s+/g, '.');
+        let destName = entry.name.replace(/\s+/g, '.');
+        
+        // Prevent macOS updater packages from overwriting each other when building both architectures
+        if (targetTriple && (entry.name === 'TM Code.app.tar.gz' || entry.name === 'TM Code.app.tar.gz.sig')) {
+          let arch = '';
+          if (targetTriple.includes('aarch64')) {
+            arch = 'aarch64';
+          } else if (targetTriple.includes('x86_64')) {
+            arch = 'x64';
+          }
+          
+          if (arch) {
+            if (entry.name.endsWith('.sig')) {
+              destName = `TM.Code_${version}_${arch}.app.tar.gz.sig`;
+            } else {
+              destName = `TM.Code_${version}_${arch}.app.tar.gz`;
+            }
+          }
+        }
+
         const destPath = path.join(dest, destName);
         console.log(`Copying: ${entry.name} -> ${destName}`);
         fs.copyFileSync(srcPath, destPath);
