@@ -134,11 +134,11 @@ function MinimalTitleBar() {
     const tag = t.tagName?.toLowerCase() || ''
     if (['button', 'input', 'svg', 'path'].includes(tag)) return
     if (t.getAttribute?.('role') === 'button') return
-    // Respect the Tauri drag-region opt-out: any ancestor marked with
-    // data-tauri-drag-region="false" (MenuBar items, user menu avatar, etc.)
+    // Respect our drag opt-out. Avoid data-tauri-drag-region="false":
+    // on Windows the native drag handler keys off attribute presence.
     // should NOT start a window drag — otherwise the click gets eaten by
     // startDragging() on Windows and onClick never fires.
-    if (t.closest?.('[data-tauri-drag-region="false"]')) return
+    if (t.closest?.('[data-no-drag]')) return
     // Don't start dragging if clicking inside user menu area
     if (avatarRef.current?.contains(t)) return
     getCurrentWindow().startDragging().catch(() => {})
@@ -180,11 +180,10 @@ function MinimalTitleBar() {
       position="relative"
       userSelect="none"
       flexShrink={0}
-      data-tauri-drag-region
       onMouseDown={handleMouseDown}
     >
       {/* Left: Window controls (macOS) + menus */}
-      <HStack gap={2} flexShrink={0} pl={1} data-tauri-drag-region="false">
+      <HStack gap={2} flexShrink={0} pl={1} data-no-drag>
         {IS_MAC && (
           <WindowControls
             onClose={handleClose}
@@ -212,7 +211,7 @@ function MinimalTitleBar() {
       {/* Right: Agent status + User identity. The Publish button still lives
           in the PreviewView toolbar and the Cmd/Ctrl+Shift+D shortcut keeps
           working — both routes open the same modal via layoutStore. */}
-      <HStack gap={3} flexShrink={0} pr={1} data-tauri-drag-region="false">
+      <HStack gap={3} flexShrink={0} pr={1} data-no-drag>
         {/* Agent status */}
         <HStack gap={1.5}>
           <Box
@@ -297,7 +296,7 @@ function MinimalTitleBar() {
 
       {/* Right: window controls (Windows/Linux) */}
       {!IS_MAC && (
-        <HStack flexShrink={0} data-tauri-drag-region="false">
+        <HStack flexShrink={0} data-no-drag>
           <WindowControls
             onClose={handleClose}
             onMinimize={handleMinimize}

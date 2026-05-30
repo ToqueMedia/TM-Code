@@ -294,7 +294,7 @@ function MenuBar() {
 			<Flex
 				align="center"
 				gap={0}
-				data-tauri-drag-region="false"
+				data-no-drag
 			>
 				{menus.map(function renderTrigger(menu) {
 					const isActive = openMenuId === menu.id
@@ -309,7 +309,7 @@ function MenuBar() {
 							_hover={{ bg: tokens.colors.bg.hoverSubtle }}
 							onClick={e => handleMenuClick(menu.id, e)}
 							onMouseEnter={e => handleMenuHover(menu.id, e)}
-							data-tauri-drag-region="false"
+							data-no-drag
 							userSelect="none"
 						>
 							<Text

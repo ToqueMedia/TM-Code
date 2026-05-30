@@ -73,7 +73,6 @@ function WinBarButton({
 		<button
 			type="button"
 			aria-label={ariaLabel}
-			data-tauri-drag-region="false"
 			data-no-drag
 			onMouseDown={swallowMouseDown}
 			onClick={onClick}
@@ -98,7 +97,7 @@ const WindowControls = ({ onClose, onMinimize, onMaximize }: WindowControlsProps
 		return (
 			<HStack
 				gap="8px"
-				data-tauri-drag-region="false"
+				data-no-drag
 				role="group"
 				css={{
 					'& .mac-dot-icon': { 
@@ -153,7 +152,7 @@ const WindowControls = ({ onClose, onMinimize, onMaximize }: WindowControlsProps
 
 	// Windows/Linux: icon-based real <button> elements
 	return (
-		<HStack gap={0} data-tauri-drag-region="false" data-no-drag>
+		<HStack gap={0} data-no-drag>
 			<WinBarButton
 				ariaLabel="Minimize"
 				onClick={onMinimize}

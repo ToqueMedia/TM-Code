@@ -30,6 +30,13 @@ export default function ContextMenuOverlay({ items, x, y, onClose }: ContextMenu
 	const menuRef = useRef<HTMLDivElement>(null)
 	const [highlightIdx, setHighlightIdx] = useState(-1)
 
+	function runItemAction(item: ContextMenuItem) {
+		if (item.action && !item.disabled && !item.separator) {
+			item.action()
+			onClose()
+		}
+	}
+
 	// Clamp to viewport after mount
 	useEffect(function clamp() {
 		const el = menuRef.current
@@ -84,12 +91,17 @@ export default function ContextMenuOverlay({ items, x, y, onClose }: ContextMenu
 			position="fixed"
 			inset={0}
 			zIndex={30000}
-			onMouseDown={onClose}
+			data-no-drag
+			onMouseDown={e => {
+				e.stopPropagation()
+				onClose()
+			}}
 		>
 			<Box
 				ref={menuRef}
 				role="menu"
 				aria-label="Context menu"
+				data-no-drag
 				position="fixed"
 				left={`${x}px`}
 				top={`${y}px`}
@@ -127,19 +139,23 @@ export default function ContextMenuOverlay({ items, x, y, onClose }: ContextMenu
 							opacity={item.disabled ? 0.4 : 1}
 							bg={isHighlighted ? tokens.colors.menu.hover : 'transparent'}
 							_hover={{ bg: item.disabled ? 'transparent' : tokens.colors.menu.hover }}
+							css={{ '& *': { pointerEvents: 'none' } }}
 							onMouseEnter={() => setHighlightIdx(idx)}
 							onMouseLeave={() => setHighlightIdx(-1)}
-							onClick={e => {
+							onMouseDown={e => {
+								e.preventDefault()
 								e.stopPropagation()
-								if (item.action && !item.disabled) {
-									item.action()
-									onClose()
-								}
+								runItemAction(item)
+							}}
+							onClick={e => {
+								e.preventDefault()
+								e.stopPropagation()
 							}}
 							onKeyDown={e => {
-								if (e.key === 'Enter' && item.action && !item.disabled) {
-									item.action()
-									onClose()
+								if (e.key === 'Enter') {
+									e.preventDefault()
+									e.stopPropagation()
+									runItemAction(item)
 								}
 							}}
 						>
