@@ -4,7 +4,7 @@
   "description": "Capability for the main window",
   "windows": ["main", "splash"],
   "remote": {
-    "urls": ["http://localhost:14300"]
+    "urls": ["http://localhost:14300", "http://localhost:1420"]
   },
   "permissions": [
     "core:default",
