@@ -89,6 +89,7 @@
   <body>
     <div class="stage">
       <div class="wordmark">TM Code</div>
+      <div id="version" style="font-size: 11px; color: rgba(254, 16, 99, 0.65); font-weight: 600; margin-top: -6px; margin-bottom: 2px; letter-spacing: 0.05em;"></div>
       <div class="tagline">Loading workspace</div>
       <div class="dots">
         <span class="dot"></span>
@@ -96,5 +97,18 @@
         <span class="dot"></span>
       </div>
     </div>
+    <script>
+      document.addEventListener('DOMContentLoaded', async () => {
+        try {
+          if (window.__TAURI__) {
+            const version = await window.__TAURI__.core.invoke('get_app_version');
+            const el = document.getElementById('version');
+            if (el) el.textContent = `v${version}`;
+          }
+        } catch (e) {
+          console.error('[splash] failed to fetch version:', e);
+        }
+      });
+    </script>
   </body>
 </html>

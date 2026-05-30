@@ -15,7 +15,7 @@ import {
   LuSettings,
   LuEraser,
 } from 'react-icons/lu'
-import { invoke } from '@/utils/invokeMetrics'
+import { getVersion } from '@tauri-apps/api/app'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -23,7 +23,7 @@ import { t } from '@/i18n'
 let versionPromise: Promise<string> | null = null
 function getAppVersion(): Promise<string> {
   if (!versionPromise) {
-    versionPromise = invoke<string>('get_app_version')
+    versionPromise = getVersion()
       .then(v => `v${v}`)
       .catch(() => '')
   }
