@@ -30,6 +30,7 @@ commands.allow = [
   "execute_command",
   "run_streaming_command",
   "start_dev_server",
+  "get_interactive_shell_info",
   "start_pty_shell",
   "write_to_pty",
   "resize_pty",

@@ -11,6 +11,8 @@
  * snapshot from construction time.
  */
 
+import type { FileStateCache } from './fileStateCache'
+
 /** Stores a read snapshot for concurrent-modification detection. */
 export interface ReadTimestamp {
   timestamp: number
@@ -33,6 +35,9 @@ export interface ToolRegistrationContext {
 
   // ── Read-before-write bookkeeping (shared Map) ─────────────────────
   readFileTimestamps: Map<string, ReadTimestamp>
+
+  // ── Content cache for dedup + state recovery ──────────────────────
+  readFileState: FileStateCache
 
   // ── Large result storage (shared Map) ──────────────────────────────
   largeResults: Map<string, string>

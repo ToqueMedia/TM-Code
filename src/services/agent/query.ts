@@ -1,0 +1,1044 @@
+/**
+ * Query loop — async generator agent loop ported from claude-vaz query.ts.
+ *
+ * Core pattern: while(true) { stream → collect tool_calls → execute tools → continue }
+ *
+ * Adapted for TM Code:
+ *   - No Bun feature flags — uses boolean constants
+ *   - Uses OpenAI SDK for streaming (all providers OpenAI-compatible)
+ *   - Internal ContentBlockAPI format converted at API boundary
+ *   - Integrates with TM Code's ToolExecutor and AgentCallbacks
+ */
+
+import type OpenAI from "openai";
+import type { ContentBlockAPI } from "../../types/chat";
+import {
+  microcompact,
+  applyToolResultBudget,
+  snipCompactIfNeeded,
+  autoCompact,
+  getCompactPrompt,
+  type AutoCompactTrackingState,
+  type CompactFn,
+} from "./compact";
+import {
+  applyCollapsesIfNeeded,
+  recoverFromOverflow,
+  withholdPromptTooLong,
+  resetContextCollapse,
+} from "./collapse";
+import {
+  checkForLoop,
+  createLoopDetectorState,
+  resetLoopDetector,
+} from "./loopDetector";
+
+// ── Constants ──
+
+const MAX_OUTPUT_TOKENS = 32_768;
+const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3;
+
+// ── Types ──
+
+/** Message shape used throughout the query loop. */
+export interface QueryMessage {
+  role: "user" | "assistant";
+  content: string | ContentBlockAPI[] | null;
+}
+
+/** Stream events yielded to the caller for UI rendering. */
+export type QueryStreamEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "thinking_delta"; thinking: string }
+  | { type: "tool_use_start"; id: string; name: string }
+  | { type: "tool_use_delta"; id: string; input: string }
+  | { type: "tool_use_stop"; id: string }
+  | { type: "message_start" }
+  | { type: "message_stop"; stopReason: string; usage?: OpenAI.CompletionUsage }
+  | {
+      type: "tool_result";
+      toolUseId: string;
+      content: string;
+      isError: boolean;
+    }
+  | { type: "compact_start"; beforeTokens: number }
+  | { type: "compact_end"; beforeTokens: number; afterTokens: number }
+  | {
+      type: "worker_status";
+      phase: "attempting" | "retrying" | "connected";
+      message: string;
+      provider?: string;
+      model?: string;
+      attempt?: number;
+      maxAttempts?: number;
+      httpStatus?: number;
+      retryInMs?: number;
+    }
+  | { type: "error"; message: string }
+  | { type: "interrupted" };
+
+/** Tool execution callback — the bridge to ToolExecutor. */
+export type ToolExecutorFn = (
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  toolUseId: string,
+  signal?: AbortSignal,
+) => Promise<{ content: string; isError: boolean }>;
+
+/** Parameters for the query loop. */
+export interface QueryParams {
+  /** Initial messages (conversation history). */
+  messages: QueryMessage[];
+  /** System prompt. */
+  systemPrompt: string;
+  /** OpenAI SDK client (pre-configured with baseURL + auth). */
+  client: OpenAI;
+  /** Model ID to use. */
+  model: string;
+  /** Tool definitions in OpenAI format. */
+  tools: OpenAI.ChatCompletionTool[];
+  /** Tool execution function. */
+  executeTool: ToolExecutorFn;
+  /** Abort signal for cancellation. */
+  signal: AbortSignal;
+  /** Maximum turns before stopping (default: Infinity). */
+  maxTurns?: number;
+  /** Maximum output tokens override. */
+  maxOutputTokensOverride?: number;
+  /** Thinking configuration. */
+  thinkingConfig?: Record<string, unknown>;
+  /** Callback for reporting token usage. */
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
+  /** Custom compact instructions. */
+  compactInstructions?: string;
+  /** Extra headers merged into every chat.completions.create request. */
+  extraHeaders?: Record<string, string>;
+}
+
+/** Terminal return value. */
+export interface QueryTerminal {
+  reason: "completed" | "aborted" | "error" | "max_turns" | "blocking_limit";
+  turnCount: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+}
+
+// ── Internal state ──
+
+interface LoopState {
+  messages: QueryMessage[];
+  autoCompactTracking: AutoCompactTrackingState | undefined;
+  maxOutputTokensRecoveryCount: number;
+  continuationCount: number;
+  turnCount: number;
+  collapseRecoveryAttempts: number;
+}
+
+// ── Helpers ──
+
+function generateId(): string {
+  return `toolu_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** Convert internal QueryMessage[] to OpenAI ChatCompletionMessageParam[]. */
+function toOpenAIMessages(
+  messages: QueryMessage[],
+  systemPrompt?: string,
+  model?: string,
+): OpenAI.ChatCompletionMessageParam[] {
+  const result: OpenAI.ChatCompletionMessageParam[] = [];
+  const needsGemini3FunctionCallSignature = /^gemini-3/i.test(model ?? "");
+  if (systemPrompt) {
+    result.push({ role: "system", content: systemPrompt });
+  }
+
+  for (const msg of messages) {
+    if (typeof msg.content === "string" || msg.content === null) {
+      const textContent = (msg.content ?? "") as string;
+      if (msg.role === "assistant") {
+        result.push({ role: "assistant", content: textContent });
+      } else {
+        result.push({ role: "user", content: textContent });
+      }
+    } else if (Array.isArray(msg.content)) {
+      if (msg.role === "assistant") {
+        const textParts = (msg.content as ContentBlockAPI[])
+          .filter((b) => b.type === "text")
+          .map((b) => (b as { type: "text"; text: string }).text)
+          .join("");
+
+        // MiniMax M2.7/M3: preserve thinking for reasoning continuity
+        const thinkingParts = (msg.content as ContentBlockAPI[])
+          .filter((b) => b.type === "thinking")
+          .map((b) => (b as { type: "thinking"; thinking: string }).thinking)
+          .join("");
+
+        const toolCallBlocks = (msg.content as ContentBlockAPI[]).filter(
+          (b) => b.type === "tool_call",
+        );
+
+        const toolCalls: OpenAI.ChatCompletionMessageToolCall[] =
+          toolCallBlocks.map((b, index) => {
+            const tc = b as {
+              type: "tool_call";
+              id: string;
+              name: string;
+              arguments: string;
+              thoughtSignature?: string;
+            };
+            const toolCall: any = {
+              id: tc.id,
+              type: "function" as const,
+              function: {
+                name: tc.name,
+                arguments: tc.arguments,
+              },
+            };
+            // Gemini OpenAI compatibility expects thought signatures under
+            // tool_calls[].extra_content.google.thought_signature. Per the
+            // Gemini 3 docs, only the first parallel function call carries a
+            // signature, but that first call in each current-turn step is
+            // mandatory. For history transferred from non-Gemini providers,
+            // Google documents skip_thought_signature_validator as the dummy
+            // fallback. Do not add it to subsequent parallel calls.
+            const thoughtSignature =
+              tc.thoughtSignature ||
+              (needsGemini3FunctionCallSignature && index === 0
+                ? "skip_thought_signature_validator"
+                : undefined);
+            if (thoughtSignature) {
+              toolCall.extra_content = {
+                google: {
+                  thought_signature: thoughtSignature,
+                },
+              };
+            }
+            return toolCall as OpenAI.ChatCompletionMessageToolCall;
+          });
+
+        const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
+          role: "assistant",
+          content: textParts || null,
+        };
+        if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
+
+        // MiniMax: preserve thinking in content with <think> tags OR as reasoning_details
+        // For models that support reasoning_content/reasoning_details, we add it as a separate field
+        if (thinkingParts) {
+          (assistantMsg as any).reasoning_content = thinkingParts;
+        }
+
+        result.push(assistantMsg);
+      } else {
+        // user message: split into text + tool result messages
+        const textParts: string[] = [];
+        for (const block of msg.content as ContentBlockAPI[]) {
+          if (block.type === "text") {
+            textParts.push(block.text);
+          } else if (block.type === "tool_result") {
+            // Flush text first
+            if (textParts.length > 0) {
+              result.push({ role: "user", content: textParts.join("\n") });
+              textParts.length = 0;
+            }
+            result.push({
+              role: "tool",
+              tool_call_id: (
+                block as { type: "tool_result"; toolCallId: string }
+              ).toolCallId,
+              content: (block as { type: "tool_result"; content: string })
+                .content,
+            });
+          }
+        }
+        if (textParts.length > 0) {
+          result.push({ role: "user", content: textParts.join("\n") });
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+/** Filter out incomplete tool_call blocks (no matching tool_result). */
+function filterIncompleteToolCalls(messages: QueryMessage[]): QueryMessage[] {
+  const toolCallIds = new Set<string>();
+  const toolResultIds = new Set<string>();
+
+  for (const msg of messages) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type === "tool_call") toolCallIds.add(block.id);
+      if (block.type === "tool_result") toolResultIds.add(block.toolCallId);
+    }
+  }
+
+  const orphanedIds = new Set(
+    [...toolCallIds].filter((id) => !toolResultIds.has(id)),
+  );
+
+  if (orphanedIds.size === 0) return messages;
+
+  return messages.map((msg) => {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) return msg;
+    const filtered = (msg.content as ContentBlockAPI[]).filter(
+      (block) => !(block.type === "tool_call" && orphanedIds.has(block.id)),
+    );
+    if (filtered.length === (msg.content as ContentBlockAPI[]).length)
+      return msg;
+    return { ...msg, content: filtered.length > 0 ? filtered : "" };
+  });
+}
+
+// ── Main query loop ──
+
+/**
+ * The core query loop — an async generator that streams model responses,
+ * executes tools, applies context management, and continues until the
+ * model stops requesting tools or a terminal condition is met.
+ *
+ * Yields QueryStreamEvents for the UI layer to consume.
+ */
+export async function* query(
+  params: QueryParams,
+): AsyncGenerator<QueryStreamEvent, QueryTerminal> {
+  const {
+    systemPrompt,
+    client,
+    model,
+    tools,
+    executeTool,
+    signal,
+    maxTurns = Infinity,
+    maxOutputTokensOverride,
+    thinkingConfig,
+    onUsage,
+    compactInstructions,
+    extraHeaders,
+  } = params;
+
+  let state: LoopState = {
+    messages: [...params.messages],
+    autoCompactTracking: undefined,
+    maxOutputTokensRecoveryCount: 0,
+    continuationCount: 0,
+    turnCount: 0,
+    collapseRecoveryAttempts: 0,
+  };
+
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  const loopDetectorState = createLoopDetectorState();
+  let thinkingOnlyRecoveryCount = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const {
+      messages,
+      autoCompactTracking,
+      maxOutputTokensRecoveryCount,
+      turnCount,
+    } = state;
+
+    // ── Check termination ──
+
+    if (signal.aborted) {
+      yield { type: "interrupted" };
+      return {
+        reason: "aborted",
+        turnCount,
+        totalInputTokens,
+        totalOutputTokens,
+      };
+    }
+
+    if (turnCount >= maxTurns) {
+      return {
+        reason: "max_turns",
+        turnCount,
+        totalInputTokens,
+        totalOutputTokens,
+      };
+    }
+
+    state.turnCount++;
+
+    // ── Context management pipeline ──
+    // Order: toolResultBudget → snip → microcompact → collapse → autoCompact
+
+    let messagesForQuery = [...messages];
+
+    // 1. Tool result budget
+    messagesForQuery = applyToolResultBudget(messagesForQuery);
+
+    // 2. Snip compact
+    const snipResult = snipCompactIfNeeded(messagesForQuery);
+    if (snipResult.messagesRemoved > 0) {
+      messagesForQuery = snipResult.messages;
+    }
+    const snipTokensFreed = snipResult.tokensFreed;
+
+    // 3. Microcompact
+    const microResult = microcompact(messagesForQuery);
+    if (microResult.clearedCount > 0) {
+      messagesForQuery = microResult.messages;
+    }
+
+    // 4. Context collapse (stub for now)
+    const collapseResult = applyCollapsesIfNeeded(messagesForQuery);
+    messagesForQuery = collapseResult.messages;
+
+    // 5. Auto-compact
+    let tracking = autoCompactTracking;
+    const compactFn: CompactFn = async (
+      msgs: { role: string; content: any }[],
+      _sysPrompt: string,
+    ) => {
+      // Side-call: use the same client to summarize
+      const prompt = getCompactPrompt(compactInstructions);
+      const compactMessages: OpenAI.ChatCompletionMessageParam[] = [
+        { role: "system", content: prompt },
+        ...msgs.map(
+          (m: any): OpenAI.ChatCompletionMessageParam => ({
+            role: m.role as "user" | "assistant",
+            content:
+              typeof m.content === "string"
+                ? m.content
+                : (m.content as ContentBlockAPI[])
+                    .filter((b) => b.type === "text")
+                    .map((b) => (b as { type: "text"; text: string }).text)
+                    .join("\n"),
+          }),
+        ),
+      ];
+      try {
+        const response = await client.chat.completions.create(
+          {
+            model,
+            max_tokens: 16384,
+            messages: compactMessages,
+          },
+          { signal, headers: extraHeaders },
+        );
+        return response.choices[0]?.message?.content || null;
+      } catch {
+        return null;
+      }
+    };
+
+    const autoResult = await autoCompact(
+      messagesForQuery,
+      systemPrompt,
+      compactFn,
+      tracking,
+      snipTokensFreed,
+    );
+
+    if (autoResult.wasCompacted && autoResult.postCompactMessages) {
+      yield {
+        type: "compact_start",
+        beforeTokens: autoResult.preCompactTokenCount ?? 0,
+      };
+      messagesForQuery = autoResult.postCompactMessages;
+      resetContextCollapse();
+      tracking = {
+        compacted: true,
+        turnId: generateId(),
+        turnCounter: 0,
+        consecutiveFailures: 0,
+      };
+      yield {
+        type: "compact_end",
+        beforeTokens: autoResult.preCompactTokenCount ?? 0,
+        afterTokens: autoResult.postCompactTokenCount ?? 0,
+      };
+    } else if (autoResult.consecutiveFailures !== undefined) {
+      tracking = {
+        ...(tracking ?? { compacted: false, turnId: "", turnCounter: 0 }),
+        consecutiveFailures: autoResult.consecutiveFailures,
+      };
+    }
+
+    // Filter incomplete tool calls (orphaned tool_use without tool_result)
+    messagesForQuery = filterIncompleteToolCalls(messagesForQuery);
+
+    // Ensure message alternation: Anthropic requires user/assistant/user/...
+    // NOTE: This synthetic assistant message was removed — it caused the model
+    // to see 'Understood. What would you like me to do next?' as its own prior
+    // response and loop on it instead of actually executing tools. OpenAI-
+    // compatible APIs (used by TM Code) do NOT require strict alternation;
+    // the toOpenAIMessages() converter already handles tool_results correctly.
+    // If a future provider requires alternation, fix it at the API boundary
+    // (toOpenAIMessages) instead of injecting fake messages into state.
+
+    // ── Build API request (convert internal format → OpenAI) ──
+
+    const maxTokens = maxOutputTokensOverride ?? MAX_OUTPUT_TOKENS;
+    const apiMessages = toOpenAIMessages(messagesForQuery, systemPrompt, model);
+
+    // ── Stream from model ──
+
+    yield { type: "message_start" };
+
+    const assistantTextParts: string[] = [];
+    const assistantThinkingParts: string[] = [];
+    const collectedToolCalls: Array<{
+      id: string;
+      name: string;
+      argsJson: string;
+      thoughtSignature?: string;
+    }> = [];
+    const pendingToolCalls: Map<
+      number,
+      {
+        id: string;
+        name: string;
+        argsParts: string[];
+        thoughtSignature?: string;
+      }
+    > = new Map();
+    let stopReason = "";
+    let turnUsage: OpenAI.CompletionUsage | undefined;
+
+    // MiniMax: buffer for content that may contain <think> tags
+    // Gemini: buffer for content that may contain <thought> tags
+    // Tags can span multiple chunks, so we buffer and only yield text
+    // when we know the content is safe (no partial tags)
+    const contentBuffer: string[] = [];
+    let thinkMode = false; // true when inside <think>...</think> or <thought>...</thought>
+
+    try {
+      const streamParams: Record<string, unknown> = {
+        model,
+        max_tokens: maxTokens,
+        messages: apiMessages,
+        stream: true,
+      };
+
+      if (tools.length > 0) {
+        streamParams.tools = tools;
+      }
+
+      if (thinkingConfig) {
+        Object.assign(streamParams, thinkingConfig);
+      }
+
+      const stream = await client.chat.completions.create(
+        {
+          ...streamParams,
+          stream: true,
+        } as any,
+        { signal, headers: extraHeaders },
+      );
+
+      // Process OpenAI stream chunks
+      for await (const chunk of stream as any) {
+        if (signal.aborted) {
+          yield { type: "interrupted" };
+          return {
+            reason: "aborted",
+            turnCount: state.turnCount,
+            totalInputTokens,
+            totalOutputTokens,
+          };
+        }
+
+        if (chunk?.type === "worker_status") {
+          yield {
+            type: "worker_status",
+            phase:
+              chunk.phase === "attempting" || chunk.phase === "connected"
+                ? chunk.phase
+                : "retrying",
+            message:
+              typeof chunk.message === "string"
+                ? chunk.message
+                : "Worker status update",
+            provider:
+              typeof chunk.provider === "string" ? chunk.provider : undefined,
+            model: typeof chunk.model === "string" ? chunk.model : undefined,
+            attempt:
+              typeof chunk.attempt === "number" ? chunk.attempt : undefined,
+            maxAttempts:
+              typeof chunk.maxAttempts === "number"
+                ? chunk.maxAttempts
+                : undefined,
+            httpStatus:
+              typeof chunk.httpStatus === "number"
+                ? chunk.httpStatus
+                : undefined,
+            retryInMs:
+              typeof chunk.retryInMs === "number" ? chunk.retryInMs : undefined,
+          };
+          continue;
+        }
+
+        // Defensive: skip chunks that are null/undefined or lack choices array
+        if (
+          !chunk ||
+          typeof chunk !== "object" ||
+          !Array.isArray(chunk.choices)
+        ) {
+          continue;
+        }
+
+        const choice = chunk.choices[0];
+        if (!choice) continue;
+
+        const delta = choice.delta;
+
+        // Debug: log first chunks to see reasoning_content vs content structure
+        if (!delta) continue;
+
+        // Reasoning/thinking content (OpenAI-compatible format)
+        // MiniMax M3: reasoning_details field when reasoning_split=True
+        // Other models: reasoning_content field
+        if (delta?.reasoning_content) {
+          const reasoning = delta.reasoning_content;
+          assistantThinkingParts.push(reasoning);
+          yield { type: "thinking_delta", thinking: reasoning };
+        }
+
+        // MiniMax M3: reasoning_details array (when reasoning_split=True)
+        if (
+          delta?.reasoning_details &&
+          Array.isArray(delta.reasoning_details)
+        ) {
+          for (const detail of delta.reasoning_details) {
+            if (detail?.text) {
+              assistantThinkingParts.push(detail.text);
+              yield { type: "thinking_delta", thinking: detail.text };
+            }
+          }
+        }
+
+        // Text content — MiniMax may embed <think> tags in content
+        // We use a state machine to handle tags spanning multiple chunks
+        if (delta?.content) {
+          const raw = delta.content;
+          contentBuffer.push(raw);
+
+          // Process buffered content character-by-character to handle partial tags
+          let buffered = contentBuffer.join("");
+          contentBuffer.length = 0;
+
+          while (buffered.length > 0) {
+            if (!thinkMode) {
+              // Look for opening <think> or <thought> tag
+              const thinkOpenIdx = buffered.indexOf("<think>");
+              const thoughtOpenIdx = buffered.indexOf("<thought>");
+
+              // Find the earliest opening tag
+              let openIdx = -1;
+              let openTagLen = 0;
+
+              if (
+                thinkOpenIdx !== -1 &&
+                (thoughtOpenIdx === -1 || thinkOpenIdx < thoughtOpenIdx)
+              ) {
+                openIdx = thinkOpenIdx;
+                openTagLen = 7;
+              } else if (thoughtOpenIdx !== -1) {
+                openIdx = thoughtOpenIdx;
+                openTagLen = 9;
+              }
+
+              if (openIdx === -1) {
+                // No opening tag found — all text is safe
+                assistantTextParts.push(buffered);
+                yield { type: "text_delta", text: buffered };
+                buffered = "";
+              } else if (openIdx > 0) {
+                // Text before the tag — safe to yield
+                const before = buffered.slice(0, openIdx);
+                assistantTextParts.push(before);
+                yield { type: "text_delta", text: before };
+                buffered = buffered.slice(openIdx);
+              } else {
+                // Starts with opening tag — enter think mode
+                thinkMode = true;
+                buffered = buffered.slice(openTagLen); // skip opening tag
+              }
+            } else {
+              // Inside thinking — look for closing </think> or </thought>
+              const thinkCloseIdx = buffered.indexOf("</think>");
+              const thoughtCloseIdx = buffered.indexOf("</thought>");
+
+              // Find the earliest closing tag
+              let closeIdx = -1;
+              let closeTagLen = 0;
+
+              if (
+                thinkCloseIdx !== -1 &&
+                (thoughtCloseIdx === -1 || thinkCloseIdx < thoughtCloseIdx)
+              ) {
+                closeIdx = thinkCloseIdx;
+                closeTagLen = 8; // '</think>'.length
+              } else if (thoughtCloseIdx !== -1) {
+                closeIdx = thoughtCloseIdx;
+                closeTagLen = 10; // '</thought>'.length
+              }
+
+              if (closeIdx === -1) {
+                // Still inside thinking — accumulate
+                assistantThinkingParts.push(buffered);
+                yield { type: "thinking_delta", thinking: buffered };
+                buffered = "";
+              } else {
+                // Found closing tag — extract thinking content
+                const thinking = buffered.slice(0, closeIdx);
+                if (thinking) {
+                  assistantThinkingParts.push(thinking);
+                  yield { type: "thinking_delta", thinking };
+                }
+                thinkMode = false;
+                buffered = buffered.slice(closeIdx + closeTagLen);
+              }
+            }
+          }
+        }
+
+        // Tool calls (streaming)
+        if (delta?.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            let pending = pendingToolCalls.get(tc.index);
+            if (!pending) {
+              pending = {
+                id: tc.id || "",
+                name: tc.function?.name || "",
+                argsParts: [],
+              };
+              pendingToolCalls.set(tc.index, pending);
+              // Only emit tool_use_start if we haven't already emitted for this ID
+              if (tc.id) {
+                const alreadyCollected = collectedToolCalls.some(
+                  (c) => c.id === tc.id,
+                );
+                if (!alreadyCollected) {
+                  yield {
+                    type: "tool_use_start",
+                    id: tc.id,
+                    name: tc.function?.name || "",
+                  };
+                }
+              }
+            }
+            if (tc.id && !pending.id) pending.id = tc.id;
+            if (tc.function?.name && !pending.name)
+              pending.name = tc.function.name;
+            if (tc.function?.arguments) {
+              pending.argsParts.push(tc.function.arguments);
+              yield {
+                type: "tool_use_delta",
+                id: pending.id,
+                input: tc.function.arguments,
+              };
+            }
+
+            // Gemini 3: Capture thought_signature from extra_content.google
+            // The thought_signature must be passed back in subsequent turns
+            // for function calling to work correctly with Gemini 3 models.
+            const tcAny = tc as any;
+            const sig =
+              tcAny?.extra_content?.google?.thought_signature ??
+              tcAny?.extra_content?.google?.thoughtSignature;
+            if (sig && !pending.thoughtSignature) {
+              pending.thoughtSignature = sig;
+            }
+          }
+        }
+
+        // Finish reason — may appear in multiple chunks (e.g. MiniMax)
+        if (choice.finish_reason) {
+          stopReason = choice.finish_reason;
+          // Emit tool_use_stop for all completed tool calls (guard against duplicates)
+          const seenToolIds = new Set(collectedToolCalls.map((tc) => tc.id));
+          for (const [, pending] of pendingToolCalls) {
+            if (pending.id && !seenToolIds.has(pending.id)) {
+              collectedToolCalls.push({
+                id: pending.id,
+                name: pending.name,
+                argsJson: pending.argsParts.join(""),
+                thoughtSignature: pending.thoughtSignature,
+              });
+              seenToolIds.add(pending.id);
+              yield { type: "tool_use_stop", id: pending.id };
+            }
+          }
+        }
+
+        // Usage
+        if (chunk.usage) {
+          turnUsage = chunk.usage;
+        }
+      }
+
+      // Some OpenAI-compatible providers close the stream after tool-call
+      // deltas without sending a final finish_reason chunk. MiniMax has been
+      // observed doing this, leaving the UI with a pending "Creating..." tool
+      // and the loop with collectedToolCalls empty. Flush any remaining
+      // pending calls here so they still execute.
+      const seenToolIds = new Set(collectedToolCalls.map((tc) => tc.id));
+      for (const [, pending] of pendingToolCalls) {
+        if (pending.id && !seenToolIds.has(pending.id)) {
+          collectedToolCalls.push({
+            id: pending.id,
+            name: pending.name,
+            argsJson: pending.argsParts.join(""),
+            thoughtSignature: pending.thoughtSignature,
+          });
+          seenToolIds.add(pending.id);
+          yield { type: "tool_use_stop", id: pending.id };
+        }
+      }
+
+      // Get final message for usage/stop reason (not needed with standard stream)
+      // Usage and finish_reason are already captured from chunks above
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+
+      // ── Collapse recovery on prompt_too_long ──
+      const MAX_COLLAPSE_RECOVERY = 3;
+      const isPromptTooLong =
+        /prompt_too_long|prompt is too long|context_length_exceeded/i.test(
+          errMsg,
+        );
+
+      if (
+        isPromptTooLong &&
+        state.collapseRecoveryAttempts < MAX_COLLAPSE_RECOVERY
+      ) {
+        withholdPromptTooLong();
+        const recovery = recoverFromOverflow(messagesForQuery);
+        if (recovery.committed > 0) {
+          state = {
+            ...state,
+            messages: recovery.messages as QueryMessage[],
+            collapseRecoveryAttempts: state.collapseRecoveryAttempts + 1,
+          };
+          continue;
+        }
+      }
+
+      yield { type: "error", message: errMsg };
+
+      // If we have tool calls from a partial stream, yield error results
+      for (const tc of collectedToolCalls) {
+        yield {
+          type: "tool_result",
+          toolUseId: tc.id,
+          content: `Error: ${errMsg}`,
+          isError: true,
+        };
+      }
+
+      return {
+        reason: "error",
+        turnCount: state.turnCount,
+        totalInputTokens,
+        totalOutputTokens,
+      };
+    }
+
+    // ── Record usage ──
+
+    if (turnUsage) {
+      totalInputTokens += turnUsage.prompt_tokens;
+      totalOutputTokens += turnUsage.completion_tokens;
+      onUsage?.(turnUsage.prompt_tokens, turnUsage.completion_tokens);
+    }
+
+    yield { type: "message_stop", stopReason, usage: turnUsage };
+
+    // ── Build assistant message and add to history ──
+
+    const assistantBlocks: ContentBlockAPI[] = [];
+    if (assistantThinkingParts.length > 0) {
+      assistantBlocks.push({
+        type: "thinking",
+        thinking: assistantThinkingParts.join(""),
+      });
+    }
+    if (assistantTextParts.length > 0) {
+      assistantBlocks.push({ type: "text", text: assistantTextParts.join("") });
+    }
+    for (const tc of collectedToolCalls) {
+      assistantBlocks.push({
+        type: "tool_call",
+        id: tc.id,
+        name: tc.name,
+        arguments: tc.argsJson,
+        ...(tc.thoughtSignature
+          ? { thoughtSignature: tc.thoughtSignature }
+          : {}),
+      });
+    }
+
+    const assistantMessage: QueryMessage = {
+      role: "assistant",
+      content:
+        assistantBlocks.length > 0
+          ? assistantBlocks
+          : assistantTextParts.join("") || "",
+    };
+
+    const updatedMessages = [...messagesForQuery, assistantMessage];
+
+    // ── Check if we need to continue (tool_use) ──
+
+    if (collectedToolCalls.length === 0) {
+      const assistantText = assistantTextParts.join("").trim();
+      const assistantThinking = assistantThinkingParts.join("").trim();
+
+      // Guardrail: a turn that emits only reasoning and no visible text/tool call
+      // is not useful to the developer. Give the model one chance to recover,
+      // then stop instead of burning credits in a thinking loop.
+      if (!assistantText && assistantThinking.length > 0) {
+        if (thinkingOnlyRecoveryCount < 1) {
+          state = {
+            ...state,
+            messages: [
+              ...updatedMessages,
+              {
+                role: "user",
+                content:
+                  "Your previous turn produced only thinking/reasoning with no visible answer and no tool call. Stop reasoning privately and either call the correct tool now or provide the concise final answer. Do not repeat the same thinking.",
+              },
+            ],
+            continuationCount: 0,
+          };
+          thinkingOnlyRecoveryCount++;
+          continue;
+        }
+        yield {
+          type: "error",
+          message:
+            "Stopped: the model produced only thinking with no visible answer or tool call.",
+        };
+        return {
+          reason: "error",
+          turnCount: state.turnCount,
+          totalInputTokens,
+          totalOutputTokens,
+        };
+      }
+
+      const loopCheck = checkForLoop(assistantText, loopDetectorState);
+      if (loopCheck.isLoop) {
+        yield {
+          type: "error",
+          message: `Stopped: repeated similar assistant output detected (${Math.round(loopCheck.similarity * 100)}% similarity across ${loopCheck.count} turns).`,
+        };
+        return {
+          reason: "error",
+          turnCount: state.turnCount,
+          totalInputTokens,
+          totalOutputTokens,
+        };
+      }
+
+      // No tool calls — check for max_tokens continuation
+      if (
+        stopReason === "max_tokens" &&
+        maxOutputTokensRecoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+      ) {
+        state = {
+          ...state,
+          messages: [
+            ...updatedMessages,
+            {
+              role: "user",
+              content:
+                "Output token limit hit. Resume directly — no apology, no recap. Break remaining work into smaller pieces.",
+            },
+          ],
+          maxOutputTokensRecoveryCount: maxOutputTokensRecoveryCount + 1,
+          continuationCount: 0,
+        };
+        continue;
+      }
+
+      // Model is done — return terminal
+      state.messages = updatedMessages;
+      return {
+        reason: "completed",
+        turnCount: state.turnCount,
+        totalInputTokens,
+        totalOutputTokens,
+      };
+    }
+
+    // Tool calls mean the model is making observable progress; reset loop guards.
+    resetLoopDetector(loopDetectorState);
+    thinkingOnlyRecoveryCount = 0;
+
+    // ── Execute tools ──
+
+    const toolResultBlocks: ContentBlockAPI[] = [];
+
+    for (const tc of collectedToolCalls) {
+      if (signal.aborted) {
+        yield { type: "interrupted" };
+        return {
+          reason: "aborted",
+          turnCount: state.turnCount,
+          totalInputTokens,
+          totalOutputTokens,
+        };
+      }
+
+      let toolInput: Record<string, unknown> = {};
+      try {
+        toolInput = tc.argsJson ? JSON.parse(tc.argsJson) : {};
+      } catch {
+        toolInput = {};
+      }
+
+      try {
+        const result = await executeTool(tc.name, toolInput, tc.id, signal);
+        yield {
+          type: "tool_result",
+          toolUseId: tc.id,
+          content: result.content,
+          isError: result.isError,
+        };
+        toolResultBlocks.push({
+          type: "tool_result",
+          toolCallId: tc.id,
+          content: result.content,
+        });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        yield {
+          type: "tool_result",
+          toolUseId: tc.id,
+          content: `Tool execution error: ${errMsg}`,
+          isError: true,
+        };
+        toolResultBlocks.push({
+          type: "tool_result",
+          toolCallId: tc.id,
+          content: `Tool execution error: ${errMsg}`,
+        });
+      }
+    }
+
+    // Add tool results as a user message
+    const toolResultMessage: QueryMessage = {
+      role: "user",
+      content: toolResultBlocks,
+    };
+
+    // ── Update state for next iteration ──
+
+    state = {
+      messages: [...updatedMessages, toolResultMessage],
+      autoCompactTracking: tracking,
+      maxOutputTokensRecoveryCount: 0,
+      continuationCount: 0,
+      turnCount: state.turnCount,
+      collapseRecoveryAttempts: state.collapseRecoveryAttempts,
+    };
+  } // while (true)
+}

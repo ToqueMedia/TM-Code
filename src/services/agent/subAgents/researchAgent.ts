@@ -11,8 +11,8 @@ export const RESEARCH_AGENT: SubAgentDefinition = {
   agentType: 'Research',
   whenToUse: 'Find API docs, external documentation, or technical information online',
   tools: ['web_search', 'web_fetch', 'read_skill', 'read_file'],
-  maxTurns: 30,
-  maxWallClockMs: 5 * 60 * 1000,
+  maxTurns: 15,
+  maxWallClockMs: 3 * 60 * 1000,
   color: '#a371f7',
   omitProjectContext: true,
 

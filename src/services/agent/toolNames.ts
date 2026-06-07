@@ -35,6 +35,12 @@ export const RENAME_FILE = 'rename_file'
 
 // Execution / dev server
 export const EXECUTE_COMMAND = 'execute_command'
+export const EXECUTE_COMMAND_BACKGROUND = 'execute_command_background'
+export const CHECK_BACKGROUND_COMMANDS = 'check_background_commands'
+export const AGENT_SHELL_START = 'agent_shell_start'
+export const AGENT_SHELL_WRITE = 'agent_shell_write'
+export const AGENT_SHELL_READ = 'agent_shell_read'
+export const AGENT_SHELL_STOP = 'agent_shell_stop'
 export const START_DEV_SERVER = 'start_dev_server'
 
 // Web / research
@@ -76,7 +82,9 @@ export const TOOL_NAMES = [
   READ_FILE, LIST_DIRECTORY, SEARCH_FILES, GLOB,
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
-  EXECUTE_COMMAND, START_DEV_SERVER,
+  EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS,
+  AGENT_SHELL_START, AGENT_SHELL_WRITE, AGENT_SHELL_READ, AGENT_SHELL_STOP,
+  START_DEV_SERVER,
   WEB_SEARCH, WEB_FETCH,
   DELEGATE, COLLECT_RESULTS,
   UPDATE_TASKS,

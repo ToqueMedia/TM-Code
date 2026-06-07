@@ -91,10 +91,14 @@ function ContextWindowIndicator() {
   const compactThreshold = getAutoCompactThreshold(rawContextWindow)
   const warnThreshold = getWarningThreshold(rawContextWindow)
 
-  // Pressure is input-only (response tokens don't occupy the window
-  // mid-turn; once the response lands it rolls into the next turn's
-  // input). Same shape as claude-vaz's calculateContextPercentages.
-  const pressureTokens = inputTokens
+  // True context occupancy: input tokens (which include all past history
+  // — previous user messages, previous assistant outputs, tool results)
+  // PLUS the current turn's output tokens (which aren't yet in
+  // prompt_tokens because they only roll into the next turn's prompt).
+  // Using input-only understated pressure mid-turn — a 80K input +
+  // 15K output looked like 33% on a 256K window, but the real occupancy
+  // was 95K ≈ 39%, and the next turn starts at 95K+.
+  const pressureTokens = inputTokens + outputTokens
   const rawPct = effectiveWindow > 0 ? (pressureTokens / effectiveWindow) * 100 : 0
   const pct = Math.min(100, rawPct)
   const overrun = rawPct > 100

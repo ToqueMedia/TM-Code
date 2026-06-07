@@ -254,6 +254,23 @@ describe('ContextBuilder', () => {
       expect(prompt).toMatch(/request_credentials/)
     })
 
+    it('includes terminal-style loop guidance in Chat mode', async () => {
+      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      expect(prompt).toContain('# Terminal-style agent loop')
+      expect(prompt).toContain('Operate like an interactive terminal operator')
+      expect(prompt).toContain('execute_command_background')
+      expect(prompt).toContain('check_background_commands')
+    })
+
+    it('includes terminal-style loop guidance in Terminal mode', async () => {
+      const prompt = await builder.buildCmdModeSystemPrompt('/test/project', '/test/home')
+      expect(prompt).toContain('**Mode: TERMINAL**')
+      expect(prompt).toContain('# Terminal-style agent loop')
+      expect(prompt).toContain('Operate like an interactive terminal operator')
+      expect(prompt).toContain('execute_command_background')
+      expect(prompt).toContain('check_background_commands')
+    })
+
     it('includes package.json summary when available', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(prompt).toContain('react')

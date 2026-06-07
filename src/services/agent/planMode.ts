@@ -27,40 +27,48 @@ export const PLAN_MODE_ALLOWED_TOOLS: ReadonlySet<string> = new Set<string>([
   UPDATE_TASKS, COLLECT_RESULTS,
   // Delegation + research while drafting the plan
   WEB_SEARCH, WEB_FETCH, DELEGATE,
-  // Writing the deliverable. Path-restricted to PLAN.md / TODO.md below.
+  // Writing the deliverable. Path-restricted to the active plan artefact / TODO.md below.
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   // Structured clarifying questions — blocks the agent loop until the developer answers
   ASK_USER_QUESTION,
-])
-
-// Files the architect is allowed to mutate, identified by basename. The
-// full-path check below ensures these only match at the project root —
-// `node_modules/PLAN.md` or any nested PLAN.md is still rejected.
-const PLAN_MODE_WRITABLE_BASENAMES: ReadonlySet<string> = new Set<string>([
-  'PLAN.md', 'TODO.md',
 ])
 
 const WRITE_TOOLS: ReadonlySet<string> = new Set<string>([
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
 ])
 
+function normalisePlanFileName(planFileName: string): string {
+  const basename = (planFileName || 'PLAN.md').replace(/\\/g, '/').split('/').pop() || 'PLAN.md'
+  return basename.endsWith('.md') ? basename : 'PLAN.md'
+}
+
 /**
  * True iff `filePath` resolves to a plan artefact at the project root —
- * i.e. exactly `<projectRoot>/PLAN.md` or `<projectRoot>/TODO.md`. Accepts
- * either a project-relative path ("PLAN.md") or an absolute one. Anything
- * nested below the root (`subdir/PLAN.md`, `src/TODO.md`) is rejected.
+ * i.e. exactly `<projectRoot>/<planFileName>` or `<projectRoot>/TODO.md`.
+ * Accepts either a project-relative path ("PLAN.md") or an absolute one.
+ * Anything nested below the root (`subdir/PLAN.md`, `src/TODO.md`) is rejected.
  */
-export function isPlanArtefactAtRoot(filePath: string, projectRoot: string): boolean {
+export function isPlanArtefactAtRoot(
+  filePath: string,
+  projectRoot: string,
+  planFileName: string = 'PLAN.md',
+): boolean {
   if (!filePath) return false
-  const normalised = filePath.replace(/\\/g, '/').replace(/\/+$/, '')
+  const allowedBasenames: ReadonlySet<string> = new Set<string>([
+    normalisePlanFileName(planFileName),
+    'TODO.md',
+  ])
+  // Clean relative path prefix ./ or .\
+  const cleanPath = filePath.replace(/^(\.\/|\.\\)+/, '')
+  const normalised = cleanPath.replace(/\\/g, '/').replace(/\/+$/, '')
   const root = (projectRoot || '').replace(/\\/g, '/').replace(/\/+$/, '')
   // Project-relative form: bare filename, no slash.
   if (!normalised.includes('/')) {
-    return PLAN_MODE_WRITABLE_BASENAMES.has(normalised)
+    return allowedBasenames.has(normalised)
   }
   // Absolute form: must equal projectRoot/PLAN.md or projectRoot/TODO.md.
   if (!root) return false
-  for (const basename of PLAN_MODE_WRITABLE_BASENAMES) {
+  for (const basename of allowedBasenames) {
     if (normalised === `${root}/${basename}`) return true
   }
   return false
@@ -76,16 +84,18 @@ export function checkPlanModeAccess(
   toolName: string,
   filePath: string,
   projectRoot: string,
+  planFileName: string = 'PLAN.md',
 ): string | null {
+  const planLabel = normalisePlanFileName(planFileName)
   if (!PLAN_MODE_ALLOWED_TOOLS.has(toolName)) {
     const allowedList = [
       READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES, READ_SKILL,
       UPDATE_TASKS, WEB_SEARCH, WEB_FETCH, ASK_USER_QUESTION,
     ].join(', ')
-    return `Blocked in /plan architect mode: ${toolName} is an implementation tool. Document what this step would do in PLAN.md's Implementation Phases section — the coding agent will run it after the user approves the plan. Allowed in this mode: ${allowedList}, ${WRITE_FILE}/${CREATE_FILE}/${EDIT_FILE} (PLAN.md or TODO.md only).`
+    return `Blocked in /plan architect mode: ${toolName} is an implementation tool. Document what this step would do in ${planLabel}'s Implementation Phases section — the coding agent will run it after the user approves the plan. Allowed in this mode: ${allowedList}, ${WRITE_FILE}/${CREATE_FILE}/${EDIT_FILE} (${planLabel} or TODO.md only).`
   }
-  if (WRITE_TOOLS.has(toolName) && !isPlanArtefactAtRoot(filePath, projectRoot)) {
-    return `Blocked in /plan architect mode: ${toolName} can only write PLAN.md or TODO.md at the project root. Tried to write "${filePath}". Source files belong to the implementation phase that follows user approval — describe them in PLAN.md's File Structure table instead.`
+  if (WRITE_TOOLS.has(toolName) && !isPlanArtefactAtRoot(filePath, projectRoot, planLabel)) {
+    return `Blocked in /plan architect mode: ${toolName} can only write ${planLabel} or TODO.md at the project root. Tried to write "${filePath}". Source files belong to the implementation phase that follows user approval — describe them in ${planLabel}'s File Structure table instead.`
   }
   return null
 }

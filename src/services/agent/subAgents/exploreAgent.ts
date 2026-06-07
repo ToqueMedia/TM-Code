@@ -11,8 +11,8 @@ export const EXPLORE_AGENT: SubAgentDefinition = {
   agentType: 'Explore',
   whenToUse: 'Find usages, definitions, file patterns, or code structure in the project',
   tools: ['read_file', 'list_directory', 'search_files', 'glob', 'read_large_result'],
-  maxTurns: 30,
-  maxWallClockMs: 5 * 60 * 1000,
+  maxTurns: 15,
+  maxWallClockMs: 3 * 60 * 1000,
   color: '#3fb8af',
   omitProjectContext: true,
 

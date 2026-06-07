@@ -16,18 +16,20 @@ interface PlanApprovalCardProps {
 
 function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
   const { projectPath, status } = card
+  const planPath = card.planPath ?? `${projectPath}/PLAN.md`
+  const planFileName = card.planFileName ?? 'PLAN.md'
 
   const handleApprove = useCallback(async () => {
     useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'approved')
-    await handlePlanApprove(projectPath)
-  }, [messageId, projectPath])
+    await handlePlanApprove(projectPath, planPath)
+  }, [messageId, projectPath, planPath])
 
   const handleChanges = useCallback(() => {
     useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'changes_requested')
-    handlePlanRequestChanges(projectPath)
-  }, [messageId, projectPath])
+    handlePlanRequestChanges(projectPath, planPath)
+  }, [messageId, projectPath, planPath])
 
   const handleReject = useCallback(() => {
     useLayoutStore.getState().setPlanViewerOpen(false)
@@ -41,17 +43,16 @@ function PlanApprovalCard({ messageId, card }: PlanApprovalCardProps) {
       layout.setPlanViewerOpen(false)
       return
     }
-    const planPath = `${projectPath}/PLAN.md`
     try {
       await FileService.readFile(planPath)
     } catch {
       useChatStore.getState().addSystemMessage(
-        'PLAN.md is missing. Run /plan again to regenerate it.',
+        `${planFileName} is missing. Run /plan again to regenerate it.`,
       )
       return
     }
-    layout.setPlanViewerOpen(true)
-  }, [projectPath])
+    layout.setPlanViewerOpen(true, planPath)
+  }, [planPath, planFileName])
 
   return (
     <Box

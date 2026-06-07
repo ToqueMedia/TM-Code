@@ -31,6 +31,8 @@ export interface CmdPromptContext {
   normalizedHome: string | null
   // Memory
   globalTmsContent: string | null
+  /** Project-level TMS.md content (<project>/TMS.md). Null when missing. */
+  tmsContent: string | null
   claudeMdContent: string | null
   /** Session-scoped memory notes (same source as chat mode). */
   sessionMemory: string | null
@@ -94,7 +96,7 @@ export interface PromptContext {
    *  dynamic section so the agent reading "what's done / what's next" has a
    *  single deterministic source rather than inferring from the filesystem.
    *  Empty array means no tracker has been seeded (single-task work, no plan). */
-  currentTasks: Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' }>
+  currentTasks: Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'; dependsOn?: string[]; blockedBy?: string[]; files?: string[] }>
   /** Pre-loaded user-scope MEMORY.md index content (`~/.toquemedia-studio/memory/`).
    *  Cross-project facts about the developer: role, preferences, validated
    *  approaches. Null when no user memory exists yet. */

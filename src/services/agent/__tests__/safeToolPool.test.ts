@@ -9,6 +9,20 @@
  *   - Telemetry counters track batch sizes and conflicts.
  */
 
+jest.mock('../../../stores/chatStore', () => ({
+  useChatStore: {
+    getState: () => ({ pendingDiffs: [] }),
+    subscribe: jest.fn(() => jest.fn()),
+  },
+}))
+
+jest.mock('../../../stores/credentialRequestStore', () => ({
+  useCredentialRequestStore: {
+    getState: () => ({ pending: new Map() }),
+    subscribe: jest.fn(() => jest.fn()),
+  },
+}))
+
 import { executeToolCalls, type PoolToolCall } from '../safeToolPool'
 import type ToolExecutor from '../toolExecutor'
 

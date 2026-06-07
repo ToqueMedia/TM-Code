@@ -21,6 +21,7 @@ import { t } from '@/i18n'
  */
 function PlanViewerPanel() {
   const isOpen = useLayoutStore(s => s.isPlanViewerOpen)
+  const planViewerPath = useLayoutStore(s => s.planViewerPath)
   const setPlanViewerOpen = useLayoutStore(s => s.setPlanViewerOpen)
   const projectPath = useProjectStore(s => s.currentProject?.path ?? '')
 
@@ -28,13 +29,13 @@ function PlanViewerPanel() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Load PLAN.md when panel opens
+  // Load the selected plan artefact when panel opens.
   useEffect(() => {
-    if (!isOpen || !projectPath) return
+    if (!isOpen || (!projectPath && !planViewerPath)) return
     let cancelled = false
     setLoading(true)
     setError(null)
-    const planPath = `${projectPath}/PLAN.md`
+    const planPath = planViewerPath ?? `${projectPath}/PLAN.md`
     FileService.readFile(planPath)
       .then(raw => {
         if (cancelled) return
@@ -47,7 +48,7 @@ function PlanViewerPanel() {
       })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [isOpen, projectPath])
+  }, [isOpen, projectPath, planViewerPath])
 
   const handleClose = useCallback(() => {
     setPlanViewerOpen(false)

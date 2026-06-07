@@ -1,31 +1,44 @@
-import { create } from 'zustand'
-import { AgentStatus, type CompactPhase } from '../types/agent'
+import { create } from "zustand";
+import { AgentStatus, type CompactPhase } from "../types/agent";
 
-export type AgentTaskStatus = 'pending' | 'in_progress' | 'completed'
+export type AgentTaskStatus =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface AgentTask {
-  id: string
-  description: string
-  status: AgentTaskStatus
+  id: string;
+  description: string;
+  status: AgentTaskStatus;
+  /** IDs of tasks that must complete before this one can start. */
+  dependsOn?: string[];
+  /** IDs of tasks currently blocking this one (stuck dependencies). */
+  blockedBy?: string[];
+  /** Files involved in this task — for prompt context and UI affordances. */
+  files?: string[];
 }
 
 interface AgentState {
-  status: AgentStatus
-  compactPhase: CompactPhase
-  error: string | null
+  status: AgentStatus;
+  compactPhase: CompactPhase;
+  error: string | null;
+  /** Latest non-model status emitted by the proxy/worker while awaiting upstream progress. */
+  workerStatus: string | null;
   /** Tasks the agent is tracking for the current message. Displayed in the chat UI. */
-  tasks: AgentTask[]
+  tasks: AgentTask[];
   /** Model name reported by the backend via X-Model-Name header. */
-  modelName: string | null
+  modelName: string | null;
   /** Provider name reported by the backend via X-Model-Provider header. */
-  modelProvider: string | null
+  modelProvider: string | null;
   /**
    * Reasoning capability of the active model, reported by the backend via
    * X-Model-Thinking-Mode header. Authoritative source for the toggle's
    * visibility — the frontend's per-plan profile is only a fallback for
    * pre-handshake state (before the first response arrives).
    */
-  thinkingMode: 'none' | 'toggleable' | 'mandatory' | null
+  thinkingMode: "none" | "toggleable" | "mandatory" | null;
   /**
    * Context window size (tokens) reported by the backend via the
    * `X-Model-Context-Window` header. The agent's compression threshold uses
@@ -35,7 +48,7 @@ interface AgentState {
    * which is wrong for any BYOK model with a different window). Null until
    * the first response arrives.
    */
-  modelContextWindow: number | null
+  modelContextWindow: number | null;
   /**
    * Whether the most recent response was actually served via BYOK (the
    * server-side X-BYOK-Active header). This is the authoritative source for
@@ -43,7 +56,7 @@ interface AgentState {
    * configured, but only this header confirms what the server did. Drifts
    * back to false when a non-BYOK request follows a BYOK one.
    */
-  byokActive: boolean
+  byokActive: boolean;
   /**
    * Phase A telemetry: cumulative count of times the safe tool pool blocked
    * a tool from starting because of an in-flight non-concurrency-safe sibling.
@@ -51,47 +64,53 @@ interface AgentState {
    * dispatch could not have prevented. Surfaced in Settings → Experimental
    * for dogfood validation. Reset on session start.
    */
-  poolConcurrencyConflictsAvoided: number
+  poolConcurrencyConflictsAvoided: number;
   /**
    * Cumulative tool calls across the current agent run. Used by the Phase A
    * tool-call-pattern telemetry to calibrate when critical reminders should
    * be re-injected (Phase C). Reset on session start.
    */
-  cumulativeToolCalls: number
+  cumulativeToolCalls: number;
   /**
    * Number of write_file / edit_file / create_file calls since the agent
    * last invoked read_dev_server_logs while a dev server is active.
    * Surfaced so the status bar / debug overlay can flag the agent drifting
    * past the "check logs after writes" rule before it becomes a failure.
    */
-  writesWithoutDevServerLogs: number
+  writesWithoutDevServerLogs: number;
 }
 
 interface AgentActions {
-  setStatus: (status: AgentStatus) => void
-  setCompactPhase: (phase: CompactPhase) => void
-  setError: (error: string | null) => void
+  setStatus: (status: AgentStatus) => void;
+  setCompactPhase: (phase: CompactPhase) => void;
+  setError: (error: string | null) => void;
+  setWorkerStatus: (status: string | null) => void;
   // Model metadata from backend response headers
-  setModelInfo: (name: string | null, provider: string | null, thinkingMode?: 'none' | 'toggleable' | 'mandatory' | null, contextWindow?: number | null) => void
-  setByokActive: (active: boolean) => void
+  setModelInfo: (
+    name: string | null,
+    provider: string | null,
+    thinkingMode?: "none" | "toggleable" | "mandatory" | null,
+    contextWindow?: number | null,
+  ) => void;
+  setByokActive: (active: boolean) => void;
   // Task management
-  setTasks: (tasks: AgentTask[]) => void
-  updateTaskStatus: (taskId: string, status: AgentTaskStatus) => void
-  clearTasks: () => void
+  setTasks: (tasks: AgentTask[]) => void;
+  clearTasks: () => void;
   // Phase A telemetry mirror
-  bumpPoolConflictsAvoided: (delta: number) => void
-  resetPoolConflictsAvoided: () => void
+  bumpPoolConflictsAvoided: (delta: number) => void;
+  resetPoolConflictsAvoided: () => void;
   // Tool-call pattern counters (Phase A)
-  bumpCumulativeToolCalls: (delta: number) => void
-  setWritesWithoutDevServerLogs: (n: number) => void
-  resetToolCallCounters: () => void
-  reset: () => void
+  bumpCumulativeToolCalls: (delta: number) => void;
+  setWritesWithoutDevServerLogs: (n: number) => void;
+  resetToolCallCounters: () => void;
+  reset: () => void;
 }
 
 export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
-  status: 'idle',
-  compactPhase: 'idle',
+  status: "idle",
+  compactPhase: "idle",
   error: null,
+  workerStatus: null,
   tasks: [],
   modelName: null,
   modelProvider: null,
@@ -103,15 +122,19 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   writesWithoutDevServerLogs: 0,
 
   setStatus: (status: AgentStatus) => {
-    set({ status })
+    set({ status });
   },
 
   setCompactPhase: (phase: CompactPhase) => {
-    set({ compactPhase: phase })
+    set({ compactPhase: phase });
   },
 
   setError: (error: string | null) => {
-    set({ error })
+    set({ error });
+  },
+
+  setWorkerStatus: (workerStatus: string | null) => {
+    set({ workerStatus });
   },
 
   setModelInfo: (name, provider, thinkingMode, contextWindow) => {
@@ -127,56 +150,56 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       // "leave alone"). Lets one header (X-Model-Context-Window) drive
       // both the agent's threshold AND the indicator pill from a single
       // source of truth.
-      ...(contextWindow !== undefined ? { modelContextWindow: contextWindow } : {}),
-    })
+      ...(contextWindow !== undefined
+        ? { modelContextWindow: contextWindow }
+        : {}),
+    });
   },
 
   setByokActive: (active: boolean) => {
-    set({ byokActive: active })
+    set({ byokActive: active });
   },
 
   setTasks: (tasks: AgentTask[]) => {
-    set({ tasks })
-  },
-
-  updateTaskStatus: (taskId: string, status: AgentTaskStatus) => {
-    set(state => ({
-      tasks: state.tasks.map(t =>
-        t.id === taskId ? { ...t, status } : t
-      ),
-    }))
+    set({ tasks });
   },
 
   clearTasks: () => {
-    set({ tasks: [] })
+    set({ tasks: [] });
   },
 
   bumpPoolConflictsAvoided: (delta: number) => {
-    if (delta <= 0) return
-    set(state => ({ poolConcurrencyConflictsAvoided: state.poolConcurrencyConflictsAvoided + delta }))
+    if (delta <= 0) return;
+    set((state) => ({
+      poolConcurrencyConflictsAvoided:
+        state.poolConcurrencyConflictsAvoided + delta,
+    }));
   },
 
   resetPoolConflictsAvoided: () => {
-    set({ poolConcurrencyConflictsAvoided: 0 })
+    set({ poolConcurrencyConflictsAvoided: 0 });
   },
 
   bumpCumulativeToolCalls: (delta: number) => {
-    if (delta <= 0) return
-    set(state => ({ cumulativeToolCalls: state.cumulativeToolCalls + delta }))
+    if (delta <= 0) return;
+    set((state) => ({
+      cumulativeToolCalls: state.cumulativeToolCalls + delta,
+    }));
   },
 
   setWritesWithoutDevServerLogs: (n: number) => {
-    set({ writesWithoutDevServerLogs: Math.max(0, n) })
+    set({ writesWithoutDevServerLogs: Math.max(0, n) });
   },
 
   resetToolCallCounters: () => {
-    set({ cumulativeToolCalls: 0, writesWithoutDevServerLogs: 0 })
+    set({ cumulativeToolCalls: 0, writesWithoutDevServerLogs: 0 });
   },
 
   reset: () => {
     set({
-      status: 'idle',
+      status: "idle",
       error: null,
+      workerStatus: null,
       tasks: [],
       modelName: null,
       modelProvider: null,
@@ -186,6 +209,6 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       poolConcurrencyConflictsAvoided: 0,
       cumulativeToolCalls: 0,
       writesWithoutDevServerLogs: 0,
-    })
+    });
   },
-}))
+}));

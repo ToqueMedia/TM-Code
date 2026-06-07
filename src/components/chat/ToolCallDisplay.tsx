@@ -12,6 +12,7 @@ import { getFileIconUrl } from '@/utils/fileIcons'
 import { tokens } from '@/theme/tokens'
 import { detectLanguage, highlightLines } from '@/utils/syntaxHighlight'
 import { t } from '@/i18n'
+import { isShellTool, ShellCommandBlock } from '../shell/ShellCommandBlock'
 
 interface ToolCallDisplayProps {
   toolCall: ToolCallDisplayType
@@ -169,13 +170,24 @@ const SUBAGENT_SPAWNERS = new Set(['research', 'verify', 'spawn_background_agent
 
 function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps) {
   const [expanded, setExpanded] = useState(false)
-  const filePath = (toolCall.input?.path || toolCall.input?.oldPath || '') as string
+  const filePath = (toolCall.input?.file_path || toolCall.input?.path || toolCall.input?.oldPath || '') as string
   const useFileIcon = FILE_TOOLS.has(toolCall.toolName) && !!filePath
   const IconComponent = TOOL_ICONS[toolCall.toolName] || FiTool
   const inputSummary = getInputSummary(toolCall.toolName, toolCall.input)
   const isRunning = toolCall.status === 'running'
   const isFailed = toolCall.status === 'failed'
   const isCompleted = toolCall.status === 'completed'
+  const isNested = !!toolCall.spawnedBy
+
+  if (isShellTool(toolCall.toolName)) {
+    return (
+      <ShellCommandBlock
+        toolCall={toolCall}
+        mode="chat"
+        nested={isNested}
+      />
+    )
+  }
 
   const hasDiff = toolCall.diffNewContent !== undefined && isWriteTool(toolCall.toolName)
 
@@ -207,7 +219,6 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
 
   // Sub-agent tool calls carry a spawnedBy id — nest them visually under the
   // research/verify/bg launcher so the user sees the full activity hierarchy.
-  const isNested = !!toolCall.spawnedBy
   const nestedProps = isNested
     ? { ml: 4, pl: 2, borderLeft: `2px solid ${tokens.colors.accent.purple}` } as const
     : {}
@@ -247,7 +258,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
           </Text>
         </Flex>
         <InlineDiff
-          filePath={(toolCall.input.file_path || toolCall.input.path) as string}
+          filePath={filePath}
           oldContent={toolCall.diffOldContent || ''}
           newContent={toolCall.diffNewContent || ''}
           isNewFile={toolCall.isNewFile || false}

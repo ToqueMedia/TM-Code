@@ -12,6 +12,7 @@ import CodeBlockAction from './CodeBlockAction'
 import ToolCallDisplayComponent from './ToolCallDisplay'
 import ReadOutputBatch from './ReadOutputBatch'
 import { groupConsecutiveLargeReads, computeContentBlockBatches } from '../../utils/groupToolCalls'
+import { isAgentShellTool, ShellSessionBlock } from '../shell/ShellCommandBlock'
 import AgentLogo from '../ui/AgentLogo'
 import CompactSummary from './CompactSummary'
 import ReasoningBlock from './ReasoningBlock'
@@ -335,6 +336,36 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       id => message.toolCalls?.find(t => t.id === id),
     )
   }, [message.contentBlocks, message.toolCalls])
+
+  const fallbackToolCallGroups = useMemo(() => {
+    if (!message.toolCalls || message.toolCalls.length === 0) return []
+    const groups: Array<
+      | { kind: 'agent_shell_session'; calls: NonNullable<ChatMessage['toolCalls']> }
+      | ReturnType<typeof groupConsecutiveLargeReads>[number]
+    > = []
+
+    for (let i = 0; i < message.toolCalls.length; i++) {
+      const call = message.toolCalls[i]
+      if (isAgentShellTool(call.toolName)) {
+        const calls = [call]
+        while (i + 1 < message.toolCalls.length && isAgentShellTool(message.toolCalls[i + 1].toolName)) {
+          calls.push(message.toolCalls[i + 1])
+          i++
+        }
+        groups.push({ kind: 'agent_shell_session', calls })
+        continue
+      }
+
+      const ordinaryCalls = [call]
+      while (i + 1 < message.toolCalls.length && !isAgentShellTool(message.toolCalls[i + 1].toolName)) {
+        ordinaryCalls.push(message.toolCalls[i + 1])
+        i++
+      }
+      groups.push(...groupConsecutiveLargeReads(ordinaryCalls))
+    }
+
+    return groups
+  }, [message.toolCalls])
 
   // Build plain-text representation of this assistant message for copying.
   // Walks contentBlocks IN ORDER so reasoning passes interleave with text in
@@ -700,6 +731,25 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
               if (block.type === 'tool_call') {
                 const tc = message.toolCalls?.find(t => t.id === block.toolCallId)
                 if (tc) {
+                  if (isAgentShellTool(tc.toolName)) {
+                    const previous = message.contentBlocks?.[idx - 1]
+                    const previousCall = previous?.type === 'tool_call'
+                      ? message.toolCalls?.find(t => t.id === previous.toolCallId)
+                      : null
+                    if (previousCall && isAgentShellTool(previousCall.toolName)) return null
+
+                    const calls = [tc]
+                    let nextIdx = idx + 1
+                    while (message.contentBlocks?.[nextIdx]?.type === 'tool_call') {
+                      const nextBlock = message.contentBlocks[nextIdx]
+                      if (nextBlock.type !== 'tool_call') break
+                      const nextCall = message.toolCalls?.find(t => t.id === nextBlock.toolCallId)
+                      if (!nextCall || !isAgentShellTool(nextCall.toolName)) break
+                      calls.push(nextCall)
+                      nextIdx++
+                    }
+                    return <ShellSessionBlock key={tc.id} toolCalls={calls} mode="chat" />
+                  }
                   return <ToolCallDisplayComponent key={tc.id} toolCall={tc} messageId={message.id} />
                 }
               }
@@ -785,11 +835,14 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             )}
             {message.toolCalls && message.toolCalls.length > 0 && (
               <Box mt={message.content ? 3 : 0}>
-                {groupConsecutiveLargeReads(message.toolCalls).map(group => (
-                  group.kind === 'large_read_batch'
+                {fallbackToolCallGroups.map(group => {
+                  if (group.kind === 'agent_shell_session') {
+                    return <ShellSessionBlock key={group.calls[0].id} toolCalls={group.calls} mode="chat" />
+                  }
+                  return group.kind === 'large_read_batch'
                     ? <ReadOutputBatch key={group.calls[0].id} calls={group.calls} />
                     : <ToolCallDisplayComponent key={group.call.id} toolCall={group.call} messageId={message.id} />
-                ))}
+                })}
               </Box>
             )}
 

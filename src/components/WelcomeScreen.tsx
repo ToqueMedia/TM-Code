@@ -1,16 +1,13 @@
 import { useCallback, useEffect } from 'react'
 import { Box, Flex, useDialog } from '@chakra-ui/react'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useProjectStore } from '../stores/projectStore'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { WelcomeSidebar, WelcomeHero, CloneDialog, StartupRequirementsBanner, PromoBanner } from './welcome'
 import SettingsView from './views/SettingsView'
-import WindowControls from './ui/WindowControls'
-import { IS_MAC } from '@/utils/platform'
+import MinimalTitleBar from './MinimalTitleBar'
 import { TerminalView } from './cmd-mode'
-import { useWindowControls } from '../hooks/useWindowControls'
 import { WindowTitleManager } from '../utils/windowTitleManager'
 
 interface WelcomeScreenProps {
@@ -21,9 +18,6 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   const cloneDialog = useDialog()
   const { recentProjects, loadRecentProjects, cmdModeProjectPath, cmdModeProjectPaths, setCmdModeProjectPath, removeCmdModePath, clearAllRecent, welcomeScreen, setWelcomeScreen } = useProjectStore()
   const showSettings = welcomeScreen === 'settings'
-
-  // Window controls — shared hook eliminates duplication
-  const { handleClose, handleMinimize, handleFullToggle } = useWindowControls()
 
   useEffect(() => {
     loadRecentProjects()
@@ -42,28 +36,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     }
   }, [cmdModeProjectPath, welcomeScreen, setWelcomeScreen])
 
-  const handleDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return
-    // Walk up the DOM from the click target to determine if the user
-    // clicked on an interactive element.  A tag-name allowlist is never
-    // complete (Chakra renders <Text> as <span>, <Flex> as <div>), so we
-    // also check cursor: pointer which Chakra sets via CSS for every
-    // interactive element.
-    let el: HTMLElement | null = e.target as HTMLElement
-    for (let i = 0; i < 8 && el && el !== e.currentTarget; i++) {
-      const tag = el.tagName?.toLowerCase() || ''
-      if (['button', 'input', 'svg', 'path', 'a', 'select', 'textarea'].includes(tag)) return
-      if (el.getAttribute('role') === 'button') return
-      if (el.hasAttribute('data-no-drag')) return
-      try {
-        if (window.getComputedStyle(el).cursor === 'pointer') return
-      } catch { /* getComputedStyle can throw on detached nodes */ }
-      el = el.parentElement
-    }
-    getCurrentWindow().startDragging().catch(() => {})
-  }, [])
-
-  const handleOpenFolder = async () => {
+  const handleOpenFolder = useCallback(async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
       const selected = await open({
@@ -77,9 +50,9 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
     }
-  }
+  }, [onOpenProject])
 
-  const handleNewProject = async () => {
+  const handleNewProject = useCallback(async () => {
     // All projects start from scratch — open folder dialog directly
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
@@ -93,9 +66,9 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
     }
-  }
+  }, [onOpenProject])
 
-  const handleCmdMode = async () => {
+  const handleCmdMode = useCallback(async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
       const selected = await open({
@@ -108,76 +81,60 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
     }
-  }
-
-  // 4 options available: New Project, Open Project, Clone Repository, CMD Mode.
+  }, [setCmdModeProjectPath])
 
   return (
     <Flex
+      direction="column"
       height="100vh"
       overflow="hidden"
       bg="#0a0a0a"
       color={tokens.colors.text.primary}
-      onMouseDown={cmdModeProjectPath ? undefined : handleDrag}
-      position="relative"
     >
-      {/* Window controls — macOS: top-left, Windows/Linux: top-right */}
-      {IS_MAC ? (
-        <Box position="absolute" top={3} left={4} zIndex={10}>
-          <WindowControls
-            onClose={handleClose}
-            onMinimize={handleMinimize}
-            onMaximize={handleFullToggle}
+      {/* Global header — provides window controls and drag area */}
+      <MinimalTitleBar />
+
+      {/* Main content area below the header */}
+      <Flex flex="1" overflow="hidden" position="relative">
+        {!cmdModeProjectPath && (
+          <WelcomeSidebar
+            recentProjects={recentProjects}
+            cmdModeProjectPaths={cmdModeProjectPaths}
+            onOpenCmdProject={setCmdModeProjectPath}
+            onOpenCmdProjectAsIde={(path) => { removeCmdModePath(path); onOpenProject(path) }}
+            onOpenProject={onOpenProject}
+            onSettings={() => setWelcomeScreen('settings')}
+            onClearRecent={clearAllRecent}
           />
-        </Box>
-      ) : (
-        <Box position="absolute" top={0} right={0} zIndex={10}>
-          <WindowControls
-            onClose={handleClose}
-            onMinimize={handleMinimize}
-            onMaximize={handleFullToggle}
-          />
-        </Box>
-      )}
+        )}
 
-      {!cmdModeProjectPath && (
-        <WelcomeSidebar
-          recentProjects={recentProjects}
-          cmdModeProjectPaths={cmdModeProjectPaths}
-          onOpenCmdProject={setCmdModeProjectPath}
-          onOpenCmdProjectAsIde={(path) => { removeCmdModePath(path); onOpenProject(path) }}
-          onOpenProject={onOpenProject}
-          onSettings={() => setWelcomeScreen('settings')}
-          onClearRecent={clearAllRecent}
-        />
-      )}
+        {showSettings ? (
+          <SettingsView onBack={() => setWelcomeScreen(cmdModeProjectPath ? null : 'hero')} />
+        ) : cmdModeProjectPath ? (
+          <Box flex="1" minH={0} display="flex" flexDirection="column">
+            <TerminalView
+              key={cmdModeProjectPath}
+              projectPath={cmdModeProjectPath}
+              onBack={() => setCmdModeProjectPath(null)}
+            />
+          </Box>
+        ) : (
+          <WelcomeHero
+            onNewProject={handleNewProject}
+            onOpenFolder={handleOpenFolder}
+            onCloneRepository={() => cloneDialog.setOpen(true)}
+            onCmdMode={handleCmdMode}
+          >
+            <PromoBanner />
+          </WelcomeHero>
+        )}
 
-      {cmdModeProjectPath ? (
-        <Box flex="1" minH={0} display="flex" flexDirection="column">
-          <TerminalView
-            key={cmdModeProjectPath}
-            projectPath={cmdModeProjectPath}
-            onBack={() => setCmdModeProjectPath(null)}
-          />
-        </Box>
-      ) : showSettings ? (
-        <SettingsView onBack={() => setWelcomeScreen('hero')} />
-      ) : (
-        <WelcomeHero
-          onNewProject={handleNewProject}
-          onOpenFolder={handleOpenFolder}
-          onCloneRepository={() => cloneDialog.setOpen(true)}
-          onCmdMode={handleCmdMode}
-        >
-          <PromoBanner />
-        </WelcomeHero>
-      )}
+        <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} />
 
-      <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} />
-
-      {/* Non-blocking prereq banner — only shows when a tool is missing/outdated.
-          Positioned absolute near the top so it doesn't reflow the hero layout. */}
-      {!cmdModeProjectPath && !showSettings && <StartupRequirementsBanner />}
+        {/* Non-blocking prereq banner — only shows when a tool is missing/outdated.
+            Positioned absolute near the top so it doesn't reflow the hero layout. */}
+        {!cmdModeProjectPath && !showSettings && <StartupRequirementsBanner />}
+      </Flex>
     </Flex>
   )
 }

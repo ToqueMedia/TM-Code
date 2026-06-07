@@ -3,6 +3,7 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { useTranslation } from '@/i18n/useTranslation'
+import { usePermissionStore } from '../../stores/permissionStore'
 
 type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
 
@@ -93,7 +94,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   const borderColor = dangerous ? 'rgba(247,127,0,0.3)' : 'rgba(163,113,247,0.25)'
 
   // Two modes: 'choose' (y/a/n/w keys) and 'writing' (textarea for deny reason).
-  const [mode, setMode] = useState<'choose' | 'writing'>('choose')
+  const [mode, setMode] = useState<'choose' | 'writing' | 'confirm-all'>('choose')
   const [reason, setReason] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -102,10 +103,44 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
     if (mode === 'writing') textareaRef.current?.focus()
   }, [mode])
 
+  // Handle approveAll with confirmation if queue is large
+  const handleApproveAllWithConfirmation = () => {
+    const queuedCount = usePermissionStore.getState().getQueuedCount()
+    if (queuedCount > 2) {
+      setMode('confirm-all')
+    } else {
+      onApproveAll()
+    }
+  }
+
+  const handleConfirmAll = () => {
+    setMode('choose')
+    onApproveAll()
+  }
+
+  const handleCancelConfirmAll = () => {
+    setMode('choose')
+  }
+
   // Keyboard: in 'choose' mode — Y/Enter=approve, A/Shift+Enter=approve all,
   // N=deny, W=write reason, Esc=deny. In 'writing' mode — textarea handles
   // its own input; Enter submits, Shift+Enter newline, Esc returns to choose.
+  // In 'confirm-all' mode — Y/Enter=confirm, N/Esc=cancel.
   useEffect(() => {
+    if (mode === 'confirm-all') {
+      function handleKeyDown(e: KeyboardEvent) {
+        if (e.key === 'y' || e.key === 'Y' || e.key === 'Enter') {
+          e.preventDefault()
+          handleConfirmAll()
+        } else if (e.key === 'n' || e.key === 'N' || e.key === 'Escape') {
+          e.preventDefault()
+          handleCancelConfirmAll()
+        }
+      }
+      window.addEventListener('keydown', handleKeyDown)
+      return () => window.removeEventListener('keydown', handleKeyDown)
+    }
+
     if (mode !== 'choose') return
     function handleKeyDown(e: KeyboardEvent) {
       const target = e.target as HTMLElement
@@ -116,7 +151,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
         onApprove()
       } else if (!hideApproveAll && (e.key === 'a' || e.key === 'A' || (e.key === 'Enter' && e.shiftKey))) {
         e.preventDefault()
-        onApproveAll()
+        handleApproveAllWithConfirmation()
       } else if (!dangerous && (e.key === 'w' || e.key === 'W')) {
         if (!onDenyWith) return
         e.preventDefault()
@@ -131,7 +166,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [mode, dangerous, onApprove, onApproveAll, onDeny, onDenyAll, onDenyWith, hideApproveAll])
+  }, [mode, dangerous, onApprove, onDeny, onDenyAll, onDenyWith, hideApproveAll])
 
   const handleSubmitReason = () => {
     if (!onDenyWith) return
@@ -178,8 +213,19 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
         )}
       </Flex>
 
-      {/* Keyboard hint row OR write-reason textarea */}
-      {mode === 'choose' ? (
+      {/* Keyboard hint row OR write-reason textarea OR confirm-all prompt */}
+      {mode === 'confirm-all' ? (
+        <Box mt={1.5}>
+          <Text fontSize="11px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} mb={1}>
+            ⚠ This will auto-approve {usePermissionStore.getState().getQueuedCount()} queued permissions without individual review.
+          </Text>
+          <Flex align="center" gap={2}>
+            <KeyHint label="y" description={t('perm.confirmAll')} color={tokens.colors.terminal.green} onClick={handleConfirmAll} />
+            <Sep />
+            <KeyHint label="n" description={t('perm.cancel')} color={tokens.colors.accent.red} onClick={handleCancelConfirmAll} />
+          </Flex>
+        </Box>
+      ) : mode === 'choose' ? (
         <Flex align="center" gap={1} mt={1.5} wrap="wrap">
           {dangerous ? (
             <>

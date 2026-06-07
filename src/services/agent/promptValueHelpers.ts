@@ -21,7 +21,7 @@
 import { t } from '../../i18n'
 import type { Attachment, ConversationMessage } from '../../types/chat'
 import type { ContentBlock, PromptValue } from '../../types/messageQueueTypes'
-import type { OpenAIContentPart } from './agentService'
+import type { OpenAIContentPart } from './types'
 
 /**
  * Per-image cap on the data URI byte length. Individual images larger
@@ -234,7 +234,7 @@ export async function buildContentParts(
  * Extract text from message content, which may be:
  *   - string (plain text)
  *   - ContentPart[] (OpenAI multimodal — text + image_url parts)
- *   - AnthropicContentBlock[] (text, tool_use, tool_result, thinking blocks)
+ *   - ContentBlockAPI[] (text, tool_call, tool_result, thinking blocks)
  *   - null/undefined
  */
 export function contentAsText(content: string | unknown[] | null | undefined): string {
@@ -247,7 +247,7 @@ export function contentAsText(content: string | unknown[] | null | undefined): s
       switch (part.type) {
         case 'text': return part.text ?? ''
         case 'thinking': return part.thinking ?? ''
-        case 'tool_use': return `[tool: ${part.name}(${JSON.stringify(part.input || {})})]`
+        case 'tool_call': return `[tool: ${part.name}(${part.arguments || '{}'})]`
         case 'tool_result': return typeof part.content === 'string' ? part.content : JSON.stringify(part.content || '')
         case 'image_url': return '[image]'
         default: return ''
@@ -280,7 +280,7 @@ export function downgradeHistoryToText(
       return msg as ConversationMessage
     }
     // The content array mixes OpenAI multimodal parts (text / image_url) with
-    // Anthropic-shape blocks (tool_use, tool_result, thinking). Only image_url
+    // content blocks (tool_call, tool_result, thinking). Only image_url
     // parts are the ones that got stripped due to no multimodal support — the
     // rest are text-equivalent and must be preserved as text so the downstream
     // model sees the real conversation instead of a row of image placeholders.
@@ -290,7 +290,7 @@ export function downgradeHistoryToText(
         switch (p.type) {
           case 'text':        return p.text ?? ''
           case 'thinking':    return p.thinking ?? ''
-          case 'tool_use':    return `[tool: ${p.name}(${JSON.stringify(p.input || {})})]`
+          case 'tool_call':    return `[tool: ${p.name}(${p.arguments || '{}'})]`
           case 'tool_result': return typeof p.content === 'string' ? p.content : JSON.stringify(p.content || '')
           case 'image_url':   return placeholder
           default:            return ''

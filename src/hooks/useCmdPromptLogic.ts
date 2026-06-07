@@ -22,6 +22,7 @@ import { preprocessHashtags } from '../services/agent/hashtagRegistry'
 import { useHashtagMenu } from '../components/prompt/useHashtagMenu'
 import { runAuthFlow, runDesignFlow } from '../services/agent/commands/authCommand'
 import { t } from '../i18n/useTranslation'
+import { classifyPendingPlanIntent } from '../services/agent/planResumeIntent'
 import {
   loadPromptHistory,
   savePromptHistory,
@@ -36,13 +37,13 @@ const MENTION_MENU_LIMIT = 50
 /**
  * CMD-mode prompt logic — slash commands, message queue, @mention support.
  */
-const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/terminal'])
+const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/terminal', '/settings', '/resume'])
 
 // Control commands that must run immediately even while the agent is streaming.
 // They each stop the agent internally (stopAgent()) before doing their work, so
 // queueing them would defeat their purpose — /exit would wait for the very task
 // it's supposed to cancel.
-const CONTROL_COMMANDS_BYPASS_QUEUE = new Set(['/exit', '/new', '/clear', '/terminal'])
+const CONTROL_COMMANDS_BYPASS_QUEUE = new Set(['/exit', '/new', '/clear', '/terminal', '/settings', '/resume'])
 
 function isTerminalToggleCommand(input: string): boolean {
   return input.trim() === '/terminal'
@@ -85,6 +86,10 @@ export function useCmdPromptLogic() {
   })
 
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Pre-send transform ref — allows external components (e.g. CmdModePromptInput)
+  // to transform the input text before it's sent to the agent. Used for paste
+  // compacting: the textarea shows placeholders, but the agent sees real text.
+  const preSendTransformRef = useRef<((input: string) => string) | null>(null)
   // Pending shell command from `! ` prefix — stored in ref, consumed by effect
   // that waits for PTY session readiness instead of polling.
   const pendingShellCmdRef = useRef<string | null>(null)
@@ -209,6 +214,16 @@ export function useCmdPromptLogic() {
     return parts.slice(1).join(' ')
   }, [])
 
+  const setInputAndCaret = useCallback((value: string, caret: 'start' | 'end') => {
+    setInput(value)
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      const pos = caret === 'start' ? 0 : value.length
+      ta.setSelectionRange(pos, pos)
+    })
+  }, [])
+
   const executePrompt = useCallback(async (promptValue: PromptValue): Promise<void> => {
     const path = currentProject?.path || useProjectStore.getState().cmdModeProjectPath || ''
 
@@ -244,6 +259,33 @@ export function useCmdPromptLogic() {
     // so it should toggle even if the global slash registry/menu changes.
     if (isTerminalToggleCommand(textPrompt)) {
       useTerminalPanelStore.getState().toggle()
+      return
+    }
+
+    // ── Interrupted /plan resume ──
+    // Same contract as chat PromptBar: while PLAN*.md is incomplete, any
+    // plain follow-up remains an architect-mode continuation. Falling through
+    // here would rebuild the default CMD coding prompt and allow source-file
+    // implementation before the approval card exists.
+    const planResumePending = useChatStore.getState().planResumePending
+    if (planResumePending && !textPrompt.trim().startsWith('/')) {
+      const attachments = typeof promptValue === 'string'
+        ? undefined
+        : promptValue.filter(b => b.type === 'attachment').map(b => b.attachment)
+      const promptBlocks = typeof promptValue === 'string' ? undefined : promptValue
+      if (path !== planResumePending.projectPath) {
+        useChatStore.getState().addUserMessage(textPrompt, attachments, promptBlocks)
+        useChatStore.getState().addSystemMessage(t('plan.resumeWrongProject'), 'warn')
+        return
+      }
+      if (classifyPendingPlanIntent(textPrompt) === 'cancel') {
+        useChatStore.getState().addUserMessage(textPrompt, attachments, promptBlocks)
+        useChatStore.getState().setPlanResumePending(null)
+        useChatStore.getState().addSystemMessage(t('plan.resumeCancelled'))
+        return
+      }
+      const { executePlanResume } = await import('../services/agent/commands/planCommand')
+      await executePlanResume(textPrompt, planResumePending, attachments, promptBlocks)
       return
     }
 
@@ -549,7 +591,12 @@ export function useCmdPromptLogic() {
   }, [input, executePrompt])
 
   const handleSend = useCallback(async () => {
-    const prompt = input.trim()
+    let prompt = input.trim()
+    // Apply pre-send transform if set (e.g. paste compacting expands
+    // "[Pasted text #1 +N lines]" back to the real text).
+    if (prompt && preSendTransformRef.current) {
+      prompt = preSendTransformRef.current(prompt)
+    }
     const hasAttachments = draftAttachments.length > 0
     if (!prompt && !hasAttachments) return
 
@@ -685,11 +732,12 @@ export function useCmdPromptLogic() {
         const caret = ta?.selectionStart ?? 0
         const selLen = ta ? ta.selectionEnd - ta.selectionStart : 0
         const atStart = caret === 0 && selLen === 0
+        const atEnd = ta ? ta.selectionStart === input.length && ta.selectionEnd === input.length : true
         const browsingHistory = historyIndexRef.current >= 0
 
         if (e.key === 'ArrowUp') {
           // Priority 1: Edit queued message if one exists and input is empty
-          if (input.length === 0 && queuedCommands.length > 0) {
+          if (input.length === 0 && queuedCommands.length > 0 && atStart) {
             e.preventDefault()
             const lastQueued = queuedCommands[queuedCommands.length - 1]!
             const val = typeof lastQueued.value === 'string'
@@ -697,36 +745,36 @@ export function useCmdPromptLogic() {
               : lastQueued.value.map(b => (b.type === 'text' ? b.text : '')).join(' ')
 
             remove([lastQueued as QueuedCommand])
-            setInput(val)
+            setInputAndCaret(val, 'start')
             return
           }
 
-          // Priority 2: Standard history navigation — only if caret is at
-          // the start and input is empty, OR the user is already cycling
-          // through history. Otherwise let the textarea handle ArrowUp.
-          if (!browsingHistory && (input.length > 0 || !atStart)) {
-            return
-          }
+          // Priority 2: Standard history navigation. ArrowUp only owns
+          // history when the caret is at the beginning of the prompt. If the
+          // user is editing in the middle/end, keep native textarea movement.
+          if (!atStart) return
           const history = historyRef.current
           if (history.length === 0) return
           e.preventDefault()
           const newIndex = Math.min(historyIndexRef.current + 1, history.length - 1)
           historyIndexRef.current = newIndex
-          setInput(history[newIndex])
+          setInputAndCaret(history[newIndex], 'start')
           return
         }
         if (e.key === 'ArrowDown') {
-          // Only hijack ArrowDown while actively browsing history — otherwise
-          // it should move the caret normally within the textarea.
+          // Only hijack ArrowDown while actively browsing history and when
+          // the caret is at the end of the prompt. In the middle of a line,
+          // ArrowDown remains native cursor movement.
           if (!browsingHistory) return
+          if (!atEnd) return
           e.preventDefault()
           if (historyIndexRef.current <= 0) {
             historyIndexRef.current = -1
-            setInput('')
+            setInputAndCaret('', 'end')
             return
           }
           historyIndexRef.current--
-          setInput(historyRef.current[historyIndexRef.current])
+          setInputAndCaret(historyRef.current[historyIndexRef.current], 'end')
           return
         }
       }
@@ -777,6 +825,7 @@ export function useCmdPromptLogic() {
       showMentionMenu, filteredMentions, selectedMentionIndex, handleMentionSelect,
       hashtagMenu,
       input, queuedCommands,
+      setInputAndCaret,
     ]
   )
 
@@ -852,6 +901,9 @@ export function useCmdPromptLogic() {
     handleDrop,
     isDragging,
     handleAttachFiles,
+    // Pre-send transform — allows CmdModePromptInput to expand paste
+    // placeholders before the prompt is sent to the agent.
+    preSendTransformRef,
   }
 }
 

@@ -67,21 +67,38 @@ export type ContentPart =
   | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } }
 
 /**
- * Anthropic Messages API content block — matches the format used by
- * agentService and chatStore for conversation history.
+ * OpenAI Chat Completion tool call — matches the format returned by
+ * OpenAI-compatible providers.
  */
-export type AnthropicContentBlock =
+export interface OpenAIToolCall {
+  id: string
+  type: 'function'
+  function: {
+    name: string
+    arguments: string
+  }
+}
+
+/**
+ * Unified content block format for conversation history.
+ * Supports both text-only and structured content (tool calls, reasoning, images).
+ * This replaces the previous AnthropicContentBlock format.
+ */
+export type ContentBlockAPI =
   | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-  | { type: 'tool_result'; tool_use_id: string; content: string }
+  | { type: 'tool_call'; id: string; name: string; arguments: string; thoughtSignature?: string }
+  | { type: 'tool_result'; toolCallId: string; content: string }
   | { type: 'thinking'; thinking: string }
   | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } }
 
+/** @deprecated Use ContentBlockAPI directly. Kept as alias for backward compatibility. */
+export type AnthropicContentBlock = ContentBlockAPI
+
 export interface ConversationMessage {
   role: 'user' | 'assistant'
-  /** String for text-only messages, AnthropicContentBlock[] for structured messages
-   *  (tool_use blocks, tool_result blocks, thinking blocks, image parts). */
-  content: string | AnthropicContentBlock[] | null
+  /** String for text-only messages, ContentBlockAPI[] for structured messages
+   *  (tool_call blocks, tool_result blocks, thinking blocks, image parts). */
+  content: string | ContentBlockAPI[] | null
 }
 
 export interface ToolCallDisplay {
@@ -100,6 +117,9 @@ export interface ToolCallDisplay {
   diffResultId?: string
   /** Live progress text shown while tool is running (e.g., sub-agent status). */
   progressText?: string
+  /** Accumulated log output from streaming commands (build, test, install, scripts).
+   *  Rendered as a scrollable terminal-style log viewer. */
+  commandLogs?: string[]
   /** Id of the parent tool call that spawned this one (research / verify / bg agent).
    *  When set, the UI renders this tool call with a nested indent + marker so the
    *  user sees the full sub-agent activity, not just a progress string. */
@@ -130,6 +150,10 @@ export interface ChatMessageCard {
   type: 'plan_approval' | 'todo_list' | 'credential_request' | 'permission_request' | 'ask_user_question'
   projectPath: string
   status: 'pending' | 'approved' | 'changes_requested' | 'rejected' | 'submitted' | 'cancelled' | 'expired'
+  /** plan_approval only: concrete plan file path when not the default project PLAN.md */
+  planPath?: string
+  /** plan_approval only: display/file basename for the concrete plan artefact */
+  planFileName?: string
   /** credential_request only: identifies the pending entry in credentialRequestStore */
   requestId?: string
   /** credential_request only: service name (e.g. "OpenAI", "Stripe") shown in the form header */
@@ -188,6 +212,12 @@ export interface ChatMessage {
   compactBeforeTokens?: number
   /** Richer metadata for compact_boundary messages (trigger, token count, messages summarized). */
   compactMetadata?: CompactMetadata
+  /** Terminal-mode local command result, rendered like a shell command block. */
+  terminalCommand?: {
+    command: string
+    output?: string
+    exitCode: number
+  }
   content: string
   timestamp: number
   codeBlocks?: CodeBlock[]
@@ -284,6 +314,21 @@ export interface ChatSession {
    *  new session creation. The agent uses these to track in-progress work,
    *  decisions made, and pending next steps. */
   sessionMemory?: string
+  /**
+   * Incomplete /plan run that should be resumed in architect mode on the next
+   * user message. This prevents a plain "continue" after an interrupted plan
+   * from falling through to the default coding agent and implementing files.
+   */
+  planResumePending?: PlanResumePending | null
+}
+
+export interface PlanResumePending {
+  projectPath: string
+  originalArgs: string
+  planPath: string
+  planFileName: string
+  mode: 'chat' | 'terminal'
+  updatedAt: number
 }
 
 /** Per-session frozen reference to the BYOK selection at creation time.
@@ -383,4 +428,5 @@ export interface PersistedSession {
   lastTurnSnapshot?: SessionTurnSnapshot
   byokSnapshot?: ByokSessionSnapshot | null
   sessionMemory?: string
+  planResumePending?: PlanResumePending | null
 }

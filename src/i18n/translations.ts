@@ -208,6 +208,9 @@ const en = {
   'settings.byokCapImages': 'Images',
   'settings.byokCapTools': 'Tool calling',
   'settings.byokCapThinking': 'Reasoning',
+  'settings.byokCapBadgeVision': 'vision',
+  'settings.byokCapBadgeTools': 'tools',
+  'settings.byokCapBadgeReasoning': 'reasoning',
   'settings.deploys': 'Deploys',
   'settings.planCredits': 'Plan & Credits',
   'settings.language': 'Language',
@@ -414,7 +417,7 @@ const en = {
   'chat.compact.summary': 'Summary',
   'chat.compact.expand': 'Show summary',
   'chat.compact.collapse': 'Hide summary',
-  'chat.recoverableUpstreamError': "The service returned a temporary error. Your message wasn't processed. Send \"Continue\" to resume from where you stopped — the agent picks up from the last step.",
+  'chat.recoverableUpstreamError': "The service returned a temporary error. Your message wasn't processed. Send a follow-up indicating you want to proceed — the agent picks up from the last step.",
   'chat.noCredits': 'No credits',
   'chat.accountInactive': 'Account inactive — contact support',
   'chat.credits': 'credits',
@@ -483,6 +486,8 @@ const en = {
   'perm.submit': 'Submit',
   'perm.deny': 'Deny',
   'perm.denyAll': 'Deny All',
+  'perm.confirmAll': 'Yes, approve all',
+  'perm.cancel': 'Cancel',
   'perm.justify': 'Justify',
   'perm.send': 'Send',
   'perm.showArgs': 'Show args',
@@ -535,6 +540,8 @@ const en = {
   'plan.hidePlan': 'Hide Plan',
   'plan.missing': 'PLAN.md is missing. Run /plan again to regenerate it.',
   'plan.approveError': 'Failed to approve plan. Try again.',
+  'plan.resumeCancelled': 'Interrupted plan discarded. Run /plan again to start a new plan.',
+  'plan.resumeWrongProject': 'There is an interrupted plan for another project/session. Switch back to that session or start a new plan.',
   'devserver.starting': 'Starting dev server...',
   'devserver.title': 'Dev server',
 
@@ -657,21 +664,21 @@ const en = {
   'terminalMode.greeting.mentionFile': 'mention a file',
   'terminalMode.greeting.runShell': 'run shell',
   'terminalMode.greeting.sandboxActive': 'sandbox mode active',
-  'terminalMode.status.awaiting': 'awaiting',
-  'terminalMode.status.reasoning': 'reasoning',
-  'terminalMode.status.writing': 'writing',
-  'terminalMode.status.applying': 'applying',
-  'terminalMode.status.compacting': 'compacting',
+  'terminalMode.status.awaiting': 'thinking',
+  'terminalMode.status.reasoning': 'thinking',
+  'terminalMode.status.writing': 'working',
+  'terminalMode.status.applying': 'applying changes',
+  'terminalMode.status.compacting': 'optimizing context',
   'terminalMode.status.ready': 'ready',
-  'terminalMode.status.contextEffective': 'effective',
-  'terminalMode.status.autoCompact': 'auto-compact next turn',
-  'terminalMode.status.missingTools': 'Missing: {missing}. Some artifact skills (PDF/Word/Excel/PPTX/Slidev) will need installs.',
-  'terminalMode.status.allToolsAvailable': 'All artifact-generation tooling available.',
-  'terminalMode.status.autoApprove': 'auto-approve',
+  'terminalMode.status.contextEffective': 'of available',
+  'terminalMode.status.autoCompact': 'will optimize next turn',
+  'terminalMode.status.missingTools': 'Missing: {missing}. Some features (PDF/Word/Excel) may not work.',
+  'terminalMode.status.allToolsAvailable': 'All features available.',
+  'terminalMode.status.autoApprove': '✓ auto-approve',
   'terminalMode.status.skills': 'skills',
   'terminalMode.status.running': 'running',
   'terminalMode.status.done': 'done',
-  'terminalMode.status.err': 'err',
+  'terminalMode.status.err': 'failed',
   'terminalMode.status.tasks': 'tasks',
   'terminalMode.status.earlierTask': 'earlier task',
   'terminalMode.status.earlierTasks': 'earlier tasks',
@@ -686,6 +693,20 @@ const en = {
   'terminalMode.permission.shiftEnterHint': 'shift+↵ for newline',
   'terminalMode.billing.overBudget': 'usage over budget — agent may be throttled',
   'terminalMode.picker.ariaLabel': 'Pick a session to resume',
+
+  // ── Terminal Mode Commands ─────────────────────────
+  'terminalMode.cmd.new': 'New session — save current and clear context',
+  'terminalMode.cmd.clear': 'Clear context — keep session, reset tokens',
+  'terminalMode.cmd.save': 'Name the session: /save <name>',
+  'terminalMode.cmd.resume': 'List sessions — /resume <n> to load',
+  'terminalMode.cmd.mcpInstall': 'Install MCP integration from registry (e.g. /mcp-install gamma)',
+  'terminalMode.cmd.mcpBrowse': 'List available MCP integrations',
+  'terminalMode.cmd.historyClear': 'Clear prompt history (ArrowUp) for this project',
+  'terminalMode.cmd.startServer': 'Start project dev server (npm/yarn/pnpm/bun run dev)',
+  'terminalMode.cmd.stopServer': 'Stop active dev server',
+  'terminalMode.cmd.terminal': 'Open/close real terminal panel (PTY)',
+  'terminalMode.cmd.settings': 'Open settings in full screen',
+  'terminalMode.cmd.exit': 'Save and close',
 
   // ── Views ──────────────────────────────────────────
   'view.toggleProjects': 'Toggle projects sidebar',
@@ -1307,11 +1328,11 @@ const en = {
   // ── Plan Command ──────────────────────────────────
   'plan.usage': 'Usage: /plan <description of what you want to build>\n\nExample: /plan user authentication with email, Google login, and role-based access',
   'plan.notFinished': 'Plan generation did not finish — PLAN.md was not written. Run /plan again to retry.',
-  'plan.cutOff': 'Plan generation was cut off — PLAN.md is still in DRAFT. Type "Continue" to resume from the next unfilled section.',
-  'plan.notComplete': 'Plan generation did not complete — PLAN.md is on disk but has no PENDING APPROVAL marker. Type "Continue" to let the architect finish, or run /plan again to retry from scratch.',
+  'plan.cutOff': 'Plan generation was cut off — PLAN.md is still in DRAFT. Send a follow-up that indicates you want the architect to proceed.',
+  'plan.notComplete': 'Plan generation did not complete — PLAN.md is on disk but has no PENDING APPROVAL marker. Send a follow-up with your intent, or run /plan again to retry from scratch.',
   'plan.tasksNotFinished': 'Task list generation did not finish — TODO.md was not written. Approve the plan again to retry.',
-  'plan.revisionCutOff': 'Revision cut off — PLAN.md is back in DRAFT. Type "Continue" to resume.',
-  'plan.revisionNotComplete': 'Revision did not complete. Type "Continue" or describe further changes to retry.',
+  'plan.revisionCutOff': 'Revision cut off — PLAN.md is back in DRAFT. Send a follow-up that indicates whether to proceed or change the plan.',
+  'plan.revisionNotComplete': 'Revision did not complete. Send a follow-up with your intent or describe further changes.',
   'plan.executing': 'Starting plan execution...',
 
   // ── Review Command ────────────────────────────────
@@ -1533,6 +1554,17 @@ const en = {
   // ── Window Title ─────────────────────────────────
   'window.baseTitle': 'TM Code',
 
+  // ── Agent Tasks Panel ───────────────────────────
+  'tasks.label': 'Tasks',
+  'tasks.failed': 'failed',
+  'tasks.cancelled': 'cancelled',
+  'tasks.earlier': 'earlier',
+  'tasks.more': 'more',
+  'tasks.taskSingular': 'task',
+  'tasks.taskPlural': 'tasks',
+  'tasks.expand': 'Show all tasks',
+  'tasks.collapse': 'Show window',
+
 } as const
 
 const pt: Record<keyof typeof en, string> = {
@@ -1742,6 +1774,9 @@ const pt: Record<keyof typeof en, string> = {
   'settings.byokCapImages': 'Imagens',
   'settings.byokCapTools': 'Tool calling',
   'settings.byokCapThinking': 'Raciocínio',
+  'settings.byokCapBadgeVision': 'visão',
+  'settings.byokCapBadgeTools': 'ferramentas',
+  'settings.byokCapBadgeReasoning': 'raciocínio',
   'settings.deploys': 'Publicações',
   'settings.planCredits': 'Plano e Consumo',
   'settings.language': 'Idioma',
@@ -1948,7 +1983,7 @@ const pt: Record<keyof typeof en, string> = {
   'chat.compact.summary': 'Resumo',
   'chat.compact.expand': 'Mostrar resumo',
   'chat.compact.collapse': 'Ocultar resumo',
-  'chat.recoverableUpstreamError': 'O serviço retornou um erro temporário. A tua mensagem não foi processada. Envia "Continue" para retomares de onde estavas — o agente continua a partir do último passo.',
+  'chat.recoverableUpstreamError': 'O serviço retornou um erro temporário. A tua mensagem não foi processada. Envia uma mensagem indicando que queres prosseguir — o agente retoma a partir do último passo.',
   'chat.noCredits': 'Sem consumo',
   'chat.accountInactive': 'Conta inactiva — contacte o suporte',
   'chat.credits': 'Consumo',
@@ -2017,6 +2052,8 @@ const pt: Record<keyof typeof en, string> = {
   'perm.submit': 'Submeter',
   'perm.deny': 'Não',
   'perm.denyAll': 'Não para todos',
+  'perm.confirmAll': 'Sim, aprovar todos',
+  'perm.cancel': 'Cancelar',
   'perm.justify': 'Justificar',
   'perm.send': 'Enviar',
   'perm.showArgs': 'Mostrar args',
@@ -2069,6 +2106,8 @@ const pt: Record<keyof typeof en, string> = {
   'plan.hidePlan': 'Ocultar Plano',
   'plan.missing': 'Ficheiro PLAN.md em falta. Execute /plan novamente para o regenerar.',
   'plan.approveError': 'Falha ao aprovar o plano. Tente novamente.',
+  'plan.resumeCancelled': 'Plano interrompido descartado. Execute /plan novamente para iniciar um novo plano.',
+  'plan.resumeWrongProject': 'Existe um plano interrompido para outro projeto/sessão. Volte a essa sessão ou inicie um novo plano.',
   'devserver.starting': 'A iniciar servidor de desenvolvimento...',
   'devserver.title': 'Servidor de dev',
   'prompt.placeholder': 'Pergunte qualquer coisa... (/ comandos, @ ficheiros, # opções)',
@@ -2215,6 +2254,21 @@ const pt: Record<keyof typeof en, string> = {
   'terminalMode.permission.shiftEnterHint': 'shift+↵ para quebra de linha',
   'terminalMode.billing.overBudget': 'utilização fora do orçamento — o agente pode sofrer restrições',
   'terminalMode.picker.ariaLabel': 'Escolha uma sessão para retomar',
+
+  // ── Terminal Mode Commands ─────────────────────────
+  'terminalMode.cmd.new': 'Nova sessão — guarda a atual e limpa contexto',
+  'terminalMode.cmd.clear': 'Limpar contexto — mantém sessão, reseta tokens',
+  'terminalMode.cmd.save': 'Dar nome à sessão: /save <nome>',
+  'terminalMode.cmd.resume': 'Listar sessões — /resume <n> para carregar',
+  'terminalMode.cmd.mcpInstall': 'Instalar integração MCP do registo (ex: /mcp-install gamma)',
+  'terminalMode.cmd.mcpBrowse': 'Listar integrações MCP disponíveis',
+  'terminalMode.cmd.historyClear': 'Limpar histórico de prompts (ArrowUp) deste projeto',
+  'terminalMode.cmd.startServer': 'Arrancar dev server do projecto (npm/yarn/pnpm/bun run dev)',
+  'terminalMode.cmd.stopServer': 'Parar dev server activo',
+  'terminalMode.cmd.terminal': 'Abrir/fechar painel de terminal real (PTY)',
+  'terminalMode.cmd.settings': 'Abrir definições em tela cheia',
+  'terminalMode.cmd.exit': 'Guardar e fechar',
+
   'view.toggleProjects': 'Alternar barra de projetos',
   'view.newChat': 'Novo Chat',
   'view.toggleSessions': 'Alternar lista de sessões',
@@ -2827,11 +2881,11 @@ const pt: Record<keyof typeof en, string> = {
   // ── Plan Command ──────────────────────────────────
   'plan.usage': 'Uso: /plan <descrição do que pretende construir>\n\nExemplo: /plan autenticação com email, Google login e controlo de acessos',
   'plan.notFinished': 'A geração do plano não terminou — o PLAN.md não foi escrito. Execute /plan novamente.',
-  'plan.cutOff': 'A geração do plano foi interrompida — o PLAN.md está em RASCUNHO. Escreva "Continue" para retomar.',
-  'plan.notComplete': 'A geração do plano não ficou completa — o PLAN.md está no disco mas sem marcador de APROVAÇÃO PENDENTE. Escreva "Continue" ou execute /plan novamente.',
+  'plan.cutOff': 'A geração do plano foi interrompida — o PLAN.md está em RASCUNHO. Envie uma mensagem indicando que pretende prosseguir com o arquiteto.',
+  'plan.notComplete': 'A geração do plano não ficou completa — o PLAN.md está no disco mas sem marcador de APROVAÇÃO PENDENTE. Envie a sua intenção ou execute /plan novamente.',
   'plan.tasksNotFinished': 'A geração de tarefas não terminou — o TODO.md não foi escrito. Aprove o plano novamente.',
-  'plan.revisionCutOff': 'Revisão interrompida — o PLAN.md voltou a RASCUNHO. Escreva "Continue" para retomar.',
-  'plan.revisionNotComplete': 'A revisão não ficou completa. Escreva "Continue" ou descreva mais alterações.',
+  'plan.revisionCutOff': 'Revisão interrompida — o PLAN.md voltou a RASCUNHO. Envie uma mensagem indicando se pretende prosseguir ou alterar o plano.',
+  'plan.revisionNotComplete': 'A revisão não ficou completa. Envie a sua intenção ou descreva mais alterações.',
   'plan.executing': 'A iniciar execução do plano...',
 
   // ── Review Command ────────────────────────────────
@@ -3052,6 +3106,17 @@ const pt: Record<keyof typeof en, string> = {
 
   // ── Window Title ─────────────────────────────────
   'window.baseTitle': 'TM Code',
+
+  // ── Agent Tasks Panel ───────────────────────────
+  'tasks.label': 'Tarefas',
+  'tasks.failed': 'falhadas',
+  'tasks.cancelled': 'canceladas',
+  'tasks.earlier': 'anteriores',
+  'tasks.more': 'mais',
+  'tasks.taskSingular': 'tarefa',
+  'tasks.taskPlural': 'tarefas',
+  'tasks.expand': 'Mostrar todas',
+  'tasks.collapse': 'Mostrar janela',
 }
 
 export type TranslationKey = keyof typeof en

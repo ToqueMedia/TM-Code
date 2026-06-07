@@ -644,9 +644,9 @@ function ActiveHeroCard(props: {
 
         {/* Capability badges */}
         <HStack gap="3px" wrap="wrap">
-          {model.capabilities.images && <HeroCapBadge icon={<FiEye size={10} />} label="vision" />}
-          {model.capabilities.tools && <HeroCapBadge icon={<FiTool size={10} />} label="tools" />}
-          {model.supportsThinking && <HeroCapBadge icon={<FiCpu size={10} />} label="reasoning" />}
+          {model.capabilities.images && <HeroCapBadge icon={<FiEye size={10} />} label={t('settings.byokCapBadgeVision')} />}
+          {model.capabilities.tools && <HeroCapBadge icon={<FiTool size={10} />} label={t('settings.byokCapBadgeTools')} />}
+          {model.supportsThinking && <HeroCapBadge icon={<FiCpu size={10} />} label={t('settings.byokCapBadgeReasoning')} />}
         </HStack>
 
         {/* Cost stripe */}

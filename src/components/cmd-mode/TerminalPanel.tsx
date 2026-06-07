@@ -20,9 +20,9 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { tokens } from '@/theme/tokens'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
-import TerminalService from '../../services/terminalService'
 import { logger } from '../../utils/logger'
 import { TerminalAutocomplete } from './TerminalAutocomplete'
+import { useTerminalAutocomplete } from './useTerminalAutocomplete'
 
 interface TerminalPanelProps {
   projectPath: string
@@ -38,6 +38,13 @@ interface PtyOutputEvent {
 interface PtyExitEvent {
   session_id: string
   exit_code: number
+}
+
+interface InteractiveShellInfo {
+  kind: string
+  commandStyle: string
+  platform: string
+  warning?: string | null
 }
 
 const TAB_BAR_HEIGHT_PX = 36
@@ -201,61 +208,16 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
   const fitRef = useRef<FitAddon | null>(null)
   const removeTerminal = useTerminalPanelStore(s => s.removeTerminal)
 
-  // Autocomplete state
-  const [completions, setCompletions] = useState<string[]>([])
-  const [selectedIdx, setSelectedIdx] = useState(0)
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
-  const completionsRef = useRef<string[]>([])
-  const selectedIdxRef = useRef(0)
-  const wordRef = useRef('')
-  const completionSeq = useRef(0)
-
-  // Keep refs in sync with state for use in onData callback
-  useEffect(() => { completionsRef.current = completions }, [completions])
-  useEffect(() => { selectedIdxRef.current = selectedIdx }, [selectedIdx])
-
-  const getCurrentWord = useCallback((term: Terminal): string => {
-    const buffer = term.buffer.active
-    const absRow = buffer.baseY + buffer.cursorY
-    const line = buffer.getLine(absRow)
-    if (!line) return ''
-    const text = line.translateToString(true)
-    const col = buffer.cursorX
-    const before = text.slice(0, col)
-    const lastSpace = before.lastIndexOf(' ')
-    return before.slice(lastSpace + 1)
-  }, [])
-
-  const getMenuPosition = useCallback((term: Terminal): { top: number; left: number } => {
-    const el = term.element
-    if (!el) return { top: 0, left: 0 }
-    const cellW = el.clientWidth / term.cols
-    const cellH = el.clientHeight / term.rows
-    const buffer = term.buffer.active
-    return {
-      top: (buffer.cursorY + 1) * cellH + 4,
-      left: buffer.cursorX * cellW,
-    }
-  }, [])
-
-  const closeMenu = useCallback(() => {
-    completionSeq.current++
-    setCompletions([])
-    setSelectedIdx(0)
-    setMenuPos(null)
-    completionsRef.current = []
-    selectedIdxRef.current = 0
-  }, [])
-
-  const applyCompletion = useCallback((term: Terminal, sid: string, completion: string, word: string) => {
-    closeMenu()
-    const backspaces = '\x7f'.repeat(word.length)
-    const separator = completion.endsWith('/') ? '' : ' '
-    invoke('write_to_pty', { sessionId: sid, data: backspaces + completion + separator }).catch((err) => {
-      logger.warn('terminal-panel', 'applyCompletion write_to_pty failed:', err)
-    })
-    term.focus()
-  }, [closeMenu])
+  const {
+    completions,
+    selectedIndex,
+    menuPosition,
+    isLoading,
+    handleTab,
+    handleKeyDown,
+    selectCompletion,
+    closeMenu,
+  } = useTerminalAutocomplete({ sessionId, projectPath })
 
   // Boot xterm + PTY
   useEffect(() => {
@@ -315,60 +277,13 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
 
     // Frontend → PTY: forward keystrokes with autocomplete interception
     const onDataDisposable = term.onData((data: string) => {
-      const hasMenu = completionsRef.current.length > 0
-
       if (data === '\t') {
-        if (hasMenu) {
-          const selected = completionsRef.current[selectedIdxRef.current]
-          if (selected) applyCompletion(term, sessionId, selected, wordRef.current)
-          return
-        }
-        const word = getCurrentWord(term)
-        if (!word) {
-          invoke('write_to_pty', { sessionId, data: '\t' }).catch(() => {})
-          return
-        }
-        wordRef.current = word
-        const seq = ++completionSeq.current
-        TerminalService.shared.getCompletions(word, projectPath).then((results) => {
-          if (completionSeq.current !== seq) return
-          if (!results || results.length === 0) {
-            invoke('write_to_pty', { sessionId, data: '\t' }).catch(() => {})
-            return
-          }
-          if (results.length === 1) {
-            applyCompletion(term, sessionId, results[0], word)
-            return
-          }
-          setCompletions(results)
-          setSelectedIdx(0)
-          setMenuPos(getMenuPosition(term))
-        }).catch(() => {
-          if (completionSeq.current !== seq) return
-          invoke('write_to_pty', { sessionId, data: '\t' }).catch(() => {})
-        })
+        handleTab(term)
         return
       }
 
-      if (hasMenu) {
-        if (data === '\x1b[B') {
-          setSelectedIdx((prev) => (prev + 1) % completionsRef.current.length)
-          return
-        }
-        if (data === '\x1b[A') {
-          setSelectedIdx((prev) => (prev - 1 + completionsRef.current.length) % completionsRef.current.length)
-          return
-        }
-        if (data === '\r' || data === '\n') {
-          const sel = completionsRef.current[selectedIdxRef.current]
-          if (sel) applyCompletion(term, sessionId, sel, wordRef.current)
-          return
-        }
-        if (data === '\x1b') {
-          closeMenu()
-          return
-        }
-        closeMenu()
+      if (handleKeyDown(term, data)) {
+        return
       }
 
       invoke('write_to_pty', { sessionId, data }).catch((err) => {
@@ -386,7 +301,7 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       if (disposed) return
       if (event.payload.session_id !== sessionId) return
       term.write(event.payload.data)
-      if (completionsRef.current.length > 0) closeMenu()
+      if (completions.length > 0) closeMenu()
     }).then((fn) => {
       if (disposed) fn()
       else unlistenOutput = fn
@@ -444,7 +359,13 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
     .catch((err) => {
       if (disposed) return
       logger.error('terminal-panel', 'start_pty_shell failed:', err)
-      term.writeln('\x1b[31mFailed to start shell. See logs.\x1b[0m')
+      term.writeln('\x1b[31mFailed to start shell. Removing terminal...\x1b[0m')
+      // Remove the failed terminal instance from the store to prevent zombie tabs
+      setTimeout(() => {
+        if (!disposed) {
+          removeTerminal(sessionId)
+        }
+      }, 2000)
     })
     .finally(() => {
       // Clean up the promise reference after a short delay to ensure any synchronous unmount/remount
@@ -499,14 +420,15 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
 
   return (
     <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative">
-      {completions.length > 0 && menuPos && (
+      {(completions.length > 0 || isLoading) && menuPosition && (
         <TerminalAutocomplete
           completions={completions}
-          selectedIndex={selectedIdx}
-          position={menuPos}
+          selectedIndex={selectedIndex}
+          position={menuPosition}
+          isLoading={isLoading}
           onSelect={(item) => {
             if (termRef.current) {
-              applyCompletion(termRef.current, sessionId, item, wordRef.current)
+              selectCompletion(termRef.current, item)
             }
           }}
         />
@@ -531,7 +453,20 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
   // Inline rename state
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [shellInfo, setShellInfo] = useState<InteractiveShellInfo | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    invoke<InteractiveShellInfo>('get_interactive_shell_info')
+      .then(info => {
+        if (!cancelled) setShellInfo(info)
+      })
+      .catch(err => {
+        logger.warn('terminal-panel', 'get_interactive_shell_info failed:', err)
+      })
+    return () => { cancelled = true }
+  }, [])
 
   const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string, tabName: string) => {
     e.preventDefault()
@@ -565,6 +500,47 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
     setRenameValue('')
   }, [])
 
+  // Keyboard shortcuts for terminal management
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isCtrl = e.ctrlKey || e.metaKey
+
+      // Ctrl+T: Add new terminal
+      if (isCtrl && e.key === 't') {
+        e.preventDefault()
+        if (instances.length < 5) {
+          addTerminal()
+        }
+        return
+      }
+
+      // Ctrl+W: Close active terminal
+      if (isCtrl && e.key === 'w') {
+        e.preventDefault()
+        if (activeInstanceId) {
+          removeTerminal(activeInstanceId)
+        }
+        return
+      }
+
+      // Ctrl+Tab / Ctrl+Shift+Tab: Navigate terminals
+      if (isCtrl && e.key === 'Tab' && instances.length > 1) {
+        e.preventDefault()
+        const currentIndex = instances.findIndex(i => i.id === activeInstanceId)
+        if (currentIndex === -1) return
+
+        const nextIndex = e.shiftKey
+          ? (currentIndex - 1 + instances.length) % instances.length
+          : (currentIndex + 1) % instances.length
+
+        setActiveTerminal(instances[nextIndex].id)
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [instances, activeInstanceId, addTerminal, removeTerminal, setActiveTerminal])
+
   return (
     <Flex
       direction="column"
@@ -593,7 +569,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
                   size="xs"
                   data-tauri-drag-region={false}
                   value={renameValue}
-                  onChange={(e) => setRenameValue(e.target.value)}
+                  onChange={(e) => setRenameValue(e.target.value.slice(0, 32))}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleRenameCommit()
                     if (e.key === 'Escape') handleRenameCancel()
@@ -607,6 +583,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
                   fontSize="12px"
                   h="24px"
                   px={2}
+                  maxLength={32}
                   _focus={{ outline: 'none' }}
                   autoFocus
                 />
@@ -629,8 +606,8 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
               as="button"
               onClick={addTerminal}
               aria-label="Add terminal"
-              title="Add terminal (max 5)"
-              p="4px"
+              title={`Add terminal (Ctrl+T) · ${instances.length}/5`}
+              px="6px"
               ml={1}
               borderRadius="4px"
               color={tokens.colors.text.disabled}
@@ -638,13 +615,38 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
               display="flex"
               alignItems="center"
               justifyContent="center"
+              gap="4px"
               transition="color 0.15s ease, background 0.15s ease"
               flexShrink={0}
             >
               <FiPlus size={13} />
+              <Text
+                fontSize="10px"
+                fontFamily={tokens.fontFamily.mono}
+                color="inherit"
+                userSelect="none"
+              >
+                {instances.length}/5
+              </Text>
             </Box>
           )}
         </HStack>
+        {shellInfo && (
+          <Flex
+            align="center"
+            h="100%"
+            px={2}
+            flexShrink={0}
+            title={shellInfo.warning || `${shellInfo.platform} · ${shellInfo.commandStyle}`}
+            color={shellInfo.warning ? tokens.colors.accent.orange : tokens.colors.text.disabled}
+            fontFamily={tokens.fontFamily.mono}
+            fontSize="10px"
+            borderLeft="1px solid rgba(255,255,255,0.05)"
+            data-tauri-drag-region={false}
+          >
+            {shellInfo.kind}
+          </Flex>
+        )}
       </Flex>
 
       {/* Context menu */}

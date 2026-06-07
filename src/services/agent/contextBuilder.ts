@@ -53,6 +53,7 @@ import {
   sharedIdentity,
   sharedMcpBlock,
   sharedOutputEfficiency,
+  sharedTerminalAgentLoop,
   sharedToneAndStyle,
   sharedUiBaseline,
 } from './contextBuilder/sections/sharedSections'
@@ -100,6 +101,8 @@ import {
   getCmdLanguageReinforcementSection,
   getCmdMemorySection,
   getCmdMemoryToolsGuidanceSection,
+  getCmdTmsContentSection,
+  getCmdTmsGuidanceSection,
   getCmdReminderSection,
   getCmdSessionMemorySection,
   getCmdRoleSection,
@@ -436,6 +439,9 @@ class ContextBuilder {
         id: t.id,
         description: t.description,
         status: t.status,
+        dependsOn: t.dependsOn ?? [],
+        blockedBy: t.blockedBy ?? [],
+        files: t.files ?? [],
       }))
     } catch { /* non-critical */ }
 
@@ -507,6 +513,7 @@ class ContextBuilder {
       getSystemSection(),
       getDoingTasksSection(ctx),
       getExecutingActionsSection(),
+      sharedTerminalAgentLoop('chat'),
       getClosedLoopSection(),
       getToolsSection(ctx),
       getConstraintsSection(ctx),
@@ -633,9 +640,10 @@ class ContextBuilder {
     const normalizedHome = homeDir ? homeDir.replace(/\\/g, '/') : null
 
     // Parallel gather — language + memory files + session memory + memdir indexes
-    const [langInstruction, globalTmsContent, claudeMdContent, sessionMemory, userMemIdx, projectMemIdx] = await Promise.all([
+    const [langInstruction, globalTmsContent, tmsContent, claudeMdContent, sessionMemory, userMemIdx, projectMemIdx] = await Promise.all([
       getLangInstruction(),
       normalizedHome ? safeReadFile(`${normalizedHome}/.toquemedia-studio/TMS.md`) : Promise.resolve(null),
+      safeReadFile(`${normalizedCwd}/TMS.md`),
       safeReadFile(`${normalizedCwd}/CLAUDE.md`),
       (async () => {
         try {
@@ -657,6 +665,7 @@ class ContextBuilder {
       homeDir,
       normalizedHome,
       globalTmsContent,
+      tmsContent,
       claudeMdContent,
       sessionMemory,
       userMemoryIndex: userMemIdx.content,
@@ -694,9 +703,10 @@ class ContextBuilder {
       getCmdRoleSection(ctx),
       sharedIdentity(),
       getCmdSystemSection(),
-      getCmdClosedLoopSection(),
       getCmdDoingTasksSection(),
       getCmdExecutingActionsSection(),
+      sharedTerminalAgentLoop('cmd'),
+      getCmdClosedLoopSection(),
       getCmdToolsSection(),
       getCmdSessionGuidanceSection(),
       getCmdSecuritySection(),
@@ -733,6 +743,19 @@ class ContextBuilder {
         '~/.toquemedia-studio/TMS.md is user-editable'),
       dynamicSection('claude_md', () => getCmdClaudeMdSection(ctx),
         'CLAUDE.md is per-project and edited by the user'),
+      // TMS.md content — injects the actual project memory into the prompt.
+      // Chat mode has getProjectMemorySection for this; CMD mode was missing
+      // it, so the agent could see guidance to create TMS.md but never read
+      // the existing content. Placed before guidance so the agent reads
+      // existing content first, then gets the create/update directive.
+      dynamicSection('tms_content', () => getCmdTmsContentSection(ctx),
+        'TMS.md content changes as the agent updates it'),
+      // TMS.md guidance — instructs the agent to create or maintain the
+      // project-level persistent memory file. Placed after CLAUDE.md so
+      // the agent reads project instructions first, then gets the TMS.md
+      // creation/maintenance directive. Same ordering as chat mode.
+      dynamicSection('tms_guidance', () => getCmdTmsGuidanceSection(ctx),
+        'TMS.md existence is a per-session check (file may be created mid-session)'),
       // Persistent memory — user-scope + project-scope MEMORY.md indexes.
       // Placed after CLAUDE.md so the model reads project instructions first,
       // then cross-session memory facts. Same ordering as chat mode.

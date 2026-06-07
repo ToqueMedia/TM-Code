@@ -13,7 +13,15 @@ export function registerTaskTools(ctx: ToolRegistrationContext): void {
   ctx.tools.set('update_tasks', {
     definition: {
       name: 'update_tasks',
-      description: 'Update the task tracker. Call after completing a unit of work (test pass, endpoint wired, etc.). The task list is persisted and survives compaction — always mark a task completed immediately when the work is verified (not just when the files exist). Task statuses: pending | in_progress | completed.',
+      description: `Update the task tracker. Call after completing a unit of work (test pass, endpoint wired, etc.). The task list is persisted and survives compaction — always mark a task completed immediately when the work is verified (not just when the files exist).
+
+Task statuses: pending | in_progress | completed | failed | cancelled.
+- Use "failed" when a task cannot be completed (dependency missing, API down, permission denied) — include the reason in the description.
+- Use "cancelled" when the developer or agent explicitly skips a task.
+
+Patch semantics: each entry in the tasks array is MERGED with the existing task by ID. To update only a status, send { id, status } — description is optional for existing tasks. New IDs (not in the current tracker) are appended. This prevents accidental task loss when the full list is not re-sent.
+
+Batch-completion rule: marking more than 2 tasks as completed in a single call reverts them to in_progress. Complete tasks one at a time with verification evidence (test output, endpoint response, etc.).`,
       input_schema: {
         type: 'object',
         properties: {
@@ -23,15 +31,15 @@ export function registerTaskTools(ctx: ToolRegistrationContext): void {
               type: 'object',
               properties: {
                 id: { type: 'string', description: 'Unique task ID' },
-                description: { type: 'string', description: 'What needs to be done (for the developer)' },
-                status: { type: 'string', enum: ['pending', 'in_progress', 'completed'], description: 'Current status' },
+                description: { type: 'string', description: 'What needs to be done (for the developer). Required for NEW tasks; optional when updating an existing task by ID.' },
+                status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'failed', 'cancelled'], description: 'Current status' },
                 dependsOn: { type: 'array', items: { type: 'string' }, description: 'IDs of tasks that must complete first' },
                 blockedBy: { type: 'array', items: { type: 'string' }, description: 'IDs of blocking tasks' },
                 files: { type: 'array', items: { type: 'string' }, description: 'Files involved in this task' },
               },
-              required: ['id', 'description', 'status'],
+              required: ['id', 'status'],
             },
-            description: 'The complete task list (replaces the previous one)',
+            description: 'Task updates — merged by ID with the existing tracker. New IDs are appended.',
           },
         },
         required: ['tasks'],
@@ -49,15 +57,48 @@ export function registerTaskTools(ctx: ToolRegistrationContext): void {
       const prev = useAgentStore.getState().tasks
       const prevCompletedIds = new Set(prev.filter(t => t.status === 'completed').map(t => t.id))
 
-      const tasks = (input.tasks as Array<{ id: string; description: string; status: string; dependsOn?: string[]; blockedBy?: string[]; files?: string[] }>)
-        .map(t => ({
-          id: t.id,
-          description: t.description,
-          status: t.status as 'pending' | 'in_progress' | 'completed',
-          dependsOn: t.dependsOn ?? [],
-          blockedBy: t.blockedBy ?? [],
-          files: t.files ?? [],
-        }))
+      type IncomingTask = { id: string; description?: string; status: string; dependsOn?: string[]; blockedBy?: string[]; files?: string[] }
+      const incoming = input.tasks as IncomingTask[]
+
+      // Patch-merge: start from the existing tracker, apply updates by ID,
+      // append new tasks. This prevents accidental deletion when the model
+      // sends a partial list (e.g. after context compression).
+      const merged = [...prev]
+      const newTasks: Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' }> = []
+
+      for (const t of incoming) {
+        const status = t.status as 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
+        const existingIdx = merged.findIndex(m => m.id === t.id)
+        if (existingIdx !== -1) {
+          // Patch existing task — description/dependsOn/blockedBy/files
+          // are optional on update. Spread the incoming fields so they
+          // replace (not merge) the existing arrays — an empty array
+          // means "no dependencies", undefined means "keep existing".
+          merged[existingIdx] = {
+            ...merged[existingIdx],
+            ...(t.description !== undefined ? { description: t.description } : {}),
+            ...(t.dependsOn !== undefined ? { dependsOn: t.dependsOn } : {}),
+            ...(t.blockedBy !== undefined ? { blockedBy: t.blockedBy } : {}),
+            ...(t.files !== undefined ? { files: t.files } : {}),
+            status,
+          }
+        } else {
+          // New task — description is required for seeding
+          if (!t.description) {
+            return `Error: task "${t.id}" is new but has no description. Provide a description for new tasks.`
+          }
+          newTasks.push({
+            id: t.id,
+            description: t.description,
+            status,
+            ...(t.dependsOn ? { dependsOn: t.dependsOn } : {}),
+            ...(t.blockedBy ? { blockedBy: t.blockedBy } : {}),
+            ...(t.files ? { files: t.files } : {}),
+          })
+        }
+      }
+
+      const tasks = [...merged, ...newTasks]
 
       useAgentStore.getState().setTasks(tasks)
 
@@ -82,11 +123,28 @@ export function registerTaskTools(ctx: ToolRegistrationContext): void {
         .filter(t => t.status === 'completed' && !prevCompletedIds.has(t.id))
         .map(t => t.id)
 
-      // Batch-completion guard — soft warning, not a block.
+      // Batch-completion guard — HARD enforcement. When >2 tasks are flipped
+      // to completed in one call (and it's not the initial seed), revert
+      // them to in_progress and require one-at-a-time verification.
+      // This prevents the 2026-05-19 failure mode (batch-completing 12→23
+      // in two calls because files existed on disk).
       const wasSeed = prev.length === 0
       const jumpSize = newlyCompletedIds.length
-      if (!wasSeed && jumpSize > 1) {
-        return `Task list updated: ${completed}/${tasks.length} completed.\n\nNote: ${jumpSize} tasks completed at once (IDs: ${newlyCompletedIds.join(', ')}). Continue with your next action.`
+      const BATCH_LIMIT = 2
+      if (!wasSeed && jumpSize > BATCH_LIMIT) {
+        // Revert the batch-completed tasks back to in_progress
+        const revertedIds = new Set(newlyCompletedIds)
+        const reverted = tasks.map(t =>
+          revertedIds.has(t.id) ? { ...t, status: 'in_progress' as const } : t
+        )
+        useAgentStore.getState().setTasks(reverted)
+        // Persist the reverted state
+        if (project?.path) {
+          void import('../taskPersistence').then(({ saveTasksToDisk }) =>
+            saveTasksToDisk(project.path, reverted),
+          ).catch(() => { /* non-critical */ })
+        }
+        return `BLOCKED: ${jumpSize} tasks were marked completed at once (IDs: ${newlyCompletedIds.join(', ')}). Batch completion is not allowed — complete tasks ONE AT A TIME with verification evidence (test output, endpoint response, etc.). The affected tasks have been reverted to in_progress. Pick the first one and verify it individually.`
       }
 
       return `Task list updated: ${completed}/${tasks.length} completed.`

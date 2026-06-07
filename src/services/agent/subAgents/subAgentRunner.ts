@@ -1,15 +1,26 @@
 /**
- * Sub-agent runner — creates a lightweight AgentService instance and runs
+ * Sub-agent runner — creates a lightweight QueryEngine instance and runs
  * the agent loop in background. Publishes events to subAgentStore (NOT chatStore).
  *
- * v0.7.0 — replaces the inline fire-and-forget pattern in spawn_background_agent.
+ * v0.8.0 — migrated from AgentService.createLightweight + runAgentLoop to
+ * QueryEngine + OpenAI SDK native streaming (claude-vaz parity).
+ *
+ * Features preserved:
+ *   - Wall-clock timeout (definition.maxWallClockMs)
+ *   - Stale detection (60s without tool call)
+ *   - OS notifications on completion/timeout/error
+ *   - Main agent wake on sub-agent completion
  */
 
+import type OpenAI from 'openai'
+import FirebaseAuthService from '../../auth/firebaseAuth'
+import { createSubAgentClient } from '../sdkClient'
+import { QueryEngine } from '../queryEngine'
+import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from '../query'
+import ToolExecutor from '../toolExecutor'
 import { useSubAgentStore } from '../../../stores/subAgentStore'
 import { maybeWakeMainAgent } from './autoWake'
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
-import type { AgentCallbacks } from '../agentService'
-import type { OpenAIToolDefinition } from '../toolExecutor'
 
 /** Options passed to the sub-agent factory. */
 export interface SubAgentRunOptions {
@@ -19,7 +30,7 @@ export interface SubAgentRunOptions {
   parentMessageId: string | undefined
   parentCtx: SubAgentParentContext
   /** Tool definitions filtered to only the sub-agent's allowed tools. */
-  filteredTools: OpenAIToolDefinition[]
+  filteredTools: import('../toolExecutor').OpenAIToolDefinition[]
 }
 
 /**
@@ -41,95 +52,219 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   // Fetch fresh state — startRun mutated the store, so the old snapshot is stale.
   const abortController = useSubAgentStore.getState().runs.get(runId)!.abortController
 
-  // Dynamically import to avoid circular deps
-  const agentModule = await import('../agentService')
-  const AgentService = agentModule.default
+  // ── Auth + SDK client ──
+  const authToken = await FirebaseAuthService.getInstance().getIdToken()
+  if (!authToken) {
+    useSubAgentStore.getState().errorRun(runId, 'Authentication expired')
+    return runId
+  }
+  const client = createSubAgentClient(authToken)
 
-  // Create a fresh AgentService instance (not the singleton)
-  // readOnly=true ensures no diff approval prompts from sub-agents.
-  const subAgent = AgentService.createLightweight({
-    tools: filteredTools,
-    readOnly: true,
-    abortController,
+  // ── Build tool definitions in OpenAI format ──
+  const openaiTools: OpenAI.ChatCompletionTool[] = filteredTools.map(t => ({
+    type: 'function' as const,
+    function: {
+      name: t.function.name,
+      description: t.function.description,
+      parameters: t.function.parameters as Record<string, unknown>,
+    },
+  }))
+
+  // ── Tool executor bridge ──
+  const toolExecutor = ToolExecutor.getInstance()
+
+  const executeTool: ToolExecutorFn = async (toolName, toolInput, toolUseId, signal) => {
+    try {
+      const raw = await toolExecutor.execute(
+        toolName,
+        toolInput,
+        toolUseId,
+        signal ?? undefined,
+        definition.agentType, // memory scope for sub-agent isolation
+      )
+      return { content: raw, isError: false }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err)
+      return { content: `Error: ${errorMsg}`, isError: true }
+    }
+  }
+
+  // ── Build system prompt ──
+  const systemPrompt = definition.getSystemPrompt(parentCtx)
+
+  // ── Create QueryEngine ──
+  const engine = new QueryEngine({
+    client,
+    model: 'mimo-v2.5-pro-1m',
+    systemPrompt,
+    tools: openaiTools,
+    executeTool,
+    maxTurns: definition.maxTurns,
   })
 
-  // Set agent type for memory isolation — memory tools will scope
-  // writes to <project>/.toquemedia/memory/<agentType>/ instead of
-  // the shared project memdir.
-  subAgent.setAgentType(definition.agentType)
-
-  // Build the sub-agent's system prompt
-  const systemPrompt = definition.getSystemPrompt(parentCtx)
-  subAgent.setSystemPrompt(systemPrompt)
+  // ── Timers ──
 
   // Wall-clock timeout — fires the AbortController to kill the loop
   const wallClockTimer = setTimeout(() => {
     const run = useSubAgentStore.getState().runs.get(runId)
     if (run && run.status === 'running') {
       useSubAgentStore.getState().timeoutRun(runId, run.finalText || '')
-      run.abortController.abort()
+      engine.cancel()
+      abortController.abort()
+      import('@/services/notificationService').then(({ notify }) => {
+        notify({
+          title: `⏰ ${definition.agentType} task timed out`,
+          body: `"${description}" exceeded the time limit`,
+          evenWhenFocused: true,
+          dedupKey: `subagent-timeout-${runId}`,
+        })
+      })
       maybeWakeMainAgent()
     }
   }, definition.maxWallClockMs)
 
-  // Track accumulated text + tokens
+  // Stale detection — abort if no tool call for 60s (likely stuck in model loop)
+  const STALE_TIMEOUT_MS = 60_000
+  let lastActivityAt = Date.now()
+  const staleTimer = setInterval(() => {
+    const elapsed = Date.now() - lastActivityAt
+    if (elapsed > STALE_TIMEOUT_MS) {
+      const run = useSubAgentStore.getState().runs.get(runId)
+      if (run && run.status === 'running') {
+        useSubAgentStore.getState().timeoutRun(runId, run.finalText || '')
+        engine.cancel()
+        abortController.abort()
+        import('@/services/notificationService').then(({ notify }) => {
+          notify({
+            title: `⏰ ${definition.agentType} task stalled`,
+            body: `"${description}" made no tool call for ${Math.round(elapsed / 1000)}s`,
+            evenWhenFocused: true,
+            dedupKey: `subagent-stale-${runId}`,
+          })
+        })
+        maybeWakeMainAgent()
+      }
+      clearInterval(staleTimer)
+    }
+  }, 10_000)
+
+  // ── Track accumulated text + tokens ──
   let resultText = ''
   let inputTokens = 0
   let outputTokens = 0
 
-  // Fire and forget — the main agent continues immediately
-  subAgent.runAgentLoop(prompt, [], {
-    onTextDelta: (delta) => {
-      resultText += delta
-    },
-    onReasoningDelta: () => {
-      // Sub-agent reasoning is NOT surfaced to the parent or user.
-      // It lives in the sub-agent's context only.
-    },
-    onToolCallPending: (childId, toolName) => {
-      useSubAgentStore.getState().addToolCall(runId, {
-        callId: childId,
-        toolName,
-        argPreview: '',
-        status: 'running',
-      })
-    },
-    onToolCallStart: (childId, _toolName, args) => {
-      // Update arg preview
-      const preview = JSON.stringify(args).slice(0, 80)
-      useSubAgentStore.getState().updateToolCall(runId, childId, { argPreview: preview })
-    },
-    onToolResult: (childId, _toolName, result, isError) => {
-      useSubAgentStore.getState().updateToolCall(runId, childId, {
-        status: isError ? 'errored' : 'completed',
-        resultPreview: typeof result === 'string' ? result.slice(0, 80) : undefined,
-      })
-    },
-    onTurnComplete: () => {},
-    onDone: (finalText) => {
+  // ── Fire and forget — iterate the query engine ──
+  void (async () => {
+    try {
+      const generator = engine.submitMessage(prompt, [])
+
+      let result = await generator.next()
+      while (!result.done) {
+        const event = result.value as QueryStreamEvent
+
+        switch (event.type) {
+          case 'text_delta':
+            lastActivityAt = Date.now()
+            resultText += event.text
+            break
+
+          case 'thinking_delta':
+            lastActivityAt = Date.now()
+            break
+
+          case 'tool_use_start':
+            lastActivityAt = Date.now()
+            useSubAgentStore.getState().addToolCall(runId, {
+              callId: event.id,
+              toolName: event.name,
+              argPreview: '',
+              status: 'running',
+            })
+            break
+
+          case 'tool_use_stop':
+            break
+
+          case 'tool_result':
+            useSubAgentStore.getState().updateToolCall(runId, event.toolUseId, {
+              status: event.isError ? 'errored' : 'completed',
+              resultPreview: typeof event.content === 'string' ? event.content.slice(0, 80) : undefined,
+            })
+            break
+
+          case 'message_stop':
+            if (event.usage) {
+              inputTokens += event.usage.prompt_tokens
+              outputTokens += event.usage.completion_tokens
+            }
+            break
+
+          case 'error':
+            // Error events are handled by the terminal result
+            break
+
+          case 'interrupted':
+            break
+
+          default:
+            break
+        }
+
+        result = await generator.next()
+      }
+
+      // Terminal
       clearTimeout(wallClockTimer)
-      if (finalText && !resultText) resultText = finalText
-      useSubAgentStore.getState().finalizeRun(runId, resultText || 'No results found.', {
+      clearInterval(staleTimer)
+
+      const terminal = result.value as QueryTerminal
+
+      if (terminal.reason === 'error') {
+        const msg = resultText || 'Model stream failed'
+        useSubAgentStore.getState().errorRun(runId, msg)
+        import('@/services/notificationService').then(({ notify }) => {
+          notify({
+            title: `❌ ${definition.agentType} task failed`,
+            body: `"${description}": ${msg.slice(0, 100)}`,
+            evenWhenFocused: true,
+            dedupKey: `subagent-error-${runId}`,
+          })
+        })
+        maybeWakeMainAgent()
+        return
+      }
+
+      if (!resultText) resultText = 'No results found.'
+      useSubAgentStore.getState().finalizeRun(runId, resultText, {
         input: inputTokens,
         output: outputTokens,
       })
+
+      import('@/services/notificationService').then(({ notify }) => {
+        notify({
+          title: `✅ ${definition.agentType} task completed`,
+          body: `"${description}" finished successfully`,
+          dedupKey: `subagent-done-${runId}`,
+        })
+      })
       maybeWakeMainAgent()
-    },
-    onError: (error) => {
+    } catch (err) {
       clearTimeout(wallClockTimer)
-      useSubAgentStore.getState().errorRun(runId, error.message)
+      clearInterval(staleTimer)
+      const msg = err instanceof Error ? err.message : String(err)
+      useSubAgentStore.getState().errorRun(runId, msg)
+
+      import('@/services/notificationService').then(({ notify }) => {
+        notify({
+          title: `❌ ${definition.agentType} task failed`,
+          body: `"${description}": ${msg.slice(0, 100)}`,
+          evenWhenFocused: true,
+          dedupKey: `subagent-error-${runId}`,
+        })
+      })
       maybeWakeMainAgent()
-    },
-    onUsageUpdate: (inp, out) => {
-      inputTokens += inp
-      outputTokens += out
-    },
-  } satisfies AgentCallbacks).catch((err) => {
-    clearTimeout(wallClockTimer)
-    const msg = err instanceof Error ? err.message : String(err)
-    useSubAgentStore.getState().errorRun(runId, msg)
-    maybeWakeMainAgent()
-  })
+    }
+  })()
 
   return runId
 }

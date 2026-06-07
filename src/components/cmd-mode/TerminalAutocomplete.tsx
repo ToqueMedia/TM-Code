@@ -6,6 +6,7 @@ interface TerminalAutocompleteProps {
   completions: string[]
   selectedIndex: number
   position: { top: number; left: number }
+  isLoading?: boolean
   onSelect: (item: string) => void
 }
 
@@ -13,6 +14,7 @@ export const TerminalAutocomplete = memo(function TerminalAutocomplete({
   completions,
   selectedIndex,
   position,
+  isLoading = false,
   onSelect,
 }: TerminalAutocompleteProps) {
   const menuRef = useRef<HTMLDivElement>(null)
@@ -63,12 +65,20 @@ export const TerminalAutocomplete = memo(function TerminalAutocomplete({
         top={0}
         zIndex={1}
       >
-        <Text fontSize="9px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} letterSpacing="0.08em" textTransform="uppercase">
-          {completions.length} completions
-        </Text>
-        <Text fontSize="9px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} letterSpacing="0.06em">
-          tab confirm · esc close
-        </Text>
+        {isLoading ? (
+          <Text fontSize="9px" color={tokens.colors.accent.primary} fontFamily={tokens.fontFamily.mono} letterSpacing="0.08em" textTransform="uppercase">
+            Searching...
+          </Text>
+        ) : (
+          <>
+            <Text fontSize="9px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} letterSpacing="0.08em" textTransform="uppercase">
+              {completions.length} completions
+            </Text>
+            <Text fontSize="9px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} letterSpacing="0.06em">
+              tab confirm · esc close
+            </Text>
+          </>
+        )}
       </Flex>
 
       {/* Items */}

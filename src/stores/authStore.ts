@@ -32,6 +32,41 @@ interface AuthActions {
   clear: () => void
 }
 
+const AUTH_BROADCAST_CHANNEL = 'tmcode-auth-sync'
+const AUTH_STORAGE_SYNC_KEY = 'tmcode-auth-sync-event'
+
+type AuthSyncPayload = Pick<AuthState, 'user' | 'isAuthenticated' | 'signupComplete'>
+
+let isApplyingRemoteAuth = false
+let authBroadcastChannel: BroadcastChannel | null = null
+
+function getAuthBroadcastChannel(): BroadcastChannel | null {
+  if (typeof BroadcastChannel === 'undefined') return null
+  if (!authBroadcastChannel) authBroadcastChannel = new BroadcastChannel(AUTH_BROADCAST_CHANNEL)
+  return authBroadcastChannel
+}
+
+function broadcastAuthState(payload: AuthSyncPayload): void {
+  if (isApplyingRemoteAuth) return
+  try { getAuthBroadcastChannel()?.postMessage(payload) } catch { /* best-effort */ }
+  try { localStorage.setItem(AUTH_STORAGE_SYNC_KEY, JSON.stringify({ payload, ts: Date.now() })) } catch { /* best-effort */ }
+}
+
+function applyRemoteAuthState(payload: AuthSyncPayload): void {
+  isApplyingRemoteAuth = true
+  try {
+    useAuthStore.setState({
+      user: payload.user,
+      isAuthenticated: payload.isAuthenticated,
+      signupComplete: payload.signupComplete,
+      isLoading: false,
+      error: null,
+    })
+  } finally {
+    isApplyingRemoteAuth = false
+  }
+}
+
 export const useAuthStore = create<AuthState & AuthActions>()(
   persist(
     (set) => ({
@@ -41,16 +76,34 @@ export const useAuthStore = create<AuthState & AuthActions>()(
       error: null,
       signupComplete: null,
 
-      setUser: (user) => set({
-        user,
-        isAuthenticated: !!user,
-        isLoading: false,
-        error: null
-      }),
+      setUser: (user) => {
+        set({
+          user,
+          isAuthenticated: !!user,
+          isLoading: false,
+          error: null
+        })
+        broadcastAuthState({
+          user,
+          isAuthenticated: !!user,
+          signupComplete: useAuthStore.getState().signupComplete,
+        })
+      },
       setLoading: (loading) => set({ isLoading: loading }),
       setError: (error) => set({ error, isLoading: false }),
-      setSignupComplete: (signupComplete) => set({ signupComplete }),
-      clear: () => set({ user: null, isAuthenticated: false, error: null, signupComplete: null }),
+      setSignupComplete: (signupComplete) => {
+        set({ signupComplete })
+        const state = useAuthStore.getState()
+        broadcastAuthState({
+          user: state.user,
+          isAuthenticated: state.isAuthenticated,
+          signupComplete,
+        })
+      },
+      clear: () => {
+        set({ user: null, isAuthenticated: false, error: null, signupComplete: null })
+        broadcastAuthState({ user: null, isAuthenticated: false, signupComplete: null })
+      },
     }),
     {
       name: 'auth-storage',
@@ -62,3 +115,19 @@ export const useAuthStore = create<AuthState & AuthActions>()(
     }
   )
 )
+
+if (typeof window !== 'undefined') {
+  try {
+    getAuthBroadcastChannel()?.addEventListener('message', (event: MessageEvent<AuthSyncPayload>) => {
+      applyRemoteAuthState(event.data)
+    })
+  } catch { /* best-effort */ }
+
+  window.addEventListener('storage', (event) => {
+    if (event.key !== AUTH_STORAGE_SYNC_KEY || !event.newValue) return
+    try {
+      const parsed = JSON.parse(event.newValue) as { payload?: AuthSyncPayload }
+      if (parsed.payload) applyRemoteAuthState(parsed.payload)
+    } catch { /* ignore malformed cross-window payload */ }
+  })
+}

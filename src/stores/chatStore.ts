@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, CompactMetadata, ContentBlock, ContentPart, ConversationMessage, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay, type AnthropicContentBlock } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, CompactMetadata, ContentBlock, ContentBlockAPI, ContentPart, ConversationMessage, PlanResumePending, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService, captureByokSnapshot } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
@@ -33,19 +33,20 @@ interface ChatState {
    * persisted as accumulators across the agent's tool-loop turns within the
    * same message).
    *
-   *   `input`  — SUMMED across turns. Each turn's prompt re-sends the full
-   *              conversation history, so this number represents the TOTAL
-   *              wire cost of the user-message-driven agent loop. Useful for
-   *              the activity-indicator "↑ Nk" display and rough cost vibe.
+   *   `input`  — MAX across turns (not SUM). Each turn's prompt re-sends
+   *              the full conversation history, so summing would double-count
+   *              (N turns × history-size = inflated total — the "↑ 904k"
+   *              bug). MAX gives the peak wire-size, bounded by the context
+   *              window and robust to mid-request compaction shrinking the
+   *              prompt. The activity indicator ("↑ Nk") shows this.
    *
    *   `output` — SUMMED across turns. Each turn emits net-new tokens; the
    *              cumulative count is the total generation cost.
    *
    * NOT the right field for the context-window-pressure pill — that uses
-   * `currentPromptTokens` below (last turn's input, NOT the cumulative).
-   * The two semantics were conflated in earlier versions; conflation meant
-   * the activity counter stayed stuck at the per-turn max instead of growing
-   * with each tool-loop turn.
+   * `currentPromptTokens + currentResponseTokens` below (true context
+   * occupancy: input tokens hold all past history, output tokens are the
+   * current turn's generation not yet rolled into the next prompt).
    */
   totalTokensUsed: { input: number; output: number }
   /**
@@ -58,9 +59,12 @@ interface ChatState {
   currentPromptTokens: number
   /**
    * Last turn's response (output) tokens — replaced per call, mirror of
-   * `currentPromptTokens`. The context window holds BOTH input AND output;
-   * the pill computes pressure as `(input + output) / window` so long
-   * reasoning/answer generations are reflected. Reset alongside
+   * `currentPromptTokens`. The context window holds BOTH input AND output.
+   * `prompt_tokens` already includes all past history (previous outputs),
+   * but the CURRENT turn's output tokens aren't yet in prompt_tokens —
+   * they roll into the next turn's prompt. The pill therefore computes
+   * pressure as `(inputTokens + outputTokens) / effectiveWindow` so long
+   * reasoning/answer generations are reflected in real-time. Reset alongside
    * `currentPromptTokens`.
    */
   currentResponseTokens: number
@@ -84,7 +88,8 @@ interface ChatState {
    * loads, and the agent starts IMPLEMENTING the original PLAN.md plus
    * the new request — the exact bug reported 2026-05-18.
    */
-  planRevisionPending: string | null
+  planRevisionPending: { projectPath: string; planPath?: string } | string | null
+  planResumePending: PlanResumePending | null
 }
 
 interface ChatActions {
@@ -119,6 +124,7 @@ interface ChatActions {
    */
   splitForQueuedMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
   addSystemMessage: (content: string, level?: SystemMessageLevel, options?: { ephemeral?: boolean; timeoutMs?: number }) => void
+  addTerminalCommandResult: (command: string, output: string, exitCode: number) => void
   /**
    * Records a context-compression boundary. The marker renders as a
    * claude-vaz-style horizontal rule; ChatView hides every message above the
@@ -178,6 +184,10 @@ interface ChatActions {
   updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>, targetMessageId?: string) => void
   updateToolCallWithResult: (toolId: string, result: string, isError: boolean, targetMessageId?: string) => void
   updateToolCallProgress: (toolId: string, progressText: string) => void
+  /** Append a line to the streaming command log for a tool call.
+   *  Used by build/test/script commands that stream output via run_streaming_command.
+   *  Each call appends one chunk to the `commandLogs` array on the tool call. */
+  appendToolCallCommandLog: (toolId: string, logChunk: string) => void
   /** Record the permission decision that gated this tool call. Called by
    *  toolExecutor right after `requestPermission` resolves. Surfaces in the
    *  session export so forensics can tell user-approved tools apart from
@@ -216,7 +226,9 @@ interface ChatActions {
   cleanupOnExit: (projectPath: string) => Promise<void>
   setDraftInput: (value: string) => void
   /** Flip the plan-revision flag — null clears it. */
-  setPlanRevisionPending: (projectPath: string | null) => void
+  setPlanRevisionPending: (value: { projectPath: string; planPath?: string } | string | null) => void
+  /** Track an interrupted /plan run that should resume in architect mode. */
+  setPlanResumePending: (value: PlanResumePending | null) => void
   addDraftAttachment: (attachment: Attachment) => void
   removeDraftAttachment: (id: string) => void
   clearDraftAttachments: () => void
@@ -224,7 +236,11 @@ interface ChatActions {
   setSessionMemory: (memory: string) => void
   clearAllSessions: () => void
   // Card messages (plan approval, todo list)
-  addCardMessage: (type: ChatMessageCard['type'], projectPath: string) => void
+  addCardMessage: (
+    type: ChatMessageCard['type'],
+    projectPath: string,
+    metadata?: Pick<ChatMessageCard, 'planPath' | 'planFileName'>,
+  ) => void
   /** Add a credential_request card with field metadata. Returns the message id so the
    *  card can update its own status when the user submits or cancels. */
   addCredentialRequestCard: (
@@ -442,11 +458,6 @@ function stopStreamingSave() {
 // Used to make the agent wait until the user approves/rejects a file change.
 const pendingDiffApprovals = new Map<string, (approved: boolean) => void>()
 
-// Timeout for diff approvals — 30 minutes. Prevents the agent from
-// being blocked forever if the user walks away with pending diffs.
-const DIFF_APPROVAL_TIMEOUT_MS = 30 * 60 * 1000
-const approvalTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
-
 /**
  * Resolve a diff approval by its diffResultId (not toolCallId).
  * Used by GeneratingView which only has access to diffResultId.
@@ -537,38 +548,18 @@ export async function createDiffApprovalPromise(toolCallId: string): Promise<boo
 
   return new Promise(resolve => {
     pendingDiffApprovals.set(toolCallId, resolve)
-    // Set timeout — auto-reject after 30 minutes to prevent the agent
-    // from being blocked forever if the user walks away.
-    const timeout = setTimeout(() => {
-      if (pendingDiffApprovals.has(toolCallId)) {
-        logger.warn('chat', `Diff approval timed out after ${DIFF_APPROVAL_TIMEOUT_MS / 60000}min for toolCallId ${toolCallId}. Auto-rejecting.`)
-        resolve(false)
-        pendingDiffApprovals.delete(toolCallId)
-      }
-      approvalTimeouts.delete(toolCallId)
-    }, DIFF_APPROVAL_TIMEOUT_MS)
-    approvalTimeouts.set(toolCallId, timeout)
   })
 }
 
 export function resolveDiffApproval(toolCallId: string, approved: boolean) {
   const resolve = pendingDiffApprovals.get(toolCallId)
   if (resolve) {
-    // Clear the timeout — no longer needed
-    const timeout = approvalTimeouts.get(toolCallId)
-    if (timeout) { clearTimeout(timeout); approvalTimeouts.delete(toolCallId) }
     resolve(approved)
     pendingDiffApprovals.delete(toolCallId)
   }
 }
 
 export function resolveAllPendingDiffApprovals(approved: boolean) {
-  // Clear all timeouts
-  for (const [, timeout] of approvalTimeouts) {
-    clearTimeout(timeout)
-  }
-  approvalTimeouts.clear()
-
   for (const [, resolve] of pendingDiffApprovals) {
     resolve(approved)
   }
@@ -643,7 +634,76 @@ export function markReasoningBoundary(): void {
   }
 }
 
+// Track whether we're waiting for user action before flushing buffered deltas
+let waitForUserFlush = false
+
+/**
+ * Check if any user-wait state is active that should pause streaming display.
+ * Text arriving while the user is deciding on a permission/diff/credential
+ * should be buffered until they respond, not shown immediately.
+ */
+function isAnyUserWaitStateActive(): boolean {
+  try {
+    // Lazy import to avoid circular dependency — permissionStore imports chatStore
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const permissionStore = require('../../stores/permissionStore').usePermissionStore
+    const credentialStore = require('../../stores/credentialRequestStore').useCredentialRequestStore
+
+    const hasPermission = !!permissionStore.getState().pendingPermission
+    const hasDiffs = useChatStore.getState().pendingDiffs.length > 0
+    const hasCredentials = credentialStore.getState().pending.size > 0
+
+    return hasPermission || hasDiffs || hasCredentials
+  } catch {
+    // Stores not ready yet — don't block
+    return false
+  }
+}
+
+/**
+ * Flush buffered deltas when user wait states clear. Called once when we
+ * detect that the user has finished their action (approved/denied permission,
+ * etc.) and we can resume showing streamed text.
+ */
+function flushWhenUserReady(): void {
+  if (!waitForUserFlush) return
+  if (isAnyUserWaitStateActive()) return
+
+  waitForUserFlush = false
+  flushBufferedDeltas()
+}
+
+// Subscribe to stores to detect when user wait states clear.
+// Deferred to next tick to avoid "used before declaration" error since
+// useChatStore is defined later in this file.
+setTimeout(() => {
+  try {
+    // Lazy import to avoid circular dependency
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const permissionStore = require('../../stores/permissionStore').usePermissionStore
+    const credentialStore = require('../../stores/credentialRequestStore').useCredentialRequestStore
+
+    permissionStore.subscribe(() => flushWhenUserReady())
+    credentialStore.subscribe(() => flushWhenUserReady())
+    useChatStore.subscribe((state, prevState) => {
+      if (state.pendingDiffs.length !== prevState.pendingDiffs.length) {
+        flushWhenUserReady()
+      }
+    })
+  } catch {
+    // Stores not ready yet — subscriptions will be set up when they are
+  }
+}, 0)
+
 function scheduleFlush() {
+  // If user is currently deciding on a permission/diff/credential, buffer
+  // the text until they respond. This prevents the confusing UX of text
+  // appearing in the chat while the user is trying to read a dialog.
+  if (isAnyUserWaitStateActive()) {
+    waitForUserFlush = true
+    return
+  }
+
   if (!flushTimer) {
     flushTimer = setTimeout(() => {
       const queued = deltaQueue
@@ -805,7 +865,7 @@ function userMessageToContentParts(msg: ChatMessage): ContentPart[] | null {
  * Anthropic format differences from OpenAI:
  *   - No role:'system' (system prompt is top-level in the request body)
  *   - No role:'tool' — tool results are content blocks inside role:'user' messages
- *   - Assistant tool_calls → tool_use content blocks inside role:'assistant' content array
+ *   - Assistant tool_calls → tool_call content blocks inside role:'assistant' content array
  *   - Thinking/reasoning → thinking content blocks
  *   - Strictly alternating user/assistant messages (no consecutive same-role)
  */
@@ -823,8 +883,8 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
         content: parts ?? msg.content,
       })
     } else if (msg.role === 'assistant') {
-      // Build Anthropic content blocks array
-      const blocks: AnthropicContentBlock[] = []
+      // Build content blocks array
+      const blocks: ContentBlockAPI[] = []
 
       // Thinking/reasoning → thinking block
       if (msg.reasoningContent) {
@@ -836,14 +896,14 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
         blocks.push({ type: 'text', text: msg.content })
       }
 
-      // Tool calls → tool_use blocks
+      // Tool calls → tool_call blocks
       if (msg.toolCalls?.length) {
         for (const tc of msg.toolCalls) {
           blocks.push({
-            type: 'tool_use',
+            type: 'tool_call',
             id: tc.id,
             name: tc.toolName,
-            input: tc.input || {},
+            arguments: JSON.stringify(tc.input || {}),
           })
         }
       }
@@ -854,16 +914,16 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
       })
 
       // Tool results → single user message with tool_result content blocks
-      // (Anthropic requires tool_results in a role:'user' message, not role:'tool')
+      // (tool results are in role:'user' messages with tool_result content blocks)
       if (msg.toolCalls?.length) {
-        const toolResultBlocks: AnthropicContentBlock[] = []
+        const toolResultBlocks: ContentBlockAPI[] = []
 
         for (const tc of msg.toolCalls) {
           // Orphan tool call: agent was cancelled mid-execution
           if (tc.status === 'running' || tc.result === undefined) {
             toolResultBlocks.push({
               type: 'tool_result',
-              tool_use_id: tc.id,
+              toolCallId: tc.id,
               content: 'Tool call was interrupted.',
             })
             continue
@@ -893,7 +953,7 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
 
           toolResultBlocks.push({
             type: 'tool_result',
-            tool_use_id: tc.id,
+            toolCallId: tc.id,
             content: resultContent,
           })
         }
@@ -959,13 +1019,32 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     draftInput: '',
     draftAttachments: [],
     planRevisionPending: null,
+    planResumePending: null,
 
     setDraftInput: (value: string) => {
       set({ draftInput: value })
       scheduleDraftPersist()
     },
 
-    setPlanRevisionPending: (projectPath: string | null) => set({ planRevisionPending: projectPath }),
+    setPlanRevisionPending: (value: { projectPath: string; planPath?: string } | string | null) => set({ planRevisionPending: value }),
+
+    setPlanResumePending: (value: PlanResumePending | null) => {
+      set(state => {
+        const sessionId = state.activeSessionId
+        if (!sessionId) return { planResumePending: value }
+        const sessions = new Map(state.sessions)
+        const session = sessions.get(sessionId)
+        if (session) {
+          sessions.set(sessionId, {
+            ...session,
+            planResumePending: value,
+            updatedAt: Date.now(),
+          })
+        }
+        return { planResumePending: value, sessions }
+      })
+      sessionService.markDirty()
+    },
 
     addDraftAttachment: (attachment: Attachment) => {
       set(state => {
@@ -1031,6 +1110,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           totalTokensUsed: { input: 0, output: 0 },
           currentPromptTokens: 0,
           currentResponseTokens: 0,
+          planResumePending: null,
         }
       })
 
@@ -1067,6 +1147,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // state immediately.
         draftInput: '',
         draftAttachments: [],
+        planResumePending: session?.planResumePending ?? null,
       })
       // Re-scope the queue log to the newly-active session.
       if (session) setQueueLogContext(session.projectPath, sessionId)
@@ -1348,6 +1429,37 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
     },
 
+    addTerminalCommandResult: (command: string, output: string, exitCode: number) => {
+      const messageId = generateId('msg')
+      const message: ChatMessage = {
+        id: messageId,
+        role: 'system',
+        level: exitCode === 0 ? 'success' : 'error',
+        content: output,
+        terminalCommand: { command, output, exitCode },
+        timestamp: Date.now(),
+      }
+
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const updatedSession: ChatSession = {
+          ...session,
+          messages: [...session.messages, message],
+          updatedAt: Date.now(),
+        }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, updatedSession)
+
+        return { sessions: updatedSessions }
+      })
+    },
+
     addCompactBoundaryMessage: (beforeTokens: number, trigger: CompactMetadata['trigger'] = 'auto', messagesSummarized?: number) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
@@ -1357,7 +1469,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         compactBeforeTokens: beforeTokens,
         compactMetadata: { trigger, beforeTokens, messagesSummarized },
         level: 'info',
-        content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens). Skills invocados re-injectados — o agente continua com regras CRITICAL intactas.`,
+        content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens).`,
         timestamp: Date.now(),
       }
 
@@ -1766,6 +1878,34 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },
 
+    appendToolCallCommandLog: (toolId: string, logChunk: string) => {
+      const { activeSessionId, streamingMessageId, sessions } = get()
+      if (!activeSessionId || !streamingMessageId) return
+
+      const session = sessions.get(activeSessionId)
+      if (!session) return
+
+      const msg = session.messages.find(m => m.id === streamingMessageId)
+      if (!msg || !msg.toolCalls) return
+
+      const idx = msg.toolCalls.findIndex(t => t.id === toolId)
+      if (idx < 0) return
+
+      const existing = msg.toolCalls[idx].commandLogs || []
+      // Cap at 500 lines to prevent memory bloat from verbose commands.
+      // Older lines are dropped — the last N lines are the most useful.
+      const MAX_LOG_LINES = 500
+      const newLogs = [...existing, logChunk]
+      const trimmed = newLogs.length > MAX_LOG_LINES ? newLogs.slice(-MAX_LOG_LINES) : newLogs
+
+      const newToolCalls = msg.toolCalls.slice()
+      newToolCalls[idx] = { ...newToolCalls[idx], commandLogs: trimmed }
+      msg.toolCalls = newToolCalls
+      session.updatedAt = Date.now()
+
+      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+    },
+
     recordToolPermission: (toolId, permission, targetMessageId) => {
       const { activeSessionId, streamingMessageId, sessions } = get()
       if (!activeSessionId) return
@@ -1807,10 +1947,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             let isNewFile: boolean | undefined
             let diffStatus: 'pending' | 'approved' | 'denied' | undefined
             let diffResultId: string | undefined
+            let diffPath: string | undefined
 
             try {
               const parsed = JSON.parse(result)
               if (parsed.type === 'diff') {
+                diffPath = parsed.path
                 diffOldContent = parsed.oldContent
                 diffNewContent = parsed.newContent
                 isNewFile = parsed.isNewFile
@@ -1847,8 +1989,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
               // Not diff JSON, ignore
             }
 
+            const mergedInput = diffPath && !toolCalls[i].input?.file_path && !toolCalls[i].input?.path
+              ? { ...toolCalls[i].input, file_path: diffPath }
+              : toolCalls[i].input
+
             toolCalls[i] = {
               ...toolCalls[i],
+              input: mergedInput,
               result,
               isError,
               status: isError ? 'failed' : 'completed',
@@ -2233,7 +2380,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           ? null
           : state.activeSessionId
 
-        return { sessions, activeSessionId, conversationHistory: [], currentTurnCount: 0 }
+        return {
+          sessions,
+          activeSessionId,
+          conversationHistory: [],
+          currentTurnCount: 0,
+          planResumePending: state.activeSessionId === sessionId ? null : state.planResumePending,
+        }
       })
     },
 
@@ -2261,6 +2414,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           totalTokensUsed: { input: 0, output: 0 },
           currentPromptTokens: 0,
           currentResponseTokens: 0,
+          planResumePending: null,
         }
       })
       // Mark dirty so the cleared state is persisted
@@ -2380,15 +2534,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       //     because the reset happens explicitly before the next turn's
       //     `message_start` lands.
       //
-      // Anti-overwrite guards. Anthropic streaming sends usage info twice
-      // per turn: `message_start` carries the real input_tokens; the final
-      // `message_delta` carries the output_tokens AND — depending on
-      // upstream — either echoes input_tokens, sends 0, OR (BYOK adapters
-      // such as DashScope GLM-5.1, OpenRouter Mimo) sends a SMALLER
-      // non-zero value (only the billable / non-cached portion). Plain
-      // REPLACE produces the visible "pill bounces 13 % → 10 %" symptom
-      // when the message_delta's smaller value wins over message_start's
-      // total. Math.max + the `> 0` guard between them: zero never wins
+      // Anti-overwrite guards. OpenAI streaming sends usage info in the
+      // final chunk: `prompt_tokens` and `completion_tokens` are both
+      // present in the last usage object. However, some BYOK adapters
+      // (such as DashScope GLM-5.1, OpenRouter Mimo) may send partial
+      // usage data. Math.max + the `> 0` guard between them: zero never wins
       // (claude-vaz parity, services/api/claude.ts:2918-2922), and a
       // non-zero smaller value never replaces a non-zero larger one.
       // Output is always a fresh per-turn value, so it overwrites
@@ -2630,6 +2780,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             currentPromptTokens: snapshot?.promptTokens ?? 0,
             currentResponseTokens: snapshot?.responseTokens ?? 0,
             pendingDiffs: [],
+            planResumePending: sessionWithTokens.planResumePending ?? null,
           }
         })
 
@@ -2724,6 +2875,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             currentPromptTokens: bootSnapshot?.promptTokens ?? 0,
             currentResponseTokens: bootSnapshot?.responseTokens ?? 0,
             pendingDiffs: [],
+            planResumePending: restoredSession.planResumePending ?? null,
           }
         })
 
@@ -2801,6 +2953,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           currentPromptTokens: 0,
           currentResponseTokens: 0,
           pendingDiffs: [],
+          planResumePending: null,
         }
       })
 
@@ -2877,6 +3030,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             currentPromptTokens: 0,
           currentResponseTokens: 0,
             pendingDiffs: [],
+            planResumePending: null,
           }
         })
       } else {
@@ -2968,14 +3122,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     // === Card messages (plan approval, todo list) ===
 
-    addCardMessage: (type: ChatMessageCard['type'], projectPath: string) => {
+    addCardMessage: (
+      type: ChatMessageCard['type'],
+      projectPath: string,
+      metadata?: Pick<ChatMessageCard, 'planPath' | 'planFileName'>,
+    ) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
         role: 'system',
         content: '',
         timestamp: Date.now(),
-        card: { type, projectPath, status: 'pending' },
+        card: { type, projectPath, status: 'pending', ...metadata },
       }
 
       set(state => {

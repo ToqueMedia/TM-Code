@@ -330,6 +330,7 @@ class FirebaseAuthService {
     this.unsubscribeUserDocListener()
 
     let firstSnapshot = true
+    let previousBillingHash = ''
     const expectedGen = this.authGeneration
     this.unsubscribeUserDoc = onSnapshot(
       doc(getFirebaseDb(), COLLECTIONS.USERS, uid),
@@ -337,12 +338,22 @@ class FirebaseAuthService {
         if (expectedGen !== this.authGeneration) return // stale listener
         if (firstSnapshot) {
           firstSnapshot = false
+          if (snap.exists()) {
+            const d = snap.data()
+            previousBillingHash = `${d.userPlan}|${d.tokenBudget}|${d.extraUsageBalance}`
+          }
           return
         }
         if (!snap.exists()) return
         // Update the throttle stamp so onAuthStateChanged's token-refresh
         // path doesn't redundantly refetch within the next 5 minutes.
         // Backend /v1/me reads fresh from Firestore on every call.
+        const data = snap.data()
+        const currentBillingHash = `${data.userPlan}|${data.tokenBudget}|${data.extraUsageBalance}`
+        if (currentBillingHash === previousBillingHash) {
+          return
+        }
+        previousBillingHash = currentBillingHash
         this.lastBillingFetchMs = Date.now()
         this.fetchBillingInfo(expectedGen).catch(() => {})
       },

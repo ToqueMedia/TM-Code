@@ -18,6 +18,8 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
   card,
 }: TerminalPlanApprovalCardProps) {
   const { projectPath, status } = card
+  const planPath = card.planPath ?? `${projectPath}/PLAN.md`
+  const planFileName = card.planFileName ?? 'PLAN.md'
 
   // Auto-remove after terminal state
   useEffect(() => {
@@ -32,20 +34,20 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
     useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'approved')
     try {
-      await handlePlanApprove(projectPath)
+      await handlePlanApprove(projectPath, planPath)
     } catch {
       useChatStore.getState().updateCardStatus(messageId, 'pending')
       useChatStore.getState().addSystemMessage(
         t('plan.approveError') ?? 'Failed to approve plan. Try again.',
       )
     }
-  }, [messageId, projectPath])
+  }, [messageId, projectPath, planPath])
 
   const handleChanges = useCallback(() => {
     useLayoutStore.getState().setPlanViewerOpen(false)
     useChatStore.getState().updateCardStatus(messageId, 'changes_requested')
-    handlePlanRequestChanges(projectPath)
-  }, [messageId, projectPath])
+    handlePlanRequestChanges(projectPath, planPath)
+  }, [messageId, projectPath, planPath])
 
   const handleReject = useCallback(() => {
     useLayoutStore.getState().setPlanViewerOpen(false)
@@ -59,17 +61,16 @@ export const TerminalPlanApprovalCard = memo(function TerminalPlanApprovalCard({
       layout.setPlanViewerOpen(false)
       return
     }
-    const planPath = `${projectPath}/PLAN.md`
     try {
       await FileService.readFile(planPath)
     } catch {
       useChatStore.getState().addSystemMessage(
-        t('plan.missing') ?? 'PLAN.md is missing. Run /plan again to regenerate it.',
+        t('plan.missing') ?? `${planFileName} is missing. Run /plan again to regenerate it.`,
       )
       return
     }
-    layout.setPlanViewerOpen(true)
-  }, [projectPath])
+    layout.setPlanViewerOpen(true, planPath)
+  }, [planPath, planFileName])
 
   // ── Approved state ──
   if (status === 'approved') {

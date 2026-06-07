@@ -1,4 +1,4 @@
-import { memo, useCallback, useImperativeHandle, useLayoutEffect, useState, forwardRef } from 'react'
+import { memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, forwardRef } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { FiPaperclip } from 'react-icons/fi'
 import { useCmdPromptLogic } from '../../hooks/useCmdPromptLogic'
@@ -108,7 +108,67 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     handlePaste,
     isDragging,
     handleAttachFiles,
+    preSendTransformRef,
   } = useCmdPromptLogic()
+
+  // ─── Paste compacting ───
+  // When the user pastes a large block of text (>5 lines), show a compact
+  // placeholder in the textarea ("[Pasted text #1 +N lines]") and store
+  // the real text in a ref. When the message is sent, the preSendTransform
+  // replaces placeholders with real text so the agent sees the full content.
+  const PASTE_MIN_LINES = 5
+  const pastedBlocksRef = useRef<Map<number, string>>(new Map())
+  const pasteCounterRef = useRef(0)
+
+  // Register the transform so handleSend expands placeholders automatically
+  useEffect(() => {
+    preSendTransformRef.current = (text: string) => {
+      if (pastedBlocksRef.current.size === 0) return text
+      let expanded = text
+      for (const [id, realText] of pastedBlocksRef.current) {
+        // Match "[Pasted text #<id> ...]"
+        const re = new RegExp(`\\[Pasted text #${id}\\s[^\\]]*\\]`)
+        expanded = expanded.replace(re, realText)
+      }
+      pastedBlocksRef.current.clear()
+      return expanded
+    }
+    return () => { preSendTransformRef.current = null }
+  }, [preSendTransformRef])
+
+  const handlePasteWithCompact = useCallback((e: React.ClipboardEvent) => {
+    // Let the attachment handler run first (images, files)
+    handlePaste(e)
+    if (e.defaultPrevented) return
+
+    // Check if the pasted text is large
+    const text = e.clipboardData?.getData('text')
+    if (!text) return
+    const lineCount = text.split('\n').length
+    if (lineCount <= PASTE_MIN_LINES) return
+
+    // Large paste — compact it
+    e.preventDefault()
+    pasteCounterRef.current++
+    const id = pasteCounterRef.current
+    const placeholder = `[Pasted text #${id} +${lineCount} lines]`
+    pastedBlocksRef.current.set(id, text)
+
+    // Insert placeholder at cursor position
+    const ta = textareaRef.current
+    if (!ta) return
+    const start = ta.selectionStart
+    const end = ta.selectionEnd
+    const before = input.slice(0, start)
+    const after = input.slice(end)
+    handleInputChange(before + placeholder + after)
+
+    // Restore cursor after placeholder
+    requestAnimationFrame(() => {
+      const pos = start + placeholder.length
+      ta.setSelectionRange(pos, pos)
+    })
+  }, [handlePaste, input, handleInputChange, textareaRef])
 
   useImperativeHandle(ref, () => ({
     focus: () => textareaRef.current?.focus(),
@@ -116,6 +176,17 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     isMenuOpen: () => showCommandMenu || showMentionMenu || hashtagMenu.show,
     clearAttachments,
   }), [textareaRef, showCommandMenu, showMentionMenu, hashtagMenu.show, clearAttachments])
+
+  // Listen for cmd-clear-input event (dispatched by Ctrl+K shortcut in TerminalView)
+  useEffect(() => {
+    const onClear = () => {
+      handleInputChange('')
+      pastedBlocksRef.current.clear()
+      textareaRef.current?.focus()
+    }
+    window.addEventListener('cmd-clear-input', onClear)
+    return () => window.removeEventListener('cmd-clear-input', onClear)
+  }, [handleInputChange, textareaRef])
 
   // Sync textarea scroll → highlight overlay so the colored slash-command
   // span stays under the actual glyphs when content scrolls past 6 rows.
@@ -310,7 +381,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             value={input}
             onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
+            onPaste={handlePasteWithCompact}
             onFocus={handleFocus}
             onBlur={handleBlur}
             onScroll={handleScroll}

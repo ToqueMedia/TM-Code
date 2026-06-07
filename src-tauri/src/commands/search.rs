@@ -144,6 +144,9 @@ pub async fn search_in_files(
     if options.whole_word {
         cmd.arg("--word-regexp");
     }
+    if !options.use_regex {
+        cmd.arg("--fixed-strings");
+    }
 
     // Include patterns
     for pattern in &options.include_patterns {
@@ -642,6 +645,9 @@ pub async fn replace_in_files(
     }
     if options.whole_word {
         cmd.arg("--word-regexp");
+    }
+    if !options.use_regex {
+        cmd.arg("--fixed-strings");
     }
 
     for pattern in &options.include_patterns {

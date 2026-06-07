@@ -11,7 +11,7 @@ import { CreditIndicator } from '../ui/CreditIndicator'
 import { McpIndicator } from '../ui/StatusIndicators'
 import ModelIndicator from '../chat/ModelIndicator'
 import { tokens } from '@/theme/tokens'
-import { IS_MAC, IS_WINDOWS, basename } from '@/utils/platform'
+import { basename } from '@/utils/platform'
 import { useTranslation } from '@/i18n/useTranslation'
 
 interface TerminalTitleBarProps {
@@ -53,14 +53,11 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
       borderBottom="1px solid rgba(255,255,255,0.05)"
       align="center"
       justify="space-between"
-      pl={IS_MAC ? '80px' : 3}
-      pr={IS_WINDOWS ? '148px' : 3}
       userSelect="none"
       flexShrink={0}
-      data-tauri-drag-region
     >
       {/* Left: label + project path */}
-      <Flex align="center" gap={2} overflow="hidden" flex="1" minW={0} data-tauri-drag-region>
+      <Flex align="center" gap={2} overflow="hidden" flex="1" minW={0}>
         <Text
           fontSize="10px"
           fontWeight="800"
@@ -69,7 +66,6 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           letterSpacing="0.1em"
           textTransform="uppercase"
           flexShrink={0}
-          data-tauri-drag-region
         >
           ◆
         </Text>
@@ -80,7 +76,6 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           color={tokens.colors.text.secondary}
           fontFamily={tokens.fontFamily.mono}
           flexShrink={0}
-          data-tauri-drag-region
         >
           {projectName}
         </Text>
@@ -94,14 +89,13 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           minW={0}
           opacity={0.5}
           display={{ base: 'none', md: 'block' }}
-          data-tauri-drag-region
         >
           {projectPath}
         </Text>
       </Flex>
 
       {/* Right: controls */}
-      <HStack gap={1.5} flexShrink={0} data-tauri-drag-region="false">
+      <HStack gap={1.5} flexShrink={0}>
         {/* Mandatory-thinking badge — static, not interactive. Renders only
             when the backend reports the active model thinks unconditionally. */}
         {thinkingMandatory && (
@@ -112,7 +106,6 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
             bg="rgba(163,113,247,0.1)"
             border="1px solid rgba(163,113,247,0.2)"
             title={t('terminalMode.titlebar.thinkingAlwaysOn')}
-            data-tauri-drag-region
           >
             <Text
               fontSize="9px"
@@ -121,7 +114,6 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
               textTransform="uppercase"
               fontFamily={tokens.fontFamily.mono}
               letterSpacing="0.08em"
-              data-tauri-drag-region
             >
               ⚡ thk
             </Text>

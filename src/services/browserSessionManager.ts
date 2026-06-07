@@ -71,31 +71,12 @@ class BrowserSessionManager {
   private viewModeBeforeSession: ViewMode | null = null
   private configPath: string | null = null
   private userDataDir: string | null = null
-  private shutdownInstalled = false
 
   static getInstance(): BrowserSessionManager {
     if (!BrowserSessionManager.instance) {
       BrowserSessionManager.instance = new BrowserSessionManager()
-      BrowserSessionManager.instance.installShutdownHook()
     }
     return BrowserSessionManager.instance
-  }
-
-  /**
-   * Best-effort shutdown so the spawned MCP server (and the Chrome process
-   * it owns) doesn't outlive the IDE. `beforeunload` fires when the Tauri
-   * webview is asked to close — synchronously enough that our stop request
-   * gets sent. Without this hook the process leaks until the OS reaps it
-   * (Mac/Linux) or stays around indefinitely (Windows).
-   */
-  private installShutdownHook(): void {
-    if (this.shutdownInstalled || typeof window === 'undefined') return
-    this.shutdownInstalled = true
-    window.addEventListener('beforeunload', () => {
-      // Fire-and-forget — beforeunload doesn't await promises, but the
-      // mcp_stop_server invoke fires off a kill on the Rust side.
-      void this.stop().catch(() => { /* noop on shutdown */ })
-    })
   }
 
   isRunning(): boolean {

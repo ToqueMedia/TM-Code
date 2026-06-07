@@ -15,7 +15,6 @@ import { registerInteractionTools } from './toolExecutor/interactionOps'
 import { registerProvisionTools } from './toolExecutor/provisionOps'
 import type { ToolRegistrationContext } from './toolExecutor/context'
 import {
-  normalizePath,
   isEnvFile,
   isSensitiveFile,
   simpleHash,
@@ -24,6 +23,7 @@ import {
   WRITE_COMMAND_PATTERNS,
   DANGEROUS_COMMANDS,
   STATE_MUTATING_COMMANDS,
+  normalizePath,
   checkForbiddenAuthImports,
   checkForbiddenItkV2,
   checkForbiddenServiceAccountImport,
@@ -36,9 +36,13 @@ import { resolveWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
+import { createFileStateCacheWithSizeLimit, type FileStateCache } from './toolExecutor/fileStateCache'
+import { checkReadDedup } from './toolExecutor/readDedup'
+import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
+import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
-import type { AgentCallbacks } from './agentService'
+import type { AgentCallbacks } from './types'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered } from '../../stores/chatStore'
 
 // === Types ===
@@ -90,6 +94,39 @@ interface ToolEntry {
   execute: (input: Record<string, unknown>) => Promise<string>
 }
 
+interface AgentShellSession {
+  id: string
+  cwd: string
+  output: string
+  readOffset: number
+  activeToolCallId: string | null
+  exited: boolean
+  exitCode: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+interface PtyOutputEvent {
+  session_id: string
+  data: string
+}
+
+interface PtyExitEvent {
+  session_id: string
+  exit_code: number
+}
+
+interface InteractiveShellInfo {
+  command: string
+  args: string[]
+  kind: string
+  commandStyle: string
+  platform: string
+  warning?: string | null
+}
+
+const AGENT_SHELL_MAX_BUFFER_CHARS = 200_000
+
 // === Abort helpers ===
 
 /**
@@ -120,6 +157,47 @@ function createLinkedAbortController(parentSignal?: AbortSignal): AbortControlle
 // future caller) keep using the canonical name.
 
 // === Tool Executor ===
+
+/**
+ * Detect commands whose output should stream in real-time to the UI.
+ * These are long-running commands (build, test, lint, script execution)
+ * where the user benefits from seeing live logs instead of waiting for
+ * the final result.
+ *
+ * Install commands (npm install, etc.) are handled separately by
+ * `executeInstallStreaming` which has additional PID-based cancellation.
+ */
+function isStreamingCommand(cmd: string): boolean {
+  const normalized = cmd.replace(/\s+/g, ' ').trim()
+
+  // Shell scripts (.sh, .bash)
+  if (/\.(?:sh|bash)(?:\s|$)/.test(normalized)) return true
+  if (/\bbash\b/.test(normalized) && /\.sh/.test(normalized)) return true
+
+  // Build commands
+  if (/(?:npm|yarn|pnpm|bun)\s+run\s+(?:build|compile|dist|package|bundle)/.test(normalized)) return true
+  if (/\b(?:make|cmake|gradle|mvn|cargo\s+build|go\s+build)\b/.test(normalized)) return true
+  if (/\bwebpack\b|\bvite\s+build\b|\brollup\b|\besbuild\b/.test(normalized)) return true
+
+  // Test commands
+  if (/(?:npm|yarn|pnpm|bun)\s+run\s+(?:test|test:\w+|spec|e2e)/.test(normalized)) return true
+  if (/(?:npm|yarn|pnpm|bun)\s+test\b/.test(normalized)) return true
+  if (/\bjest\b|\bvitest\b|\bmocha\b|\bcypress\b|\bplaywright\b/.test(normalized)) return true
+  if (/\bcargo\s+test\b|\bgo\s+test\b|\bpytest\b/.test(normalized)) return true
+
+  // Lint / format commands
+  if (/(?:npm|yarn|pnpm|bun)\s+run\s+(?:lint|format|check|typecheck)/.test(normalized)) return true
+  if (/\btsc\b|\beslint\b|\bprettier\b/.test(normalized)) return true
+  if (/\bflake8\b|\bruff\b|\bblack\b/.test(normalized)) return true
+
+  // Compound commands with && that include streaming-capable parts
+  if (/&&/.test(normalized)) {
+    const parts = normalized.split('&&').map(p => p.trim())
+    if (parts.some(p => isStreamingCommand(p))) return true
+  }
+
+  return false
+}
 
 function formatBackgroundCommandResult(cmd: {
   id: string; command: string; status: string; pid: number;
@@ -154,6 +232,10 @@ class ToolExecutor {
   /** Tracks when files were last read by the model — for read-before-write enforcement.
    *  Stores timestamp + a simple content hash to detect concurrent modifications. */
   private readFileTimestamps: Map<string, { timestamp: number; hash: number }> = new Map()
+  /** Content cache for files read by the model — enables dedup (avoids
+   *  re-sending identical content) and state recovery after session resume.
+   *  Mirrors claude-vaz's `FileStateCache` / `readFileState`. */
+  private readFileState: FileStateCache = createFileStateCacheWithSizeLimit()
   /**
    * CMD mode CWD — when set, the executor operates like Claude Code CLI:
    * no project required, file writes go directly to disk (no diff/approval),
@@ -171,6 +253,7 @@ class ToolExecutor {
    * mechanical block returns a tool result the model cannot ignore.
    */
   private planMode: boolean = false
+  private planModePlanFileName: string = 'PLAN.md'
 
   /**
    * Memory scope — set per-invocation by execute() when a sub-agent
@@ -184,8 +267,8 @@ class ToolExecutor {
   /**
    * Plan-mode progress flags. Together they enforce the architect contract:
    *
-   *   1. update_tasks is BLOCKED until PLAN.md is written (no task list without a plan).
-   *   2. After both PLAN.md is written AND update_tasks has run once, ANY further
+   *   1. update_tasks is BLOCKED until the plan file is written (no task list without a plan).
+   *   2. After both the plan file is written AND update_tasks has run once, ANY further
    *      tool call is blocked — the architect's role is complete and continuing
    *      drifts into implementation.
    *
@@ -193,6 +276,9 @@ class ToolExecutor {
    */
   private planFileWritten: boolean = false
   private planTasksSeeded: boolean = false
+  private agentShellSessions: Map<string, AgentShellSession> = new Map()
+  private agentShellListenersReady: Promise<void> | null = null
+  private lastAgentShellSessionId: string | null = null
 
   /** Shared context — passed to domain registration functions. */
   private readonly ctx: ToolRegistrationContext
@@ -220,6 +306,7 @@ class ToolExecutor {
       getProjectRoot: () => this.getProjectRoot(),
       validatePathWithinProject: (p: string) => { this.validatePathWithinProject(p); return p },
       readFileTimestamps: this.readFileTimestamps,
+      readFileState: this.readFileState,
       largeResults: this.largeResults,
       readLargeResultFromDisk: (id) => this.readLargeResultFromDisk(id),
       getCmdModeCwd: () => this.cmdModeCwd,
@@ -244,8 +331,9 @@ class ToolExecutor {
 
   /** Enable architect mode for /plan: implementation tools are blocked.
    *  Resets plan-progress flags so each /plan run starts clean. */
-  enablePlanMode(): void {
+  enablePlanMode(planFileName: string = 'PLAN.md'): void {
     this.planMode = true
+    this.planModePlanFileName = planFileName || 'PLAN.md'
     this.planFileWritten = false
     this.planTasksSeeded = false
   }
@@ -253,6 +341,7 @@ class ToolExecutor {
   /** Restore the normal coding agent surface. */
   disablePlanMode(): void {
     this.planMode = false
+    this.planModePlanFileName = 'PLAN.md'
     this.planFileWritten = false
     this.planTasksSeeded = false
   }
@@ -264,11 +353,46 @@ class ToolExecutor {
   /** Clears session-scoped state. Call on new sessions. */
   resetSessionState(): void {
     this.readFileTimestamps.clear()
+    this.readFileState.clear()
     this.largeResults.clear()
     this.largeResultsTotalBytes = 0
     this.largeResultRangesShown.clear()
     this.largeResultCounter = 0
     this.readOnlyContexts.clear()
+    for (const id of this.agentShellSessions.keys()) {
+      invoke('kill_pty_session', { sessionId: id }).catch(() => {})
+    }
+    this.agentShellSessions.clear()
+    this.lastAgentShellSessionId = null
+  }
+
+  /**
+   * Rebuild read state from conversation history (session resume).
+   *
+   * When a session is resumed, the ToolExecutor's in-memory state is empty.
+   * This method walks the conversation history and reconstructs both
+   * `readFileTimestamps` and `readFileState` so that:
+   *   - Read-before-write enforcement works (the model "remembers" what
+   *     it has read)
+   *   - Dedup works (redundant reads return stubs instead of full content)
+   *
+   * Mirrors claude-vaz's `extractReadFilesFromMessages`.
+   *
+   * @param messages  Conversation history
+   * @param invokeReadFile  Tauri IPC function to read files from disk
+   */
+  rebuildReadStateFromHistory(
+    messages: Parameters<typeof extractReadFilesFromMessages>[0],
+    invokeReadFile: (path: string) => Promise<string>,
+  ): void {
+    const cwd = this.getProjectRoot()
+    extractReadFilesFromMessages(
+      messages,
+      this.readFileState,
+      this.readFileTimestamps,
+      cwd,
+      invokeReadFile,
+    )
   }
 
   /**
@@ -343,6 +467,42 @@ class ToolExecutor {
       return `Tool ${toolName} aborted before execution (user cancelled).`
     }
 
+    // Malformed args: streaming truncated the JSON and we couldn't fully
+    // repair it. Rather than pass incomplete args to Tauri (which produces
+    // cryptic serde errors like "missing required key query"), return a
+    // clear error so the model can retry with correct arguments.
+    if (input._parseError === true) {
+      const raw = (input._raw as string) || ''
+      // Try one last repair — our repairPartialJson is in agentService, but
+      // a simple regex fallback works for the common truncation case.
+      const repaired = raw
+        .replace(/,\s*([}\]])/g, '$1')  // trailing commas
+      // Count unescaped quotes to detect unclosed strings
+      const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length
+      let closed = repaired
+      if (quoteCount % 2 !== 0) closed += '"'
+      // Close unclosed braces
+      const opens: string[] = []
+      for (const ch of closed) {
+        if (ch === '{' || ch === '[') opens.push(ch)
+        if (ch === '}' && opens.length && opens[opens.length - 1] === '{') opens.pop()
+        if (ch === ']' && opens.length && opens[opens.length - 1] === '[') opens.pop()
+      }
+      for (let i = opens.length - 1; i >= 0; i--) {
+        closed += opens[i] === '{' ? '}' : ']'
+      }
+      try {
+        const repairedArgs = JSON.parse(closed)
+        // Success! Use the repaired args, flagging them as partial so
+        // downstream code knows some values may be truncated.
+        input = { ...repairedArgs, _parseError: 'partial' }
+      } catch {
+        // Even repair failed — give the model a useful error message.
+        const preview = raw.length > 200 ? raw.slice(0, 200) + '...' : raw
+        return `Error: tool arguments could not be parsed (streaming truncated the JSON). Raw args preview: ${preview}\n\nPlease retry the tool call with properly formatted JSON arguments. Ensure all required parameters (e.g., "query" for search_in_files) are provided.`
+      }
+    }
+
     // Passive tools: handled server-side by the provider (DashScope/Qwen native tools).
     // The `passive` flag on the tool definition declares this — no hardcoded Set to maintain.
     // These are defined in the tool schema so the model can call them, but the
@@ -371,11 +531,11 @@ class ToolExecutor {
       const planBlock = this.checkPlanModeAccess(toolName, filePath)
       if (planBlock) return planBlock
 
-      // M4b — update_tasks must follow write_file('PLAN.md').
-      // The task list mirrors PLAN.md's Implementation Phases; without a
+      // M4b — update_tasks must follow write_file('<plan artefact>').
+      // The task list mirrors the plan's Implementation Phases; without a
       // written plan the tasks have no source-of-truth to derive from.
       if (toolName === 'update_tasks' && !this.planFileWritten) {
-        return `Blocked in /plan architect mode: ${toolName} must follow write_file('PLAN.md'). The task list mirrors PLAN.md's Implementation Phases — write the plan first, then derive tasks from its phase structure (one task per coherent unit of work, IDs like "1.1", "1.2", "2.1" matching the phase numbering). Calling update_tasks before write_file is a contract violation.`
+        return `Blocked in /plan architect mode: ${toolName} must follow write_file('${this.planModePlanFileName}'). The task list mirrors ${this.planModePlanFileName}'s Implementation Phases — write the plan first, then derive tasks from its phase structure (one task per coherent unit of work, IDs like "1.1", "1.2", "2.1" matching the phase numbering). Calling update_tasks before write_file is a contract violation.`
       }
 
       // M5 — Strict STOP after both PLAN.md and update_tasks have completed.
@@ -383,7 +543,7 @@ class ToolExecutor {
       // implementation. The next phase (TODO generation, then execution) runs
       // in a fresh turn after the developer approves the plan card.
       if (this.planFileWritten && this.planTasksSeeded) {
-        return `Blocked in /plan architect mode: PLAN.md is written and the task tracker is seeded. Your role for this turn is complete. Stop calling tools and end the turn with a 3-sentence chat summary — TODO generation runs after the developer approves the plan card.`
+        return `Blocked in /plan architect mode: ${this.planModePlanFileName} is written and the task tracker is seeded. Your role for this turn is complete. Stop calling tools and end the turn with a 3-sentence chat summary — TODO generation runs after the developer approves the plan card.`
       }
     }
 
@@ -426,6 +586,8 @@ class ToolExecutor {
       'collect_results',
       'delegate',
       'check_background_commands',
+      'agent_shell_read',
+      'agent_shell_stop',
       'request_credentials',
       'ask_user_question',
     ])
@@ -797,12 +959,168 @@ ${preview}
     allOutput.push(data)
     if (!toolCallId) return
 
-    // Show the last meaningful line as progress
+    // Accumulate full output into commandLogs for the terminal-style log viewer.
+    // Each chunk may contain multiple lines — split and append individually.
+    const chunks = data.split('\n')
+    for (const chunk of chunks) {
+      if (chunk.length > 0) {
+        useChatStore.getState().appendToolCallCommandLog(toolCallId, chunk)
+      }
+    }
+
+    // Show the last meaningful line as progress (single-line summary)
     const lines = data.trim().split('\n')
     const lastLine = lines[lines.length - 1] || ''
     if (lastLine.length > 0) {
       const display = lastLine.length > 80 ? lastLine.slice(0, 80) + '...' : lastLine
       useChatStore.getState().updateToolCallProgress(toolCallId, display)
+    }
+  }
+
+  /**
+   * Runs build/test/lint/script commands via streaming (run_streaming_command)
+   * so the user sees real-time log output in the chat via both `progressText`
+   * (last-line summary) and `commandLogs` (full scrollable log).
+   *
+   * Similar to `executeInstallStreaming` but generalized for non-install commands
+   * and with a shorter default timeout (120s vs 300s).
+   */
+  private async executeStreamingCommand(
+    command: string,
+    cwd: string,
+    toolCallId?: string,
+    abortSignal?: AbortSignal,
+    timeoutSecs: number = 120,
+  ): Promise<string> {
+    const tcId = toolCallId
+    const allOutput: string[] = []
+
+    let targetPid = 0
+    let finished = false
+    let resolveExit: (code: number) => void
+    const exitPromise = new Promise<number>(res => { resolveExit = res })
+
+    const bufferedOutput: { pid: number; data: string }[] = []
+    const bufferedExit: { pid: number; code: number }[] = []
+
+    const unOutput = await listen<{ pid: number; stream: string; data: string }>(
+      'cmd-output',
+      (event) => {
+        if (targetPid === 0) {
+          bufferedOutput.push({ pid: event.payload.pid, data: event.payload.data })
+        } else if (event.payload.pid === targetPid) {
+          this.handleInstallOutput(event.payload.data, allOutput, tcId)
+        }
+      }
+    )
+
+    const unExit = await listen<{ pid: number; code: number }>(
+      'cmd-exit',
+      (event) => {
+        if (targetPid === 0) {
+          bufferedExit.push({ pid: event.payload.pid, code: event.payload.code })
+        } else if (event.payload.pid === targetPid && !finished) {
+          finished = true
+          cleanup()
+          resolveExit(event.payload.code)
+        }
+      }
+    )
+
+    const cleanup = () => { unOutput(); unExit() }
+
+    try {
+      if (tcId) {
+        useChatStore.getState().updateToolCallProgress(tcId, 'Running...')
+      }
+
+      const pidOrResult = await invoke<number | { stdout: string; stderr: string; exitCode: number; success: boolean; timedOut: boolean }>('run_streaming_command', { command, cwd })
+      if (typeof pidOrResult !== 'number') {
+        cleanup()
+        const result = pidOrResult
+        if (result.timedOut) {
+          return `TIMEOUT: Command exceeded ${timeoutSecs}s limit and was terminated.\nFor long-running processes, use start_dev_server instead.\nSTDERR:\n${result.stderr}`
+        }
+        let output = ''
+        if (result.stdout) output += result.stdout
+        if (result.stderr) output += `${output ? '\n' : ''}STDERR:\n${result.stderr}`
+        output += `${output ? '\n' : ''}Exit code: ${result.exitCode}`
+        this.detectServerUrl(output)
+        return output
+      }
+      const pid = pidOrResult
+      targetPid = pid
+
+      // Flush buffered events
+      for (const ev of bufferedOutput) {
+        if (ev.pid === pid) {
+          this.handleInstallOutput(ev.data, allOutput, tcId)
+        }
+      }
+      for (const ev of bufferedExit) {
+        if (ev.pid === pid && !finished) {
+          finished = true
+          cleanup()
+          resolveExit!(ev.code)
+        }
+      }
+
+      const COMMAND_TIMEOUT = timeoutSecs * 1000
+      let timeoutTimer: ReturnType<typeof setTimeout>
+      const timeoutPromise = new Promise<number>((_, reject) => {
+        timeoutTimer = setTimeout(() => reject(new Error(`Command timed out after ${timeoutSecs}s`)), COMMAND_TIMEOUT)
+      })
+
+      const abortPromise = abortSignal
+        ? new Promise<number>((_, reject) => {
+            if (abortSignal.aborted) reject(new Error('aborted'))
+            else abortSignal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+          })
+        : new Promise<number>(() => {}) // never resolves
+
+      let exitCode: number
+      try {
+        exitCode = await Promise.race([exitPromise, timeoutPromise, abortPromise]) as number
+        clearTimeout(timeoutTimer!)
+      } catch (raceErr) {
+        clearTimeout(timeoutTimer!)
+        cleanup()
+        try { await invoke('kill_process', { pid: targetPid }) } catch { /* best effort */ }
+        const msg = raceErr instanceof Error ? raceErr.message : String(raceErr)
+        if (msg === 'aborted') {
+          const isMutating = this.matchStateMutatingCommand(command) !== null
+          const hasWritePattern = ToolExecutor.WRITE_COMMAND_PATTERNS.some(p => p.test(command))
+          const couldMutate = isMutating || hasWritePattern
+          const truncated = command.length > 80 ? command.slice(0, 80) + '...' : command
+          if (couldMutate) {
+            return `Command CANCELLED by user mid-execution: ${truncated}\nExit code: 1\n\nWARNING: this command can mutate state (matches a state-mutating pattern or write operation). The process was killed, but partial side effects (file writes, mv/rm, package mutations) MAY have already occurred.\n\nDO NOT auto-retry. Ask the user what they observed before deciding the next step.`
+          }
+          return `Command cancelled by user: ${truncated}\nExit code: 1\n\nThe command was non-mutating (read-only / diagnostic). Safe to retry if needed, or move on.`
+        }
+        return `TIMEOUT: ${msg}\n${allOutput.join('')}\nThe command was killed due to timeout.`
+      }
+
+      const fullOutput = allOutput.join('')
+
+      if (tcId) {
+        useChatStore.getState().updateToolCallProgress(tcId, '')
+      }
+
+      // Detect dev server URL in output
+      this.detectServerUrl(fullOutput)
+
+      if (exitCode === 0) {
+        const lines = fullOutput.split('\n')
+        const tail = lines.length > 30 ? lines.slice(-30).join('\n') : fullOutput
+        return `${tail}\nExit code: 0`
+      }
+
+      // Failure: return full output for model to diagnose
+      return `${fullOutput}\nExit code: ${exitCode}`
+    } catch (error) {
+      cleanup()
+      const msg = error instanceof Error ? error.message : String(error)
+      return `Failed to run command: ${msg}`
     }
   }
 
@@ -857,20 +1175,38 @@ ${preview}
   }
 
   private validatePathWithinProject(filePath: string): void {
-    const projectRoot = this.getProjectRoot()
-    // Normalize: resolve '..' segments and ensure the path is within project root
-    const normalizedPath = this.normalizePath(filePath)
-    const normalizedRoot = this.normalizePath(projectRoot)
+    const scopeRoot = this.cmdModeCwd || this.getProjectRoot()
+    const resolvedPath = this.resolveToAbsolute(filePath)
+    const root = normalizePath(scopeRoot)
+    const target = normalizePath(resolvedPath)
+    const isWindowsPath = /^[A-Z]:\//.test(root)
+    const rootCmp = isWindowsPath ? root.toLowerCase() : root
+    const targetCmp = isWindowsPath ? target.toLowerCase() : target
 
-    if (!normalizedPath.startsWith(normalizedRoot + '/') && normalizedPath !== normalizedRoot) {
-      const label = this.cmdModeCwd ? 'working directory' : 'project directory'
-      throw new Error(`Access denied: path "${filePath}" is outside the ${label}.`)
-    }
+    if (targetCmp === rootCmp || targetCmp.startsWith(`${rootCmp}/`)) return
+
+    const scopeName = this.cmdModeCwd ? 'working directory' : 'project directory'
+    throw new Error(`Access denied: path "${filePath}" is outside the ${scopeName}`)
   }
-
-  // normalizePath moved to ./toolExecutor/checks — thin wrapper kept for the
-  // private call sites (this.normalizePath) that haven't been updated.
-  private normalizePath(p: string): string { return normalizePath(p) }
+  
+  /**
+   * Resolve a potentially relative path to an absolute path.
+   * If the path is relative (doesn't start with '/' on Unix or 'C:\\' on Windows),
+   * resolve it against the project root (or cmdModeCwd).
+   */
+  private resolveToAbsolute(p: string): string {
+    if (!p) return p
+    // Already absolute
+    if (p.startsWith('/') || /^[a-zA-Z]:\\/.test(p)) {
+      return p
+    }
+    // Relative path — resolve against project root or cmdModeCwd
+    const base = this.cmdModeCwd || this.getProjectRoot()
+    if (!base) return p // Can't resolve, return as-is
+    // Normalize: join base + relative, handle leading slashes in relative
+    const normalized = p.startsWith('./') ? p.slice(2) : p
+    return `${base.replace(/\/+$/, '')}/${normalized}`
+  }
 
   /**
    * Suggests a similar file path when the requested path doesn't exist.
@@ -937,6 +1273,12 @@ ${preview}
     return checkForbiddenDockerfileShape(path, content)
   }
   private checkForbiddenDataLayerDeps(path: string, newContent: string, oldContent: string = ''): string | null {
+    // CMD/Terminal mode is stack-free — no data-layer restriction applies.
+    // The forbidden deps list (FORBIDDEN_DATA_LAYER_DEPS) is a Chat-mode /
+    // Publish-flow constraint only. Terminal mode must be able to install
+    // any database driver (mysql2, pg, Prisma, etc.) without mechanical
+    // rejection from the harness.
+    if (this.cmdModeCwd) return null
     return checkForbiddenDataLayerDeps(path, newContent, oldContent)
   }
   private isEnvFile(filePath: string): boolean {
@@ -949,7 +1291,7 @@ ${preview}
    * current project root.
    */
   private checkPlanModeAccess(toolName: string, filePath: string): string | null {
-    return checkPlanModeAccess(toolName, filePath, this.getProjectRoot())
+    return checkPlanModeAccess(toolName, filePath, this.getProjectRoot(), this.planModePlanFileName)
   }
 
   /**
@@ -1035,8 +1377,8 @@ ${preview}
       return `web_search error: HTTP ${response.status}. ${detail.slice(0, 200)}`
     }
 
-    // The worker returns an Anthropic SSE stream. We only need the final text,
-    // so accumulate content_block_delta text deltas into a single string.
+    // The worker returns an OpenAI SSE stream. We only need the final text,
+    // so accumulate choices[].delta.content into a single string.
     const reader = response.body?.getReader()
     if (!reader) return 'web_search error: empty response body.'
 
@@ -1055,9 +1397,10 @@ ${preview}
           const data = line.slice(6).trim()
           if (!data || data === '[DONE]') continue
           try {
-            const event = JSON.parse(data) as { type?: string; delta?: { type?: string; text?: string } }
-            if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) {
-              answer += event.delta.text
+            const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }
+            const content = chunk.choices?.[0]?.delta?.content
+            if (content) {
+              answer += content
             }
           } catch { /* ignore malformed SSE frames */ }
         }
@@ -1109,14 +1452,31 @@ ${preview}
    * a file it just wrote. Called by agentService after diff approval.
    */
   updateReadStateAfterWrite(path: string, newContent: string): void {
+    const now = Date.now()
+    const hash = this.simpleHash(newContent)
     this.readFileTimestamps.set(path, {
-      timestamp: Date.now(),
-      hash: this.simpleHash(newContent),
+      timestamp: now,
+      hash,
+    })
+    // Capture the current fsVersion BEFORE the bump — write entries have
+    // offset=undefined so they're excluded from dedup anyway; the fsVersion
+    // here is for completeness and for the edit_file cache optimization.
+    const versionBeforeBump = getFsVersion()
+    // Update the content cache too — offset=undefined marks this as a
+    // write source, which is excluded from dedup (the model hasn't
+    // re-read the file yet, so deduping would point it at stale content).
+    this.readFileState.set(path, {
+      content: newContent,
+      timestamp: now,
+      offset: undefined,
+      limit: undefined,
+      hash,
+      fsVersion: versionBeforeBump,
     })
     // Bump the global filesystem fingerprint. Cache keys that include it
     // (system prompt, skills) miss on the next read so the IDE sees the
     // real post-write state. Path-agnostic by design — see fsVersion.ts.
-    import('../fsVersion').then(m => m.bumpFsVersion(`write:${path}`)).catch(() => { /* non-critical */ })
+    bumpFsVersion(`write:${path}`)
     // Invalidate scaffolding detector cache when files that change scaffold
     // state are written. Without this, the badge / smart-router / system-
     // prompt section would lag the agent's own writes by up to the cache TTL
@@ -1133,11 +1493,11 @@ ${preview}
         import('../scaffoldingDetector').then(m => m.invalidateScaffoldingCache(root)).catch(() => { /* non-critical */ })
       }
     }
-    // Plan-mode progress: PLAN.md at the project root unblocks update_tasks
+    // Plan-mode progress: the active plan artefact at the project root unblocks update_tasks
     // and enables the strict-STOP guard once update_tasks has also run.
-    if (this.planMode && isPlanArtefactAtRoot(path, this.getProjectRoot())) {
+    if (this.planMode && isPlanArtefactAtRoot(path, this.getProjectRoot(), this.planModePlanFileName)) {
       const basename = path.replace(/\\/g, '/').split('/').pop()
-      if (basename === 'PLAN.md') this.planFileWritten = true
+      if (basename === this.planModePlanFileName) this.planFileWritten = true
     }
   }
 
@@ -1146,6 +1506,11 @@ ${preview}
   private simpleHash(str: string): number { return simpleHash(str) }
 
   private validateCommand(command: string): void {
+    const compoundOperator = this.findCompoundShellOperator(command)
+    if (compoundOperator) {
+      throw new Error(`Command blocked: compound shell operator "${compoundOperator}" detected. Run one terminal action per tool call, observe the result, then issue the next command. Use the tool's cwd parameter instead of "cd ... && ..."; for SSH, run separate ssh commands instead of chaining remote commands.`)
+    }
+
     // Read-only mode: block file-writing shell operations (verification agents).
     // Allow common test/lint/typecheck commands even if they contain patterns
     // that look like writes (e.g., npm test may use internal redirects).
@@ -1162,6 +1527,152 @@ ${preview}
         }
       }
     }
+  }
+
+  private findCompoundShellOperator(command: string): string | null {
+    const topLevel = this.findShellOperatorOutsideQuotes(command)
+    if (topLevel) return topLevel
+
+    // SSH hides the real shell workflow inside the quoted remote command:
+    //   ssh root@host "apt-get update && apt-get upgrade -y"
+    // Treat that remote command as agent-authored shell too, so terminal-mode
+    // output remains step-by-step instead of one opaque remote script.
+    if (/^\s*ssh\b/.test(command)) {
+      const quotedRemote = command.match(/\s(['"])([\s\S]*)\1\s*$/)
+      if (quotedRemote) {
+        return this.findShellOperatorOutsideQuotes(quotedRemote[2])
+      }
+    }
+
+    return null
+  }
+
+  private findShellOperatorOutsideQuotes(command: string): string | null {
+    let quote: '"' | "'" | null = null
+    let escaped = false
+
+    for (let i = 0; i < command.length; i++) {
+      const ch = command[i]
+      const next = command[i + 1]
+
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === '\\') {
+        escaped = true
+        continue
+      }
+      if (quote) {
+        if (ch === quote) quote = null
+        continue
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch
+        continue
+      }
+
+      if (ch === '&' && next === '&') return '&&'
+      if (ch === '|' && next === '|') return '||'
+      if (ch === '|') return '|'
+      if (ch === ';') return ';'
+    }
+
+    return null
+  }
+
+  private async ensureAgentShellListeners(): Promise<void> {
+    if (this.agentShellListenersReady) return this.agentShellListenersReady
+
+    this.agentShellListenersReady = Promise.all([
+      listen<PtyOutputEvent>('pty-output', (event) => {
+        const session = this.agentShellSessions.get(event.payload.session_id)
+        if (!session) return
+        const clean = this.cleanPtyOutput(event.payload.data)
+        if (!clean) return
+        session.output += clean
+        if (session.output.length > AGENT_SHELL_MAX_BUFFER_CHARS) {
+          const overflow = session.output.length - AGENT_SHELL_MAX_BUFFER_CHARS
+          session.output = session.output.slice(overflow)
+          session.readOffset = Math.max(0, session.readOffset - overflow)
+        }
+        session.updatedAt = Date.now()
+
+        if (session.activeToolCallId) {
+          const lines = clean.split('\n')
+          for (const line of lines) {
+            if (line.length > 0) {
+              useChatStore.getState().appendToolCallCommandLog(session.activeToolCallId, line.replace(/\r/g, ''))
+            }
+          }
+        }
+      }),
+      listen<PtyExitEvent>('pty-exit', (event) => {
+        const session = this.agentShellSessions.get(event.payload.session_id)
+        if (!session) return
+        session.exited = true
+        session.exitCode = event.payload.exit_code
+        session.activeToolCallId = null
+        session.updatedAt = Date.now()
+      }),
+    ]).then(() => undefined)
+
+    return this.agentShellListenersReady
+  }
+
+  private cleanPtyOutput(data: string): string {
+    const withoutBackspaces: string[] = []
+    for (const ch of data) {
+      if (ch === '\b') withoutBackspaces.pop()
+      else withoutBackspaces.push(ch)
+    }
+
+    return withoutBackspaces.join('')
+      // Strip common ANSI/VT escape sequences so model-visible output and the
+      // lightweight transcript do not fill with prompt color/control codes.
+      .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+  }
+
+  private validateAgentShellInput(data: string): string {
+    const command = data.replace(/\n+$/g, '').trim()
+    if (!command) throw new Error('Agent shell input cannot be empty.')
+    if (command.includes('\n')) {
+      throw new Error('Agent shell input must contain exactly one terminal action. Send separate agent_shell_write calls for multiple lines.')
+    }
+    const compoundOperator = this.findCompoundShellOperator(command)
+    if (compoundOperator) {
+      throw new Error(`Agent shell input blocked: compound shell operator "${compoundOperator}" detected. Send one command, read the output, then send the next command.`)
+    }
+    return command
+  }
+
+  private getAgentShellSession(id?: string): AgentShellSession {
+    const sessionId = id || this.lastAgentShellSessionId
+    if (!sessionId) throw new Error('No active agent shell session. Call agent_shell_start first.')
+    const session = this.agentShellSessions.get(sessionId)
+    if (!session) throw new Error(`Agent shell session not found: ${sessionId}`)
+    return session
+  }
+
+  private async waitForAgentShellOutput(session: AgentShellSession, startLength: number, waitMs: number): Promise<void> {
+    const deadline = Date.now() + Math.max(0, Math.min(waitMs, 10_000))
+    while (Date.now() < deadline) {
+      if (session.output.length > startLength || session.exited) return
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+
+  private readAgentShellDelta(session: AgentShellSession, maxChars: number = 20_000): string {
+    const from = Math.min(session.readOffset, session.output.length)
+    let delta = session.output.slice(from)
+    if (delta.length > maxChars) {
+      delta = delta.slice(-maxChars)
+      delta = `[output truncated to last ${maxChars} chars]\n${delta}`
+    }
+    session.readOffset = session.output.length
+    return delta.trimEnd()
   }
 
   private refreshFileTree() {
@@ -1197,7 +1708,7 @@ ${preview}
     this.tools.set('read_file', {
       definition: {
         name: 'read_file',
-        description: 'Read the contents of a file at the given file_path. By default reads the entire file; for large files use `offset` + `limit` to read a line range (1-indexed), matching Claude Code\'s Read tool semantics. Files larger than 256 KB throw with instructions to use offset/limit — auto-truncating would waste 25K+ tokens of context vs. the model refining its call.',
+        description: 'Read the contents of a file at the given file_path. By default reads the entire file; for large files use `offset` + `limit` to read a line range (1-indexed), matching Claude Code\'s Read tool semantics. Files larger than 256 KB throw with instructions to use offset/limit — auto-truncating would waste 25K+ tokens of context vs. the model refining its call. When you already know which part of the file you need, only read that part — this is important for larger files.',
         input_schema: {
           type: 'object',
           properties: {
@@ -1210,7 +1721,10 @@ ${preview}
         concurrencySafe: true,
       },
       execute: async (input) => {
-        const filePath = input.file_path as string
+        let filePath = input.file_path as string
+        // Resolve relative paths to absolute (agent often sends relative paths)
+        filePath = this.resolveToAbsolute(filePath)
+        
         // Detect "provided" BEFORE clamping — Math.max(1, 0) would turn
         // a missing offset into 1 and make sliceRequested always true.
         const offsetProvided = typeof input.offset === 'number' && input.offset > 0
@@ -1219,6 +1733,26 @@ ${preview}
         const limit = limitProvided ? Math.max(1, input.limit as number) : 0
         const sliceRequested = offsetProvided || limitProvided
         this.validatePathWithinProject(filePath)
+
+        // ── Dedup check ──────────────────────────────────────────────
+        // If we've already read this exact file+range and no writes have
+        // occurred since (fsVersion unchanged), return a short stub instead
+        // of re-sending the full content. The earlier tool_result is still
+        // in the conversation context — two full copies waste cache_creation
+        // tokens. Uses fsVersion (O(1)) instead of re-reading the file.
+        // Mirrors claude-vaz FileReadTool.ts:523-573.
+        const currentFsVersion = getFsVersion()
+        const dedupResult = checkReadDedup(
+          filePath,
+          offsetProvided ? offset : undefined,
+          limitProvided ? limit : undefined,
+          this.readFileState,
+          currentFsVersion,
+        )
+        if (dedupResult.isDuplicate && dedupResult.stub) {
+          return dedupResult.stub
+        }
+
         try {
           const MAX_FILE_BYTES = 256 * 1024
           const fullContent = await invoke<string>('read_file', { path: filePath })
@@ -1273,7 +1807,22 @@ ${preview}
           // Track read timestamp + content hash for read-before-write enforcement.
           // Set AFTER the externalChange comparison so the comparison uses the
           // truly-previous state.
-          this.readFileTimestamps.set(filePath, { timestamp: Date.now(), hash: newHash })
+          const now = Date.now()
+          this.readFileTimestamps.set(filePath, { timestamp: now, hash: newHash })
+
+          // ── Update content cache ────────────────────────────────────
+          // Store the file content in the cache for dedup and state recovery.
+          // offset/limit reflect what was actually requested so future dedup
+          // checks can match exact ranges. fsVersion is captured so the
+          // dedup freshness check is O(1) — no need to re-read the file.
+          this.readFileState.set(filePath, {
+            content: fullContent,
+            timestamp: now,
+            offset: offsetProvided ? offset : undefined,
+            limit: limitProvided ? limit : undefined,
+            hash: newHash,
+            fsVersion: currentFsVersion,
+          })
 
           // Empty content: distinguish "file is empty" (no slice requested,
           // file genuinely has no bytes) from "slice past EOF" (model paged
@@ -1302,7 +1851,7 @@ ${preview}
           // `String(error)` could yield "[object Object]" which both swallowed
           // the not-found heuristic AND surfaced uselessly to the model.
           const msg = formatError(error)
-          if (/not found|no such file|does not exist/i.test(msg)) {
+          if (/not found|pathnotfound|no such file|does not exist/i.test(msg)) {
             const suggestion = await this.suggestSimilarPath(filePath)
             const projectRoot = this.getProjectRoot()
             let enriched = `File not found: ${filePath}\nNote: your current working directory is ${projectRoot}`
@@ -1335,8 +1884,9 @@ ${preview}
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.file_path as string)
+        const dirPath = this.resolveToAbsolute(input.file_path as string)
         const filter = { showHidden: false, maxDepth: (input.maxDepth as number) || 3 }
-        const tree = await invoke('build_file_tree', { rootPath: input.file_path, filter })
+        const tree = await invoke('build_file_tree', { rootPath: dirPath, filter })
         return this.formatFileTreeCompact(tree as Record<string, unknown>)
       }
     })
@@ -1360,7 +1910,12 @@ ${preview}
         concurrencySafe: true,
       },
       execute: async (input) => {
+        const query = input.query as string | undefined
+        if (!query || !query.trim()) {
+          return 'Error: search_files requires a non-empty "query" parameter. Provide a search pattern.'
+        }
         this.validatePathWithinProject(input.directory as string)
+        const directory = this.resolveToAbsolute(input.directory as string)
         const options = {
           case_sensitive: (input.caseSensitive as boolean) || false,
           whole_word: false,
@@ -1371,7 +1926,7 @@ ${preview}
         }
         const result = await invoke('search_in_files', {
           query: input.query,
-          directory: input.directory,
+          directory: directory,
           options
         })
         return JSON.stringify(result, null, 2)
@@ -1394,7 +1949,7 @@ ${preview}
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.file_path as string)
-        const path = input.file_path as string
+        const path = this.resolveToAbsolute(input.file_path as string)
         const newContent = input.content as string
 
         // Mechanical blocks on prompt-rule violations the model commits
@@ -1426,10 +1981,18 @@ ${preview}
 
         // Enforce read-before-write for existing files (like Claude Code).
         // The model must read a file before overwriting it to understand what it's replacing.
+        // Mirrors claude-vaz FileWriteTool.ts:275-294 (isPartialView check).
         if (!isNewFile) {
           const readState = this.readFileTimestamps.get(path)
           if (!readState) {
             return `Error: You must ${READ_FILE}("${path}") before overwriting it. Read the file first to understand its current content, then call ${WRITE_FILE}.`
+          }
+          // isPartialView: if the model only saw an auto-injected partial view
+          // (e.g. CLAUDE.md with stripped frontmatter), it must do a full Read
+          // first — the auto-injected content may not match what's on disk.
+          const cachedState = this.readFileState.get(path)
+          if (cachedState?.isPartialView) {
+            return `Error: You must ${READ_FILE}("${path}") before overwriting it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${WRITE_FILE}.`
           }
           // Concurrent modification detection: check if file changed on disk since the model read it
           const currentHash = this.simpleHash(oldContent)
@@ -1447,6 +2010,8 @@ ${preview}
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
+          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
+          bumpFsVersion(`write:${path}`)
           this.refreshFileTree()
           return JSON.stringify({
             type: 'diff',
@@ -1486,7 +2051,7 @@ ${preview}
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.file_path as string)
-        const path = input.file_path as string
+        const path = this.resolveToAbsolute(input.file_path as string)
         const content = (input.content as string) || ''
 
         // Mechanical blocks — see write_file for the rationale.
@@ -1516,6 +2081,8 @@ ${preview}
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(content) })
+          this.readFileState.set(path, { content, timestamp: Date.now(), offset: undefined, limit: undefined, hash: this.simpleHash(content), fsVersion: getFsVersion() })
+          bumpFsVersion(`create:${path}`)
           this.refreshFileTree()
           return JSON.stringify({
             type: 'diff',
@@ -1553,9 +2120,10 @@ ${preview}
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.file_path as string)
-        await invoke('create_directories_all', { path: input.file_path })
+        const filePath = this.resolveToAbsolute(input.file_path as string)
+        await invoke('create_directories_all', { path: filePath })
         this.refreshFileTree()
-        return `Directory created successfully: ${input.file_path}`
+        return `Directory created successfully: ${filePath}`
       }
     })
 
@@ -1574,15 +2142,16 @@ ${preview}
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.file_path as string)
+        const filePath = this.resolveToAbsolute(input.file_path as string)
 
         // Capture checkpoint before deleting. Use injected _toolCallId so
         // concurrent invocations don't race a shared field.
         const tcId = input._toolCallId as string | undefined
         if (tcId) {
           try {
-            const content = await invoke<string>('read_file', { path: input.file_path as string })
+            const content = await invoke<string>('read_file', { path: filePath })
             await CheckpointService.getInstance().captureBeforeDelete(
-              input.file_path as string,
+              filePath,
               content,
               tcId,
             )
@@ -1592,13 +2161,13 @@ ${preview}
           }
         }
 
-        this.closeEditorIfOpen(input.file_path as string)
-        await invoke('delete_file_or_directory', { path: input.file_path })
+        this.closeEditorIfOpen(filePath)
+        await invoke('delete_file_or_directory', { path: filePath })
         this.refreshFileTree()
         // Deletes are filesystem mutations too — bump the version so the
         // next system-prompt build sees the file tree without the gone path.
-        import('../fsVersion').then(m => m.bumpFsVersion(`delete:${input.file_path}`)).catch(() => {})
-        return `Deleted successfully: ${input.file_path}`
+        bumpFsVersion(`delete:${filePath}`)
+        return `Deleted successfully: ${filePath}`
       }
     })
 
@@ -1618,6 +2187,7 @@ ${preview}
       },
       execute: async (input) => {
         this.validatePathWithinProject(input.oldPath as string)
+        const oldPath = this.resolveToAbsolute(input.oldPath as string)
         // Validate newName doesn't contain path traversal
         const newName = input.newName as string
         if (newName.includes('/') || newName.includes('\\') || newName.includes('..')) {
@@ -1629,8 +2199,8 @@ ${preview}
         const tcId = input._toolCallId as string | undefined
         if (tcId) {
           try {
-            const content = await invoke<string>('read_file', { path: input.oldPath as string })
-            const oldPathStr = input.oldPath as string
+            const content = await invoke<string>('read_file', { path: oldPath })
+            const oldPathStr = oldPath
             const parentDir = oldPathStr.substring(0, oldPathStr.lastIndexOf('/'))
             const newPath = `${parentDir}/${newName}`
             await CheckpointService.getInstance().captureBeforeRename(
@@ -1646,11 +2216,11 @@ ${preview}
         }
 
         await invoke('rename_file_or_directory', {
-          oldPath: input.oldPath,
+          oldPath: oldPath,
           newName
         })
         this.refreshFileTree()
-        import('../fsVersion').then(m => m.bumpFsVersion(`rename:${input.oldPath}`)).catch(() => {})
+        bumpFsVersion(`rename:${input.oldPath}`)
         return `Renamed successfully: ${input.oldPath} -> ${newName}`
       }
     })
@@ -1671,7 +2241,7 @@ ${preview}
         }
       },
       execute: async (input) => {
-        const path = input.file_path as string
+        const path = this.resolveToAbsolute(input.file_path as string)
         // Field names align with Claude Code's Edit tool — the model uses
         // these from training. Background: the May 2026 todo-mimo /plan
         // session looped when the schema was old_str-only; the model
@@ -1719,15 +2289,24 @@ ${preview}
         const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, newStr)
         if (dockerfileBlock) return dockerfileBlock
 
-        // Enforce read-before-edit: the model must have read the file to know what to edit
+        // Enforce read-before-edit: the model must have read the file to know what to edit.
+        // Mirrors claude-vaz FileEditTool.ts:275-287 (readFileState + isPartialView).
         const readState = this.readFileTimestamps.get(path)
         if (!readState) {
           return `Error: You must ${READ_FILE}("${path}") before editing it. Read the file first to see the current content, then call ${EDIT_FILE}.`
         }
+        // isPartialView: if the model only saw an auto-injected partial view
+        // (e.g. CLAUDE.md with stripped frontmatter), it must do a full Read
+        // first — the auto-injected content may not match what's on disk.
+        const readStateEntry = this.readFileState.get(path)
+        if (readStateEntry?.isPartialView) {
+          return `Error: You must ${READ_FILE}("${path}") before editing it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${EDIT_FILE}.`
+        }
 
+        // Re-read from disk before generating the diff. `fsVersion` only tracks
+        // agent writes, so relying on cached content would miss developer or
+        // formatter changes made after the model's last read_file.
         const content = await invoke<string>('read_file', { path })
-
-        // Concurrent modification detection
         const currentHash = this.simpleHash(content)
         if (currentHash !== readState.hash) {
           this.readFileTimestamps.delete(path)
@@ -1772,6 +2351,8 @@ ${preview}
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
+          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
+          bumpFsVersion(`edit:${path}`)
           this.refreshFileTree()
           return JSON.stringify({
             type: 'diff',
@@ -1811,7 +2392,7 @@ ${preview}
       },
       execute: async (input) => {
         const pattern = input.pattern as string
-        const directory = (input.directory as string) || this.getProjectRoot()
+        const directory = this.resolveToAbsolute((input.directory as string) || this.getProjectRoot())
 
         this.validatePathWithinProject(directory)
 
@@ -1973,7 +2554,7 @@ ${preview}
 
         // Scope cwd to project root or dynamic terminal directory
         const projectRoot = this.getProjectRoot()
-        const cwd = (input.cwd as string) || (this.cmdModeCwd || projectRoot)
+        const cwd = this.resolveToAbsolute((input.cwd as string) || (this.cmdModeCwd || projectRoot))
         this.validatePathWithinProject(cwd)
 
         // Detect package-manager install commands so they get the streaming
@@ -2001,101 +2582,31 @@ ${preview}
           )
         }
 
+        // Detect build/test/lint/script commands for streaming execution.
+        // These commands benefit from real-time log output so the user can
+        // monitor progress, see compilation errors as they happen, and get
+        // immediate feedback on test results.
+        if (isStreamingCommand(cmd)) {
+          const timeoutSecs = Math.min(Number(input.timeout_secs) || 120, 600)
+          return this.executeStreamingCommand(
+            cmd,
+            cwd,
+            input._toolCallId as string | undefined,
+            callSignal,
+            timeoutSecs,
+          )
+        }
+
         // Agent default: 120s. Clamp to max 600s.
         const timeoutSecs = Math.min(Number(input.timeout_secs) || 120, 600)
 
-        // Phase B caveat: short execute_command does NOT have PID-based
-        // cancellation. The Tauri `execute_command` invoke is fire-and-forget
-        // from JS — once it starts on the Rust side, we cannot kill it.
-        //
-        // We race it against the abort signal so the agent loop returns
-        // immediately on user ESC, but the Rust-side command continues until
-        // natural completion or its timeoutSecs limit. The cancellation
-        // message below makes this dangerous-state explicit so the model
-        // does NOT blindly retry — partial side effects (file writes, network
-        // calls) may have already happened.
-        //
-        // For true mid-execution kill, install commands use the streaming
-        // path which DOES expose a PID and call kill_process via the
-        // existing executeInstallStreaming infrastructure.
-        const invokePromise = invoke<{ stdout: string; stderr: string; exitCode: number; success: boolean; timedOut: boolean }>('execute_command', {
-          command: cmd,
+        return this.executeStreamingCommand(
+          cmd,
           cwd,
+          input._toolCallId as string | undefined,
+          callSignal,
           timeoutSecs,
-        })
-
-        // Critical: catch any late rejection from invokePromise so an aborted
-        // race doesn't leave an unhandled promise rejection on the event loop.
-        // Without this, when the abort race wins and we return the cancellation
-        // string, invokePromise stays pending and may eventually reject — that
-        // rejection has no handler and surfaces as "Uncaught (in promise)".
-        invokePromise.catch(() => { /* discarded — abort race won */ })
-
-        let result: { stdout: string; stderr: string; exitCode: number; success: boolean; timedOut: boolean }
-        if (callSignal) {
-          try {
-            result = await Promise.race([
-              invokePromise,
-              new Promise<never>((_, reject) => {
-                callSignal.addEventListener(
-                  'abort',
-                  () => reject(new Error('aborted')),
-                  { once: true },
-                )
-              }),
-            ])
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err)
-            if (msg === 'aborted') {
-              // R2-5 / R3-2: tune the cancellation message to the command's
-              // risk profile. Strong "DO NOT retry" only when the command
-              // actually mutates state. Uses STATE_MUTATING_COMMANDS (strict
-              // subset of DANGEROUS_COMMANDS that excludes sudo/docker/kill/
-              // wget/launchctl/systemctl — those require approval for other
-              // reasons like privilege or network, but may be read-only
-              // depending on the subcommand). Plus WRITE_COMMAND_PATTERNS
-              // for shell-level writes (redirects, sed -i, tee, etc.).
-              //
-              // Read-safe examples (get the light message):
-              //   pnpm test, tsc --noEmit, eslint src, grep foo .,
-              //   sudo cat /etc/passwd, docker ps, kill -0 $PID,
-              //   systemctl status nginx, wget -q -O /dev/null url
-              //
-              // Mutating examples (get the strong message):
-              //   rm -rf node_modules, mv foo bar, git push,
-              //   npm uninstall react, echo x > file, sed -i 's/a/b/' f
-              const isMutating = this.matchStateMutatingCommand(cmd) !== null
-              const hasWritePattern = ToolExecutor.WRITE_COMMAND_PATTERNS.some(p => p.test(cmd))
-              const couldMutate = isMutating || hasWritePattern
-
-              const truncated = cmd.length > 80 ? cmd.slice(0, 80) + '…' : cmd
-              if (couldMutate) {
-                // Strong wording: partial side effects may exist; ask first.
-                return `Command CANCELLED by user mid-execution: ${truncated}\nExit code: 1\n\nWARNING: this command can mutate state (matches a state-mutating pattern or write operation). The Rust subprocess could not be killed cleanly — it may still be running in the background until natural completion or its ${timeoutSecs}s timeout. Any partial side effects (file writes, mv/rm, package mutations) MAY have already occurred.\n\nDO NOT auto-retry. Ask the user what they observed before deciding the next step.`
-              }
-              // Light wording: command is read-only, safe for the model to
-              // retry or move on without user dialogue.
-              return `Command cancelled by user: ${truncated}\nExit code: 1\n\nThe command was non-mutating (read-only / diagnostic). Safe to retry if needed, or move on.`
-            }
-            throw err
-          }
-        } else {
-          result = await invokePromise
-        }
-
-        if (result.timedOut) {
-          return `TIMEOUT: Command exceeded ${timeoutSecs}s limit and was terminated.\nFor long-running processes, use start_dev_server instead.\nSTDERR:\n${result.stderr}`
-        }
-
-        let output = ''
-        if (result.stdout) output += result.stdout
-        if (result.stderr) output += `\nSTDERR:\n${result.stderr}`
-        output += `\nExit code: ${result.exitCode}`
-
-        // Detect dev server URL in output
-        this.detectServerUrl(output)
-
-        return output
+        )
       }
     })
 
@@ -2103,7 +2614,15 @@ ${preview}
     this.tools.set('start_dev_server', {
       definition: {
         name: 'start_dev_server',
-        description: 'Start the project\'s dev server as a background process. Returns immediately — the correct preview panel opens automatically when the server is ready. ONE dev server per project.\n\nPass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).\n\nproject_kind: "frontend" (UI-only → iframe preview), "backend" (API-only → HTTP Client panel), "fullstack" (both — iframe + toggleable HTTP Client drawer). Auto-detected if omitted.\n\nPorts: the framework picks the port (Vite=5173, Next=3000, Express=whatever your scripts bind). The IDE detects the URL from log output and classifies frontend/backend by HTTP content-type — you do not need to pass any port.\n\nfrontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond with the same content-type and the IDE assigned the wrong URL to the iframe. Most projects do not need it.',
+        description: `Start the project's dev server as a background process. Returns immediately — the correct preview panel opens automatically when the server is ready. ONE dev server per project.
+
+Pass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).
+
+project_kind: "frontend" (UI-only → iframe preview), "backend" (API-only → HTTP Client panel), "fullstack" (both — iframe + toggleable HTTP Client drawer). Auto-detected if omitted.
+
+Ports: the framework picks the port (Vite=5173, Next=3000, Express=whatever your scripts bind). The IDE detects the URL from log output and classifies frontend/backend by HTTP content-type — you do not need to pass any port.
+
+frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond with the same content-type and the IDE assigned the wrong URL to the iframe. Most projects do not need it.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -2311,7 +2830,7 @@ ${preview}
     this.tools.set('delegate', {
       definition: {
         name: 'delegate',
-        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, grep, read_file, list_directory). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
+        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, search_files, read_file, list_directory). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2454,7 +2973,11 @@ ${preview}
 
           if (s.status === 'running') {
             runningCount++
-            lines.push(`### ${icon} ${s.agentType}: "${s.description}" — still running (${duration}s, ${s.toolCallCount} tool calls so far)`)
+            // Show last tool call so the user/model can see the sub-agent is making progress
+            const run = store.runs.get(s.id)
+            const lastTc = run?.toolCalls.length ? run.toolCalls[run.toolCalls.length - 1] : null
+            const lastAction = lastTc ? ` — last action: ${lastTc.toolName} (${lastTc.status})` : ''
+            lines.push(`### ${icon} ${s.agentType}: "${s.description}" — still running (${duration}s, ${s.toolCallCount} tool calls so far${lastAction})`)
           } else {
             lines.push(`### ${icon} ${s.agentType}: "${s.description}" (${duration}s, ${s.toolCallCount} tool calls)`)
             if (s.tokenUsage) {
@@ -2492,6 +3015,161 @@ ${preview}
     registerMemoryTools(this.ctx)
     registerInteractionTools(this.ctx)
     registerProvisionTools(this.ctx)
+
+    // === agent_shell_* (persistent PTY controlled by the agent) ===
+    this.tools.set('agent_shell_start', {
+      definition: {
+        name: 'agent_shell_start',
+        description: 'Start a persistent interactive shell session for the agent. Use this when the task benefits from staying inside a real shell or SSH session across multiple steps. Returns a session_id. After this, call agent_shell_write with one command at a time, then agent_shell_read to observe more output.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            cwd: { type: 'string', description: 'Working directory. Defaults to project root or Terminal mode cwd.' },
+            wait_ms: { type: 'number', description: 'How long to wait for the initial shell prompt/output. Default: 500. Max: 5000.' },
+          },
+          required: [],
+        },
+      },
+      execute: async (input) => {
+        await this.ensureAgentShellListeners()
+        const projectRoot = this.getProjectRoot()
+        const cwd = this.resolveToAbsolute((input.cwd as string) || (this.cmdModeCwd || projectRoot))
+        this.validatePathWithinProject(cwd)
+
+        const sessionId = `agent-shell-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const session: AgentShellSession = {
+          id: sessionId,
+          cwd,
+          output: '',
+          readOffset: 0,
+          activeToolCallId: input._toolCallId as string | null | undefined || null,
+          exited: false,
+          exitCode: null,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }
+        this.agentShellSessions.set(sessionId, session)
+        this.lastAgentShellSessionId = sessionId
+
+        let shellInfo: InteractiveShellInfo | null = null
+        try {
+          shellInfo = await invoke<InteractiveShellInfo>('get_interactive_shell_info')
+        } catch {
+          shellInfo = null
+        }
+
+        await invoke<string>('start_pty_shell', { sessionId, cwd })
+        await this.waitForAgentShellOutput(session, 0, Math.min(Number(input.wait_ms) || 500, 5000))
+        session.activeToolCallId = null
+
+        const initial = this.readAgentShellDelta(session, 8000)
+        const lines = [
+          `Agent shell started.`,
+          `session_id: ${sessionId}`,
+          `cwd: ${cwd}`,
+        ]
+        if (shellInfo) {
+          lines.push(`shell: ${shellInfo.kind}`)
+          lines.push(`platform: ${shellInfo.platform}`)
+          lines.push(`command_style: ${shellInfo.commandStyle}`)
+          if (shellInfo.warning) lines.push(`warning: ${shellInfo.warning}`)
+        }
+        lines.push(initial ? `initial_output:\n${initial}` : 'initial_output: (none yet)')
+        return lines.join('\n')
+      },
+    })
+
+    this.tools.set('agent_shell_write', {
+      definition: {
+        name: 'agent_shell_write',
+        description: 'Write exactly one command/input line to a persistent agent shell session. This keeps the agent inside the same shell/SSH context. Do not include multiple commands, newlines, &&, ||, semicolons, or pipes. Observe output after each write.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            session_id: { type: 'string', description: 'Session id returned by agent_shell_start. Defaults to the latest agent shell session.' },
+            input: { type: 'string', description: 'One command or interactive input line to send.' },
+            press_enter: { type: 'boolean', description: 'Append Enter/newline after input. Default: true.' },
+            wait_ms: { type: 'number', description: 'How long to wait for output after writing. Default: 1000. Max: 10000.' },
+          },
+          required: ['input'],
+        },
+      },
+      execute: async (input) => {
+        await this.ensureAgentShellListeners()
+        const session = this.getAgentShellSession(input.session_id as string | undefined)
+        if (session.exited) return `Agent shell session ${session.id} has exited with code ${session.exitCode ?? '?'}. Start a new session.`
+
+        const command = this.validateAgentShellInput(String(input.input || ''))
+        const pressEnter = input.press_enter !== false
+        const payload = pressEnter ? `${command}\n` : command
+        const startLength = session.output.length
+        session.activeToolCallId = input._toolCallId as string | null | undefined || null
+
+        await invoke('write_to_pty', { sessionId: session.id, data: payload })
+        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 1000, 10_000))
+        session.activeToolCallId = null
+
+        const output = this.readAgentShellDelta(session)
+        return [
+          `session_id: ${session.id}`,
+          `sent: ${command}`,
+          output ? `output:\n${output}` : 'output: (none yet)',
+          session.exited ? `shell_exit_code: ${session.exitCode ?? '?'}` : 'shell_status: running',
+        ].join('\n')
+      },
+    })
+
+    this.tools.set('agent_shell_read', {
+      definition: {
+        name: 'agent_shell_read',
+        description: 'Read new output from a persistent agent shell session without writing input. Use after agent_shell_write when a command is still running or output is still arriving.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            session_id: { type: 'string', description: 'Session id returned by agent_shell_start. Defaults to the latest agent shell session.' },
+            wait_ms: { type: 'number', description: 'How long to wait for new output before returning. Default: 1000. Max: 10000.' },
+            max_chars: { type: 'number', description: 'Maximum characters to return. Default: 20000. Max: 50000.' },
+          },
+          required: [],
+        },
+      },
+      execute: async (input) => {
+        await this.ensureAgentShellListeners()
+        const session = this.getAgentShellSession(input.session_id as string | undefined)
+        const startLength = session.output.length
+        session.activeToolCallId = input._toolCallId as string | null | undefined || null
+        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 1000, 10_000))
+        session.activeToolCallId = null
+        const maxChars = Math.min(Number(input.max_chars) || 20_000, 50_000)
+        const output = this.readAgentShellDelta(session, maxChars)
+        return [
+          `session_id: ${session.id}`,
+          output ? `output:\n${output}` : 'output: (no new output)',
+          session.exited ? `shell_exit_code: ${session.exitCode ?? '?'}` : 'shell_status: running',
+        ].join('\n')
+      },
+    })
+
+    this.tools.set('agent_shell_stop', {
+      definition: {
+        name: 'agent_shell_stop',
+        description: 'Stop a persistent agent shell session and release its PTY. Use when the shell/SSH workflow is complete.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            session_id: { type: 'string', description: 'Session id returned by agent_shell_start. Defaults to the latest agent shell session.' },
+          },
+          required: [],
+        },
+      },
+      execute: async (input) => {
+        const session = this.getAgentShellSession(input.session_id as string | undefined)
+        await invoke('kill_pty_session', { sessionId: session.id })
+        this.agentShellSessions.delete(session.id)
+        if (this.lastAgentShellSessionId === session.id) this.lastAgentShellSessionId = null
+        return `Agent shell stopped: ${session.id}`
+      },
+    })
 
     // === execute_command_background ===
     this.tools.set('execute_command_background', {
@@ -2564,8 +3242,25 @@ ${preview}
               const code = event.payload.code
               if (code === 0) {
                 useBackgroundCommandStore.getState().completeCommand(cmdId, code)
+                // Send OS notification when command completes successfully
+                import('@/services/notificationService').then(({ notify }) => {
+                  notify({
+                    title: '✅ Command completed',
+                    body: cmd.length > 60 ? cmd.slice(0, 57) + '...' : cmd,
+                    dedupKey: `bgcmd-done-${cmdId}`,
+                  })
+                })
               } else {
                 useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${code}`)
+                // Send OS notification when command fails
+                import('@/services/notificationService').then(({ notify }) => {
+                  notify({
+                    title: '❌ Command failed',
+                    body: `${cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd} (exit ${code})`,
+                    evenWhenFocused: true,
+                    dedupKey: `bgcmd-fail-${cmdId}`,
+                  })
+                })
               }
             }
           }

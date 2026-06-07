@@ -4,6 +4,7 @@ import type { ToolCallDisplay } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { TerminalStructuredDiff } from './TerminalStructuredDiff'
 import { getToolDisplay, getToolSubtitle, shortenPath } from './toolDisplay'
+import { isShellTool, ShellCommandBlock } from '../shell/ShellCommandBlock'
 
 interface TerminalToolCallProps {
   toolCall: ToolCallDisplay
@@ -81,6 +82,17 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
   const hasDiff = toolCall.diffOldContent !== undefined || toolCall.diffNewContent !== undefined
   const isReadTool = READ_TOOLS.has(toolCall.toolName)
   const isWriteTool = WRITE_TOOLS.has(toolCall.toolName)
+  const isNested = !!toolCall.spawnedBy
+
+  if (isShellTool(toolCall.toolName)) {
+    return (
+      <ShellCommandBlock
+        toolCall={toolCall}
+        mode="terminal"
+        nested={isNested}
+      />
+    )
+  }
 
   const display = getToolDisplay(toolCall.toolName)
   const verb = isRunning ? display.running : isError ? display.failed : display.done
@@ -107,9 +119,11 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
   )
 
   const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(toolCall.toolName)
-  const showResult = toolCall.result && !hasDiff && !isReadTool && !isSubAgentSpawner
-
-  const isNested = !!toolCall.spawnedBy
+  // In terminal mode, only code diffs are shown as results.
+  // Screenshots are extracted below and always rendered.
+  // Errors are shown for all tools (critical for debugging).
+  // Success results for execute_command, MCP, etc. are intentionally hidden.
+  const screenshotSrc = toolCall.result ? extractImageSrc(toolCall.result) : null
 
   return (
     <Box
@@ -239,56 +253,53 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
           />
         )}
 
-        {/* Tool result for non-read, non-diff tools (execute_command, etc.) */}
-        {showResult && (() => {
-          const imgSrc = extractImageSrc(toolCall.result!)
-          if (imgSrc) {
-            return (
-              <Box mt="3px" borderRadius="4px" overflow="hidden" maxW="480px">
-                <Image
-                  src={imgSrc}
-                  alt="Screenshot"
-                  w="100%"
-                  borderRadius="4px"
-                  border="1px solid rgba(255,255,255,0.06)"
-                />
-              </Box>
-            )
-          }
-          return (
-            <Box
-              mt="3px"
-              px={2}
-              py="4px"
-              borderRadius="3px"
-              bg={isError ? 'rgba(248,81,73,0.04)' : 'rgba(255,255,255,0.015)'}
-              border={`1px solid ${isError ? 'rgba(248,81,73,0.12)' : 'rgba(255,255,255,0.04)'}`}
+        {/* Screenshots — always visible (browser_take_screenshot, etc.) */}
+        {screenshotSrc && (
+          <Box mt="3px" borderRadius="4px" overflow="hidden" maxW="480px">
+            <Image
+              src={screenshotSrc}
+              alt="Screenshot"
+              w="100%"
+              borderRadius="4px"
+              border="1px solid rgba(255,255,255,0.06)"
+            />
+          </Box>
+        )}
+
+        {/* Error result for any tool — always shown for debugging */}
+        {isError && toolCall.result && !hasDiff && !isReadTool && !isSubAgentSpawner && (
+          <Box
+            mt="3px"
+            px={2}
+            py="4px"
+            borderRadius="3px"
+            bg="rgba(248,81,73,0.04)"
+            border="1px solid rgba(248,81,73,0.12)"
+          >
+            <Text
+              fontSize="12px"
+              color={tokens.colors.accent.red}
+              whiteSpace="pre-wrap"
+              lineHeight="1.5"
+              fontFamily={tokens.fontFamily.mono}
             >
+              {toolCall.result.length > RESULT_PREVIEW_CHARS
+                ? toolCall.result.slice(0, RESULT_PREVIEW_CHARS)
+                : toolCall.result}
+            </Text>
+            {toolCall.result.length > RESULT_PREVIEW_CHARS && (
               <Text
-                fontSize="12px"
-                color={isError ? tokens.colors.accent.red : tokens.colors.text.secondary}
-                whiteSpace="pre-wrap"
-                lineHeight="1.5"
+                mt="2px"
+                fontSize="10px"
+                color={tokens.colors.text.disabled}
                 fontFamily={tokens.fontFamily.mono}
+                fontStyle="italic"
               >
-                {toolCall.result!.length > RESULT_PREVIEW_CHARS
-                  ? toolCall.result!.slice(0, RESULT_PREVIEW_CHARS)
-                  : toolCall.result}
+                … {toolCall.result.length - RESULT_PREVIEW_CHARS} more chars
               </Text>
-              {toolCall.result!.length > RESULT_PREVIEW_CHARS && (
-                <Text
-                  mt="2px"
-                  fontSize="10px"
-                  color={tokens.colors.text.disabled}
-                  fontFamily={tokens.fontFamily.mono}
-                  fontStyle="italic"
-                >
-                  … {toolCall.result!.length - RESULT_PREVIEW_CHARS} more chars
-                </Text>
-              )}
-            </Box>
-          )
-        })()}
+            )}
+          </Box>
+        )}
 
         {/* Error result for read tools — still show the error */}
         {isReadTool && isError && toolCall.result && (
@@ -302,8 +313,8 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
           </Text>
         )}
 
-        {/* Live progress */}
-        {toolCall.progressText && (
+        {/* Live progress — shown when commandLogs is not populated (single-line fallback) */}
+        {(!toolCall.commandLogs || toolCall.commandLogs.length === 0) && toolCall.progressText && (
           <Flex align="center" gap={1.5} mt="3px">
             <Box
               w="6px"

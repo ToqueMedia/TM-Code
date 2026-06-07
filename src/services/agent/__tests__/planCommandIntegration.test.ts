@@ -14,6 +14,11 @@ const disablePlanMode = jest.fn()
 const setRequestType = jest.fn()
 const setAutoApproveDiffs = jest.fn()
 const mockRunAgentWithCallbacks = jest.fn()
+const mockReadFile = jest.fn().mockRejectedValue(new Error('not found'))
+const mockAddSystemMessage = jest.fn()
+const mockAddCardMessage = jest.fn()
+const mockSetPlanResumePending = jest.fn()
+const mockCreateSession = jest.fn()
 
 jest.mock('../agentRunner', () => ({
   runAgentWithCallbacks: (...args: unknown[]) => mockRunAgentWithCallbacks(...args),
@@ -38,14 +43,17 @@ jest.mock('../agentService', () => ({
 }))
 
 jest.mock('../../fileService', () => ({
-  FileService: { readFile: jest.fn().mockRejectedValue(new Error('not found')) },
+  FileService: { readFile: mockReadFile },
 }))
 
 jest.mock('../../../stores/chatStore', () => ({
   useChatStore: {
     getState: () => ({
-      addSystemMessage: jest.fn(),
-      addCardMessage: jest.fn(),
+      addSystemMessage: mockAddSystemMessage,
+      addCardMessage: mockAddCardMessage,
+      setPlanResumePending: mockSetPlanResumePending,
+      createSession: mockCreateSession,
+      activeSessionId: null,
     }),
   },
 }))
@@ -68,7 +76,7 @@ jest.mock('../../../stores/settingsStore', () => ({
   },
 }))
 
-import { executePlan } from '../commands/planCommand'
+import { executePlan, executePlanResume } from '../commands/planCommand'
 
 describe('executePlan call sequence', () => {
   beforeEach(() => {
@@ -77,6 +85,12 @@ describe('executePlan call sequence', () => {
     setRequestType.mockReset()
     setAutoApproveDiffs.mockReset()
     mockRunAgentWithCallbacks.mockReset()
+    mockReadFile.mockReset()
+    mockReadFile.mockRejectedValue(new Error('not found'))
+    mockAddSystemMessage.mockReset()
+    mockAddCardMessage.mockReset()
+    mockSetPlanResumePending.mockReset()
+    mockCreateSession.mockReset()
     mockAgentLanguage = 'en'
   })
 
@@ -160,6 +174,74 @@ describe('executePlan call sequence', () => {
     expect(capturedPrompt).toContain('/projects/foo/PLAN.md')
   })
 
+  test('creates a feature-specific plan when PLAN.md already exists', async () => {
+    let capturedPrompt: string | undefined
+    let capturedOptions: Record<string, unknown> | undefined
+    let agentRan = false
+    mockReadFile.mockImplementation(async (path: string) => {
+      if (path === '/projects/foo/PLAN.md') return 'existing plan'
+      if (path === '/projects/foo/PLAN-build-chat-export.md' && agentRan) {
+        return 'Status: PENDING APPROVAL\n# Chat export'
+      }
+      throw new Error('not found')
+    })
+    mockRunAgentWithCallbacks.mockImplementation(async (prompt: string, opts: Record<string, unknown>) => {
+      capturedPrompt = prompt
+      capturedOptions = opts
+      agentRan = true
+    })
+
+    await executePlan('build chat export', '/projects/foo')
+
+    expect(enablePlanMode).toHaveBeenCalledWith('PLAN-build-chat-export.md')
+    expect(capturedPrompt).toContain('/projects/foo/PLAN-build-chat-export.md')
+    expect(capturedOptions?.systemPromptOverride as string).toContain('PLAN-build-chat-export.md')
+    expect(mockAddCardMessage).toHaveBeenCalledWith('plan_approval', '/projects/foo', {
+      planPath: '/projects/foo/PLAN-build-chat-export.md',
+      planFileName: 'PLAN-build-chat-export.md',
+    })
+  })
+
+  test('keeps resume metadata when PLAN.md is still DRAFT after an interrupted run', async () => {
+    let readCount = 0
+    mockReadFile.mockImplementation(async () => {
+      readCount += 1
+      if (readCount === 1) throw new Error('not found')
+      return 'Status: DRAFT\n# Architecture'
+    })
+    mockRunAgentWithCallbacks.mockResolvedValue(undefined)
+
+    await executePlan('build inventory', '/projects/foo')
+
+    expect(mockSetPlanResumePending).toHaveBeenCalledWith(expect.objectContaining({
+      projectPath: '/projects/foo',
+      originalArgs: 'build inventory',
+      planPath: '/projects/foo/PLAN.md',
+      planFileName: 'PLAN.md',
+      mode: 'chat',
+    }))
+    expect(mockSetPlanResumePending).not.toHaveBeenCalledWith(null)
+    expect(mockAddSystemMessage).toHaveBeenCalled()
+  })
+
+  test('clears resume metadata when PLAN.md is ready for approval', async () => {
+    let readCount = 0
+    mockReadFile.mockImplementation(async () => {
+      readCount += 1
+      if (readCount === 1) throw new Error('not found')
+      return 'Status: PENDING APPROVAL\n# Architecture'
+    })
+    mockRunAgentWithCallbacks.mockResolvedValue(undefined)
+
+    await executePlan('build inventory', '/projects/foo')
+
+    expect(mockSetPlanResumePending).toHaveBeenLastCalledWith(null)
+    expect(mockAddCardMessage).toHaveBeenCalledWith('plan_approval', '/projects/foo', {
+      planPath: '/projects/foo/PLAN.md',
+      planFileName: 'PLAN.md',
+    })
+  })
+
   test('user-bubble text is "/plan <args>"', async () => {
     let capturedOptions: Record<string, unknown> | undefined
     mockRunAgentWithCallbacks.mockImplementation(async (_p: string, opts: Record<string, unknown>) => {
@@ -169,6 +251,71 @@ describe('executePlan call sequence', () => {
     await executePlan('xyz', '/projects/foo')
 
     expect(capturedOptions?.userMessageText).toBe('/plan xyz')
+  })
+
+  test('resume continues the interrupted plan with architect prompt and same artefact', async () => {
+    let capturedPrompt: string | undefined
+    let capturedOptions: Record<string, unknown> | undefined
+    let readCount = 0
+    mockReadFile.mockImplementation(async () => {
+      readCount += 1
+      if (readCount === 1) return 'Status: DRAFT\n## 1. Context\n_In progress._'
+      return 'Status: PENDING APPROVAL\n# Architecture'
+    })
+    mockRunAgentWithCallbacks.mockImplementation(async (prompt: string, opts: Record<string, unknown>) => {
+      capturedPrompt = prompt
+      capturedOptions = opts
+    })
+
+    await executePlanResume('prossegue', {
+      projectPath: '/projects/foo',
+      originalArgs: 'build inventory',
+      planPath: '/projects/foo/PLAN.md',
+      planFileName: 'PLAN.md',
+      mode: 'chat',
+      updatedAt: 123,
+    })
+
+    expect(enablePlanMode).toHaveBeenCalledWith('PLAN.md')
+    expect(capturedPrompt).toContain('Resume an interrupted /plan architect run')
+    expect(capturedPrompt).toContain('build inventory')
+    expect(capturedPrompt).toContain('Status: DRAFT')
+    expect(capturedOptions?.userMessageText).toBe('prossegue')
+    expect(capturedOptions?.systemPromptOverride as string).toContain('Software Architect')
+    expect(mockSetPlanResumePending).toHaveBeenLastCalledWith(null)
+  })
+
+  test('resume sends attachments to the model without storing the internal prompt as user blocks', async () => {
+    let capturedOptions: Record<string, unknown> | undefined
+    const attachment = {
+      id: 'att-1',
+      type: 'file',
+      name: 'notes.md',
+      path: '/projects/foo/notes.md',
+    }
+    const userBlocks = [
+      { type: 'text', text: 'usa estas notas' },
+      { type: 'attachment', attachment },
+    ]
+    mockReadFile.mockImplementation(async () => 'Status: DRAFT\n# Architecture')
+    mockRunAgentWithCallbacks.mockImplementation(async (_prompt: string, opts: Record<string, unknown>) => {
+      capturedOptions = opts
+    })
+
+    await executePlanResume('usa estas notas', {
+      projectPath: '/projects/foo',
+      originalArgs: 'build inventory',
+      planPath: '/projects/foo/PLAN.md',
+      planFileName: 'PLAN.md',
+      mode: 'chat',
+      updatedAt: 123,
+    }, [attachment as never], userBlocks as never)
+
+    expect(capturedOptions?.userMessageBlocks).toBe(userBlocks)
+    const modelBlocks = capturedOptions?.modelMessageBlocks as Array<{ type: string; text?: string; attachment?: unknown }>
+    expect(modelBlocks[0]?.type).toBe('text')
+    expect(modelBlocks[0]?.text).toContain('Resume an interrupted /plan architect run')
+    expect(modelBlocks[1]).toEqual({ type: 'attachment', attachment })
   })
 
   test('returns early without enablingPlanMode when args are empty', async () => {

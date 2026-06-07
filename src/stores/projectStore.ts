@@ -308,17 +308,23 @@ export const useProjectStore = create<ProjectStore>()(
               import('../services/agent/taskPersistence'),
               import('./agentStore'),
             ]);
-            // Clear stale tasks from the PREVIOUS project before hydrating.
-            // Without this, if the new project has no tasks.json, the old
-            // project's tasks survive in the global agentStore and the
-            // AgentTasksPanel renders cross-project data.
-            useAgentStore.getState().clearTasks();
+            // Hydrate atomically — no clearTasks() before load. The old
+            // project's tasks stay in the store during the async load, then
+            // setTasks() atomically replaces them. This eliminates the race
+            // window where the store is empty but tasks.json exists on disk
+            // (which could cause the agent to re-seed a fresh tracker and
+            // overwrite the real state). On load failure, clear stale data.
             const tasks = await loadTasksFromDisk(path);
             useAgentStore.getState().setTasks(tasks);
           } catch (error) {
             // Tracker hydration is non-critical — fall back to an empty
             // tracker rather than block project open. The agent will seed
             // a fresh one on its next /plan or update_tasks call.
+            // Also clear stale cross-project data from the previous project.
+            try {
+              const { useAgentStore } = await import('./agentStore');
+              useAgentStore.getState().clearTasks();
+            } catch { /* non-critical */ }
             logger.warn('project', 'Failed to hydrate task tracker:', error);
           }
 

@@ -188,9 +188,12 @@ export async function extractAndResolveMentions(text: string, projectPath: strin
 
     if (isDirectory) {
       try {
+        // Shallow traversal — only direct children are listed (slice(0, 200)),
+        // so maxDepth: 2 is plenty and prevents unbounded filesystem walks that
+        // can stall for minutes on large project directories.
         const tree = await cachedBuildFileTree<FileTreeNode>({
           rootPath: fullPath,
-          filter: { showHidden: false },
+          filter: { showHidden: false, maxDepth: 2 },
         })
         const children = tree.children || []
         const listing = children
@@ -235,9 +238,11 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
           : content
         return `<attached_file path="${att.path}">\n${truncated}\n</attached_file>`
       } else if (att.type === 'folder') {
+        // Shallow traversal — only root-level children names are rendered,
+        // so maxDepth: 1 avoids deep filesystem walks on large directories.
         const tree = await cachedBuildFileTree<FileTreeNode>({
           rootPath: att.path,
-          filter: { showHidden: false },
+          filter: { showHidden: false, maxDepth: 1 },
         })
         const listing = (tree.children || [])
           .map(c => `${c.type === 'directory' ? '[d] ' : '    '}${c.name}`)

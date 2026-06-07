@@ -82,7 +82,7 @@ describe('detectThinkingShapeFromBaseURL', () => {
   describe('Google Gemini', () => {
     it('matches the generative-language host', () => {
       expect(detectThinkingShapeFromBaseURL('https://generativelanguage.googleapis.com/v1beta'))
-        .toBe('gemini_thinking_budget')
+        .toBe('openai_reasoning_effort')
     })
   })
 

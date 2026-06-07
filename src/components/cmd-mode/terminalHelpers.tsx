@@ -102,6 +102,65 @@ export const terminalMarkdownComponents: Components = {
       {children}
     </span>
   ),
+  // Markdown tables — rendered with proper terminal UI/UX
+  table: ({ children }) => (
+    <div style={{
+      margin: '8px 0',
+      overflowX: 'auto',
+      borderRadius: '4px',
+      border: '1px solid rgba(255, 255, 255, 0.08)',
+    }}>
+      <table style={{
+        width: '100%',
+        borderCollapse: 'collapse',
+        fontSize: '11px',
+        fontFamily: tokens.fontFamily.mono,
+        lineHeight: '1.5',
+      }}>
+        {children}
+      </table>
+    </div>
+  ),
+  thead: ({ children }) => (
+    <thead style={{
+      background: 'rgba(255, 255, 255, 0.04)',
+      borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+    }}>
+      {children}
+    </thead>
+  ),
+  tbody: ({ children }) => (
+    <tbody>
+      {children}
+    </tbody>
+  ),
+  tr: ({ children }) => (
+    <tr style={{
+      borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
+    }}>
+      {children}
+    </tr>
+  ),
+  th: ({ children }) => (
+    <th style={{
+      padding: '6px 10px',
+      textAlign: 'left',
+      fontWeight: 600,
+      color: '#ffffff',
+      whiteSpace: 'nowrap',
+    }}>
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td style={{
+      padding: '5px 10px',
+      color: tokens.colors.text.secondary,
+      verticalAlign: 'top',
+    }}>
+      {children}
+    </td>
+  ),
 }
 
 // ─── Error Boundary ───

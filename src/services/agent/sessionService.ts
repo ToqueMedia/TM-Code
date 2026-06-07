@@ -298,6 +298,7 @@ class SessionService {
         updatedAt: persisted.updatedAt,
         byokSnapshot: persisted.byokSnapshot ?? null,
         sessionMemory: persisted.sessionMemory,
+        planResumePending: persisted.planResumePending ?? null,
       } as ChatSession & { lastTurnSnapshot?: SessionTurnSnapshot }
       if (persisted.lastTurnSnapshot) out.lastTurnSnapshot = persisted.lastTurnSnapshot
       return out
@@ -337,6 +338,7 @@ class SessionService {
           .filter((m): m is ChatMessage => m !== null),
         byokSnapshot: session.byokSnapshot ?? null,
         sessionMemory: session.sessionMemory,
+        planResumePending: session.planResumePending ?? null,
       }
 
       if (tokenUsage) {

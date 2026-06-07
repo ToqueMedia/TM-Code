@@ -39,6 +39,8 @@ function getInitials(email: string | null, displayName: string | null): string {
 
 function MinimalTitleBar() {
   const currentProject = useProjectStore(s => s.currentProject)
+  const cmdModeProjectPath = useProjectStore(s => s.cmdModeProjectPath)
+  const welcomeScreen = useProjectStore(s => s.welcomeScreen)
   const status = useAgentStore(s => s.status)
   const user = useAuthStore(s => s.user)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
@@ -246,6 +248,14 @@ function MinimalTitleBar() {
           _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
           role="button"
           onClick={function () {
+            const project = useProjectStore.getState()
+            if (!project.currentProject || project.cmdModeProjectPath) {
+              project.setWelcomeScreen(project.welcomeScreen === 'settings'
+                ? (project.cmdModeProjectPath ? null : 'hero')
+                : 'settings')
+              return
+            }
+
             const layout = useLayoutStore.getState()
             if (layout.viewMode === 'settings') {
               layout.goBack()
@@ -254,7 +264,12 @@ function MinimalTitleBar() {
             }
           }}
         >
-          <FiSettings size={14} />
+          <FiSettings
+            size={14}
+            color={(cmdModeProjectPath || !currentProject) && welcomeScreen === 'settings'
+              ? tokens.colors.text.primary
+              : undefined}
+          />
         </Flex>
 
         {/* User identity */}

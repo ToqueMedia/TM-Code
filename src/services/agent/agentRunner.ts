@@ -5,8 +5,9 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useProblemsStore } from '../../stores/problemsStore'
 import { useBillingStore } from '../../stores/billingStore'
+import { t } from '../../i18n/useTranslation'
 import AgentService from './agentService'
-import type { OpenAIContentPart } from './agentService'
+import type { OpenAIContentPart } from './types'
 import ContextBuilder from './contextBuilder'
 import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
@@ -24,6 +25,8 @@ interface RunAgentOptions {
   userMessageAttachments?: Attachment[]
   /** Original prompt blocks for preserving attachment order in conversation history. */
   userMessageBlocks?: PromptBlock[]
+  /** Optional content blocks used only for the model payload, not the transcript. */
+  modelMessageBlocks?: PromptBlock[]
   /** Use existing conversation history instead of empty. Default: false */
   useConversationHistory?: boolean
   /**
@@ -89,6 +92,7 @@ async function runAgentInternal(
     userMessageText,
     userMessageAttachments,
     userMessageBlocks,
+    modelMessageBlocks,
     useConversationHistory = false,
     cmdOnlyMode = false,
     skipStartAssistantMessage = false,
@@ -137,6 +141,19 @@ async function runAgentInternal(
       userMessageBlocks,
     )
     logger.info('agent', `→ User message sent (${(userMessageText || prompt).length} chars)`)
+  }
+
+  // Stop before starting an assistant turn when billing has already told us
+  // service is blocked. This prevents reload + queued "continue" from
+  // replaying into the API and creating a credit-error loop.
+  const billingState = useBillingStore.getState()
+  if (!billingState.isActive || billingState.noCredits || billingState.status === 'rejected') {
+    const message = !billingState.isActive
+      ? t('chat.accountInactive')
+      : `${t('chat.noCredits')}: ${t('chat.noCreditsRemaining')} ${t('chat.buyCredits')}.`
+    chatStore.addSystemMessage(message, 'error')
+    agentStore.setStatus('idle')
+    return
   }
 
   // Reset the per-request token counter at the START of each new request so
@@ -253,7 +270,8 @@ async function runAgentInternal(
 
   let userContent: string | OpenAIContentPart[] = prompt
 
-  if (hasAnyAttachments && userMessageBlocks) {
+  const blocksForModel = modelMessageBlocks ?? userMessageBlocks
+  if (hasAnyAttachments && blocksForModel) {
     const imageCount = userMessageAttachments?.filter(a => a.type === 'image').length ?? 0
     const fileCount = (userMessageAttachments?.length ?? 0) - imageCount
     logger.info('agent', `→ Processing attachments (${imageCount} images, ${fileCount} files)...`)
@@ -266,14 +284,14 @@ async function runAgentInternal(
 
     // Multimodal path — only when there are actual images AND the plan supports it.
     if (hasImageAttachments && supportsMultimodal) {
-      const parts = await buildContentParts(userMessageBlocks, projectPath, promptResolvers)
+      const parts = await buildContentParts(blocksForModel, projectPath, promptResolvers)
       if (parts) userContent = parts
     }
 
     // Text fallback — handles file/folder attachments (resolveAttachmentXml)
     // AND image placeholders when multimodal isn't available or failed.
     if (typeof userContent === 'string') {
-      userContent = await buildAugmentedPrompt(userMessageBlocks, projectPath, promptResolvers)
+      userContent = await buildAugmentedPrompt(blocksForModel, projectPath, promptResolvers)
     }
     logger.info('agent', `✓ Content parts built (${Date.now() - attachStart}ms)`)
   }

@@ -47,6 +47,12 @@ const MAX_PROPOSALS_PER_RUN = 5
  *  trivial turns ("ok", "yes", "thanks") where there's nothing to learn. */
 const MIN_USER_MESSAGE_LENGTH = 30
 
+function splitJsonEnvelopeFromTrailingSse(rawBody: string): string {
+  const billingEventIdx = rawBody.indexOf('data: {"type":"billing"')
+  if (billingEventIdx <= 0) return rawBody
+  return rawBody.slice(0, billingEventIdx).trim()
+}
+
 export interface MemoryProposal {
   name: string
   type: MemoryType
@@ -113,7 +119,7 @@ Rules:
 - Each \`name\` is short kebab-case (e.g. "no-trailing-summaries", "prefers-pnpm").
 - Each \`description\` is one line ≤150 chars — what shows up in MEMORY.md.
 - For \`feedback\` and \`project\` types, the \`body\` MUST follow:
-  Lead with the rule/fact.\\n\\n**Why:** <the motivation>.\\n\\n**How to apply:** <when/where this kicks in>.
+  Lead with the rule/fact.\n\n**Why:** <the motivation>.\n\n**How to apply:** <when/where this kicks in>.
 - For \`user\` and \`reference\` types, plain prose body is fine.
 - \`rationale\` is one short sentence explaining WHY this is worth saving (the signal you keyed on).
 - Return {"proposals": []} when the turn has nothing memorable. Routine bug-fixes, code reads, and yes/no exchanges produce nothing. Demand a real signal: explicit preference, validated approach, project-context disclosure, external-system pointer.
@@ -158,8 +164,22 @@ ${assistantText.slice(-4000)}`
       return { proposals: [], latencyMs: Math.round(performance.now() - startedAt) }
     }
 
-    const data = await res.json() as {
-      choices?: Array<{ message?: { content?: string } }>
+    const ct = res.headers.get('content-type') ?? 'unknown'
+    const rawBody = await res.text().catch(() => '')
+    const envelopeBody = splitJsonEnvelopeFromTrailingSse(rawBody)
+    let data: { choices?: Array<{ message?: { content?: string } }> }
+    try {
+      data = JSON.parse(envelopeBody) as { choices?: Array<{ message?: { content?: string } }> }
+      if (envelopeBody !== rawBody) {
+        logger.debug('memdir', '[extractor] recovered JSON envelope by stripping trailing billing SSE event')
+      }
+    } catch (jsonErr) {
+      // Worker may return non-JSON (HTML error page, empty body, etc.)
+      // on auth failures or upstream issues. Log status + content-type
+      // for debugging but swallow gracefully — extractor is fire-and-forget.
+      const preview = rawBody.slice(0, 200).replace(/\s+/g, ' ')
+      logger.debug('memdir', `[extractor] response is not valid JSON (HTTP ${res.status}, content-type: ${ct}, body="${preview}"):`, jsonErr)
+      return { proposals: [], latencyMs: Math.round(performance.now() - startedAt) }
     }
     const content = data.choices?.[0]?.message?.content ?? ''
     if (!content) {

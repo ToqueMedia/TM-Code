@@ -12,6 +12,20 @@
  *     accumulate across tool calls.
  */
 
+jest.mock('../../../stores/chatStore', () => ({
+  useChatStore: {
+    getState: () => ({ pendingDiffs: [] }),
+    subscribe: jest.fn(() => jest.fn()),
+  },
+}))
+
+jest.mock('../../../stores/credentialRequestStore', () => ({
+  useCredentialRequestStore: {
+    getState: () => ({ pending: new Map() }),
+    subscribe: jest.fn(() => jest.fn()),
+  },
+}))
+
 import { createPermissionAwareTimeout } from '../safeToolPool'
 import { usePermissionStore } from '../../../stores/permissionStore'
 

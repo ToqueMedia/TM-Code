@@ -10,6 +10,7 @@
  * - Memory selector cache (memorySelector)
  * - Skill service cache (skillService)
  * - Scaffolding detector cache (scaffoldingDetector)
+ * - Context collapse staged summaries (contextCollapse)
  *
  * What is NOT cleared (intentionally):
  * - Invoked skills (needed for post-compact re-injection of CRITICAL blocks)
@@ -53,6 +54,12 @@ export async function runPostCompactCleanup(): Promise<void> {
       invalidateScaffoldingCache(projectPath)
     } catch { /* non-critical */ }
   }
+
+  // 5. Context collapse — clear staged summaries (indices invalidated by compaction)
+  try {
+    const { resetContextCollapse } = await import('./collapse')
+    resetContextCollapse()
+  } catch { /* non-critical */ }
 
   logger.debug('agent', '[compact-cleanup] post-compact cache sweep complete')
 }

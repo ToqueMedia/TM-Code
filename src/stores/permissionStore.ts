@@ -206,6 +206,10 @@ interface PermissionActions {
   setAutoApproveDiffs: (value: boolean) => void
   resetAutoApprove: () => void
   clearPending: () => void
+  /** Returns the number of permissions waiting in the queue (excluding the
+   *  currently displayed one). Used by UI to show confirmation before
+   *  approveAll when there are many pending requests. */
+  getQueuedCount: () => number
 }
 
 /**
@@ -520,5 +524,9 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       })
     }
     set({ pendingPermission: null, permissionQueue: [] })
+  },
+
+  getQueuedCount: () => {
+    return get().permissionQueue.length
   },
 }))

@@ -37,50 +37,86 @@
 import type ToolExecutor from './toolExecutor'
 import { formatError } from '../../utils/errors'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { useChatStore } from '../../stores/chatStore'
+import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 
 /**
  * Wrap `inner` in a timeout that does NOT count time spent waiting for the
- * user to answer a permission dialog.
+ * user to answer a permission dialog, approve a diff, or submit credentials.
  *
  * Why: a tool's `execute()` promise covers BOTH the permission request and
  * the actual work. With a flat `Promise.race(execute, setTimeout(timeoutMs))`,
  * the deadline expires while the user is still reading the dialog — the user
  * approves, the HTTP call fires, but the pool already rejected. The user sees
  * a "timed out after 300 seconds" failure even though they approved within a
- * normal human latency. Per project policy: permission waits are unbounded.
+ * normal human latency. Per project policy: user waits are unbounded.
  *
- * How: track wall-clock elapsed minus accumulated permission-pending time.
+ * How: track wall-clock elapsed minus accumulated user-wait time.
  * When the timer fires, recompute "active" elapsed; if still under
- * `timeoutMs`, reschedule for the remainder. The permission store is the
- * single source of truth for "am I currently waiting on the user?" — we
- * subscribe so transitions in/out of pending state are recorded as they
- * happen, not only when the timer ticks.
+ * `timeoutMs`, reschedule for the remainder. Three stores are the
+ * sources of truth for "am I currently waiting on the user?":
+ *   - permissionStore.pendingPermission — tool permission dialog
+ *   - chatStore.pendingDiffs.length > 0 — file diff awaiting approval
+ *   - credentialRequestStore.pending.size > 0 — credentials form open
+ * We subscribe to all three so transitions in/out of wait states are
+ * recorded as they happen, not only when the timer ticks.
  */
 export function createPermissionAwareTimeout(toolName: string, timeoutMs: number): {
   promise: Promise<never>
   cleanup: () => void
 } {
   const startedAt = Date.now()
-  let pendingStartedAt: number | null =
-    usePermissionStore.getState().pendingPermission ? startedAt : null
   let totalPausedMs = 0
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined
 
-  const unsubscribe = usePermissionStore.subscribe((state) => {
-    const isPending = !!state.pendingPermission
-    const wasPending = pendingStartedAt !== null
-    if (isPending && !wasPending) {
-      pendingStartedAt = Date.now()
-    } else if (!isPending && wasPending) {
-      totalPausedMs += Date.now() - pendingStartedAt!
-      pendingStartedAt = null
+  // Helper: check if any user-wait state is currently active
+  const isAnyWaitStateActive = (): boolean => {
+    const hasPermission = !!usePermissionStore.getState().pendingPermission
+    const hasDiffs = useChatStore.getState().pendingDiffs.length > 0
+    const hasCredentials = useCredentialRequestStore.getState().pending.size > 0
+    return hasPermission || hasDiffs || hasCredentials
+  }
+
+  let waitStartedAt: number | null = isAnyWaitStateActive() ? startedAt : null
+
+  // Subscribe to all three stores to detect wait state transitions
+  const unsubscribePermission = usePermissionStore.subscribe(() => {
+    const isWaiting = isAnyWaitStateActive()
+    const wasWaiting = waitStartedAt !== null
+    if (isWaiting && !wasWaiting) {
+      waitStartedAt = Date.now()
+    } else if (!isWaiting && wasWaiting) {
+      totalPausedMs += Date.now() - waitStartedAt!
+      waitStartedAt = null
+    }
+  })
+
+  const unsubscribeChat = useChatStore.subscribe(() => {
+    const isWaiting = isAnyWaitStateActive()
+    const wasWaiting = waitStartedAt !== null
+    if (isWaiting && !wasWaiting) {
+      waitStartedAt = Date.now()
+    } else if (!isWaiting && wasWaiting) {
+      totalPausedMs += Date.now() - waitStartedAt!
+      waitStartedAt = null
+    }
+  })
+
+  const unsubscribeCredentials = useCredentialRequestStore.subscribe(() => {
+    const isWaiting = isAnyWaitStateActive()
+    const wasWaiting = waitStartedAt !== null
+    if (isWaiting && !wasWaiting) {
+      waitStartedAt = Date.now()
+    } else if (!isWaiting && wasWaiting) {
+      totalPausedMs += Date.now() - waitStartedAt!
+      waitStartedAt = null
     }
   })
 
   const promise = new Promise<never>((_, reject) => {
     const tick = () => {
       const now = Date.now()
-      const currentPause = pendingStartedAt !== null ? now - pendingStartedAt : 0
+      const currentPause = waitStartedAt !== null ? now - waitStartedAt : 0
       const activeMs = now - startedAt - totalPausedMs - currentPause
       if (activeMs >= timeoutMs) {
         reject(new Error(`Tool "${toolName}" timed out after ${timeoutMs / 1000} seconds`))
@@ -93,7 +129,9 @@ export function createPermissionAwareTimeout(toolName: string, timeoutMs: number
 
   const cleanup = () => {
     if (timeoutHandle) clearTimeout(timeoutHandle)
-    unsubscribe()
+    unsubscribePermission()
+    unsubscribeChat()
+    unsubscribeCredentials()
   }
 
   return { promise, cleanup }
@@ -664,10 +702,12 @@ export class StreamingSafeToolPool {
       try { this.onToolResult?.(toolCall, errorMsg, true) } catch { /* swallow */ }
     }
 
-    // Clean up in-flight, push to completed, wake consumer, try next
+    // Push to completed BEFORE removing from inFlight — prevents
+    // getRemainingResults() from returning prematurely when it sees
+    // inFlight.size === 0 but the result hasn't been enqueued yet.
+    this.completedResults.push(result)
     this.inFlight.delete(toolCall.id)
     this.inFlightSafe.delete(toolCall.id)
-    this.completedResults.push(result)
     this.resultAvailable?.()
     void this.processQueue()
 

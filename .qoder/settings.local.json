@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la ~/dev/claude-vaz 2>/dev/null || echo \"Directory not found\")",
+      "Bash(find /Users/ithustle/dev/deskotp -name \"worker*\" -o -name \"*worker*\" 2>/dev/null | grep -E \"\\\\.\\(ts|js\\)$\" | head -20)",
+      "Bash(ls -la /Users/ithustle/dev/deskotp/ | head -30)",
+      "Bash(ls -la /Users/ithustle/dev/deskotp/toquemedia-studio-api/src 2>/dev/null | head -30)",
+      "Bash(cd /Users/ithustle/dev/deskotp/toquemedia-studio-api && npx tsc --noEmit --pretty 2>&1 | head -50)",
+      "Bash(npx tsc --noEmit --pretty 2>&1 | head -30)",
+      "Bash(pwd && npx tsc --noEmit --pretty 2>&1 | head -30)",
+      "Bash(cd /Users/ithustle/dev/deskotp/toquemedia-studio-api && npx tsc --noEmit --pretty 2>&1 | head -30)",
+      "Bash(npx vitest run --reporter=verbose 2>&1 | tail -40)",
+      "Bash(npx vitest run --reporter=verbose 2>&1 | tail -30)",
+      "Bash(ls /Users/ithustle/dev/deskotp/toquemedia-studio-api/vitest.config.* 2>&1 && ls /Users/ithustle/dev/deskotp/toquemedia-studio-api/__tests__/ 2>&1 | head -10)",
+      "Bash(ls /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/__tests__/ 2>&1 | head -15)",
+      "Bash(npx vitest run src/__tests__/anthropicAdapter.test.ts src/__tests__/billing.test.ts src/__tests__/proxy.test.ts --reporter=verbose 2>&1 | tail -40)",
+      "Bash(npx vitest run src/__tests__/anthropicAdapter.test.ts src/__tests__/billing.test.ts src/__tests__/proxy.test.ts --reporter=verbose 2>&1 | tail -60)",
+      "Bash(cd /Users/ithustle/dev/deskotp/toquemedia-studio-api && npx vitest run src/__tests__/anthropicAdapter.test.ts src/__tests__/billing.test.ts src/__tests__/proxy.test.ts --reporter=verbose 2>&1 | tail -60)",
+      "Bash(npx vitest run src/__tests__/ --reporter=verbose 2>&1 | tail -20)",
+      "Bash(cd /Users/ithustle/dev/deskotp/toquemedia-studio-api && npx vitest run --reporter=verbose 2>&1 | tail -15)",
+      "Bash(npx vitest run --reporter=verbose 2>&1 | grep -E \"FAIL|✗|×\" | head -15)",
+      "Bash(cd /Users/ithustle/dev/deskotp/toquemedia-studio-api && npx vitest run 2>&1 | grep -E \"FAIL|Tests|Test Files\")",
+      "Bash(cd /Users/ithustle/dev/deskotp/toquemedia-studio-api && git stash && npx vitest run src/__tests__/chatE2E.test.ts 2>&1 | grep -E \"FAIL|Tests|Test Files\" && git stash pop)",
+      "Bash(npx tsc --noEmit 2>&1 | head -50)",
+      "Bash(npx tsc --noEmit 2>&1 | grep -E \"\\(TerminalPanel|useTerminalAutocomplete\\)\" | head -20)",
+      "Bash(npx tsc --noEmit 2>&1 | grep -E \"\\(permissionStore|TerminalPermissionPrompt|safeToolPool|chatStore\\)\" | head -30)",
+      "Bash(npx tsc --noEmit 2>&1 | grep -E \"error TS\" | head -20)",
+      "Bash(npx tsc --noEmit 2>&1 | tail -5)",
+      "Bash(npx tsc --noEmit --skipLibCheck 2>&1 | head -30)",
+      "Bash(npx tsc --noEmit --skipLibCheck 2>&1 | grep -E \"\\(WelcomeScreen|TerminalTitleBar|MinimalTitleBar\\)\" || echo \"✅ Ficheiros sem erros\")",
+      "Bash(git log --oneline -20 src/services/agent/agentService.ts 2>/dev/null | head -30)",
+      "Bash(wc:*)",
+      "Bash(npx jest --testPathPattern=\"agentServiceRequestType|planCommandIntegration\" --no-coverage 2>&1 | tail -30)",
+      "Bash(npx jest --testPathPatterns=\"agentServiceRequestType|planCommandIntegration\" --no-coverage 2>&1 | tail -40)",
+      "Bash(ls /Users/ithustle/dev/deskotp/exodus-ide/src/services/agent/streamParser.* 2>/dev/null; ls /Users/ithustle/dev/deskotp/exodus-ide/src/services/agent/*stream*.* 2>/dev/null)",
+      "Bash(npx tsc --noEmit --pretty 2>&1 | head -5)",
+      "Bash(cat tsconfig.json | head -20)",
+      "Bash(npx jest src/services/agent/__tests__/planCommandIntegration.test.ts --no-coverage 2>&1 | tail -20)"
+    ]
+  }
+}

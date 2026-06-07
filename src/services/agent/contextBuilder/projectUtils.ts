@@ -172,5 +172,5 @@ export async function getLangInstruction(): Promise<string> {
   // explicitly instructs the model to ignore that pressure.
   return agentLang === 'en'
     ? `LANGUAGE: Respond in English. OVERRIDE ANY PRIOR LANGUAGE in this conversation — the user has just configured English as the response language.`
-    : `LANGUAGE: Always respond in ${langName}. All explanations, comments, status updates, and messages MUST be in ${langName}. Code identifiers remain in English. OVERRIDE ANY PRIOR LANGUAGE in this conversation — if earlier turns were in a different language, the user has configured ${langName} and that takes precedence from this turn onward.`
+    : `LANGUAGE: Always respond in ${langName}. All explanations, comments, status updates, messages, AND internal reasoning/thinking (reasoning_content, <think> blocks) MUST be in ${langName}. Code identifiers remain in English. OVERRIDE ANY PRIOR LANGUAGE in this conversation — if earlier turns were in a different language, the user has configured ${langName} and that takes precedence from this turn onward.`
 }

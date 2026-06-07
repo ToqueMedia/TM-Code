@@ -41,6 +41,11 @@ interface TasksFileV1 {
   schemaVersion: 1
   /** ISO timestamp of the last write — useful for telemetry / debugging only. */
   updatedAt: string
+  /** ISO timestamp when ALL tasks reached a terminal state (completed/failed/cancelled).
+   *  Present means the tracker is archival — the next session starts fresh.
+   *  loadTasksFromDisk returns [] when this field is set, keeping the store
+   *  clean while preserving the completion record on disk for future review. */
+  completedAt?: string
   tasks: AgentTask[]
 }
 
@@ -67,13 +72,23 @@ export async function loadTasksFromDisk(projectPath: string): Promise<AgentTask[
       console.warn('[taskPersistence] tasks.json present but unrecognised shape; ignoring')
       return []
     }
+    // If the tracker was previously fully completed (completedAt present),
+    // don't load stale terminal tasks into the store — return empty so the
+    // agent starts fresh. The disk record is preserved for review/export.
+    if (parsed.completedAt) return []
+
     // Coerce status enum defensively — the on-disk file is a contract but
     // we don't want one bad row to wedge the whole tracker.
+    const VALID_STATUSES = new Set(['pending', 'in_progress', 'completed', 'failed', 'cancelled'])
     return parsed.tasks.filter((t): t is AgentTask =>
       !!t
       && typeof t.id === 'string'
       && typeof t.description === 'string'
-      && (t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed'),
+      && VALID_STATUSES.has(t.status)
+      // Optional fields: allow string arrays or absent — reject malformed
+      && (t.dependsOn === undefined || (Array.isArray(t.dependsOn) && t.dependsOn.every(v => typeof v === 'string')))
+      && (t.blockedBy === undefined || (Array.isArray(t.blockedBy) && t.blockedBy.every(v => typeof v === 'string')))
+      && (t.files === undefined || (Array.isArray(t.files) && t.files.every(v => typeof v === 'string'))),
     )
   } catch (err) {
     console.warn('[taskPersistence] failed to parse tasks.json:', err)
@@ -86,12 +101,27 @@ export async function loadTasksFromDisk(projectPath: string): Promise<AgentTask[
  * are logged but NOT re-thrown — a disk write failure must not block the
  * agent loop, the in-memory store remains the live view either way and
  * the next mutation will retry the persist.
+ *
+ * When ALL tasks are in a terminal state (completed/failed/cancelled),
+ * the tracker is no longer needed for day-to-day steering — the next
+ * session starts fresh via `completedAt`. Instead of deleting tasks.json
+ * (which loses the completion record permanently), we PRESERVE the file
+ * with a `completedAt` timestamp:
+ *   1. The next session's loadTasksFromDisk returns [] (completedAt
+ *      present), so the store stays clean — no stale "all done" rows.
+ *   2. The developer retains the full task record on disk for review
+ *      ("what did I accomplish?"), export, or audit.
+ *   3. The `.toquemedia/` directory stays tidy — no fragmentation from
+ *      repeated delete→re-create cycles across sessions.
  */
 export async function saveTasksToDisk(projectPath: string, tasks: AgentTask[]): Promise<void> {
   if (!projectPath) return
+  const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
+  const allTerminal = tasks.length > 0 && tasks.every(t => TERMINAL.has(t.status))
   const payload: TasksFileV1 = {
     schemaVersion: 1,
     updatedAt: new Date().toISOString(),
+    ...(allTerminal ? { completedAt: new Date().toISOString() } : {}),
     tasks,
   }
   try {

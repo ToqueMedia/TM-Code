@@ -1,6 +1,6 @@
 [package]
 name = "toquemedia-studio"
-version = "0.7.2"
+version = "0.7.3"
 description = "TM Code — The Agent-First IDE"
 authors = ["Toque Media"]
 edition = "2021"
@@ -83,4 +83,3 @@ window-vibrancy = "0.5"
 [target.'cfg(target_os = "windows")'.dependencies]
 # Same crate handles Mica (Win 11) / Acrylic (Win 10) on Windows.
 window-vibrancy = "0.5"
-

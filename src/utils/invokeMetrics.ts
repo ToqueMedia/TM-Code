@@ -53,8 +53,22 @@ interface MetricRow {
   lastCallAt: number
 }
 
+interface PendingInvoke {
+  id: number
+  cmd: string
+  startedAt: number
+}
+
+interface PendingInvokeRow {
+  id: number
+  cmd: string
+  ageMs: number
+}
+
 const FLAG_KEY = 'tm:ipc-metrics'
 const metrics = new Map<string, MetricEntry>()
+const pending = new Map<number, PendingInvoke>()
+let nextPendingId = 1
 
 function isEnabled(): boolean {
   try {
@@ -87,15 +101,18 @@ export async function invoke<T = unknown>(
   args?: InvokeArgs,
   options?: InvokeOptions,
 ): Promise<T> {
-  if (!isEnabled()) return rawInvoke<T>(cmd, args, options)
   const start = performance.now()
+  const pendingId = nextPendingId++
+  pending.set(pendingId, { id: pendingId, cmd, startedAt: start })
   try {
     const result = await rawInvoke<T>(cmd, args, options)
-    record(cmd, performance.now() - start, true)
+    if (isEnabled()) record(cmd, performance.now() - start, true)
     return result
   } catch (err) {
-    record(cmd, performance.now() - start, false)
+    if (isEnabled()) record(cmd, performance.now() - start, false)
     throw err
+  } finally {
+    pending.delete(pendingId)
   }
 }
 
@@ -120,6 +137,17 @@ export function resetInvokeMetrics(): void {
   metrics.clear()
 }
 
+export function getPendingInvokes(): PendingInvokeRow[] {
+  const now = performance.now()
+  return Array.from(pending.values())
+    .map(item => ({
+      id: item.id,
+      cmd: item.cmd,
+      ageMs: Math.round(now - item.startedAt),
+    }))
+    .sort((a, b) => b.ageMs - a.ageMs)
+}
+
 export function enableInvokeMetrics(): void {
   try { localStorage.setItem(FLAG_KEY, '1') } catch { /* private mode etc. */ }
 }
@@ -131,8 +159,21 @@ export function disableInvokeMetrics(): void {
 // Console handle. Adding this once on module evaluation is cheap and gives
 // devs `__tmIpcMetrics` in any DevTools session without needing to import.
 if (typeof window !== 'undefined') {
+  const logPendingInvokes = () => {
+    const rows = getPendingInvokes()
+    if (rows.length === 0) return
+    const preview = rows
+      .slice(0, 12)
+      .map(row => `${row.cmd}#${row.id} ${row.ageMs}ms`)
+      .join(', ')
+    console.warn(`[ipc] page is unloading with ${rows.length} pending Tauri invoke(s): ${preview}`)
+  }
+  window.addEventListener('pagehide', logPendingInvokes, { capture: true })
+  window.addEventListener('beforeunload', logPendingInvokes, { capture: true })
+
   ;(window as unknown as { __tmIpcMetrics?: unknown }).__tmIpcMetrics = {
     get: getInvokeMetrics,
+    pending: getPendingInvokes,
     reset: resetInvokeMetrics,
     enable: enableInvokeMetrics,
     disable: disableInvokeMetrics,

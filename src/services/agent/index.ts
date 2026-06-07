@@ -1,5 +1,5 @@
 export { default as AgentService } from './agentService'
-export type { AgentCallbacks } from './agentService'
+export type { AgentCallbacks } from './types'
 export { default as ToolExecutor } from './toolExecutor'
 export type { ToolDefinition, OpenAIToolDefinition } from './toolExecutor'
 export { default as ContextBuilder } from './contextBuilder'

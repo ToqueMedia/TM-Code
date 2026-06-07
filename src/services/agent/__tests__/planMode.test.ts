@@ -85,6 +85,14 @@ describe('checkPlanModeAccess', () => {
       }
     })
 
+    test('allows the active feature plan file at project root', () => {
+      for (const tool of ['write_file', 'create_file', 'edit_file']) {
+        expect(checkPlanModeAccess(tool, 'PLAN-chat-export.md', ROOT, 'PLAN-chat-export.md')).toBeNull()
+        expect(checkPlanModeAccess(tool, `${ROOT}/PLAN-chat-export.md`, ROOT, 'PLAN-chat-export.md')).toBeNull()
+        expect(checkPlanModeAccess(tool, 'TODO.md', ROOT, 'PLAN-chat-export.md')).toBeNull()
+      }
+    })
+
     test('handles Windows-style paths', () => {
       const winRoot = 'C:\\Users\\dev\\projects\\myapp'
       // checkPlanModeAccess normalises backslashes internally
@@ -160,6 +168,21 @@ describe('isPlanArtefactAtRoot', () => {
     expect(isPlanArtefactAtRoot('TODO.md', ROOT)).toBe(true)
     expect(isPlanArtefactAtRoot(`${ROOT}/PLAN.md`, ROOT)).toBe(true)
     expect(isPlanArtefactAtRoot(`${ROOT}/TODO.md`, ROOT)).toBe(true)
+    expect(isPlanArtefactAtRoot('./PLAN.md', ROOT)).toBe(true)
+    expect(isPlanArtefactAtRoot('.\\TODO.md', ROOT)).toBe(true)
+  })
+
+  test('handles multiple redundant relative prefixes', () => {
+    expect(isPlanArtefactAtRoot('././PLAN.md', ROOT)).toBe(true)
+    expect(isPlanArtefactAtRoot('.\\.\\TODO.md', ROOT)).toBe(true)
+    expect(isPlanArtefactAtRoot('./.\\PLAN.md', ROOT)).toBe(true)
+  })
+
+  test('handles Windows-style absolute paths with mixed slashes', () => {
+    const winRoot = 'C:\\Users\\dev\\projects\\myapp'
+    expect(isPlanArtefactAtRoot('C:\\Users\\dev\\projects\\myapp\\PLAN.md', winRoot)).toBe(true)
+    expect(isPlanArtefactAtRoot('C:/Users/dev/projects/myapp/TODO.md', winRoot)).toBe(true)
+    expect(isPlanArtefactAtRoot('C:\\Users\\dev\\projects\\myapp/PLAN.md', winRoot)).toBe(true)
   })
 
   test('rejects nested paths', () => {

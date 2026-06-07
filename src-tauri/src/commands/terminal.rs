@@ -22,6 +22,17 @@ pub struct CommandResult {
     pub timed_out: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractiveShellInfo {
+    pub command: String,
+    pub args: Vec<String>,
+    pub kind: String,
+    pub command_style: String,
+    pub platform: String,
+    pub warning: Option<String>,
+}
+
 // Estado global para manter histórico de comandos
 type CommandHistory = Mutex<Vec<String>>;
 pub type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
@@ -164,58 +175,187 @@ fn hide_console_window(cmd: &mut Command) {
     }
 }
 
-/// Pick a real interactive shell for `start_interactive_shell`.
+#[cfg(target_os = "windows")]
+fn run_probe(command: &str, args: &[&str], timeout: Duration) -> Option<std::process::Output> {
+    let mut probe = Command::new(command);
+    probe
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    hide_console_window(&mut probe);
+
+    let mut child = probe.spawn().ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn probe_success(command: &str, args: &[&str]) -> bool {
+    run_probe(command, args, Duration::from_secs(2))
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn probe_git_bash(command: &str) -> Option<String> {
+    run_probe(command, &["-lc", "uname -s"], Duration::from_secs(2))
+        .map(|output| {
+            if !output.status.success() {
+                return None;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout).to_uppercase();
+            if stdout.contains("MINGW") {
+                Some("git-bash".to_string())
+            } else if stdout.contains("MSYS") {
+                Some("msys-bash".to_string())
+            } else if stdout.contains("CYGWIN") {
+                Some("cygwin-bash".to_string())
+            } else {
+                None
+            }
+        })
+        .flatten()
+}
+
+#[cfg(target_os = "windows")]
+fn find_git_bash() -> Option<(String, String)> {
+    let mut candidates: Vec<String> = Vec::new();
+
+    if let Ok(program_files) = env::var("ProgramFiles") {
+        candidates.push(format!("{}\\Git\\bin\\bash.exe", program_files));
+    }
+    if let Ok(program_files_x86) = env::var("ProgramFiles(x86)") {
+        candidates.push(format!("{}\\Git\\bin\\bash.exe", program_files_x86));
+    }
+    if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        candidates.push(format!("{}\\Programs\\Git\\bin\\bash.exe", local_app_data));
+    }
+
+    for candidate in candidates {
+        if PathBuf::from(&candidate).exists() {
+            if let Some(kind) = probe_git_bash(&candidate) {
+                return Some((candidate, kind));
+            }
+        }
+    }
+
+    for candidate in ["bash.exe", "bash"] {
+        if let Some(kind) = probe_git_bash(candidate) {
+            return Some((candidate.to_string(), kind));
+        }
+    }
+
+    None
+}
+
+/// Pick a real interactive shell for PTY sessions.
 ///
-/// On Windows, prefer PowerShell 7 (`pwsh`) > Windows PowerShell (`powershell`) > `cmd`.
-/// `cmd /C` is NOT interactive — it runs a command and exits — so we use `cmd` with no
-/// flags or PowerShell with `-NoLogo -NoExit`.
+/// On Windows, prefer Git Bash (bundled with the required Git for Windows)
+/// before PowerShell so agent commands stay closer to macOS/Linux semantics.
+/// If Git Bash is unavailable, fall back to PowerShell 7, Windows PowerShell,
+/// then cmd.exe.
 ///
 /// On Unix, use the user's `$SHELL` (or `/bin/bash`) with `-i`.
-fn pick_interactive_shell() -> (String, Vec<String>) {
+fn pick_interactive_shell_info() -> InteractiveShellInfo {
     #[cfg(target_os = "windows")]
     {
-        use std::sync::OnceLock;
-        static CACHED_SHELL: OnceLock<(String, Vec<String>)> = OnceLock::new();
+        if let Some((bash, kind)) = find_git_bash() {
+            return InteractiveShellInfo {
+                command: bash,
+                args: vec!["--login".to_string(), "-i".to_string()],
+                kind,
+                command_style: "posix".to_string(),
+                platform: "windows".to_string(),
+                warning: None,
+            };
+        }
 
-        CACHED_SHELL
-            .get_or_init(|| {
-                // Try pwsh (PowerShell 7+, cross-platform) first
-                let mut pwsh_probe = Command::new("pwsh");
-                pwsh_probe
-                    .arg("-Version")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                hide_console_window(&mut pwsh_probe);
-                if pwsh_probe.status().map(|s| s.success()).unwrap_or(false) {
-                    return (
-                        "pwsh".to_string(),
-                        vec!["-NoLogo".to_string(), "-NoExit".to_string()],
-                    );
-                }
-                // Fall back to Windows PowerShell (always available on Win 10/11)
-                let mut ps_probe = Command::new("powershell");
-                ps_probe
-                    .arg("-Command")
-                    .arg("$PSVersionTable.PSVersion")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                hide_console_window(&mut ps_probe);
-                if ps_probe.status().map(|s| s.success()).unwrap_or(false) {
-                    return (
-                        "powershell".to_string(),
-                        vec!["-NoLogo".to_string(), "-NoExit".to_string()],
-                    );
-                }
-                // Last resort: cmd.exe with no /C flag (interactive)
-                ("cmd".to_string(), vec![])
-            })
-            .clone()
+        if probe_success("pwsh", &["-Version"]) {
+            return InteractiveShellInfo {
+                command: "pwsh".to_string(),
+                args: vec!["-NoLogo".to_string(), "-NoExit".to_string()],
+                kind: "pwsh".to_string(),
+                command_style: "powershell".to_string(),
+                platform: "windows".to_string(),
+                warning: Some(
+                    "Git Bash was not found. Using PowerShell; prefer PowerShell commands."
+                        .to_string(),
+                ),
+            };
+        }
+
+        if probe_success("powershell", &["-Command", "$PSVersionTable.PSVersion"]) {
+            return InteractiveShellInfo {
+                command: "powershell".to_string(),
+                args: vec!["-NoLogo".to_string(), "-NoExit".to_string()],
+                kind: "powershell".to_string(),
+                command_style: "powershell".to_string(),
+                platform: "windows".to_string(),
+                warning: Some(
+                    "Git Bash was not found. Using Windows PowerShell; prefer PowerShell commands."
+                        .to_string(),
+                ),
+            };
+        }
+
+        InteractiveShellInfo {
+            command: "cmd".to_string(),
+            args: vec![],
+            kind: "cmd".to_string(),
+            command_style: "cmd".to_string(),
+            platform: "windows".to_string(),
+            warning: Some(
+                "Git Bash and PowerShell were not found. Using cmd.exe; POSIX commands may not work."
+                    .to_string(),
+            ),
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        (shell, vec!["-i".to_string()])
+        let kind = PathBuf::from(&shell)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("shell")
+            .to_string();
+        InteractiveShellInfo {
+            command: shell,
+            args: vec!["-i".to_string()],
+            kind,
+            command_style: "posix".to_string(),
+            platform: env::consts::OS.to_string(),
+            warning: None,
+        }
     }
+}
+
+fn pick_interactive_shell() -> (String, Vec<String>) {
+    let info = pick_interactive_shell_info();
+    (info.command, info.args)
+}
+
+#[tauri::command]
+pub async fn get_interactive_shell_info() -> InteractiveShellInfo {
+    pick_interactive_shell_info()
 }
 
 /// Build a command with sandbox if enabled, otherwise plain host command.

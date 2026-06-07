@@ -43,6 +43,7 @@ import {
 import { getQueryGuard } from '../../services/agent/queryGuard'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
+import { classifyPendingPlanIntent } from '../../services/agent/planResumeIntent'
 
 /**
  * ServiceError codes that mean "transient upstream / network problem the user
@@ -108,6 +109,7 @@ export function usePromptBar() {
   const navigatingHistoryRef = useRef(false)
   const isStreaming = useChatStore(s => s.isStreaming)
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
+  const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const hasPendingCredential = useCredentialRequestStore(s => s.pending.size > 0)
   // Subscribe to the QueryGuard via useSyncExternalStore — same pattern
   // Claude Code uses. Re-renders when reserve/tryStart/end/forceEnd fires.
@@ -235,6 +237,20 @@ export function usePromptBar() {
       textareaRef.current.focus()
     }
   }, [])
+
+  // Restore focus when permission dialog closes.
+  // PromptBar is unmounted while PermissionDialog is shown (conditional render
+  // in MainLayout). When the dialog closes and PromptBar remounts, we need to
+  // restore focus so the user can continue typing without clicking.
+  const prevPendingPermissionRef = useRef(pendingPermission)
+  useEffect(() => {
+    const wasBlocked = prevPendingPermissionRef.current
+    prevPendingPermissionRef.current = pendingPermission
+    if (wasBlocked && !pendingPermission) {
+      const t = setTimeout(() => textareaRef.current?.focus(), 50)
+      return () => clearTimeout(t)
+    }
+  }, [pendingPermission])
 
   // Slash command input handler — detect "/" prefix and filter commands
   const handleInputChange = useCallback((value: string) => {
@@ -901,6 +917,9 @@ export function usePromptBar() {
     // prompts route here.
     const revisionProjectPath = useChatStore.getState().planRevisionPending
     if (revisionProjectPath && prompt && !slashCommandRegistry.isSlashCommand(prompt)) {
+      const revisionTarget = typeof revisionProjectPath === 'string'
+        ? { projectPath: revisionProjectPath, planPath: undefined }
+        : revisionProjectPath
       // Clear the flag BEFORE dispatch so a subsequent message after the
       // revision turn falls back to the normal path. If revision fails,
       // the user can request changes again from the new card.
@@ -909,7 +928,7 @@ export function usePromptBar() {
       clearDraftAttachments()
       try {
         const { executePlanRevision } = await import('../../services/agent/commands/planCommand')
-        await executePlanRevision(prompt, revisionProjectPath)
+        await executePlanRevision(prompt, revisionTarget.projectPath, 'chat', revisionTarget.planPath)
       } catch (err) {
         logger.error('prompt', 'executePlanRevision failed:', err)
         useChatStore.getState().addSystemMessage(
@@ -1103,6 +1122,17 @@ export function usePromptBar() {
     // Clear the message queue BEFORE cancelling — prevents useQueueProcessor
     // from firing when queryGuard transitions to idle.
     clearMessageQueue()
+
+    // Check if there are pending permissions that will be cancelled
+    const pendingCount = usePermissionStore.getState().getQueuedCount()
+    if (pendingCount > 0) {
+      const confirmed = window.confirm(
+        `There are ${pendingCount} pending permission${pendingCount > 1 ? 's' : ''} in the queue. ` +
+        `Stopping will cancel all of them. Continue?`
+      )
+      if (!confirmed) return
+    }
+
     // Clear any pending permission first — resolves the dangling Promise
     usePermissionStore.getState().clearPending()
     // Resolve any pending diff approval waits (rejects them)
@@ -1110,7 +1140,7 @@ export function usePromptBar() {
     AgentService.getInstance().cancelLoop()
     useAgentStore.getState().setStatus('idle')
     useChatStore.getState().finalizeAssistantMessage()
-  }, [])
+  }, [clearMessageQueue])
 
   // === Queue processor — runs queued commands when agent becomes idle ===
   //
@@ -1156,6 +1186,39 @@ export function usePromptBar() {
         head.mode === 'prompt' && commands.length > 1
           ? joinPromptValues(commands.map(c => c.value))
           : head.value
+
+      const planResumePending = useChatStore.getState().planResumePending
+      if (planResumePending && head.mode === 'prompt') {
+        const display = extractDisplayFromValue(mergedValue)
+        const blocks = typeof mergedValue === 'string' ? undefined : mergedValue
+        const activeProjectPath = useProjectStore.getState().currentProject?.path || ''
+
+        if (activeProjectPath !== planResumePending.projectPath) {
+          useChatStore.getState().addUserMessage(display.text, display.attachments, blocks)
+          useChatStore.getState().addSystemMessage(t('plan.resumeWrongProject'), 'warn')
+          return
+        }
+
+        const intent = classifyPendingPlanIntent(display.text)
+        if (intent === 'cancel') {
+          useChatStore.getState().addUserMessage(display.text, display.attachments, blocks)
+          useChatStore.getState().setPlanResumePending(null)
+          useChatStore.getState().addSystemMessage(t('plan.resumeCancelled'))
+          return
+        }
+
+        try {
+          const { executePlanResume } = await import('../../services/agent/commands/planCommand')
+          await executePlanResume(display.text, planResumePending, display.attachments, blocks)
+        } catch (err) {
+          logger.error('prompt', 'executePlanResume failed:', err)
+          useChatStore.getState().addSystemMessage(
+            `Plan resume failed: ${(err as Error).message}. Run /plan again to restart.`,
+            'error',
+          )
+        }
+        return
+      }
 
       // The bubble is created on dispatch (inside runAgentForPrompt) —
       // never at enqueue time. QueuedMessagesPreview already shows the

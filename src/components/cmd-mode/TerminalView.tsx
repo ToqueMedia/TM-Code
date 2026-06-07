@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
 import { usePermissionStore } from '../../stores/permissionStore'
-import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
+
 import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import { useTerminalPanelStore, TERMINAL_PANEL_MIN_WIDTH } from '../../stores/terminalPanelStore'
@@ -19,10 +20,12 @@ import { BillingOverageBanner } from './BillingOverageBanner'
 import { ErrorBoundary } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
-import { useCmdScrollFollow } from '../../hooks/useCmdScrollFollow'
+import AgentTasksPanel from '../chat/AgentTasksPanel'
+import { useStickToBottom } from 'use-stick-to-bottom'
 import { useAttachments } from '../../hooks/useAttachments'
 import { useTranslation } from '@/i18n/useTranslation'
 import { tokens } from '@/theme/tokens'
+import { FiChevronDown } from 'react-icons/fi'
 
 interface TerminalViewProps {
   projectPath: string
@@ -37,12 +40,23 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const isStreaming = useChatStore(s => s.isStreaming)
   const streamingVersion = useChatStore(s => s.streamingVersion)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
+  const agentStatus = useAgentStore(s => s.status)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
-  const hasPendingCredential = useCredentialRequestStore(s => s.pending.size > 0)
   const hasPendingAskUserQuestion = useAskUserQuestionStore(s => s.pending.size > 0)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
+
+  // Track if we've ever had messages — prevents flicker when first message
+  // is added and then immediately removed (e.g. session switch, clear).
+  // Also used to fade out the greeting smoothly instead of abrupt removal.
+  const [hasEverHadMessages, setHasEverHadMessages] = useState(false)
+
+  useEffect(() => {
+    if (messages.length > 0) {
+      setHasEverHadMessages(true)
+    }
+  }, [messages.length])
 
   const sessionPickerOpen = useCmdOverlayStore(s => s.sessionPickerOpen)
   const sessionPickerItems = useCmdOverlayStore(s => s.sessionPickerItems)
@@ -50,6 +64,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
 
   const promptInputRef = useRef<CmdModePromptInputRef>(null)
   const isStreamingRef = useRef(isStreaming)
+  const agentStatusRef = useRef(agentStatus)
   const pendingPermissionRef = useRef(pendingPermission)
   const prevPendingPermissionRef = useRef(pendingPermission)
   const sessionPickerOpenRef = useRef(sessionPickerOpen)
@@ -79,6 +94,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   }, [isStreaming])
 
   useEffect(() => {
+    agentStatusRef.current = agentStatus
+  }, [agentStatus])
+
+  useEffect(() => {
     pendingPermissionRef.current = pendingPermission
   }, [pendingPermission])
 
@@ -104,9 +123,19 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   }, [])
 
   // Create a session if none exists (fresh mount or after cleanup above).
+  // Guard with a ref to prevent the effect from re-firing when createSession
+  // changes activeSessionId, which would otherwise cause a render loop.
+  const sessionCreatedRef = useRef(false)
   useEffect(() => {
     if (!projectPath) return
+    sessionCreatedRef.current = false
+    return () => { sessionCreatedRef.current = false }
+  }, [projectPath])
+
+  useEffect(() => {
+    if (!projectPath || sessionCreatedRef.current) return
     if (!useChatStore.getState().activeSessionId) {
+      sessionCreatedRef.current = true
       useChatStore.getState().createSession(projectPath)
     }
   }, [activeSessionId, projectPath])
@@ -125,13 +154,20 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     if (!projectPath) return
     let cancelled = false
 
-    // Tasks — clear cross-project leak, hydrate new project's tasks.json.
-    const { clearTasks, setTasks } = useAgentStore.getState()
-    clearTasks()
+    // Tasks — hydrate new project's tasks.json atomically.
+    // We do NOT clear before load: clearTasks() + async loadFromDisk creates
+    // a race window where the store is empty but tasks.json still exists on
+    // disk. If the agent reads prompt context during this gap, it sees
+    // tasks=[] and may re-seed a fresh tracker, overwriting the real state.
+    // Instead, loadFromDisk resolves with the new project's tasks (or []),
+    // and setTasks() atomically replaces the old project's data — no
+    // intermediate empty state. If the load fails, we clear stale data as
+    // a fallback (old project's tasks are worse than empty).
+    const { setTasks, clearTasks } = useAgentStore.getState()
     import('../../services/agent/taskPersistence').then(({ loadTasksFromDisk }) =>
       loadTasksFromDisk(projectPath)
         .then(tasks => { if (!cancelled) setTasks(tasks) })
-        .catch(() => { /* non-critical — empty tracker is fine */ }),
+        .catch(() => { if (!cancelled) clearTasks() }),
     )
 
     // Permissions — clear stale trust grants, hydrate new project's
@@ -162,11 +198,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     }
   }, [projectPath])
 
-  // Scroll follow — auto-sticks to bottom while user is near bottom; pauses on manual scroll up.
-  const { scrollRef, stickToBottom } = useCmdScrollFollow({
-    isStreaming,
-    streamingVersion,
-    messageCount: messages.length,
+  // use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
+  // streaming content, expanding diffs, and dynamic height changes.
+  // Replaces the old useCmdScrollFollow hook whose manual scrollTop
+  // approach missed content-height changes between buffer flushes.
+  const { scrollRef, contentRef, scrollToBottom, isAtBottom } = useStickToBottom({
+    resize: 'instant',
+    initial: 'instant',
   })
 
   // Pagination — same shape used by chat. Render the latest 30 messages,
@@ -200,8 +238,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         const beforeHeight = scrollEl.scrollHeight
         const beforeTop = scrollEl.scrollTop
         loadMore()
-        // Double rAF — see ChatView. CMD mode uses `useCmdScrollFollow`
-        // (not `useStickToBottom`) but the principle is the same: let the
+        // Double rAF — see ChatView. CMD mode uses `useStickToBottom`
+        // (ResizeObserver-based) but the principle is the same: let the
         // follow logic settle before our manual scrollTop write.
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
@@ -248,6 +286,47 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     }
   }, [pendingPermission])
 
+  // Native terminal keyboard shortcuts.
+  // Ctrl+C: stop agent if active
+  // Ctrl+L: scroll to bottom (like native terminal clear)
+  // Ctrl+K: clear input line (like native terminal)
+  useEffect(() => {
+    const isAgentActive = () => {
+      const status = agentStatusRef.current
+      return isStreamingRef.current || (status !== 'idle' && status !== 'error')
+    }
+    const handler = (e: KeyboardEvent) => {
+      // Ctrl/Cmd+C — stop agent when it is active, including non-streaming tool phases.
+      if (e.key === 'c' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+        if (isAgentActive()) {
+          e.preventDefault()
+          e.stopPropagation()
+          stopAgent()
+          return
+        }
+      }
+      // Ctrl+L — scroll to bottom (native terminal behavior)
+      if (e.key === 'l' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        wasAtBottomRef.current = true
+        scrollToBottom()
+        return
+      }
+      // Ctrl+K — clear input line (native terminal behavior)
+      if (e.key === 'k' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+        if (promptInputRef.current?.hasText?.()) {
+          e.preventDefault()
+          e.stopPropagation()
+          window.dispatchEvent(new CustomEvent('cmd-clear-input'))
+          return
+        }
+      }
+    }
+    window.addEventListener('keydown', handler, true)
+    return () => window.removeEventListener('keydown', handler, true)
+  }, [scrollToBottom])
+
   // Unified Escape handler. Priority:
   //   1. Permission prompt owns Escape while visible (handled by the prompt itself)
   //   2. AskUserQuestion owns Escape (cancels the question)
@@ -258,6 +337,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   //   7. Typing with text → let the textarea handle it
   //   8. Idle → exit to welcome
   useEffect(() => {
+    const isAgentActive = () => {
+      const status = agentStatusRef.current
+      return isStreamingRef.current || (status !== 'idle' && status !== 'error')
+    }
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       if (pendingPermissionRef.current) return
@@ -280,7 +363,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         return
       }
       if (promptInputRef.current?.isMenuOpen?.()) return
-      if (isStreamingRef.current) {
+      if (isAgentActive()) {
         e.preventDefault()
         e.stopPropagation()
         stopAgent()
@@ -309,8 +392,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     // Clear draft attachments when switching sessions
     promptInputRef.current?.clearAttachments()
     await loadSessionById(session.id, projectPath)
-    // Restore focus to the prompt after the picker unmounts.
-    setTimeout(() => promptInputRef.current?.focus(), 40)
+    // Wait a frame for React to commit the new messages before restoring focus.
+    // Using requestAnimationFrame instead of a fixed timeout avoids the race
+    // where 40ms isn't enough for a slow session load.
+    requestAnimationFrame(() => {
+      promptInputRef.current?.focus()
+    })
   }, [projectPath])
 
   const handleClosePicker = useCallback(() => {
@@ -318,10 +405,78 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     setTimeout(() => promptInputRef.current?.focus(), 40)
   }, [])
 
-  // Scroll to bottom after session load or when user sends.
+  // Track whether user was at bottom before streaming started.
+  // Once the user scrolls away during streaming, we stop forcing scroll
+  // until they manually return to the bottom (clicking the ↓ button or
+  // scrolling back down). This prevents the scroll from yanking the user
+  // away from content they're reading mid-stream.
+  const wasAtBottomRef = useRef(true)
+  const prevStreamingRef = useRef(false)
+
+  // When the user expands/collapses an inline element (reasoning block,
+  // tool call, diff), the message height changes and the stick-to-bottom
+  // ResizeObserver fires scrollToBottom. If the user clicked an element
+  // ABOVE the current viewport, that yanks them away from what they were
+  // reading. We listen for an explicit interaction event from those
+  // expand/collapse handlers and freeze stick-to-bottom for a tick so the
+  // upcoming resize doesn't auto-scroll.
+  const isAtBottomRef = useRef(isAtBottom)
+  isAtBottomRef.current = isAtBottom
   useEffect(() => {
-    stickToBottom()
-  }, [messages.length, stickToBottom])
+    if (typeof window === 'undefined') return
+    const onInteraction = () => {
+      if (!isAtBottomRef.current) {
+        wasAtBottomRef.current = false
+      }
+    }
+    window.addEventListener('cmd-toggle-interaction', onInteraction)
+    return () => window.removeEventListener('cmd-toggle-interaction', onInteraction)
+  }, [])
+
+  // Consolidated scroll effect — handles all three concerns in deterministic
+  // order to prevent race conditions between the separate wasAtBottom tracking,
+  // streaming scroll, and end-of-stream scroll effects.
+  useEffect(() => {
+    // 1. Track wasAtBottom
+    if (isAtBottom) {
+      wasAtBottomRef.current = true
+    } else if (isStreaming) {
+      wasAtBottomRef.current = false
+    }
+
+    // 2. Force scroll during streaming if user was at bottom
+    if (isStreaming && wasAtBottomRef.current) {
+      scrollToBottom()
+    }
+
+    // 3. When streaming ends, force final scroll after DOM settles
+    if (prevStreamingRef.current && !isStreaming && wasAtBottomRef.current) {
+      const timer = setTimeout(() => scrollToBottom(), 80)
+      prevStreamingRef.current = isStreaming
+      return () => clearTimeout(timer)
+    }
+    prevStreamingRef.current = isStreaming
+  }, [streamingVersion, isStreaming, isAtBottom, scrollToBottom])
+
+  // Terminal bell — when streaming ends and the window is not focused,
+  // flash the document title to get the user's attention (like iTerm2).
+  useEffect(() => {
+    if (prevStreamingRef.current && !isStreaming) {
+      if (document.hidden) {
+        const originalTitle = document.title
+        document.title = '✓ Done — Terminal'
+        const resetTitle = () => {
+          document.title = originalTitle
+          document.removeEventListener('visibilitychange', resetTitle)
+        }
+        document.addEventListener('visibilitychange', resetTitle)
+        // Also reset after 5s in case the user never returns
+        const autoReset = setTimeout(resetTitle, 5000)
+        const cleanup = () => { clearTimeout(autoReset); resetTitle() }
+        return cleanup
+      }
+    }
+  }, [isStreaming])
 
   // Kill all PTY sessions when leaving the project (unmount TerminalView).
   useEffect(() => {
@@ -349,16 +504,33 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   // Suppress prompt input focus until the terminal panel's PTY is ready.
   // onReady callback fires when start_pty_shell succeeds — clears the flag
   // so the xterm keeps focus and the textarea doesn't steal it back.
+  // Fallback timeout: if onReady never fires (PTY failure, slow init),
+  // clear the suppress after 500ms so the prompt isn't stuck forever.
   const suppressPromptFocusRef = useRef(false)
+  const suppressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const prevTerminalOpenRef = useRef(terminalOpen)
   useEffect(() => {
     if (terminalOpen && !prevTerminalOpenRef.current) {
       suppressPromptFocusRef.current = true
+      suppressTimeoutRef.current = setTimeout(() => {
+        suppressPromptFocusRef.current = false
+        suppressTimeoutRef.current = null
+      }, 500)
     }
     prevTerminalOpenRef.current = terminalOpen
   }, [terminalOpen])
   const handleTerminalReady = useCallback(() => {
+    if (suppressTimeoutRef.current) {
+      clearTimeout(suppressTimeoutRef.current)
+      suppressTimeoutRef.current = null
+    }
     suppressPromptFocusRef.current = false
+  }, [])
+  // Cleanup suppress timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current)
+    }
   }, [])
 
   const maxPanelWidth = outerWidth > 0 ? Math.floor(outerWidth * 0.5) : terminalWidthPref
@@ -417,7 +589,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           from pushing siblings off-screen. Same pattern as ChatView. */}
       <Box position="relative" flex="1" minH={0} overflow="hidden">
       <Box
-        ref={scrollRef as React.RefObject<HTMLDivElement>}
+        ref={scrollRef}
         h="100%"
         overflowY="auto"
         px={3}
@@ -432,17 +604,31 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.08)', borderRadius: '2px' },
         }}
       >
-        <Box minH="100%">
+        <Box ref={contentRef} minH="100%">
           {isLoadingSession ? (
             <Box mb={2}>
               <Text color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} fontSize="12px">
                 {t('terminalMode.view.loadingSession')}
               </Text>
             </Box>
-          ) : messages.length === 0 ? (
-            <TerminalGreeting projectPath={projectPath} />
           ) : (
-            <Box pb={1} data-selectable="true">
+            <AnimatePresence mode="wait">
+              {messages.length === 0 && !hasEverHadMessages ? (
+                <motion.div
+                  key="greeting"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0, transition: { duration: 0.15 } }}
+                >
+                  <TerminalGreeting projectPath={projectPath} />
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="messages"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1, transition: { duration: 0.2 } }}
+                >
+                  <Box pb={1} data-selectable="true">
               {canLoadMore && (
                 <Box
                   as="button"
@@ -472,17 +658,61 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
               )}
               {visibleItems.map(msg => (
                 <ErrorBoundary key={msg.id}>
-                  <TerminalMessageRenderer
-                    message={msg}
-                    isStreaming={msg.id === streamingMessageId}
-                  />
+                  <Box
+                    css={{
+                      animation: 'msgFadeIn 0.12s ease-out',
+                      '@keyframes msgFadeIn': {
+                        from: { opacity: '0', transform: 'translateY(3px)' },
+                        to: { opacity: '1', transform: 'translateY(0)' },
+                      },
+                    }}
+                  >
+                    <TerminalMessageRenderer
+                      message={msg}
+                      isStreaming={msg.id === streamingMessageId}
+                    />
+                  </Box>
                 </ErrorBoundary>
               ))}
             </Box>
+                </motion.div>
+              )}
+            </AnimatePresence>
           )}
         </Box>
       </Box>
       </Box>
+
+      {/* Scroll-to-bottom button — appears when user scrolls away from bottom */}
+      {!isAtBottom && messages.length > 0 && (
+        <Box
+          position="absolute"
+          bottom="12px"
+          right="16px"
+          as="button"
+          w="28px"
+          h="28px"
+          borderRadius="full"
+          bg="rgba(163, 113, 247, 0.15)"
+          border="1px solid rgba(163, 113, 247, 0.3)"
+          color={tokens.colors.accent.purple}
+          cursor="pointer"
+          display="flex"
+          alignItems="center"
+          justifyContent="center"
+          onClick={() => {
+            wasAtBottomRef.current = true
+            scrollToBottom()
+          }}
+          zIndex={10}
+          transition="all 0.15s"
+          _hover={{ bg: 'rgba(163, 113, 247, 0.25)', transform: 'scale(1.1)' }}
+          _active={{ transform: 'scale(0.95)' }}
+          aria-label="Scroll to bottom"
+        >
+          <FiChevronDown size={16} />
+        </Box>
+      )}
 
       {pendingPermission && (
         <Box flexShrink={0}>
@@ -509,11 +739,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         />
       )}
 
+      {/* Task list — appears when the agent defines tasks, hides when all complete */}
+      <AgentTasksPanel />
+
       <Box flexShrink={0} data-tauri-drag-region>
         <TerminalStatusLine />
       </Box>
 
-      <Box display={(pendingPermission || hasPendingCredential || hasPendingAskUserQuestion) ? 'none' : undefined} flexShrink={0} data-no-focus-steal>
+      <Box display={(pendingPermission || hasPendingAskUserQuestion) ? 'none' : undefined} flexShrink={0} data-no-focus-steal>
         <CmdModePromptInput ref={promptInputRef} />
       </Box>
     </Flex>

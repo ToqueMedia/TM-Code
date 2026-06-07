@@ -67,5 +67,4 @@ export { useDialog } from './useDialog'
 // Window controls
 export { useWindowControls } from './useWindowControls'
 
-// CMD-mode scroll follow
-export { useCmdScrollFollow } from './useCmdScrollFollow'
+

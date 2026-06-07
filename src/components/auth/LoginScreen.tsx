@@ -288,7 +288,7 @@ function LoginScreen() {
             Não tem conta?
           </Text>
           <a
-            href="https://toquemedia.net"
+            href="https://code.toquemedia.net"
             target="_blank"
             rel="noopener noreferrer"
             style={{
@@ -298,7 +298,7 @@ function LoginScreen() {
               textDecoration: 'none',
             }}
           >
-            Criar conta no site
+            {t('onboarding.ready.createAccount')}
           </a>
         </Flex>
       </Flex>

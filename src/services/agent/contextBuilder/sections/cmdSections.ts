@@ -17,7 +17,7 @@ import {
   READ_FILE, SEARCH_FILES, GLOB,
   READ_SKILL,
   CREATE_FILE, EDIT_FILE,
-  EXECUTE_COMMAND,
+  EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND,
   UPDATE_TASKS,
 } from '../../toolNames'
 import { sanitizeProjectContent, skillsFromHashtags } from '../helpers'
@@ -31,6 +31,7 @@ import { composeScaffoldingAwareSection } from './chatSections'
 import {
   sharedDoingTasksCore,
   sharedIdentityReminder,
+  sharedThinkingEfficiencyReminder,
 } from './sharedSections'
 
 export function getCmdCompletionContractSection(): string {
@@ -65,7 +66,7 @@ export function getCmdClosedLoopSection(): string {
 **VERIFY** work before reporting completion.
 
 **After \`${EXECUTE_COMMAND}\`:**
- - **READ** the full output. Exit code ≠ 0 or stderr errors → **fix the actual error** before continuing. This is about real failures, not defensive re-checks — once the error is resolved, move on.
+ - **READ** the full output. Exit code ≠ 0 or stderr errors → **fix the actual error** before continuing. This is about real failures, not defensive re-checks — once the error is resolved, move on. **DO NOT BLINDLY RETRY** the exact same command.
  - **TREAT** warnings about missing dependencies or type errors as blockers — address them.
 
 **After file changes:**
@@ -73,7 +74,7 @@ export function getCmdClosedLoopSection(): string {
  - When you installed dependencies, **CONFIRM** exit code 0 before writing code that depends on them.
 
 **Verification before completion:**
- - When finishing a coding session or after significant changes, **CONSIDER** running the type checker via \`execute_command_background({ command: "./node_modules/.bin/tsc --noEmit" })\` (background, non-blocking). If \`tsc\` is not installed, try \`npx tsc --noEmit\` via \`execute_command\` with a generous timeout.
+ - When finishing a coding session or after significant changes, **CONSIDER** running the type checker via \`${EXECUTE_COMMAND_BACKGROUND}({ command: "./node_modules/.bin/tsc --noEmit" })\` (background, non-blocking). If \`tsc\` is not installed, try \`npx tsc --noEmit\` via \`${EXECUTE_COMMAND}\` with a generous timeout.
  - **FIX** errors and repeat until clean.
  - **SAY SO EXPLICITLY** when verification is not possible (no test, no type checker).
 
@@ -111,10 +112,10 @@ When you hit an obstacle, do NOT use destructive actions as a shortcut to make i
 export function getCmdToolsSection(): string {
   return `# Using your tools
 
- - Use dedicated tools (\`${READ_FILE}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`) instead of shell commands for file operations. Reserve \`${EXECUTE_COMMAND}\` for system commands and terminal operations only.
+ - Use dedicated tools (\`${READ_FILE}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`) instead of shell commands for file operations. Reserve \`${EXECUTE_COMMAND}\` for system commands and terminal operations only. **DO NOT** use \`${EXECUTE_COMMAND}\` for exploring code (\`cat\`, \`grep\`, \`ls\`).
  - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. Mark each task as completed as soon as you are done with it.
  - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
- - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel. After delegating, if you have no other work, end your turn — results will be available on next interaction.
+ - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel. After delegating, if you have no other work, end your turn — results will be available on next interaction. **Do NOT delegate trivial tasks** — if the answer is one \`read_file\`, \`glob\`, or \`search_files\` call away, just do it yourself. Delegation adds 30-60s of overhead; reserve it for multi-step research or verification.
  - \`collect_results\`: collect results from team members. Returns immediately with finished results — does NOT block. The system auto-wakes you when new results arrive.`
 }
 
@@ -152,7 +153,7 @@ Files:
 
 Verification (Terminal mode — do NOT run dev servers):
  - **DO NOT** invoke \`npm run dev\`, \`yarn dev\`, \`pnpm dev\`, or \`start_dev_server\`. Terminal mode is a terminal session — long-running background processes are hard for the user to terminate cleanly and leave orphaned ports.
- - To validate changes, prefer **non-blocking** checks: \`tsc --noEmit\` (via execute_command_background), \`eslint\`, \`npm run build\` / \`yarn build\` (one-shot, exits on its own), unit/integration tests (\`npm test\`, \`pytest\`, \`cargo test\`, etc.).
+ - To validate changes, prefer **non-blocking** checks: \`tsc --noEmit\` (via \`${EXECUTE_COMMAND_BACKGROUND}\`), \`eslint\`, \`npm run build\` / \`yarn build\` (one-shot, exits on its own), unit/integration tests (\`npm test\`, \`pytest\`, \`cargo test\`, etc.).
  - When the user wants to see the app running, ASK them to run the dev command themselves — don't start it yourself.
 
 Safety:
@@ -237,6 +238,49 @@ export function getCmdClaudeMdSection(ctx: CmdPromptContext): string | null {
     ? ctx.claudeMdContent.slice(0, 8000) + '\n\n[... truncated — read CLAUDE.md for full content]'
     : ctx.claudeMdContent
   return `# claudeMd\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of ${ctx.normalizedCwd}/CLAUDE.md (project instructions):\n${sanitizeProjectContent(truncated)}`
+}
+
+/**
+ * TMS.md guidance for CMD mode — instructs the agent to create or
+ * maintain the project-level TMS.md persistent memory file.
+ *
+ * Mirrors the chat-mode `getMemoryGuidanceSection` logic but adapted
+ * for Terminal mode's higher autonomy (no diff approval, direct writes).
+ *
+ * Three paths:
+ *  1. TMS.md exists → keep it updated.
+ *  2. TMS.md missing → create it after the first significant task.
+ *  3. TMS.md missing + CLAUDE.md exists → still create TMS.md (CLAUDE.md
+ *     is for instructions, TMS.md is for persistent memory / milestones).
+ */
+export function getCmdTmsGuidanceSection(ctx: CmdPromptContext): string | null {
+  if (ctx.tmsContent) {
+    return `**TMS.md** (project persistent memory) exists at ${ctx.normalizedCwd}/TMS.md. Keep it updated with milestones (dated) and architectural decisions (with rationale) as you complete work. Preserve "Project Analysis" and "Custom Instructions" sections as-is.`
+  }
+
+  return `This project has no TMS.md — the persistent project memory file that stores framework info, dev commands, architectural decisions, and milestones across sessions. Without it, every session re-analyzes the project from scratch.
+
+**After completing your first significant task in this session**, create TMS.md at the project root (\`${ctx.normalizedCwd}/TMS.md\`) with these sections:
+- \`# TMS — Project Memory\`
+- \`## Project Analysis\` (name, framework, package manager, key deps, directory overview)
+- \`## Memory\` with sub-sections: \`### Milestones\` (dated entries), \`### Decisions\` (with rationale), \`### Pending Tasks\`
+- \`## Custom Instructions\` (developer-specific rules from CLAUDE.md or user input)
+
+Use your existing knowledge of the project (file reads, package.json, directory structure) to populate it. This file persists across sessions and is your project-level persistent memory.`
+}
+
+/**
+ * Injects the actual content of the project's TMS.md into the prompt.
+ * Chat mode has `getProjectMemorySection` for this; CMD mode was missing
+ * it — the agent could see guidance to create TMS.md but never read the
+ * existing content.
+ */
+export function getCmdTmsContentSection(ctx: CmdPromptContext): string | null {
+  if (!ctx.tmsContent) return null
+  const truncated = ctx.tmsContent.length > 6000
+    ? ctx.tmsContent.slice(0, 6000) + '\n\n[... truncated — read TMS.md for full content]'
+    : ctx.tmsContent
+  return `# Project memory\n${sanitizeProjectContent(truncated)}`
 }
 
 /**
@@ -339,14 +383,16 @@ export function getCmdReminderSection(loadedSkillNames: string[] = []): string {
   // their CRITICAL blocks before improvising. Same mechanism chat mode
   // uses via `ctx.loadedSkillNames` in `getReminderSection`.
   const skillReminder = loadedSkillNames.length > 0
-    ? `\n10. Skills loaded: ${loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
+    ? `\n8. Skills loaded: ${loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
     : ''
   return `# Reminder
 
 1. **COMPLETE** every task and **VERIFY** before reporting done. Say so when verification is not possible.
 2. File writes go to disk immediately — **DOUBLE-CHECK** paths and content.
-3. **AFTER** execute_command: **READ** full output. Exit code ≠ 0 → **FIX** the actual error and move on. When it passes, state it plainly — don't re-verify what you already checked.
-4. **CONFIRM** dependencies are installed before importing. **INSTALL** first when missing.
-5. For destructive or shared-state actions: **CONFIRM** with the user first.
-6. ${sharedIdentityReminder()}${skillReminder}`
+3. **AFTER** execute_command: **READ** full output. Exit code ≠ 0 → **FIX** the actual error and move on. **DO NOT BLINDLY RETRY** the exact same command.
+4. **DO NOT EXECUTE SOURCE FILES DIRECTLY** (e.g., \`Ran(file.ts)\`). Use test runners (\`jest\`, \`vitest\`) for tests, or \`ts-node\`/\`bun\` for scripts. Use dedicated tools (\`read_file\`, \`search_files\`) for file exploration, not shell commands (\`cat\`, \`grep\`).
+5. **CONFIRM** dependencies are installed before importing. **INSTALL** first when missing.
+6. For destructive or shared-state actions: **CONFIRM** with the user first.
+7. ${sharedIdentityReminder()}
+8. ${sharedThinkingEfficiencyReminder()}${skillReminder}`
 }

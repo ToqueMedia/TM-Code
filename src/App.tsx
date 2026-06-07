@@ -19,7 +19,7 @@ import MCPService from './services/mcp/mcpService';
 import { browserSession } from './services/browserSessionManager';
 import ToolExecutor from './services/agent/toolExecutor';
 import AgentService from './services/agent/agentService';
-import { autoCheckForUpdate } from './services/updateService';
+import { autoCheckForUpdate, stopAutoUpdateChecks } from './services/updateService';
 import { checkStartupRequirements, GLOBAL_REQUIREMENTS } from './services/startupRequirements';
 import type { EnvironmentCheckResult } from './services/environmentCheck';
 import { useUpdateStore } from './stores/updateStore';
@@ -113,33 +113,42 @@ function App() {
 	// the DOM is fully populated. The Rust side has a 15s failsafe in case
 	// this effect never fires (render crash) — see lib.rs setup.
 	useEffect(() => {
+		let active = true
 		import('@tauri-apps/api/core').then(({ invoke }) => {
+			if (!active) return
 			invoke('app_ready').catch(() => { /* not running under Tauri */ })
 		})
+		return () => { active = false }
 	}, []);
 
 
-	// Initialize Firebase Auth listener
 	useEffect(() => {
+		let active = true
 		FirebaseAuthService.getInstance().init();
 		// Restore persisted sandbox state to Rust backend
 		import('./stores/settingsStore').then(({ useSettingsStore }) => {
+			if (!active) return
 			const sandboxEnabled = useSettingsStore.getState().sandboxEnabled;
 			if (sandboxEnabled) {
 				import('@tauri-apps/api/core').then(({ invoke }) => {
+					if (!active) return
 					invoke('sandbox_set_enabled', { enabled: true }).catch(() => {});
 				});
 			}
 		});
+		return () => { active = false }
 	}, []);
 
 	// Listen for OAuth popup messages forwarded from the Rust popup window
 	useEffect(() => {
+		let active = true;
 		let unlistenMessage: (() => void) | undefined;
 		let unlistenClosed: (() => void) | undefined;
 
 		import('@tauri-apps/api/event').then(({ listen }) => {
+			if (!active) return;
 			listen<string>('oauth-popup-message', (e) => {
+				if (!active) return;
 				try {
 					const data = JSON.parse(e.payload);
 					window.dispatchEvent(new MessageEvent('message', { data: data }));
@@ -147,16 +156,24 @@ function App() {
 						(window as any)._oauthProxy.closed = true;
 					}
 				} catch (err) {}
-			}).then(unsub => { unlistenMessage = unsub; });
+			}).then(unsub => {
+				if (active) unlistenMessage = unsub;
+				else unsub();
+			});
 
 			listen('oauth-popup-closed', () => {
+				if (!active) return;
 				if ((window as any)._oauthProxy) {
 					(window as any)._oauthProxy.closed = true;
 				}
-			}).then(unsub => { unlistenClosed = unsub; });
+			}).then(unsub => {
+				if (active) unlistenClosed = unsub;
+				else unsub();
+			});
 		}).catch(() => {});
 
 		return () => {
+			active = false;
 			if (unlistenMessage) unlistenMessage();
 			if (unlistenClosed) unlistenClosed();
 		};
@@ -550,6 +567,7 @@ function App() {
 	useEffect(() => {
 		if (!isAuthenticated) return;
 		autoCheckForUpdate();
+		return () => stopAutoUpdateChecks();
 	}, [isAuthenticated]);
 
 	// Re-check snooze state every minute if update is pending

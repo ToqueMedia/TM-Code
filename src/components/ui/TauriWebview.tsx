@@ -109,6 +109,51 @@ const IframePreview = memo(forwardRef<TauriWebviewHandle, TauriWebviewProps>(fun
 
 // Module-level state for the native webview — survives component unmount/remount
 let nativePreviewUrl = ''
+let pageIsUnloading = false
+let resizePreviewInFlight = false
+let queuedResizePreviewArgs: Record<string, unknown> | null = null
+
+if (typeof window !== 'undefined') {
+  const markUnloading = () => { pageIsUnloading = true }
+  const markLoaded = () => { pageIsUnloading = false }
+  window.addEventListener('pagehide', markUnloading, { capture: true })
+  window.addEventListener('beforeunload', markUnloading, { capture: true })
+  window.addEventListener('pageshow', markLoaded, { capture: true })
+}
+
+function firePreviewInvoke(command: string, args?: Record<string, unknown>): void {
+  if (pageIsUnloading) return
+  if (command === 'resize_preview_webview') {
+    fireResizePreviewInvoke(args)
+    return
+  }
+  invoke(command, args).catch(() => {})
+}
+
+function fireResizePreviewInvoke(args?: Record<string, unknown>): void {
+  if (pageIsUnloading) return
+  if (resizePreviewInFlight) {
+    queuedResizePreviewArgs = args ?? {}
+    return
+  }
+
+  resizePreviewInFlight = true
+  invoke('resize_preview_webview', args)
+    .catch(() => {})
+    .finally(() => {
+      resizePreviewInFlight = false
+      const nextArgs = queuedResizePreviewArgs
+      queuedResizePreviewArgs = null
+      if (nextArgs && !pageIsUnloading) {
+        fireResizePreviewInvoke(nextArgs)
+      }
+    })
+}
+
+function parkPreviewWebview(): void {
+  if (!nativePreviewUrl || pageIsUnloading) return
+  firePreviewInvoke('resize_preview_webview', { x: -9999, y: -9999, width: 1, height: 1 })
+}
 
 const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function MacWebview({ url, html, reloadKey = 0, frozen = false, bottomReserveHeight = 0 }, ref) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -127,7 +172,7 @@ const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function Ma
   const resolvedUrl = url || (html ? htmlToDataUri(html) : '')
 
   const navigate = useCallback(async (action: 'back' | 'forward' | 'reload'): Promise<boolean> => {
-    if (!nativePreviewUrl) return false
+    if (!nativePreviewUrl || pageIsUnloading) return false
     try {
       await invoke('navigate_preview_webview', { action })
       return true
@@ -176,7 +221,7 @@ const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function Ma
       && last.height === rect.height
     ) return
     lastSentRectRef.current = rect
-    invoke('resize_preview_webview', rect).catch(() => {})
+    firePreviewInvoke('resize_preview_webview', rect)
   }, [])
 
   // RAF-coalesced syncPosition for window-level events. The ResizeObserver
@@ -192,26 +237,31 @@ const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function Ma
   useEffect(() => {
     if (!resolvedUrl) return
 
+    let active = true
     const timer = setTimeout(async () => {
+      if (!active || pageIsUnloading) return
       const rect = getRect()
       if (!rect) return
       try {
         await invoke('open_preview_webview', { url: resolvedUrl, ...rect })
+        if (!active || pageIsUnloading) return
         nativePreviewUrl = resolvedUrl
         logger.info('preview', `Webview: ${url || 'static'}`)
       } catch (err) {
-        logger.error('preview', 'Failed:', err)
+        if (active && !pageIsUnloading) logger.error('preview', 'Failed:', err)
       }
     }, 200)
 
-    return () => clearTimeout(timer)
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
   }, [resolvedUrl, reloadKey, syncPosition, url])
 
   useEffect(() => {
     return () => {
-      if (nativePreviewUrl) {
-        invoke('resize_preview_webview', { x: -9999, y: -9999, width: 1, height: 1 }).catch(() => {})
-      }
+      cancelAnimationFrame(rafRef.current)
+      parkPreviewWebview()
     }
   }, [])
 
@@ -245,11 +295,6 @@ const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function Ma
 
   useEffect(() => {
     syncPosition()
-    return () => {
-      if (nativePreviewUrl) {
-        invoke('resize_preview_webview', { x: -9999, y: -9999, width: 1, height: 1 }).catch(() => {})
-      }
-    }
   }, [syncPosition])
 
   // useLayoutEffect — fires synchronously after DOM commit but BEFORE the
@@ -266,7 +311,7 @@ const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function Ma
       // Record the parked rect so the next syncPosition doesn't dedupe
       // against a stale on-screen rect and skip restoration.
       lastSentRectRef.current = parked
-      invoke('resize_preview_webview', parked).catch(() => {})
+      firePreviewInvoke('resize_preview_webview', parked)
     } else {
       syncPosition()
     }
@@ -289,8 +334,8 @@ export default TauriWebview
 /** Explicitly close the preview webview (e.g., stop server).
  *  No-op on non-macOS (iframe just unmounts with the React tree). */
 export function closePreviewWebview() {
-  if (IS_MAC && nativePreviewUrl) {
+  if (IS_MAC && nativePreviewUrl && !pageIsUnloading) {
     nativePreviewUrl = ''
-    invoke('close_preview_webview').catch(() => {})
+    firePreviewInvoke('close_preview_webview')
   }
 }

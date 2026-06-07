@@ -11,6 +11,12 @@
  * `@ts-expect-error` on the private `instance` field.
  */
 
+import { TextEncoder } from 'util'
+
+if (!globalThis.TextEncoder) {
+  Object.defineProperty(globalThis, 'TextEncoder', { value: TextEncoder })
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Module-level mocks (before any imports of the module under test)
 // ═══════════════════════════════════════════════════════════════════════
@@ -148,6 +154,7 @@ jest.mock('../../mcp/mcpService', () => ({}))
 
 jest.mock('../../fsVersion', () => ({
   bumpFsVersion: jest.fn().mockResolvedValue(undefined),
+  getFsVersion: jest.fn().mockReturnValue(0),
 }))
 
 jest.mock('../../scaffoldingDetector', () => ({
@@ -534,6 +541,18 @@ describe('C: Plan mode', () => {
     // Simulate PLAN.md being written by calling updateReadStateAfterWrite
     // which sets planFileWritten = true when planMode is on and path is PLAN.md
     exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '# Plan content')
+    mockInvoke.mockResolvedValue(undefined as never)
+
+    const result = await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
+
+    expect(result).not.toContain('Blocked')
+  })
+
+  it('tracks a custom feature plan file in plan mode', async () => {
+    const exec = freshExecutor()
+    exec.enablePlanMode('PLAN-chat-export.md')
+
+    exec.updateReadStateAfterWrite('/projects/test-app/PLAN-chat-export.md', '# Plan content')
     mockInvoke.mockResolvedValue(undefined as never)
 
     const result = await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
@@ -1063,6 +1082,10 @@ describe('I: Tool definitions and metadata', () => {
     expect(names).toContain('read_file')
     expect(names).toContain('write_file')
     expect(names).toContain('execute_command')
+    expect(names).toContain('agent_shell_start')
+    expect(names).toContain('agent_shell_write')
+    expect(names).toContain('agent_shell_read')
+    expect(names).toContain('agent_shell_stop')
     expect(names).toContain('update_tasks')
     expect(names).toContain('ask_user_question')
   })
@@ -1217,5 +1240,143 @@ describe('J: Path validation', () => {
     await expect(
       exec.execute('write_file', { file_path: '/etc/evil.txt', content: 'new' })
     ).rejects.toThrow('outside the project directory')
+  })
+
+  it('list_directory validates path before listing', async () => {
+    const exec = freshExecutor()
+    await expect(
+      exec.execute('list_directory', { file_path: '/etc' })
+    ).rejects.toThrow('outside the project directory')
+  })
+
+  it('search_files validates directory before searching', async () => {
+    const exec = freshExecutor()
+    await expect(
+      exec.execute('search_files', { query: 'todo', directory: '/etc' })
+    ).rejects.toThrow('outside the project directory')
+  })
+
+  it('create_directory validates path before creating', async () => {
+    const exec = freshExecutor()
+    await expect(
+      exec.execute('create_directory', { file_path: '/etc' })
+    ).rejects.toThrow('outside the project directory')
+  })
+
+  it('glob validates directory before listing files', async () => {
+    const exec = freshExecutor()
+    await expect(
+      exec.execute('glob', { pattern: '*.ts', directory: '/etc' })
+    ).rejects.toThrow('outside the project directory')
+  })
+
+  it('allows relative paths by resolving them against project root', async () => {
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue('content' as never)
+
+    const result = await exec.execute('read_file', { file_path: 'PLAN.md' })
+    expect(result).toBe('content')
+
+    const nestedResult = await exec.execute('read_file', { file_path: './src/app.tsx' })
+    expect(nestedResult).toBe('content')
+  })
+
+  it('rejects relative paths that traverse outside project root using dot-dots', async () => {
+    const exec = freshExecutor()
+    await expect(
+      exec.execute('read_file', { file_path: '../../etc/passwd' })
+    ).rejects.toThrow('outside the project directory')
+  })
+
+  it('correctly resolves and normalizes Windows-style relative and backslash paths', async () => {
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue('win-content' as never)
+
+    const result = await exec.execute('read_file', { file_path: 'src\\components\\Button.tsx' })
+    expect(result).toBe('win-content')
+
+    const prefixResult = await exec.execute('read_file', { file_path: '.\\src\\components\\Button.tsx' })
+    expect(prefixResult).toBe('win-content')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+// K: Command and Background Command Sandbox & Timeout Constraints
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('K: Command and Background Command Sandbox & Timeout Constraints', () => {
+  it('runs execute_command through the streaming command path', async () => {
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0, success: true, timedOut: false })
+
+    await exec.execute('execute_command', { command: 'echo "hello"', timeout_secs: 1000 })
+
+    expect(mockInvoke).toHaveBeenCalledWith('run_streaming_command', expect.objectContaining({
+      command: 'echo "hello"',
+      cwd: '/projects/test-app',
+    }))
+  })
+
+  it('returns streamed command output for execute_command', async () => {
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue({ stdout: 'hello', stderr: '', exitCode: 0, success: true, timedOut: false })
+
+    const result = await exec.execute('execute_command', { command: 'echo "hello"' })
+
+    expect(result).toContain('hello')
+    expect(result).toContain('Exit code: 0')
+  })
+
+  it('blocks compound shell commands so agent work stays step-by-step', async () => {
+    const exec = freshExecutor()
+
+    await expect(
+      exec.execute('execute_command', { command: 'apt-get update && apt-get upgrade -y' })
+    ).rejects.toThrow('compound shell operator "&&" detected')
+  })
+
+  it('blocks compound commands hidden inside ssh remote commands', async () => {
+    const exec = freshExecutor()
+
+    await expect(
+      exec.execute('execute_command', { command: 'ssh root@72.62.38.27 "apt-get update && apt-get upgrade -y"' })
+    ).rejects.toThrow('compound shell operator "&&" detected')
+  })
+
+  it('allows a single ssh remote command', async () => {
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue({ stdout: 'ok', stderr: '', exitCode: 0, success: true, timedOut: false })
+
+    const result = await exec.execute('execute_command', { command: 'ssh root@72.62.38.27 "apt-get update"' })
+
+    expect(result).toContain('ok')
+    expect(result).toContain('Exit code: 0')
+  })
+
+  it('rejects custom cwd parameter outside the project root in execute_command', async () => {
+    const exec = freshExecutor()
+
+    await expect(
+      exec.execute('execute_command', { command: 'echo "hello"', cwd: '/etc' })
+    ).rejects.toThrow('Access denied: path "/etc" is outside the project directory')
+  })
+
+  it('allows custom cwd parameter within the project root in execute_command', async () => {
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0, success: true, timedOut: false })
+
+    await exec.execute('execute_command', { command: 'echo "hello"', cwd: '/projects/test-app/src' })
+
+    expect(mockInvoke).toHaveBeenCalledWith('run_streaming_command', expect.objectContaining({
+      cwd: '/projects/test-app/src'
+    }))
+  })
+
+  it('rejects custom cwd parameter outside the project root in execute_command_background', async () => {
+    const exec = freshExecutor()
+
+    await expect(
+      exec.execute('execute_command_background', { command: 'echo "hello"', cwd: '/etc' })
+    ).rejects.toThrow('Access denied: path "/etc" is outside the project directory')
   })
 })

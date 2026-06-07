@@ -21,6 +21,7 @@
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::canonicalize_path;
 
@@ -132,6 +133,19 @@ fn memory_file_path(
     Ok(file)
 }
 
+fn unique_sibling_tmp_path(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("memory");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    path.with_file_name(format!("{filename}.{pid}.{nanos}.tmp"))
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryFileEntry {
@@ -166,7 +180,9 @@ pub async fn read_memory_file(
 }
 
 /// Write a memory file. Creates the scope directory on first write.
-/// Atomic: writes to `<filename>.tmp` then renames.
+/// Atomic: writes to a unique sibling temp file then renames. The unique name
+/// prevents concurrent writes to the same memory file from stealing each
+/// other's temp file and failing the losing commit with ENOENT.
 #[tauri::command]
 pub async fn write_memory_file(
     scope: String,
@@ -186,10 +202,7 @@ pub async fn write_memory_file(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create memory dir: {}", e))?;
     }
-    let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|s| s.to_str()).unwrap_or("md")
-    ));
+    let tmp = unique_sibling_tmp_path(&path);
     std::fs::write(&tmp, content).map_err(|e| format!("Failed to write {}: {}", filename, e))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit {}: {}", filename, e))?;
     Ok(())

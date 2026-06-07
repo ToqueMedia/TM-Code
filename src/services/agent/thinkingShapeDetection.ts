@@ -6,7 +6,7 @@
  *   - Xiaomi MiMo  : `chat_template_kwargs: { enable_thinking: false }`
  *   - Anthropic    : `thinking: { type: 'disabled' }`
  *   - DashScope/Qwen: `enable_thinking: false`
- *   - Google Gemini: `thinking_budget: 0`
+ *   - Google Gemini: `reasoning_effort: 'low'` (via OpenAI-compat /v1beta/openai/)
  *   - OpenAI        : `reasoning_effort: 'minimal'`
  *   - Moonshot Kimi: `thinking: { enabled: false }` (Kimi extension; only on K2.5 / K2.6)
  *
@@ -39,13 +39,15 @@ const SHAPE_RULES: ReadonlyArray<{
   shape: ThinkingShape
 }> = [
   { match: (h) => h === 'openrouter.ai' || h.endsWith('.openrouter.ai'), shape: 'openrouter_reasoning' },
-  // Xiaomi MiMo official platform + the mimo.xiaomi.com subdomain.
-  { match: (h) => h === 'xiaomimimo.com' || h.endsWith('.xiaomimimo.com') || h === 'mimo.xiaomi.com', shape: 'mimo_chat_template_kwargs' },
+  // Gutlawb gateway (proxies Xiaomi MiMo models) + legacy xiaomimimo.com host.
+  { match: (h) => h === 'opengateway.gitlawb.com' || h.endsWith('.gitlawb.com') || h === 'xiaomimimo.com' || h.endsWith('.xiaomimimo.com') || h === 'mimo.xiaomi.com', shape: 'mimo_chat_template_kwargs' },
   { match: (h) => h === 'api.anthropic.com', shape: 'anthropic' },
   // DashScope has regional variants — dashscope.aliyuncs.com (CN) and
   // dashscope-intl.aliyuncs.com.
   { match: (h) => /(^|\.)dashscope(-[a-z0-9]+)?\.aliyuncs\.com$/i.test(h), shape: 'qwen_enable_thinking' },
-  { match: (h) => h === 'generativelanguage.googleapis.com', shape: 'gemini_thinking_budget' },
+  // Google Gemini via OpenAI-compat endpoint (/v1beta/openai/). The endpoint
+  // maps OpenAI-style reasoning_effort to Gemini's internal thinkingConfig.
+  { match: (h) => h === 'generativelanguage.googleapis.com', shape: 'openai_reasoning_effort' },
   { match: (h) => h === 'api.openai.com', shape: 'openai_reasoning_effort' },
   // Moonshot Kimi — `thinking` Kimi-specific extension. The kimi-k2-thinking*
   // SKUs reason unconditionally; only k2.5 / k2.6 honor the toggle.

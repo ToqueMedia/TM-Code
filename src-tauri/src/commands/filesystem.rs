@@ -2,6 +2,7 @@ use glob::glob as glob_match;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 use super::{canonicalize_path, normalize_path_for_frontend};
@@ -620,6 +621,19 @@ fn agent_state_path(project_path: &str, filename: &str) -> Result<PathBuf, Strin
     Ok(file)
 }
 
+fn unique_sibling_tmp_path(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("agent-state");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    path.with_file_name(format!("{filename}.{pid}.{nanos}.tmp"))
+}
+
 /// Read a JSON state blob from `<project>/.toquemedia/<filename>`.
 ///
 /// Returns `Ok(None)` when the file does not exist — distinguishes
@@ -642,9 +656,11 @@ pub async fn read_agent_state(
 /// Write a JSON state blob to `<project>/.toquemedia/<filename>`.
 ///
 /// Creates the `.toquemedia/` directory on first call. Writes are
-/// atomic-ish: write to `<filename>.tmp` then rename, so a crash mid-
+/// atomic-ish: write to a unique sibling temp file then rename, so a crash mid-
 /// write does not leave a half-file the next read would parse as
-/// corrupted JSON.
+/// corrupted JSON. The temp name must be unique because permission/task state
+/// can be persisted concurrently; a fixed `<filename>.tmp` lets one writer
+/// rename another writer's temp and leaves the loser with ENOENT on commit.
 #[tauri::command]
 pub async fn write_agent_state(
     project_path: String,
@@ -652,15 +668,33 @@ pub async fn write_agent_state(
     content: String,
 ) -> Result<(), String> {
     let path = agent_state_path(&project_path, &filename)?;
+
+    // Ensure the .toquemedia directory exists before writing
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create .toquemedia/: {}", e))?;
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create .toquemedia directory: {}", e))?;
+        }
     }
-    let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|s| s.to_str()).unwrap_or("")
-    ));
+
+    let tmp = unique_sibling_tmp_path(&path);
     std::fs::write(&tmp, content).map_err(|e| format!("Failed to write {}: {}", filename, e))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit {}: {}", filename, e))?;
     Ok(())
+}
+
+/// Delete a JSON state blob from `<project>/.toquemedia/<filename>`.
+///
+/// Returns `Ok(())` even when the file does not exist — a delete of a
+/// never-persisted state is a no-op, not an error. Used by the TS layer
+/// to clean up `tasks.json` once all tasks are completed so the next
+/// session starts with a fresh tracker instead of inheriting stale
+/// "all done" state from a prior run.
+#[tauri::command]
+pub async fn delete_agent_state(project_path: String, filename: String) -> Result<(), String> {
+    let path = agent_state_path(&project_path, &filename)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {}: {}", filename, e))
 }

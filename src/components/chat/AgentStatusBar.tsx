@@ -49,6 +49,16 @@ function AgentStatusBar() {
   const queueLength = getCommandQueueSnapshot().length
 
   const handleStop = () => {
+    // Check if there are pending permissions that will be cancelled
+    const pendingCount = usePermissionStore.getState().getQueuedCount()
+    if (pendingCount > 0) {
+      const confirmed = window.confirm(
+        `There are ${pendingCount} pending permission${pendingCount > 1 ? 's' : ''} in the queue. ` +
+        `Stopping will cancel all of them. Continue?`
+      )
+      if (!confirmed) return
+    }
+
     usePermissionStore.getState().clearPending()
     usePermissionStore.getState().resetAutoApprove()
     resolveAllPendingDiffApprovals(false)
@@ -137,15 +147,13 @@ function AgentStatusBar() {
 
   return (
     <Box borderTop="1px solid rgba(255, 255, 255, 0.04)" bg="rgba(255, 255, 255, 0.02)">
-      {/* Agent task list — shows while the agent is actively working OR
-          has tasks that aren't all done yet. Once the agent finishes AND
-          every task is completed, hide the strip so the chrome stops
-          occupying vertical space with stale state (same rule as
-          AgentTasksPanel and TerminalStatusLine — single source of truth
-          for "is there meaningful task progress to surface").
+      {/* Agent task list — shows while there are tasks not yet in a terminal state.
+          Once every task is completed/failed/cancelled, hide the strip so the chrome
+          stops occupying vertical space with stale state (same rule as AgentTasksPanel
+          — single source of truth for "is there meaningful task progress to surface").
           Defensive Array.isArray guard kept against a rogue setTasks(undefined). */}
       {Array.isArray(agentTasks) && agentTasks.length > 0 && (
-        agentTasks.some(t => t.status !== 'completed') || isStreaming
+        agentTasks.some(t => t.status !== 'completed' && t.status !== 'failed' && t.status !== 'cancelled')
       ) && (
         <Box px={3} pt="6px" pb="4px" borderBottom="1px solid rgba(255, 255, 255, 0.04)">
           <Flex align="center" gap="6px" mb="4px">

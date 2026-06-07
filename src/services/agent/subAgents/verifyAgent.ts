@@ -17,7 +17,7 @@ export const VERIFY_AGENT: SubAgentDefinition = {
     'read_large_result',
   ],
   disallowedTools: ['write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'],
-  maxTurns: 30,
+  maxTurns: 15,
   maxWallClockMs: 5 * 60 * 1000,
   color: '#f77f00',
   omitProjectContext: false, // needs project context for test commands

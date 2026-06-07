@@ -52,6 +52,31 @@ function formatRelativeTime(ts: number): string {
   return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
+function addCmdResult(command: string, output: string, exitCode: number): void {
+  useChatStore.getState().addTerminalCommandResult(command, output, exitCode)
+}
+
+function sessionDisplayName(summary: SessionSummary): string {
+  return summary.name || summary.lastMessage || `#${summary.id.slice(0, 6)}`
+}
+
+function formatResumeListOutput(sessions: SessionSummary[]): string {
+  const visible = sessions.slice(0, 20)
+  const lines = [
+    `${sessions.length} sessão${sessions.length === 1 ? '' : 'ões'} encontrada${sessions.length === 1 ? '' : 's'}.`,
+    ...visible.map((session, index) => {
+      const name = sessionDisplayName(session)
+      return `${String(index + 1).padStart(2, ' ')}  ${name}  ${formatRelativeTime(session.updatedAt)}  ${session.id.slice(0, 8)}`
+    }),
+  ]
+
+  if (sessions.length > visible.length) {
+    lines.push(`... ${sessions.length - visible.length} mais`)
+  }
+  lines.push('Use ↑/↓ para escolher no picker, Enter para carregar, Esc para cancelar.')
+  return lines.join('\n')
+}
+
 // ─── Shared: stop agent (DRY) ───
 
 /**
@@ -146,10 +171,18 @@ async function executeSave(args: string, _projectPath: string): Promise<void> {
 // exiting CMD Mode.
 
 async function executeResume(_args: string, projectPath: string): Promise<void> {
-  const summaries = await sessionService.listSessions(projectPath)
+  let summaries: SessionSummary[]
+  try {
+    summaries = await sessionService.listSessions(projectPath)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    logger.error('cmd', 'Failed to list sessions:', err)
+    addCmdResult('/resume', `Erro ao listar sessões: ${msg}`, 1)
+    return
+  }
 
   if (summaries.length === 0) {
-    useChatStore.getState().addSystemMessage('Nenhuma sessão guardada para este projeto.', 'info')
+    addCmdResult('/resume', 'Nenhuma sessão guardada para este projeto.', 0)
     return
   }
 
@@ -159,6 +192,7 @@ async function executeResume(_args: string, projectPath: string): Promise<void> 
   _lastListedSessions = sorted
 
   const activeId = useChatStore.getState().activeSessionId
+  addCmdResult('/resume', formatResumeListOutput(sorted), 0)
   useCmdOverlayStore.getState().openSessionPicker(sorted, activeId)
 }
 
@@ -182,21 +216,21 @@ export async function loadSessionById(sessionId: string, projectPath: string): P
     const session = state.sessions.get(sessionId)
     const name = session?.name || `#${sessionId.slice(0, 6)}`
     useCheckpointStore.getState().clear()
-    state.addSystemMessage(`Sessão ${name} carregada.`, 'success', { ephemeral: true })
+    addCmdResult(`/resume ${sessionId.slice(0, 8)}`, `Sessão ${name} carregada.`, 0)
     return
   }
   try {
     await state.switchSession(projectPath, sessionId)
     const loadedSession = state.getActiveSession()
     const name = loadedSession?.name || `#${sessionId.slice(0, 6)}`
-    state.addSystemMessage(`Sessão ${name} carregada.`, 'success', { ephemeral: true })
+    addCmdResult(`/resume ${sessionId.slice(0, 8)}`, `Sessão ${name} carregada.`, 0)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     logger.error('cmd', `Failed to resume session ${sessionId}:`, err)
     if (msg.includes('not found') || msg.includes('ENOENT')) {
-      state.addSystemMessage(`Sessão não encontrada. Use /resume para ver a lista.`, 'error')
+      addCmdResult(`/resume ${sessionId.slice(0, 8)}`, 'Sessão não encontrada. Use /resume para ver a lista.', 1)
     } else {
-      state.addSystemMessage(`Erro ao carregar sessão: ${msg}`, 'error')
+      addCmdResult(`/resume ${sessionId.slice(0, 8)}`, `Erro ao carregar sessão: ${msg}`, 1)
     }
   }
 }
@@ -215,10 +249,7 @@ async function executeResumeTarget(target: string, projectPath: string): Promise
     }
     const entry = _lastListedSessions[n - 1]
     if (!entry) {
-      useChatStore.getState().addSystemMessage(
-        `Sessão #${n} não existe. Use /resume para ver a lista.`,
-        'error'
-      )
+      addCmdResult(`/resume ${target}`, `Sessão #${n} não existe. Use /resume para ver a lista.`, 1)
       return
     }
     resolvedId = entry.id
@@ -235,7 +266,7 @@ async function executeResumeTarget(target: string, projectPath: string): Promise
     const session = state.sessions.get(resolvedId)
     const name = session?.name || `#${n || resolvedId.slice(0, 6)}`
     useCheckpointStore.getState().clear()
-    state.addSystemMessage(`Sessão ${name} carregada.`, 'success', { ephemeral: true })
+    addCmdResult(`/resume ${target}`, `Sessão ${name} carregada.`, 0)
     return
   }
 
@@ -244,14 +275,14 @@ async function executeResumeTarget(target: string, projectPath: string): Promise
     await state.switchSession(projectPath, resolvedId)
     const loadedSession = state.getActiveSession()
     const name = loadedSession?.name || `#${n || resolvedId.slice(0, 6)}`
-    state.addSystemMessage(`Sessão ${name} carregada.`, 'success', { ephemeral: true })
+    addCmdResult(`/resume ${target}`, `Sessão ${name} carregada.`, 0)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     logger.error('cmd', `Failed to resume session ${resolvedId}:`, err)
     if (msg.includes('not found') || msg.includes('ENOENT')) {
-      state.addSystemMessage(`Sessão não encontrada. Use /resume para ver a lista.`, 'error')
+      addCmdResult(`/resume ${target}`, 'Sessão não encontrada. Use /resume para ver a lista.', 1)
     } else {
-      state.addSystemMessage(`Erro ao carregar sessão: ${msg}`, 'error')
+      addCmdResult(`/resume ${target}`, `Erro ao carregar sessão: ${msg}`, 1)
     }
   }
 }
@@ -519,6 +550,12 @@ async function executeTerminal(_args: string, _projectPath: string): Promise<voi
   useTerminalPanelStore.getState().toggle()
 }
 
+// ─── /settings — Open SettingsView in full-screen overlay ───
+
+async function executeSettings(_args: string, _projectPath: string): Promise<void> {
+  useProjectStore.getState().setWelcomeScreen('settings')
+}
+
 // ─── /exit — Save → Stop → Close terminal panel → Return to WelcomeScreen ───
 
 async function executeExit(_args: string, _projectPath: string): Promise<void> {
@@ -548,26 +585,26 @@ async function executeExit(_args: string, _projectPath: string): Promise<void> {
 export const CMD_MODE_COMMANDS: SlashCommand[] = [
   {
     name: '/new',
-    description: 'Nova sessão — guarda a atual e limpa contexto',
+    description: t('terminalMode.cmd.new'),
     enabled: true,
     execute: executeNew,
   },
   {
     name: '/clear',
-    description: 'Limpar contexto — mantém sessão, reseta tokens',
+    description: t('terminalMode.cmd.clear'),
     enabled: true,
     execute: executeClear,
   },
   {
     name: '/save',
-    description: 'Dar nome à sessão: /save <nome>',
+    description: t('terminalMode.cmd.save'),
     enabled: true,
     execute: executeSave,
     argHint: '[nome da sessão]',
   },
   {
     name: '/resume',
-    description: 'Listar sessões — /resume <n> para carregar',
+    description: t('terminalMode.cmd.resume'),
     enabled: true,
     argHint: '[número ou ID da sessão]',
     execute: async (args: string, projectPath: string) => {
@@ -581,44 +618,50 @@ export const CMD_MODE_COMMANDS: SlashCommand[] = [
   },
   {
     name: '/mcp-install',
-    description: 'Instalar integração MCP do registo (ex: /mcp-install gamma)',
+    description: t('terminalMode.cmd.mcpInstall'),
     enabled: true,
     execute: executeMcpInstall,
     argHint: '[nome da integração MCP]',
   },
   {
     name: '/mcp-browse',
-    description: 'Listar integrações MCP disponíveis',
+    description: t('terminalMode.cmd.mcpBrowse'),
     enabled: true,
     execute: executeMcpBrowse,
   },
   {
     name: '/history-clear',
-    description: 'Limpar histórico de prompts (ArrowUp) deste projeto',
+    description: t('terminalMode.cmd.historyClear'),
     enabled: true,
     execute: executeHistoryClear,
   },
   {
     name: '/start-server',
-    description: 'Arrancar dev server do projecto (npm/yarn/pnpm/bun run dev)',
+    description: t('terminalMode.cmd.startServer'),
     enabled: true,
     execute: executeStartServer,
   },
   {
     name: '/stop-server',
-    description: 'Parar dev server activo',
+    description: t('terminalMode.cmd.stopServer'),
     enabled: true,
     execute: executeStopServer,
   },
   {
     name: '/terminal',
-    description: 'Abrir/fechar painel de terminal real (PTY)',
+    description: t('terminalMode.cmd.terminal'),
     enabled: true,
     execute: executeTerminal,
   },
   {
+    name: '/settings',
+    description: t('terminalMode.cmd.settings'),
+    enabled: true,
+    execute: executeSettings,
+  },
+  {
     name: '/exit',
-    description: 'Guardar e fechar',
+    description: t('terminalMode.cmd.exit'),
     enabled: true,
     execute: executeExit,
   },

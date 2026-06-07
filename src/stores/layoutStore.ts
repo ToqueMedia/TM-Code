@@ -77,6 +77,8 @@ interface LayoutState {
   previewServerTimedOut: boolean
   /** True when the Plan Viewer side panel is open */
   isPlanViewerOpen: boolean
+  /** Concrete plan file path currently shown by the Plan Viewer. */
+  planViewerPath: string | null
   /**
    * Reference count of open overlays that must cover the native preview webview.
    * On Windows/Linux the wry child webview is an OS child window that sits ABOVE
@@ -136,7 +138,7 @@ interface LayoutActions {
   /** Set the section SettingsView should open on. Pair with setViewMode('settings'). */
   setSettingsInitialSection: (section: string | null) => void
   togglePlanViewer: () => void
-  setPlanViewerOpen: (open: boolean) => void
+  setPlanViewerOpen: (open: boolean, planPath?: string | null) => void
   /** Drop the pending section so a subsequent Settings open defaults to Profile. */
   clearSettingsInitialSection: () => void
 }
@@ -163,6 +165,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   previewReloadKey: 0,
   previewServerTimedOut: false,
   isPlanViewerOpen: false,
+  planViewerPath: null,
   devServerLogs: [],
   isConsoleVisible: false,
   overlayCount: 0,
@@ -357,11 +360,17 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   },
 
   togglePlanViewer: () => {
-    set(state => ({ isPlanViewerOpen: !state.isPlanViewerOpen }))
+    set(state => ({
+      isPlanViewerOpen: !state.isPlanViewerOpen,
+      planViewerPath: state.isPlanViewerOpen ? null : state.planViewerPath,
+    }))
   },
 
-  setPlanViewerOpen: (open: boolean) => {
-    set({ isPlanViewerOpen: open })
+  setPlanViewerOpen: (open: boolean, planPath?: string | null) => {
+    set(state => ({
+      isPlanViewerOpen: open,
+      planViewerPath: open ? (planPath ?? state.planViewerPath) : null,
+    }))
   },
 
   goBack: () => {

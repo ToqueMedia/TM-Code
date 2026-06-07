@@ -13,6 +13,12 @@ import { TerminalPlanApprovalCard } from './TerminalPlanApprovalCard'
 import SubAgentCard from '../chat/SubAgentCard'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import { useChatStore } from '../../stores/chatStore'
+import { groupConsecutiveAgentShellCalls, isAgentShellTool, ShellCommandBlock, ShellSessionBlock } from '../shell/ShellCommandBlock'
+
+const USER_PROMPT_COLOR = tokens.colors.accent.purple
+const USER_TEXT_COLOR = '#f2ecff'
+const ASSISTANT_MARKER_COLOR = tokens.colors.terminal.cyan
+const ASSISTANT_TEXT_COLOR = '#b9c7d9'
 
 // ─── Special card renderer (plan_approval, credential_request, ask_user_question) ───
 
@@ -150,7 +156,7 @@ function ContentBlocksRenderer({
               key={`text-${i}`}
               mb={1}
               fontSize="14px"
-              color={tokens.colors.terminal.foreground}
+              color={ASSISTANT_TEXT_COLOR}
               lineHeight="1.55"
               css={{ '& > span:last-child': { marginBottom: 0 } }}
               maxW="100%"
@@ -163,6 +169,23 @@ function ContentBlocksRenderer({
         }
         if (block.type === 'tool_call') {
           const tc = toolCallMap.get(block.toolCallId)
+          if (tc && isAgentShellTool(tc.toolName)) {
+            const previous = optimizedBlocks[i - 1]
+            const previousCall = previous?.type === 'tool_call' ? toolCallMap.get(previous.toolCallId) : null
+            if (previousCall && isAgentShellTool(previousCall.toolName)) return null
+
+            const calls = [tc]
+            let nextIdx = i + 1
+            while (optimizedBlocks[nextIdx]?.type === 'tool_call') {
+              const nextBlock = optimizedBlocks[nextIdx]
+              if (nextBlock.type !== 'tool_call') break
+              const nextCall = toolCallMap.get(nextBlock.toolCallId)
+              if (!nextCall || !isAgentShellTool(nextCall.toolName)) break
+              calls.push(nextCall)
+              nextIdx++
+            }
+            return <ShellSessionBlock key={block.toolCallId} toolCalls={calls} mode="terminal" />
+          }
           return tc ? <TerminalToolCall key={block.toolCallId} toolCall={tc} /> : null
         }
         return null
@@ -257,12 +280,20 @@ function TerminalMessageRendererInner({
     const hasAttachments = message.attachments && message.attachments.length > 0
 
     return (
-      <Box mb={4}>
+      <Box
+        mb={4}
+        py={1.5}
+        pl={2}
+        pr={2}
+        borderLeft={`2px solid ${USER_PROMPT_COLOR}`}
+        bg="rgba(163, 113, 247, 0.035)"
+        borderRadius="0 4px 4px 0"
+      >
         <Flex gap={1.5} align="flex-start">
           <Text
             fontFamily={tokens.fontFamily.mono}
             fontSize="14px"
-            color={tokens.colors.accent.purple}
+            color={USER_PROMPT_COLOR}
             fontWeight="700"
             lineHeight="1.55"
             flexShrink={0}
@@ -273,10 +304,10 @@ function TerminalMessageRendererInner({
           <Box flex="1" minW={0}>
             <Text
               fontSize="14px"
-              color="#ffffff"
+              color={USER_TEXT_COLOR}
               whiteSpace="pre-wrap"
               lineHeight="1.55"
-              fontWeight="500"
+              fontWeight="600"
               wordBreak="break-word"
               overflowWrap="anywhere"
             >
@@ -293,6 +324,23 @@ function TerminalMessageRendererInner({
 
   // ── System message ──
   if (message.role === 'system') {
+    if (message.terminalCommand) {
+      return (
+        <ShellCommandBlock
+          mode="terminal"
+          toolCall={{
+            id: message.id,
+            toolName: 'execute_command',
+            input: { command: message.terminalCommand.command },
+            result: `${message.terminalCommand.output}${message.terminalCommand.output ? '\n' : ''}Exit code: ${message.terminalCommand.exitCode}`,
+            isError: message.terminalCommand.exitCode !== 0,
+            status: message.terminalCommand.exitCode === 0 ? 'completed' : 'failed',
+            timestamp: message.timestamp,
+          }}
+        />
+      )
+    }
+
     // Cards (ask_user_question, plan_approval, credential_request) are system
     // messages with card data — render them via TerminalSpecialCards instead of
     // plain text.
@@ -350,7 +398,31 @@ function TerminalMessageRendererInner({
       overflowX="hidden"
       wordBreak="break-word"
       style={{ overflowWrap: 'anywhere' }}
+      borderLeft={`2px solid rgba(17, 168, 205, 0.28)`}
+      pl={2.5}
     >
+      <Flex align="center" gap={1.5} mb={message.content || hasContentBlocks || message.toolCalls?.length ? 1 : 0}>
+        <Text
+          fontFamily={tokens.fontFamily.mono}
+          fontSize="12px"
+          color={ASSISTANT_MARKER_COLOR}
+          lineHeight="1.4"
+          userSelect="none"
+        >
+          ◆
+        </Text>
+        <Text
+          fontFamily={tokens.fontFamily.mono}
+          fontSize="10px"
+          color={tokens.colors.text.disabled}
+          lineHeight="1.4"
+          textTransform="uppercase"
+          letterSpacing="0"
+          userSelect="none"
+        >
+          TM Code
+        </Text>
+      </Flex>
       {/* Waiting dots — only when streaming with no visible content yet */}
       {isStreaming && !message.content && (!message.toolCalls || message.toolCalls.length === 0) && (
         <Flex gap="5px" align="center" py={1.5}>
@@ -404,13 +476,17 @@ function TerminalMessageRendererInner({
         <ContentBlocksRenderer blocks={message.contentBlocks!} toolCalls={message.toolCalls} isStreaming={isStreaming} />
       ) : (
         <>
-          {message.toolCalls?.map(tc => <TerminalToolCall key={tc.id} toolCall={tc} />)}
+          {message.toolCalls && groupConsecutiveAgentShellCalls(message.toolCalls).map(group => (
+            group.kind === 'agent_shell_session'
+              ? <ShellSessionBlock key={group.calls[0].id} toolCalls={group.calls} mode="terminal" />
+              : <TerminalToolCall key={group.call.id} toolCall={group.call} />
+          ))}
           {/* Hide text content while reasoning is in-flight */}
           {!(isStreaming && message.reasoningContent && !message.reasoningDurationMs) && message.content && (
             <Box
               mb={1}
               fontSize="14px"
-              color={tokens.colors.terminal.foreground}
+              color={ASSISTANT_TEXT_COLOR}
               lineHeight="1.55"
               css={{ '& > span:last-child': { marginBottom: 0 } }}
               maxW="100%"

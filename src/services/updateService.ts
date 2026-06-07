@@ -25,6 +25,9 @@ const PERIODIC_CHECK_INTERVAL_MS = 60 * 60 * 1000 // 1h
 const MIN_CHECK_GAP_MS = 15 * 60 * 1000 // 15min
 
 let lastCheckAtMs = 0
+let startupTimer: ReturnType<typeof setTimeout> | null = null
+let periodicTimer: ReturnType<typeof setInterval> | null = null
+let focusHandler: (() => void) | null = null
 
 export { type UpdateInfo }
 
@@ -102,6 +105,22 @@ export function setPendingUpdate(update: UpdateInfo | null): void {
  * open. Shows banner if update available. All triggers funnel through one
  * `performCheck` so the 15min throttle applies uniformly.
  */
+export function stopAutoUpdateChecks(): void {
+  if (startupTimer) {
+    clearTimeout(startupTimer)
+    startupTimer = null
+  }
+  if (periodicTimer) {
+    clearInterval(periodicTimer)
+    periodicTimer = null
+  }
+  if (focusHandler) {
+    window.removeEventListener('focus', focusHandler)
+    focusHandler = null
+  }
+  checkedThisSession = false
+}
+
 export async function autoCheckForUpdate(): Promise<void> {
   if (checkedThisSession) return
   checkedThisSession = true
@@ -153,12 +172,16 @@ export async function autoCheckForUpdate(): Promise<void> {
   }
 
   // Initial check after startup delay
-  setTimeout(() => performCheck('startup'), 5000)
+  startupTimer = setTimeout(() => {
+    startupTimer = null
+    performCheck('startup')
+  }, 5000)
 
   // Periodic check every 1h
-  setInterval(() => performCheck('interval'), PERIODIC_CHECK_INTERVAL_MS)
+  periodicTimer = setInterval(() => performCheck('interval'), PERIODIC_CHECK_INTERVAL_MS)
 
   // Re-check when the user returns to the app (alt-tab back, system wake).
   // Throttled to 15min minimum gap to avoid spam.
-  window.addEventListener('focus', () => performCheck('focus'))
+  focusHandler = () => performCheck('focus')
+  window.addEventListener('focus', focusHandler)
 }

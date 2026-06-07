@@ -8,6 +8,7 @@ import AgentService from '../agentService'
 import ToolExecutor from '../toolExecutor'
 import { preprocessHashtags } from '../hashtagRegistry'
 import { detectAiAgentIntent, buildAiAgentPlatformLine } from '../aiAgentIntent'
+import type { Attachment, PlanResumePending, PromptBlock } from '../../../types/chat'
 import {
   READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES,
   READ_SKILL, WRITE_FILE, EDIT_FILE, CREATE_FILE,
@@ -41,6 +42,52 @@ type PlanReadiness = {
   ready: boolean
   reason?: 'missing' | 'draft' | 'unknown'
   content?: string
+}
+
+type PlanArtifact = {
+  fileName: string
+  path: string
+}
+
+function joinProjectFile(projectPath: string, fileName: string): string {
+  return `${projectPath.replace(/[\\/]$/, '')}/${fileName}`
+}
+
+function slugifyPlanName(input: string): string {
+  const slug = input
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+    .replace(/-+$/g, '')
+  return slug || 'feature'
+}
+
+async function resolvePlanArtifact(projectPath: string, args: string): Promise<PlanArtifact> {
+  const defaultPath = joinProjectFile(projectPath, 'PLAN.md')
+  if (!(await fileExists(defaultPath))) {
+    return { fileName: 'PLAN.md', path: defaultPath }
+  }
+
+  const baseName = `PLAN-${slugifyPlanName(args)}`
+  for (let suffix = 0; suffix < 100; suffix += 1) {
+    const fileName = suffix === 0 ? `${baseName}.md` : `${baseName}-${suffix + 1}.md`
+    const path = joinProjectFile(projectPath, fileName)
+    if (!(await fileExists(path))) {
+      return { fileName, path }
+    }
+  }
+
+  const fallbackName = `PLAN-${Date.now()}.md`
+  return { fileName: fallbackName, path: joinProjectFile(projectPath, fallbackName) }
+}
+
+function planArtifactFromPath(projectPath: string, planPath?: string): PlanArtifact {
+  const path = planPath || joinProjectFile(projectPath, 'PLAN.md')
+  const fileName = path.replace(/\\/g, '/').split('/').pop() || 'PLAN.md'
+  return { fileName, path }
 }
 
 async function readPlanReadiness(path: string): Promise<PlanReadiness> {
@@ -78,6 +125,18 @@ export async function executePlan(
   const permStore = usePermissionStore.getState()
   const prevAutoApprove = permStore.autoApproveDiffs
   permStore.setAutoApproveDiffs(true)
+  const planArtifact = await resolvePlanArtifact(projectPath, args)
+  if (!chatStore.activeSessionId) {
+    chatStore.createSession(projectPath)
+  }
+  chatStore.setPlanResumePending({
+    projectPath,
+    originalArgs: args,
+    planPath: planArtifact.path,
+    planFileName: planArtifact.fileName,
+    mode,
+    updatedAt: Date.now(),
+  })
 
   // Run the architect agent with reasoning model (Qwen 3.6 Max-Preview via DashScope)
   const agentService = AgentService.getInstance()
@@ -88,7 +147,7 @@ export async function executePlan(
   // Pairs with the buildArchitectSystemPrompt — prompt is the soft contract,
   // this is the hard one.
   const toolExecutor = ToolExecutor.getInstance()
-  toolExecutor.enablePlanMode()
+  toolExecutor.enablePlanMode(planArtifact.fileName)
   try {
     // The architect role goes into a DEDICATED system prompt that REPLACES
     // the default IDE prompt — without the override, the IDE's "coding
@@ -106,7 +165,7 @@ export async function executePlan(
     // the plan reflects the platform's canonical integrations.
     const hashtagSignals = preprocessHashtags(args)
     const aiAgentSignal = detectAiAgentIntent(args)
-    await runAgentWithCallbacks(buildArchitectUserMessage(args, projectPath, hashtagSignals, aiAgentSignal), {
+    await runAgentWithCallbacks(buildArchitectUserMessage(args, projectPath, hashtagSignals, aiAgentSignal, planArtifact), {
       addUserMessage: true,
       userMessageText: `/plan ${args}`,
       // Mode-aware: chat injects platform-publish constraints into the
@@ -114,7 +173,7 @@ export async function executePlan(
       // terminal swaps in a free-stack note (any host / DB / framework).
       // Same PLAN.md template + completion rules in both branches — only
       // the stack-choice constraints change.
-      systemPromptOverride: buildArchitectSystemPrompt(mode),
+      systemPromptOverride: buildArchitectSystemPrompt(mode, planArtifact.fileName),
       // CMD mode requires the tool executor to be aware of the cwd; without
       // cmdOnlyMode it falls back to useProjectStore.currentProject (empty
       // in CMD) and every file tool fails with "No project is open."
@@ -133,7 +192,7 @@ export async function executePlan(
   // write failures don't always flip agent status to 'error', so the Status
   // marker is the authoritative signal.
   if (useAgentStore.getState().status === 'error') return
-  const readiness = await readPlanReadiness(`${projectPath}/PLAN.md`)
+  const readiness = await readPlanReadiness(planArtifact.path)
   if (!readiness.ready) {
     const reason = readiness.reason
     const message =
@@ -145,11 +204,88 @@ export async function executePlan(
     chatStore.addSystemMessage(message)
     return
   }
-  chatStore.addCardMessage('plan_approval', projectPath)
+  chatStore.setPlanResumePending(null)
+  chatStore.addCardMessage('plan_approval', projectPath, {
+    planPath: planArtifact.path,
+    planFileName: planArtifact.fileName,
+  })
 }
 
-export async function handlePlanApprove(projectPath: string): Promise<void> {
+export async function executePlanResume(
+  message: string,
+  pending: PlanResumePending,
+  attachments?: Attachment[],
+  promptBlocks?: PromptBlock[],
+): Promise<void> {
   const chatStore = useChatStore.getState()
+  const mode = pending.mode || 'chat'
+  const planArtifact: PlanArtifact = {
+    fileName: pending.planFileName,
+    path: pending.planPath,
+  }
+
+  if (!chatStore.activeSessionId) {
+    chatStore.createSession(pending.projectPath)
+  }
+  chatStore.setPlanResumePending({
+    ...pending,
+    updatedAt: Date.now(),
+  })
+
+  const initialReadiness = await readPlanReadiness(planArtifact.path)
+  if (initialReadiness.ready) {
+    chatStore.setPlanResumePending(null)
+    return
+  }
+  const currentPlan = initialReadiness.content ?? null
+
+  const permStore = usePermissionStore.getState()
+  const prevAutoApprove = permStore.autoApproveDiffs
+  permStore.setAutoApproveDiffs(true)
+  const agentService = AgentService.getInstance()
+  agentService.setRequestType('plan')
+  const toolExecutor = ToolExecutor.getInstance()
+  toolExecutor.enablePlanMode(planArtifact.fileName)
+
+  try {
+    const resumePrompt = buildArchitectResumeMessage(message, pending, currentPlan, attachments?.length ?? 0)
+    const modelBlocks: PromptBlock[] | undefined = promptBlocks
+      ? [{ type: 'text', text: resumePrompt }, ...promptBlocks.filter(block => block.type === 'attachment')]
+      : undefined
+    await runAgentWithCallbacks(
+      resumePrompt,
+      {
+        addUserMessage: true,
+        userMessageText: message || 'Plan follow-up',
+        userMessageAttachments: attachments,
+        userMessageBlocks: promptBlocks,
+        modelMessageBlocks: modelBlocks,
+        systemPromptOverride: buildArchitectSystemPrompt(mode, planArtifact.fileName),
+        cmdOnlyMode: mode === 'terminal',
+      },
+    )
+  } finally {
+    agentService.setRequestType(null)
+    toolExecutor.disablePlanMode()
+    permStore.setAutoApproveDiffs(prevAutoApprove)
+  }
+
+  if (useAgentStore.getState().status === 'error') return
+  const readiness = await readPlanReadiness(planArtifact.path)
+  if (!readiness.ready) {
+    return
+  }
+  chatStore.setPlanResumePending(null)
+  chatStore.addCardMessage('plan_approval', pending.projectPath, {
+    planPath: planArtifact.path,
+    planFileName: planArtifact.fileName,
+  })
+}
+
+export async function handlePlanApprove(projectPath: string, planPath?: string): Promise<void> {
+  const chatStore = useChatStore.getState()
+  const planArtifact = planArtifactFromPath(projectPath, planPath)
+  chatStore.setPlanResumePending(null)
 
   // Ephemeral status — the approval action speaks for itself (the card moves
   // to "approved"); this is just a transitional "working on next phase" hint.
@@ -173,7 +309,7 @@ export async function handlePlanApprove(projectPath: string): Promise<void> {
   // forced reasoning, and the user's own thinking preference takes over for
   // every turn that follows.
   try {
-    await runAgentWithCallbacks(buildTodoPrompt(projectPath), {
+    await runAgentWithCallbacks(buildTodoPrompt(projectPath, planArtifact.path, planArtifact.fileName), {
       addUserMessage: true,
       userMessageText: 'Generate task list from approved plan',
     })
@@ -192,15 +328,16 @@ export async function handlePlanApprove(projectPath: string): Promise<void> {
   chatStore.addCardMessage('todo_list', projectPath)
 }
 
-export function handlePlanRequestChanges(projectPath: string): void {
+export function handlePlanRequestChanges(projectPath: string, planPath?: string): void {
   const chatStore = useChatStore.getState()
+  chatStore.setPlanResumePending(null)
   // Flip the revision flag. The NEXT user message routes to
   // `executePlanRevision` (via usePromptBar) instead of the normal chat
   // path. Without this, the revision feedback gets treated as a normal
   // coding prompt — the default IDE system prompt loads, the agent starts
   // IMPLEMENTING the original PLAN.md, and the user's feedback gets
   // bolted onto the implementation. The flag is the routing signal.
-  chatStore.setPlanRevisionPending(projectPath)
+  chatStore.setPlanRevisionPending({ projectPath, planPath })
   chatStore.addSystemMessage(
     t('plan.requestChanges')
   )
@@ -220,15 +357,17 @@ export async function executePlanRevision(
   feedback: string,
   projectPath: string,
   mode: 'chat' | 'terminal' = 'chat',
+  planPath?: string,
 ): Promise<void> {
   const chatStore = useChatStore.getState()
+  const planArtifact = planArtifactFromPath(projectPath, planPath)
 
   // Read the current plan so the architect sees what to modify. If it's
   // gone (deleted, corrupted), fall back to re-running /plan from scratch
   // with the feedback as the new idea.
   let currentPlan: string | null = null
   try {
-    currentPlan = await FileService.readFile(`${projectPath}/PLAN.md`)
+    currentPlan = await FileService.readFile(planArtifact.path)
   } catch {
     chatStore.addSystemMessage(
       t('plan.missing'),
@@ -246,14 +385,14 @@ export async function executePlanRevision(
   const agentService = AgentService.getInstance()
   agentService.setRequestType('plan')
   const toolExecutor = ToolExecutor.getInstance()
-  toolExecutor.enablePlanMode()
+  toolExecutor.enablePlanMode(planArtifact.fileName)
 
   try {
-    const revisionPrompt = buildArchitectRevisionMessage(feedback, projectPath, currentPlan)
+    const revisionPrompt = buildArchitectRevisionMessage(feedback, projectPath, currentPlan, planArtifact)
     await runAgentWithCallbacks(revisionPrompt, {
       addUserMessage: true,
       userMessageText: feedback,
-      systemPromptOverride: buildArchitectSystemPrompt(mode),
+      systemPromptOverride: buildArchitectSystemPrompt(mode, planArtifact.fileName),
       cmdOnlyMode: mode === 'terminal',
     })
   } finally {
@@ -266,7 +405,7 @@ export async function executePlanRevision(
   // back to PENDING APPROVAL after the edits, surface that — the model
   // may have hit the stream cut mid-revision.
   if (useAgentStore.getState().status === 'error') return
-  const readiness = await readPlanReadiness(`${projectPath}/PLAN.md`)
+  const readiness = await readPlanReadiness(planArtifact.path)
   if (!readiness.ready) {
     chatStore.addSystemMessage(
       readiness.reason === 'draft'
@@ -275,13 +414,17 @@ export async function executePlanRevision(
     )
     return
   }
-  chatStore.addCardMessage('plan_approval', projectPath)
+  chatStore.addCardMessage('plan_approval', projectPath, {
+    planPath: planArtifact.path,
+    planFileName: planArtifact.fileName,
+  })
 }
 
 function buildArchitectRevisionMessage(
   feedback: string,
   projectPath: string,
   currentPlan: string,
+  planArtifact: PlanArtifact = planArtifactFromPath(projectPath),
 ): string {
   return `The developer reviewed the plan you wrote and is requesting changes.
 
@@ -289,35 +432,74 @@ Their feedback:
 "${feedback}"
 
 Project root: ${projectPath}
+Plan file: ${planArtifact.path}
 
-The current PLAN.md (your previous version) is below. Your job this turn is to:
+The current ${planArtifact.fileName} (your previous version) is below. Your job this turn is to:
 
-1. Read the feedback and identify what specific sections of PLAN.md need to change.
-2. Edit PLAN.md to incorporate the feedback. Use \`${EDIT_FILE}\` for surgical changes (single section, a few tasks, one decision row). Use \`${WRITE_FILE}\` only if the feedback requires restructuring the document end-to-end.
+1. Read the feedback and identify what specific sections of ${planArtifact.fileName} need to change.
+2. Edit ${planArtifact.fileName} at ${planArtifact.path} to incorporate the feedback. Use \`${EDIT_FILE}\` for surgical changes (single section, a few tasks, one decision row). Use \`${WRITE_FILE}\` only if the feedback requires restructuring the document end-to-end.
 3. If the implementation phases shift, update the task tracker via \`${UPDATE_TASKS}\` to mirror the new structure (same task-id convention: "1.1", "1.2", etc.).
 4. Flip frontmatter \`Status:\` back to \`PENDING APPROVAL\` (or leave as-is if it's already there) — the IDE waits for this marker before re-rendering the approval card.
 5. Post a 3-sentence chat summary of what you changed, then STOP. The developer will re-approve / re-request changes / reject from the new card.
 
-**DO NOT implement the plan.** This is a revision turn, not an execution turn. Edits to PLAN.md only — no source files, no \`provision_auth\`, no \`start_dev_server\`, no \`execute_command\`. The tool executor enforces this mechanically; ignoring this rule produces tool blocks.
+**DO NOT implement the plan.** This is a revision turn, not an execution turn. Edits to ${planArtifact.fileName} only — no source files, no \`provision_auth\`, no \`start_dev_server\`, no \`execute_command\`. The tool executor enforces this mechanically; ignoring this rule produces tool blocks.
 
-**DO NOT re-write PLAN.md from scratch unless the feedback explicitly asks for restructuring.** Targeted Edits preserve the parts the developer was happy with and keep the diff reviewable.
+**DO NOT re-write ${planArtifact.fileName} from scratch unless the feedback explicitly asks for restructuring.** Targeted Edits preserve the parts the developer was happy with and keep the diff reviewable.
 
 ---
 
-Current PLAN.md content:
+Current ${planArtifact.fileName} content:
 
 \`\`\`markdown
 ${currentPlan}
 \`\`\``
 }
 
+function buildArchitectResumeMessage(
+  message: string,
+  pending: PlanResumePending,
+  currentPlan: string | null,
+  attachmentCount: number,
+): string {
+  const planBlock = currentPlan
+    ? `The current interrupted ${pending.planFileName} content is below. Pick up from this state; do not discard completed sections unless the developer explicitly requested a change.\n\n\`\`\`markdown\n${currentPlan}\n\`\`\``
+    : `${pending.planFileName} is not readable yet. Restart the scaffold-then-edit /plan flow for the original request and write it to ${pending.planPath}.`
+  const attachmentLine = attachmentCount > 0
+    ? `\n\nThe developer also attached ${attachmentCount} item(s). Inspect them as part of interpreting the latest message.`
+    : ''
+
+  return `Resume an interrupted /plan architect run.
+
+Original developer request:
+"${pending.originalArgs}"
+
+Developer's latest message:
+"${message || '(no text; see attached context)'}"${attachmentLine}
+
+Project root: ${pending.projectPath}
+Plan file: ${pending.planPath}
+Active plan artefact: ${pending.planFileName}
+
+Interpret the developer's latest message using the conversation history and the plan state:
+- If they are asking the architect to proceed with planning, finish ${pending.planFileName}: fill missing / placeholder / incomplete sections, flip \`Status:\` to \`PENDING APPROVAL\` only after the full plan is complete, seed the task tracker with \`${UPDATE_TASKS}\`, post a brief summary, and stop.
+- If they supplied new constraints or corrections, update ${pending.planFileName} accordingly under the same architect-only rules.
+- If they are asking a question about the interrupted plan, answer the question briefly and stop without mutating project source files.
+- If they are asking to pause or not advance, acknowledge the current plan status and stop without mutating project source files.
+
+DO NOT implement the plan. Do not create source files, run commands, provision auth, or start dev servers. This is still /plan architect mode; implementation starts only after the approval card.
+
+${planBlock}`
+}
+
 export function handlePlanReject(): void {
   const chatStore = useChatStore.getState()
+  chatStore.setPlanResumePending(null)
   chatStore.addSystemMessage(t('plan.rejected'))
 }
 
 export async function handleStartExecution(projectPath: string): Promise<void> {
   const chatStore = useChatStore.getState()
+  chatStore.setPlanResumePending(null)
 
   chatStore.addSystemMessage(t('plan.executing'))
 
@@ -382,11 +564,11 @@ The GIP tenant has redirect URIs locked to \`http://localhost:5173\`. If Vite fa
 
 After start_dev_server, verify the dev server logs show \`:5173\`. If for any reason Vite still falls back to 5174 after the IDE's auto-recovery, ask the developer to check what else is holding the port.
 
-End the turn with a single hand-off line — "Phase 1 complete. <one-sentence working state>. Tell me to continue to start Phase 2." — and stop. The turn ends here even if Phase 1 finished early; the developer needs the gap to validate the working state before the next phase begins.
+End the turn with a single hand-off line — "Phase 1 complete. <one-sentence working state>. Tell me when to start Phase 2." — and stop. The turn ends here even if Phase 1 finished early; the developer needs the gap to validate the working state before the next phase begins.
 
 ## When the developer replies
 
-The hand-off cue is a hint, not a magic word. Read the developer's next message and judge intent. Treat it as a proceed-to-next-phase instruction whenever it expresses one — in any language, with any phrasing, with or without naming the phase, possibly combined with a tweak ("apply this and continue", "swap to Redis and start Phase 2"). When the message combines a change with a proceed cue, apply the change first, then run the requested phase under the same single-phase contract above.
+The hand-off cue is a hint, not a magic word. Read the developer's next message and judge intent. Treat it as a proceed-to-next-phase instruction whenever it expresses one — in any language, with any phrasing, with or without naming the phase, possibly combined with a tweak ("apply this and start the next phase", "swap to Redis and start Phase 2"). When the message combines a change with a proceed cue, apply the change first, then run the requested phase under the same single-phase contract above.
 
 When the message is something else — a question, a bug report on completed work, a standalone change request, a stop signal — handle it on its own. Starting a new phase as a side effect of an unrelated message robs the developer of the validation gap the contract is built around.
 
@@ -419,6 +601,7 @@ function buildArchitectUserMessage(
   projectPath: string,
   signals?: { authProviders: ('google' | 'email-password')[]; hasDesign: boolean },
   aiAgent?: { namedModels: string[]; isConversational: boolean },
+  planArtifact: PlanArtifact = planArtifactFromPath(projectPath),
 ): string {
   // Architect-side platform context: when the developer's idea included
   // `#auth-google` / `#auth-email-password` / `#design`, surface them as
@@ -460,7 +643,8 @@ function buildArchitectUserMessage(
   return `The developer wants to build:
 "${userIdea}"
 
-Write the architecture document to ${projectPath}/PLAN.md, following every rule in your system prompt.
+Write the architecture document to ${planArtifact.path}, following every rule in your system prompt.
+The active plan artefact for this run is ${planArtifact.fileName}. If the system prompt says PLAN.md, interpret it as ${planArtifact.fileName} for this run.
 
 Project root: ${projectPath}${platformBlock}`
 }
@@ -522,12 +706,12 @@ Your deliverable this turn is a complete PLAN.md, produced via a sequence of sma
   4. \`${UPDATE_TASKS}\`({ tasks: [...] }) — seeded from PLAN.md's Implementation Phases (§13).
   5. A final 3-sentence chat summary. Then STOP.
 
-This many-small-edits shape exists because a single \`${WRITE_FILE}\` with the whole document body in \`content\` is a long brittle stream. Many small edits each fit in seconds; if the network drops between two edits, the work already on disk persists and you continue from the next section.
+This many-small-edits shape exists because a single \`${WRITE_FILE}\` with the whole document body in \`content\` is a long brittle stream. Many small edits each fit in seconds; if the network drops between two edits, the work already on disk persists and you advance from the next section.
 
 The chat is NOT a presentation channel. You do NOT:
 - Output the architecture as a markdown reply, table, or summary BEFORE \`${WRITE_FILE}\` runs.
 - Preview sections, ask "Shall I write this?", or wait for a "go ahead".
-- Ask for verbal approval ("Posso prosseguir?" / "Ready to implement?" / "Approve to continue?") — there is a programmatic Approve / Request changes / Reject card the IDE renders the moment Status flips to PENDING APPROVAL.
+- Ask for verbal approval ("Posso prosseguir?" / "Ready to implement?" / "Approve so I can proceed?") — there is a programmatic Approve / Request changes / Reject card the IDE renders the moment Status flips to PENDING APPROVAL.
 
 If you produce architecture content as chat text instead of going through \`${WRITE_FILE}\` + \`${EDIT_FILE}\`, the developer never sees the approval card and the entire turn is wasted. The chat is reserved for ONE thing: a 3-sentence summary AFTER all the tool calls succeed.`
 }
@@ -571,7 +755,7 @@ function getApprovalFlowSection(): string {
 
 The IDE handles approval through a UI card, not through chat. Strict sequence:
 
-0. If the developer's request is ambiguous on a decision that affects the architecture, call \`${ASK_USER_QUESTION}\` to resolve it (see "Clarifying questions" below). After receiving answers, incorporate them and continue to step 1.
+0. If the developer's request is ambiguous on a decision that affects the architecture, call \`${ASK_USER_QUESTION}\` to resolve it (see "Clarifying questions" below). After receiving answers, incorporate them and proceed to step 1.
 1. You call \`${WRITE_FILE}\`({ path: "...PLAN.md", content: "<scaffold>" }) with frontmatter (\`Status: DRAFT\`) and every section heading from §1 to §14 with a placeholder body.
 2. You call \`${EDIT_FILE}\` repeatedly — one call per section — replacing each placeholder with finished content.
 3. A final \`${EDIT_FILE}\` flips frontmatter \`Status: DRAFT\` → \`Status: PENDING APPROVAL\`. This is the user-visible "ready" marker.
@@ -584,7 +768,7 @@ The IDE handles approval through a UI card, not through chat. Strict sequence:
 You DO NOT:
 - Ask "Posso prosseguir?", "Shall I implement?", "Ready to start?" — the card is the channel, the chat reply is wasted.
 - Wait for the developer to type "yes" — the card answers for them.
-- Continue calling tools after the chat summary — the next phase runs in a fresh turn after card approval.
+- Keep calling tools after the chat summary — the next phase runs in a fresh turn after card approval.
 
 Asking for verbal approval is the same failure mode as outputting the plan in chat: the developer sees a question with no card, replies in chat, the system has no PLAN.md to approve, the run dies.
 
@@ -658,7 +842,7 @@ Before writing PLAN.md, assess whether the developer's request contains ambiguit
 - Present 2-4 concrete options with labels and short descriptions explaining the trade-off.
 - The UI always includes an "Other" option with a free-text input — no action needed from you.
 - Ask one question per concern — do not bundle unrelated decisions into a single question.
-- After receiving answers, incorporate them into PLAN.md (§7 Technical Decisions, §3 Architecture, etc.) and continue the scaffold-then-edit flow.
+- After receiving answers, incorporate them into PLAN.md (§7 Technical Decisions, §3 Architecture, etc.) and proceed through the scaffold-then-edit flow.
 
 You DO NOT:
 - Ask more than 3 clarifying questions in a single plan run. If you have more than 3 unknowns, pick the 3 that most affect the architecture and record the rest in §14 Open Questions.
@@ -1006,7 +1190,7 @@ CRITICAL — channel, shape, and stop rules:
 RECOVERY — when something doesn't go to plan:
 
 7. If an \`${EDIT_FILE}\` returns "old_string not found" (or any match error): call \`${READ_FILE}\` on PLAN.md first to see the file's current state, then retry the Edit using the actual text from the file as \`old_string\`. Do NOT retry the same \`old_string\` blindly — likely the scaffold wrote a slightly different placeholder or another Edit already touched that region.
-8. If the developer typed "Continue" or this turn resumed after a network interrupt and you're unsure which sections are already filled: call \`${READ_FILE}\` on PLAN.md first. The sections still showing \`_In progress._\` are the unfilled ones; sections with real content are done. Resume from the first unfilled section. Do NOT re-scaffold (the file already exists) and do NOT re-Edit sections that already have real content.
+8. If this turn is resuming after a network interruption or an ambiguous follow-up and you're unsure which sections are already filled: call \`${READ_FILE}\` on PLAN.md first. The sections still showing \`_In progress._\` are the unfilled ones; sections with real content are done. Resume from the first unfilled section. Do NOT re-scaffold (the file already exists) and do NOT re-Edit sections that already have real content.
 
 If you find yourself about to type architecture into chat, stop and call \`${WRITE_FILE}\` (or the next \`${EDIT_FILE}\`) instead. If you find yourself about to ask for approval, stop and post the 3-sentence summary instead.`
 }
@@ -1188,8 +1372,8 @@ You are the Architect, not the coder. This turn writes ONE artefact (PLAN.md, pl
 Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, provisioning, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
 }
 
-function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat'): string {
-  return [
+function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat', planFileName: string = 'PLAN.md'): string {
+  const prompt = [
     // --- Static (cacheable across sessions for the same model) ---
     // Primacy bookend — read-only contract with the cost of violation named.
     // Paired with getReminder() at the recency end of the prompt.
@@ -1217,14 +1401,17 @@ function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat'): string 
     // --- Dynamic (per-session) ---
     getLangDirective(),
   ].filter(s => s !== '').join('\n\n')
+  return planFileName === 'PLAN.md'
+    ? prompt
+    : prompt.replace(/\bPLAN\.md\b/g, planFileName)
 }
 
 // ── TODO Prompt ──
 
-function buildTodoPrompt(projectPath: string): string {
-  return `Read the approved PLAN.md at ${projectPath}/PLAN.md and generate a development task list.
+function buildTodoPrompt(projectPath: string, planPath: string = joinProjectFile(projectPath, 'PLAN.md'), planFileName: string = 'PLAN.md'): string {
+  return `Read the approved ${planFileName} at ${planPath} and generate a development task list.
 
-Begin directly with the read_file call. Do NOT acknowledge "I'll generate the task list" or recap PLAN.md's intent — the deliverable is TODO.md (via write_file) plus a 3-sentence summary, in that order. The first action after this prompt should be the read_file('${projectPath}/PLAN.md') tool call.
+Begin directly with the read_file call. Do NOT acknowledge "I'll generate the task list" or recap ${planFileName}'s intent — the deliverable is TODO.md (via write_file) plus a 3-sentence summary, in that order. The first action after this prompt should be the read_file('${planPath}') tool call.
 
 Note: the architect already populated the task tracker via update_tasks during /plan. The tracker is the source-of-truth for the developer's UI. TODO.md is the markdown checklist version with finer detail (file paths, acceptance criteria, dependencies). Use the SAME task IDs the architect used (e.g., "1.1", "1.2", "2.1") — TODO.md and the tracker must correlate so the implementation agent can flip tracker rows by ID as it progresses.
 
@@ -1233,13 +1420,13 @@ Write TODO.md at ${projectPath}/TODO.md following this structure:
 \`\`\`markdown
 # Development Tasks
 
-> Generated from PLAN.md by TM Code
+> Generated from ${planFileName} by TM Code
 > Date: {current date}
 > Status: 0/{total} tasks completed
 
 ---
 
-## Phase 1 — {Phase Name from PLAN.md}
+## Phase 1 — {Phase Name from plan file}
 
 - [ ] **Task 1.1:** {specific, actionable task}
   - Files: {files to create/modify}
@@ -1264,18 +1451,18 @@ Write TODO.md at ${projectPath}/TODO.md following this structure:
 | Phase 1 — {name} | {count} | — |
 | Phase 2 — {name} | {count} | Phase 1 |
 
-**Critical path:** {from PLAN.md}
+**Critical path:** {from plan file}
 **Total: {count} tasks**
 \`\`\`
 
 Requirements:
-1. Read PLAN.md first — use its Implementation Phases as the skeleton.
+1. Read ${planFileName} first — use its Implementation Phases as the skeleton.
 2. Reuse the task IDs the architect already seeded in the tracker (Phase.Task numbering: "1.1", "1.2", "2.1"...). If the architect's task list under-decomposed a phase and TODO.md needs more granularity, append sub-IDs ("1.1a", "1.1b") rather than renumbering — renumbering breaks the tracker correlation.
 3. Break each phase into small tasks (each task = one coherent change, max 3-4 files).
-4. Preserve the dependency chain from PLAN.md. Never reference a task that hasn't been done yet.
+4. Preserve the dependency chain from ${planFileName}. Never reference a task that hasn't been done yet.
 5. Each task must specify files AND an acceptance criterion (how to know it's done).
-6. Include setup tasks (install deps, create directories) and testing tasks where PLAN.md's Testing Strategy calls for them.
-7. Tasks that address risks from PLAN.md's Risks table should be explicit (e.g., "Add checksum verification — mitigates document divergence risk").
+6. Include setup tasks (install deps, create directories) and testing tasks where ${planFileName}'s Testing Strategy calls for them.
+7. Tasks that address risks from ${planFileName}'s Risks table should be explicit (e.g., "Add checksum verification — mitigates document divergence risk").
 8. Write to TODO.md using write_file.
 9. Present a summary in the chat.`
 }
