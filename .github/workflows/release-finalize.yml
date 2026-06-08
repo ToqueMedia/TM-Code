@@ -1,0 +1,38 @@
+name: Release Finalize
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing release tag to finalize'
+        required: true
+        default: '0.7.3'
+
+jobs:
+  generate-updater:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate latest.json from release assets
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        run: |
+          node scripts/generate-latest-json.mjs "${{ inputs.version }}"
+
+  publish-release:
+    needs: generate-updater
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release (remove draft)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        run: |
+          gh release edit "${{ inputs.version }}" \
+            --repo ToqueMedia/TM-Code \
+            --draft=false
