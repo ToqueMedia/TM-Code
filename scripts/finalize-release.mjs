@@ -45,8 +45,40 @@ function run(command, args, options = {}) {
   return result.stdout || '';
 }
 
+function ensureGithubCliAuth() {
+  const ghVersion = spawnSync('gh', ['--version'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    shell: false
+  });
+
+  if (ghVersion.status !== 0) {
+    console.error('Error: GitHub CLI is required to finalize the release.');
+    console.error('Install it from: https://cli.github.com');
+    process.exit(1);
+  }
+
+  const authStatus = spawnSync('gh', ['auth', 'status', '--hostname', 'github.com'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    shell: false
+  });
+
+  if (authStatus.status !== 0) {
+    console.error('Error: GitHub CLI is not authenticated.');
+    console.error('Run one of these before finalizing the release:');
+    console.error('  gh auth login');
+    console.error('  GH_TOKEN=<token> yarn release:finalize');
+    console.error('');
+    console.error('The token needs release write permission for ToqueMedia/TM-Code.');
+    process.exit(authStatus.status || 1);
+  }
+}
+
 const version = resolveVersion();
 const bareVersion = version.startsWith('v') ? version.substring(1) : version;
+
+ensureGithubCliAuth();
 
 console.log(`\nChecking release assets for ${version}...`);
 
