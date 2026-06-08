@@ -110,15 +110,17 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
 
         {showSettings ? (
           <SettingsView onBack={() => setWelcomeScreen(cmdModeProjectPath ? null : 'hero')} />
-        ) : cmdModeProjectPath ? (
-          <Box flex="1" minH={0} display="flex" flexDirection="column">
+        ) : null}
+
+        {cmdModeProjectPath ? (
+          <Box flex="1" minH={0} display={showSettings ? 'none' : 'flex'} flexDirection="column">
             <TerminalView
               key={cmdModeProjectPath}
               projectPath={cmdModeProjectPath}
               onBack={() => setCmdModeProjectPath(null)}
             />
           </Box>
-        ) : (
+        ) : !showSettings ? (
           <WelcomeHero
             onNewProject={handleNewProject}
             onOpenFolder={handleOpenFolder}
@@ -127,7 +129,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
           >
             <PromoBanner />
           </WelcomeHero>
-        )}
+        ) : null}
 
         <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} />
 

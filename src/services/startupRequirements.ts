@@ -19,7 +19,7 @@ export const GLOBAL_REQUIREMENTS: ExtendedRequirement[] = [
     name: 'Node.js',
     command: 'node',
     versionFlag: '--version',
-    minVersion: '20.0.0',
+    minVersion: '20.19.0',
     installUrl: 'https://nodejs.org',
     installHint: 'Download from nodejs.org or install via nvm/fnm',
     mandatory: true,
@@ -45,11 +45,16 @@ export const GLOBAL_REQUIREMENTS: ExtendedRequirement[] = [
   },
 ]
 
-const STORAGE_KEY = 'tm-startup-requirements-v1'
+const STORAGE_KEY = 'tm-startup-requirements-v2'
 const TTL_MS = 24 * 60 * 60 * 1000 // 24h
+const REQUIREMENTS_SIGNATURE = GLOBAL_REQUIREMENTS
+  .map(r => `${r.name}:${r.command}:${r.versionFlag}:${r.minVersion}`)
+  .sort()
+  .join('|')
 
 interface PersistedCheck {
   timestamp: number
+  requirementsSignature?: string
   result: EnvironmentCheckResult
 }
 
@@ -60,6 +65,7 @@ function readCache(): EnvironmentCheckResult | null {
     if (!raw) return null
     const parsed = JSON.parse(raw) as PersistedCheck
     if (Date.now() - parsed.timestamp > TTL_MS) return null
+    if (parsed.requirementsSignature !== REQUIREMENTS_SIGNATURE) return null
     return parsed.result
   } catch {
     return null
@@ -68,7 +74,11 @@ function readCache(): EnvironmentCheckResult | null {
 
 function writeCache(result: EnvironmentCheckResult): void {
   try {
-    const payload: PersistedCheck = { timestamp: Date.now(), result }
+    const payload: PersistedCheck = {
+      timestamp: Date.now(),
+      requirementsSignature: REQUIREMENTS_SIGNATURE,
+      result,
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
   } catch {
     // Quota or privacy mode — non-fatal
@@ -95,6 +105,9 @@ export async function checkStartupRequirements(forceRefresh = false): Promise<En
 
 /** Forget the persisted check — next call will re-run tools. */
 export function clearStartupRequirementsCache(): void {
-  try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
+  try {
+    localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem('tm-startup-requirements-v1')
+  } catch { /* ignore */ }
   clearRequirementsCache()
 }

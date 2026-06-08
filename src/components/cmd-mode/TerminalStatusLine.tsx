@@ -13,7 +13,6 @@ import { useChatStore } from "../../stores/chatStore";
 import { useMcpStore } from "../../stores/mcpStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { usePermissionStore } from "../../stores/permissionStore";
-import { useSkillStore } from "../../stores/skillStore";
 import { useBillingStore } from "../../stores/billingStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useBackgroundCommandStore } from "../../stores/backgroundCommandStore";
@@ -60,10 +59,9 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   });
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow);
   const modelName = useAgentStore((s) => s.modelName);
-  const skillCount = useSkillStore((s) => s.skills.length);
   const mcpServers = useMcpStore((s) => s.servers);
   const mcpIsInitializing = useMcpStore((s) => s.isInitializing);
-  const totalMcpTools = useMcpStore((s) => s.getTotalToolCount());
+  const mcpError = useMcpStore((s) => s.error);
   const autoApproveDiffs = usePermissionStore((s) => s.autoApproveDiffs);
   const queuedCommands = useSyncExternalStore(
     subscribeToCommandQueue,
@@ -73,6 +71,10 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   const preflight = usePreflightStatus();
   const devServer = useLayoutStore((s) => s.devServer);
   const bgCommands = useBackgroundCommandStore((s) => s.commands);
+  const activeSessionCreatedAt = useChatStore((s) => {
+    if (!s.activeSessionId) return 0;
+    return s.sessions.get(s.activeSessionId)?.createdAt ?? 0;
+  });
 
   // Session-mode elapsed: total wall time per request, freezes during permission waits.
   const { elapsedMs: elapsed } = useAgentElapsed("session");
@@ -203,10 +205,10 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
         : tokens.colors.accent.red;
   const ctxTooltip =
     ctxPct > 0
-      ? `Context usage: ${pressureTokens.toLocaleString()} (${currentPromptTokens.toLocaleString()}+${currentResponseTokens.toLocaleString()}) / ${effectiveWindow.toLocaleString()} ${t("terminalMode.status.contextEffective")} (${ctxPct.toFixed(1)}%)\nModel: ${activeProfile.name}${compactImminent ? `\n⚡ Will optimize context next turn` : ""}`
+      ? `${t("terminalMode.status.contextUsage")}: ${pressureTokens.toLocaleString()} (${currentPromptTokens.toLocaleString()}+${currentResponseTokens.toLocaleString()}) / ${effectiveWindow.toLocaleString()} ${t("terminalMode.status.contextEffective")} (${ctxPct.toFixed(1)}%)\n${t("terminalMode.status.model")}: ${activeProfile.name}${compactImminent ? `\n${t("terminalMode.status.autoCompact")}` : ""}`
       : undefined;
 
-  // Toolkit preflight — small "tk 3/3" indicator. Tooltip lists missing pieces.
+  // Toolkit preflight. Tooltip lists missing pieces.
   const toolkit = useMemo(() => {
     if (!preflight.ranAt) return null;
     const { available, total } = countAvailable(preflight);
@@ -214,38 +216,41 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
     if (!preflight.pandoc.found) missing.push("pandoc");
     if (!preflight.venv.found) missing.push("python venv");
     if (!preflight.npx.found) missing.push("npx");
-    const label = `tk ${available}/${total}`;
+    const label = `${t("terminalMode.status.toolkit")}: ${available}/${total}`;
     const title = missing.length
       ? t("terminalMode.status.missingTools").replace(
           "{missing}",
           missing.join(", "),
         )
       : t("terminalMode.status.allToolsAvailable");
+    if (missing.length === 0) return null;
     return { label, title, allGreen: missing.length === 0 };
-  }, [preflight]);
+  }, [preflight, t]);
 
   // Info segments — compact, terminal style
   const segments = useMemo(() => {
     const out: string[] = [];
     if (autoApproveDiffs) out.push(t("terminalMode.status.autoApprove"));
-    if (queueLength > 0) out.push(`${queueLength} queued`);
-    if (skillCount > 0)
-      out.push(`${skillCount} ${t("terminalMode.status.skills")}`);
+    if (queueLength > 0)
+      out.push(`${t("terminalMode.status.queue")}: ${queueLength}`);
     if (mcpIsInitializing) {
-      out.push("MCP connecting…");
+      out.push(t("terminalMode.status.mcpConnecting"));
+    } else if (mcpError) {
+      out.push(`${t("terminalMode.status.mcp")}: ${t("terminalMode.status.err")}`);
     } else {
-      const running = mcpServers.filter((s) => s.status === "running").length;
-      if (running > 0) out.push(`${running} MCP (${totalMcpTools} tools)`);
+      const errored = mcpServers.filter((s) => s.status === "error").length;
+      if (errored > 0)
+        out.push(`${t("terminalMode.status.mcp")}: ${t("terminalMode.status.err")}: ${errored}`);
     }
     if (devServer && devServer.status !== "stopped") {
       const url = devServer.frontendUrl || devServer.backendUrl;
       const port = url?.match(/:(\d+)/)?.[1];
       out.push(
         port
-          ? `server :${port}`
+          ? `${t("terminalMode.status.devServer")}: :${port}`
           : devServer.status === "starting"
-            ? "server starting…"
-            : "server running",
+            ? t("terminalMode.status.devServerStarting")
+            : t("terminalMode.status.devServerRunning"),
       );
     }
     // Background commands
@@ -253,31 +258,35 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
       (c) => c.status === "running",
     ).length;
     const bgCmdCompleted = Array.from(bgCommands.values()).filter(
-      (c) => c.status === "completed",
+      (c) =>
+        c.status === "completed" &&
+        (c.completedAt ?? 0) >= activeSessionCreatedAt,
     ).length;
     const bgCmdErrored = Array.from(bgCommands.values()).filter(
-      (c) => c.status === "error",
+      (c) =>
+        c.status === "error" &&
+        (c.completedAt ?? 0) >= activeSessionCreatedAt,
     ).length;
     if (bgCmdRunning > 0 || bgCmdCompleted > 0 || bgCmdErrored > 0) {
       const parts: string[] = [];
       if (bgCmdRunning > 0)
-        parts.push(`${bgCmdRunning} ${t("terminalMode.status.running")}`);
+        parts.push(`${t("terminalMode.status.running")}: ${bgCmdRunning}`);
       if (bgCmdCompleted > 0)
-        parts.push(`${bgCmdCompleted} ${t("terminalMode.status.done")}`);
+        parts.push(`${t("terminalMode.status.done")}: ${bgCmdCompleted}`);
       if (bgCmdErrored > 0)
-        parts.push(`${bgCmdErrored} ${t("terminalMode.status.err")}`);
-      out.push(`${parts.join(", ")} background`);
+        parts.push(`${t("terminalMode.status.err")}: ${bgCmdErrored}`);
+      out.push(`${t("terminalMode.status.background")}: ${parts.join(", ")}`);
     }
     return out;
   }, [
     autoApproveDiffs,
     queueLength,
-    skillCount,
     mcpIsInitializing,
+    mcpError,
     mcpServers,
-    totalMcpTools,
     devServer,
     bgCommands,
+    activeSessionCreatedAt,
     t,
   ]);
 
@@ -369,7 +378,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
                 <>
                   {isStreaming && " · "}
                   <Text as="span" color={ctxColor}>
-                    {`ctx ${Math.round(ctxPct)}%`}
+                    {`${t("terminalMode.status.context")}: ${Math.round(ctxPct)}%`}
                   </Text>
                 </>
               )}

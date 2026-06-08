@@ -220,7 +220,7 @@ const planMarkdownStyles = {
     paddingBottom: '6px',
     borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
   },
-  '& h1:first-child': { marginTop: 0 },
+  '& h1:first-of-type': { marginTop: 0 },
   '& h2': {
     fontSize: '17px',
     fontWeight: 600,

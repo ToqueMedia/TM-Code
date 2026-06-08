@@ -27,6 +27,8 @@ const TOOL_DISPLAY: Record<string, ToolDisplay> = {
   search_files: { running: 'Searching', done: 'Searched', failed: 'Search failed' },
   glob: { running: 'Matching', done: 'Matched', failed: 'Glob failed' },
   execute_command: { running: 'Running', done: 'Ran', failed: 'Command failed' },
+  execute_command_background: { running: 'Starting background command', done: 'Background command started', failed: 'Background command failed' },
+  check_background_commands: { running: 'Checking background commands', done: 'Checked background commands', failed: 'Background check failed' },
   start_dev_server: { running: 'Starting dev server', done: 'Dev server started', failed: 'Dev server failed' },
   read_dev_server_logs: { running: 'Reading logs', done: 'Logs read', failed: 'Log read failed' },
   read_large_result: { running: 'Reading slice', done: 'Read slice', failed: 'Slice read failed' },

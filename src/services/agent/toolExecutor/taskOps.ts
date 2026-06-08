@@ -8,6 +8,37 @@
 
 import type { ToolRegistrationContext } from './context'
 
+type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
+type StoredTask = {
+  id: string
+  description: string
+  status: TaskStatus
+  dependsOn?: string[]
+  blockedBy?: string[]
+  files?: string[]
+}
+
+const TERMINAL_TASK_STATUSES = new Set<TaskStatus>(['completed', 'failed', 'cancelled'])
+
+function isTerminalTask(status: string): boolean {
+  return TERMINAL_TASK_STATUSES.has(status as TaskStatus)
+}
+
+function formatTaskUpdateResult(tasks: StoredTask[], resetArchivedList: boolean): string {
+  const completed = tasks.filter(t => t.status === 'completed').length
+  const lines = [`Task list updated: ${completed}/${tasks.length} completed.`]
+  const activeTasks = tasks.filter(t => !isTerminalTask(t.status))
+
+  if (activeTasks.length === 0) return lines[0]
+
+  lines.push(resetArchivedList ? 'New task list:' : 'Active tasks:')
+  for (const task of activeTasks) {
+    const marker = task.status === 'in_progress' ? '~' : ' '
+    lines.push(`- [${marker}] ${task.id}: ${task.description}`)
+  }
+  return lines.join('\n')
+}
+
 export function registerTaskTools(ctx: ToolRegistrationContext): void {
   // === update_tasks ===
   ctx.tools.set('update_tasks', {
@@ -54,20 +85,29 @@ Batch-completion rule: marking more than 2 tasks as completed in a single call r
         return 'Blocked in /plan mode: update_tasks must follow write_file — create PLAN.md first, then seed the task tracker.'
       }
 
-      const prev = useAgentStore.getState().tasks
+      const prev = useAgentStore.getState().tasks as StoredTask[]
       const prevCompletedIds = new Set(prev.filter(t => t.status === 'completed').map(t => t.id))
 
       type IncomingTask = { id: string; description?: string; status: string; dependsOn?: string[]; blockedBy?: string[]; files?: string[] }
       const incoming = input.tasks as IncomingTask[]
+      const prevAllTerminal = prev.length > 0 && prev.every(t => isTerminalTask(t.status))
+      const incomingAddsNewTask = incoming.some(t => !prev.some(existing => existing.id === t.id))
+      const resetArchivedList = prevAllTerminal && incomingAddsNewTask
+      const baseTasks = resetArchivedList ? [] : prev
 
       // Patch-merge: start from the existing tracker, apply updates by ID,
       // append new tasks. This prevents accidental deletion when the model
       // sends a partial list (e.g. after context compression).
-      const merged = [...prev]
-      const newTasks: Array<{ id: string; description: string; status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' }> = []
+      //
+      // Exception: if the previous tracker is already archival (every task is
+      // terminal) and the agent adds new IDs, treat the call as a fresh task
+      // list. This keeps new work visible instead of appending it under an
+      // old completed plan that the UI correctly hides.
+      const merged = [...baseTasks]
+      const newTasks: StoredTask[] = []
 
       for (const t of incoming) {
-        const status = t.status as 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
+        const status = t.status as TaskStatus
         const existingIdx = merged.findIndex(m => m.id === t.id)
         if (existingIdx !== -1) {
           // Patch existing task — description/dependsOn/blockedBy/files
@@ -118,7 +158,6 @@ Batch-completion rule: marking more than 2 tasks as completed in a single call r
         ctx.setPlanTasksSeeded(true)
       }
 
-      const completed = tasks.filter(t => t.status === 'completed').length
       const newlyCompletedIds = tasks
         .filter(t => t.status === 'completed' && !prevCompletedIds.has(t.id))
         .map(t => t.id)
@@ -147,7 +186,7 @@ Batch-completion rule: marking more than 2 tasks as completed in a single call r
         return `BLOCKED: ${jumpSize} tasks were marked completed at once (IDs: ${newlyCompletedIds.join(', ')}). Batch completion is not allowed — complete tasks ONE AT A TIME with verification evidence (test output, endpoint response, etc.). The affected tasks have been reverted to in_progress. Pick the first one and verify it individually.`
       }
 
-      return `Task list updated: ${completed}/${tasks.length} completed.`
+      return formatTaskUpdateResult(tasks, resetArchivedList)
     },
   })
 

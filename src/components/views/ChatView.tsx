@@ -43,6 +43,7 @@ function ChatView() {
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
+  const chatTextFontSize = useSettingsStore(s => s.chatTextFontSize)
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const scaffoldMessage = useLayoutStore(s => s.scaffoldMessage)
   const billingPlan = useBillingStore(s => s.plan)
@@ -245,11 +246,52 @@ function ChatView() {
     }
   }, [isAtBottom, isStreaming])
 
+  const chatTextScaleStyles = useMemo(() => {
+    const bodySize = `${chatTextFontSize}px`
+    const codeSize = `${Math.max(12, chatTextFontSize - 1)}px`
+    return {
+      '--chat-a11y-text-size': bodySize,
+      '--chat-a11y-code-size': codeSize,
+      '& [data-chat-transcript]': {
+        fontSize: 'var(--chat-a11y-text-size)',
+      },
+      '& [data-chat-transcript] :is(p, li, span, div, button, table, th, td)': {
+        fontSize: 'var(--chat-a11y-text-size) !important',
+        lineHeight: '1.7',
+      },
+      '& [data-chat-transcript] :is(code, pre, pre *)': {
+        fontSize: 'var(--chat-a11y-code-size) !important',
+        lineHeight: '1.65',
+      },
+      '& [data-chat-transcript] :is(h1)': {
+        fontSize: `${chatTextFontSize + 6}px !important`,
+        lineHeight: '1.35',
+      },
+      '& [data-chat-transcript] :is(h2)': {
+        fontSize: `${chatTextFontSize + 3}px !important`,
+        lineHeight: '1.4',
+      },
+      '& [data-chat-transcript] :is(h3, h4)': {
+        fontSize: `${chatTextFontSize + 1}px !important`,
+        lineHeight: '1.45',
+      },
+      '& [data-chat-transcript] :is(p, li, span, div, button, th, td, code, pre)': {
+        overflowWrap: 'anywhere',
+        wordBreak: 'break-word',
+      },
+      '& [data-chat-transcript] :is(button, [role="button"])': {
+        whiteSpace: 'normal',
+      },
+    }
+  }, [chatTextFontSize])
+
   return (
     <Flex
       direction="column"
       flex="1"
       overflow="hidden"
+      fontSize={`${chatTextFontSize}px`}
+      css={chatTextScaleStyles}
     >
       {/* Session header bar */}
       <Flex
@@ -571,6 +613,7 @@ function ChatView() {
                 w="100%"
                 py={4}
                 data-selectable="true"
+                data-chat-transcript
               >
                 {/* Reveal-earlier-history affordance — only visible when:
                     (a) the agent has compressed the conversation at least

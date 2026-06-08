@@ -114,9 +114,11 @@ export function getCmdToolsSection(): string {
 
  - Use dedicated tools (\`${READ_FILE}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`) instead of shell commands for file operations. Reserve \`${EXECUTE_COMMAND}\` for system commands and terminal operations only. **DO NOT** use \`${EXECUTE_COMMAND}\` for exploring code (\`cat\`, \`grep\`, \`ls\`).
  - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. Mark each task as completed as soon as you are done with it.
- - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
- - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel. After delegating, if you have no other work, end your turn — results will be available on next interaction. **Do NOT delegate trivial tasks** — if the answer is one \`read_file\`, \`glob\`, or \`search_files\` call away, just do it yourself. Delegation adds 30-60s of overhead; reserve it for multi-step research or verification.
- - \`collect_results\`: collect results from team members. Returns immediately with finished results — does NOT block. The system auto-wakes you when new results arrive.`
+	 - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
+	 - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel. After delegating, if you have no other work, end your turn — results will be available on next interaction. **Do NOT delegate trivial tasks** — if the answer is one \`read_file\`, \`glob\`, or \`search_files\` call away, just do it yourself. Delegation adds 30-60s of overhead; reserve it for multi-step research or verification.
+	 - \`collect_results\`: collect results from team members. Returns immediately with finished results — does NOT block. The system auto-wakes you when new results arrive.
+	 - \`execute_command_background\`: start long-running commands and continue useful work. The system auto-wakes you when the command exits.
+	 - \`check_background_commands\`: read background command output once after auto-wake or after doing other useful work. If the command is still running, do NOT call it repeatedly; end your turn and wait for auto-wake.`
 }
 
 export function getCmdEnvironmentSection(ctx: CmdPromptContext): string {

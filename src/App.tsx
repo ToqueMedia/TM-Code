@@ -516,12 +516,12 @@ function App() {
 		}
 
 		useChatStore.getState().clearAllSessions();
-		// Reset agent state so per-project things like the agent task list,
-		// last-response model name/provider, and BYOK confirmation pill don't
-		// leak from the previous project. Without this the AgentTasksPanel
-		// would still show tasks from the previously open project until the
-		// user fired their first message in the new one.
-		useAgentStore.getState().reset();
+		// Reset transient agent state so last-response model/provider and BYOK
+		// confirmation don't leak from the previous project. Keep the task
+		// tracker intact here: projectStore / TerminalView hydrate it from the
+		// new project's .toquemedia/tasks.json, and clearing in this effect can
+		// race after hydration and make the task panel disappear.
+		useAgentStore.getState().resetTransientState();
 
 		const chatStore = useChatStore.getState();
 		chatStore.restoreLastSession(projectPath).then(restored => {

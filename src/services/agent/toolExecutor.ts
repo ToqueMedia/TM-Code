@@ -295,6 +295,34 @@ class ToolExecutor {
     return ToolExecutor.instance
   }
 
+  /**
+   * Create an isolated executor for a sub-agent run.
+   *
+   * The child gets its own read-file cache, large-result store, shell sessions,
+   * and memory scope state, while inheriting the parent execution mode. This
+   * mirrors the claude-vaz pattern of per-agent tool contexts without changing
+   * the main-agent singleton contract.
+   */
+  createIsolatedChild(): ToolExecutor {
+    const child = new ToolExecutor()
+    child.cmdModeCwd = this.cmdModeCwd
+    child.planMode = this.planMode
+    child.planModePlanFileName = this.planModePlanFileName
+    child.planFileWritten = this.planFileWritten
+    child.planTasksSeeded = this.planTasksSeeded
+    child.largeResultsDir = this.largeResultsDir
+    return child
+  }
+
+  /** Release session-scoped state owned by an isolated child executor. */
+  disposeIsolatedChild(): void {
+    this.resetSessionState()
+    this.cmdModeCwd = null
+    this.disablePlanMode()
+    this.largeResultsDir = null
+    this.memoryScopeAgentType = null
+  }
+
   /** Enable CLI/CMD mode: file ops write directly to disk, no project required. */
   enableCmdMode(cwd: string): void {
     this.cmdModeCwd = cwd
@@ -3175,7 +3203,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('execute_command_background', {
       definition: {
         name: 'execute_command_background',
-        description: 'Execute a shell command in the background. Returns immediately with a tracking ID — the command runs while you continue working. Use for long-running operations like npm install, build, or compile that would otherwise block your workflow. The command runs in the project directory. Use check_background_commands to see results when ready. Max 6 concurrent background commands.',
+        description: 'Execute a shell command in the background. Returns immediately with a tracking ID — the command runs while you continue working. Use for long-running operations like npm install, build, or compile that would otherwise block your workflow. The command runs in the project directory. The system auto-wakes you when the command exits; use check_background_commands once to read the result. Do not poll. Max 6 concurrent background commands.',
         input_schema: {
           type: 'object',
           properties: {
@@ -3214,6 +3242,14 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         // Fix #6: declared before listeners so they can clear it on normal exit
         let timeoutTimer: ReturnType<typeof setTimeout> | undefined
 
+        const wakeForTerminalState = (status: 'completed' | 'error' | 'cancelled', exitCode?: number | null) => {
+          import('./backgroundCommands/autoWake')
+            .then(({ maybeWakeMainAgentForBackgroundCommand }) => {
+              maybeWakeMainAgentForBackgroundCommand({ id: cmdId, command: cmd, status, exitCode })
+            })
+            .catch(() => { /* auto-wake is best-effort */ })
+        }
+
         const bufferedOutput: { pid: number; data: string }[] = []
         const bufferedExit: { pid: number; code: number }[] = []
 
@@ -3242,6 +3278,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               const code = event.payload.code
               if (code === 0) {
                 useBackgroundCommandStore.getState().completeCommand(cmdId, code)
+                wakeForTerminalState('completed', code)
                 // Send OS notification when command completes successfully
                 import('@/services/notificationService').then(({ notify }) => {
                   notify({
@@ -3252,6 +3289,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
                 })
               } else {
                 useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${code}`)
+                wakeForTerminalState('error', code)
                 // Send OS notification when command fails
                 import('@/services/notificationService').then(({ notify }) => {
                   notify({
@@ -3297,8 +3335,10 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               unOutput(); unExit()
               if (ev.code === 0) {
                 useBackgroundCommandStore.getState().completeCommand(cmdId, ev.code)
+                wakeForTerminalState('completed', ev.code)
               } else {
                 useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${ev.code}`)
+                wakeForTerminalState('error', ev.code)
               }
             }
           }
@@ -3307,7 +3347,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           if (finished) {
             const result = useBackgroundCommandStore.getState().getById(cmdId)
             const exitInfo = result?.exitCode !== null ? ` (exit ${result?.exitCode})` : ''
-            return `Command completed immediately (PID: ${pid}, id: ${cmdId})${exitInfo}. Use check_background_commands to see results.`
+            return `Command completed immediately (PID: ${pid}, id: ${cmdId})${exitInfo}. Use check_background_commands once to see results.`
           }
 
           const timeoutSecs = Math.min((input.timeout_secs as number) || 300, 600)
@@ -3317,6 +3357,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               unOutput(); unExit()
               try { await invoke('kill_process', { pid }) } catch { /* best effort */ }
               useBackgroundCommandStore.getState().failCommand(cmdId, `Timed out after ${timeoutSecs}s`)
+              wakeForTerminalState('error', null)
             }
           }, timeoutSecs * 1000)
 
@@ -3330,11 +3371,12 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
                 unOutput(); unExit()
                 try { await invoke('kill_process', { pid }) } catch { /* best effort */ }
                 useBackgroundCommandStore.getState().cancelCommand(cmdId)
+                wakeForTerminalState('cancelled', null)
               }
             }, { once: true })
           }
 
-          return `Background command started (PID: ${pid}, id: ${cmdId}). Use check_background_commands to see results when ready.`
+          return `Background command started (PID: ${pid}, id: ${cmdId}). Continue other work or end your turn; the system will wake you when it exits.`
         } catch (err) {
           unOutput(); unExit()
           const msg = err instanceof Error ? err.message : String(err)
@@ -3347,7 +3389,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('check_background_commands', {
       definition: {
         name: 'check_background_commands',
-        description: 'Check the status and output of background commands started with execute_command_background. Returns all running and recently completed commands with their output.',
+        description: 'Read the status and output of background commands started with execute_command_background. Use once after an auto-wake or after you have done other useful work. Do not call repeatedly to wait; if commands are still running and you have no other work, end your turn.',
         input_schema: {
           type: 'object',
           properties: {
@@ -3365,6 +3407,10 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         if (targetId) {
           const cmd = bgCmdStore.getById(targetId)
           if (!cmd) return `No background command found with id: ${targetId}`
+          if (cmd.status !== 'running') {
+            const { acknowledgeBackgroundCommandWake } = await import('./backgroundCommands/autoWake')
+            acknowledgeBackgroundCommandWake(cmd.id)
+          }
           return formatBackgroundCommandResult(cmd)
         }
 
@@ -3372,7 +3418,11 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         if (all.length === 0) return 'No background commands running or recently completed.'
 
         const lines: string[] = []
+        const { acknowledgeBackgroundCommandWake } = await import('./backgroundCommands/autoWake')
         for (const cmd of all) {
+          if (cmd.status !== 'running') {
+            acknowledgeBackgroundCommandWake(cmd.id)
+          }
           lines.push(formatBackgroundCommandResult(cmd))
         }
 

@@ -417,6 +417,9 @@ class AgentService {
       thinkingConfig,
       maxTurns: this.lightweightOptions?.maxTurns,
       extraHeaders,
+      onResponseHeaders: this.lightweightOptions
+        ? undefined
+        : (headers) => this.applyStreamingResponseHeaders(headers),
       // Usage is reported via message_stop events — do NOT add onUsage
       // callback here or output tokens will be double-counted (SUM semantics).
     });
@@ -485,6 +488,12 @@ class AgentService {
           break;
 
         case "message_start":
+          break;
+
+        case "billing_update":
+          if (!this.lightweightOptions) {
+            useBillingStore.getState().updateFromSSE(event.billing);
+          }
           break;
 
         case "message_stop":
@@ -579,6 +588,68 @@ class AgentService {
       /* use default */
     }
     return "mimo-v2.5-pro-1m";
+  }
+
+  /**
+   * Streaming chat responses expose billing/model metadata in HTTP headers
+   * before the final SSE billing event arrives. The OpenAI SDK hides those
+   * headers unless we use withResponse(), so apply them explicitly here.
+   */
+  private applyStreamingResponseHeaders(headers: Headers): void {
+    try {
+      useBillingStore.getState().updateFromHeaders(headers);
+    } catch {
+      /* non-critical */
+    }
+
+    try {
+      const modelName = headers.get("X-Model-Name");
+      const modelProvider = headers.get("X-Model-Provider");
+      const thinkingModeRaw = headers.get("X-Model-Thinking-Mode");
+      const contextWindowRaw = headers.get("X-Model-Context-Window");
+      const byokActiveRaw = headers.get("X-BYOK-Active");
+
+      const hasModelInfo =
+        modelName !== null ||
+        modelProvider !== null ||
+        thinkingModeRaw !== null ||
+        contextWindowRaw !== null;
+
+      if (hasModelInfo) {
+        const parsedContext =
+          contextWindowRaw !== null ? Number.parseInt(contextWindowRaw, 10) : undefined;
+        const contextWindow =
+          parsedContext !== undefined && Number.isFinite(parsedContext) && parsedContext > 0
+            ? parsedContext
+            : contextWindowRaw !== null
+              ? null
+              : undefined;
+        const thinkingMode =
+          thinkingModeRaw === "none" ||
+          thinkingModeRaw === "toggleable" ||
+          thinkingModeRaw === "mandatory"
+            ? thinkingModeRaw
+            : thinkingModeRaw !== null
+              ? null
+              : undefined;
+
+        useAgentStore.getState().setModelInfo(
+          modelName,
+          modelProvider,
+          thinkingMode,
+          contextWindow,
+        );
+        if (contextWindow && contextWindow > 0) {
+          this.sessionState.setContextWindowSize(contextWindow);
+        }
+      }
+
+      if (byokActiveRaw !== null) {
+        useAgentStore.getState().setByokActive(byokActiveRaw.toLowerCase() === "true");
+      }
+    } catch {
+      /* non-critical */
+    }
   }
 
   /**

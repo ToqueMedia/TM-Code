@@ -103,6 +103,7 @@ interface AgentActions {
   bumpCumulativeToolCalls: (delta: number) => void;
   setWritesWithoutDevServerLogs: (n: number) => void;
   resetToolCallCounters: () => void;
+  resetTransientState: () => void;
   reset: () => void;
 }
 
@@ -195,9 +196,27 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
     set({ cumulativeToolCalls: 0, writesWithoutDevServerLogs: 0 });
   },
 
+  resetTransientState: () => {
+    set({
+      status: "idle",
+      compactPhase: "idle",
+      error: null,
+      workerStatus: null,
+      modelName: null,
+      modelProvider: null,
+      thinkingMode: null,
+      modelContextWindow: null,
+      byokActive: false,
+      poolConcurrencyConflictsAvoided: 0,
+      cumulativeToolCalls: 0,
+      writesWithoutDevServerLogs: 0,
+    });
+  },
+
   reset: () => {
     set({
       status: "idle",
+      compactPhase: "idle",
       error: null,
       workerStatus: null,
       tasks: [],

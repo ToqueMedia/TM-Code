@@ -15,6 +15,10 @@ export interface AutocompleteSettings {
   ollamaUrl: string
 }
 
+export const DEFAULT_CHAT_TEXT_FONT_SIZE = 14
+export const CHAT_TEXT_FONT_SIZE_OPTIONS = [14, 16, 18, 20] as const
+export type ChatTextFontSize = typeof CHAT_TEXT_FONT_SIZE_OPTIONS[number]
+
 // AgentModelId removed — model selection moved to backend (decided by plan).
 // Dead code reference for migration: was 'mimo-v2-flash' | 'deepseek-v3.2' | etc.
 
@@ -74,6 +78,7 @@ interface SettingsState {
   shortcuts: ShortcutMap
   hasCompletedOnboarding: boolean
   sandboxEnabled: boolean
+  chatTextFontSize: ChatTextFontSize
   /** Commands that require explicit developer approval every time the agent uses them.
    *  Empty by default (nothing blocked). User selects which commands to flag in Settings. */
   flaggedCommands: string[]
@@ -92,6 +97,7 @@ interface SettingsActions {
   setFormatOnSave: (value: boolean) => void
   setAppLanguage: (lang: AppLanguage) => void
   setAgentLanguage: (lang: AgentLanguage) => void
+  setChatTextFontSize: (size: number) => void
   setShortcut: (id: ShortcutId, binding: KeyBinding) => void
   resetShortcuts: () => void
   completeOnboarding: () => void
@@ -114,6 +120,7 @@ const DEFAULTS: SettingsState = {
   shortcuts: { ...DEFAULT_SHORTCUTS },
   hasCompletedOnboarding: false,
   sandboxEnabled: false,
+  chatTextFontSize: DEFAULT_CHAT_TEXT_FONT_SIZE,
   flaggedCommands: [],
 }
 
@@ -213,6 +220,10 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         }).catch(() => { /* non-critical */ })
       },
 
+      setChatTextFontSize: (size: number) => {
+        set(() => ({ chatTextFontSize: normalizeChatTextFontSize(size) }))
+      },
+
       setShortcut: (id: ShortcutId, binding: KeyBinding) => {
         set(state => {
           // Clear any conflicting shortcut (other action with the same binding)
@@ -238,7 +249,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, flaggedCommands: state.flaggedCommands }
+        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, chatTextFontSize: state.chatTextFontSize, flaggedCommands: state.flaggedCommands }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -261,6 +272,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           agentLanguage: p.agentLanguage ?? DEFAULTS.agentLanguage,
           hasCompletedOnboarding: p.hasCompletedOnboarding ?? DEFAULTS.hasCompletedOnboarding,
           sandboxEnabled: p.sandboxEnabled ?? DEFAULTS.sandboxEnabled,
+          chatTextFontSize: normalizeChatTextFontSize(p.chatTextFontSize),
           flaggedCommands: Array.isArray(p.flaggedCommands) ? p.flaggedCommands : DEFAULTS.flaggedCommands,
           // Merge shortcuts: defaults for new keys, but preserve null (cleared by conflict)
           shortcuts: Object.fromEntries(
@@ -274,6 +286,16 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     }
   )
 )
+
+function normalizeChatTextFontSize(size: unknown): ChatTextFontSize {
+  if (typeof size !== 'number' || !Number.isFinite(size)) {
+    return DEFAULT_CHAT_TEXT_FONT_SIZE
+  }
+  const rounded = Math.round(size)
+  return (CHAT_TEXT_FONT_SIZE_OPTIONS as readonly number[]).includes(rounded)
+    ? rounded as ChatTextFontSize
+    : DEFAULT_CHAT_TEXT_FONT_SIZE
+}
 
 /** Check if two KeyBindings are equivalent */
 function bindingsEqual(a: KeyBinding, b: KeyBinding): boolean {

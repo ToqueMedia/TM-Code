@@ -130,6 +130,21 @@ function MinimalTitleBar() {
     } catch (e) { console.error('Window toggle failed:', e) }
   }
 
+  const handleDoubleClick = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
+    const t = e.target as HTMLElement
+    const tag = t.tagName?.toLowerCase() || ''
+    if (['button', 'input', 'svg', 'path'].includes(tag)) return
+    if (t.getAttribute?.('role') === 'button') return
+    if (t.closest?.('[data-no-drag]')) return
+    if (avatarRef.current?.contains(t)) return
+    try {
+      const win = getCurrentWindow()
+      const isMax = await win.isMaximized()
+      if (isMax) await win.unmaximize()
+      else await win.maximize()
+    } catch (err) { console.error('Window toggle failed:', err) }
+  }, [])
+
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
     const t = e.target as HTMLElement
@@ -183,6 +198,7 @@ function MinimalTitleBar() {
       userSelect="none"
       flexShrink={0}
       onMouseDown={handleMouseDown}
+      onDoubleClick={handleDoubleClick}
     >
       {/* Left: Window controls (macOS) + menus */}
       <HStack gap={2} flexShrink={0} pl={1} data-no-drag>

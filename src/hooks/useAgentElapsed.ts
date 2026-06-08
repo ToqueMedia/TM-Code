@@ -3,6 +3,7 @@ import { useAgentStore } from '../stores/agentStore'
 import { useChatStore } from '../stores/chatStore'
 import { usePermissionStore } from '../stores/permissionStore'
 import { useCredentialRequestStore } from '../stores/credentialRequestStore'
+import { useAskUserQuestionStore } from '../stores/askUserQuestionStore'
 
 /**
  * Elapsed-time ticker for any UI that surfaces "the agent is busy for N seconds".
@@ -37,12 +38,13 @@ export function useAgentElapsed(mode: 'phase' | 'session'): {
   const isStreaming = useChatStore(s => s.isStreaming)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const pendingCredentialCount = useCredentialRequestStore(s => s.pending.size)
+  const pendingQuestionCount = useAskUserQuestionStore(s => s.pending.size)
   const pendingDiffCount = useChatStore(s => s.pendingDiffs.length)
 
   const isBusy = mode === 'phase'
     ? status !== 'idle' && status !== 'error'
     : isStreaming
-  const isPaused = !!pendingPermission || pendingCredentialCount > 0 || pendingDiffCount > 0
+  const isPaused = !!pendingPermission || pendingCredentialCount > 0 || pendingQuestionCount > 0 || pendingDiffCount > 0
 
   const [elapsedMs, setElapsedMs] = useState(0)
   const phaseStartRef = useRef<number>(0)

@@ -55,6 +55,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
       justify="space-between"
       userSelect="none"
       flexShrink={0}
+      data-ui-chrome
     >
       {/* Left: label + project path */}
       <Flex align="center" gap={2} overflow="hidden" flex="1" minW={0}>

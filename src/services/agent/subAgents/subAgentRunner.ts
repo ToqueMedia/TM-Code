@@ -18,6 +18,7 @@ import { createSubAgentClient } from '../sdkClient'
 import { QueryEngine } from '../queryEngine'
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from '../query'
 import ToolExecutor from '../toolExecutor'
+import { useBillingStore } from '../../../stores/billingStore'
 import { useSubAgentStore } from '../../../stores/subAgentStore'
 import { maybeWakeMainAgent } from './autoWake'
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
@@ -71,7 +72,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   }))
 
   // ── Tool executor bridge ──
-  const toolExecutor = ToolExecutor.getInstance()
+  const toolExecutor = ToolExecutor.getInstance().createIsolatedChild()
 
   const executeTool: ToolExecutorFn = async (toolName, toolInput, toolUseId, signal) => {
     try {
@@ -100,6 +101,9 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     tools: openaiTools,
     executeTool,
     maxTurns: definition.maxTurns,
+    onResponseHeaders: (headers) => {
+      useBillingStore.getState().updateFromHeaders(headers)
+    },
   })
 
   // ── Timers ──
@@ -199,6 +203,10 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
             }
             break
 
+          case 'billing_update':
+            useBillingStore.getState().updateFromSSE(event.billing)
+            break
+
           case 'error':
             // Error events are handled by the terminal result
             break
@@ -263,6 +271,10 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
         })
       })
       maybeWakeMainAgent()
+    } finally {
+      clearTimeout(wallClockTimer)
+      clearInterval(staleTimer)
+      toolExecutor.disposeIsolatedChild()
     }
   })()
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
@@ -9,6 +9,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import { useTerminalPanelStore, TERMINAL_PANEL_MIN_WIDTH } from '../../stores/terminalPanelStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands'
 import CmdModePromptInput, { type CmdModePromptInputRef } from './CmdModePromptInput'
 import { TerminalTitleBar } from './TerminalTitleBar'
@@ -43,6 +44,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const agentStatus = useAgentStore(s => s.status)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const hasPendingAskUserQuestion = useAskUserQuestionStore(s => s.pending.size > 0)
+  const chatTextFontSize = useSettingsStore(s => s.chatTextFontSize)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
@@ -536,6 +538,45 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const maxPanelWidth = outerWidth > 0 ? Math.floor(outerWidth * 0.5) : terminalWidthPref
   const clampedPanelWidth = Math.min(terminalWidthPref, Math.max(TERMINAL_PANEL_MIN_WIDTH, maxPanelWidth))
 
+  const terminalTextScaleStyles = useMemo(() => {
+    const bodySize = `${chatTextFontSize}px`
+    const codeSize = `${Math.max(12, chatTextFontSize - 1)}px`
+    return {
+      '--terminal-a11y-text-size': bodySize,
+      '--terminal-a11y-code-size': codeSize,
+      '& [data-cmd-mode-root]': {
+        fontSize: 'var(--terminal-a11y-text-size)',
+      },
+      '& [data-cmd-mode-root] :is(p, li, span, div, button, textarea, input, table, th, td):not([data-ui-chrome] *)': {
+        fontSize: 'var(--terminal-a11y-text-size) !important',
+        lineHeight: '1.6',
+      },
+      '& [data-cmd-mode-root] :is(code, pre, pre *):not([data-ui-chrome] *)': {
+        fontSize: 'var(--terminal-a11y-code-size) !important',
+        lineHeight: '1.6',
+      },
+      '& [data-cmd-mode-root] :is(h1):not([data-ui-chrome] *)': {
+        fontSize: `${chatTextFontSize + 4}px !important`,
+        lineHeight: '1.35',
+      },
+      '& [data-cmd-mode-root] :is(h2):not([data-ui-chrome] *)': {
+        fontSize: `${chatTextFontSize + 2}px !important`,
+        lineHeight: '1.4',
+      },
+      '& [data-cmd-mode-root] :is(h3):not([data-ui-chrome] *)': {
+        fontSize: `${chatTextFontSize + 1}px !important`,
+        lineHeight: '1.45',
+      },
+      '& [data-cmd-mode-root] :is(p, li, span, div, button, textarea, input, th, td, code, pre)': {
+        overflowWrap: 'anywhere',
+        wordBreak: 'break-word',
+      },
+      '& [data-cmd-mode-root] :is(button, [role="button"])': {
+        whiteSpace: 'normal',
+      },
+    }
+  }, [chatTextFontSize])
+
   // Divider drag — captures pointer, updates width store.
   const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null)
   const handleDividerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -567,9 +608,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       bg={tokens.colors.terminal.background}
       color={tokens.colors.terminal.foreground}
       fontFamily={tokens.fontFamily.mono}
-      fontSize="14px"
+      fontSize={`${chatTextFontSize}px`}
       position="relative"
       overflow="hidden"
+      css={terminalTextScaleStyles}
     >
     <Flex
       direction="column"

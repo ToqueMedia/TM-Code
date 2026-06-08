@@ -72,7 +72,7 @@ function getDisplayCommand(toolCall: ToolCallDisplay): string {
 
   if (toolCall.toolName === 'check_background_commands') {
     const id = typeof toolCall.input?.id === 'string' ? toolCall.input.id.trim() : ''
-    return id ? `check_background_commands --id ${id}` : 'check_background_commands'
+    return id ? `# check background command ${id}` : '# check background commands'
   }
 
   if (toolCall.toolName === 'agent_shell_start') {

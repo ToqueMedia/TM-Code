@@ -51,6 +51,8 @@ export interface QueryEngineOptions {
   maxTurns?: number
   /** Extra headers merged into every chat.completions.create request. */
   extraHeaders?: Record<string, string>
+  /** Called as soon as streaming response headers are available. */
+  onResponseHeaders?: (headers: Headers) => void
 }
 
 export interface QueryEngineState {
@@ -153,6 +155,7 @@ export class QueryEngine {
       },
       compactInstructions: this.options.compactInstructions,
       extraHeaders: this.options.extraHeaders,
+      onResponseHeaders: this.options.onResponseHeaders,
     }
 
     try {

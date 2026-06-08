@@ -25,6 +25,11 @@ interface CommandResult {
   success: boolean
 }
 
+interface CommandCandidate {
+  label: string
+  command: string
+}
+
 const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
 const cache = new Map<string, {
@@ -36,22 +41,21 @@ async function checkSingle(req: Requirement): Promise<CheckResult> {
   const homeDir = await invoke<string>('get_home_directory').catch(() => null)
   
   // Support multiple commands for the same requirement (e.g. python3 OR python)
-  const commandsToTry = (req.name === 'Python 3' && IS_WINDOWS) 
-    ? ['python', 'python3'] 
-    : [req.command]
+  const commandsToTry = getCommandCandidates(req, homeDir)
 
   let lastError = ''
+  let bestOutdated: CheckResult | null = null
 
-  for (const cmd of commandsToTry) {
+  for (const candidate of commandsToTry) {
     try {
-      console.log(`[envCheck] Checking ${req.name} via "${cmd} ${req.versionFlag}"`)
+      console.log(`[envCheck] Checking ${req.name} via "${candidate.label}"`)
       
       const output = await invoke<CommandResult>('execute_command', {
-        command: `${cmd} ${req.versionFlag}`,
+        command: candidate.command,
         cwd: homeDir,
       })
 
-      console.log(`[envCheck] Result for ${req.name} (${cmd}):`, output)
+      console.log(`[envCheck] Result for ${req.name} (${candidate.label}):`, output)
 
       if (output.success) {
         const rawOutput = (output.stdout || output.stderr || '').trim()
@@ -59,22 +63,30 @@ async function checkSingle(req: Requirement): Promise<CheckResult> {
 
         if (version) {
           const meetsMinimum = compareVersions(version, req.minVersion) >= 0
-          return {
+          const result = {
             requirement: req,
             found: true,
             version,
             meetsMinimum,
             error: meetsMinimum ? null : t('env.versionBelowMin').replace('{version}', version).replace('{min}', req.minVersion),
           }
+          if (meetsMinimum) return result
+          if (!bestOutdated || compareVersions(version, bestOutdated.version || '0.0.0') > 0) {
+            bestOutdated = result
+          }
+          lastError = result.error || ''
+          continue
         }
         lastError = t('env.parseFailed').replace('{output}', rawOutput)
       } else {
-        lastError = t('env.commandFailed').replace('{command}', cmd)
+        lastError = t('env.commandFailed').replace('{command}', candidate.label)
       }
     } catch (e) {
       lastError = String(e)
     }
   }
+
+  if (bestOutdated) return bestOutdated
 
   return {
     requirement: req,
@@ -83,6 +95,104 @@ async function checkSingle(req: Requirement): Promise<CheckResult> {
     meetsMinimum: false,
     error: `${req.name} not found. ${lastError}`,
   }
+}
+
+function quoteCommandPath(path: string): string {
+  return /[\s()]/.test(path) ? `"${path.replace(/"/g, '\\"')}"` : path
+}
+
+function commandCandidate(command: string, versionFlag: string, label = command): CommandCandidate {
+  return { label, command: `${command} ${versionFlag}` }
+}
+
+function literalShellSingleQuoted(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+function latestExecutableVersionCommand(globPattern: string): string {
+  return `bash -lc ${literalShellSingleQuoted(`for bin in ${globPattern}; do [ -x "$bin" ] || continue; "$bin" --version; done | awk '{ raw=$0; v=$0; sub(/^v/, "", v); split(v, a, "."); score=(a[1]+0)*1000000000+(a[2]+0)*1000000+(a[3]+0); if (score > bestScore) { bestScore=score; best=raw } } END { if (best != "") print best }'`)}`
+}
+
+function getCommandCandidates(req: Requirement, homeDir: string | null): CommandCandidate[] {
+  const candidates: CommandCandidate[] = [commandCandidate(req.command, req.versionFlag)]
+
+  if (req.name === 'Python 3') {
+    if (IS_WINDOWS) {
+      candidates.push(
+        commandCandidate('python3', req.versionFlag),
+        commandCandidate('py -3', req.versionFlag),
+      )
+    } else {
+      candidates.push(commandCandidate('python', req.versionFlag))
+      if (homeDir) {
+        candidates.push(
+          commandCandidate(`${homeDir}/.pyenv/shims/python3`, req.versionFlag),
+          commandCandidate(`${homeDir}/.asdf/shims/python3`, req.versionFlag),
+        )
+      }
+      candidates.push(
+        commandCandidate('/opt/homebrew/bin/python3', req.versionFlag),
+        commandCandidate('/usr/local/bin/python3', req.versionFlag),
+      )
+    }
+  }
+
+  if (req.name === 'Node.js') {
+    if (homeDir) {
+      candidates.push(
+        commandCandidate(`${homeDir}/.volta/bin/node`, req.versionFlag),
+        commandCandidate(`${homeDir}/.asdf/shims/node`, req.versionFlag),
+        commandCandidate(`${homeDir}/.nodenv/shims/node`, req.versionFlag),
+        commandCandidate(`${homeDir}/.local/share/fnm/node-versions/current/installation/bin/node`, req.versionFlag),
+      )
+    }
+    if (!IS_WINDOWS) {
+      // `nvm use 20` only changes the PATH of the terminal where it ran; a
+      // running Tauri app will not inherit it. Probe installed nvm versions
+      // directly and return the highest node binary found.
+      candidates.push({
+        label: 'nvm installed node versions',
+        command: latestExecutableVersionCommand('"$HOME"/.nvm/versions/node/v*/bin/node'),
+      })
+      candidates.push({
+        label: 'fnm installed node versions',
+        command: latestExecutableVersionCommand('"$HOME"/.local/share/fnm/node-versions/v*/installation/bin/node "$HOME"/Library/Application\\ Support/fnm/node-versions/v*/installation/bin/node'),
+      })
+      candidates.push({
+        label: 'asdf installed node versions',
+        command: latestExecutableVersionCommand('"$HOME"/.asdf/installs/nodejs/*/bin/node'),
+      })
+      candidates.push({
+        label: 'nodenv installed node versions',
+        command: latestExecutableVersionCommand('"$HOME"/.nodenv/versions/*/bin/node'),
+      })
+      candidates.push(
+        commandCandidate('/opt/homebrew/bin/node', req.versionFlag),
+        commandCandidate('/usr/local/bin/node', req.versionFlag),
+      )
+    }
+  }
+
+  if (req.name === 'Git') {
+    if (IS_WINDOWS) {
+      candidates.push(
+        commandCandidate(quoteCommandPath('C:\\Program Files\\Git\\cmd\\git.exe'), req.versionFlag),
+        commandCandidate(quoteCommandPath('C:\\Program Files (x86)\\Git\\cmd\\git.exe'), req.versionFlag),
+      )
+    } else {
+      candidates.push(
+        commandCandidate('/opt/homebrew/bin/git', req.versionFlag),
+        commandCandidate('/usr/local/bin/git', req.versionFlag),
+      )
+    }
+  }
+
+  const seen = new Set<string>()
+  return candidates.filter(candidate => {
+    if (!candidate.command || seen.has(candidate.command)) return false
+    seen.add(candidate.command)
+    return true
+  })
 }
 
 /**

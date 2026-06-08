@@ -76,6 +76,28 @@ function buildReadSummary(toolName: string, result: string | undefined): string 
   return null
 }
 
+function buildTaskCompletionSummary(result: string | undefined, input: Record<string, unknown> | undefined): string | null {
+  if (result) {
+    const match = result.match(/Task list updated:\s*(\d+)\/(\d+)\s+completed\./)
+    if (match) return `${match[1]}/${match[2]}`
+  }
+
+  const tasks = input?.tasks
+  if (!Array.isArray(tasks)) return null
+
+  const completed = tasks.filter((task) => {
+    if (!task || typeof task !== 'object') return false
+    return (task as { status?: unknown }).status === 'completed'
+  }).length
+  return `${completed}/${tasks.length}`
+}
+
+function buildTaskListPreview(result: string | undefined): string | null {
+  if (!result) return null
+  if (!result.includes('Active tasks:') && !result.includes('New task list:')) return null
+  return result.split('\n').slice(1).join('\n').trim() || null
+}
+
 export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: TerminalToolCallProps) {
   const isError = toolCall.isError || toolCall.status === 'failed'
   const isRunning = toolCall.status === 'running'
@@ -96,10 +118,14 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
 
   const display = getToolDisplay(toolCall.toolName)
   const verb = isRunning ? display.running : isError ? display.failed : display.done
+  const taskCompletionSummary = toolCall.toolName === 'update_tasks'
+    ? buildTaskCompletionSummary(toolCall.result, toolCall.input)
+    : null
   const subtitle = useMemo(
     () => getToolSubtitle(toolCall.toolName, toolCall.input),
     [toolCall.toolName, toolCall.input],
   )
+  const headerSubtitle = taskCompletionSummary ?? subtitle
 
   const filePath = typeof toolCall.input?.file_path === 'string'
     ? (toolCall.input.file_path as string)
@@ -124,6 +150,12 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
   // Errors are shown for all tools (critical for debugging).
   // Success results for execute_command, MCP, etc. are intentionally hidden.
   const screenshotSrc = toolCall.result ? extractImageSrc(toolCall.result) : null
+  const taskListResult =
+    toolCall.toolName === 'update_tasks' &&
+    !isRunning &&
+    !isError
+      ? buildTaskListPreview(toolCall.result)
+      : null
 
   return (
     <Box
@@ -185,9 +217,9 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
           flexShrink={0}
         >
           {verb}
-          {subtitle && (
+          {headerSubtitle && (
             <Text as="span" color={tokens.colors.text.muted} fontWeight="400">
-              ({subtitle.length > 70 ? shortenPath(subtitle) : subtitle})
+              ({headerSubtitle.length > 70 ? shortenPath(headerSubtitle) : headerSubtitle})
             </Text>
           )}
         </Text>
@@ -263,6 +295,28 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
               borderRadius="4px"
               border="1px solid rgba(255,255,255,0.06)"
             />
+          </Box>
+        )}
+
+        {/* Task updates: show unfinished/new tasks inline. Completed lists stay hidden. */}
+        {taskListResult && (
+          <Box
+            mt="3px"
+            px={2}
+            py="5px"
+            borderRadius="3px"
+            bg="rgba(255,255,255,0.025)"
+            border="1px solid rgba(255,255,255,0.06)"
+          >
+            <Text
+              fontSize="12px"
+              color={tokens.colors.text.secondary}
+              whiteSpace="pre-wrap"
+              lineHeight="1.5"
+              fontFamily={tokens.fontFamily.mono}
+            >
+              {taskListResult}
+            </Text>
           </Box>
         )}
 

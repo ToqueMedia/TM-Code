@@ -25,6 +25,8 @@ export const RequirementsErrorScreen: React.FC<RequirementsErrorScreenProps> = (
     return !status || !status.meetsMinimum
   })
 
+  const getStatus = (reqName: string) => result?.requirements?.[reqName]
+
   return (
     <Flex
       direction="column"
@@ -48,15 +50,18 @@ export const RequirementsErrorScreen: React.FC<RequirementsErrorScreenProps> = (
 
         <VStack gap={2}>
           <Heading size="lg" fontWeight="800">
-            Requisitos em falta
+            Requisitos incompatíveis
           </Heading>
           <Text color={tokens.colors.text.secondary} fontSize="15px">
-            O TM Code requer as seguintes ferramentas instaladas no seu sistema para funcionar corretamente.
+            O TM Code precisa destas ferramentas com versões compatíveis para funcionar corretamente.
           </Text>
         </VStack>
 
         <VStack align="stretch" w="100%" gap={3} mt={4}>
-          {missingMandatory.map(req => (
+          {missingMandatory.map(req => {
+            const status = getStatus(req.name)
+            const isOutdated = !!status?.found && !status.meetsMinimum
+            return (
             <Box
               key={req.name}
               bg={tokens.colors.bg.card}
@@ -83,10 +88,13 @@ export const RequirementsErrorScreen: React.FC<RequirementsErrorScreenProps> = (
                 </Link>
               </Flex>
               <Text fontSize="12px" color={tokens.colors.text.muted}>
-                {req.installHint}
+                {isOutdated
+                  ? `Encontrado ${status?.version ?? 'versão desconhecida'} — mínimo necessário ${req.minVersion}. ${req.installHint}`
+                  : `Não encontrado. ${req.installHint}`}
               </Text>
             </Box>
-          ))}
+            )
+          })}
         </VStack>
 
         <Button

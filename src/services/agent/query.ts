@@ -12,6 +12,7 @@
 
 import type OpenAI from "openai";
 import type { ContentBlockAPI } from "../../types/chat";
+import type { BillingSSEEvent } from "../../stores/billingStore";
 import {
   microcompact,
   applyToolResultBudget,
@@ -55,6 +56,7 @@ export type QueryStreamEvent =
   | { type: "tool_use_stop"; id: string }
   | { type: "message_start" }
   | { type: "message_stop"; stopReason: string; usage?: OpenAI.CompletionUsage }
+  | { type: "billing_update"; billing: BillingSSEEvent }
   | {
       type: "tool_result";
       toolUseId: string;
@@ -113,6 +115,8 @@ export interface QueryParams {
   compactInstructions?: string;
   /** Extra headers merged into every chat.completions.create request. */
   extraHeaders?: Record<string, string>;
+  /** Called as soon as streaming response headers are available. */
+  onResponseHeaders?: (headers: Headers) => void;
 }
 
 /** Terminal return value. */
@@ -316,6 +320,7 @@ export async function* query(
     onUsage,
     compactInstructions,
     extraHeaders,
+    onResponseHeaders,
   } = params;
 
   let state: LoopState = {
@@ -524,13 +529,20 @@ export async function* query(
         Object.assign(streamParams, thinkingConfig);
       }
 
-      const stream = await client.chat.completions.create(
+      const responsePromise = client.chat.completions.create(
         {
           ...streamParams,
           stream: true,
         } as any,
         { signal, headers: extraHeaders },
       );
+      const { data: stream, response } =
+        typeof (responsePromise as any).withResponse === "function"
+          ? await (responsePromise as any).withResponse()
+          : { data: await responsePromise, response: null };
+      if (response?.headers) {
+        onResponseHeaders?.(response.headers);
+      }
 
       // Process OpenAI stream chunks
       for await (const chunk of stream as any) {
@@ -571,6 +583,11 @@ export async function* query(
             retryInMs:
               typeof chunk.retryInMs === "number" ? chunk.retryInMs : undefined,
           };
+          continue;
+        }
+
+        if (chunk?.type === "billing") {
+          yield { type: "billing_update", billing: chunk as BillingSSEEvent };
           continue;
         }
 

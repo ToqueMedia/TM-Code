@@ -14,7 +14,7 @@ import {
 } from '@chakra-ui/react'
 import { FiArrowLeft, FiPlus, FiTrash2, FiSquare, FiRefreshCw, FiServer, FiExternalLink, FiLogOut } from 'react-icons/fi'
 import { useLayoutStore } from '../../stores/layoutStore'
-import { useSettingsStore, DEFAULT_SHORTCUTS, type ShortcutId, type KeyBinding } from '../../stores/settingsStore'
+import { useSettingsStore, DEFAULT_SHORTCUTS, CHAT_TEXT_FONT_SIZE_OPTIONS, type ShortcutId, type KeyBinding } from '../../stores/settingsStore'
 import { useUpdateStore } from '../../stores/updateStore'
 import KeyBindingDisplay from '../ui/KeyBindingDisplay'
 import { useSkillStore } from '../../stores/skillStore'
@@ -855,15 +855,53 @@ function EditorSection() {
   const insertSpaces = useSettingsStore(function (s) { return s.editor.insertSpaces })
   const detectIndentation = useSettingsStore(function (s) { return s.editor.detectIndentation })
   const formatOnSave = useSettingsStore(function (s) { return s.formatOnSave })
+  const chatTextFontSize = useSettingsStore(function (s) { return s.chatTextFontSize })
 
   const setAutocompleteEnabled = useSettingsStore(function (s) { return s.setAutocompleteEnabled })
   const setTabSize = useSettingsStore(function (s) { return s.setTabSize })
   const setInsertSpaces = useSettingsStore(function (s) { return s.setInsertSpaces })
   const setDetectIndentation = useSettingsStore(function (s) { return s.setDetectIndentation })
   const setFormatOnSave = useSettingsStore(function (s) { return s.setFormatOnSave })
+  const setChatTextFontSize = useSettingsStore(function (s) { return s.setChatTextFontSize })
 
   return (
     <VStack align="stretch" gap={6}>
+      <SettingsGroup title={t('settings.accessibility')}>
+        <Field.Root>
+          <HStack justify="space-between" align="center" gap={4}>
+            <Box minW={0}>
+              <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                {t('settings.chatTextSize')}
+              </Text>
+              <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                {t('settings.chatTextSizeDesc')}
+              </Text>
+            </Box>
+            <NativeSelect.Root size="sm" width="150px" flexShrink={0}>
+              <NativeSelect.Field
+                bg={tokens.colors.bg.input}
+                borderColor={tokens.colors.border.input}
+                color={tokens.colors.text.primary}
+                value={String(chatTextFontSize)}
+                onChange={function (e) {
+                  const v = parseInt(e.target.value, 10)
+                  if (!Number.isNaN(v)) setChatTextFontSize(v)
+                }}
+              >
+                {CHAT_TEXT_FONT_SIZE_OPTIONS.map(function (size) {
+                  return (
+                    <option key={size} value={String(size)}>
+                      {size === 14 ? t('settings.textSizeDefault') : `${size}px`}
+                    </option>
+                  )
+                })}
+              </NativeSelect.Field>
+              <NativeSelect.Indicator />
+            </NativeSelect.Root>
+          </HStack>
+        </Field.Root>
+      </SettingsGroup>
+
       <SettingsGroup title={t("settings.aiAutocomplete")}>
         <Field.Root>
           <HStack justify="space-between">

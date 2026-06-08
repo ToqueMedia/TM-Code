@@ -24,11 +24,13 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>
   search_files: FiSearch,
   glob: FiSearch,
   execute_command: FiTerminal,
+  execute_command_background: FiTerminal,
   create_directory: FiFolder,
   web_fetch: FiGlobe,
   research: FiCpu,
   spawn_background_agent: FiCpu,
   check_background_agents: FiSearch,
+  check_background_commands: FiSearch,
 }
 
 /** Tools where we show a file-extension icon instead of the generic tool icon. */
@@ -47,6 +49,8 @@ const TOOL_LABELS: Record<string, string> = {
   search_files: t('toolLabel.searching'),
   glob: t('toolLabel.findingFiles'),
   execute_command: t('toolLabel.running'),
+  execute_command_background: t('toolLabel.backgroundCommand'),
+  check_background_commands: t('toolLabel.checkingBackgroundCommands'),
   start_dev_server: t('toolLabel.startingServer'),
   read_dev_server_logs: t('toolLabel.readingLogs'),
   read_large_result: t('toolLabel.readingOutput'),
@@ -111,6 +115,12 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       const cmd = String(input.command || '')
       return cmd.length > 60 ? cmd.slice(0, 57) + '...' : cmd
     }
+    case 'execute_command_background': {
+      const cmd = String(input.command || '')
+      return cmd.length > 60 ? cmd.slice(0, 57) + '...' : cmd
+    }
+    case 'check_background_commands':
+      return input.id ? String(input.id) : ''
     case 'start_dev_server': {
       const type = input.server_type === 'backend' ? 'backend' : 'frontend'
       return `${type} server`

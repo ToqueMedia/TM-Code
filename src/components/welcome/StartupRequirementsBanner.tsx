@@ -174,7 +174,7 @@ function StartupRequirementsBanner() {
                   <Text fontSize="11px" color={tokens.colors.text.secondary} lineHeight="1.4" lineClamp={1}>
                     {!r.found
                       ? r.requirement.installHint
-                      : `Found ${r.version ?? 'unknown'} — ${r.requirement.installHint}`}
+                      : `Found ${r.version ?? 'unknown'} — requires ${r.requirement.minVersion}+. ${r.requirement.installHint}`}
                   </Text>
                 </Box>
                 <Box
