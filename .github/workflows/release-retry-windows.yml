@@ -50,10 +50,9 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
-      - name: Import Windows certificate
+      - name: Prepare Windows certificate
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path certificate -Force
@@ -63,19 +62,27 @@ jobs:
           if (-not (Test-Path certificate/certificate.pfx)) {
             throw 'Decoded Windows certificate was not created.'
           }
-          Import-PfxCertificate `
-            -FilePath certificate/certificate.pfx `
-            -CertStoreLocation Cert:\CurrentUser\My `
-            -Password (ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText)
 
       - name: Install frontend dependencies
         run: yarn install --frozen-lockfile
+
+      - name: Verify Windows code signing
+        env:
+          WINDOWS_CERTIFICATE_PATH: ${{ github.workspace }}\certificate\certificate.pfx
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          $probe = Join-Path $env:RUNNER_TEMP 'tm-code-signing-probe.exe'
+          Copy-Item "$env:WINDIR\System32\notepad.exe" $probe -Force
+          ./scripts/sign-windows.ps1 $probe
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          WINDOWS_CERTIFICATE_PATH: ${{ github.workspace }}\certificate\certificate.pfx
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           VITE_USE_EMULATORS: 'false'
           VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
           VITE_APPCHECK_ENABLED: 'false'
