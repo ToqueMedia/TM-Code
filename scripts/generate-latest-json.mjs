@@ -21,9 +21,10 @@ if (!version) {
   process.exit(1);
 }
 
-// Normalize version format (ensure it starts with 'v')
-const tagVersion = version.startsWith('v') ? version : `v${version}`;
-const bareVersion = tagVersion.substring(1);
+// Preserve the exact release tag passed by the workflow. Older releases used
+// `v0.x.y`; 0.7.3+ uses plain `0.x.y`.
+const tagVersion = version;
+const bareVersion = tagVersion.startsWith('v') ? tagVersion.substring(1) : tagVersion;
 
 const repo = 'ToqueMedia/TM-Code';
 const baseUrl = `https://github.com/${repo}/releases/download/${tagVersion}`;

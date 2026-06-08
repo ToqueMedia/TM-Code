@@ -1,97 +1,40 @@
-name: Release
+name: Release Retry Failed Platforms
 
 on:
-  push:
-    tags:
-      - 'v*'
-      - '[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing release tag to complete'
+        required: true
+        default: '0.7.3'
+      source_ref:
+        description: 'Source ref to build'
+        required: true
+        default: '0.7.3'
 
 jobs:
-  create-release:
+  verify-release:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Get version from tag
+      - name: Resolve version
         id: version
-        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
 
-      - name: Create draft release on public repo
+      - name: Ensure draft release exists
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
         run: |
-          gh release create "${{ steps.version.outputs.version }}" \
-            --repo ToqueMedia/TM-Code \
-            --title "TM Code ${{ steps.version.outputs.version }}" \
-            --notes "Download the installer for your platform below." \
-            --draft || echo "Draft release already exists, continuing."
-
-
-  build-linux:
-    needs: create-release
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: yarn
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - name: Install frontend dependencies
-        run: yarn install --frozen-lockfile
-
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
-          VITE_USE_EMULATORS: 'false'
-          VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
-          VITE_APPCHECK_ENABLED: 'false'
-          VITE_DASHSCOPE_API_KEY: ${{ secrets.VITE_DASHSCOPE_API_KEY }}
-          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
-          VITE_FIREBASE_AUTH_DOMAIN: 'maiplayer-ac56d.firebaseapp.com'
-          VITE_FIREBASE_PROJECT_ID: 'maiplayer-ac56d'
-          VITE_FIREBASE_STORAGE_BUCKET: 'maiplayer-ac56d.firebasestorage.app'
-          VITE_FIREBASE_MESSAGING_SENDER_ID: '113004896685'
-          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
-          VITE_FIREBASE_MEASUREMENT_ID: 'G-S6V1T01G96'
-        with:
-          includeUpdaterJson: true
-
-      - name: Upload artifacts to public repo release
-        env:
-          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
-        shell: bash
-        run: |
-          VERSION="${{ needs.create-release.outputs.version }}"
-          find src-tauri/target -path "*/bundle/*" -type f \( \
-            -name "*.deb" -o -name "*.AppImage" -o -name "*.AppImage.sig" -o -name "*.deb.sig" \
-          \) | while read file; do
-            echo "Uploading: $file"
-            gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
-          done
+          gh release view "${{ inputs.version }}" --repo ToqueMedia/TM-Code >/dev/null
 
   build-macos-apple-silicon:
-    needs: create-release
+    needs: verify-release
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -158,14 +101,14 @@ jobs:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
         shell: bash
         run: |
-          VERSION="${{ needs.create-release.outputs.version }}"
+          VERSION="${{ needs.verify-release.outputs.version }}"
+          BARE_VERSION="${VERSION#v}"
           find src-tauri/target -path "*/bundle/*" -type f \( \
             -name "*.dmg" -o -name "*.dmg.sig" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
           \) | while read file; do
             echo "Uploading: $file"
             gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
           done
-          BARE_VERSION="${VERSION#v}"
           TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
           TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
           if [ -n "$TAR_GZ" ]; then
@@ -178,10 +121,12 @@ jobs:
           fi
 
   build-macos-intel:
-    needs: create-release
+    needs: verify-release
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -248,14 +193,14 @@ jobs:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
         shell: bash
         run: |
-          VERSION="${{ needs.create-release.outputs.version }}"
+          VERSION="${{ needs.verify-release.outputs.version }}"
+          BARE_VERSION="${VERSION#v}"
           find src-tauri/target -path "*/bundle/*" -type f \( \
             -name "*.dmg" -o -name "*.dmg.sig" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
           \) | while read file; do
             echo "Uploading: $file"
             gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
           done
-          BARE_VERSION="${VERSION#v}"
           TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
           TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
           if [ -n "$TAR_GZ" ]; then
@@ -268,10 +213,12 @@ jobs:
           fi
 
   build-windows:
-    needs: create-release
+    needs: verify-release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -327,7 +274,7 @@ jobs:
       - name: Upload artifacts to public repo release
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
-          VERSION: ${{ needs.create-release.outputs.version }}
+          VERSION: ${{ needs.verify-release.outputs.version }}
         shell: pwsh
         run: |
           Get-ChildItem -Path src-tauri\target -Recurse -File |
@@ -347,10 +294,7 @@ jobs:
             }
 
   generate-updater:
-    # Runs AFTER all platform builds complete.
-    # Builds the latest.json updater manifest from the release assets,
-    # so all platforms are included in one file.
-    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel, build-windows]
+    needs: [verify-release, build-macos-apple-silicon, build-macos-intel, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -364,16 +308,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
         run: |
-          node scripts/generate-latest-json.mjs "${{ needs.create-release.outputs.version }}"
+          node scripts/generate-latest-json.mjs "${{ needs.verify-release.outputs.version }}"
 
   publish-release:
-    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel, build-windows, generate-updater]
+    needs: [verify-release, build-macos-apple-silicon, build-macos-intel, build-windows, generate-updater]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release (remove draft)
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
         run: |
-          gh release edit "${{ needs.create-release.outputs.version }}" \
+          gh release edit "${{ needs.verify-release.outputs.version }}" \
             --repo ToqueMedia/TM-Code \
             --draft=false
