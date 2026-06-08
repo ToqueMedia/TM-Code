@@ -267,100 +267,11 @@ jobs:
             fi
           fi
 
-  build-windows:
-    needs: create-release
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: yarn
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
-
-      - name: Prepare Windows certificate
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path certificate -Force
-          Set-Content -Path certificate/tempCert.txt -Value $env:WINDOWS_CERTIFICATE
-          certutil -decode certificate/tempCert.txt certificate/certificate.pfx
-          Remove-Item certificate/tempCert.txt -Force
-          if (-not (Test-Path certificate/certificate.pfx)) {
-            throw 'Decoded Windows certificate was not created.'
-          }
-
-      - name: Install frontend dependencies
-        run: yarn install --frozen-lockfile
-
-      - name: Verify Windows code signing
-        env:
-          WINDOWS_CERTIFICATE_PATH: ${{ github.workspace }}\certificate\certificate.pfx
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        shell: pwsh
-        run: |
-          $probe = Join-Path $env:RUNNER_TEMP 'tm-code-signing-probe.exe'
-          Copy-Item "$env:WINDIR\System32\notepad.exe" $probe -Force
-          ./scripts/sign-windows.ps1 $probe
-
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
-          WINDOWS_CERTIFICATE_PATH: ${{ github.workspace }}\certificate\certificate.pfx
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          VITE_USE_EMULATORS: 'false'
-          VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
-          VITE_APPCHECK_ENABLED: 'false'
-          VITE_DASHSCOPE_API_KEY: ${{ secrets.VITE_DASHSCOPE_API_KEY }}
-          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
-          VITE_FIREBASE_AUTH_DOMAIN: 'maiplayer-ac56d.firebaseapp.com'
-          VITE_FIREBASE_PROJECT_ID: 'maiplayer-ac56d'
-          VITE_FIREBASE_STORAGE_BUCKET: 'maiplayer-ac56d.firebasestorage.app'
-          VITE_FIREBASE_MESSAGING_SENDER_ID: '113004896685'
-          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
-          VITE_FIREBASE_MEASUREMENT_ID: 'G-S6V1T01G96'
-        with:
-          includeUpdaterJson: true
-
-      - name: Upload artifacts to public repo release
-        env:
-          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
-          VERSION: ${{ needs.create-release.outputs.version }}
-        shell: pwsh
-        run: |
-          Get-ChildItem -Path src-tauri\target -Recurse -File |
-            Where-Object {
-              $_.FullName -match '\\bundle\\' -and (
-                $_.Name -like '*.msi' -or
-                $_.Name -like '*.msi.sig' -or
-                $_.Name -like '*.exe' -or
-                $_.Name -like '*.exe.sig' -or
-                $_.Name -like '*.zip' -or
-                $_.Name -like '*.zip.sig'
-              )
-            } |
-            ForEach-Object {
-              Write-Host "Uploading: $($_.FullName)"
-              gh release upload "$env:VERSION" $_.FullName --repo ToqueMedia/TM-Code --clobber
-            }
-
   generate-updater:
     # Runs AFTER all platform builds complete.
     # Builds the latest.json updater manifest from the release assets,
     # so all platforms are included in one file.
-    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel, build-windows]
+    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -377,7 +288,7 @@ jobs:
           node scripts/generate-latest-json.mjs "${{ needs.create-release.outputs.version }}"
 
   publish-release:
-    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel, build-windows, generate-updater]
+    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel, generate-updater]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release (remove draft)
