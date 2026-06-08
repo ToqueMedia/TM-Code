@@ -16,6 +16,7 @@
     "tauri:build:win-x64:unsigned": "node scripts/build.mjs x86_64-pc-windows-msvc --unsigned",
     "tauri:build:mac-intel": "node scripts/build.mjs x86_64-apple-darwin",
     "tauri:build:mac-arm64": "node scripts/build.mjs aarch64-apple-darwin",
+    "release:finalize": "node scripts/finalize-release.mjs",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",

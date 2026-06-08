@@ -160,6 +160,9 @@ try {
   console.log('\n🚀 Successfully updated latest.json on the GitHub release!');
 } catch (error) {
   console.error(`❌ Error uploading latest.json: ${error.message}`);
+  fs.rmSync(sigsDir, { recursive: true, force: true });
+  fs.unlinkSync(latestJsonPath);
+  process.exit(1);
 }
 
 // Clean up temp dir and local latest.json
