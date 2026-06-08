@@ -2,9 +2,19 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "windows": {
-      "certificateThumbprint": "38E6C668AC8EFE1303075A685595003AC087970A",
-      "digestAlgorithm": "sha256",
-      "timestampUrl": "http://timestamp.comodoca.com"
+      "certificateThumbprint": null,
+      "digestAlgorithm": null,
+      "timestampUrl": null,
+      "signCommand": {
+        "cmd": "powershell",
+        "args": [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          "$script = if ($env:GITHUB_WORKSPACE) { Join-Path $env:GITHUB_WORKSPACE 'scripts/sign-windows.ps1' } elseif (Test-Path 'scripts/sign-windows.ps1') { 'scripts/sign-windows.ps1' } else { '../scripts/sign-windows.ps1' }; & $script '%1'"
+        ]
+      }
     }
   }
 }
