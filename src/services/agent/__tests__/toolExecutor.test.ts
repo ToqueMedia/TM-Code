@@ -1298,6 +1298,48 @@ describe('J: Path validation', () => {
     const prefixResult = await exec.execute('read_file', { file_path: '.\\src\\components\\Button.tsx' })
     expect(prefixResult).toBe('win-content')
   })
+
+  it('treats Windows drive-letter paths with forward slashes as absolute', async () => {
+    mockCurrentProject.path = 'C:/Users/celso/Documents/Gestao de Tarefas'
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue('win-content' as never)
+
+    const result = await exec.execute('read_file', {
+      file_path: 'C:/Users/celso/Documents/Gestao de Tarefas/src/App.tsx',
+    })
+
+    expect(result).toBe('win-content')
+    expect(mockInvoke).toHaveBeenCalledWith('read_file', {
+      path: 'C:/Users/celso/Documents/Gestao de Tarefas/src/App.tsx',
+    })
+  })
+
+  it('does not duplicate Windows forward-slash directories for read-only search tools', async () => {
+    const root = 'C:/Users/celso/Documents/Gestao de Tarefas'
+    mockCurrentProject.path = root
+    const exec = freshExecutor()
+
+    mockInvoke.mockResolvedValueOnce({ name: 'Gestao de Tarefas', type: 'directory', children: [] } as never)
+    await exec.execute('list_directory', { file_path: root })
+    expect(mockInvoke).toHaveBeenLastCalledWith('build_file_tree', {
+      rootPath: root,
+      filter: { showHidden: false, maxDepth: 3 },
+    })
+
+    mockInvoke.mockResolvedValueOnce({ query: 'ReportsPage', total_files: 0, total_matches: 0, files: [], file_name_matches: [], duration_ms: 0, truncated: false } as never)
+    await exec.execute('search_files', { query: 'ReportsPage', directory: root })
+    expect(mockInvoke).toHaveBeenLastCalledWith('search_in_files', expect.objectContaining({
+      query: 'ReportsPage',
+      directory: root,
+    }))
+
+    mockInvoke.mockResolvedValueOnce([`${root}/src/App.tsx`] as never)
+    await exec.execute('glob', { pattern: 'src/**/*.tsx', directory: root })
+    expect(mockInvoke).toHaveBeenLastCalledWith('glob_files', {
+      pattern: 'src/**/*.tsx',
+      directory: root,
+    })
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════════

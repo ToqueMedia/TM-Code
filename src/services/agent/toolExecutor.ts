@@ -1191,13 +1191,13 @@ ${preview}
   
   /**
    * Resolve a potentially relative path to an absolute path.
-   * If the path is relative (doesn't start with '/' on Unix or 'C:\\' on Windows),
+   * If the path is relative (doesn't start with '/' on Unix or 'C:\\' / 'C:/' on Windows),
    * resolve it against the project root (or cmdModeCwd).
    */
   private resolveToAbsolute(p: string): string {
     if (!p) return p
     // Already absolute
-    if (p.startsWith('/') || /^[a-zA-Z]:\\/.test(p)) {
+    if (p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p)) {
       return p
     }
     // Relative path — resolve against project root or cmdModeCwd
