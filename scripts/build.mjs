@@ -6,17 +6,29 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+const positionalArgs = process.argv.slice(2).filter(arg => !arg.startsWith('--'));
+const flags = new Set(process.argv.slice(2).filter(arg => arg.startsWith('--')));
+
 // Get target from arguments
-const target = process.argv[2];
+const target = positionalArgs[0];
+const isUnsignedBuild = flags.has('--unsigned');
+const requireUpdaterArtifacts = flags.has('--require-updater-artifacts');
+const isWindowsTarget = target?.includes('windows') || (os.platform() === 'win32' && !target);
 
 // Check if TAURI_SIGNING_PRIVATE_KEY is already set
-if (!process.env.TAURI_SIGNING_PRIVATE_KEY) {
+if (!process.env.TAURI_SIGNING_PRIVATE_KEY && !isUnsignedBuild) {
   const keyPath = path.join(os.homedir(), '.tauri', 'toquemedia-studio.key');
   if (fs.existsSync(keyPath)) {
     console.log(`\n🔑 Found signing key locally at: ${keyPath}`);
     const key = fs.readFileSync(keyPath, 'utf8').trim();
     process.env.TAURI_SIGNING_PRIVATE_KEY = key;
     process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD = '';
+  } else if (isWindowsTarget || requireUpdaterArtifacts) {
+    console.error('\n❌ TAURI_SIGNING_PRIVATE_KEY is required for signed Windows release builds.');
+    console.error('   Without it, Tauri will not generate the Windows updater setup.exe.sig artifact.');
+    console.error(`   Save the key at: ${keyPath}`);
+    console.error('   Or run the explicit unsigned script: yarn tauri:build:win-x64:unsigned\n');
+    process.exit(1);
   } else {
     console.warn('\n================================================================================');
     console.warn('⚠️  WARNING: TAURI_SIGNING_PRIVATE_KEY is not set!');
@@ -85,6 +97,26 @@ const moveResult = spawnSync('node', moveArgs, {
 if (moveResult.status !== 0) {
   console.error(`❌ Organizing builds failed with exit code: ${moveResult.status}`);
   process.exit(moveResult.status || 1);
+}
+
+if (isWindowsTarget && requireUpdaterArtifacts) {
+  const pkgPath = path.join(__dirname, '../package.json');
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+  const version = pkg.version || 'unknown';
+  const destDir = path.join(os.homedir(), 'Desktop', 'builds-desktop', `v${version}`);
+  const files = fs.existsSync(destDir) ? fs.readdirSync(destDir) : [];
+  const setupFile = `TM.Code_${version}_x64-setup.exe`;
+  const setupSigFile = `${setupFile}.sig`;
+  const hasSetup = files.includes(setupFile);
+  const hasSetupSig = files.includes(setupSigFile);
+
+  if (!hasSetup || !hasSetupSig) {
+    console.error('\n❌ Windows updater artifacts are missing after build.');
+    console.error(`   Checked: ${destDir}`);
+    console.error(`   Required: ${setupFile} and ${setupSigFile}.`);
+    console.error('   Do not publish latest.json/release for Windows without these files.\n');
+    process.exit(1);
+  }
 }
 
 console.log('\n✅ Build completed and files organized successfully!\n');

@@ -25,6 +25,7 @@ if (!version) {
 // `v0.x.y`; 0.7.3+ uses plain `0.x.y`.
 const tagVersion = version;
 const bareVersion = tagVersion.startsWith('v') ? tagVersion.substring(1) : tagVersion;
+const allowMissingWindows = process.argv.includes('--allow-missing-windows');
 
 const repo = 'ToqueMedia/TM-Code';
 const baseUrl = `https://github.com/${repo}/releases/download/${tagVersion}`;
@@ -74,32 +75,39 @@ const linuxSig = readSig(`TM.Code_${bareVersion}_amd64.AppImage.sig`);
 const darwinArm64Sig = readSig(`TM.Code_${bareVersion}_aarch64.app.tar.gz.sig`);
 const darwinX64Sig = readSig(`TM.Code_${bareVersion}_x64.app.tar.gz.sig`);
 
-// Look for Windows signature dynamically
+// Look for Windows signature dynamically. Our Windows updater artifact naming
+// follows the historical release format:
+//   TM.Code_<version>_x64-setup.exe
+//   TM.Code_<version>_x64-setup.exe.sig
+// The MSI is uploaded for manual installation, but latest.json must point to
+// the setup.exe for the Tauri updater.
 let windowsSig = '';
-let windowsZipFile = `TM.Code_${bareVersion}_x64_en-US.msi.zip`; // fallback default
+let windowsInstallerFile = `TM.Code_${bareVersion}_x64-setup.exe`;
 
 const files = fs.readdirSync(sigsDir);
-// 1. Try to find standard .zip.sig first (strongly recommended by Tauri)
-let winSigFile = files.find(file => file.includes('_x64') && file.endsWith('.zip.sig'));
+let winSigFile = files.find(file => file === `TM.Code_${bareVersion}_x64-setup.exe.sig`);
 
-if (!winSigFile) {
-  // 2. Fallback to other potential Windows signatures (.msi.sig or .exe.sig / -setup.exe.sig)
-  winSigFile = files.find(file => 
-    file.includes('_x64') && 
-    (file.endsWith('.msi.sig') || file.endsWith('.exe.sig')) && 
-    !file.endsWith('.app.tar.gz.sig')
-  );
-  if (winSigFile) {
-    console.warn(`\n⚠️  WARNING: Found Windows signature "${winSigFile}" but it is not a ".zip.sig" file!`);
-    console.warn(`   Tauri's auto-updater client on Windows REQUIRES ".zip" bundles (e.g. "TM.Code_${bareVersion}_x64_en-US.msi.zip").`);
-    console.warn(`   Pointing the updater directly to a raw ".msi" or ".exe" will cause the update to fail on client machines.`);
-    console.warn(`   Make sure to build and upload ".zip" and ".zip.sig" files to the release!\n`);
-  }
-}
+// Fallback for future/renamed setup artifacts. Avoid MSI here: MSI is a manual
+// installer asset and older working latest.json files pointed to setup.exe.
+winSigFile ||= files.find(file =>
+  file.includes('_x64')
+  && file.endsWith('-setup.exe.sig')
+  && !file.endsWith('.app.tar.gz.sig')
+);
 
 if (winSigFile) {
   windowsSig = readSig(winSigFile);
-  windowsZipFile = winSigFile.replace(/\.sig$/, '');
+  windowsInstallerFile = winSigFile.replace(/\.sig$/, '');
+}
+
+if (!windowsSig && !allowMissingWindows) {
+  console.error('\n❌ Windows updater artifact is missing from the release.');
+  console.error('   latest.json must include windows-x86_64, otherwise Windows clients show a raw updater error.');
+  console.error(`   Build Windows manually with: yarn tauri:build:win-x64`);
+  console.error(`   Upload TM.Code_${bareVersion}_x64-setup.exe and TM.Code_${bareVersion}_x64-setup.exe.sig, then rerun this script.`);
+  console.error('   For an intentional non-updater/platform-limited release, pass --allow-missing-windows explicitly.\n');
+  fs.rmSync(sigsDir, { recursive: true, force: true });
+  process.exit(1);
 }
 
 // Construct latest.json
@@ -134,7 +142,7 @@ if (darwinX64Sig) {
 if (windowsSig) {
   latestJson.platforms['windows-x86_64'] = {
     signature: windowsSig,
-    url: `${baseUrl}/${windowsZipFile}`
+    url: `${baseUrl}/${windowsInstallerFile}`
   };
 }
 
