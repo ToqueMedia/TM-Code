@@ -382,6 +382,13 @@ class AgentService {
     const client = this.lightweightOptions
       ? createSubAgentClient(authToken)
       : createAgentClient(authToken);
+    const refreshClient = async (): Promise<OpenAI | null> => {
+      const refreshed = await FirebaseAuthService.getInstance().getIdToken(true);
+      if (!refreshed) return null;
+      return this.lightweightOptions
+        ? createSubAgentClient(refreshed)
+        : createAgentClient(refreshed);
+    };
 
     // 3. Build tool definitions in OpenAI format
     const filteredTools = this.tools.filter((t) => {
@@ -410,6 +417,7 @@ class AgentService {
     // 7. Create QueryEngine
     const engine = new QueryEngine({
       client,
+      refreshClient,
       model: this.resolveModel(),
       systemPrompt: this.systemPrompt,
       tools: openaiTools,

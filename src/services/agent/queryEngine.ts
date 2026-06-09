@@ -31,6 +31,8 @@ const DEFAULT_MODEL = 'mimo-v2.5-pro-1m'
 export interface QueryEngineOptions {
   /** OpenAI SDK client (pre-configured with baseURL + auth). */
   client: OpenAI
+  /** Recreate the SDK client with fresh credentials after an auth failure. */
+  refreshClient?: () => Promise<OpenAI | null>
   /** Model ID. Default: mimo-v2.5-pro-1m. */
   model?: string
   /** System prompt. */
@@ -141,6 +143,7 @@ export class QueryEngine {
       messages,
       systemPrompt: this.options.systemPrompt,
       client: this.options.client,
+      refreshClient: this.options.refreshClient,
       model: this.options.model ?? DEFAULT_MODEL,
       tools: this.options.tools,
       executeTool: this.options.executeTool,

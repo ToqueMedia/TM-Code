@@ -38,6 +38,9 @@ import {
 
 const MAX_OUTPUT_TOKENS = 32_768;
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3;
+const PLATFORM_AUTH_REFRESH_ATTEMPTS = 1;
+const CREDENTIAL_CONFIG_MAX_RETRIES = 3;
+const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
 
 // ── Types ──
 
@@ -95,6 +98,8 @@ export interface QueryParams {
   systemPrompt: string;
   /** OpenAI SDK client (pre-configured with baseURL + auth). */
   client: OpenAI;
+  /** Recreate the SDK client with fresh credentials after an auth failure. */
+  refreshClient?: () => Promise<OpenAI | null>;
   /** Model ID to use. */
   model: string;
   /** Tool definitions in OpenAI format. */
@@ -142,6 +147,118 @@ interface LoopState {
 
 function generateId(): string {
   return `toolu_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      resolve(false);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function errorStatus(error: unknown): number | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : undefined;
+}
+
+function errorSource(error: unknown): string | undefined {
+  const source = (error as { source?: unknown } | null)?.source;
+  return typeof source === "string" ? source : undefined;
+}
+
+function errorPayload(error: unknown): string {
+  const apiError = (error as { error?: unknown } | null)?.error;
+  if (!apiError) return "";
+  if (typeof apiError === "string") return apiError;
+  try {
+    return JSON.stringify(apiError);
+  } catch {
+    return "";
+  }
+}
+
+function isPlatformAuthError(error: unknown): boolean {
+  if (errorSource(error) === "upstream") return false;
+  if (errorStatus(error) !== 401) return false;
+  const text = `${errorMessage(error)} ${errorPayload(error)}`.toLowerCase();
+  return /invalid token|expired|auth|unauthori[sz]ed/.test(text);
+}
+
+function isCredentialOrConfigError(error: unknown): boolean {
+  const status = errorStatus(error);
+  const text = `${errorMessage(error)} ${errorPayload(error)}`.toLowerCase();
+
+  if (errorSource(error) === "upstream" && (status === 401 || status === 403)) {
+    return true;
+  }
+
+  return (
+    /api key not configured|auth not configured|endpoint not configured|provider not configured/.test(text) ||
+    /invalid api key|incorrect api key|api key.*invalid|invalid token|unauthori[sz]ed|permission denied|forbidden|credential/.test(text)
+  );
+}
+
+function hasStartedModelOutput(args: {
+  textParts: string[];
+  thinkingParts: string[];
+  toolCalls: unknown[];
+  pendingToolCalls: Map<unknown, unknown>;
+}): boolean {
+  return (
+    args.textParts.length > 0 ||
+    args.thinkingParts.length > 0 ||
+    args.toolCalls.length > 0 ||
+    args.pendingToolCalls.size > 0
+  );
+}
+
+function createStreamPayloadError(raw: unknown): Error {
+  const payload = raw as {
+    type?: unknown;
+    message?: unknown;
+    status?: unknown;
+    provider?: unknown;
+    model?: unknown;
+  };
+  const status = typeof payload.status === "number" ? payload.status : undefined;
+  const message =
+    typeof payload.message === "string"
+      ? payload.message
+      : errorMessage(raw);
+  const err = new Error(
+    status ? `Provider error (${status}): ${message}` : message,
+  );
+  const annotated = err as Error & {
+    status?: number;
+    source?: string;
+    type?: unknown;
+    provider?: unknown;
+    model?: unknown;
+  };
+  annotated.status = status;
+  annotated.source = "upstream";
+  annotated.type = payload.type;
+  annotated.provider = payload.provider;
+  annotated.model = payload.model;
+  return annotated;
 }
 
 /** Convert internal QueryMessage[] to OpenAI ChatCompletionMessageParam[]. */
@@ -309,7 +426,6 @@ export async function* query(
 ): AsyncGenerator<QueryStreamEvent, QueryTerminal> {
   const {
     systemPrompt,
-    client,
     model,
     tools,
     executeTool,
@@ -322,6 +438,8 @@ export async function* query(
     extraHeaders,
     onResponseHeaders,
   } = params;
+  let client = params.client;
+  const refreshClient = params.refreshClient;
 
   let state: LoopState = {
     messages: [...params.messages],
@@ -338,7 +456,7 @@ export async function* query(
   let thinkingOnlyRecoveryCount = 0;
 
   // eslint-disable-next-line no-constant-condition
-  while (true) {
+  queryLoop: while (true) {
     const {
       messages,
       autoCompactTracking,
@@ -513,6 +631,13 @@ export async function* query(
     const contentBuffer: string[] = [];
     let thinkMode = false; // true when inside <think>...</think> or <thought>...</thought>
 
+    let authRefreshAttempts = 0;
+    let credentialConfigRetries = 0;
+
+    // Retry the same model turn only before any assistant output/tool call has
+    // been emitted. Retrying after visible output could duplicate text or tools.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
     try {
       const streamParams: Record<string, unknown> = {
         model,
@@ -589,6 +714,10 @@ export async function* query(
         if (chunk?.type === "billing") {
           yield { type: "billing_update", billing: chunk as BillingSSEEvent };
           continue;
+        }
+
+        if (chunk?.error) {
+          throw createStreamPayloadError(chunk.error);
         }
 
         // Defensive: skip chunks that are null/undefined or lack choices array
@@ -812,8 +941,79 @@ export async function* query(
 
       // Get final message for usage/stop reason (not needed with standard stream)
       // Usage and finish_reason are already captured from chunks above
+      break;
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
+      const outputStarted = hasStartedModelOutput({
+        textParts: assistantTextParts,
+        thinkingParts: assistantThinkingParts,
+        toolCalls: collectedToolCalls,
+        pendingToolCalls,
+      });
+
+      if (
+        !outputStarted &&
+        isPlatformAuthError(error)
+      ) {
+        if (refreshClient && authRefreshAttempts < PLATFORM_AUTH_REFRESH_ATTEMPTS) {
+          authRefreshAttempts++;
+          yield {
+            type: "worker_status",
+            phase: "retrying",
+            message: "Authentication token expired. Refreshing and retrying...",
+            attempt: authRefreshAttempts,
+            maxAttempts: PLATFORM_AUTH_REFRESH_ATTEMPTS,
+            httpStatus: errorStatus(error),
+          };
+          const refreshed = await refreshClient();
+          if (refreshed) {
+            client = refreshed;
+            continue;
+          }
+        }
+        yield {
+          type: "error",
+          message: "Authentication expired. Please sign in again.",
+        };
+        return {
+          reason: "error",
+          turnCount: state.turnCount,
+          totalInputTokens,
+          totalOutputTokens,
+        };
+      }
+
+      if (
+        !outputStarted &&
+        isCredentialOrConfigError(error) &&
+        credentialConfigRetries < CREDENTIAL_CONFIG_MAX_RETRIES
+      ) {
+        const nextRetry = credentialConfigRetries + 1;
+        yield {
+          type: "worker_status",
+          phase: "retrying",
+          message: `Provider credential/configuration error. Retrying ${nextRetry}/${CREDENTIAL_CONFIG_MAX_RETRIES} in 30s...`,
+          attempt: nextRetry,
+          maxAttempts: CREDENTIAL_CONFIG_MAX_RETRIES,
+          httpStatus: errorStatus(error),
+          retryInMs: CREDENTIAL_CONFIG_RETRY_DELAY_MS,
+        };
+        const completedDelay = await abortableDelay(
+          CREDENTIAL_CONFIG_RETRY_DELAY_MS,
+          signal,
+        );
+        if (!completedDelay) {
+          yield { type: "interrupted" };
+          return {
+            reason: "aborted",
+            turnCount: state.turnCount,
+            totalInputTokens,
+            totalOutputTokens,
+          };
+        }
+        credentialConfigRetries = nextRetry;
+        continue;
+      }
 
       // ── Collapse recovery on prompt_too_long ──
       const MAX_COLLAPSE_RECOVERY = 3;
@@ -834,7 +1034,7 @@ export async function* query(
             messages: recovery.messages as QueryMessage[],
             collapseRecoveryAttempts: state.collapseRecoveryAttempts + 1,
           };
-          continue;
+          continue queryLoop;
         }
       }
 
@@ -856,6 +1056,7 @@ export async function* query(
         totalInputTokens,
         totalOutputTokens,
       };
+    }
     }
 
     // ── Record usage ──
