@@ -27,6 +27,7 @@ import { useAttachments } from '../../hooks/useAttachments'
 import { useTranslation } from '@/i18n/useTranslation'
 import { tokens } from '@/theme/tokens'
 import { FiChevronDown } from 'react-icons/fi'
+import { hasCopyableSelection } from './terminalKeyboard'
 
 interface TerminalViewProps {
   projectPath: string
@@ -289,7 +290,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   }, [pendingPermission])
 
   // Native terminal keyboard shortcuts.
-  // Ctrl+C: stop agent if active
+  // Ctrl/Cmd+C: stop agent if active and no selected text would be copied
   // Ctrl+L: scroll to bottom (like native terminal clear)
   // Ctrl+K: clear input line (like native terminal)
   useEffect(() => {
@@ -299,8 +300,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     }
     const handler = (e: KeyboardEvent) => {
       // Ctrl/Cmd+C — stop agent when it is active, including non-streaming tool phases.
+      // If the user has selected text in chat, prompt, terminal output, or Monaco,
+      // leave the browser/editor copy behavior untouched.
       if (e.key === 'c' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
-        if (isAgentActive()) {
+        if (isAgentActive() && !hasCopyableSelection(e.target)) {
           e.preventDefault()
           e.stopPropagation()
           stopAgent()
