@@ -36,6 +36,7 @@ import { useByokStore } from '../../stores/byokStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
 import { tauriFetch, registerHeaderProvider } from '../tauriFetch'
 import { resolveWorkerUrl } from '../../utils/devUrls'
+import { syncInstalledTmCodeVersion } from '../tmCodeVersionSync'
 
 // Firebase config from environment variables — no hardcoded fallbacks.
 // Lazy initialization: validated on first use (not at import time) so tests
@@ -241,6 +242,8 @@ class FirebaseAuthService {
         isAdmin: previousIsAdmin,
       }
       store.setUser(authData)
+
+      this.syncInstalledVersion(user.uid)
 
       // Enrich with Firestore profile (for displayName/photoURL) — non-blocking.
       // Precedence: Firestore profile → live Firebase user → store (may have been
@@ -729,6 +732,19 @@ class FirebaseAuthService {
   /** Best-effort profile field sync (fire-and-forget) */
   private syncProfile(uid: string, fields: Record<string, unknown>) {
     setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid), fields, { merge: true }).catch(() => {})
+  }
+
+  /** Best-effort installed IDE version sync, keyed locally per authenticated user. */
+  private syncInstalledVersion(uid: string) {
+    syncInstalledTmCodeVersion(uid, async (version) => {
+      const now = Timestamp.now()
+      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid), {
+        tmCodeVersion: version,
+        tmCodeVersionUpdatedAt: now,
+      }, { merge: true })
+    }).catch((err) => {
+      console.warn('[auth] TM Code version sync failed:', err)
+    })
   }
 
 }

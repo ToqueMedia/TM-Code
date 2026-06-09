@@ -5,6 +5,10 @@ jest.mock('@tauri-apps/api/core', () => ({
   invoke: jest.fn(),
 }))
 
+jest.mock('@tauri-apps/api/app', () => ({
+  getVersion: jest.fn().mockResolvedValue('0.0.0-test'),
+}))
+
 // Mock Tauri plugin-fs
 jest.mock('@tauri-apps/plugin-fs', () => ({
   readTextFile: jest.fn(),
