@@ -1,0 +1,303 @@
+diff --git a/src/billingStream.ts b/src/billingStream.ts
+index ef2ca17..f695230 100644
+--- a/src/billingStream.ts
++++ b/src/billingStream.ts
+@@ -42,6 +42,8 @@ export interface BillingStreamContext {
+    * usage normally, this field is ignored.
+    */
+   inputChars?: number
++  /** Multiplier applied to provider-reported tokens before TMS budget commit. */
++  billingMultiplier?: number
+ }
+ 
+ /** Characters-per-token ratio for the missing-usage fallback estimator.
+@@ -306,8 +308,19 @@ export function createBillingStream(
+     return usageData ? usageData.prompt_tokens + usageData.completion_tokens : 0
+   }
+ 
++  function getBillingMultiplier(): number {
++    const multiplier = ctx.billingMultiplier ?? 1
++    return Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1
++  }
++
++  function getChargedTokens(rawTokens: number): number {
++    return Math.ceil(rawTokens * getBillingMultiplier())
++  }
++
+   function buildBillingSSE(): string {
+     const rawTokens = getRawTokens()
++    const chargedTokens = getChargedTokens(rawTokens)
++    const billingMultiplier = getBillingMultiplier()
+ 
+     // BYOK: emit a stripped-down event. TMS budget fields are zero/empty;
+     // the IDE reads `byok: true` and ignores them.
+@@ -316,7 +329,7 @@ export function createBillingStream(
+         type: 'billing',
+         consumed_pct: 0,
+         status: 'allowed',
+-        tokens_used: rawTokens,
++        tokens_used: chargedTokens,
+         tokens_consumed: 0,
+         token_budget: 0,
+         cycle_end: '',
+@@ -324,6 +337,7 @@ export function createBillingStream(
+         plan: ctx.planConfig.planId as UserPlanName,
+         used_overage: false,
+         byok: true,
++        billing_multiplier: billingMultiplier,
+       }
+       return `data: ${JSON.stringify(event)}\n\n`
+     }
+@@ -332,10 +346,10 @@ export function createBillingStream(
+ 
+     // Predicted post-commit state — what the user sees in the UI.
+     // tokensConsumed grows in BOTH cycle and overage modes (monotonic).
+-    const predictedTokensConsumed = ctx.tokenBudget.tokensConsumed + rawTokens
++    const predictedTokensConsumed = ctx.tokenBudget.tokensConsumed + chargedTokens
+     let predictedExtraBalance = ctx.tokenBudget.extraUsageBalance
+     if (wasOverage) {
+-      predictedExtraBalance = Math.max(0, predictedExtraBalance - rawTokens)
++      predictedExtraBalance = Math.max(0, predictedExtraBalance - chargedTokens)
+     }
+ 
+     const tokenBudget = ctx.planConfig.tokenBudget
+@@ -363,13 +377,14 @@ export function createBillingStream(
+       type: 'billing',
+       consumed_pct: consumedPct,
+       status,
+-      tokens_used: rawTokens,
++      tokens_used: chargedTokens,
+       tokens_consumed: predictedTokensConsumed,
+       token_budget: tokenBudget,
+       cycle_end: ctx.tokenBudget.cycleEnd,
+       extra_usage_balance: predictedExtraBalance,
+       plan: ctx.planConfig.planId as UserPlanName,
+       used_overage: wasOverage,
++      billing_multiplier: billingMultiplier,
+     }
+     return `data: ${JSON.stringify(event)}\n\n`
+   }
+@@ -389,6 +404,8 @@ export function createBillingStream(
+       return
+     }
+ 
++    const chargedTokens = getChargedTokens(rawTokens)
++
+     if (rawTokens === 0) {
+       if (streamInterrupted) {
+         // Stream dropped mid-flight (already logged by proxy.ts's wrapper as
+@@ -428,7 +445,7 @@ export function createBillingStream(
+       if (hasEstimable) {
+         const estimatedPrompt = Math.ceil((ctx.inputChars ?? 0) / ESTIMATION_CHARS_PER_TOKEN)
+         const estimatedCompletion = Math.ceil(outputChars / ESTIMATION_CHARS_PER_TOKEN)
+-        const estimatedTotal = estimatedPrompt + estimatedCompletion
++        const estimatedTotal = getChargedTokens(estimatedPrompt + estimatedCompletion)
+ 
+         console.warn(
+           `[billing] SILENT_TOKEN_LOSS_RECOVERED user=${ctx.userId} plan=${ctx.planConfig.planId} ` +
+@@ -501,7 +518,7 @@ export function createBillingStream(
+     }
+ 
+     console.info(
+-      `[billing] finalize: user=${ctx.userId} tokens=${rawTokens} ` +
++      `[billing] finalize: user=${ctx.userId} tokens=${rawTokens} charged=${chargedTokens} ` +
+       `mode=${ctx.budgetCheck.usingOverage ? 'overage' : 'cycle'} ` +
+       `model=${ctx.model ?? '?'}`
+     )
+@@ -511,13 +528,13 @@ export function createBillingStream(
+     // overage (by design — fair-use soft cap), but we log it so we can
+     // measure how much "free spillover" is happening across users.
+     if (!ctx.budgetCheck.usingOverage && ctx.planConfig.tokenBudget > 0) {
+-      const newTotal = ctx.tokenBudget.tokensConsumed + rawTokens
++      const newTotal = ctx.tokenBudget.tokensConsumed + chargedTokens
+       if (newTotal > ctx.planConfig.tokenBudget) {
+         const spillover = newTotal - Math.max(ctx.tokenBudget.tokensConsumed, ctx.planConfig.tokenBudget)
+         console.warn(
+           `[billing] SPILLOVER user=${ctx.userId} plan=${ctx.planConfig.planId} ` +
+           `model=${ctx.model ?? '?'} budget=${ctx.planConfig.tokenBudget} ` +
+-          `pre=${ctx.tokenBudget.tokensConsumed} request=${rawTokens} spillover=${spillover}`
++          `pre=${ctx.tokenBudget.tokensConsumed} request=${chargedTokens} raw=${rawTokens} spillover=${spillover}`
+         )
+       }
+     }
+@@ -526,7 +543,7 @@ export function createBillingStream(
+       userId: ctx.userId,
+       projectId: ctx.projectId,
+       idToken: ctx.idToken,
+-      rawTokens,
++      rawTokens: chargedTokens,
+       asOverage: ctx.budgetCheck.usingOverage,
+       environment: ctx.environment,
+       kv: ctx.kv,
+@@ -539,7 +556,7 @@ export function createBillingStream(
+ 
+     if (!result.success) {
+       console.error(
+-        `[billing] commit failed user=${ctx.userId} tokens=${rawTokens} mode=${ctx.budgetCheck.usingOverage ? 'overage' : 'cycle'} — request was served free`
++        `[billing] commit failed user=${ctx.userId} tokens=${chargedTokens} raw=${rawTokens} mode=${ctx.budgetCheck.usingOverage ? 'overage' : 'cycle'} — request was served free`
+       )
+     }
+   }
+diff --git a/src/index.ts b/src/index.ts
+index c32fe36..ed39599 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -216,7 +216,7 @@ const EXPOSED_HEADERS = [
+ 
+ const ALLOWED_HEADERS = [
+   'Content-Type', 'Authorization',
+-  'X-Firebase-AppCheck', 'X-Conversation-Id', 'X-Request-Type',
++  'X-Firebase-AppCheck', 'X-Conversation-Id', 'X-Request-Type', 'X-TM-Speed', 'x-tm-speed',
+   // BYOK request headers — without these in the allow-list, the browser
+   // preflight (OPTIONS) blocks any chat request that carries a user-supplied
+   // API key. They never leak server-side: byok.ts redacts them from logs.
+@@ -1564,6 +1564,7 @@ export default {
+ 
+         const actualModel = response.headers.get('X-Model-Name') || planConfig.model
+         const actualProvider = response.headers.get('X-Model-Provider') || planConfig.provider
++        const billingMultiplier = actualModel === 'mimo-v2.5-pro-ultraspeed' ? 3 : 1
+         // Performance trace: auth | user+byok | plan | body | upstream
+         console.info(`[perf] auth=${t1 - t0}ms user=${t2 - t1}ms plan=${t3 - t2}ms body=${t4 - t3}ms fetch=${t5 - t4}ms total=${t5 - t0}ms model=${actualModel} provider=${actualProvider} status=${response.status}`)
+ 
+@@ -1608,6 +1609,7 @@ export default {
+           const completionTokens = parsePositiveIntHeader(response.headers, 'X-Usage-Completion-Tokens')
+           const totalTokens = parsePositiveIntHeader(response.headers, 'X-Usage-Total-Tokens')
+           const rawTokens = totalTokens || (promptTokens + completionTokens)
++          const chargedTokens = Math.ceil(rawTokens * billingMultiplier)
+ 
+           if (rawTokens > 0) {
+             ctx.waitUntil(
+@@ -1615,7 +1617,7 @@ export default {
+                 userId,
+                 projectId: env.FIREBASE_PROJECT_ID,
+                 idToken,
+-                rawTokens,
++                rawTokens: chargedTokens,
+                 asOverage: budgetCheck.usingOverage,
+                 environment: env.ENVIRONMENT,
+                 kv: env.RATE_LIMIT,
+@@ -1626,7 +1628,7 @@ export default {
+                 env,
+               }).then(result => {
+                 if (!result.success) {
+-                  console.error(`[billing][non-stream] commit failed user=${userId} plan=${userData.userPlan} model=${actualModel} provider=${actualProvider} tokens=${rawTokens}`)
++                  console.error(`[billing][non-stream] commit failed user=${userId} plan=${userData.userPlan} model=${actualModel} provider=${actualProvider} tokens=${chargedTokens} raw=${rawTokens}`)
+                 }
+               })
+             )
+@@ -1643,6 +1645,13 @@ export default {
+           for (const [key, value] of Object.entries(budgetHeaders)) {
+             headers.set(key, value)
+           }
++          if (chargedTokens > 0) {
++            const predictedTokensConsumed = userData.tokenBudget.tokensConsumed + chargedTokens
++            headers.set('X-Tokens-Consumed', String(predictedTokensConsumed))
++            headers.set('X-Budget-Pct', planConfig.tokenBudget > 0
++              ? (predictedTokensConsumed / planConfig.tokenBudget).toFixed(4)
++              : '0.0000')
++          }
+ 
+           return new Response(response.body, {
+             status: response.status,
+@@ -1669,6 +1678,7 @@ export default {
+               env,
+               byok: false,
+               inputChars,
++              billingMultiplier,
+             })
+           : response.body
+ 
+diff --git a/src/proxy.ts b/src/proxy.ts
+index 2f5c749..1ef0c6d 100644
+--- a/src/proxy.ts
++++ b/src/proxy.ts
+@@ -56,6 +56,7 @@ const MODEL_TO_PROVIDER: Record<string, string> = {
+   'qwen3.7-max':         'dashscope',    // Alibaba Cloud flagship — 1M ctx, toggleable thinking
+   // ── Xiaomi MiMo (official API) ───────────────────
+   'mimo-v2.5-pro-1m':    'mimo-anthropic',
++  'mimo-v2.5-pro-ultraspeed': 'mimo-anthropic',
+   'mimo-v2.5-1m':        'mimo-anthropic',
+   // ── StepFun ──────────────────────────────────────
+   'step-3.7-flash':      'stepfun',      // High-throughput reasoning, multimodal, 256K ctx
+@@ -200,6 +201,7 @@ export async function applyProviderAuthHeader(
+  */
+ const MODEL_UPSTREAM_ID: Record<string, string> = {
+   'mimo-v2.5-pro-1m': 'mimo-v2.5-pro',
++  'mimo-v2.5-pro-ultraspeed': 'mimo-v2.5-pro-ultraspeed',
+   'mimo-v2.5-1m': 'mimo-v2.5',
+   // MiniMax: upstream expects exact model name as listed in docs.
+   'minimax-m2.7': 'MiniMax-M2.7',
+@@ -236,6 +238,7 @@ const MODEL_CONTEXT_BUDGET: Record<string, number> = {
+   'qwen3.6-plus':        1_000_000,
+   'qwen3.7-max':         1_000_000,
+   'mimo-v2.5-pro-1m':    1_000_000,
++  'mimo-v2.5-pro-ultraspeed': 1_000_000,
+   'mimo-v2.5-1m':        1_000_000,
+   'step-3.7-flash':      256_000,
+   'minimax-m2.7':        204_800,
+@@ -261,6 +264,7 @@ const MODEL_THINKING_MODE: Record<string, ThinkingMode> = {
+   'qwen3.6-plus':          'toggleable',
+   'qwen3.7-max':           'toggleable',
+   'mimo-v2.5-pro-1m':      'toggleable',
++  'mimo-v2.5-pro-ultraspeed': 'toggleable',
+   'mimo-v2.5-1m':          'toggleable',
+   'step-3.7-flash':        'toggleable',  // reasoning_effort: low|medium|high
+   'minimax-m2.7':          'none',
+@@ -380,6 +384,7 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
+   { id: 'glm-5.1',               name: 'GLM-5.1',                   providerLabel: 'Alibaba China',  category: 'coder' },
+   { id: 'qwen3.7-max',           name: 'Qwen 3.7 Max',              providerLabel: 'Alibaba China',  category: 'coder' },
+   { id: 'mimo-v2.5-pro-1m',      name: 'MiMo V2.5 Pro · 1M',        providerLabel: 'Official',       category: 'coder' },
++  { id: 'mimo-v2.5-pro-ultraspeed', name: 'MiMo V2.5 Pro UltraSpeed', providerLabel: 'Official',      category: 'coder' },
+   { id: 'mimo-v2.5-1m',          name: 'MiMo V2.5 · 1M',            providerLabel: 'Official',       category: 'coder' },
+   { id: 'step-3.7-flash',        name: 'Step 3.7 Flash',            providerLabel: 'StepFun',        category: 'coder' },
+   { id: 'minimax-m2.7',          name: 'MiniMax M2.7',              providerLabel: 'MiniMax',        category: 'coder' },
+@@ -816,16 +821,27 @@ export async function handleChatRequest(
+     provider = memorySidecar.provider
+     console.info(`[memory-sidecar] routed to model=${model} provider=${provider} stream=${(body as any).stream}`)
+   } else {
+-    // Normal request: respect client model choice, validated against plan
+-    const resolved = resolveClientModel(body.model, planConfig, env.ENVIRONMENT)
+-    if ('error' in resolved) {
+-      return Response.json(
+-        { error: (resolved as { error: string }).error },
+-        { status: 400 }
+-      )
++    if (request.headers.get('X-TM-Speed') === 'true') {
++      if (planConfig.planId === 'explorer' || planConfig.planId === 'byok-only') {
++        return Response.json(
++          { error: 'TM Speed requires a paid TMS plan', reason: 'tm_speed_paid_required' },
++          { status: 403 }
++        )
++      }
++      model = 'mimo-v2.5-pro-ultraspeed'
++      provider = MODEL_TO_PROVIDER[model] ?? 'mimo-anthropic'
++    } else {
++      // Normal request: respect client model choice, validated against plan
++      const resolved = resolveClientModel(body.model, planConfig, env.ENVIRONMENT)
++      if ('error' in resolved) {
++        return Response.json(
++          { error: (resolved as { error: string }).error },
++          { status: 400 }
++        )
++      }
++      model = (resolved as { model: string; providerKey: string }).model
++      provider = (resolved as { model: string; providerKey: string }).providerKey
+     }
+-    model = (resolved as { model: string; providerKey: string }).model
+-    provider = (resolved as { model: string; providerKey: string }).providerKey
+   }
+ 
+   // Multimodal preprocessing: if the request contains images, call Qwen 3.6 Plus
+diff --git a/src/types.ts b/src/types.ts
+index 99220d7..f83c6d9 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -332,6 +332,8 @@ export interface BillingEvent {
+    * `tokens_used` × provider pricing for cost display.
+    */
+   byok?: boolean
++  /** Multiplier applied to provider-reported tokens before TMS budget commit. */
++  billing_multiplier?: number
+ }
+ 
+ // ── Legacy rate-limit (kept for /v1/commit-message and burst protection) ──

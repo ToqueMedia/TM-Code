@@ -25,6 +25,7 @@ import {
 } from "../../stores/chatStore";
 import { useBillingStore } from "../../stores/billingStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useTmSpeedStore } from "../../stores/tmSpeedStore";
 import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
 import { getQueryGuard } from "./queryGuard";
@@ -411,8 +412,7 @@ class AgentService {
     const executeTool = this.createToolExecutorBridge(callbacks);
 
     // 6. Build extra headers — X-Request-Type is sticky across turns
-    const extraHeaders: Record<string, string> | undefined =
-      this.requestType ? { "X-Request-Type": this.requestType } : undefined;
+    const extraHeaders = this.buildExtraHeaders();
 
     // 7. Create QueryEngine
     const engine = new QueryEngine({
@@ -658,6 +658,15 @@ class AgentService {
     } catch {
       /* non-critical */
     }
+  }
+
+  private buildExtraHeaders(): Record<string, string> | undefined {
+    const headers: Record<string, string> = {};
+    if (this.requestType) headers["X-Request-Type"] = this.requestType;
+    if (!this.lightweightOptions && useTmSpeedStore.getState().enabled) {
+      headers["X-TM-Speed"] = "true";
+    }
+    return Object.keys(headers).length > 0 ? headers : undefined;
   }
 
   /**

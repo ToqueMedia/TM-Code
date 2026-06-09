@@ -33,6 +33,7 @@ import { useBillingStore } from '../../stores/billingStore'
 import { useFeaturesStore } from '../../stores/featuresStore'
 import { usePromotionsStore } from '../../stores/promotionsStore'
 import { useByokStore } from '../../stores/byokStore'
+import { useTmSpeedStore } from '../../stores/tmSpeedStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
 import { tauriFetch, registerHeaderProvider } from '../tauriFetch'
 import { resolveWorkerUrl } from '../../utils/devUrls'
@@ -219,6 +220,7 @@ class FirebaseAuthService {
       if (!user) {
         store.setUser(null)
         useBillingStore.getState().reset()
+        useTmSpeedStore.getState().reset()
         this.lastBillingFetchMs = 0 // allow immediate fetch on next login
         this.lastRegisteredUid = null // allow re-registration on next login
         this.unsubscribeUserDocListener()
@@ -257,7 +259,10 @@ class FirebaseAuthService {
       this.blockedSynced = false
       this.loadProfile(user.uid).then(profile => {
         if (gen !== this.authGeneration) return
-        if (!profile) return
+        if (!profile) {
+          useTmSpeedStore.getState().updateFromProfile(null)
+          return
+        }
         // Re-read the current store user so we don't clobber `isAdmin` if
         // /v1/me has already resolved and populated it. `authData.isAdmin`
         // is the snapshot captured at onAuthStateChanged time and may be
@@ -278,6 +283,7 @@ class FirebaseAuthService {
         if (profile.blocked === true) {
           this.blockedSynced = true
         }
+        useTmSpeedStore.getState().updateFromProfile(profile)
       }).catch(() => {})
 
       // Load billing data from backend API.
@@ -343,6 +349,7 @@ class FirebaseAuthService {
           firstSnapshot = false
           if (snap.exists()) {
             const d = snap.data()
+            useTmSpeedStore.getState().updateFromProfile(d)
             previousBillingHash = `${d.userPlan}|${d.tokenBudget}|${d.extraUsageBalance}`
           }
           return
@@ -352,6 +359,7 @@ class FirebaseAuthService {
         // path doesn't redundantly refetch within the next 5 minutes.
         // Backend /v1/me reads fresh from Firestore on every call.
         const data = snap.data()
+        useTmSpeedStore.getState().updateFromProfile(data)
         const currentBillingHash = `${data.userPlan}|${data.tokenBudget}|${data.extraUsageBalance}`
         if (currentBillingHash === previousBillingHash) {
           return
@@ -727,6 +735,24 @@ class FirebaseAuthService {
 
   getCurrentUser(): User | null {
     return this.currentUser
+  }
+
+  async setTmSpeedEnabled(enabled: boolean): Promise<void> {
+    if (!this.currentUser) {
+      throw new Error('Not authenticated')
+    }
+
+    const previous = useTmSpeedStore.getState().enabled
+    useTmSpeedStore.getState().setEnabled(enabled)
+    try {
+      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, this.currentUser.uid), {
+        tmSpeedEnabled: enabled,
+        tmSpeedUpdatedAt: Timestamp.now(),
+      }, { merge: true })
+    } catch (err) {
+      useTmSpeedStore.getState().setEnabled(previous)
+      throw err
+    }
   }
 
   /** Best-effort profile field sync (fire-and-forget) */

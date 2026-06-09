@@ -5,6 +5,7 @@ import { executePayments } from './commands/paymentsCommand'
 import { executeE2E } from './commands/e2eCommand'
 import { executeReview } from './commands/reviewCommand'
 import { executeCompact } from './commands/compactCommand'
+import { executeSpeed } from './commands/speedCommand'
 
 /** A canonical argument value the user can pick after the command name. */
 export interface SlashCommandArg {
@@ -54,6 +55,11 @@ export interface SlashCommand {
    * by another path (e.g. typing the full command and pressing enter).
    */
   requiresPaidPlan?: boolean
+  /**
+   * Defaults to true. Account-level commands such as `/speed` work before a
+   * project is open.
+   */
+  requiresProject?: boolean
 }
 
 class SlashCommandRegistry {
@@ -124,6 +130,15 @@ class SlashCommandRegistry {
       enabled: true,
       execute: executeCompact,
       argHint: '[optional: custom instructions for summarization]',
+    })
+
+    this.register({
+      name: '/speed',
+      description: 'Toggle TM Speed — Fast Mode 3x consume',
+      enabled: true,
+      execute: executeSpeed,
+      requiresPaidPlan: true,
+      requiresProject: false,
     })
 
     // Note: `/auth` was removed in favour of the `#auth-email-password` and

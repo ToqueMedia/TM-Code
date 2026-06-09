@@ -3,6 +3,7 @@ import { useChatStore } from '../stores/chatStore'
 import { useAgentStore } from '../stores/agentStore'
 import { useProjectStore } from '../stores/projectStore'
 import { useAuthStore } from '../stores/authStore'
+import { useBillingStore } from '../stores/billingStore'
 import { useTerminalPanelStore } from '../stores/terminalPanelStore'
 import { slashCommandRegistry, type SlashCommand } from '../services/agent/slashCommandRegistry'
 import { CMD_MODE_COMMANDS } from '../services/agent/cmdModeCommands'
@@ -294,6 +295,13 @@ export function useCmdPromptLogic() {
     if (command) {
       if (!command.enabled) {
         useChatStore.getState().addSystemMessage(`Command ${command.name} is not yet available.`, 'warn')
+        return
+      }
+      if (command.requiresPaidPlan && useBillingStore.getState().plan === 'explorer') {
+        useChatStore.getState().addSystemMessage(
+          `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`,
+          'warn',
+        )
         return
       }
       // Smart router for /payments — same parity as chat-mode usePromptBar.

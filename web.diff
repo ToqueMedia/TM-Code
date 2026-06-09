@@ -1,0 +1,143 @@
+diff --git a/packages/web/public/docs/21-planos-e-creditos.md b/packages/web/public/docs/21-planos-e-creditos.md
+index 61dbc0e..8d4c81d 100644
+--- a/packages/web/public/docs/21-planos-e-creditos.md
++++ b/packages/web/public/docs/21-planos-e-creditos.md
+@@ -24,6 +24,7 @@ Os preços actualizados estão em [code.toquemedia.net/pricing](https://code.toq
+ |---|---|---|
+ | Chat agent | ✓ | ✓ |
+ | `/init`, `/plan`, `/debug`, `/payments` | ✓ | ✓ |
++| `/speed` / TM Speed (MiMo UltraSpeed, consumo 3x) | ✗ | ✓ |
+ | `/te2e` (browser-driven QA) | ✗ | ✓ |
+ | Imagens em prompts | ✗ | ✓ |
+ | Reasoning toggle | ✗ | ✓ |
+@@ -33,6 +34,7 @@ Os preços actualizados estão em [code.toquemedia.net/pricing](https://code.toq
+ ### Como funciona o consumo
+ 
+ - Cada interacção com o agente deduz uma fracção do **consumo** do plano
++- Com **TM Speed** ligado (`/speed`), pedidos principais do agente consomem **3x** e usam MiMo V2.5 Pro UltraSpeed
+ - O consumo reinicia no início de cada ciclo (mensal)
+ - Quando ultrapassas o limite do plano, entras em **overage** (saldo extra cobrado avulso) se tiveres saldo
+ - A status bar mostra a percentagem de consumo
+diff --git a/packages/web/public/docs/7-comandos-do-agente-slash-commands.md b/packages/web/public/docs/7-comandos-do-agente-slash-commands.md
+index 6ffd9d1..b929e78 100644
+--- a/packages/web/public/docs/7-comandos-do-agente-slash-commands.md
++++ b/packages/web/public/docs/7-comandos-do-agente-slash-commands.md
+@@ -16,6 +16,7 @@ Escreves `/` no início da mensagem para abrir o menu de comandos. Tab/Enter par
+ | `/debug` | Investiga um erro de forma hipótese-driven | Todos |
+ | `/review` | Code review crítico por sub-agente fresh, ranked por severidade | Todos |
+ | `/payments` | Integra MoMenu Payments (MCX, E-kwanza, Referência) | Todos |
++| `/speed` | Liga/desliga TM Speed: routing rápido via MiMo UltraSpeed, consumo 3x | **Pago** |
+ | `/te2e` | Valida a app fazendo o agente conduzir um browser real | **Pago** |
+ 
+ ### `/init <opcional: descrição>`
+@@ -109,6 +110,12 @@ Integra MoMenu Payments. O agente:
+ 3. Implementa a integração
+ 4. Adiciona endpoints, componentes UI, e testes manuais
+ 
++### `/speed` *(pago)*
++
++Alterna o **TM Speed** para a tua conta. Quando ligado, os pedidos principais do agente usam o modelo MiMo V2.5 Pro UltraSpeed e consomem **3x** o normal. Escreve `/speed` novamente para desligar.
++
++Funciona tanto no Chat como no CMD Mode. Sidecars internos como memória e web search continuam no routing normal.
++
+ ### `/te2e <o que validar>` *(pago)*
+ 
+ Validação adversarial. O agente:
+diff --git a/packages/web/src/locales/en.json b/packages/web/src/locales/en.json
+index b6dfa0d..ea577a5 100644
+--- a/packages/web/src/locales/en.json
++++ b/packages/web/src/locales/en.json
+@@ -412,6 +412,7 @@
+   "plans.compare.row.deploy": "Live publishing",
+   "plans.compare.row.e2e": "Integrated E2E tests",
+   "plans.compare.row.model": "AI model",
++  "plans.compare.row.tmSpeed": "TM Speed (/speed)",
+   "plans.compare.row.multimodal": "Multimodal agent (vision)",
+   "plans.compare.row.support": "Support",
+   "plans.compare.row.usage": "Usage capacity",
+diff --git a/packages/web/src/locales/fr.json b/packages/web/src/locales/fr.json
+index ff3ef55..5da82eb 100644
+--- a/packages/web/src/locales/fr.json
++++ b/packages/web/src/locales/fr.json
+@@ -409,6 +409,7 @@
+   "plans.compare.row.deploy": "Publication en ligne",
+   "plans.compare.row.e2e": "Tests E2E intégrés",
+   "plans.compare.row.model": "Modèle d'IA",
++  "plans.compare.row.tmSpeed": "TM Speed (/speed)",
+   "plans.compare.row.multimodal": "Agent multimodal (vision)",
+   "plans.compare.row.support": "Support",
+   "plans.compare.row.usage": "Capacité d'utilisation",
+diff --git a/packages/web/src/locales/pt.json b/packages/web/src/locales/pt.json
+index 8fd5c17..17e6774 100644
+--- a/packages/web/src/locales/pt.json
++++ b/packages/web/src/locales/pt.json
+@@ -412,6 +412,7 @@
+   "plans.compare.row.deploy": "Publicação ao vivo",
+   "plans.compare.row.e2e": "Testes E2E integrados",
+   "plans.compare.row.model": "Modelo de IA",
++  "plans.compare.row.tmSpeed": "TM Speed (/speed)",
+   "plans.compare.row.multimodal": "Agente multimodal (visão)",
+   "plans.compare.row.support": "Suporte",
+   "plans.compare.row.usage": "Capacidade de uso",
+diff --git a/packages/web/src/locales/zh.json b/packages/web/src/locales/zh.json
+index 423e4e0..e275428 100644
+--- a/packages/web/src/locales/zh.json
++++ b/packages/web/src/locales/zh.json
+@@ -410,6 +410,7 @@
+   "plans.compare.row.deploy": "在线发布",
+   "plans.compare.row.e2e": "集成 E2E 测试",
+   "plans.compare.row.model": "AI 模型",
++  "plans.compare.row.tmSpeed": "TM Speed（/speed）",
+   "plans.compare.row.multimodal": "多模态代理（视觉）",
+   "plans.compare.row.support": "支持",
+   "plans.compare.row.usage": "使用容量",
+diff --git a/packages/web/src/screens/landing/PlansSection.tsx b/packages/web/src/screens/landing/PlansSection.tsx
+index ca49585..4a4584f 100644
+--- a/packages/web/src/screens/landing/PlansSection.tsx
++++ b/packages/web/src/screens/landing/PlansSection.tsx
+@@ -53,11 +53,11 @@ interface ComparisonPlan {
+ }
+ 
+ // Rows of the comparison table — what actually differs between tiers.
+-// Capacity + model (server-side), and 3 features that ARE plan-gated by design
+-// (multimodal vision, deploy, e2e). Everything else (chat-first, editor,
++// Capacity + model (server-side), and features that ARE plan-gated by design
++// (TM Speed, multimodal vision, deploy, e2e). Everything else (chat-first, editor,
+ // autocomplete, MCP, debugger, HTTP client, source control, ...) is universal
+ // and shown in the "Included in every plan" section instead.
+-const ROW_KEYS = ['usage', 'model', 'byok', 'multimodal', 'deploy', 'e2e', 'support'] as const
++const ROW_KEYS = ['usage', 'model', 'tmSpeed', 'byok', 'multimodal', 'deploy', 'e2e', 'support'] as const
+ 
+ /**
+  * Row label i18n keys — translated lazily inside ComparisonTable so each
+@@ -68,6 +68,7 @@ const ROW_KEYS = ['usage', 'model', 'byok', 'multimodal', 'deploy', 'e2e', 'supp
+ const ROW_LABEL_KEYS: Record<(typeof ROW_KEYS)[number], string> = {
+     usage: 'plans.compare.row.usage',
+     model: 'plans.compare.row.model',
++    tmSpeed: 'plans.compare.row.tmSpeed',
+     byok: 'plans.compare.row.byok',
+     multimodal: 'plans.compare.row.multimodal',
+     deploy: 'plans.compare.row.deploy',
+@@ -92,6 +93,7 @@ function buildExplorerColumn(t: (k: string) => string): ComparisonPlan {
+         features: [
+             t('plans.compare.usage.explorer'),
+             t('plans.compare.model.entry'),
++            false,
+             t('plans.compare.byok.explorer'),
+             false,
+             false,
+@@ -117,10 +119,10 @@ function dbToColumn(cfg: SubscriptionPlanConfig, t: (k: string) => string): Comp
+     // Feature matrix values per plan key. Usage cell is a qualitative tier
+     // (t('plans.compare.usage.*')) — NOT a token/credit count.
+     const features: Record<PlanKey, Array<string | boolean>> = {
+-        'explorer':  [t('plans.compare.usage.explorer'), t('plans.compare.model.entry'),    t('plans.compare.byok.explorer'), false,                              false,                            false, t('plans.compare.support.community')],
+-        'vibe':      [t('plans.compare.usage.vibe'),     t('plans.compare.model.mid'),      true,                             true,  t('plans.compare.deploy.vibe'), true,  t('plans.compare.support.email')],
+-        'pro':       [t('plans.compare.usage.pro'),      t('plans.compare.model.advanced'), true,                             true,  t('plans.compare.deploy.pro'),  true,  t('plans.compare.support.priority')],
+-        'max':       [t('plans.compare.usage.max'),      t('plans.compare.model.top'),      true,                             true,  t('plans.compare.deploy.max'),  true,  t('plans.compare.support.dedicated')],
++        'explorer':  [t('plans.compare.usage.explorer'), t('plans.compare.model.entry'),    false, t('plans.compare.byok.explorer'), false,                              false,                            false, t('plans.compare.support.community')],
++        'vibe':      [t('plans.compare.usage.vibe'),     t('plans.compare.model.mid'),      true,  true,                             true,  t('plans.compare.deploy.vibe'), true,  t('plans.compare.support.email')],
++        'pro':       [t('plans.compare.usage.pro'),      t('plans.compare.model.advanced'), true,  true,                             true,  t('plans.compare.deploy.pro'),  true,  t('plans.compare.support.priority')],
++        'max':       [t('plans.compare.usage.max'),      t('plans.compare.model.top'),      true,  true,                             true,  t('plans.compare.deploy.max'),  true,  t('plans.compare.support.dedicated')],
+     }
+     return { key, ...common, features: features[key] || features['pro'] }
+ }

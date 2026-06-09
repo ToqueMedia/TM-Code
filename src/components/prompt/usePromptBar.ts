@@ -974,7 +974,7 @@ export function usePromptBar() {
       }
 
       const projectPath = currentProject?.path
-      if (!projectPath) {
+      if (command.requiresProject !== false && !projectPath) {
         useChatStore.getState().setDraftInput('')
         clearDraftAttachments()
         useChatStore.getState().addSystemMessage('No project open. Open a project first.')
@@ -1012,7 +1012,7 @@ export function usePromptBar() {
       // architect's system prompt so the PLAN.md it produces is shaped
       // for the TM Code Publish pipeline (no Prisma/SQLite, firebase-admin
       // baseline, Dockerfile + backend in the same scaffold turn).
-      await command.execute(args, projectPath, 'chat')
+      await command.execute(args, projectPath ?? '', 'chat')
       return
     }
 
