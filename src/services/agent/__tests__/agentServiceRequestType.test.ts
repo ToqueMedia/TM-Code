@@ -2,6 +2,7 @@ import 'openai/shims/node'
 import AgentService from '../agentService'
 
 const mockQueryEngineOptions: Array<Record<string, unknown>> = []
+let mockTmSpeedEnabled = false
 
 // Mock core modules to avoid Tauri/Firebase/Zustand errors during initialization
 jest.mock('../toolExecutor', () => ({
@@ -73,6 +74,14 @@ jest.mock('../../../stores/billingStore', () => ({
   },
 }))
 
+jest.mock('../../../stores/tmSpeedStore', () => ({
+  useTmSpeedStore: {
+    getState: () => ({
+      enabled: mockTmSpeedEnabled,
+    }),
+  },
+}))
+
 jest.mock('../../../stores/agentStore', () => ({
   useAgentStore: {
     getState: () => ({
@@ -132,6 +141,7 @@ describe('AgentService X-Request-Type header stickiness', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockQueryEngineOptions.length = 0
+    mockTmSpeedEnabled = false
     agentService = AgentService.createLightweight({ tools: [], maxTurns: 1 })
   })
 
@@ -160,4 +170,56 @@ describe('AgentService X-Request-Type header stickiness', () => {
       expect(agentService.getRequestType()).toBeNull()
     },
   )
+})
+
+describe('AgentService X-TM-Speed header', () => {
+  const speedCallbacks = {
+    onTextDelta: jest.fn(),
+    onReasoningDelta: jest.fn(),
+    onToolCallPending: jest.fn(),
+    onToolCallStart: jest.fn(),
+    onToolResult: jest.fn(),
+    onTurnComplete: jest.fn(),
+    onDone: jest.fn(),
+    onError: jest.fn(),
+    onUsageUpdate: jest.fn(),
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockQueryEngineOptions.length = 0
+    mockTmSpeedEnabled = false
+  })
+
+  afterEach(() => {
+    mockTmSpeedEnabled = false
+    AgentService.getInstance().setRequestType(null)
+  })
+
+  it('adds X-TM-Speed for the main agent when TM Speed is enabled', () => {
+    mockTmSpeedEnabled = true
+    const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
+
+    expect(headers).toEqual({ 'X-TM-Speed': 'true' })
+  })
+
+  it('combines X-TM-Speed with X-Request-Type when both are present', () => {
+    mockTmSpeedEnabled = true
+    const service = AgentService.getInstance()
+    service.setRequestType('plan')
+
+    const headers = (service as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
+
+    expect(headers).toEqual({ 'X-Request-Type': 'plan', 'X-TM-Speed': 'true' })
+  })
+
+  it('does not add X-TM-Speed to lightweight sidecar agents', async () => {
+    mockTmSpeedEnabled = true
+    const lightweight = AgentService.createLightweight({ tools: [], maxTurns: 1 })
+
+    await lightweight.runAgentLoop('sidecar', [], speedCallbacks)
+
+    expect(mockQueryEngineOptions).toHaveLength(1)
+    expect(mockQueryEngineOptions[0].extraHeaders).toBeUndefined()
+  })
 })

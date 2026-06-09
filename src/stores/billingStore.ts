@@ -33,6 +33,7 @@ export interface BillingSSEEvent {
   extra_usage_balance: number // overage credits after this request
   plan: UserPlanName
   used_overage: boolean       // request charged to overage balance (vs cycle)
+  billing_multiplier?: number
   /** When true, the request was forwarded with a client-supplied API key.
    *  TMS budget fields (consumed_pct, token_budget, cycle_end, extra_usage_balance,
    *  used_overage, tokens_consumed) are zero/empty and MUST be ignored. Only
