@@ -57,10 +57,10 @@ function saveAutoApproveDiffs(value: boolean) {
  *  projectStore.openProject) and Terminal Mode (set by TerminalView)
  *  without depending on projectStore. */
 function persistPermissions(): void {
-  const { projectPath, approvedScopes, projectToolAllowlist } = usePermissionStore.getState()
+  const { projectPath, approvedScopes, projectToolAllowlist, additionalDirectories } = usePermissionStore.getState()
   if (!projectPath) return
   void import('../services/agent/permissionPersistence')
-    .then(({ savePermissionsToDisk }) => savePermissionsToDisk(projectPath, approvedScopes, projectToolAllowlist))
+    .then(({ savePermissionsToDisk }) => savePermissionsToDisk(projectPath, approvedScopes, projectToolAllowlist, additionalDirectories))
     .catch(() => { /* persistence failure must not break the permission flow */ })
 }
 
@@ -83,11 +83,17 @@ function saveGlobalToolAllowlist(tools: Set<string>): void {
  *  it without round-tripping through React's update queue.
  *  Also sets `projectPath` so `persistPermissions` writes to the
  *  correct project in both Chat Mode and Terminal Mode. */
-export function hydrateApprovedScopes(scopes: Set<'core' | 'mcp'>, projectPath?: string, tools?: Set<string>): void {
+export function hydrateApprovedScopes(
+  scopes: Set<'core' | 'mcp'>,
+  projectPath?: string,
+  tools?: Set<string>,
+  directories?: Set<string>,
+): void {
   // Set directly — no persistence write here: this IS the load step. The
   // disk file is already canonical; writing back would be a no-op.
   const patch: Partial<PermissionState> = { approvedScopes: scopes }
   if (tools) patch.projectToolAllowlist = tools
+  if (directories) patch.additionalDirectories = directories
   if (projectPath != null) patch.projectPath = projectPath
   usePermissionStore.setState(patch)
 }
@@ -132,7 +138,7 @@ function getToolScope(toolName: string): 'core' | 'mcp' {
 }
 
 /** Why this permission requires a forced prompt (bypasses "Accept All") */
-export type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
+export type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | 'path_access' | null
 
 /**
  * Outcome of a permission request — enriched so callers can record the path
@@ -162,6 +168,8 @@ interface PendingPermission {
   args: Record<string, unknown>
   /** Why this prompt was forced — null means normal permission flow */
   promptReason: PromptReason
+  /** When promptReason is 'path_access', the directory being requested for access */
+  pathAccessTarget?: string
   /** Resolves the pending `requestPermission` promise. */
   resolve: (result: PermissionDecision) => void
 }
@@ -177,6 +185,9 @@ interface PermissionState {
   projectToolAllowlist: Set<string>
   /** Global tool names the user clicked "Always allow" for (cross-project). */
   globalToolAllowlist: Set<string>
+  /** Extra directories the user approved for agent file access, beyond the
+   *  project root. Persists per-project in .toquemedia/permissions.json. */
+  additionalDirectories: Set<string>
   /** When true, file diffs (write_file/edit_file/create_file) are auto-accepted without user confirmation */
   autoApproveDiffs: boolean
   /** When true, user clicked "Deny All" — auto-deny all non-dangerous queued permissions */
@@ -189,6 +200,13 @@ interface PermissionState {
 
 interface PermissionActions {
   requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason) => Promise<PermissionDecision>
+  /** Prompt the user to allow agent access to a directory outside the project root.
+   *  If approved, the directory is added to additionalDirectories. */
+  requestPathAccess: (filePath: string, directoryToAdd: string) => Promise<PermissionDecision>
+  /** Add a directory to additionalDirectories. persist=true writes to disk. */
+  addDirectory: (path: string, persist: boolean) => void
+  /** Remove a directory from additionalDirectories and persist. */
+  removeDirectory: (path: string) => void
   approve: () => void
   approveAll: () => void
   /** Approve current + add tool to per-project allowlist (persisted to disk). */
@@ -254,6 +272,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approvedScopes: new Set(),
   projectToolAllowlist: new Set(),
   globalToolAllowlist: loadGlobalToolAllowlist(),
+  additionalDirectories: new Set(),
   autoApproveDiffs: loadAutoApproveDiffs(),
   autoDenyAll: false,
   pendingPermission: null,
@@ -331,14 +350,22 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approve: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
-      set({ pendingPermission: null, autoDenyAll: false })
+      // For path_access prompts, add the directory (session only)
+      if (pendingPermission.promptReason === 'path_access' && pendingPermission.pathAccessTarget) {
+        const dirs = new Set(get().additionalDirectories)
+        dirs.add(pendingPermission.pathAccessTarget)
+        set({ pendingPermission: null, autoDenyAll: false, additionalDirectories: dirs })
+        void logPermission(`✓ Acesso permitido a \`${pendingPermission.pathAccessTarget}\` (sessão)`, 'success')
+      } else {
+        set({ pendingPermission: null, autoDenyAll: false })
+        void logPermission(`✓ Autorizaste \`${pendingPermission.toolName}\``, 'success')
+      }
       pendingPermission.resolve({
         approved: true,
         prompted: true,
         source: 'user',
         promptKind: pendingPermission.promptReason,
       })
-      void logPermission(`✓ Autorizaste \`${pendingPermission.toolName}\``, 'success')
       advanceQueue(set, get)
     }
   },
@@ -390,17 +417,29 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approveAlwaysInProject: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
-      const toolAllowlist = new Set(get().projectToolAllowlist)
-      toolAllowlist.add(pendingPermission.toolName)
-      set({ pendingPermission: null, projectToolAllowlist: toolAllowlist, autoDenyAll: false })
-
-      pendingPermission.resolve({
-        approved: true,
-        prompted: true,
-        source: 'user',
-        promptKind: pendingPermission.promptReason,
-      })
-      void logPermission(`✓ Permitiste \`${pendingPermission.toolName}\` (sempre neste projeto)`, 'success')
+      if (pendingPermission.promptReason === 'path_access' && pendingPermission.pathAccessTarget) {
+        const dirs = new Set(get().additionalDirectories)
+        dirs.add(pendingPermission.pathAccessTarget)
+        set({ pendingPermission: null, additionalDirectories: dirs, autoDenyAll: false })
+        pendingPermission.resolve({
+          approved: true,
+          prompted: true,
+          source: 'user',
+          promptKind: pendingPermission.promptReason,
+        })
+        void logPermission(`✓ Acesso permitido a \`${pendingPermission.pathAccessTarget}\` (sempre neste projeto)`, 'success')
+      } else {
+        const toolAllowlist = new Set(get().projectToolAllowlist)
+        toolAllowlist.add(pendingPermission.toolName)
+        set({ pendingPermission: null, projectToolAllowlist: toolAllowlist, autoDenyAll: false })
+        pendingPermission.resolve({
+          approved: true,
+          prompted: true,
+          source: 'user',
+          promptKind: pendingPermission.promptReason,
+        })
+        void logPermission(`✓ Permitiste \`${pendingPermission.toolName}\` (sempre neste projeto)`, 'success')
+      }
       persistPermissions()
       advanceQueue(set, get)
     }
@@ -498,8 +537,52 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   resetAutoApprove: () => {
     saveAutoApproveDiffs(false)
     const empty = new Set<'core' | 'mcp'>()
-    set({ approvedScopes: empty, projectToolAllowlist: new Set(), autoApproveDiffs: false, autoDenyAll: false })
+    set({ approvedScopes: empty, projectToolAllowlist: new Set(), additionalDirectories: new Set(), autoApproveDiffs: false, autoDenyAll: false })
     persistPermissions()
+  },
+
+  addDirectory: (path: string, persist: boolean) => {
+    const dirs = new Set(get().additionalDirectories)
+    if (dirs.has(path)) return
+    dirs.add(path)
+    set({ additionalDirectories: dirs })
+    if (persist) persistPermissions()
+  },
+
+  removeDirectory: (path: string) => {
+    const dirs = new Set(get().additionalDirectories)
+    if (!dirs.delete(path)) return
+    set({ additionalDirectories: dirs })
+    persistPermissions()
+  },
+
+  requestPathAccess: (filePath: string, directoryToAdd: string) => {
+    // Already approved — silent pass
+    if (get().additionalDirectories.has(directoryToAdd)) {
+      return Promise.resolve({ approved: true, prompted: false, source: 'user' as const })
+    }
+
+    return new Promise<PermissionDecision>((resolve) => {
+      const entry: PendingPermission = {
+        id: crypto.randomUUID(),
+        toolName: 'path_access',
+        args: { file_path: filePath },
+        promptReason: 'path_access',
+        pathAccessTarget: directoryToAdd,
+        resolve,
+      }
+
+      const { pendingPermission } = get()
+      if (pendingPermission === null) {
+        set({ pendingPermission: entry })
+      } else {
+        set(state => ({ permissionQueue: [...state.permissionQueue, entry] }))
+      }
+      void logPermission(
+        `🔒 O agente pediu acesso a \`${directoryToAdd}\` (fora do projeto)`,
+        'warn',
+      )
+    })
   },
 
   clearPending: () => {

@@ -1981,7 +1981,7 @@ function AdminSection() {
     }
   }, [])
 
-  useEffect(function () { load(); refreshVerify() }, [load, refreshVerify])
+  useEffect(function () { load() }, [load])
 
   async function handleSave(plan: 'free' | 'paid') {
     const modelId = plan === 'free' ? freeSelection : paidSelection
@@ -2118,8 +2118,10 @@ function AdminSection() {
               )
             })}
           </VStack>
-        ) : (
+        ) : isVerifying ? (
           <Text fontSize="12px" color={tokens.colors.text.muted}>{t('admin.verifyChecking')}</Text>
+        ) : (
+          <Text fontSize="12px" color={tokens.colors.text.muted}>{t('admin.verifyIdle')}</Text>
         )}
         <Flex justify="flex-end" mt={3}>
           <Button

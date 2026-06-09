@@ -178,7 +178,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     import('../../stores/permissionStore').then(({ hydrateApprovedScopes }) =>
       import('../../services/agent/permissionPersistence').then(({ loadPermissionsFromDisk }) =>
         loadPermissionsFromDisk(projectPath)
-          .then(perms => { if (!cancelled) hydrateApprovedScopes(perms.scopes, projectPath, perms.tools) })
+          .then(perms => { if (!cancelled) hydrateApprovedScopes(perms.scopes, projectPath, perms.tools, perms.directories) })
           .catch(() => { /* non-critical — empty grants means re-prompt */ }),
       ),
     )

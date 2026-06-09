@@ -30,11 +30,14 @@ export interface PermissionsFileV2 {
   approvedScopes: ApprovedScope[]
   /** Tool names the user clicked "Always allow in this project" for. */
   approvedTools: string[]
+  /** Extra directories the user approved for agent file access. */
+  additionalDirectories?: string[]
 }
 
 export interface LoadedPermissions {
   scopes: Set<ApprovedScope>
   tools: Set<string>
+  directories: Set<string>
 }
 
 /**
@@ -46,7 +49,7 @@ export interface LoadedPermissions {
  * tool set. The next save will upgrade the file to v2.
  */
 export async function loadPermissionsFromDisk(projectPath: string): Promise<LoadedPermissions> {
-  const empty: LoadedPermissions = { scopes: new Set(), tools: new Set() }
+  const empty: LoadedPermissions = { scopes: new Set(), tools: new Set(), directories: new Set() }
   if (!projectPath) return empty
   try {
     const raw = await invoke<string | null>('read_agent_state', {
@@ -57,7 +60,7 @@ export async function loadPermissionsFromDisk(projectPath: string): Promise<Load
     // Use a loose shape — the discriminated union of v1/v2 makes
     // Partial<...> collapse to `never` on shared keys with different
     // literal types. Parse generically then branch on schemaVersion.
-    const parsed = JSON.parse(raw) as { schemaVersion?: number; approvedScopes?: unknown; approvedTools?: unknown }
+    const parsed = JSON.parse(raw) as { schemaVersion?: number; approvedScopes?: unknown; approvedTools?: unknown; additionalDirectories?: unknown }
 
     // v2 file — preferred
     if (parsed.schemaVersion === 2 && Array.isArray(parsed.approvedScopes)) {
@@ -66,16 +69,18 @@ export async function loadPermissionsFromDisk(projectPath: string): Promise<Load
           (parsed.approvedScopes as string[]).filter((s): s is ApprovedScope => s === 'core' || s === 'mcp'),
         ),
         tools: new Set(Array.isArray(parsed.approvedTools) ? (parsed.approvedTools as string[]) : []),
+        directories: new Set(Array.isArray(parsed.additionalDirectories) ? (parsed.additionalDirectories as string[]) : []),
       }
     }
 
-    // v1 file — backward compat (no approvedTools)
+    // v1 file — backward compat (no approvedTools or additionalDirectories)
     if (parsed.schemaVersion === 1 && Array.isArray(parsed.approvedScopes)) {
       return {
         scopes: new Set(
           (parsed.approvedScopes as string[]).filter((s): s is ApprovedScope => s === 'core' || s === 'mcp'),
         ),
         tools: new Set(),
+        directories: new Set(),
       }
     }
 
@@ -97,6 +102,7 @@ export async function savePermissionsToDisk(
   projectPath: string,
   approvedScopes: Set<ApprovedScope>,
   approvedTools: Set<string>,
+  additionalDirectories?: Set<string>,
 ): Promise<void> {
   if (!projectPath) return
   const payload: PermissionsFileV2 = {
@@ -104,6 +110,7 @@ export async function savePermissionsToDisk(
     updatedAt: new Date().toISOString(),
     approvedScopes: Array.from(approvedScopes),
     approvedTools: Array.from(approvedTools),
+    additionalDirectories: additionalDirectories ? Array.from(additionalDirectories) : [],
   }
   try {
     await invoke('write_agent_state', {

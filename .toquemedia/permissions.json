@@ -1,6 +1,8 @@
 {
   "schemaVersion": 2,
-  "updatedAt": "2026-06-08T22:57:09.804Z",
-  "approvedScopes": [],
+  "updatedAt": "2026-06-09T12:39:35.011Z",
+  "approvedScopes": [
+    "core"
+  ],
   "approvedTools": []
 }

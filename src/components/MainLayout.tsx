@@ -447,6 +447,7 @@ function MainLayout() {
                             toolName={pendingPermission.toolName}
                             args={pendingPermission.args}
                             promptReason={pendingPermission.promptReason ?? null}
+                            pathAccessTarget={pendingPermission.pathAccessTarget}
                             approve={approve}
                             approveAlwaysInProject={approveAlwaysInProject}
                             approveAlwaysGlobal={approveAlwaysGlobal}
@@ -503,6 +504,7 @@ function MainLayout() {
                   toolName={pendingPermission.toolName}
                   args={pendingPermission.args}
                   promptReason={pendingPermission.promptReason ?? null}
+                  pathAccessTarget={pendingPermission.pathAccessTarget}
                   approve={approve}
                   approveAlwaysInProject={approveAlwaysInProject}
                   approveAlwaysGlobal={approveAlwaysGlobal}

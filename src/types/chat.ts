@@ -133,7 +133,7 @@ export interface ToolCallDisplay {
     approved: boolean
     prompted: boolean
     source: 'safe_tool' | 'has_own_approval' | 'approved_scope' | 'user'
-    promptKind?: 'sensitive_file' | 'dangerous_command' | null
+    promptKind?: import('../stores/permissionStore').PromptReason
     denyReason?: string
   }
 }

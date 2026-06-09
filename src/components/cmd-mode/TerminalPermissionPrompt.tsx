@@ -3,9 +3,7 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { useTranslation } from '@/i18n/useTranslation'
-import { usePermissionStore } from '../../stores/permissionStore'
-
-type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
+import { usePermissionStore, type PromptReason } from '../../stores/permissionStore'
 
 interface TerminalPermissionPromptProps {
   toolName: string
