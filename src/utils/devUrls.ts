@@ -31,8 +31,10 @@ import {
   VITE_WORKER_URL,
   VITE_AI_WORKER_URL,
   VITE_DEPLOY_URL,
+  DEFAULT_AI_WORKER_URL,
   DEFAULT_OLLAMA_URL,
   DEFAULT_WORKER_URL,
+  PRODUCTION_AI_WORKER_URL,
   PRODUCTION_DEPLOY_URL,
 } from '@/utils/viteEnv'
 
@@ -87,18 +89,15 @@ export function resolveWorkerUrl(): string {
 }
 
 export function resolveAIWorkerUrl(): string {
-  if (!VITE_AI_WORKER_URL) {
-    throw new Error('VITE_AI_WORKER_URL is required for AI data-plane requests. Configure it to the ai-pass-through-worker URL.')
-  }
   const url = resolveUrl({
     envValue: VITE_AI_WORKER_URL,
-    fallback: VITE_AI_WORKER_URL,
+    fallback: IS_VITE_DEV ? DEFAULT_AI_WORKER_URL : PRODUCTION_AI_WORKER_URL,
     isViteDev: IS_VITE_DEV,
     isWindows: IS_WINDOWS,
   })
   if (IS_VITE_DEV && !_aiWorkerUrlLogged) {
     _aiWorkerUrlLogged = true
-    console.info(`[devUrls] AI Worker URL: ${url} (env=${VITE_AI_WORKER_URL ?? '<unset>'}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
+    console.info(`[devUrls] AI Worker URL: ${url} (env=${VITE_AI_WORKER_URL ?? '<unset>'}, fallback=${IS_VITE_DEV ? DEFAULT_AI_WORKER_URL : PRODUCTION_AI_WORKER_URL}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
   }
   return url
 }
