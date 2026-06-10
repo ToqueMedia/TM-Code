@@ -104,6 +104,35 @@ function registerFormattingProvider(monaco: Monaco) {
   }
 }
 
+const MIRRORED_PAIR_CHARS: Record<string, string> = {
+  '"': '"',
+  "'": "'",
+  '`': '`',
+  '(': ')',
+  '[': ']',
+  '{': '}',
+}
+
+function isPunctuationOnlyCompletion(text: string): boolean {
+  return /^[\s"'`()[\]{}<>.,;:!?]+$/.test(text)
+}
+
+function shouldSuppressInlineCompletion(prefix: string, suffix: string, suggestion: string): boolean {
+  const trimmed = suggestion.trim()
+  if (!trimmed) return true
+
+  const previous = prefix.slice(-1)
+  const next = suffix.charAt(0)
+  if (previous && MIRRORED_PAIR_CHARS[previous] === next) return true
+
+  if (isPunctuationOnlyCompletion(trimmed)) return true
+
+  const nextNonWhitespace = suffix.trimStart()
+  if (nextNonWhitespace && nextNonWhitespace.startsWith(trimmed)) return true
+
+  return false
+}
+
 interface MonacoEditorProps {
   path: string;
   groupId?: string;
@@ -404,6 +433,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
 
           const result = await AICompletionService.getInstance().getCompletion(prefix, suffix);
           if (!result || token.isCancellationRequested) return { items: [] };
+          if (shouldSuppressInlineCompletion(prefix, suffix, result)) return { items: [] };
 
           return {
             items: [{
@@ -477,6 +507,23 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     // Override Monaco's Go to Line / Quick Outline — their QuickInput widgets freeze in Tauri WebView
     ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyG, () => {});
     ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyO, () => {});
+
+    disposablesRef.current.push(ed.onKeyDown((event) => {
+      const cancelsInlineCompletion =
+        event.keyCode === monaco.KeyCode.Backspace ||
+        event.keyCode === monaco.KeyCode.Delete ||
+        event.keyCode === monaco.KeyCode.LeftArrow ||
+        event.keyCode === monaco.KeyCode.RightArrow ||
+        event.keyCode === monaco.KeyCode.UpArrow ||
+        event.keyCode === monaco.KeyCode.DownArrow ||
+        event.keyCode === monaco.KeyCode.Home ||
+        event.keyCode === monaco.KeyCode.End ||
+        event.keyCode === monaco.KeyCode.Escape
+
+      if (cancelsInlineCompletion) {
+        AICompletionService.getInstance().cancel()
+      }
+    }));
 
     // Content change — autosave directly to disk, then refresh git gutter
     // Uses pathRef.current (not boundPath) so it works across model swaps

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
@@ -437,6 +437,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     window.addEventListener('cmd-toggle-interaction', onInteraction)
     return () => window.removeEventListener('cmd-toggle-interaction', onInteraction)
   }, [])
+
+  // Synchronously scroll to bottom when a new message is added and the user was already at the bottom.
+  // This prevents the scroll-jump effect when the user sends a message.
+  useLayoutEffect(() => {
+    if (wasAtBottomRef.current) {
+      scrollToBottom()
+    }
+  }, [messages.length, scrollToBottom])
 
   // Consolidated scroll effect — handles all three concerns in deterministic
   // order to prevent race conditions between the separate wasAtBottom tracking,

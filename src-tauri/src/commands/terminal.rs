@@ -339,7 +339,7 @@ fn pick_interactive_shell_info() -> InteractiveShellInfo {
             .to_string();
         InteractiveShellInfo {
             command: shell,
-            args: vec!["-i".to_string()],
+            args: vec!["-l".to_string(), "-i".to_string()],
             kind,
             command_style: "posix".to_string(),
             platform: env::consts::OS.to_string(),
@@ -1129,6 +1129,11 @@ pub async fn start_pty_shell(
     for (k, v) in env::vars() {
         cmd.env(k, v);
     }
+
+    // Set terminal coloring environment variables
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("FORCE_COLOR", "1");
 
     // Create PTY with default dimensions
     let pair = pty_system

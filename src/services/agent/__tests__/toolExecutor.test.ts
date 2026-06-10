@@ -1396,9 +1396,8 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
   it('rejects custom cwd parameter outside the project root in execute_command', async () => {
     const exec = freshExecutor()
 
-    await expect(
-      exec.execute('execute_command', { command: 'echo "hello"', cwd: '/etc' })
-    ).rejects.toThrow('Access denied: path "/etc" is outside the project directory')
+    const result = await exec.execute('execute_command', { command: 'echo "hello"', cwd: '/etc' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('allows custom cwd parameter within the project root in execute_command', async () => {
@@ -1415,8 +1414,7 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
   it('rejects custom cwd parameter outside the project root in execute_command_background', async () => {
     const exec = freshExecutor()
 
-    await expect(
-      exec.execute('execute_command_background', { command: 'echo "hello"', cwd: '/etc' })
-    ).rejects.toThrow('Access denied: path "/etc" is outside the project directory')
+    const result = await exec.execute('execute_command_background', { command: 'echo "hello"', cwd: '/etc' })
+    expect(result).toContain('outside the project directory')
   })
 })

@@ -554,8 +554,9 @@ class ToolExecutor {
       'read_file', 'write_file', 'edit_file', 'create_file',
       'delete_file', 'rename_file', 'copy_file', 'list_directory',
       'search_files', 'glob', 'path_exists', 'append_file',
+      'execute_command', 'execute_command_background', 'agent_shell_start'
     ])
-    const pathForScope = (input.file_path || input.oldPath || input.directory || '') as string
+    const pathForScope = (input.file_path || input.oldPath || input.directory || input.cwd || '') as string
     if (pathForScope && FILE_SCOPE_TOOLS.has(toolName)) {
       const scopeCheck = this.checkPathScope(pathForScope)
       if (!scopeCheck.allowed) {

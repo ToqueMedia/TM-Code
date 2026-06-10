@@ -10,6 +10,7 @@ import AgentService from './agentService'
 import type { OpenAIContentPart } from './types'
 import ContextBuilder from './contextBuilder'
 import ToolExecutor from './toolExecutor'
+import FirebaseAuthService from '../auth/firebaseAuth'
 import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
 import { resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../attachmentService'
@@ -473,5 +474,15 @@ async function runAgentInternal(
     // Restore the preview pane if a browser-driven session hid it. Safe
     // when no session was active (no-op).
     browserSession.endSession()
+
+    // Persist latest tokens consumed to Firestore
+    try {
+      const billingState = useBillingStore.getState()
+      if (billingState.tokensConsumed > 0) {
+        FirebaseAuthService.getInstance().persistTokensConsumed(billingState.tokensConsumed).catch(() => {})
+      }
+    } catch (err) {
+      logger.warn('agent', 'Failed to persist billing tokens consumed:', err)
+    }
   }
 }

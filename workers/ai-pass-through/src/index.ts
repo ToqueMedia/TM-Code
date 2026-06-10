@@ -61,6 +61,14 @@ async function handleChatCompletions(
   }
 
   const durationMs = Date.now() - startedAt
+  
+  let responseBody: ReadableStream | string | null = upstream.body
+  if (upstream.status === 400) {
+    const errorText = await upstream.text()
+    console.error(`[ai-pass-through] Upstream 400 Error Body:`, errorText)
+    responseBody = errorText
+  }
+
   await logRequest({
     requestId,
     userId: user.userId,
@@ -73,7 +81,7 @@ async function handleChatCompletions(
     configKey: active.key,
   })
 
-  return new Response(upstream.body, {
+  return new Response(responseBody, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers: buildResponseHeaders(upstream, {

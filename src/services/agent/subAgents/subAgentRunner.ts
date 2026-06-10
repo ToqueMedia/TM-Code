@@ -61,7 +61,9 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   }
   const client = createSubAgentClient(authToken)
   const refreshClient = async (): Promise<OpenAI | null> => {
-    const refreshed = await FirebaseAuthService.getInstance().getIdToken(true)
+    const auth = FirebaseAuthService.getInstance()
+    const refreshed = await auth.getIdToken(true)
+      ?? (await auth.refreshLogin() ? await auth.getIdToken(true) : null)
     return refreshed ? createSubAgentClient(refreshed) : null
   }
 

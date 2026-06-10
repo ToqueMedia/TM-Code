@@ -6,6 +6,7 @@ import {
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
+  reload,
   type User
 } from 'firebase/auth'
 import {
@@ -679,8 +680,17 @@ class FirebaseAuthService {
     }
   }
 
+  private getLiveCurrentUser(): User | null {
+    const sdkUser = getFirebaseAuth().currentUser
+    if (sdkUser && sdkUser !== this.currentUser) {
+      this.currentUser = sdkUser
+    }
+    return this.currentUser ?? sdkUser ?? null
+  }
+
   async getIdToken(forceRefresh = false): Promise<string | null> {
-    if (!this.currentUser) {
+    const user = this.getLiveCurrentUser()
+    if (!user) {
       console.warn('[auth] getIdToken: currentUser is null')
       return null
     }
@@ -695,9 +705,9 @@ class FirebaseAuthService {
     // already stale; happy path is unchanged because Firebase decodes the JWT
     // locally before deciding to refresh.
     try {
-      const token = await this.currentUser.getIdToken(forceRefresh)
+      const token = await user.getIdToken(forceRefresh)
       if (token && !forceRefresh && this.isTokenNearExpiry(token)) {
-        return await this.currentUser.getIdToken(true)
+        return await user.getIdToken(true)
       }
       return token
     } catch (err) {
@@ -706,6 +716,31 @@ class FirebaseAuthService {
       // a transient retry — same contract as before for the no-user branch.
       console.warn('[auth] getIdToken refresh failed:', err)
       return null
+    }
+  }
+
+  /**
+   * Refresh the Firebase user record and force-mint a fresh ID token without
+   * signing out. Use this after wake-from-sleep or platform 401s where the SDK
+   * still has a persisted account but local auth state may be stale.
+   */
+  async refreshLogin(): Promise<boolean> {
+    const user = this.getLiveCurrentUser()
+    if (!user) {
+      console.warn('[auth] refreshLogin: currentUser is null')
+      return false
+    }
+
+    try {
+      await reload(user)
+      const liveUser = this.getLiveCurrentUser()
+      const token = await (liveUser ?? user).getIdToken(true)
+      if (!token) return false
+      this.fetchBillingInfo(this.authGeneration).catch(() => {})
+      return true
+    } catch (err) {
+      console.warn('[auth] refreshLogin failed:', err)
+      return false
     }
   }
 
@@ -771,6 +806,21 @@ class FirebaseAuthService {
     }).catch((err) => {
       console.warn('[auth] TM Code version sync failed:', err)
     })
+  }
+
+  async persistTokensConsumed(tokensConsumed: number): Promise<void> {
+    const uid = this.currentUser?.uid
+    if (!uid) return
+    try {
+      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid), {
+        tokenBudget: {
+          tokensConsumed
+        }
+      }, { merge: true })
+      console.info(`[billing] Persisted tokensConsumed=${tokensConsumed} to Firestore`)
+    } catch (err) {
+      console.warn('[billing] Failed to persist tokensConsumed to Firestore:', err)
+    }
   }
 
 }
