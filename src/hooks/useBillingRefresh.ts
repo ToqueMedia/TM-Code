@@ -8,9 +8,10 @@ import FirebaseAuthService from '../services/auth/firebaseAuth'
  *  1. Window becomes visible (user returns to the app)
  *  2. Network reconnects (user comes back online)
  *
- * The primary source of billing updates remains the SSE billing event injected
- * at the end of every /v1/chat/completions response. This hook handles the gaps
- * where state changes outside of chat:
+ * Billing state is refreshed from the Control Plane. The dedicated AI
+ * data-plane Worker is a thin pass-through and does not inject billing events
+ * into /v1/chat/completions streams. This hook handles state changes outside
+ * of chat:
  *  - User purchased a credit pack via web checkout (refresh on window focus)
  *  - User upgraded their plan via web (refresh on window focus)
  *  - Cycle reset happened externally (refresh on window focus)

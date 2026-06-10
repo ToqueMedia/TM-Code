@@ -30,7 +30,7 @@
  */
 
 import { logger } from '../../utils/logger'
-import { resolveWorkerUrl } from '../../utils/devUrls'
+import { resolveAIWorkerUrl } from '../../utils/devUrls'
 import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import type { MemoryFile } from './memdir'
 
@@ -121,7 +121,7 @@ export async function distillMemories(input: DistillerInput): Promise<DistillerR
     const idToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!idToken) return null
 
-    const workerUrl = resolveWorkerUrl()
+    const workerUrl = resolveAIWorkerUrl()
     const ac = new AbortController()
     const timeoutId = setTimeout(() => ac.abort(), DISTILLER_TIMEOUT_MS)
 

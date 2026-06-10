@@ -1,0 +1,11 @@
+name = "ai-pass-through-worker"
+main = "src/index.ts"
+compatibility_date = "2026-06-02"
+
+[[kv_namespaces]]
+binding = "ACTIVE_AI_CONFIG"
+id = "replace-with-active-ai-config-kv-id"
+preview_id = "replace-with-active-ai-config-kv-id"
+
+[vars]
+ACTIVE_AI_CONFIG_KEY = "active"

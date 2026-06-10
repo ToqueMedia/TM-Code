@@ -322,10 +322,10 @@ function SourceControlPanel() {
       if (!token) token = await FirebaseAuthService.getInstance().getIdToken(true)
       if (!token) throw new Error(t('sourceControl.notAuthenticated'))
 
-      const { resolveWorkerUrl } = await import('../../utils/devUrls')
-      const workerUrl = resolveWorkerUrl()
+      const { resolveAIWorkerUrl } = await import('../../utils/devUrls')
+      const workerUrl = resolveAIWorkerUrl()
       const { tauriFetch } = await import('../../services/tauriFetch')
-      const response = await tauriFetch(`${workerUrl}/v1/commit-message`, {
+      const response = await tauriFetch(`${workerUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({
@@ -367,6 +367,9 @@ ${diffStat}
 Diff hunks:
 ${diffDetail}`,
           }],
+          temperature: 0.2,
+          max_tokens: 700,
+          stream: false,
         }),
       })
 

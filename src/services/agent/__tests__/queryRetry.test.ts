@@ -86,7 +86,7 @@ describe('query retry handling', () => {
 
     expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
     expect(await nextEvent(generator)).toMatchObject({
-      type: 'worker_status',
+      type: 'agent_status',
       phase: 'retrying',
       httpStatus: 401,
     })
@@ -117,7 +117,7 @@ describe('query retry handling', () => {
 
     expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
     expect(await nextEvent(generator)).toMatchObject({
-      type: 'worker_status',
+      type: 'agent_status',
       phase: 'retrying',
       httpStatus: 401,
     })
@@ -153,7 +153,7 @@ describe('query retry handling', () => {
 
     expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
     expect(await nextEvent(generator)).toMatchObject({
-      type: 'worker_status',
+      type: 'agent_status',
       phase: 'retrying',
       httpStatus: 401,
     })
@@ -229,7 +229,7 @@ describe('query retry handling', () => {
     expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
 
     expect(await nextEvent(generator)).toMatchObject({
-      type: 'worker_status',
+      type: 'agent_status',
       phase: 'retrying',
       attempt: 1,
       maxAttempts: 3,
@@ -240,7 +240,7 @@ describe('query retry handling', () => {
     jest.advanceTimersByTime(30000)
     await Promise.resolve()
     expect(await secondAttempt).toMatchObject({
-      type: 'worker_status',
+      type: 'agent_status',
       phase: 'retrying',
       attempt: 2,
       maxAttempts: 3,
@@ -251,7 +251,7 @@ describe('query retry handling', () => {
     jest.advanceTimersByTime(30000)
     await Promise.resolve()
     expect(await thirdAttempt).toMatchObject({
-      type: 'worker_status',
+      type: 'agent_status',
       phase: 'retrying',
       attempt: 3,
       maxAttempts: 3,

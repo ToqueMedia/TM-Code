@@ -3,8 +3,8 @@
  *
  * Supported models: GLM 5.1, Qwen 3.7 Max, MiMo V2.5 Pro 1M, MiMo V2.5 1M.
  *
- * The Worker (proxy.ts) handles auth, billing, and API key injection.
- * The IDE only needs sampling params and thinking config shape.
+ * The dedicated AI pass-through Worker handles auth and provider API key
+ * injection. The Control Plane owns the active provider/model choice.
  */
 
 import type { UserPlanName } from '../../stores/billingStore'

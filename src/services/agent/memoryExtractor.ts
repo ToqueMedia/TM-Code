@@ -31,7 +31,7 @@
  */
 
 import { logger } from '../../utils/logger'
-import { resolveWorkerUrl } from '../../utils/devUrls'
+import { resolveAIWorkerUrl } from '../../utils/devUrls'
 import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import type { MemoryType } from './memdir'
 
@@ -46,12 +46,6 @@ const MAX_PROPOSALS_PER_RUN = 5
 /** Minimum user-message length before extraction is attempted. Skips
  *  trivial turns ("ok", "yes", "thanks") where there's nothing to learn. */
 const MIN_USER_MESSAGE_LENGTH = 30
-
-function splitJsonEnvelopeFromTrailingSse(rawBody: string): string {
-  const billingEventIdx = rawBody.indexOf('data: {"type":"billing"')
-  if (billingEventIdx <= 0) return rawBody
-  return rawBody.slice(0, billingEventIdx).trim()
-}
 
 export interface MemoryProposal {
   name: string
@@ -96,7 +90,7 @@ export async function extractMemoriesFromTurn(input: ExtractorInput): Promise<Ex
     const idToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!idToken) return { proposals: [], latencyMs: 0 }
 
-    const workerUrl = resolveWorkerUrl()
+    const workerUrl = resolveAIWorkerUrl()
     const ac = new AbortController()
     const timeoutId = setTimeout(() => ac.abort(), EXTRACTOR_TIMEOUT_MS)
 
@@ -166,13 +160,9 @@ ${assistantText.slice(-4000)}`
 
     const ct = res.headers.get('content-type') ?? 'unknown'
     const rawBody = await res.text().catch(() => '')
-    const envelopeBody = splitJsonEnvelopeFromTrailingSse(rawBody)
     let data: { choices?: Array<{ message?: { content?: string } }> }
     try {
-      data = JSON.parse(envelopeBody) as { choices?: Array<{ message?: { content?: string } }> }
-      if (envelopeBody !== rawBody) {
-        logger.debug('memdir', '[extractor] recovered JSON envelope by stripping trailing billing SSE event')
-      }
+      data = JSON.parse(rawBody) as { choices?: Array<{ message?: { content?: string } }> }
     } catch (jsonErr) {
       // Worker may return non-JSON (HTML error page, empty body, etc.)
       // on auth failures or upstream issues. Log status + content-type

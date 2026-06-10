@@ -101,7 +101,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   const engine = new QueryEngine({
     client,
     refreshClient,
-    model: 'mimo-v2.5-pro-1m',
+    model: 'tm-active-model',
     systemPrompt,
     tools: openaiTools,
     executeTool,
@@ -208,11 +208,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
             }
             break
 
-          case 'billing_update':
-            useBillingStore.getState().updateFromSSE(event.billing)
-            break
-
-          case 'worker_status':
+          case 'agent_status':
             lastActivityAt = Date.now()
             break
 

@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:ai-worker": "yarn --cwd workers/ai-pass-through dev",
     "build": "tsc && vite build",
     "preview": "yarn run build && wrangler dev",
     "tauri": "tauri",
@@ -18,6 +19,7 @@
     "tauri:build:mac-arm64": "node scripts/build.mjs aarch64-apple-darwin",
     "release:finalize": "node scripts/finalize-release.mjs",
     "test": "jest",
+    "test:ai-worker": "yarn --cwd workers/ai-pass-through test",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "deploy": "yarn run build && wrangler deploy"

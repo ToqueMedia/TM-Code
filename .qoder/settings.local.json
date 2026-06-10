@@ -38,7 +38,11 @@
       "Bash(npx jest src/services/agent/__tests__/planCommandIntegration.test.ts --no-coverage 2>&1 | tail -20)",
       "Bash(npx tsc --noEmit --pretty 2>&1 | head -40)",
       "Bash(npx tsc --noEmit 2>&1 | grep -E \"TerminalView|MinimalTitleBar|PlanViewerPanel|TerminalTitleBar\" | head -20)",
-      "Bash(npx tsc --noEmit 2>&1 | grep -E \"WelcomeScreen|TerminalView|MinimalTitleBar|PlanViewerPanel|TerminalTitleBar\" | head -20)"
+      "Bash(npx tsc --noEmit 2>&1 | grep -E \"WelcomeScreen|TerminalView|MinimalTitleBar|PlanViewerPanel|TerminalTitleBar\" | head -20)",
+      "Bash(ls ~/dev/deskotp/toquemedia-studio-api/src/ 2>/dev/null || ls ~/dev/deskotp/toquemedia-studio-api/ 2>/dev/null)",
+      "Bash(ls ~/dev/deskotp/toquemedia-studio-api/wrangler* 2>/dev/null && cat ~/dev/deskotp/toquemedia-studio-api/package.json | head -20)",
+      "Bash(ls ~/dev/deskotp/toquemedia-studio-api/wrangler.* 2>/dev/null; cat ~/dev/deskotp/toquemedia-studio-api/package.json 2>/dev/null | head -30)",
+      "Bash(find:*)"
     ]
   }
 }

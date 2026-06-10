@@ -1,9 +1,10 @@
 /**
  * SDK Client Factory — creates a pre-configured OpenAI SDK instance
- * that connects to the TM Code Worker endpoint.
+ * that connects to the TM Code AI data-plane Worker endpoint.
  *
- * The Worker handles JWT validation, billing, and API key injection.
- * The SDK connects directly to the Worker's /v1/chat/completions endpoint.
+ * The Worker validates the user token, injects the active provider API key,
+ * injects the active model from Control Plane config, and passes the stream
+ * through without billing/parser mutations.
  *
  * Auth flow:
  *   1. IDE gets Firebase JWT token from FirebaseAuthService
@@ -12,11 +13,11 @@
  */
 
 import OpenAI from 'openai'
-import { resolveWorkerUrl } from '../../utils/devUrls'
+import { resolveAIWorkerUrl } from '../../utils/devUrls'
 
 // ── Constants ──
 
-const DEFAULT_MAX_RETRIES = 2
+const DEFAULT_MAX_RETRIES = 0
 const DEFAULT_TIMEOUT_MS = 300_000 // 5 min (matches claude-vaz)
 
 // ── Helpers ──
@@ -43,7 +44,7 @@ function normalizeBaseURL(raw: string): string {
 // ── Factory ──
 
 /**
- * Create an OpenAI SDK client configured to talk to the TM Code Worker.
+ * Create an OpenAI SDK client configured to talk to the TM Code AI data plane.
  *
  * @param authToken - Firebase JWT token (or session token) for Worker auth.
  *   The SDK sends this as the `Authorization: Bearer` header. The Worker validates it
@@ -58,7 +59,7 @@ export function createAgentClient(
     baseURL?: string
   },
 ): OpenAI {
-  const workerUrl = options?.baseURL ?? resolveWorkerUrl()
+  const workerUrl = options?.baseURL ?? resolveAIWorkerUrl()
 
   return new OpenAI({
     baseURL: normalizeBaseURL(workerUrl),
@@ -87,7 +88,7 @@ export function createSubAgentClient(
   },
 ): OpenAI {
   return createAgentClient(authToken, {
-    maxRetries: 1, // Sub-agents fail fast
+    maxRetries: 0,
     timeout: options?.timeout ?? 120_000, // 2 min default for sub-agents
     ...options,
   })

@@ -1011,13 +1011,10 @@ ${preview}
     if (!toolCallId) return
 
     // Accumulate full output into commandLogs for the terminal-style log viewer.
-    // Each chunk may contain multiple lines — split and append individually.
+    // Each chunk may contain multiple lines. Append in one store update to
+    // avoid React/Zustand nested update explosions on verbose commands.
     const chunks = data.split('\n')
-    for (const chunk of chunks) {
-      if (chunk.length > 0) {
-        useChatStore.getState().appendToolCallCommandLog(toolCallId, chunk)
-      }
-    }
+    useChatStore.getState().appendToolCallCommandLogs(toolCallId, chunks)
 
     // Show the last meaningful line as progress (single-line summary)
     const lines = data.trim().split('\n')
@@ -1644,11 +1641,10 @@ ${preview}
 
         if (session.activeToolCallId) {
           const lines = clean.split('\n')
-          for (const line of lines) {
-            if (line.length > 0) {
-              useChatStore.getState().appendToolCallCommandLog(session.activeToolCallId, line.replace(/\r/g, ''))
-            }
-          }
+          useChatStore.getState().appendToolCallCommandLogs(
+            session.activeToolCallId,
+            lines.map(line => line.replace(/\r/g, '')),
+          )
         }
       }),
       listen<PtyExitEvent>('pty-exit', (event) => {

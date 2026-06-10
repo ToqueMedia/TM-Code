@@ -28,7 +28,7 @@
 
 import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
-import { resolveWorkerUrl } from '../../utils/devUrls'
+import { resolveAIWorkerUrl } from '../../utils/devUrls'
 import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 
 /**
@@ -145,7 +145,7 @@ export async function selectRelevantMemories(args: {
     const idToken = await FirebaseAuthService.getInstance().getIdToken()
     if (!idToken) return null
 
-    const workerUrl = resolveWorkerUrl()
+    const workerUrl = resolveAIWorkerUrl()
     const ac = new AbortController()
     const timeoutId = setTimeout(() => ac.abort(), SELECTOR_TIMEOUT_MS)
 

@@ -188,6 +188,7 @@ interface ChatActions {
    *  Used by build/test/script commands that stream output via run_streaming_command.
    *  Each call appends one chunk to the `commandLogs` array on the tool call. */
   appendToolCallCommandLog: (toolId: string, logChunk: string) => void
+  appendToolCallCommandLogs: (toolId: string, logChunks: string[]) => void
   /** Record the permission decision that gated this tool call. Called by
    *  toolExecutor right after `requestPermission` resolves. Surfaces in the
    *  session export so forensics can tell user-approved tools apart from
@@ -1879,6 +1880,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     appendToolCallCommandLog: (toolId: string, logChunk: string) => {
+      get().appendToolCallCommandLogs(toolId, [logChunk])
+    },
+
+    appendToolCallCommandLogs: (toolId: string, logChunks: string[]) => {
+      const chunks = logChunks.filter(chunk => chunk.length > 0)
+      if (chunks.length === 0) return
+
       const { activeSessionId, streamingMessageId, sessions } = get()
       if (!activeSessionId || !streamingMessageId) return
 
@@ -1895,7 +1903,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // Cap at 500 lines to prevent memory bloat from verbose commands.
       // Older lines are dropped — the last N lines are the most useful.
       const MAX_LOG_LINES = 500
-      const newLogs = [...existing, logChunk]
+      const newLogs = [...existing, ...chunks]
       const trimmed = newLogs.length > MAX_LOG_LINES ? newLogs.slice(-MAX_LOG_LINES) : newLogs
 
       const newToolCalls = msg.toolCalls.slice()

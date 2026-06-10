@@ -19,6 +19,9 @@ export const DEFAULT_OLLAMA_URL = 'http://localhost:11434'
 /** Default Worker endpoint when no override is set. */
 export const DEFAULT_WORKER_URL = 'http://localhost:8787'
 
+/** Default AI data-plane Worker endpoint when no override is set. */
+export const DEFAULT_AI_WORKER_URL = 'http://localhost:8788'
+
 /**
  * Production Worker URL — ALWAYS used for the deploy pipeline, even in
  * dev mode. Reason: wrangler dev (localhost:8787) emulates R2/D1 locally,
@@ -38,6 +41,9 @@ export const VITE_OLLAMA_URL: string | undefined = import.meta.env.VITE_OLLAMA_U
 
 /** User-provided Worker URL override (Vite env); undefined in Jest. */
 export const VITE_WORKER_URL: string | undefined = import.meta.env.VITE_WORKER_URL as string | undefined
+
+/** User-provided AI data-plane Worker URL override (Vite env); undefined in Jest. */
+export const VITE_AI_WORKER_URL: string | undefined = import.meta.env.VITE_AI_WORKER_URL as string | undefined
 
 /** Whether the app is running under a Vite dev server (false in tests, prod build, SSR). */
 export const IS_VITE_DEV: boolean = import.meta.env.DEV === true

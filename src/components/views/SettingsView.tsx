@@ -1932,14 +1932,11 @@ function AddServerForm(props: { projectPath: string; onDone: () => void; onCance
 function AdminSection() {
   const t = useTranslation()
   const [models, setModels] = useState<import('../../services/adminService').AdminModel[]>([])
-  const [freeLive, setFreeLive] = useState<string>('')
-  const [paidLive, setPaidLive] = useState<string>('')
-  const [paidDivergent, setPaidDivergent] = useState<Record<string, string> | null>(null)
-  const [freeSelection, setFreeSelection] = useState<string>('')
-  const [paidSelection, setPaidSelection] = useState<string>('')
+  const [activeLive, setActiveLive] = useState<string>('')
+  const [activeSelection, setActiveSelection] = useState<string>('')
+  const [activeConfig, setActiveConfig] = useState<import('../../services/adminService').ActiveAIConfig | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-  const [isSavingFree, setIsSavingFree] = useState(false)
-  const [isSavingPaid, setIsSavingPaid] = useState(false)
+  const [isSavingActive, setIsSavingActive] = useState(false)
   const [forbidden, setForbidden] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [verify, setVerify] = useState<import('../../services/adminService').VerifyResponse | null>(null)
@@ -1949,14 +1946,18 @@ function AdminSection() {
     setIsLoading(true)
     setError(null)
     try {
-      const { fetchAdminModels } = await import('../../services/adminService')
-      const data = await fetchAdminModels()
-      setModels(data.models)
-      setFreeLive(data.live.free)
-      setFreeSelection(data.live.free)
-      setPaidLive(data.live.paid || '')
-      setPaidSelection(data.live.paid || '')
-      setPaidDivergent(data.live.paidDivergent)
+      const { fetchAdminModels, fetchAdminVerify } = await import('../../services/adminService')
+      const [modelsData, verifyData] = await Promise.all([
+        fetchAdminModels(),
+        fetchAdminVerify(),
+      ])
+      const activeId = findActiveModelId(modelsData.models, verifyData.activeAIConfig)
+
+      setModels(modelsData.models)
+      setVerify(verifyData)
+      setActiveConfig(verifyData.activeAIConfig ?? null)
+      setActiveLive(activeId)
+      setActiveSelection(activeId || modelsData.models[0]?.id || '')
     } catch (err) {
       if (err instanceof Error && err.message === 'FORBIDDEN') {
         setForbidden(true)
@@ -1973,35 +1974,36 @@ function AdminSection() {
     try {
       const { fetchAdminVerify } = await import('../../services/adminService')
       const data = await fetchAdminVerify()
+      const activeId = findActiveModelId(models, data.activeAIConfig)
       setVerify(data)
+      setActiveConfig(data.activeAIConfig ?? null)
+      setActiveLive(activeId)
+      if (activeId) setActiveSelection(activeId)
     } catch (err) {
       if (err instanceof Error && err.message === 'FORBIDDEN') setForbidden(true)
     } finally {
       setIsVerifying(false)
     }
-  }, [])
+  }, [models])
 
   useEffect(function () { load() }, [load])
 
-  async function handleSave(plan: 'free' | 'paid') {
-    const modelId = plan === 'free' ? freeSelection : paidSelection
-    if (!modelId) return
-    const setSaving = plan === 'free' ? setIsSavingFree : setIsSavingPaid
-    setSaving(true)
+  async function handlePublishActive() {
+    const model = models.find(m => m.id === activeSelection)
+    if (!model) return
+    setIsSavingActive(true)
     setError(null)
     try {
-      const { setLiveModel } = await import('../../services/adminService')
-      await setLiveModel(plan, modelId)
-      // The "live" badge next to the selected model updates as confirmation —
-      // no need for a transient "Saved" flash.
-      if (plan === 'free') setFreeLive(modelId)
-      else { setPaidLive(modelId); setPaidDivergent(null) }
-      // Refresh verify card so admin sees the new resolution immediately.
-      refreshVerify()
+      const { setActiveAIModel } = await import('../../services/adminService')
+      const config = await setActiveAIModel(model)
+      setActiveConfig(config)
+      setActiveLive(model.id)
+      setActiveSelection(model.id)
+      await refreshVerify()
     } catch (err) {
       setError(err instanceof Error ? err.message : t('admin.saveError'))
     } finally {
-      setSaving(false)
+      setIsSavingActive(false)
     }
   }
 
@@ -2023,54 +2025,53 @@ function AdminSection() {
         </Box>
       )}
 
-      <SettingsGroup title={t('admin.freePlan')} badge={t('admin.coderModels')}>
+      <SettingsGroup title="Data Plane de IA activo" badge={t('admin.coderModels')}>
+        <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>
+          Publica a configuração activa que o ai-pass-through-worker lê em ACTIVE_AI_CONFIG. O agente usa apenas VITE_AI_WORKER_URL.
+        </Text>
         <ModelRadioList
           models={models}
-          selectedId={freeSelection}
-          liveId={freeLive}
-          onChange={setFreeSelection}
+          selectedId={activeSelection}
+          liveId={activeLive}
+          onChange={setActiveSelection}
         />
-        <Flex justify="flex-end" mt={3}>
-          <Button
-            size="sm"
-            disabled={isSavingFree || freeSelection === freeLive || !freeSelection}
-            onClick={function () { handleSave('free') }}
-            bg={tokens.colors.accent.primary}
-            color="white"
-            _hover={{ bg: tokens.colors.accent.primaryDark }}
-            _disabled={{ opacity: 0.4, cursor: 'not-allowed' }}
+        {activeConfig && (
+          <Box
+            mt={3}
+            p={3}
+            borderRadius={tokens.radius.lg}
+            bg={tokens.colors.bg.card}
+            border="1px solid"
+            borderColor={activeConfig.enabled ? tokens.colors.bg.cardBorder : tokens.colors.accent.orange}
           >
-            {isSavingFree ? t('admin.saving') : t('admin.save')}
-          </Button>
-        </Flex>
-      </SettingsGroup>
-
-      <SettingsGroup title={t('admin.paidPlans')} badge={t('admin.coderModels')}>
-        <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>{t('admin.paidPlansDesc')}</Text>
-        {paidDivergent && (
-          <Box p={3} mb={3} borderRadius={tokens.radius.lg}
-            bg="rgba(247, 127, 0, 0.08)"
-            border="1px solid" borderColor={tokens.colors.accent.orange}>
-            <Text fontSize="11px" color={tokens.colors.accent.orange}>{t('admin.divergentTiers')}</Text>
+            <Flex justify="space-between" align="center" mb={1}>
+              <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>Active AI Config</Text>
+              <Text fontSize="10px" color={activeConfig.enabled ? tokens.colors.accent.green : tokens.colors.accent.orange}>
+                {activeConfig.enabled ? 'enabled' : 'disabled'}
+              </Text>
+            </Flex>
+            <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
+              {activeConfig.provider} / {activeConfig.model}
+            </Text>
+            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt={1}>
+              {activeConfig.baseUrl}{activeConfig.chatCompletionsPath}
+            </Text>
+            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt={1}>
+              {activeConfig.authHeader} · {activeConfig.authScheme} · {activeConfig.apiKeyEnv}
+            </Text>
           </Box>
         )}
-        <ModelRadioList
-          models={models}
-          selectedId={paidSelection}
-          liveId={paidLive}
-          onChange={setPaidSelection}
-        />
         <Flex justify="flex-end" mt={3}>
           <Button
             size="sm"
-            disabled={isSavingPaid || (paidSelection === paidLive && !paidDivergent) || !paidSelection}
-            onClick={function () { handleSave('paid') }}
+            disabled={isSavingActive || activeSelection === activeLive || !activeSelection}
+            onClick={handlePublishActive}
             bg={tokens.colors.accent.primary}
             color="white"
             _hover={{ bg: tokens.colors.accent.primaryDark }}
             _disabled={{ opacity: 0.4, cursor: 'not-allowed' }}
           >
-            {isSavingPaid ? t('admin.saving') : t('admin.save')}
+            {isSavingActive ? t('admin.saving') : 'Publicar active config'}
           </Button>
         </Flex>
       </SettingsGroup>
@@ -2079,44 +2080,38 @@ function AdminSection() {
         <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>{t('admin.verifyDesc')}</Text>
         {verify ? (
           <VStack align="stretch" gap={2}>
-            {verify.verified.map(function (row) {
-              const isStale = verify.cache.stalePlans.includes(row.plan)
-              const broken = !row.ok
-              return (
-                <Box
-                  key={row.plan}
-                  p={3}
-                  borderRadius={tokens.radius.lg}
-                  bg={tokens.colors.bg.card}
-                  border="1px solid"
-                  borderColor={broken ? tokens.colors.accent.red : (isStale ? tokens.colors.accent.orange : tokens.colors.bg.cardBorder)}
-                >
-                  <Flex justify="space-between" align="center" mb={1}>
-                    <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>{row.plan}</Text>
-                    <HStack gap={2}>
-                      {broken && (
-                        <Text fontSize="10px" color={tokens.colors.accent.red}>
-                          {t('admin.verifyBroken')}
-                        </Text>
-                      )}
-                      {!broken && isStale && (
-                        <Text fontSize="10px" color={tokens.colors.accent.orange}>
-                          {t('admin.verifyStale')}
-                        </Text>
-                      )}
-                    </HStack>
-                  </Flex>
-                  <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
-                    {row.storedIdeModel} → {row.resolvedUpstreamModel ?? '?'} @ {row.resolvedProvider ?? '?'}
+            {verify.activeAIConfig && (
+              <Box
+                p={3}
+                borderRadius={tokens.radius.lg}
+                bg={tokens.colors.bg.card}
+                border="1px solid"
+                borderColor={verify.activeAIConfig.enabled ? tokens.colors.bg.cardBorder : tokens.colors.accent.orange}
+              >
+                <Flex justify="space-between" align="center" mb={1}>
+                  <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>Active AI Config</Text>
+                  <Text
+                    fontSize="10px"
+                    color={verify.activeAIConfig.enabled ? tokens.colors.accent.green : tokens.colors.accent.orange}
+                  >
+                    {verify.activeAIConfig.enabled ? 'enabled' : 'disabled'}
                   </Text>
-                  {row.providerUrl && (
-                    <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt={1}>
-                      {row.providerUrl}
-                    </Text>
-                  )}
-                </Box>
-              )
-            })}
+                </Flex>
+                <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
+                  {verify.activeAIConfig.provider} / {verify.activeAIConfig.model}
+                </Text>
+                <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt={1}>
+                  {verify.activeAIConfig.baseUrl}{verify.activeAIConfig.chatCompletionsPath}
+                </Text>
+                <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt={1}>
+                  {verify.activeAIConfig.authHeader} · {verify.activeAIConfig.authScheme} · {verify.activeAIConfig.apiKeyEnv}
+                </Text>
+              </Box>
+            )}
+
+            {!verify.activeAIConfig && (
+              <Text fontSize="12px" color={tokens.colors.text.muted}>{t('admin.verifyIdle')}</Text>
+            )}
           </VStack>
         ) : isVerifying ? (
           <Text fontSize="12px" color={tokens.colors.text.muted}>{t('admin.verifyChecking')}</Text>
@@ -2139,6 +2134,32 @@ function AdminSection() {
       </SettingsGroup>
     </VStack>
   )
+}
+
+function findActiveModelId(
+  models: import('../../services/adminService').AdminModel[],
+  config: import('../../services/adminService').ActiveAIConfig | null | undefined,
+): string {
+  if (!config) return ''
+  return models.find(model => activeConfigMatches(model.activeConfig, config))?.id || ''
+}
+
+function activeConfigMatches(
+  expected: import('../../services/adminService').ActiveAIConfigInput,
+  actual: import('../../services/adminService').ActiveAIConfig,
+): boolean {
+  return expected.provider === actual.provider &&
+    expected.model === actual.model &&
+    trimTrailingSlashes(expected.baseUrl) === trimTrailingSlashes(actual.baseUrl) &&
+    expected.chatCompletionsPath === actual.chatCompletionsPath &&
+    expected.authHeader === actual.authHeader &&
+    expected.authScheme === actual.authScheme &&
+    expected.apiKeyEnv === actual.apiKeyEnv &&
+    expected.enabled === actual.enabled
+}
+
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '')
 }
 
 function ModelRadioList(props: {

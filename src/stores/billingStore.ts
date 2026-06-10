@@ -10,8 +10,8 @@ import type { Promotion } from './promotionsStore'
 //   - 'pro':             20.91M
 //   - 'max':             129.81M
 // Pricing is admin-controlled in toquemedia-studio; the IDE only consumes the
-// plan name + token budget reported by the backend. The per-plan model is
-// also admin-managed (Settings → Live Model) — the frontend never picks one.
+// plan name + token budget reported by the backend. The active AI provider/model
+// is published separately as Active AI Config by the Control Plane.
 export type UserPlanName = 'explorer' | 'vibe' | 'pro' | 'max' | 'welcome' | 'byok-only'
 
 export type CostBudgetStatus =
@@ -20,27 +20,6 @@ export type CostBudgetStatus =
   | 'allowed_critical'
   | 'allowed_overage'
   | 'rejected'
-
-/** Shape of the SSE event injected by the worker at the end of /v1/chat/completions */
-export interface BillingSSEEvent {
-  type: 'billing'
-  consumed_pct: number        // 0–1 normal cycle, > 1 in overage
-  status: CostBudgetStatus
-  tokens_used: number         // raw tokens consumed in THIS request
-  tokens_consumed: number     // cumulative cycle total (post-commit prediction)
-  token_budget: number        // plan budget for the cycle (post-commit)
-  cycle_end: string           // "YYYY-MM-DD"
-  extra_usage_balance: number // overage credits after this request
-  plan: UserPlanName
-  used_overage: boolean       // request charged to overage balance (vs cycle)
-  billing_multiplier?: number
-  /** When true, the request was forwarded with a client-supplied API key.
-   *  TMS budget fields (consumed_pct, token_budget, cycle_end, extra_usage_balance,
-   *  used_overage, tokens_consumed) are zero/empty and MUST be ignored. Only
-   *  `tokens_used` is meaningful — the IDE multiplies it by provider pricing
-   *  to display $$ cost per request. */
-  byok?: boolean
-}
 
 /** Shape of the /v1/me response body */
 export interface MeResponse {
@@ -68,8 +47,7 @@ export interface MeResponse {
 // The backend is the source of truth. The store receives data from:
 //   1. /v1/me on app launch + window focus + post-purchase deep link
 //      (event-driven, NEVER polling — see memory feedback_no_polling.md)
-//   2. SSE billing event injected at the end of every /v1/chat/completions
-//   3. Response headers (X-Budget-Pct, X-Budget-Status, X-Cycle-End, X-Extra-Tokens)
+//   2. Response headers, when an administrative gateway returns budget metadata
 
 interface BillingState {
   // Identity
@@ -96,13 +74,12 @@ interface BillingState {
 }
 
 interface BillingActions {
-  updateFromSSE: (data: BillingSSEEvent) => void
   updateFromHeaders: (headers: Headers) => void
   updateFromMe: (data: MeResponse) => void
   setNoCredits: () => void
   /** Clear noCredits flag without changing the underlying status — used by
    *  agentService before each request as an optimistic "maybe it's resolved" reset.
-   *  The next response (headers + SSE) will set the real state. */
+   *  The next Control Plane refresh or budget header will set the real state. */
   clearNoCredits: () => void
   reset: () => void
 }
@@ -162,38 +139,8 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
   ...INITIAL_STATE,
 
   /**
-   * Apply an SSE billing event from /v1/chat/completions. The backend sends
-   * monotonically-correct values (computed with atomic Firestore ops), so the
-   * IDE just trusts and applies. Includes tokens_consumed (cumulative total)
-   * directly — no derivation from consumedPct × tokenBudget.
-   */
-  updateFromSSE: (data) => {
-    // BYOK requests don't consume TMS budget — only the per-request token
-    // count (tokens_used) is meaningful, for $$ cost display. Leave the
-    // existing TMS state untouched so a user toggling between BYOK and TMS
-    // mid-conversation doesn't see their budget bar reset to zero.
-    if (data.byok) {
-      set({ lastTokensUsed: data.tokens_used })
-      return
-    }
-    set({
-      consumedPct: data.consumed_pct,
-      tokensConsumed: data.tokens_consumed,
-      status: data.status,
-      cycleEnd: data.cycle_end,
-      tmsRemaining: data.extra_usage_balance,
-      tokenBudget: data.token_budget,
-      plan: data.plan,
-      lastTokensUsed: data.tokens_used,
-      lastUsedOverage: data.used_overage,
-      noCredits: data.status === 'rejected',
-    })
-  },
-
-  /**
-   * Apply rate-limit headers from a /v1/chat/completions response. These arrive
-   * BEFORE the SSE billing event, so they reflect the pre-stream state. The
-   * SSE event arrives later with the post-commit state and supersedes.
+   * Apply budget headers if a gateway response includes them. The new AI
+   * pass-through Worker does not add billing headers, so absence is normal.
    *
    * Updates BOTH consumedPct AND tokensConsumed (from X-Tokens-Consumed) so
    * the dropdown's absolute count stays consistent with the % indicator.

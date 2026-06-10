@@ -12,7 +12,6 @@
 
 import type OpenAI from "openai";
 import type { ContentBlockAPI } from "../../types/chat";
-import type { BillingSSEEvent } from "../../stores/billingStore";
 import {
   microcompact,
   applyToolResultBudget,
@@ -59,7 +58,6 @@ export type QueryStreamEvent =
   | { type: "tool_use_stop"; id: string }
   | { type: "message_start" }
   | { type: "message_stop"; stopReason: string; usage?: OpenAI.CompletionUsage }
-  | { type: "billing_update"; billing: BillingSSEEvent }
   | {
       type: "tool_result";
       toolUseId: string;
@@ -69,7 +67,7 @@ export type QueryStreamEvent =
   | { type: "compact_start"; beforeTokens: number }
   | { type: "compact_end"; beforeTokens: number; afterTokens: number }
   | {
-      type: "worker_status";
+      type: "agent_status";
       phase: "attempting" | "retrying" | "connected";
       message: string;
       provider?: string;
@@ -681,41 +679,6 @@ export async function* query(
           };
         }
 
-        if (chunk?.type === "worker_status") {
-          yield {
-            type: "worker_status",
-            phase:
-              chunk.phase === "attempting" || chunk.phase === "connected"
-                ? chunk.phase
-                : "retrying",
-            message:
-              typeof chunk.message === "string"
-                ? chunk.message
-                : "Worker status update",
-            provider:
-              typeof chunk.provider === "string" ? chunk.provider : undefined,
-            model: typeof chunk.model === "string" ? chunk.model : undefined,
-            attempt:
-              typeof chunk.attempt === "number" ? chunk.attempt : undefined,
-            maxAttempts:
-              typeof chunk.maxAttempts === "number"
-                ? chunk.maxAttempts
-                : undefined,
-            httpStatus:
-              typeof chunk.httpStatus === "number"
-                ? chunk.httpStatus
-                : undefined,
-            retryInMs:
-              typeof chunk.retryInMs === "number" ? chunk.retryInMs : undefined,
-          };
-          continue;
-        }
-
-        if (chunk?.type === "billing") {
-          yield { type: "billing_update", billing: chunk as BillingSSEEvent };
-          continue;
-        }
-
         if (chunk?.error) {
           throw createStreamPayloadError(chunk.error);
         }
@@ -958,7 +921,7 @@ export async function* query(
         if (refreshClient && authRefreshAttempts < PLATFORM_AUTH_REFRESH_ATTEMPTS) {
           authRefreshAttempts++;
           yield {
-            type: "worker_status",
+            type: "agent_status",
             phase: "retrying",
             message: "Authentication token expired. Refreshing and retrying...",
             attempt: authRefreshAttempts,
@@ -990,7 +953,7 @@ export async function* query(
       ) {
         const nextRetry = credentialConfigRetries + 1;
         yield {
-          type: "worker_status",
+          type: "agent_status",
           phase: "retrying",
           message: `Provider credential/configuration error. Retrying ${nextRetry}/${CREDENTIAL_CONFIG_MAX_RETRIES} in 30s...`,
           attempt: nextRetry,

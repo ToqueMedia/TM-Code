@@ -24,7 +24,7 @@ import {
 
 // ── Constants ──
 
-const DEFAULT_MODEL = 'mimo-v2.5-pro-1m'
+const DEFAULT_MODEL = 'tm-active-model'
 
 // ── Types ──
 
@@ -33,7 +33,7 @@ export interface QueryEngineOptions {
   client: OpenAI
   /** Recreate the SDK client with fresh credentials after an auth failure. */
   refreshClient?: () => Promise<OpenAI | null>
-  /** Model ID. Default: mimo-v2.5-pro-1m. */
+  /** Placeholder model. The AI pass-through Worker injects the active model. */
   model?: string
   /** System prompt. */
   systemPrompt: string

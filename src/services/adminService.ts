@@ -9,18 +9,14 @@ export interface AdminModel {
   name: string
   providerLabel: string
   category: ModelCategory
+  activeConfig: ActiveAIConfigInput
 }
+
+export type ActiveAIConfigInput = Omit<ActiveAIConfig, 'updatedAt' | 'updatedBy'>
 
 export interface AdminModelsResponse {
   models: AdminModel[]
-  live: {
-    free: string
-    paid: string | null
-    paidDivergent: Record<string, string> | null
-  }
 }
-
-export type AdminPlanGroup = 'free' | 'paid'
 
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await FirebaseAuthService.getInstance().getIdToken()
@@ -40,47 +36,50 @@ export async function fetchAdminModels(): Promise<AdminModelsResponse> {
   return await res.json() as AdminModelsResponse
 }
 
-export async function setLiveModel(plan: AdminPlanGroup, modelId: string): Promise<void> {
-  const res = await tauriFetch(`${resolveWorkerUrl()}/v1/admin/live-model`, {
-    method: 'POST',
+export async function publishActiveAIConfig(config: ActiveAIConfigInput): Promise<ActiveAIConfig> {
+  const res = await tauriFetch(`${resolveWorkerUrl()}/v1/admin/ai/active-config`, {
+    method: 'PUT',
     headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ plan, modelId }),
+    body: JSON.stringify(config),
   })
   if (!res.ok) {
     if (res.status === 403) throw new Error('FORBIDDEN')
-    // The worker returns a structured JSON envelope: `{ error: string, detail?: string }`.
-    // Surface the human-readable `detail` when present (covers the
-    // common "Plan(s) not found in Firestore" case the user kept hitting
-    // — previously came through as a raw JSON dump in the UI error banner).
-    // Falls back to the raw body when not JSON / no detail field.
     const raw = await res.text().catch(() => '')
     let human = raw
     try {
       const parsed = JSON.parse(raw) as { error?: string; detail?: string }
-      if (parsed.detail) {
-        human = parsed.detail
-      } else if (parsed.error) {
-        human = parsed.error
-      }
-    } catch { /* not JSON — keep raw */ }
-    throw new Error(`Failed to update live model (${res.status}): ${human.slice(0, 300)}`)
+      human = parsed.detail || parsed.error || raw
+    } catch { /* keep raw */ }
+    throw new Error(`Failed to publish active AI config (${res.status}): ${human.slice(0, 300)}`)
   }
+  const data = await res.json() as { config?: ActiveAIConfig }
+  if (!data.config) {
+    throw new Error('Failed to publish active AI config: missing config in response')
+  }
+  return data.config
 }
 
-export interface VerifyEntry {
-  plan: string
-  storedIdeModel: string
-  resolvedProvider: string | null
-  resolvedUpstreamModel: string | null
-  providerUrl: string | null
-  ok: boolean
+export async function setActiveAIModel(model: AdminModel): Promise<ActiveAIConfig> {
+  return publishActiveAIConfig(model.activeConfig)
+}
+
+export interface ActiveAIConfig {
+  provider: string
+  model: string
+  baseUrl: string
+  chatCompletionsPath: string
+  authHeader: string
+  authScheme: 'Bearer' | 'none'
+  apiKeyEnv: string
+  enabled: boolean
+  updatedAt?: string
+  updatedBy?: string
 }
 
 export interface VerifyResponse {
-  verified: VerifyEntry[]
+  activeAIConfig?: ActiveAIConfig | null
   cache: {
-    kvLive: Record<string, string | null>
-    stalePlans: string[]
+    activeConfigKey: string
   }
 }
 
@@ -93,5 +92,12 @@ export async function fetchAdminVerify(): Promise<VerifyResponse> {
     const detail = await res.text().catch(() => '')
     throw new Error(`Failed to verify admin state (${res.status}): ${detail.slice(0, 200)}`)
   }
-  return await res.json() as VerifyResponse
+  const data = await res.json() as Partial<VerifyResponse>
+  return {
+    ...data,
+    activeAIConfig: data.activeAIConfig ?? null,
+    cache: {
+      activeConfigKey: data.cache?.activeConfigKey ?? 'active',
+    },
+  }
 }
