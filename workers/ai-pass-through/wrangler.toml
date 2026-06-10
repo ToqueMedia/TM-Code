@@ -4,7 +4,7 @@ compatibility_date = "2026-06-02"
 
 [[kv_namespaces]]
 binding = "ACTIVE_AI_CONFIG"
-id = "replace-with-active-ai-config-kv-id"
+id = "b4052457452a4e84aedf332e055c4b1a"
 preview_id = "replace-with-active-ai-config-kv-id"
 
 [vars]

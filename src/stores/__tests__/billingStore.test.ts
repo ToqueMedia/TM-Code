@@ -98,6 +98,31 @@ describe('billingStore', () => {
     })
   })
 
+  describe('addEstimatedUsage', () => {
+    it('optimistically advances cycle usage when pass-through responses have no billing headers', () => {
+      useBillingStore.getState().updateFromMe({
+        plan: 'pro',
+        isActive: true,
+        billing: {
+          consumedPct: 0.25,
+          tokensConsumed: 250,
+          tokenBudget: 1000,
+          cycleEnd: '2026-04-30',
+          extraUsageBalance: 0,
+          status: 'allowed',
+        },
+      })
+
+      useBillingStore.getState().addEstimatedUsage(125)
+
+      const state = useBillingStore.getState()
+      expect(state.tokensConsumed).toBe(375)
+      expect(state.consumedPct).toBeCloseTo(0.375, 4)
+      expect(state.lastTokensUsed).toBe(125)
+      expect(state.noCredits).toBe(false)
+    })
+  })
+
   describe('isBlocked / isInOverage helpers', () => {
     it('isBlocked returns true only for rejected', () => {
       expect(isBlocked('rejected')).toBe(true)

@@ -53,6 +53,23 @@ interface RunAgentOptions {
   systemPromptOverride?: string
 }
 
+const APPROX_CHARS_PER_TOKEN = 4
+
+function estimateTokensFromText(value: string): number {
+  if (!value) return 0
+  return Math.ceil(value.length / APPROX_CHARS_PER_TOKEN)
+}
+
+function estimateTokensFromValue(value: unknown): number {
+  if (typeof value === 'string') return estimateTokensFromText(value)
+  if (value === null || value === undefined) return 0
+  try {
+    return estimateTokensFromText(JSON.stringify(value))
+  } catch {
+    return estimateTokensFromText(String(value))
+  }
+}
+
 /**
  * Serialization chain — each invocation awaits the previous one to fully
  * settle before starting. We *cannot* simply drop concurrent calls: the
@@ -306,6 +323,31 @@ async function runAgentInternal(
   const loopStartTime = Date.now()
   let firstTextReceived = false
   let firstReasoningReceived = false
+  const initialPromptEstimate = estimateTokensFromText(systemPrompt)
+    + estimateTokensFromValue(history)
+    + estimateTokensFromValue(userContent)
+  let estimatedPromptTokens = 0
+  let estimatedOutputTokens = 0
+  let estimatedBilledTokens = 0
+  const applyLiveTokenEstimate = (inputDelta: number, outputDelta: number) => {
+    if (inputDelta > 0) estimatedPromptTokens += inputDelta
+    if (outputDelta > 0) estimatedOutputTokens += outputDelta
+
+    if (inputDelta > 0 || outputDelta > 0) {
+      useChatStore.getState().addEstimatedTokenUsage(
+        estimatedPromptTokens,
+        estimatedOutputTokens,
+      )
+    }
+
+    const billableDelta = Math.max(0, inputDelta) + Math.max(0, outputDelta)
+    if (billableDelta > 0) {
+      estimatedBilledTokens += billableDelta
+      useBillingStore.getState().addEstimatedUsage(billableDelta)
+    }
+  }
+
+  applyLiveTokenEstimate(initialPromptEstimate, 0)
   logger.info('agent', '→ Agent loop starting...')
 
   try {
@@ -320,6 +362,7 @@ async function runAgentInternal(
           logger.info('agent', `✓ First text delta received (${Date.now() - loopStartTime}ms into loop)`)
         }
         agentStore.setStatus('generating')
+        applyLiveTokenEstimate(0, estimateTokensFromText(delta))
         appendTextDeltaBuffered(delta)
       },
       onReasoningDelta: (delta) => {
@@ -329,6 +372,7 @@ async function runAgentInternal(
           logger.info('agent', `✓ Reasoning started (${Date.now() - loopStartTime}ms into loop)`)
         }
         agentStore.setStatus('reasoning')
+        applyLiveTokenEstimate(0, estimateTokensFromText(delta))
         appendReasoningDeltaBuffered(delta)
       },
       onReasoningComplete: () => {
@@ -359,6 +403,7 @@ async function runAgentInternal(
         const resultLen = typeof result === 'string' ? result.length : JSON.stringify(result).length
         logger.info('agent', `✓ ${toolName} completed (${resultLen} chars${isError ? ', ERROR' : ''})`)
         useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
+        applyLiveTokenEstimate(estimateTokensFromValue(result), 0)
         // Tool finished — we are now waiting for the model's next response.
         agentStore.setStatus('awaiting_response')
       },
@@ -394,6 +439,12 @@ async function runAgentInternal(
       onUsageUpdate: (inputTokens, outputTokens) => {
         logger.info('agent', `→ Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out`)
         useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
+        const authoritativeTotal = inputTokens + outputTokens
+        const correction = authoritativeTotal - estimatedBilledTokens
+        if (correction > 0) {
+          useBillingStore.getState().addEstimatedUsage(correction)
+          estimatedBilledTokens += correction
+        }
       },
       onContextCompression: (event) => {
         if (event.type === 'hooks_start') {
