@@ -333,7 +333,17 @@
       "Bash(echo \"rust_exit=$?\")",
       "Bash(echo \"ts_exit=$?\")",
       "Bash(echo \"rust=$?\")",
-      "Bash(echo \"ts=$?\")"
+      "Bash(echo \"ts=$?\")",
+      "Bash(yarn tauri:build:mac-arm64 *)",
+      "Read(//Users/ithustle/Desktop/**)",
+      "Read(//Users/ithustle/Desktop/builds-desktop/**)",
+      "Bash(pkill -f \"release/toquemedia-studio\")",
+      "Bash(pkill -f \"TM Code.app\")",
+      "Bash(sed -n '950,1000p' src/components/prompt/usePromptBar.ts)",
+      "Bash(sed -n '285,330p' src/hooks/useCmdPromptLogic.ts)",
+      "Bash(sed -n '14,22p' src/stores/settingsStore.ts)",
+      "Bash(sed -n '288,300p' src/stores/settingsStore.ts)",
+      "Bash(lsof -nP -iTCP:9099 -iTCP:1420 -sTCP:LISTEN)"
     ]
   }
 }

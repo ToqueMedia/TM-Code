@@ -52,12 +52,37 @@ const IGNORE_DIR_NAMES = new Set<string>([
   '.expo',
   'tmp',
   '.tmp',
+  '.output',
+  '.vercel',
+  '.netlify',
+  '.serverless',
+  '.parcel-cache',
+  '.astro',
+  '.docusaurus',
+  '.vite',
+  '.wrangler',
+  'storybook-static',
+  'bower_components',
+  '.pnpm-store',
+  '.yarn',
 ])
 
 const IGNORE_FILE_EXT = new Set<string>([
   'rlib', 'rmeta', 'pyc', 'pyo', 'class', 'o', 'obj', 'so', 'dylib', 'dll',
   'exe', 'lock',
 ])
+
+// Build artifacts that carry a compound extension — getExtension() sees only
+// the last segment ('js', 'css'), so suffix-match these explicitly. Keeps
+// minified bundles and sourcemaps out of @mention results even when they
+// live outside a recognised build directory.
+const IGNORE_FILE_SUFFIXES = ['.min.js', '.min.css', '.min.mjs', '.bundle.js', '.chunk.js', '.map']
+
+function isIgnoredFileName(name: string): boolean {
+  if (IGNORE_FILE_EXT.has(getExtension(name))) return true
+  const ln = name.toLowerCase()
+  return IGNORE_FILE_SUFFIXES.some(suffix => ln.endsWith(suffix))
+}
 
 function splitPath(p: string): string[] {
   return p.replace(/\\/g, '/').split('/').filter(Boolean)
@@ -85,6 +110,62 @@ export default class QuickOpenService {
   private buildToken = 0
   /** Unsubscribe for the live filesystem watcher, if any. */
   private watcherCleanup: (() => void) | null = null
+  /** Plain directory names harvested from the project's root .gitignore —
+   *  catches project-specific build output (e.g. `www`, `.output`, `bundle`)
+   *  that the static IGNORE_DIR_NAMES list can't anticipate. */
+  private gitignoreDirs: Set<string> = new Set()
+
+  private isIgnoredDirName(name: string): boolean {
+    const ln = name.toLowerCase()
+    return IGNORE_DIR_NAMES.has(ln) || this.gitignoreDirs.has(ln)
+  }
+
+  /**
+   * Does any ANCESTOR directory segment fall in an ignored set?
+   * Two deliberate subtleties:
+   *  - The path is made relative to rootPath first, so a project that
+   *    happens to LIVE inside a folder named `build`/`dist` isn't nuked.
+   *  - The final segment (basename) is excluded — files are judged by
+   *    isIgnoredFileName and directories by isIgnoredDirName at their own
+   *    call sites; judging basenames here would hide files like a
+   *    gitignored `.env`, which the index includes on purpose.
+   */
+  private hasIgnoredAncestor(path: string): boolean {
+    let rel = path
+    if (this.rootPath && path.startsWith(this.rootPath)) {
+      rel = path.slice(this.rootPath.length)
+    }
+    const segs = splitPath(rel)
+    segs.pop()
+    return segs.some(seg => this.isIgnoredDirName(seg))
+  }
+
+  /**
+   * Best-effort parse of the root .gitignore. Only plain, single-segment
+   * directory-ish entries are honored (`dist/`, `build`, `.output`) — globs,
+   * negations, and nested paths are skipped; the goal is catching build
+   * output folders, not reimplementing git matching semantics.
+   */
+  private async loadGitignoreDirs(rootPath: string): Promise<void> {
+    this.gitignoreDirs = new Set()
+    try {
+      const fs = await import('@tauri-apps/plugin-fs')
+      const raw = await fs.readTextFile(`${rootPath}/.gitignore`)
+      for (const line of raw.split('\n')) {
+        let s = line.trim()
+        if (!s || s.startsWith('#') || s.startsWith('!')) continue
+        if (/[*?[\]]/.test(s)) continue // glob — skip
+        s = s.replace(/^\/+/, '').replace(/\/+$/, '')
+        if (!s || s.includes('/')) continue // nested path — skip
+        // Never let a .gitignore line hide source-looking files via a name
+        // that's actually a file (e.g. ".env"); only block descend, which
+        // is harmless for files anyway since we match directory names.
+        this.gitignoreDirs.add(s.toLowerCase())
+      }
+    } catch {
+      // No .gitignore (or unreadable) — static list still applies.
+    }
+  }
 
   static getInstance(): QuickOpenService {
     if (!QuickOpenService.instance) {
@@ -120,6 +201,7 @@ export default class QuickOpenService {
     this.index = []
     this.pathToEntry.clear()
     this.notify()
+    await this.loadGitignoreDirs(rootPath)
     await this.buildIndex()
     // Start live watcher only after the initial index has settled.
     this.startWatcher().catch(err => logger.warn('quick-open', 'watcher start failed', err))
@@ -142,6 +224,7 @@ export default class QuickOpenService {
     this.index = []
     this.pathToEntry.clear()
     this.notify()
+    await this.loadGitignoreDirs(this.rootPath)
     await this.buildIndex()
   }
 
@@ -209,7 +292,7 @@ export default class QuickOpenService {
             : `${current}/${n}`
 
           if (entry.isDirectory) {
-            if (IGNORE_DIR_NAMES.has(n.toLowerCase())) continue
+            if (this.isIgnoredDirName(n)) continue
             // Skip known symlinks when we can detect them — avoids the textbook
             // `a/b -> ../a` infinite loop.
             if (entry.isSymlink) continue
@@ -218,8 +301,7 @@ export default class QuickOpenService {
             pathSet.set(p, e)
             stack.push(p)
           } else {
-            const ext = getExtension(n)
-            if (IGNORE_FILE_EXT.has(ext)) continue
+            if (isIgnoredFileName(n)) continue
             const e: IndexEntry = { path: p, isDirectory: false }
             entriesOut.push(e)
             pathSet.set(p, e)
@@ -250,13 +332,10 @@ export default class QuickOpenService {
     if (this.pathToEntry.has(path)) return
     const name = getFileName(path)
     if (!name) return
-    if (isDirectory && IGNORE_DIR_NAMES.has(name.toLowerCase())) return
-    if (!isDirectory && IGNORE_FILE_EXT.has(getExtension(name))) return
+    if (isDirectory && this.isIgnoredDirName(name)) return
+    if (!isDirectory && isIgnoredFileName(name)) return
     // Refuse entries that fall under an ignored ancestor (e.g. target/).
-    const parts = splitPath(path)
-    for (const seg of parts) {
-      if (IGNORE_DIR_NAMES.has(seg.toLowerCase())) return
-    }
+    if (this.hasIgnoredAncestor(path)) return
     const entry: IndexEntry = { path, isDirectory }
     this.pathToEntry.set(path, entry)
     this.index.push(entry)
@@ -306,8 +385,7 @@ export default class QuickOpenService {
 
             for (const p of paths) {
               // Cheap filter: drop events inside any ignored directory.
-              const segments = splitPath(p)
-              if (segments.some(s => IGNORE_DIR_NAMES.has(s.toLowerCase()))) continue
+              if (this.hasIgnoredAncestor(p)) continue
 
               if (kindStr === 'create' || kindStr === 'rename') {
                 // We don't know if it's a file or dir without stat(). Best-effort:
@@ -358,7 +436,10 @@ export default class QuickOpenService {
    * Prefers recently-used entries, then directories for navigation, then files.
    */
   list(limit: number = 30, includeDirectories: boolean = false): QuickOpenItem[] {
-    const source = includeDirectories ? this.index : this.index.filter(e => !e.isDirectory)
+    // Defensive: never surface ignored content even if a stale entry slipped
+    // into the index through an unguarded path (e.g. older session data).
+    const source = (includeDirectories ? this.index : this.index.filter(e => !e.isDirectory))
+      .filter(e => !this.hasIgnoredAncestor(e.path) && (e.isDirectory || !isIgnoredFileName(getFileName(e.path))))
     const now = Date.now()
     const sorted = source.slice().sort((a, b) => {
       const aUsed = a.lastUsed || 0
@@ -398,6 +479,9 @@ export default class QuickOpenService {
       const entry = this.index[i]
       if (!includeDirectories && entry.isDirectory) continue
       const name = getFileName(entry.path)
+      // Defensive mirror of the list() filter — see comment there.
+      if (!entry.isDirectory && isIgnoredFileName(name)) continue
+      if (this.hasIgnoredAncestor(entry.path)) continue
       const ln = name.toLowerCase()
       const lp = entry.path.toLowerCase()
 

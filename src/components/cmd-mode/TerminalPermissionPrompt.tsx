@@ -20,6 +20,9 @@ interface TerminalPermissionPromptProps {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** How long after mount before keyboard shortcuts take effect (ms). */
+const KEY_ARMING_MS = 350
+
 function getArgPreview(toolName: string, args: Record<string, unknown>): string | null {
   // Pick the first non-empty string from a list of candidate keys.
   const pick = (...keys: string[]): string | null => {
@@ -101,6 +104,18 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   const [reason, setReason] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  // Arming delay — the prompt can appear mid-typing (the agent requests a
+  // permission while the user is writing in the prompt input). Keystrokes
+  // already in flight would otherwise land on the y/n/Enter handlers below
+  // and approve/deny something the user never saw. Ignore keys until the
+  // prompt has been visible long enough to be perceived. Key-repeats are
+  // ignored for the same reason (Enter held down from before the prompt).
+  const armedAtRef = useRef(0)
+  useEffect(() => {
+    armedAtRef.current = performance.now() + KEY_ARMING_MS
+  }, [])
+  const isArmed = () => performance.now() >= armedAtRef.current
+
   // Auto-focus textarea when switching to writing mode.
   useEffect(() => {
     if (mode === 'writing') textareaRef.current?.focus()
@@ -132,6 +147,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   useEffect(() => {
     if (mode === 'confirm-all') {
       function handleKeyDown(e: KeyboardEvent) {
+        if (!isArmed() || e.repeat) return
         if (e.key === 'y' || e.key === 'Y' || e.key === 'Enter') {
           e.preventDefault()
           handleConfirmAll()
@@ -146,6 +162,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
 
     if (mode !== 'choose') return
     function handleKeyDown(e: KeyboardEvent) {
+      if (!isArmed() || e.repeat) return
       const target = e.target as HTMLElement
       if (target.tagName === 'TEXTAREA') return
 

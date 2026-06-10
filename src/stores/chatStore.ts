@@ -644,27 +644,26 @@ export function markReasoningBoundary(): void {
 // Track whether we're waiting for user action before flushing buffered deltas
 let waitForUserFlush = false
 
+// Store hooks resolved via dynamic import in the deferred block below.
+// They CANNOT be required lazily: `require` does not exist in the Vite ESM
+// build, so the previous require()-based access always threw and the whole
+// wait-for-user buffering silently no-oped in production (text kept
+// streaming behind permission prompts). Dynamic import() breaks the
+// circular dependency the same way without depending on CJS.
+let _permissionStore: typeof import('./permissionStore').usePermissionStore | null = null
+let _credentialStore: typeof import('./credentialRequestStore').useCredentialRequestStore | null = null
+
 /**
  * Check if any user-wait state is active that should pause streaming display.
  * Text arriving while the user is deciding on a permission/diff/credential
  * should be buffered until they respond, not shown immediately.
  */
 function isAnyUserWaitStateActive(): boolean {
-  try {
-    // Lazy import to avoid circular dependency — permissionStore imports chatStore
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const permissionStore = require('../../stores/permissionStore').usePermissionStore
-    const credentialStore = require('../../stores/credentialRequestStore').useCredentialRequestStore
-
-    const hasPermission = !!permissionStore.getState().pendingPermission
-    const hasDiffs = useChatStore.getState().pendingDiffs.length > 0
-    const hasCredentials = credentialStore.getState().pending.size > 0
-
-    return hasPermission || hasDiffs || hasCredentials
-  } catch {
-    // Stores not ready yet — don't block
-    return false
-  }
+  // Refs still null (first tick / tests) → don't block.
+  const hasPermission = !!_permissionStore?.getState().pendingPermission
+  const hasDiffs = useChatStore.getState().pendingDiffs.length > 0
+  const hasCredentials = (_credentialStore?.getState().pending.size ?? 0) > 0
+  return hasPermission || hasDiffs || hasCredentials
 }
 
 /**
@@ -684,22 +683,22 @@ function flushWhenUserReady(): void {
 // Deferred to next tick to avoid "used before declaration" error since
 // useChatStore is defined later in this file.
 setTimeout(() => {
-  try {
-    // Lazy import to avoid circular dependency
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const permissionStore = require('../../stores/permissionStore').usePermissionStore
-    const credentialStore = require('../../stores/credentialRequestStore').useCredentialRequestStore
-
-    permissionStore.subscribe(() => flushWhenUserReady())
-    credentialStore.subscribe(() => flushWhenUserReady())
-    useChatStore.subscribe((state, prevState) => {
-      if (state.pendingDiffs.length !== prevState.pendingDiffs.length) {
-        flushWhenUserReady()
-      }
-    })
-  } catch {
-    // Stores not ready yet — subscriptions will be set up when they are
-  }
+  void Promise.all([
+    import('./permissionStore'),
+    import('./credentialRequestStore'),
+  ]).then(([permission, credential]) => {
+    _permissionStore = permission.usePermissionStore
+    _credentialStore = credential.useCredentialRequestStore
+    permission.usePermissionStore.subscribe(() => flushWhenUserReady())
+    credential.useCredentialRequestStore.subscribe(() => flushWhenUserReady())
+  }).catch(() => {
+    // Stores unavailable (tests) — buffering degrades to pass-through.
+  })
+  useChatStore.subscribe((state, prevState) => {
+    if (state.pendingDiffs.length !== prevState.pendingDiffs.length) {
+      flushWhenUserReady()
+    }
+  })
 }, 0)
 
 function scheduleFlush() {

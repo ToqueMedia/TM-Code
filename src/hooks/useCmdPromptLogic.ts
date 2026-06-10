@@ -584,6 +584,24 @@ export function useCmdPromptLogic() {
       return
     }
 
+    // Paid-plan gate at selection time — parity with chat-mode usePromptBar.
+    // The menu's mouse onClick refuses paywalled rows, but keyboard Enter
+    // routes here directly; without this a free user could pick a Pro/Max
+    // row (e.g. /speed) and have it land in the input or run. Refuse and
+    // surface the plan message so the action isn't silently swallowed.
+    if (command.requiresPaidPlan && !command.usesOwnPlanGate) {
+      const billingPlan = useBillingStore.getState().plan
+      if (!isSlashCommandAllowedForPlan(command, billingPlan)) {
+        useChatStore.getState().addSystemMessage(
+          command.planGateMessageKey ? t(command.planGateMessageKey) : `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`,
+          'warn',
+        )
+        setShowCommandMenu(false)
+        setIsArgMode(false)
+        return
+      }
+    }
+
     // Command mode: real command pick. No-arg commands run immediately;
     // commands that accept args get the trailing space + focus.
     setShowCommandMenu(false)

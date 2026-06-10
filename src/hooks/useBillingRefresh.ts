@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
+import { useAuthStore } from '../stores/authStore'
+import { useBillingStore } from '../stores/billingStore'
 
 /**
  * Refreshes billing state on event-driven triggers (NEVER polling).
@@ -54,9 +56,32 @@ export function useBillingRefresh(): void {
     document.addEventListener('visibilitychange', handleVisibility)
     window.addEventListener('online', handleOnline)
 
+    // 3. Auth becomes ready (app launch / login) and billing never loaded.
+    //    Safety net for the onAuthStateChanged-driven fetch: if it aborted or
+    //    exhausted its retries at cold boot, the plan card stayed empty until
+    //    the next window-focus or a chat turn touched the user doc. This is a
+    //    single deferred check per auth-ready event — NOT polling.
+    let bootRetryTimer: ReturnType<typeof setTimeout> | null = null
+    const scheduleBootCheck = (isAuthed: boolean) => {
+      if (!isAuthed || useBillingStore.getState().isLoaded) return
+      if (bootRetryTimer) clearTimeout(bootRetryTimer)
+      bootRetryTimer = setTimeout(() => {
+        bootRetryTimer = null
+        if (!useBillingStore.getState().isLoaded) refresh()
+      }, 3000)
+    }
+    scheduleBootCheck(useAuthStore.getState().isAuthenticated)
+    const unsubAuth = useAuthStore.subscribe((state, prev) => {
+      if (state.isAuthenticated && !prev.isAuthenticated) {
+        scheduleBootCheck(true)
+      }
+    })
+
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility)
       window.removeEventListener('online', handleOnline)
+      if (bootRetryTimer) clearTimeout(bootRetryTimer)
+      unsubAuth()
     }
   }, [])
 }
