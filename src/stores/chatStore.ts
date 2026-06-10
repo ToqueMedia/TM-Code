@@ -167,6 +167,8 @@ interface ChatActions {
   replaceConversationHistory: (newHistory: ConversationMessage[]) => void
   /** Reset token counters to zero (used after compaction). */
   resetTokenCounters: () => void
+  /** Optimistic live estimate used when a pass-through provider streams no usage chunks. */
+  addEstimatedTokenUsage: (inputTokens: number, outputTokens: number) => void
   // Streaming actions
   appendTextDelta: (delta: string) => void
   appendReasoningDelta: (delta: string) => void
@@ -2523,6 +2525,46 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           currentPromptTokens: 0,
           currentResponseTokens: 0,
           sessions,
+        }
+      })
+    },
+
+    addEstimatedTokenUsage: (inputTokens: number, outputTokens: number) => {
+      if (
+        (!Number.isFinite(inputTokens) || inputTokens <= 0) &&
+        (!Number.isFinite(outputTokens) || outputTokens <= 0)
+      ) {
+        return
+      }
+
+      set(state => {
+        const nextPrompt =
+          inputTokens > 0
+            ? Math.max(state.currentPromptTokens, Math.ceil(inputTokens))
+            : state.currentPromptTokens
+        const nextResponse =
+          outputTokens > 0
+            ? Math.max(state.currentResponseTokens, Math.ceil(outputTokens))
+            : state.currentResponseTokens
+
+        let nextSessions = state.sessions
+        if (state.activeSessionId && (nextPrompt > 0 || nextResponse > 0)) {
+          const active = state.sessions.get(state.activeSessionId)
+          if (active) {
+            nextSessions = new Map(state.sessions)
+            nextSessions.set(state.activeSessionId, {
+              ...active,
+              lastPromptTokens: Math.max(active.lastPromptTokens ?? 0, nextPrompt),
+              lastResponseTokens: nextResponse,
+              updatedAt: Date.now(),
+            })
+          }
+        }
+
+        return {
+          currentPromptTokens: nextPrompt,
+          currentResponseTokens: nextResponse,
+          sessions: nextSessions,
         }
       })
     },

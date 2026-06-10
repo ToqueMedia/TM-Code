@@ -76,6 +76,7 @@ interface BillingState {
 interface BillingActions {
   updateFromHeaders: (headers: Headers) => void
   updateFromMe: (data: MeResponse) => void
+  addEstimatedUsage: (tokens: number) => void
   setNoCredits: () => void
   /** Clear noCredits flag without changing the underlying status — used by
    *  agentService before each request as an optimistic "maybe it's resolved" reset.
@@ -197,6 +198,58 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
       status: data.billing.status,
       tmsRemaining: data.billing.extraUsageBalance,
       noCredits: data.billing.status === 'rejected',
+    })
+  },
+
+  /**
+   * Local optimistic usage used while the AI data-plane Worker streams
+   * provider output. The pass-through Worker intentionally no longer emits
+   * billing headers, so this keeps the header pill moving until /v1/me or
+   * an administrative gateway response provides the authoritative numbers.
+   */
+  addEstimatedUsage: (tokens) => {
+    if (!Number.isFinite(tokens) || tokens <= 0) return
+    const rounded = Math.ceil(tokens)
+    set(state => {
+      const tokensConsumed = state.tokensConsumed + rounded
+      const consumedPct = state.tokenBudget > 0
+        ? tokensConsumed / state.tokenBudget
+        : state.consumedPct
+
+      // Overage deduction: if they are in overage, deduct tokens from tmsRemaining
+      let tmsRemaining = state.tmsRemaining
+      const isOverage = state.status === 'allowed_overage' || consumedPct > 1
+      if (isOverage) {
+        tmsRemaining = Math.max(0, tmsRemaining - rounded)
+      }
+
+      let status = state.status
+      let noCredits = state.noCredits
+      if (isOverage && tmsRemaining <= 0) {
+        status = 'rejected'
+        noCredits = true
+      } else {
+        status =
+          state.status === 'rejected' || state.status === 'allowed_overage'
+            ? state.status
+            : consumedPct >= 1
+              ? 'allowed_critical'
+              : consumedPct >= 0.95
+                ? 'allowed_critical'
+                : consumedPct >= 0.8
+                  ? 'allowed_warning'
+                  : state.status
+      }
+
+      return {
+        tokensConsumed,
+        consumedPct,
+        status,
+        tmsRemaining,
+        noCredits,
+        lastTokensUsed: state.lastTokensUsed + rounded,
+        lastUsedOverage: state.lastUsedOverage || isOverage,
+      }
     })
   },
 

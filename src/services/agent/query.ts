@@ -265,6 +265,115 @@ function createStreamPayloadError(raw: unknown): Error {
   return annotated;
 }
 
+function getToolCallId(toolCall: unknown): string | null {
+  const id = (toolCall as { id?: unknown } | null)?.id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+function getToolMessageCallId(message: unknown): string | null {
+  const toolCallId = (message as { tool_call_id?: unknown } | null)
+    ?.tool_call_id;
+  return typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId : null;
+}
+
+function isToolMessage(message: OpenAI.ChatCompletionMessageParam): boolean {
+  return (message as { role?: unknown }).role === "tool";
+}
+
+function assistantHasSendablePayload(message: Record<string, unknown>): boolean {
+  const content = message.content;
+  if (typeof content === "string") return content.length > 0;
+  if (Array.isArray(content)) return content.length > 0;
+  if (content !== null && content !== undefined) return true;
+
+  return Object.keys(message).some(
+    (key) => key !== "role" && key !== "tool_calls",
+  );
+}
+
+/**
+ * OpenAI-compatible providers validate tool history strictly: every
+ * role:"tool" message must answer a tool_call id from the immediately
+ * preceding assistant message. Provider-native round-trip state can become
+ * stale after switching providers mid-session, and compaction can also leave
+ * orphaned tool results behind. Normalize the wire payload at the API boundary
+ * so strict providers such as MiniMax reject neither case.
+ */
+function normalizeOpenAIToolSequence(
+  messages: OpenAI.ChatCompletionMessageParam[],
+): OpenAI.ChatCompletionMessageParam[] {
+  const normalized: OpenAI.ChatCompletionMessageParam[] = [];
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index] as unknown as Record<string, unknown>;
+
+    if (isToolMessage(messages[index])) {
+      continue;
+    }
+
+    if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) {
+      normalized.push(messages[index]);
+      continue;
+    }
+
+    let nextIndex = index + 1;
+    const followingToolMessages: OpenAI.ChatCompletionMessageParam[] = [];
+    while (nextIndex < messages.length && isToolMessage(messages[nextIndex])) {
+      followingToolMessages.push(messages[nextIndex]);
+      nextIndex += 1;
+    }
+
+    const followingToolIds = new Set(
+      followingToolMessages
+        .map(getToolMessageCallId)
+        .filter((id): id is string => id !== null),
+    );
+
+    const keptToolCalls = message.tool_calls.filter((toolCall) => {
+      const id = getToolCallId(toolCall);
+      return id !== null && followingToolIds.has(id);
+    });
+
+    const assistantMessage: Record<string, unknown> = {
+      ...message,
+      tool_calls: keptToolCalls,
+    };
+
+    if (keptToolCalls.length === 0) {
+      const assistantWithoutToolCalls: Record<string, unknown> = { ...message };
+      delete assistantWithoutToolCalls.tool_calls;
+      if (assistantHasSendablePayload(assistantWithoutToolCalls)) {
+        normalized.push(
+          assistantWithoutToolCalls as unknown as OpenAI.ChatCompletionMessageParam,
+        );
+      }
+      index = nextIndex - 1;
+      continue;
+    }
+
+    normalized.push(
+      assistantMessage as unknown as OpenAI.ChatCompletionMessageParam,
+    );
+
+    const pendingToolIds = new Set(
+      keptToolCalls
+        .map(getToolCallId)
+        .filter((id): id is string => id !== null),
+    );
+
+    for (const toolMessage of followingToolMessages) {
+      const toolCallId = getToolMessageCallId(toolMessage);
+      if (!toolCallId || !pendingToolIds.has(toolCallId)) continue;
+      normalized.push(toolMessage);
+      pendingToolIds.delete(toolCallId);
+    }
+
+    index = nextIndex - 1;
+  }
+
+  return normalized;
+}
+
 /** Convert internal QueryMessage[] to OpenAI ChatCompletionMessageParam[]. */
 export function toOpenAIMessages(
   messages: QueryMessage[],
@@ -408,7 +517,7 @@ export function toOpenAIMessages(
     }
   }
 
-  return result;
+  return normalizeOpenAIToolSequence(result);
 }
 
 /** Filter out incomplete tool_call blocks (no matching tool_result). */

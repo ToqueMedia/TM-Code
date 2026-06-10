@@ -56,7 +56,19 @@ describe('Provider-native reasoning round-trip', () => {
         _native: nativeMsg,
       }
 
-      const apiMessages = toOpenAIMessages([queryMsg])
+      const apiMessages = toOpenAIMessages([
+        queryMsg,
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              toolCallId: 'call_1',
+              content: 'file contents',
+            },
+          ],
+        },
+      ])
       const apiMsg = apiMessages[0] as any
 
       // Native fields are preserved
@@ -68,6 +80,8 @@ describe('Provider-native reasoning round-trip', () => {
       expect(apiMsg.tool_calls).toHaveLength(1)
       expect(apiMsg.tool_calls[0].id).toBe('call_1')
       expect(apiMsg.tool_calls[0].function.name).toBe('read_file')
+      expect((apiMessages[1] as any).role).toBe('tool')
+      expect((apiMessages[1] as any).tool_call_id).toBe('call_1')
     })
 
     it('rebuild produces _native ConversationMessage', () => {
@@ -227,13 +241,60 @@ describe('Provider-native reasoning round-trip', () => {
         _native: nativeMsg,
       }
 
-      const apiMessages = toOpenAIMessages([queryMsg])
+      const apiMessages = toOpenAIMessages([
+        queryMsg,
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              toolCallId: 'call_1',
+              content: 'ok',
+            },
+          ],
+        },
+      ])
       const apiMsg = apiMessages[0] as any
 
       expect(apiMsg.tool_calls[0].extra_content).toEqual({
         google: { thought_signature: 'sig_abc' },
       })
       expect(apiMsg.tool_calls[0].custom_tc_field).toBe(42)
+    })
+
+    it('drops stale provider-native tool calls when matching tool results are absent', () => {
+      const queryMsg: QueryMessage = {
+        role: 'assistant',
+        content: 'Stale provider message',
+        _native: {
+          role: 'assistant',
+          content: 'Stale provider message',
+          tool_calls: [
+            {
+              id: 'gemini_call_1',
+              type: 'function',
+              function: { name: 'read_file', arguments: '{}' },
+            },
+          ],
+        },
+      }
+
+      const apiMessages = toOpenAIMessages([
+        queryMsg,
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              toolCallId: 'minimax_rejected_id',
+              content: 'orphaned result',
+            },
+          ],
+        },
+      ])
+
+      expect((apiMessages[0] as any).tool_calls).toBeUndefined()
+      expect(apiMessages.some((m: any) => m.role === 'tool')).toBe(false)
     })
   })
 
@@ -278,7 +339,19 @@ describe('Provider-native reasoning round-trip', () => {
         ],
       }
 
-      const apiMessages = toOpenAIMessages([queryMsg])
+      const apiMessages = toOpenAIMessages([
+        queryMsg,
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              toolCallId: 'call_1',
+              content: 'legacy result',
+            },
+          ],
+        },
+      ])
       const apiMsg = apiMessages[0] as any
 
       // Legacy reconstruction works
@@ -286,6 +359,7 @@ describe('Provider-native reasoning round-trip', () => {
       expect(apiMsg.content).toBe('Legacy text')
       expect(apiMsg.reasoning_content).toBe('Legacy thinking')
       expect(apiMsg.tool_calls).toHaveLength(1)
+      expect((apiMessages[1] as any).tool_call_id).toBe('call_1')
     })
   })
 

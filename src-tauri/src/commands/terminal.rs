@@ -339,7 +339,7 @@ fn pick_interactive_shell_info() -> InteractiveShellInfo {
             .to_string();
         InteractiveShellInfo {
             command: shell,
-            args: vec!["-i".to_string()],
+            args: vec!["-l".to_string(), "-i".to_string()],
             kind,
             command_style: "posix".to_string(),
             platform: env::consts::OS.to_string(),
@@ -1128,6 +1128,24 @@ pub async fn start_pty_shell(
     // Inherit environment
     for (k, v) in env::vars() {
         cmd.env(k, v);
+    }
+
+    // Set terminal coloring and UTF-8 locale environment variables
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("FORCE_COLOR", "1");
+    cmd.env("CLICOLOR", "1");
+    cmd.env("CLICOLOR_FORCE", "1");
+    cmd.env("TERM_PROGRAM", "Apple_Terminal");
+
+    // Ensure UTF-8 locale is set so zsh/git/etc. enable full color and unicode support
+    let lang = env::var("LANG").unwrap_or_default();
+    if lang.is_empty() || lang == "C" || lang == "POSIX" {
+        cmd.env("LANG", "en_US.UTF-8");
+    }
+    let lc_all = env::var("LC_ALL").unwrap_or_default();
+    if lc_all.is_empty() || lc_all == "C" || lc_all == "POSIX" {
+        cmd.env("LC_ALL", "en_US.UTF-8");
     }
 
     // Create PTY with default dimensions

@@ -384,7 +384,9 @@ class AgentService {
       ? createSubAgentClient(authToken)
       : createAgentClient(authToken);
     const refreshClient = async (): Promise<OpenAI | null> => {
-      const refreshed = await FirebaseAuthService.getInstance().getIdToken(true);
+      const auth = FirebaseAuthService.getInstance();
+      const refreshed = await auth.getIdToken(true)
+        ?? (await auth.refreshLogin() ? await auth.getIdToken(true) : null);
       if (!refreshed) return null;
       return this.lightweightOptions
         ? createSubAgentClient(refreshed)

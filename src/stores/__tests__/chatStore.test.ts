@@ -55,6 +55,8 @@ function resetStore() {
     conversationHistory: [],
     currentTurnCount: 0,
     totalTokensUsed: { input: 0, output: 0 },
+    currentPromptTokens: 0,
+    currentResponseTokens: 0,
     pendingDiffs: [],
   })
 }
@@ -285,6 +287,22 @@ describe('chatStore', () => {
       // output is always overwritten with the latest call.
       expect(currentPromptTokens).toBe(200)
       expect(currentResponseTokens).toBe(75)
+    })
+
+    it('tracks live estimated context before provider usage arrives', () => {
+      useChatStore.getState().addEstimatedTokenUsage(120, 10)
+      useChatStore.getState().addEstimatedTokenUsage(100, 25)
+
+      let state = useChatStore.getState()
+      expect(state.currentPromptTokens).toBe(120)
+      expect(state.currentResponseTokens).toBe(25)
+      expect(state.totalTokensUsed).toEqual({ input: 0, output: 0 })
+
+      useChatStore.getState().addTokenUsage(140, 30)
+      state = useChatStore.getState()
+      expect(state.currentPromptTokens).toBe(140)
+      expect(state.currentResponseTokens).toBe(30)
+      expect(state.totalTokensUsed).toEqual({ input: 140, output: 30 })
     })
   })
 

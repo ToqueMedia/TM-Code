@@ -1,15 +1,21 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "toquemedia-studio",
-  "compatibility_date": "2025-09-27",
-  "observability": {
-    "enabled": true
-  },
-  "assets": {
-    "directory": "./dist",
-    "not_found_handling": "single-page-application"
-  },
-  "compatibility_flags": [
-    "nodejs_compat"
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "toquemedia-studio",
+	"compatibility_date": "2025-09-27",
+	"observability": {
+		"enabled": true
+	},
+	"assets": {
+		"directory": "./dist",
+		"not_found_handling": "single-page-application"
+	},
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"kv_namespaces": [
+		{
+			"binding": "ACTIVE_AI_CONFIG",
+			"id": "b4052457452a4e84aedf332e055c4b1a"
+		}
+	]
 }

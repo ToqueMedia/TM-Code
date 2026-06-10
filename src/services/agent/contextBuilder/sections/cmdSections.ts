@@ -393,7 +393,7 @@ export function getCmdReminderSection(loadedSkillNames: string[] = []): string {
     : ''
   return `# Reminder
 
-1. **COMPLETE** every task and **VERIFY** before reporting done. Say so when verification is not possible.
+1. **COMPLETE** every task and run one highest-signal verification path before reporting done. If it passes, stop with summary + verification + next steps — do not keep re-checking. Say so when verification is not possible.
 2. File writes go to disk immediately — **DOUBLE-CHECK** paths and content.
 3. **AFTER** execute_command: **READ** full output. Exit code ≠ 0 → **FIX** the actual error and move on. **DO NOT BLINDLY RETRY** the exact same command.
 4. **For reading files**, use \`${READ_FILE}\`. **For searching**, use \`${SEARCH_FILES}\`. **For listing directories**, use \`${LIST_DIRECTORY}\`. **For finding files by pattern**, use \`${GLOB}\`. Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
