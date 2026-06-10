@@ -808,16 +808,20 @@ class FirebaseAuthService {
     })
   }
 
-  async persistTokensConsumed(tokensConsumed: number): Promise<void> {
+  async persistTokensConsumed(tokensConsumed: number, extraUsageBalance?: number): Promise<void> {
     const uid = this.currentUser?.uid
     if (!uid) return
     try {
-      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid), {
+      const updateData: any = {
         tokenBudget: {
           tokensConsumed
         }
-      }, { merge: true })
-      console.info(`[billing] Persisted tokensConsumed=${tokensConsumed} to Firestore`)
+      }
+      if (extraUsageBalance !== undefined) {
+        updateData.extraUsageBalance = extraUsageBalance
+      }
+      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid), updateData, { merge: true })
+      console.info(`[billing] Persisted tokensConsumed=${tokensConsumed}, extraUsageBalance=${extraUsageBalance} to Firestore`)
     } catch (err) {
       console.warn('[billing] Failed to persist tokensConsumed to Firestore:', err)
     }

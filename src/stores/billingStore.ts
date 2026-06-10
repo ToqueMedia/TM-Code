@@ -215,22 +215,40 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
       const consumedPct = state.tokenBudget > 0
         ? tokensConsumed / state.tokenBudget
         : state.consumedPct
-      const status =
-        state.status === 'rejected' || state.status === 'allowed_overage'
-          ? state.status
-          : consumedPct >= 1
-            ? 'allowed_critical'
-            : consumedPct >= 0.95
+
+      // Overage deduction: if they are in overage, deduct tokens from tmsRemaining
+      let tmsRemaining = state.tmsRemaining
+      const isOverage = state.status === 'allowed_overage' || consumedPct > 1
+      if (isOverage) {
+        tmsRemaining = Math.max(0, tmsRemaining - rounded)
+      }
+
+      let status = state.status
+      let noCredits = state.noCredits
+      if (isOverage && tmsRemaining <= 0) {
+        status = 'rejected'
+        noCredits = true
+      } else {
+        status =
+          state.status === 'rejected' || state.status === 'allowed_overage'
+            ? state.status
+            : consumedPct >= 1
               ? 'allowed_critical'
-              : consumedPct >= 0.8
-                ? 'allowed_warning'
-                : state.status
+              : consumedPct >= 0.95
+                ? 'allowed_critical'
+                : consumedPct >= 0.8
+                  ? 'allowed_warning'
+                  : state.status
+      }
+
       return {
         tokensConsumed,
         consumedPct,
         status,
+        tmsRemaining,
+        noCredits,
         lastTokensUsed: state.lastTokensUsed + rounded,
-        lastUsedOverage: state.lastUsedOverage || consumedPct > 1 || state.status === 'allowed_overage',
+        lastUsedOverage: state.lastUsedOverage || isOverage,
       }
     })
   },

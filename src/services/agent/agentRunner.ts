@@ -479,7 +479,10 @@ async function runAgentInternal(
     try {
       const billingState = useBillingStore.getState()
       if (billingState.tokensConsumed > 0) {
-        FirebaseAuthService.getInstance().persistTokensConsumed(billingState.tokensConsumed).catch(() => {})
+        FirebaseAuthService.getInstance().persistTokensConsumed(
+          billingState.tokensConsumed,
+          billingState.tmsRemaining
+        ).catch(() => {})
       }
     } catch (err) {
       logger.warn('agent', 'Failed to persist billing tokens consumed:', err)
