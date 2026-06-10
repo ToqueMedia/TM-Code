@@ -28,7 +28,6 @@ jobs:
 
 
   build-linux:
-    if: false
     needs: create-release
     runs-on: ubuntu-22.04
     steps:
@@ -185,7 +184,6 @@ jobs:
           fi
 
   build-macos-intel:
-    if: false
     needs: create-release
     runs-on: macos-15-intel
     steps:
@@ -285,7 +283,7 @@ jobs:
     # Runs AFTER all platform builds complete.
     # Builds the latest.json updater manifest from the release assets,
     # so all platforms are included in one file.
-    needs: [create-release, build-macos-apple-silicon]
+    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -302,7 +300,7 @@ jobs:
           node scripts/generate-latest-json.mjs "${{ needs.create-release.outputs.version }}"
 
   publish-release:
-    needs: [create-release, build-macos-apple-silicon, generate-updater]
+    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel, generate-updater]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release (remove draft)
