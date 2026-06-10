@@ -28,6 +28,7 @@ jobs:
 
 
   build-linux:
+    if: false
     needs: create-release
     runs-on: ubuntu-22.04
     steps:
@@ -159,13 +160,8 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ needs.create-release.outputs.version }}"
-          find src-tauri/target -path "*/bundle/*" -type f \( \
-            -name "*.dmg" -o -name "*.dmg.sig" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
-          \) | while read file; do
-            echo "Uploading: $file"
-            gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
-          done
           BARE_VERSION="${VERSION#v}"
+
           TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
           TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
           if [ -n "$TAR_GZ" ]; then
@@ -177,7 +173,19 @@ jobs:
             fi
           fi
 
+          DMG=$(find src-tauri/target -name "*.dmg" -not -path "*/deps/*" | head -1)
+          DMG_SIG=$(find src-tauri/target -name "*.dmg.sig" -not -path "*/deps/*" | head -1)
+          if [ -n "$DMG" ]; then
+            cp "$DMG" "TM.Code_${BARE_VERSION}_aarch64.dmg"
+            gh release upload "$VERSION" "TM.Code_${BARE_VERSION}_aarch64.dmg" --repo ToqueMedia/TM-Code --clobber
+            if [ -n "$DMG_SIG" ]; then
+              cp "$DMG_SIG" "TM.Code_${BARE_VERSION}_aarch64.dmg.sig"
+              gh release upload "$VERSION" "TM.Code_${BARE_VERSION}_aarch64.dmg.sig" --repo ToqueMedia/TM-Code --clobber
+            fi
+          fi
+
   build-macos-intel:
+    if: false
     needs: create-release
     runs-on: macos-15-intel
     steps:
@@ -249,13 +257,8 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ needs.create-release.outputs.version }}"
-          find src-tauri/target -path "*/bundle/*" -type f \( \
-            -name "*.dmg" -o -name "*.dmg.sig" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
-          \) | while read file; do
-            echo "Uploading: $file"
-            gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
-          done
           BARE_VERSION="${VERSION#v}"
+
           TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
           TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
           if [ -n "$TAR_GZ" ]; then
@@ -267,11 +270,22 @@ jobs:
             fi
           fi
 
+          DMG=$(find src-tauri/target -name "*.dmg" -not -path "*/deps/*" | head -1)
+          DMG_SIG=$(find src-tauri/target -name "*.dmg.sig" -not -path "*/deps/*" | head -1)
+          if [ -n "$DMG" ]; then
+            cp "$DMG" "TM.Code_${BARE_VERSION}_x64.dmg"
+            gh release upload "$VERSION" "TM.Code_${BARE_VERSION}_x64.dmg" --repo ToqueMedia/TM-Code --clobber
+            if [ -n "$DMG_SIG" ]; then
+              cp "$DMG_SIG" "TM.Code_${BARE_VERSION}_x64.dmg.sig"
+              gh release upload "$VERSION" "TM.Code_${BARE_VERSION}_x64.dmg.sig" --repo ToqueMedia/TM-Code --clobber
+            fi
+          fi
+
   generate-updater:
     # Runs AFTER all platform builds complete.
     # Builds the latest.json updater manifest from the release assets,
     # so all platforms are included in one file.
-    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel]
+    needs: [create-release, build-macos-apple-silicon]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -288,7 +302,7 @@ jobs:
           node scripts/generate-latest-json.mjs "${{ needs.create-release.outputs.version }}"
 
   publish-release:
-    needs: [create-release, build-linux, build-macos-apple-silicon, build-macos-intel, generate-updater]
+    needs: [create-release, build-macos-apple-silicon, generate-updater]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release (remove draft)

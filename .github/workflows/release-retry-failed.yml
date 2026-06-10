@@ -103,12 +103,6 @@ jobs:
         run: |
           VERSION="${{ needs.verify-release.outputs.version }}"
           BARE_VERSION="${VERSION#v}"
-          find src-tauri/target -path "*/bundle/*" -type f \( \
-            -name "*.dmg" -o -name "*.dmg.sig" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
-          \) | while read file; do
-            echo "Uploading: $file"
-            gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
-          done
           TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
           TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
           if [ -n "$TAR_GZ" ]; then
@@ -120,7 +114,19 @@ jobs:
             fi
           fi
 
+          DMG=$(find src-tauri/target -name "*.dmg" -not -path "*/deps/*" | head -1)
+          DMG_SIG=$(find src-tauri/target -name "*.dmg.sig" -not -path "*/deps/*" | head -1)
+          if [ -n "$DMG" ]; then
+            cp "$DMG" "TM.Code_${BARE_VERSION}_aarch64.dmg"
+            gh release upload "$VERSION" "TM.Code_${BARE_VERSION}_aarch64.dmg" --repo ToqueMedia/TM-Code --clobber
+            if [ -n "$DMG_SIG" ]; then
+              cp "$DMG_SIG" "TM.Code_${BARE_VERSION}_aarch64.dmg.sig"
+              gh release upload "$VERSION" "TM.Code_${BARE_VERSION}_aarch64.dmg.sig" --repo ToqueMedia/TM-Code --clobber
+            fi
+          fi
+
   build-macos-intel:
+    if: false
     needs: verify-release
     runs-on: macos-15-intel
     steps:
@@ -195,12 +201,6 @@ jobs:
         run: |
           VERSION="${{ needs.verify-release.outputs.version }}"
           BARE_VERSION="${VERSION#v}"
-          find src-tauri/target -path "*/bundle/*" -type f \( \
-            -name "*.dmg" -o -name "*.dmg.sig" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
-          \) | while read file; do
-            echo "Uploading: $file"
-            gh release upload "$VERSION" "$file" --repo ToqueMedia/TM-Code --clobber
-          done
           TAR_GZ=$(find src-tauri/target -name "*.app.tar.gz" -not -path "*/deps/*" | head -1)
           TAR_SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -not -path "*/deps/*" | head -1)
           if [ -n "$TAR_GZ" ]; then
@@ -212,8 +212,19 @@ jobs:
             fi
           fi
 
+          DMG=$(find src-tauri/target -name "*.dmg" -not -path "*/deps/*" | head -1)
+          DMG_SIG=$(find src-tauri/target -name "*.dmg.sig" -not -path "*/deps/*" | head -1)
+          if [ -n "$DMG" ]; then
+            cp "$DMG" "TM.Code_${BARE_VERSION}_x64.dmg"
+            gh release upload "$VERSION" "TM.Code_${BARE_VERSION}_x64.dmg" --repo ToqueMedia/TM-Code --clobber
+            if [ -n "$DMG_SIG" ]; then
+              cp "$DMG_SIG" "TM.Code_${BARE_VERSION}_x64.dmg.sig"
+              gh release upload "$VERSION" "TM.Code_${BARE_VERSION}_x64.dmg.sig" --repo ToqueMedia/TM-Code --clobber
+            fi
+          fi
+
   generate-updater:
-    needs: [verify-release, build-macos-apple-silicon, build-macos-intel]
+    needs: [verify-release, build-macos-apple-silicon]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -230,7 +241,7 @@ jobs:
           node scripts/generate-latest-json.mjs "${{ needs.verify-release.outputs.version }}"
 
   publish-release:
-    needs: [verify-release, build-macos-apple-silicon, build-macos-intel, generate-updater]
+    needs: [verify-release, build-macos-apple-silicon, generate-updater]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release (remove draft)
