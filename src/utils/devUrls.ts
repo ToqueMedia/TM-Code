@@ -63,6 +63,16 @@ function remapGatewayHost(url: string): string {
 export function resolveUrl(input: ResolveUrlInput): string {
   const { envValue, fallback, isViteDev, isWindows } = input
   if (!envValue) return fallback
+  if (!isViteDev) {
+    const lower = envValue.toLowerCase()
+    if (
+      lower.startsWith('http://localhost') ||
+      lower.startsWith('http://127.0.0.1') ||
+      lower.startsWith('http://192.168.64.1')
+    ) {
+      return fallback
+    }
+  }
   if (isViteDev && !isWindows) return remapGatewayHost(envValue)
   return envValue
 }
@@ -77,13 +87,13 @@ let _aiWorkerUrlLogged = false
 export function resolveWorkerUrl(): string {
   const url = resolveUrl({
     envValue: VITE_WORKER_URL,
-    fallback: DEFAULT_WORKER_URL,
+    fallback: IS_VITE_DEV ? DEFAULT_WORKER_URL : PRODUCTION_DEPLOY_URL,
     isViteDev: IS_VITE_DEV,
     isWindows: IS_WINDOWS,
   })
   if (IS_VITE_DEV && !_workerUrlLogged) {
     _workerUrlLogged = true
-    console.info(`[devUrls] Worker URL: ${url} (env=${VITE_WORKER_URL ?? '<unset>'}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
+    console.info(`[devUrls] Worker URL: ${url} (env=${VITE_WORKER_URL ?? '<unset>'}, fallback=${IS_VITE_DEV ? DEFAULT_WORKER_URL : PRODUCTION_DEPLOY_URL}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
   }
   return url
 }
