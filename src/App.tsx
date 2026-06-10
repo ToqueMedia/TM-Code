@@ -860,10 +860,28 @@ function App() {
 		return <LoginScreen />;
 	}
 
-	// Authenticated but signup not yet complete (backend /v1/me reported
-	// `signup_incomplete`). Show login screen — signup must be done on the website.
+	// Authenticated but the backend hasn't answered yet (signupComplete === null
+	// until /v1/me resolves, seconds after sign-in). Keep showing a spinner —
+	// bouncing back to an idle LoginScreen in this window made every successful
+	// login look like it silently failed.
+	if (signupComplete === null) {
+		return (
+			<Flex
+				justify="center"
+				align="center"
+				height="100vh"
+				bg={tokens.colors.bg.welcome}
+			>
+				<LoadingSpinner size="lg" label={t('login.signingIn')} />
+			</Flex>
+		);
+	}
+
+	// Backend /v1/me reported `signup_incomplete`. Show login screen — signup
+	// must be done on the website. The explicit key forces a fresh mount so the
+	// submit spinner from the previous attempt doesn't survive the transition.
 	if (signupComplete !== true) {
-		return <LoginScreen />;
+		return <LoginScreen key="signup-incomplete" />;
 	}
 
 	return (

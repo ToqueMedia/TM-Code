@@ -31,8 +31,10 @@ import {
   VITE_WORKER_URL,
   VITE_AI_WORKER_URL,
   VITE_DEPLOY_URL,
+  DEFAULT_AI_WORKER_URL,
   DEFAULT_OLLAMA_URL,
   DEFAULT_WORKER_URL,
+  PRODUCTION_AI_WORKER_URL,
   PRODUCTION_DEPLOY_URL,
 } from '@/utils/viteEnv'
 
@@ -61,6 +63,16 @@ function remapGatewayHost(url: string): string {
 export function resolveUrl(input: ResolveUrlInput): string {
   const { envValue, fallback, isViteDev, isWindows } = input
   if (!envValue) return fallback
+  if (!isViteDev) {
+    const lower = envValue.toLowerCase()
+    if (
+      lower.startsWith('http://localhost') ||
+      lower.startsWith('http://127.0.0.1') ||
+      lower.startsWith('http://192.168.64.1')
+    ) {
+      return fallback
+    }
+  }
   if (isViteDev && !isWindows) return remapGatewayHost(envValue)
   return envValue
 }
@@ -75,30 +87,27 @@ let _aiWorkerUrlLogged = false
 export function resolveWorkerUrl(): string {
   const url = resolveUrl({
     envValue: VITE_WORKER_URL,
-    fallback: DEFAULT_WORKER_URL,
+    fallback: IS_VITE_DEV ? DEFAULT_WORKER_URL : PRODUCTION_DEPLOY_URL,
     isViteDev: IS_VITE_DEV,
     isWindows: IS_WINDOWS,
   })
   if (IS_VITE_DEV && !_workerUrlLogged) {
     _workerUrlLogged = true
-    console.info(`[devUrls] Worker URL: ${url} (env=${VITE_WORKER_URL ?? '<unset>'}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
+    console.info(`[devUrls] Worker URL: ${url} (env=${VITE_WORKER_URL ?? '<unset>'}, fallback=${IS_VITE_DEV ? DEFAULT_WORKER_URL : PRODUCTION_DEPLOY_URL}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
   }
   return url
 }
 
 export function resolveAIWorkerUrl(): string {
-  if (!VITE_AI_WORKER_URL) {
-    throw new Error('VITE_AI_WORKER_URL is required for AI data-plane requests. Configure it to the ai-pass-through-worker URL.')
-  }
   const url = resolveUrl({
     envValue: VITE_AI_WORKER_URL,
-    fallback: VITE_AI_WORKER_URL,
+    fallback: IS_VITE_DEV ? DEFAULT_AI_WORKER_URL : PRODUCTION_AI_WORKER_URL,
     isViteDev: IS_VITE_DEV,
     isWindows: IS_WINDOWS,
   })
   if (IS_VITE_DEV && !_aiWorkerUrlLogged) {
     _aiWorkerUrlLogged = true
-    console.info(`[devUrls] AI Worker URL: ${url} (env=${VITE_AI_WORKER_URL ?? '<unset>'}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
+    console.info(`[devUrls] AI Worker URL: ${url} (env=${VITE_AI_WORKER_URL ?? '<unset>'}, fallback=${IS_VITE_DEV ? DEFAULT_AI_WORKER_URL : PRODUCTION_AI_WORKER_URL}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
   }
   return url
 }

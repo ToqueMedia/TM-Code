@@ -29,6 +29,7 @@ const CMD_TEXT_STYLE: React.CSSProperties = {
 
 export interface CmdModePromptInputRef {
   focus: () => void
+  blur: () => void
   hasText: () => boolean
   isMenuOpen: () => boolean
   clearAttachments: () => void
@@ -172,6 +173,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
 
   useImperativeHandle(ref, () => ({
     focus: () => textareaRef.current?.focus(),
+    blur: () => textareaRef.current?.blur(),
     hasText: () => (textareaRef.current?.value.trim().length ?? 0) > 0,
     isMenuOpen: () => showCommandMenu || showMentionMenu || hashtagMenu.show,
     clearAttachments,

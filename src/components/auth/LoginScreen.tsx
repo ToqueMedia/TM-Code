@@ -43,9 +43,13 @@ function LoginScreen() {
 
     try {
       await FirebaseAuthService.getInstance().signIn(email, password)
+      // Success: keep the spinner on. signIn resolving only means Firebase
+      // accepted the credentials — the screen switches when onAuthStateChanged
+      // flips isAuthenticated and /v1/me confirms signup (App.tsx auth gate),
+      // which unmounts this component. Clearing the spinner here made the form
+      // reappear idle for those seconds, reading as a silent login failure.
     } catch (err: unknown) {
       setError(getErrorMessage(err))
-    } finally {
       setLoading(false)
     }
   }

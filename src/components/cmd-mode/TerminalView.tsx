@@ -9,7 +9,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import { useTerminalPanelStore, TERMINAL_PANEL_MIN_WIDTH } from '../../stores/terminalPanelStore'
-import { useSettingsStore } from '../../stores/settingsStore'
+import { useSettingsStore, CHAT_TEXT_FONT_SIZE_OPTIONS, DEFAULT_CHAT_TEXT_FONT_SIZE } from '../../stores/settingsStore'
 import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands'
 import CmdModePromptInput, { type CmdModePromptInputRef } from './CmdModePromptInput'
 import { TerminalTitleBar } from './TerminalTitleBar'
@@ -83,9 +83,15 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   }, [hasPendingAskUserQuestion])
 
   // Restore focus when ask_user_question prompt clears (after submit/cancel).
+  // Blur on appear — same hidden-textarea/IME-ghosting issue as the
+  // permission prompt (see the pendingPermission effect below).
   useEffect(() => {
     const wasBlocked = prevHasPendingAskUserQuestionRef.current
     prevHasPendingAskUserQuestionRef.current = hasPendingAskUserQuestion
+    if (!wasBlocked && hasPendingAskUserQuestion) {
+      promptInputRef.current?.blur()
+      return
+    }
     if (wasBlocked && !hasPendingAskUserQuestion) {
       const t = setTimeout(() => promptInputRef.current?.focus(), 50)
       return () => clearTimeout(t)
@@ -279,10 +285,19 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     promptInputRef.current?.focus()
   }, [pendingPermission])
 
-  // Restore focus when permission prompt clears.
+  // Restore focus when permission prompt clears. On the opposite edge —
+  // prompt APPEARING while the user is mid-typing — explicitly blur the
+  // prompt textarea. Hiding it with display:none doesn't reliably drop
+  // focus in WKWebView, so subsequent keystrokes kept feeding the hidden
+  // field and macOS rendered the IME composition in a floating panel over
+  // where the box used to be ("ghost characters").
   useEffect(() => {
     const wasBlocked = prevPendingPermissionRef.current
     prevPendingPermissionRef.current = pendingPermission
+    if (!wasBlocked && pendingPermission) {
+      promptInputRef.current?.blur()
+      return
+    }
     if (wasBlocked && !pendingPermission) {
       const t = setTimeout(() => promptInputRef.current?.focus(), 50)
       return () => clearTimeout(t)
@@ -292,11 +307,22 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   // Native terminal keyboard shortcuts.
   // Ctrl/Cmd+C: stop agent if active and no selected text would be copied
   // Ctrl+L: scroll to bottom (like native terminal clear)
-  // Ctrl+K: clear input line (like native terminal)
+  // Ctrl+K / Ctrl+U: clear input line (native terminal / readline kill-line)
+  // Cmd/Ctrl + = / - / 0: font zoom in / out / reset (iTerm2, Terminal.app)
   useEffect(() => {
     const isAgentActive = () => {
       const status = agentStatusRef.current
       return isStreamingRef.current || (status !== 'idle' && status !== 'error')
+    }
+    const stepFontSize = (direction: 1 | -1 | 0) => {
+      const { chatTextFontSize, setChatTextFontSize } = useSettingsStore.getState()
+      if (direction === 0) {
+        setChatTextFontSize(DEFAULT_CHAT_TEXT_FONT_SIZE)
+        return
+      }
+      const idx = (CHAT_TEXT_FONT_SIZE_OPTIONS as readonly number[]).indexOf(chatTextFontSize)
+      const nextIdx = Math.min(CHAT_TEXT_FONT_SIZE_OPTIONS.length - 1, Math.max(0, idx + direction))
+      setChatTextFontSize(CHAT_TEXT_FONT_SIZE_OPTIONS[nextIdx])
     }
     const handler = (e: KeyboardEvent) => {
       // Ctrl/Cmd+C — stop agent when it is active, including non-streaming tool phases.
@@ -318,12 +344,36 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         scrollToBottom()
         return
       }
-      // Ctrl+K — clear input line (native terminal behavior)
-      if (e.key === 'k' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+      // Ctrl+K — clear input line (native terminal behavior).
+      // Ctrl+U — readline kill-line, same effect here (no cursor-relative
+      // splitting in a multi-line prompt box; full-clear matches user intent).
+      if ((e.key === 'k' && (e.ctrlKey || e.metaKey) && !e.shiftKey) ||
+          (e.key === 'u' && e.ctrlKey && !e.metaKey && !e.shiftKey)) {
         if (promptInputRef.current?.hasText?.()) {
           e.preventDefault()
           e.stopPropagation()
           window.dispatchEvent(new CustomEvent('cmd-clear-input'))
+          return
+        }
+      }
+      // Cmd/Ctrl + = / + — zoom in, - — zoom out, 0 — reset (terminal parity).
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        if (e.key === '=' || e.key === '+') {
+          e.preventDefault()
+          e.stopPropagation()
+          stepFontSize(1)
+          return
+        }
+        if (e.key === '-') {
+          e.preventDefault()
+          e.stopPropagation()
+          stepFontSize(-1)
+          return
+        }
+        if (e.key === '0') {
+          e.preventDefault()
+          e.stopPropagation()
+          stepFontSize(0)
           return
         }
       }
@@ -473,8 +523,16 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
 
   // Terminal bell — when streaming ends and the window is not focused,
   // flash the document title to get the user's attention (like iTerm2).
+  //
+  // Owns its own prev-streaming ref. It previously shared prevStreamingRef
+  // with the consolidated scroll effect above — which runs first (declaration
+  // order) and overwrites the ref to the CURRENT isStreaming, so by the time
+  // this effect compared it the edge was gone and the bell never rang.
+  const prevStreamingBellRef = useRef(false)
   useEffect(() => {
-    if (prevStreamingRef.current && !isStreaming) {
+    const wasStreaming = prevStreamingBellRef.current
+    prevStreamingBellRef.current = isStreaming
+    if (wasStreaming && !isStreaming) {
       if (document.hidden) {
         const originalTitle = document.title
         document.title = '✓ Done — Terminal'
@@ -584,6 +642,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       },
       '& [data-cmd-mode-root] :is(button, [role="button"])': {
         whiteSpace: 'normal',
+      },
+      // Native terminal selection — muted accent wash instead of the browser
+      // default blue, matching iTerm2/Terminal.app feel.
+      '& [data-cmd-mode-root] *::selection': {
+        background: 'rgba(163, 113, 247, 0.30)',
+        color: 'inherit',
       },
     }
   }, [chatTextFontSize])

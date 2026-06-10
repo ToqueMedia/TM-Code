@@ -33,6 +33,8 @@ export const DEFAULT_AI_WORKER_URL = 'http://localhost:8788'
  */
 export const PRODUCTION_DEPLOY_URL = 'https://api-agents.toquemedia.net'
 
+export const PRODUCTION_AI_WORKER_URL = 'https://ai-pass-through-worker.geral-871.workers.dev'
+
 /** Optional override for deploys (staging the pipeline). Undefined → use PRODUCTION_DEPLOY_URL. */
 export const VITE_DEPLOY_URL: string | undefined = import.meta.env.VITE_DEPLOY_URL as string | undefined
 

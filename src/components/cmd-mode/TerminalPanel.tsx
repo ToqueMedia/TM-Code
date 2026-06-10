@@ -252,6 +252,7 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
         brightBlue: tokens.colors.terminal.brightBlue,
         brightMagenta: tokens.colors.terminal.brightMagenta,
         brightCyan: tokens.colors.terminal.brightCyan,
+        brightWhite: tokens.colors.terminal.brightWhite,
       },
     })
 

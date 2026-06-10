@@ -74,13 +74,13 @@ describe('resolveUrl — pure resolver', () => {
       })).toBe('https://api-agents.toquemedia.net')
     })
 
-    it('Mac prod with 192.168.64.1 stays (intentional override in prod build)', () => {
+    it('Mac prod with 192.168.64.1 falls back (sanitizes local IP gateway in production builds)', () => {
       expect(resolveUrl({
         envValue: 'http://192.168.64.1:8787',
-        fallback: 'http://localhost:8787',
+        fallback: 'https://api-agents.toquemedia.net',
         isViteDev: false,
         isWindows: false,
-      })).toBe('http://192.168.64.1:8787')
+      })).toBe('https://api-agents.toquemedia.net')
     })
 
     it('Windows prod with HTTPS URL stays', () => {

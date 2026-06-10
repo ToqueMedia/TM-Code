@@ -193,6 +193,12 @@ class FirebaseAuthService {
   private unsubscribePromotions: (() => void) | null = null
   private lastBillingFetchMs = 0
   private authGeneration = 0
+  /** uid the current authGeneration belongs to. The generation must only
+   *  advance when the SIGNED-IN USER changes (login/logout), never on
+   *  same-user token rotations — onAuthStateChanged fires on those too, and
+   *  bumping the generation there aborted the in-flight startup /v1/me fetch
+   *  at its gen guard, leaving billing empty until a later trigger. */
+  private lastAuthUid: string | null = null
   /** Tracks the uid for which device registration was last attempted.
    *  Prevents redundant register-device calls on token refresh (~50min). */
   private lastRegisteredUid: string | null = null
@@ -224,6 +230,8 @@ class FirebaseAuthService {
         useTmSpeedStore.getState().reset()
         this.lastBillingFetchMs = 0 // allow immediate fetch on next login
         this.lastRegisteredUid = null // allow re-registration on next login
+        this.lastAuthUid = null
+        this.authGeneration++ // invalidate in-flight fetches/listeners
         this.unsubscribeUserDocListener()
         this.unsubscribeSubscriptionDocListener()
         this.unsubscribePromotionsListener()
@@ -255,7 +263,15 @@ class FirebaseAuthService {
       // Firestore doc with an empty displayName before our signUp setDoc wins;
       // in that window Firestore reads back `''` and without this fallback
       // we'd clobber the name that signUp just pushed to the store.
-      const gen = ++this.authGeneration
+      // Advance the generation only on a real user change. Same-user events
+      // (token rotation ~50min, tab focus) keep the generation stable so
+      // fetches/listeners started by an earlier event aren't spuriously
+      // invalidated mid-flight.
+      if (this.lastAuthUid !== user.uid) {
+        this.lastAuthUid = user.uid
+        this.authGeneration++
+      }
+      const gen = this.authGeneration
       // blockedSynced will be initialized from Firestore profile below
       this.blockedSynced = false
       this.loadProfile(user.uid).then(profile => {
@@ -546,7 +562,14 @@ class FirebaseAuthService {
       try {
         const token = await this.getIdToken(attempt > 1) // force refresh on retry
         if (!token) {
-          console.warn('[billing] No token available — user not authenticated')
+          // At cold boot the SDK's token refresh can transiently fail (App
+          // Check still minting, network not up) — retry instead of giving
+          // up, otherwise billing stays empty until the next focus/refetch.
+          console.warn(`[billing] No token available (attempt ${attempt}/${MAX_ATTEMPTS})`)
+          if (attempt < MAX_ATTEMPTS) {
+            await new Promise(r => setTimeout(r, RETRY_DELAY))
+            continue
+          }
           return
         }
         if (targetGen !== this.authGeneration) return

@@ -1151,6 +1151,7 @@ const en = {
   'login.emailPlaceholder': 'name@email.com',
   'login.password': 'Password',
   'login.passwordPlaceholder': 'Your password',
+  'login.signingIn': 'Signing in…',
 
   // ── Source Control ────────────────────────────────
   'sourceControl.stage': 'Stage: {file}',
@@ -2741,6 +2742,7 @@ const pt: Record<keyof typeof en, string> = {
   'login.emailPlaceholder': 'nome@email.com',
   'login.password': 'Password',
   'login.passwordPlaceholder': 'A sua password',
+  'login.signingIn': 'A entrar…',
 
   // ── Source Control ────────────────────────────────
   'sourceControl.stage': 'Adicionar: {file}',
