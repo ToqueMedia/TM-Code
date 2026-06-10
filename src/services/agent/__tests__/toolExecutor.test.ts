@@ -33,9 +33,12 @@ jest.mock('@tauri-apps/api/event', () => ({
 }))
 
 const mockRequestPermission = jest.fn()
+const mockRequestPathAccess = jest.fn().mockResolvedValue({ approved: false, prompted: true, source: 'user' as const })
 const mockGetState_permission = jest.fn(() => ({
   requestPermission: mockRequestPermission,
+  requestPathAccess: mockRequestPathAccess,
   autoApproveDiffs: false,
+  additionalDirectories: [] as string[],
 }))
 
 const mockCurrentProject = { path: '/projects/test-app' }
@@ -673,9 +676,8 @@ describe('D: CMD mode', () => {
     const exec = freshExecutor()
     exec.enableCmdMode('/projects/test-app')
 
-    await expect(
-      exec.execute('read_file', { file_path: '/other/project/file.txt' })
-    ).rejects.toThrow('outside the working directory')
+    const result = await exec.execute('read_file', { file_path: '/other/project/file.txt' })
+    expect(result).toContain('outside the working directory')
   })
 
   it('disableCmdMode returns to normal mode', async () => {
@@ -1179,17 +1181,15 @@ describe('J: Path validation', () => {
   it('rejects paths outside the project root', async () => {
     const exec = freshExecutor()
 
-    await expect(
-      exec.execute('read_file', { file_path: '/etc/passwd' })
-    ).rejects.toThrow('outside the project directory')
+    const result = await exec.execute('read_file', { file_path: '/etc/passwd' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('rejects path traversal attempts', async () => {
     const exec = freshExecutor()
 
-    await expect(
-      exec.execute('read_file', { file_path: '/projects/test-app/../../etc/passwd' })
-    ).rejects.toThrow('outside the project directory')
+    const result = await exec.execute('read_file', { file_path: '/projects/test-app/../../etc/passwd' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('normalizes paths with .. segments', async () => {
@@ -1225,9 +1225,8 @@ describe('J: Path validation', () => {
       const exec = freshExecutor()
       exec.enableCmdMode('/other/root')
 
-      await expect(
-        exec.execute('read_file', { file_path: '/projects/test-app/file.txt' })
-      ).rejects.toThrow('outside the working directory')
+      const result = await exec.execute('read_file', { file_path: '/projects/test-app/file.txt' })
+      expect(result).toContain('outside the working directory')
     } finally {
       mockCurrentProject.path = originalPath
     }
@@ -1237,23 +1236,20 @@ describe('J: Path validation', () => {
     const exec = freshExecutor()
     exec.updateReadStateAfterWrite('/etc/evil.txt', 'old')
 
-    await expect(
-      exec.execute('write_file', { file_path: '/etc/evil.txt', content: 'new' })
-    ).rejects.toThrow('outside the project directory')
+    const result = await exec.execute('write_file', { file_path: '/etc/evil.txt', content: 'new' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('list_directory validates path before listing', async () => {
     const exec = freshExecutor()
-    await expect(
-      exec.execute('list_directory', { file_path: '/etc' })
-    ).rejects.toThrow('outside the project directory')
+    const result = await exec.execute('list_directory', { file_path: '/etc' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('search_files validates directory before searching', async () => {
     const exec = freshExecutor()
-    await expect(
-      exec.execute('search_files', { query: 'todo', directory: '/etc' })
-    ).rejects.toThrow('outside the project directory')
+    const result = await exec.execute('search_files', { query: 'todo', directory: '/etc' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('create_directory validates path before creating', async () => {
@@ -1265,9 +1261,8 @@ describe('J: Path validation', () => {
 
   it('glob validates directory before listing files', async () => {
     const exec = freshExecutor()
-    await expect(
-      exec.execute('glob', { pattern: '*.ts', directory: '/etc' })
-    ).rejects.toThrow('outside the project directory')
+    const result = await exec.execute('glob', { pattern: '*.ts', directory: '/etc' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('allows relative paths by resolving them against project root', async () => {
@@ -1283,9 +1278,8 @@ describe('J: Path validation', () => {
 
   it('rejects relative paths that traverse outside project root using dot-dots', async () => {
     const exec = freshExecutor()
-    await expect(
-      exec.execute('read_file', { file_path: '../../etc/passwd' })
-    ).rejects.toThrow('outside the project directory')
+    const result = await exec.execute('read_file', { file_path: '../../etc/passwd' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('correctly resolves and normalizes Windows-style relative and backslash paths', async () => {
@@ -1369,20 +1363,24 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
     expect(result).toContain('Exit code: 0')
   })
 
-  it('blocks compound shell commands so agent work stays step-by-step', async () => {
+  it('allows compound shell commands (prompt guidance prevents misuse)', async () => {
     const exec = freshExecutor()
+    mockInvoke.mockResolvedValue({ stdout: 'done', stderr: '', exitCode: 0, success: true, timedOut: false })
 
-    await expect(
-      exec.execute('execute_command', { command: 'apt-get update && apt-get upgrade -y' })
-    ).rejects.toThrow('compound shell operator "&&" detected')
+    const result = await exec.execute('execute_command', { command: 'apt-get update && apt-get upgrade -y' })
+
+    expect(result).toContain('done')
+    expect(result).toContain('Exit code: 0')
   })
 
-  it('blocks compound commands hidden inside ssh remote commands', async () => {
+  it('allows compound commands inside ssh remote commands', async () => {
     const exec = freshExecutor()
+    mockInvoke.mockResolvedValue({ stdout: 'done', stderr: '', exitCode: 0, success: true, timedOut: false })
 
-    await expect(
-      exec.execute('execute_command', { command: 'ssh root@72.62.38.27 "apt-get update && apt-get upgrade -y"' })
-    ).rejects.toThrow('compound shell operator "&&" detected')
+    const result = await exec.execute('execute_command', { command: 'ssh root@72.62.38.27 "apt-get update && apt-get upgrade -y"' })
+
+    expect(result).toContain('done')
+    expect(result).toContain('Exit code: 0')
   })
 
   it('allows a single ssh remote command', async () => {

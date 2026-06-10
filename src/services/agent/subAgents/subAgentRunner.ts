@@ -60,6 +60,10 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     return runId
   }
   const client = createSubAgentClient(authToken)
+  const refreshClient = async (): Promise<OpenAI | null> => {
+    const refreshed = await FirebaseAuthService.getInstance().getIdToken(true)
+    return refreshed ? createSubAgentClient(refreshed) : null
+  }
 
   // ── Build tool definitions in OpenAI format ──
   const openaiTools: OpenAI.ChatCompletionTool[] = filteredTools.map(t => ({
@@ -96,7 +100,8 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   // ── Create QueryEngine ──
   const engine = new QueryEngine({
     client,
-    model: 'mimo-v2.5-pro-1m',
+    refreshClient,
+    model: 'tm-active-model',
     systemPrompt,
     tools: openaiTools,
     executeTool,
@@ -203,8 +208,8 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
             }
             break
 
-          case 'billing_update':
-            useBillingStore.getState().updateFromSSE(event.billing)
+          case 'agent_status':
+            lastActivityAt = Date.now()
             break
 
           case 'error':

@@ -15,7 +15,8 @@
  *   Mac / Linux dev:    192.168.64.1 → localhost (auto-fixed)
  *   Windows dev:        192.168.64.1 stays (correct for UTM)
  *   Production build:   env value used verbatim (remote HTTPS endpoint)
- *   No env value:       hard-coded localhost fallback
+ *   No env value:       hard-coded localhost fallback, except AI data plane
+ *                       which must be configured explicitly
  *
  * The pure `resolveUrl()` function takes all inputs as arguments so it's
  * testable without needing to mock platform/viteEnv modules (which Jest's
@@ -28,6 +29,7 @@ import {
   IS_VITE_DEV,
   VITE_OLLAMA_URL,
   VITE_WORKER_URL,
+  VITE_AI_WORKER_URL,
   VITE_DEPLOY_URL,
   DEFAULT_OLLAMA_URL,
   DEFAULT_WORKER_URL,
@@ -68,6 +70,7 @@ export function resolveUrl(input: ResolveUrlInput): string {
 // Log the resolved Worker URL once on first call in dev so DevTools shows
 // where requests are going (helps debug "is the IDE hitting prod or local?").
 let _workerUrlLogged = false
+let _aiWorkerUrlLogged = false
 
 export function resolveWorkerUrl(): string {
   const url = resolveUrl({
@@ -79,6 +82,23 @@ export function resolveWorkerUrl(): string {
   if (IS_VITE_DEV && !_workerUrlLogged) {
     _workerUrlLogged = true
     console.info(`[devUrls] Worker URL: ${url} (env=${VITE_WORKER_URL ?? '<unset>'}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
+  }
+  return url
+}
+
+export function resolveAIWorkerUrl(): string {
+  if (!VITE_AI_WORKER_URL) {
+    throw new Error('VITE_AI_WORKER_URL is required for AI data-plane requests. Configure it to the ai-pass-through-worker URL.')
+  }
+  const url = resolveUrl({
+    envValue: VITE_AI_WORKER_URL,
+    fallback: VITE_AI_WORKER_URL,
+    isViteDev: IS_VITE_DEV,
+    isWindows: IS_WINDOWS,
+  })
+  if (IS_VITE_DEV && !_aiWorkerUrlLogged) {
+    _aiWorkerUrlLogged = true
+    console.info(`[devUrls] AI Worker URL: ${url} (env=${VITE_AI_WORKER_URL ?? '<unset>'}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
   }
   return url
 }

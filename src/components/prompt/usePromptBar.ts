@@ -16,7 +16,7 @@ import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
 import MCPService from '../../services/mcp/mcpService'
 import { browserSession } from '../../services/browserSessionManager'
-import { slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
+import { isSlashCommandAllowedForPlan, slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
 import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
@@ -370,11 +370,11 @@ export function usePromptBar() {
     // a free user could press Enter on a "Pro" row and the command would
     // land in the textarea. We refuse to insert it AND surface a message
     // so the action is not silently swallowed.
-    if (command.requiresPaidPlan) {
+    if (command.requiresPaidPlan && !command.usesOwnPlanGate) {
       const billingState = useBillingStore.getState()
-      if (billingState.plan === 'explorer') {
+      if (!isSlashCommandAllowedForPlan(command, billingState.plan)) {
         useChatStore.getState().addSystemMessage(
-          `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`
+          command.planGateMessageKey ? t(command.planGateMessageKey) : `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`
         )
         useLayoutStore.getState().setViewMode('settings')
         // Also dismiss the menu so the user isn't left with the same row
@@ -963,18 +963,19 @@ export function usePromptBar() {
       // gate — the command's own paywall message catches it eventually,
       // but blocking here keeps the contract consistent and avoids
       // half-spawned side effects (e.g. browserSession.start).
-      if (command.requiresPaidPlan && useBillingStore.getState().plan === 'explorer') {
+      const billingPlan = useBillingStore.getState().plan
+      if (command.requiresPaidPlan && !command.usesOwnPlanGate && !isSlashCommandAllowedForPlan(command, billingPlan)) {
         useChatStore.getState().setDraftInput('')
         clearDraftAttachments()
         useChatStore.getState().addSystemMessage(
-          `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`
+          command.planGateMessageKey ? t(command.planGateMessageKey) : `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`
         )
         useLayoutStore.getState().setViewMode('settings')
         return
       }
 
       const projectPath = currentProject?.path
-      if (!projectPath) {
+      if (command.requiresProject !== false && !projectPath) {
         useChatStore.getState().setDraftInput('')
         clearDraftAttachments()
         useChatStore.getState().addSystemMessage('No project open. Open a project first.')
@@ -989,7 +990,7 @@ export function usePromptBar() {
       // prompt section) routes to fix-mode rather than re-running fetches.
       if (command.name === '/payments') {
         const { blocked } = await guardScaffoldReapply(
-          projectPath,
+          projectPath!,
           ['payments.momenu'],
           () => buildPaymentsReapplyMessage(),
           () => { useChatStore.getState().setDraftInput(''); clearDraftAttachments() },
@@ -1012,7 +1013,7 @@ export function usePromptBar() {
       // architect's system prompt so the PLAN.md it produces is shaped
       // for the TM Code Publish pipeline (no Prisma/SQLite, firebase-admin
       // baseline, Dockerfile + backend in the same scaffold turn).
-      await command.execute(args, projectPath, 'chat')
+      await command.execute(args, projectPath ?? '', 'chat')
       return
     }
 

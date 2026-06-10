@@ -14,7 +14,7 @@ import { MONOREPO_DIRS } from '../../../projectTypeDetector'
 import { useLayoutStore } from '../../../../stores/layoutStore'
 import SkillService from '../../skillService'
 import {
-  READ_FILE,
+  READ_FILE, SEARCH_FILES, LIST_DIRECTORY, GLOB,
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS, START_DEV_SERVER,
@@ -1064,7 +1064,7 @@ export function getReminderSection(ctx: PromptContext): string {
 2. **AFTER** file changes with a dev server running: \`${READ_DEV_SERVER_LOGS}\` and fix errors before continuing. Track the \`next_since\` cursor — without it you re-read stale entries.
 3. **FIX** real errors; **SKIP** defensive re-checks. When a check passes (clean dev-server logs, no diagnostics, build OK), state it plainly and move on — don't re-verify what you already checked. If verification isn't possible (no test exists, can't run the code), say so explicitly rather than looping until you find something to do. **And — when the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.**
 4. **AFTER** \`execute_command\`: **READ** the output. If exit code ≠ 0, **DIAGNOSE AND FIX** the actual error. **DO NOT BLINDLY RETRY** the exact same command.
-5. **DO NOT EXECUTE SOURCE FILES DIRECTLY** (e.g., \`Ran(file.ts)\`). Use test runners (\`jest\`, \`vitest\`) for tests, or \`ts-node\`/\`bun\` for scripts. Use dedicated tools (\`read_file\`, \`search_files\`) for file exploration, not shell commands (\`cat\`, \`grep\`).
+5. **For reading files**, use \`${READ_FILE}\`. **For searching**, use \`${SEARCH_FILES}\`. **For listing directories**, use \`${LIST_DIRECTORY}\`. **For finding files by pattern**, use \`${GLOB}\`. Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
 6. **DEVELOPER-OWNED env vars** (third-party services the developer integrates — LLM, payments, email, SMTP, analytics, webhooks): call \`${REQUEST_CREDENTIALS}\` in the SAME turn you write \`process.env.X\`. For **PLATFORM-MANAGED** vars (\`TM_AUTH_*\`, \`TMDB_*\`, \`TM_FILES_*\`, \`APP_ID\`) use the matching \`provision_*\` tool instead — \`request_credentials\` is the wrong path.
 7. **FILE UPLOADS** use TM Files, never base64-in-DB. When uploading user content (avatars, images, attachments, documents): call \`provision_files\` if \`TM_FILES_URL\` is missing from .env, generate \`backend/src/files.ts\` (or \`server/src/files.ts\` if the project uses the \`server/\` convention) from the publish-backend skill recipe, and call \`uploadFile()\` from your upload routes. Store the returned \`publicUrl\` in DB columns — never the bytes. The pre-deploy lint catches the common base64-in-DB shape (Drizzle \`db.insert().values({...toString('base64')...})\` and data-URI literals) but the discipline is the goal: never base64 user content into the DB even when the lint wouldn't catch it.
 8. ${sharedUiBaselineReminder()}

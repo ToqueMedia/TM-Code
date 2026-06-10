@@ -3,9 +3,7 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { useTranslation } from '@/i18n/useTranslation'
-import { usePermissionStore } from '../../stores/permissionStore'
-
-type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | null
+import { usePermissionStore, type PromptReason } from '../../stores/permissionStore'
 
 interface TerminalPermissionPromptProps {
   toolName: string
@@ -91,7 +89,12 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   const hideApproveAll = dangerous
 
   const accentColor = dangerous ? tokens.colors.accent.orange : tokens.colors.accent.purple
-  const borderColor = dangerous ? 'rgba(247,127,0,0.3)' : 'rgba(163,113,247,0.25)'
+  const borderColor = dangerous ? 'rgba(247,127,0,0.42)' : 'rgba(163,113,247,0.34)'
+  const panelBg = dangerous ? 'rgba(247, 127, 0, 0.035)' : 'rgba(163, 113, 247, 0.035)'
+  const promptTitle = dangerous ? t('perm.dangerousTitle') : t('terminalMode.permission.title')
+  const question = toolName === 'execute_command' || promptReason === 'dangerous_command'
+    ? t('perm.allowCommand')
+    : t('perm.allowAction')
 
   // Two modes: 'choose' (y/a/n/w keys) and 'writing' (textarea for deny reason).
   const [mode, setMode] = useState<'choose' | 'writing' | 'confirm-all'>('choose')
@@ -183,85 +186,118 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   return (
     <Box
       mx={3}
-      mb={2}
-      pl={3}
-      py={1.5}
-      borderLeft={`2px solid ${borderColor}`}
+      mb={2.5}
+      px={3}
+      py={2.5}
+      bg={panelBg}
+      border="1px solid"
+      borderColor="rgba(255,255,255,0.08)"
+      borderLeft={`3px solid ${borderColor}`}
+      borderRadius="6px"
+      boxShadow="0 8px 28px rgba(0,0,0,0.22)"
       fontFamily={tokens.fontFamily.mono}
+      data-ui-chrome
     >
-      {/* Tool + arg line */}
-      <Flex align="baseline" gap={1.5} wrap="wrap">
-        <Text fontSize="11px" color={accentColor} fontWeight="700" flexShrink={0} userSelect="none">
-          ?
-        </Text>
-        <Text fontSize="12px" color={tokens.colors.terminal.foreground} fontWeight="600" flexShrink={0}>
-          {toolName}
-        </Text>
+      <Text
+        fontSize="13px"
+        lineHeight="1.5"
+        color={tokens.colors.text.primary}
+        fontWeight="700"
+        letterSpacing="0"
+        mb={2}
+      >
+        {promptTitle}
+      </Text>
+
+      <Box
+        borderTop="1px solid rgba(255,255,255,0.07)"
+        pt={2}
+      >
+        <Flex align="baseline" gap={2} minW={0}>
+          <Text fontSize="11px" color={tokens.colors.text.disabled} flexShrink={0}>
+            {t('terminalMode.permission.tool')}:
+          </Text>
+          <Text fontSize="13px" color={tokens.colors.text.primary} fontWeight="700" flexShrink={0}>
+            {toolName}
+          </Text>
+        </Flex>
+
+        {preview && (
+          <Flex align="flex-start" gap={2} mt={1} minW={0}>
+            <Text fontSize="11px" color={tokens.colors.text.disabled} flexShrink={0}>
+              {toolName === 'execute_command' ? t('terminalMode.permission.command') : t('terminalMode.permission.target')}:
+            </Text>
+            <Text
+              fontSize="13px"
+              lineHeight="1.45"
+              color={dangerous ? tokens.colors.accent.orange : tokens.colors.text.secondary}
+              wordBreak="break-word"
+              overflowWrap="anywhere"
+              minW={0}
+            >
+              {preview}
+            </Text>
+          </Flex>
+        )}
+
         {warning && (
-          <Text fontSize="10px" color={accentColor} opacity={0.85} flexShrink={0}>
+          <Text fontSize="11px" color={accentColor} opacity={0.92} mt={1.5}>
             [{warning}]
           </Text>
         )}
-        {preview && (
-          <Text
-            fontSize="12px"
-            color={dangerous ? tokens.colors.accent.orange : tokens.colors.text.muted}
-            wordBreak="break-all"
-          >
-            {preview}
-          </Text>
-        )}
-      </Flex>
+      </Box>
 
       {/* Keyboard hint row OR write-reason textarea OR confirm-all prompt */}
       {mode === 'confirm-all' ? (
-        <Box mt={1.5}>
-          <Text fontSize="11px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} mb={1}>
-            ⚠ This will auto-approve {usePermissionStore.getState().getQueuedCount()} queued permissions without individual review.
+        <Box mt={2.5}>
+          <Text fontSize="12px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} mb={1.5}>
+            {t('terminalMode.permission.approveAllWarning').replace('{count}', String(usePermissionStore.getState().getQueuedCount()))}
           </Text>
-          <Flex align="center" gap={2}>
-            <KeyHint label="y" description={t('perm.confirmAll')} color={tokens.colors.terminal.green} onClick={handleConfirmAll} />
-            <Sep />
-            <KeyHint label="n" description={t('perm.cancel')} color={tokens.colors.accent.red} onClick={handleCancelConfirmAll} />
+          <Flex direction="column" gap={1}>
+            <OptionRow shortcut="y" label={t('perm.confirmAll')} color={tokens.colors.terminal.green} onClick={handleConfirmAll} />
+            <OptionRow shortcut="n" label={t('perm.cancel')} color={tokens.colors.accent.red} onClick={handleCancelConfirmAll} />
           </Flex>
         </Box>
       ) : mode === 'choose' ? (
-        <Flex align="center" gap={1} mt={1.5} wrap="wrap">
-          {dangerous ? (
-            <>
-              <KeyHint label="y" description={t('perm.approve')} color={tokens.colors.terminal.green} onClick={onApprove} />
-              <Sep />
-              <KeyHint label="n" description={t('perm.deny')} color={tokens.colors.accent.red} onClick={onDeny} />
-            </>
-          ) : (
-            <>
-              <KeyHint label="y" description={t('perm.approve')} color={tokens.colors.terminal.green} onClick={onApprove} />
-              <Sep />
-              <KeyHint label="a" description={t('perm.approveAll')} color={tokens.colors.accent.purple} onClick={onApproveAll} />
-              <Sep />
-              <KeyHint label="n" description={t('perm.deny')} color={tokens.colors.accent.red} onClick={onDeny} />
-              <Sep />
-              <KeyHint label="d" description={t('perm.denyAll')} color={tokens.colors.accent.red} onClick={onDenyAll} />
-              <Sep />
-              <KeyHint label="w" description={t('perm.justify')} color={tokens.colors.accent.orange} onClick={() => setMode('writing')} />
-            </>
-          )}
+        <Box mt={2.5}>
+          <Text fontSize="13px" lineHeight="1.45" color={tokens.colors.text.primary} mb={1.5}>
+            {question}
+          </Text>
+          <Flex direction="column" gap={0.5}>
+            {dangerous ? (
+              <>
+                <OptionRow shortcut="y" label={t('perm.allowThisTime')} color={tokens.colors.terminal.green} onClick={onApprove} />
+                <OptionRow shortcut="n" label={t('perm.deny')} color={tokens.colors.accent.red} onClick={onDeny} />
+              </>
+            ) : (
+              <>
+                <OptionRow shortcut="y" label={t('perm.allowThisTime')} color={tokens.colors.terminal.green} onClick={onApprove} />
+                <OptionRow shortcut="a" label={t('perm.approveAll')} color={tokens.colors.accent.purple} onClick={handleApproveAllWithConfirmation} />
+                <OptionRow shortcut="n" label={t('perm.deny')} color={tokens.colors.accent.red} onClick={onDeny} />
+                <OptionRow shortcut="d" label={t('perm.denyAll')} color={tokens.colors.accent.red} onClick={onDenyAll} />
+                <OptionRow shortcut="w" label={t('perm.denyWithReason')} color={tokens.colors.accent.orange} onClick={() => setMode('writing')} />
+              </>
+            )}
+          </Flex>
           <Text
-            fontSize="10px"
+            fontSize="11px"
             color={tokens.colors.text.disabled}
             fontFamily={tokens.fontFamily.mono}
-            ml={2}
+            mt={1.5}
             cursor="pointer"
             onClick={onDeny}
             _hover={{ color: tokens.colors.text.muted }}
             transition="color 0.1s"
             userSelect="none"
           >
-            · {t('terminalMode.permission.escCancels')}
+            {t('terminalMode.permission.shortcutHint')} - {t('terminalMode.permission.escCancels')}
           </Text>
-        </Flex>
+        </Box>
       ) : (
-        <Box mt={1.5}>
+        <Box mt={2.5}>
+          <Text fontSize="13px" lineHeight="1.45" color={tokens.colors.text.primary} mb={1.5}>
+            {t('perm.denyWithReason')}
+          </Text>
           <textarea
             ref={textareaRef}
             value={reason}
@@ -279,10 +315,10 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
             rows={2}
             style={{
               width: '100%',
-              background: 'rgba(255,255,255,0.03)',
+              background: 'rgba(0,0,0,0.28)',
               border: `1px solid ${tokens.colors.accent.orange}44`,
-              borderRadius: '4px',
-              padding: '6px 8px',
+              borderRadius: '6px',
+              padding: '8px 10px',
               fontFamily: tokens.fontFamily.mono,
               fontSize: '12px',
               color: tokens.colors.terminal.foreground,
@@ -290,12 +326,11 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
               resize: 'none',
             }}
           />
-          <Flex align="center" gap={2} mt={1}>
-            <KeyHint label="↵" description={t('terminalMode.permission.send')} color={tokens.colors.accent.orange} onClick={handleSubmitReason} />
-            <Sep />
+          <Flex align="center" gap={1.5} mt={1.5} wrap="wrap">
+            <KeyHint label="enter" description={t('terminalMode.permission.send')} color={tokens.colors.accent.orange} onClick={handleSubmitReason} />
             <KeyHint label="esc" description={t('terminalMode.permission.cancel')} color={tokens.colors.text.disabled} onClick={handleCancelWriting} />
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} ml={2} userSelect="none">
-              · {t('terminalMode.permission.shiftEnterHint')}
+            <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} userSelect="none">
+              {t('terminalMode.permission.shiftEnterHint')}
             </Text>
           </Flex>
         </Box>
@@ -303,14 +338,6 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
     </Box>
   )
 })
-
-function Sep() {
-  return (
-    <Text fontSize="10px" color="rgba(255,255,255,0.1)" fontFamily={tokens.fontFamily.mono} mx={1}>
-      ·
-    </Text>
-  )
-}
 
 function KeyHint({
   label,
@@ -368,6 +395,73 @@ function KeyHint({
       </Box>
       <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
         {description}
+      </Text>
+    </Flex>
+  )
+}
+
+function OptionRow({
+  shortcut,
+  label,
+  color,
+  onClick,
+}: {
+  shortcut: string
+  label: string
+  color: string
+  onClick: () => void
+}) {
+  return (
+    <Flex
+      as="button"
+      align="center"
+      gap={2}
+      w="100%"
+      minW={0}
+      px={2}
+      py={1}
+      borderRadius="4px"
+      color={tokens.colors.text.secondary}
+      bg="transparent"
+      border="1px solid transparent"
+      textAlign="left"
+      cursor="pointer"
+      transition="all 0.12s ease"
+      onClick={onClick}
+      _hover={{
+        bg: 'rgba(255,255,255,0.045)',
+        borderColor: 'rgba(255,255,255,0.08)',
+        color: tokens.colors.text.primary,
+      }}
+      _focusVisible={{
+        outline: 'none',
+        borderColor: color,
+        boxShadow: `0 0 0 1px ${color}66`,
+      }}
+    >
+      <Text color={color} fontSize="13px" fontWeight="800" flexShrink={0} lineHeight="1.4">
+        &gt;
+      </Text>
+      <Text
+        as="span"
+        minW="28px"
+        color={color}
+        fontSize="12px"
+        fontWeight="700"
+        textAlign="center"
+        lineHeight="1.4"
+      >
+        {shortcut}
+      </Text>
+      <Text
+        as="span"
+        color="inherit"
+        fontSize="12px"
+        lineHeight="1.45"
+        minW={0}
+        overflowWrap="anywhere"
+      >
+        {label}
       </Text>
     </Flex>
   )

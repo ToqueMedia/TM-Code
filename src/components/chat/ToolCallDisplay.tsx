@@ -48,7 +48,7 @@ const TOOL_LABELS: Record<string, string> = {
   create_directory: t('toolLabel.creatingFolder'),
   search_files: t('toolLabel.searching'),
   glob: t('toolLabel.findingFiles'),
-  execute_command: t('toolLabel.running'),
+  execute_command: t('toolLabel.run'),
   execute_command_background: t('toolLabel.backgroundCommand'),
   check_background_commands: t('toolLabel.checkingBackgroundCommands'),
   start_dev_server: t('toolLabel.startingServer'),

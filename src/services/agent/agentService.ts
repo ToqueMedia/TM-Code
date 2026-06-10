@@ -25,6 +25,7 @@ import {
 } from "../../stores/chatStore";
 import { useBillingStore } from "../../stores/billingStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useTmSpeedStore } from "../../stores/tmSpeedStore";
 import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
 import { getQueryGuard } from "./queryGuard";
@@ -382,6 +383,13 @@ class AgentService {
     const client = this.lightweightOptions
       ? createSubAgentClient(authToken)
       : createAgentClient(authToken);
+    const refreshClient = async (): Promise<OpenAI | null> => {
+      const refreshed = await FirebaseAuthService.getInstance().getIdToken(true);
+      if (!refreshed) return null;
+      return this.lightweightOptions
+        ? createSubAgentClient(refreshed)
+        : createAgentClient(refreshed);
+    };
 
     // 3. Build tool definitions in OpenAI format
     const filteredTools = this.tools.filter((t) => {
@@ -404,12 +412,12 @@ class AgentService {
     const executeTool = this.createToolExecutorBridge(callbacks);
 
     // 6. Build extra headers — X-Request-Type is sticky across turns
-    const extraHeaders: Record<string, string> | undefined =
-      this.requestType ? { "X-Request-Type": this.requestType } : undefined;
+    const extraHeaders = this.buildExtraHeaders();
 
     // 7. Create QueryEngine
     const engine = new QueryEngine({
       client,
+      refreshClient,
       model: this.resolveModel(),
       systemPrompt: this.systemPrompt,
       tools: openaiTools,
@@ -490,12 +498,6 @@ class AgentService {
         case "message_start":
           break;
 
-        case "billing_update":
-          if (!this.lightweightOptions) {
-            useBillingStore.getState().updateFromSSE(event.billing);
-          }
-          break;
-
         case "message_stop":
           clearWorkerStatus();
           turnNumber++;
@@ -507,7 +509,7 @@ class AgentService {
               event.usage.completion_tokens,
             );
           }
-          callbacks.onTurnComplete(turnNumber);
+          callbacks.onTurnComplete(turnNumber, event.providerState);
           break;
 
         case "compact_start":
@@ -527,7 +529,7 @@ class AgentService {
           });
           break;
 
-        case "worker_status":
+        case "agent_status":
           if (!this.lightweightOptions) {
             useAgentStore.getState().setWorkerStatus(event.message);
           }
@@ -578,22 +580,17 @@ class AgentService {
   // ══════════════════════════════════════════════════════════════
 
   /**
-   * Resolve the model ID to use for the query engine.
+   * Resolve the placeholder model ID sent to the AI data-plane Worker.
+   * The Worker always replaces this with the active Control Plane model.
    */
   private resolveModel(): string {
-    try {
-      const modelName = useAgentStore.getState().modelName;
-      if (modelName && MODEL_PROFILES[modelName]) return modelName;
-    } catch {
-      /* use default */
-    }
-    return "mimo-v2.5-pro-1m";
+    return "tm-active-model";
   }
 
   /**
-   * Streaming chat responses expose billing/model metadata in HTTP headers
-   * before the final SSE billing event arrives. The OpenAI SDK hides those
-   * headers unless we use withResponse(), so apply them explicitly here.
+   * Streaming responses may expose safe metadata in HTTP headers. The
+   * dedicated AI pass-through Worker does not inject billing events into the
+   * stream, so missing budget headers are expected.
    */
   private applyStreamingResponseHeaders(headers: Headers): void {
     try {
@@ -652,41 +649,23 @@ class AgentService {
     }
   }
 
+  private buildExtraHeaders(): Record<string, string> | undefined {
+    const headers: Record<string, string> = {};
+    if (this.requestType) headers["X-Request-Type"] = this.requestType;
+    if (!this.lightweightOptions && useTmSpeedStore.getState().enabled) {
+      headers["X-TM-Speed"] = "true";
+    }
+    return Object.keys(headers).length > 0 ? headers : undefined;
+  }
+
   /**
-   * Build thinking config for the query engine based on current profile.
+   * The TMS data plane is provider-agnostic. The active provider/model is a
+   * Control Plane decision, so the IDE must not send provider-specific thinking
+   * fields such as enable_thinking, thinking, or reasoning. Those fields caused
+   * strict OpenAI-compatible providers like Gemini to reject otherwise valid
+   * requests with 400.
    */
   private buildThinkingConfig(): Record<string, unknown> | undefined {
-    try {
-      const plan = useBillingStore.getState().plan;
-      const modelName = useAgentStore.getState().modelName;
-      const profile =
-        modelName && MODEL_PROFILES[modelName]
-          ? MODEL_PROFILES[modelName]
-          : getProfileForPlan(plan);
-
-      if (!profile.supportsThinking) return undefined;
-
-      if (profile.thinkingParam === "enable_thinking") {
-        const config: Record<string, unknown> = { enable_thinking: true };
-        if (profile.thinkingBudget)
-          config.max_thinking_tokens = profile.thinkingBudget;
-        return config;
-      }
-      if (profile.thinkingParam === "reasoning") {
-        const reasoning: Record<string, unknown> = { enabled: true };
-        if (profile.thinkingBudget)
-          reasoning.max_tokens = profile.thinkingBudget;
-        return { reasoning };
-      }
-      if (profile.thinkingParam === "thinking") {
-        const thinking: Record<string, unknown> = { type: "enabled" };
-        if (profile.thinkingBudget)
-          thinking.budget_tokens = profile.thinkingBudget;
-        return { thinking };
-      }
-    } catch {
-      /* no thinking */
-    }
     return undefined;
   }
 

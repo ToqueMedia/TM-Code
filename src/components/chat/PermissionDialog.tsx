@@ -17,11 +17,18 @@ import { t } from '@/i18n'
  * Two options for dangerous tools:
  *  1. Yes, allow this time
  *  4. No (tell the agent what to do instead)
+ *
+ * Three options for path_access (directory outside project):
+ *  1. Allow access this session
+ *  2. Always allow in this project
+ *  3. Deny
  */
 interface PermissionDialogProps {
   toolName: string
   args: Record<string, unknown>
   promptReason: string | null
+  /** When promptReason is 'path_access', the directory being requested */
+  pathAccessTarget?: string
   approve: () => void
   approveAlwaysInProject: () => void
   approveAlwaysGlobal: () => void
@@ -35,6 +42,7 @@ export default function PermissionDialog({
   toolName,
   args,
   promptReason,
+  pathAccessTarget,
   approve,
   approveAlwaysInProject,
   approveAlwaysGlobal,
@@ -50,6 +58,8 @@ export default function PermissionDialog({
   const isDangerous =
     promptReason === 'dangerous_command' ||
     toolName === 'delete_file'
+
+  const isPathAccess = promptReason === 'path_access'
 
   // Reset on new permission
   useEffect(() => {
@@ -77,9 +87,9 @@ export default function PermissionDialog({
       }
 
       if (e.key === '1') { e.preventDefault(); setSelected('once') }
-      if (!isDangerous && e.key === '2') { e.preventDefault(); setSelected('project') }
-      if (!isDangerous && e.key === '3') { e.preventDefault(); setSelected('global') }
-      if (e.key === '4' || (isDangerous && e.key === '2')) {
+      if (!isDangerous && e.key === '2') { e.preventDefault(); setSelected(isPathAccess ? 'project' : 'project') }
+      if (!isDangerous && !isPathAccess && e.key === '3') { e.preventDefault(); setSelected('global') }
+      if (e.key === '4' || (isDangerous && e.key === '2') || (isPathAccess && e.key === '3')) {
         e.preventDefault()
         setSelected('deny')
         setShowReason(true)
@@ -98,7 +108,7 @@ export default function PermissionDialog({
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, isDangerous, showReason])
+  }, [selected, isDangerous, isPathAccess, showReason])
 
   const handleSubmit = () => {
     if (selected === 'once') approve()
@@ -111,10 +121,15 @@ export default function PermissionDialog({
   }
 
   const icon = isDangerous ? <FiAlertTriangle /> : <FiLock />
-  const iconColor = isDangerous ? tokens.colors.accent.orange : tokens.colors.accent.purple
+  const iconColor = isDangerous
+    ? tokens.colors.accent.orange
+    : isPathAccess
+      ? tokens.colors.accent.orange
+      : tokens.colors.accent.purple
 
-  const label =
-    toolName === 'browser_action'
+  const label = isPathAccess
+    ? (pathAccessTarget || toolName)
+    : toolName === 'browser_action'
       ? (typeof args.action === 'string' ? args.action : toolName)
       : toolName === 'execute_command'
         ? (typeof args.command === 'string' ? args.command : toolName)
@@ -129,6 +144,7 @@ export default function PermissionDialog({
     promptReason === 'sensitive_file' ? t('perm.sensitiveFile') :
     promptReason === 'dangerous_command' ? t('perm.dangerousCommand') :
     promptReason === 'browser_action' ? t('perm.browserAction') :
+    promptReason === 'path_access' ? t('perm.pathAccess') :
     null
 
   return (
@@ -148,7 +164,7 @@ export default function PermissionDialog({
             {icon}
           </Box>
           <Text fontSize="13px" fontWeight={600} color={tokens.colors.text.primary}>
-            {isCommand ? t('perm.allowCommand') : t('perm.allowAction')}
+            {isPathAccess ? t('perm.pathAccessTitle') : isCommand ? t('perm.allowCommand') : t('perm.allowAction')}
           </Text>
         </Flex>
 
@@ -175,7 +191,7 @@ export default function PermissionDialog({
         <Flex direction="column" gap={1} mb={2}>
           <OptionRow
             index={1}
-            label={t('perm.allowThisTime')}
+            label={isPathAccess ? t('perm.pathAccessSession') : t('perm.allowThisTime')}
             selected={selected === 'once'}
             onClick={() => { setSelected('once'); setShowReason(false) }}
           />
@@ -183,20 +199,22 @@ export default function PermissionDialog({
             <>
               <OptionRow
                 index={2}
-                label={t('perm.allowAlwaysProject').replace('{tool}', toolName)}
+                label={isPathAccess ? t('perm.pathAccessProject') : t('perm.allowAlwaysProject').replace('{tool}', toolName)}
                 selected={selected === 'project'}
                 onClick={() => { setSelected('project'); setShowReason(false) }}
               />
-              <OptionRow
-                index={3}
-                label={t('perm.allowAlwaysGlobal').replace('{tool}', toolName)}
-                selected={selected === 'global'}
-                onClick={() => { setSelected('global'); setShowReason(false) }}
-              />
+              {!isPathAccess && (
+                <OptionRow
+                  index={3}
+                  label={t('perm.allowAlwaysGlobal').replace('{tool}', toolName)}
+                  selected={selected === 'global'}
+                  onClick={() => { setSelected('global'); setShowReason(false) }}
+                />
+              )}
             </>
           )}
           <OptionRow
-            index={isDangerous ? 2 : 4}
+            index={(isDangerous || isPathAccess) ? (isDangerous ? 2 : 3) : 4}
             label={t('perm.denyWithReason')}
             selected={selected === 'deny'}
             onClick={() => { setSelected('deny'); setShowReason(true) }}

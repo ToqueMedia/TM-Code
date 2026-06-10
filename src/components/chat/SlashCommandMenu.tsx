@@ -3,7 +3,7 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { useBillingStore } from '../../stores/billingStore'
-import type { SlashCommand } from '../../services/agent/slashCommandRegistry'
+import { isSlashCommandAllowedForPlan, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 
 export type SlashCommandMenuTheme = 'red' | 'purple'
 
@@ -55,7 +55,7 @@ function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', di
   // Plan gate for paid commands — read here (not in the parent) so the
   // menu reacts immediately when the plan changes mid-session (upgrade /
   // downgrade) without prop wiring at every callsite.
-  const isFreePlan = useBillingStore(s => s.plan === 'explorer')
+  const plan = useBillingStore(s => s.plan)
 
   // Scroll selected item into view
   useEffect(() => {
@@ -99,7 +99,7 @@ function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', di
       } : undefined}
     >
       {commands.map((cmd, index) => {
-        const isPaywalled = !!cmd.requiresPaidPlan && isFreePlan
+        const isPaywalled = !isSlashCommandAllowedForPlan(cmd, plan)
         const isInteractable = cmd.enabled && !isPaywalled
         const appliedHint = appliedHints?.get(cmd.name)
         const isApplied = !!appliedHint
@@ -182,7 +182,7 @@ function SlashCommandMenu({ commands, selectedIndex, onSelect, theme = 'red', di
                 fontWeight="600"
                 textTransform="uppercase"
               >
-                Pro
+                {cmd.allowedPlans ? cmd.allowedPlans.map(p => p.toUpperCase()).join('/') : 'Pro'}
               </Text>
             )}
           </Flex>

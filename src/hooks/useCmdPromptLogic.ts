@@ -3,8 +3,9 @@ import { useChatStore } from '../stores/chatStore'
 import { useAgentStore } from '../stores/agentStore'
 import { useProjectStore } from '../stores/projectStore'
 import { useAuthStore } from '../stores/authStore'
+import { useBillingStore } from '../stores/billingStore'
 import { useTerminalPanelStore } from '../stores/terminalPanelStore'
-import { slashCommandRegistry, type SlashCommand } from '../services/agent/slashCommandRegistry'
+import { isSlashCommandAllowedForPlan, slashCommandRegistry, type SlashCommand } from '../services/agent/slashCommandRegistry'
 import { CMD_MODE_COMMANDS } from '../services/agent/cmdModeCommands'
 import { runAgentWithCallbacks } from '../services/agent/agentRunner'
 import {
@@ -294,6 +295,14 @@ export function useCmdPromptLogic() {
     if (command) {
       if (!command.enabled) {
         useChatStore.getState().addSystemMessage(`Command ${command.name} is not yet available.`, 'warn')
+        return
+      }
+      const billingPlan = useBillingStore.getState().plan
+      if (command.requiresPaidPlan && !command.usesOwnPlanGate && !isSlashCommandAllowedForPlan(command, billingPlan)) {
+        useChatStore.getState().addSystemMessage(
+          command.planGateMessageKey ? t(command.planGateMessageKey) : `${command.name} is a paid feature. Upgrade your plan in Settings to use it.`,
+          'warn',
+        )
         return
       }
       // Smart router for /payments — same parity as chat-mode usePromptBar.

@@ -23,6 +23,14 @@ const statusMeta: Record<string, { color: string; label: string }> = {
 
 type FeedbackType = 'success' | 'error' | null
 const ROW_HEIGHT = 28
+const TM_CODE_COMMIT_SIGNATURE = 'Co-Authored-By: TM Code <tm.code@toquemedia.net>'
+
+function ensureTmCodeCommitSignature(message: string): string {
+  const trimmed = message.trim()
+  if (!trimmed) return ''
+  if (/^Co-Authored-By:\s*TM Code\s*</im.test(trimmed)) return trimmed
+  return `${trimmed}\n\n${TM_CODE_COMMIT_SIGNATURE}`
+}
 
 // ── Styles (injected once) ──────────────────────────────────────────────
 
@@ -30,7 +38,7 @@ const PANEL_STYLES = `
 .sc-textarea {
   width: 100%;
   min-height: 30px;
-  max-height: 200px;
+  max-height: 360px;
   padding: 6px 32px 6px 8px;
   border: 1px solid ${tokens.colors.border.input};
   border-radius: 4px;
@@ -128,8 +136,12 @@ function SourceControlPanel() {
     const el = textareaRef.current
     if (!el) return
     el.style.height = '30px'
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+    el.style.height = `${Math.min(el.scrollHeight, 360)}px`
   }, [])
+
+  useEffect(() => {
+    resizeTextarea()
+  }, [commitMsg, resizeTextarea])
 
   // ── Load git status ──────────────────────────────────────────────────
 
@@ -273,16 +285,35 @@ function SourceControlPanel() {
     setGenerating(true)
     try {
       const { invoke: inv } = await import('@tauri-apps/api/core')
+      const diffBase = staged.length > 0 ? 'git diff --cached' : 'git diff HEAD'
+      const maxDiffChars = 14_000
       const diffResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
         'execute_command',
-        { command: staged.length > 0 ? 'git diff --cached --stat' : 'git diff --stat HEAD', cwd: projectPath, timeoutSecs: 5 }
+        { command: `${diffBase} --stat --compact-summary`, cwd: projectPath, timeoutSecs: 8 }
       )
       const diffStat = diffResult.success ? diffResult.stdout.trim() : ''
+      const nameStatusResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
+        'execute_command',
+        { command: `${diffBase} --name-status`, cwd: projectPath, timeoutSecs: 8 }
+      )
+      const nameStatus = nameStatusResult.success ? nameStatusResult.stdout.trim() : ''
+      const numstatResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
+        'execute_command',
+        { command: `${diffBase} --numstat`, cwd: projectPath, timeoutSecs: 8 }
+      )
+      const numstat = numstatResult.success ? numstatResult.stdout.trim() : ''
       const detailResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
         'execute_command',
-        { command: staged.length > 0 ? 'git diff --cached --no-color -U2 | head -200' : 'git diff --no-color -U2 HEAD | head -200', cwd: projectPath, timeoutSecs: 5 }
+        {
+          command: `${diffBase} --no-color --find-renames --find-copies --diff-algorithm=histogram -U4`,
+          cwd: projectPath,
+          timeoutSecs: 10,
+        }
       )
-      const diffDetail = detailResult.success ? detailResult.stdout.trim() : ''
+      const rawDiffDetail = detailResult.success ? detailResult.stdout.trim() : ''
+      const diffDetail = rawDiffDetail.length > maxDiffChars
+        ? `${rawDiffDetail.slice(0, maxDiffChars)}\n\n[Diff truncated: ${rawDiffDetail.length - maxDiffChars} additional characters omitted]`
+        : rawDiffDetail
       const targetFiles = staged.length > 0 ? staged : unstaged
       const fileList = targetFiles.map(f => `${f.status}: ${f.path}`).join('\n')
 
@@ -291,38 +322,54 @@ function SourceControlPanel() {
       if (!token) token = await FirebaseAuthService.getInstance().getIdToken(true)
       if (!token) throw new Error(t('sourceControl.notAuthenticated'))
 
-      const { resolveWorkerUrl } = await import('../../utils/devUrls')
-      const workerUrl = resolveWorkerUrl()
+      const { resolveAIWorkerUrl } = await import('../../utils/devUrls')
+      const workerUrl = resolveAIWorkerUrl()
       const { tauriFetch } = await import('../../services/tauriFetch')
-      const response = await tauriFetch(`${workerUrl}/v1/commit-message`, {
+      const response = await tauriFetch(`${workerUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({
           messages: [{
             role: 'user',
-            content: `Generate a git commit message for these changes using conventional commits format.
+            content: `Generate a detailed git commit message for these changes using conventional commits format.
+
+Base the message on the actual diff hunks and changed files below. Mention concrete modules, components, APIs, config, tests, and behavior changes when they are visible in the diff. Do not invent changes that are not supported by the diff.
 
 Format:
 <type>(<scope>): <subject line, max 72 chars>
 
-<body: 2-4 bullet points explaining what changed and why>
+<body: 3-6 bullet points explaining what changed and why>
 
 Rules:
 - type: feat, fix, refactor, chore, docs, style, perf, test
-- scope: the main area affected (component name, service, etc.)
-- subject: imperative mood, lowercase, no period
-- body: each line starts with "- ", explain what not how
+- scope: the main area affected (component, service, worker endpoint, etc.)
+- subject: imperative mood, lowercase, no period, specific to the main change
+- body: each line starts with "- "
+- body bullets must be concrete and derived from file-level diffs, not generic summaries
+- prefer explaining user-visible behavior and integration impact over implementation trivia
+- sign the commit message with this exact final trailer:
+${TM_CODE_COMMIT_SIGNATURE}
+- do not add any user name, user email, "Signed-off-by" user trailer, or other attribution
 - Output ONLY the commit message, no quotes, no markdown, no explanation
 
 Files changed:
 ${fileList}
 
+Name/status:
+${nameStatus}
+
+Line changes:
+${numstat}
+
 Diff stat:
 ${diffStat}
 
-Diff detail:
-${diffDetail.slice(0, 4000)}`,
+Diff hunks:
+${diffDetail}`,
           }],
+          temperature: 0.2,
+          max_tokens: 700,
+          stream: false,
         }),
       })
 
@@ -332,7 +379,7 @@ ${diffDetail.slice(0, 4000)}`,
 
       if (aiMsg) {
         const cleaned = aiMsg.replace(/^["'`]+|["'`]+$/g, '').replace(/^(commit message:?\s*)/i, '').trim()
-        setCommitMsg(cleaned)
+        setCommitMsg(ensureTmCodeCommitSignature(cleaned))
         requestAnimationFrame(resizeTextarea)
       } else {
         showFeedback('error', 'AI returned empty message')
@@ -394,7 +441,7 @@ ${diffDetail.slice(0, 4000)}`,
           ref={textareaRef}
           className="sc-textarea"
           value={commitMsg}
-          onChange={e => { setCommitMsg(e.target.value); resizeTextarea() }}
+          onChange={e => { setCommitMsg(e.target.value) }}
           onKeyDown={handleKeyDown}
           placeholder={`Commit message (${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Enter)`}
           rows={1}

@@ -601,6 +601,13 @@ class SessionService {
       if (msg.reasoningDurationMs) sanitized.reasoningDurationMs = msg.reasoningDurationMs
     }
 
+    // Persist provider-native state for exact round-trip across sessions.
+    // When present, rebuildConversationHistory uses this instead of
+    // reconstructing from reasoningContent/contentBlocks.
+    if (msg.providerState) {
+      sanitized.providerState = msg.providerState
+    }
+
     // Don't persist isStreaming
     return sanitized
   }

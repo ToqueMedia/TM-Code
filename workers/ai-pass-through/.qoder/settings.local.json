@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/ithustle/dev/deskotp/exodus-ide/workers/**)",
+      "Bash(node:*)",
+      "Bash(node -e \"\nconst cli = require\\('fs'\\).readFileSync\\('/Users/ithustle/dev/deskotp/exodus-ide/node_modules/wrangler/wrangler-dist/cli.js', 'utf-8'\\);\nconst idx = cli.indexOf\\('runCustomBuild\\('\\);\nwhile \\(idx !== -1\\) {\n  const context = cli.substring\\(idx - 100, idx + 200\\);\n  console.log\\('---'\\);\n  console.log\\(context\\);\n  idx = cli.indexOf\\('runCustomBuild\\(', idx + 1\\);\n}\n\" 2>&1 | head -80)",
+      "Read(//Users/ithustle/dev/deskotp/exodus-ide/.wrangler/**)",
+      "Bash(/Users/ithustle/dev/deskotp/exodus-ide/node_modules/.bin/wrangler dev --config /Users/ithustle/dev/deskotp/exodus-ide/workers/ai-pass-through/wrangler.jsonc 2>&1 | head -30)",
+      "Bash(cd /tmp && mkdir -p wrangler-test && cd wrangler-test && cat > wrangler.jsonc << 'EOF'\n{\n  \"name\": \"test-worker\",\n  \"main\": \"src/index.ts\",\n  \"compatibility_date\": \"2026-06-09\"\n}\nEOF\nmkdir -p src && cat > src/index.ts << 'EOF'\nexport default { fetch\\(\\) { return new Response\\(\"hello\"\\); } }\nEOF\n/Users/ithustle/dev/deskotp/exodus-ide/node_modules/.bin/wrangler dev 2>&1 | head -20)",
+      "Bash(../../node_modules/.bin/wrangler dev 2>&1 | head -30)",
+      "Bash(mv wrangler.toml wrangler.toml.bak && mv /Users/ithustle/dev/deskotp/exodus-ide/wrangler.jsonc /Users/ithustle/dev/deskotp/exodus-ide/wrangler.jsonc.bak && ../../node_modules/.bin/wrangler dev 2>&1 | head -30)",
+      "WebFetch(*)",
+      "Bash(mv wrangler.toml.bak wrangler.toml 2>/dev/null; mv /Users/ithustle/dev/deskotp/exodus-ide/wrangler.jsonc.bak /Users/ithustle/dev/deskotp/exodus-ide/wrangler.jsonc 2>/dev/null; rm -rf /Users/ithustle/dev/deskotp/exodus-ide/.wrangler/deploy && echo \"Cleaned up\")",
+      "Bash(find:*)",
+      "Bash(rm wrangler.toml && ../../node_modules/.bin/wrangler dev 2>&1 | head -30)",
+      "Bash(cp -r /Users/ithustle/dev/deskotp/exodus-ide/workers/ai-pass-through /tmp/ai-pass-through-test && cd /tmp/ai-pass-through-test && /Users/ithustle/dev/deskotp/exodus-ide/node_modules/.bin/wrangler dev 2>&1 | head -30)",
+      "Bash(cd /tmp/ai-pass-through-test && cat > wrangler.jsonc << 'EOF'\n{\n  \"name\": \"ai-pass-through-worker\",\n  \"main\": \"src/index.ts\",\n  \"compatibility_date\": \"2026-06-02\"\n}\nEOF\n/Users/ithustle/dev/deskotp/exodus-ide/node_modules/.bin/wrangler dev 2>&1 | head -30)",
+      "Bash(kill 87515 2>/dev/null; cd /tmp/ai-pass-through-test && cat > wrangler.jsonc << 'EOF'\n{\n  \"name\": \"ai-pass-through-worker\",\n  \"main\": \"src/index.ts\",\n  \"compatibility_date\": \"2026-06-02\",\n  \"kv_namespaces\": [\n    {\n      \"binding\": \"ACTIVE_AI_CONFIG\",\n      \"id\": \"replace-with-production-kv-namespace-id\",\n      \"preview_id\": \"replace-with-preview-kv-namespace-id\"\n    }\n  ]\n}\nEOF\n/Users/ithustle/dev/deskotp/exodus-ide/node_modules/.bin/wrangler dev 2>&1 | head -20)",
+      "Bash(sleep 3 && cat /private/tmp/qoder-cli-502/-Users-ithustle-dev-deskotp-exodus-ide-workers-ai-pass-through/a79ca649-4caf-4dbe-a5c5-7803a6d5c7fd/tasks/7d1b.output 2>/dev/null | tail -5; kill %1 2>/dev/null; pkill -f \"wrangler dev\" 2>/dev/null; echo \"done\")",
+      "Bash(cd /Users/ithustle/dev/deskotp/exodus-ide/workers/ai-pass-through && ../../node_modules/.bin/wrangler dev 2>&1 | head -30)",
+      "Bash(cd /tmp/ai-pass-through-test && cp /Users/ithustle/dev/deskotp/exodus-ide/workers/ai-pass-through/package.json . && /Users/ithustle/dev/deskotp/exodus-ide/node_modules/.bin/wrangler dev 2>&1 | head -20)",
+      "Bash(cd /tmp/ai-pass-through-test && cat > package.json << 'EOF'\n{\n  \"name\": \"ai-pass-through-worker\",\n  \"private\": true\n}\nEOF\n/Users/ithustle/dev/deskotp/exodus-ide/node_modules/.bin/wrangler dev 2>&1 | head -10)",
+      "Bash(pkill -f \"wrangler dev\" 2>/dev/null; cd /tmp/ai-pass-through-test && cat > package.json << 'EOF'\n{\n  \"name\": \"ai-pass-through-worker\",\n  \"private\": true,\n  \"type\": \"module\"\n}\nEOF\n/Users/ithustle/dev/deskotp/exodus-ide/node_modules/.bin/wrangler dev 2>&1 | head -10)",
+      "Bash(ls /Users/ithustle/dev/deskotp/toquemedia-studio-api/ | head -20)",
+      "Bash(npm install --silent 2>&1 | tail -5)",
+      "Bash(./node_modules/.bin/wrangler --version 2>&1)",
+      "Bash(./node_modules/.bin/wrangler dev 2>&1 | head -30)"
+    ]
+  }
+}

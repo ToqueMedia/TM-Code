@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, CompactMetadata, ContentBlock, ContentBlockAPI, ContentPart, ConversationMessage, PlanResumePending, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, CompactMetadata, ContentBlock, ContentBlockAPI, ContentPart, ConversationMessage, PlanResumePending, ProviderState, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService, captureByokSnapshot } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
@@ -188,6 +188,7 @@ interface ChatActions {
    *  Used by build/test/script commands that stream output via run_streaming_command.
    *  Each call appends one chunk to the `commandLogs` array on the tool call. */
   appendToolCallCommandLog: (toolId: string, logChunk: string) => void
+  appendToolCallCommandLogs: (toolId: string, logChunks: string[]) => void
   /** Record the permission decision that gated this tool call. Called by
    *  toolExecutor right after `requestPermission` resolves. Surfaces in the
    *  session export so forensics can tell user-approved tools apart from
@@ -204,6 +205,10 @@ interface ChatActions {
   syncDiffStatusByResultId: (diffResultId: string, status: 'approved' | 'denied') => void
   updateConversationHistory: (messages: ConversationMessage[]) => void
   incrementTurnCount: () => void
+  /** Attach provider-native state to the current streaming assistant message
+   *  for exact round-trip in subsequent turns. Called by agentRunner when a
+   *  message_stop event carries providerState from query.ts. */
+  setProviderState: (providerState: ProviderState) => void
   addTokenUsage: (input: number, output: number) => void
   /** Reset the per-request token counter. Called at the start of each new
    *  agent request (runAgentInternal entry) so the indicator scopes to the
@@ -883,35 +888,55 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
         content: parts ?? msg.content,
       })
     } else if (msg.role === 'assistant') {
-      // Build content blocks array
-      const blocks: ContentBlockAPI[] = []
+      // ── Native round-trip: prefer providerState when available ──
+      // When the assistant message has a captured native state from the
+      // provider, use it as the source of truth for the next API call.
+      // This preserves reasoning_content, reasoning_details, signatures,
+      // tool_calls, and any provider-specific fields exactly as returned.
+      const native = msg.providerState?.nativeAssistantMessage
+      if (native) {
+        // Build the ConversationMessage with _native for exact round-trip.
+        // The content field uses the legacy text for display compatibility;
+        // _native carries the full native message for the API boundary.
+        const nativeContent = typeof native.content === 'string'
+          ? native.content
+          : msg.content || ''
+        history.push({
+          role: 'assistant',
+          content: nativeContent,
+          _native: native,
+        })
+      } else {
+        // ── Legacy fallback: reconstruct from UI state ──
+        const blocks: ContentBlockAPI[] = []
 
-      // Thinking/reasoning → thinking block
-      if (msg.reasoningContent) {
-        blocks.push({ type: 'thinking', thinking: msg.reasoningContent })
-      }
-
-      // Text → text block
-      if (msg.content) {
-        blocks.push({ type: 'text', text: msg.content })
-      }
-
-      // Tool calls → tool_call blocks
-      if (msg.toolCalls?.length) {
-        for (const tc of msg.toolCalls) {
-          blocks.push({
-            type: 'tool_call',
-            id: tc.id,
-            name: tc.toolName,
-            arguments: JSON.stringify(tc.input || {}),
-          })
+        // Thinking/reasoning → thinking block
+        if (msg.reasoningContent) {
+          blocks.push({ type: 'thinking', thinking: msg.reasoningContent })
         }
-      }
 
-      history.push({
-        role: 'assistant',
-        content: blocks.length > 0 ? blocks : msg.content || '',
-      })
+        // Text → text block
+        if (msg.content) {
+          blocks.push({ type: 'text', text: msg.content })
+        }
+
+        // Tool calls → tool_call blocks
+        if (msg.toolCalls?.length) {
+          for (const tc of msg.toolCalls) {
+            blocks.push({
+              type: 'tool_call',
+              id: tc.id,
+              name: tc.toolName,
+              arguments: JSON.stringify(tc.input || {}),
+            })
+          }
+        }
+
+        history.push({
+          role: 'assistant',
+          content: blocks.length > 0 ? blocks : msg.content || '',
+        })
+      }
 
       // Tool results → single user message with tool_result content blocks
       // (tool results are in role:'user' messages with tool_result content blocks)
@@ -1879,6 +1904,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     appendToolCallCommandLog: (toolId: string, logChunk: string) => {
+      get().appendToolCallCommandLogs(toolId, [logChunk])
+    },
+
+    appendToolCallCommandLogs: (toolId: string, logChunks: string[]) => {
+      const chunks = logChunks.filter(chunk => chunk.length > 0)
+      if (chunks.length === 0) return
+
       const { activeSessionId, streamingMessageId, sessions } = get()
       if (!activeSessionId || !streamingMessageId) return
 
@@ -1895,7 +1927,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // Cap at 500 lines to prevent memory bloat from verbose commands.
       // Older lines are dropped — the last N lines are the most useful.
       const MAX_LOG_LINES = 500
-      const newLogs = [...existing, logChunk]
+      const newLogs = [...existing, ...chunks]
       const trimmed = newLogs.length > MAX_LOG_LINES ? newLogs.slice(-MAX_LOG_LINES) : newLogs
 
       const newToolCalls = msg.toolCalls.slice()
@@ -2501,6 +2533,22 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     incrementTurnCount: () => {
       set(state => ({ currentTurnCount: state.currentTurnCount + 1 }))
+    },
+
+    setProviderState: (providerState: ProviderState) => {
+      const { activeSessionId, streamingMessageId, sessions } = get()
+      if (!activeSessionId || !streamingMessageId) return
+      const session = sessions.get(activeSessionId)
+      if (!session) return
+
+      const msg = session.messages.find(m => m.id === streamingMessageId)
+      if (msg && msg.role === 'assistant') {
+        // Replace — the last turn's native state is the source of truth
+        // for continuing the conversation (earlier turns are already in
+        // the messages array with their own providerState if they had one).
+        msg.providerState = providerState
+        session.updatedAt = Date.now()
+      }
     },
 
     addTokenUsage: (input: number, output: number) => {

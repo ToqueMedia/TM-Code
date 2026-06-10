@@ -5,6 +5,9 @@ import { executePayments } from './commands/paymentsCommand'
 import { executeE2E } from './commands/e2eCommand'
 import { executeReview } from './commands/reviewCommand'
 import { executeCompact } from './commands/compactCommand'
+import { executeSpeed } from './commands/speedCommand'
+import type { UserPlanName } from '../../stores/billingStore'
+import type { TranslationKey } from '../../i18n'
 
 /** A canonical argument value the user can pick after the command name. */
 export interface SlashCommandArg {
@@ -54,6 +57,29 @@ export interface SlashCommand {
    * by another path (e.g. typing the full command and pressing enter).
    */
   requiresPaidPlan?: boolean
+  /** Optional stricter plan allow-list for plan-gated commands. */
+  allowedPlans?: UserPlanName[]
+  /** Optional i18n key for a custom plan-gate message. */
+  planGateMessageKey?: TranslationKey
+  /**
+   * When true AND requiresPaidPlan is also true, the generic paid-plan
+   * guard in executePrompt is skipped so the command's own execute()
+   * function can show a specific message (e.g. /speed shows
+   * "speed.planRequired" instead of the generic "paid feature" text).
+   * The "Pro" badge still renders in the menu.
+   */
+  usesOwnPlanGate?: boolean
+  /**
+   * Defaults to true. Account-level commands such as `/speed` work before a
+   * project is open.
+   */
+  requiresProject?: boolean
+}
+
+export function isSlashCommandAllowedForPlan(command: SlashCommand, plan: UserPlanName): boolean {
+  if (command.allowedPlans) return command.allowedPlans.includes(plan)
+  if (command.requiresPaidPlan) return plan !== 'explorer'
+  return true
 }
 
 class SlashCommandRegistry {
@@ -124,6 +150,17 @@ class SlashCommandRegistry {
       enabled: true,
       execute: executeCompact,
       argHint: '[optional: custom instructions for summarization]',
+    })
+
+    this.register({
+      name: '/speed',
+      description: 'Toggle TM Speed — faster agent responses for Pro and Max',
+      enabled: true,
+      execute: executeSpeed,
+      requiresPaidPlan: true,
+      allowedPlans: ['pro', 'max'],
+      planGateMessageKey: 'speed.planRequired',
+      requiresProject: false,
     })
 
     // Note: `/auth` was removed in favour of the `#auth-email-password` and

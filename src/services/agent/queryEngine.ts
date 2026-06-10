@@ -24,14 +24,16 @@ import {
 
 // ── Constants ──
 
-const DEFAULT_MODEL = 'mimo-v2.5-pro-1m'
+const DEFAULT_MODEL = 'tm-active-model'
 
 // ── Types ──
 
 export interface QueryEngineOptions {
   /** OpenAI SDK client (pre-configured with baseURL + auth). */
   client: OpenAI
-  /** Model ID. Default: mimo-v2.5-pro-1m. */
+  /** Recreate the SDK client with fresh credentials after an auth failure. */
+  refreshClient?: () => Promise<OpenAI | null>
+  /** Placeholder model. The AI pass-through Worker injects the active model. */
   model?: string
   /** System prompt. */
   systemPrompt: string
@@ -141,6 +143,7 @@ export class QueryEngine {
       messages,
       systemPrompt: this.options.systemPrompt,
       client: this.options.client,
+      refreshClient: this.options.refreshClient,
       model: this.options.model ?? DEFAULT_MODEL,
       tools: this.options.tools,
       executeTool: this.options.executeTool,
@@ -189,12 +192,13 @@ export class QueryEngine {
  * Helper: convert TM Code's ConversationMessage[] to QueryMessage[].
  */
 export function toQueryMessages(
-  history: Array<{ role: string; content: string | ContentBlockAPI[] | null }>,
+  history: Array<{ role: string; content: string | ContentBlockAPI[] | null; _native?: Record<string, unknown> }>,
 ): QueryMessage[] {
   return history
     .filter(m => m.role === 'user' || m.role === 'assistant')
     .map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
+      ...(m._native ? { _native: m._native } : {}),
     }))
 }

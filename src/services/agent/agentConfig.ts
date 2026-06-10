@@ -5,12 +5,6 @@
  * All behavioural logic lives elsewhere.
  */
 
-import { resolveWorkerUrl } from '../../utils/devUrls'
-
-// ── Worker ──
-
-export const WORKER_URL = resolveWorkerUrl()
-
 // ── Model / sampling ──
 
 export const MAX_OUTPUT_TOKENS = 32_768

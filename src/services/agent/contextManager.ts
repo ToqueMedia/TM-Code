@@ -14,13 +14,13 @@
  */
 
 import { logger } from '../../utils/logger'
+import { resolveAIWorkerUrl } from '../../utils/devUrls'
 import { contentAsText } from './promptValueHelpers'
 import { buildCompactPrompt, buildPostCompactionSummaryMessage, formatCompactSummary } from './compactPrompt'
 import { archivePreCompactTranscript } from './compactTranscriptArchive'
 import type { InternalMessage } from './messageUtils'
 import type { SessionState } from './sessionState'
 import {
-  WORKER_URL,
   MIN_KEEP_RECENT_TURNS,
   MAX_KEEP_RECENT_TURNS,
   MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS,
@@ -86,7 +86,7 @@ export function computeMicrocompactKeepRecent(
 // ── LLM Summarization ──
 
 /**
- * Call the Worker's /v1/summarize endpoint for LLM-based summarization.
+ * Call the AI pass-through Worker's chat completions endpoint for LLM-based summarization.
  * Pure HTTP call — no store reads.
  */
 export async function callSummarizationAPI(
@@ -98,7 +98,7 @@ export async function callSummarizationAPI(
   const serialized = serializeMessagesForSummary(messages)
   const summaryPrompt = buildCompactPrompt()
 
-  const url = `${WORKER_URL}/v1/summarize`
+  const url = `${resolveAIWorkerUrl()}/v1/chat/completions`
 
   // Timeout watchdog
   const timeoutCtl = new AbortController()
@@ -120,6 +120,8 @@ export async function callSummarizationAPI(
         ...appCheckHeaders,
       },
       body: JSON.stringify({
+        stream: false,
+        model: 'tm-active-model',
         max_tokens: 16384,
         messages: [
           { role: 'system', content: summaryPrompt },

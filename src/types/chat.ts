@@ -94,11 +94,49 @@ export type ContentBlockAPI =
 /** @deprecated Use ContentBlockAPI directly. Kept as alias for backward compatibility. */
 export type AnthropicContentBlock = ContentBlockAPI
 
+/**
+ * Opaque provider-native state captured at turn completion.
+ * Preserved for exact round-trip in subsequent turns — never
+ * transformed into text or stripped of unknown fields.
+ */
+export interface ProviderState {
+  /** Provider identifier (e.g. "dashscope", "mimo", "gemini") */
+  provider: string
+  /** Protocol family detected at request time */
+  protocol: 'openai-chat' | 'anthropic' | 'openai-responses' | 'custom'
+  /**
+   * OpenAI Chat-compatible: complete assistant message as returned by the
+   * provider. Includes role, content, reasoning_content, reasoning_details,
+   * tool_calls, and any unknown fields. Deep copy — safe to serialize.
+   */
+  nativeAssistantMessage?: Record<string, unknown>
+  /**
+   * Anthropic: native content blocks including thinking, signature,
+   * redacted_thinking, text, tool_use with IDs and unknown fields.
+   * Reserved for future Anthropic protocol support.
+   */
+  nativeContentBlocks?: unknown[]
+  /**
+   * OpenAI Responses API: native output items including reasoning,
+   * encrypted_content, function_call/output linkage, IDs.
+   * Reserved for future Responses API support.
+   */
+  nativeResponseOutputItems?: unknown[]
+  /** Epoch ms when captured */
+  capturedAt?: number
+}
+
 export interface ConversationMessage {
   role: 'user' | 'assistant'
   /** String for text-only messages, ContentBlockAPI[] for structured messages
    *  (tool_call blocks, tool_result blocks, thinking blocks, image parts). */
   content: string | ContentBlockAPI[] | null
+  /**
+   * Provider-native fields for exact round-trip (assistant messages only).
+   * Spread into the API request body by query.ts instead of reconstructing
+   * from reasoningContent/contentBlocks. Undefined on legacy sessions.
+   */
+  _native?: Record<string, unknown>
 }
 
 export interface ToolCallDisplay {
@@ -133,7 +171,7 @@ export interface ToolCallDisplay {
     approved: boolean
     prompted: boolean
     source: 'safe_tool' | 'has_own_approval' | 'approved_scope' | 'user'
-    promptKind?: 'sensitive_file' | 'dangerous_command' | null
+    promptKind?: import('../stores/permissionStore').PromptReason
     denyReason?: string
   }
 }
@@ -248,6 +286,14 @@ export interface ChatMessage {
    *             before (no behavioural change for old data).
    */
   thinkingRequested?: boolean
+  /**
+   * Opaque provider-native state captured at turn completion. When present,
+   * rebuildConversationHistory uses this as the source of truth for the
+   * assistant message in subsequent turns instead of reconstructing from
+   * reasoningContent/contentBlocks. Undefined on legacy sessions — the
+   * legacy reasoningContent fallback path is used instead.
+   */
+  providerState?: ProviderState
   /** Inline card (plan approval, todo list) */
   card?: ChatMessageCard
   /** Attachments included with this message (metadata only — content is resolved into message.content at send-time) */

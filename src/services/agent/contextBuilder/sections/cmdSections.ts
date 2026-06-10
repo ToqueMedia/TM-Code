@@ -14,9 +14,8 @@ import { IS_MAC, IS_WINDOWS } from '@/utils/platform'
 import { buildMemoryGuidanceSection } from '../../memoryGuidance'
 import SkillService from '../../skillService'
 import {
-  READ_FILE, SEARCH_FILES, GLOB,
+  READ_FILE, SEARCH_FILES, LIST_DIRECTORY, GLOB,
   READ_SKILL,
-  CREATE_FILE, EDIT_FILE,
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND,
   UPDATE_TASKS,
 } from '../../toolNames'
@@ -112,7 +111,12 @@ When you hit an obstacle, do NOT use destructive actions as a shortcut to make i
 export function getCmdToolsSection(): string {
   return `# Using your tools
 
- - Use dedicated tools (\`${READ_FILE}\`, \`${EDIT_FILE}\`, \`${CREATE_FILE}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`) instead of shell commands for file operations. Reserve \`${EXECUTE_COMMAND}\` for system commands and terminal operations only. **DO NOT** use \`${EXECUTE_COMMAND}\` for exploring code (\`cat\`, \`grep\`, \`ls\`).
+ - Use the right tool for each task — prefer dedicated tools over shell equivalents:
+   - \`${READ_FILE}\` — read file contents (replaces \`cat\`, \`head\`, \`tail\`)
+   - \`${SEARCH_FILES}\` — search text/patterns in files (replaces \`grep\`, \`rg\`, \`ack\`)
+   - \`${LIST_DIRECTORY}\` — list directory contents (replaces \`ls\`, \`tree\`)
+   - \`${GLOB}\` — find files by pattern (replaces \`find\`, \`fd\`)
+   - \`${EXECUTE_COMMAND}\` — run CLIs, tests, builds, package managers, git, curl, and system operations
  - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. Mark each task as completed as soon as you are done with it.
 	 - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
 	 - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel. After delegating, if you have no other work, end your turn — results will be available on next interaction. **Do NOT delegate trivial tasks** — if the answer is one \`read_file\`, \`glob\`, or \`search_files\` call away, just do it yourself. Delegation adds 30-60s of overhead; reserve it for multi-step research or verification.
@@ -392,7 +396,7 @@ export function getCmdReminderSection(loadedSkillNames: string[] = []): string {
 1. **COMPLETE** every task and **VERIFY** before reporting done. Say so when verification is not possible.
 2. File writes go to disk immediately — **DOUBLE-CHECK** paths and content.
 3. **AFTER** execute_command: **READ** full output. Exit code ≠ 0 → **FIX** the actual error and move on. **DO NOT BLINDLY RETRY** the exact same command.
-4. **DO NOT EXECUTE SOURCE FILES DIRECTLY** (e.g., \`Ran(file.ts)\`). Use test runners (\`jest\`, \`vitest\`) for tests, or \`ts-node\`/\`bun\` for scripts. Use dedicated tools (\`read_file\`, \`search_files\`) for file exploration, not shell commands (\`cat\`, \`grep\`).
+4. **For reading files**, use \`${READ_FILE}\`. **For searching**, use \`${SEARCH_FILES}\`. **For listing directories**, use \`${LIST_DIRECTORY}\`. **For finding files by pattern**, use \`${GLOB}\`. Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
 5. **CONFIRM** dependencies are installed before importing. **INSTALL** first when missing.
 6. For destructive or shared-state actions: **CONFIRM** with the user first.
 7. ${sharedIdentityReminder()}

@@ -98,10 +98,13 @@
 ## Memory
 
 ### Milestones
+- 2026-06-09: `/speed` gated to pro/max plans. Service-layer check in `executeSpeed` (reads `useBillingStore.getState().plan`, whitelist `['pro','max']`) shows `speed.planRequired`. New opt-in `usesOwnPlanGate` flag in `SlashCommand` lets a paid command bypass the generic `requiresPaidPlan` guard so its own message is shown. The "Pro" badge in the slash menu still renders. Generic guard in `executePrompt`/`usePromptBar` checks `requiresPaidPlan && !usesOwnPlanGate`.
 - 2026-06-02: Migrated Gemini 3.5 Flash → Gemini 3.1 Pro (thinkingBudget, 200K ctx cap, temperature 0.7/topP 0.95/topK 64)
 - 2026-06-02: MiMo provider changed from api.xiaomimimo.com to opengateway.gitlawb.com (Gutlawb gateway), context window capped at 256K
 
 ### Decisions
+- 2026-06-09: Gate per-command paid features in the **service layer** (e.g. `executeSpeed`), not the UI. UI is shared between ChatView and TerminalView, but the service-layer gate covers both call sites and any future invoker (queued commands, hotkeys, MCP).
+- 2026-06-09: Add `usesOwnPlanGate` as an opt-in flag (not a default). Default behaviour (generic "paid feature" text + settings redirect) preserved for commands like `/te2e` that don't have custom copy.
 - 2026-06-02: Gemini 3.1 Pro uses thinkingBudget (numeric) instead of thinkingLevel (string). Budget map: low=2048, medium=8192, high=24576. Always-on thinking for coding tasks (high=24576).
 - 2026-06-02: Gemini 3.1 Pro context window officially 1M but capped at 200K for cost/latency balance.
 - 2026-06-02: MiMo authStyle changed from 'api-key' to default Bearer (Gutlawb gateway uses standard Authorization header).

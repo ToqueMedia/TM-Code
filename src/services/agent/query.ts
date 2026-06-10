@@ -11,8 +11,7 @@
  */
 
 import type OpenAI from "openai";
-import type { ContentBlockAPI } from "../../types/chat";
-import type { BillingSSEEvent } from "../../stores/billingStore";
+import type { ContentBlockAPI, ProviderState } from "../../types/chat";
 import {
   microcompact,
   applyToolResultBudget,
@@ -38,6 +37,9 @@ import {
 
 const MAX_OUTPUT_TOKENS = 32_768;
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3;
+const PLATFORM_AUTH_REFRESH_ATTEMPTS = 1;
+const CREDENTIAL_CONFIG_MAX_RETRIES = 3;
+const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
 
 // ── Types ──
 
@@ -45,6 +47,12 @@ const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3;
 export interface QueryMessage {
   role: "user" | "assistant";
   content: string | ContentBlockAPI[] | null;
+  /**
+   * Provider-native fields for exact round-trip (assistant only).
+   * When present, toOpenAIMessages spreads these into the API message
+   * instead of reconstructing from content blocks.
+   */
+  _native?: Record<string, unknown>;
 }
 
 /** Stream events yielded to the caller for UI rendering. */
@@ -55,8 +63,7 @@ export type QueryStreamEvent =
   | { type: "tool_use_delta"; id: string; input: string }
   | { type: "tool_use_stop"; id: string }
   | { type: "message_start" }
-  | { type: "message_stop"; stopReason: string; usage?: OpenAI.CompletionUsage }
-  | { type: "billing_update"; billing: BillingSSEEvent }
+  | { type: "message_stop"; stopReason: string; usage?: OpenAI.CompletionUsage; providerState?: ProviderState }
   | {
       type: "tool_result";
       toolUseId: string;
@@ -66,7 +73,7 @@ export type QueryStreamEvent =
   | { type: "compact_start"; beforeTokens: number }
   | { type: "compact_end"; beforeTokens: number; afterTokens: number }
   | {
-      type: "worker_status";
+      type: "agent_status";
       phase: "attempting" | "retrying" | "connected";
       message: string;
       provider?: string;
@@ -95,6 +102,8 @@ export interface QueryParams {
   systemPrompt: string;
   /** OpenAI SDK client (pre-configured with baseURL + auth). */
   client: OpenAI;
+  /** Recreate the SDK client with fresh credentials after an auth failure. */
+  refreshClient?: () => Promise<OpenAI | null>;
   /** Model ID to use. */
   model: string;
   /** Tool definitions in OpenAI format. */
@@ -144,8 +153,120 @@ function generateId(): string {
   return `toolu_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function abortableDelay(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      resolve(false);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function errorStatus(error: unknown): number | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : undefined;
+}
+
+function errorSource(error: unknown): string | undefined {
+  const source = (error as { source?: unknown } | null)?.source;
+  return typeof source === "string" ? source : undefined;
+}
+
+function errorPayload(error: unknown): string {
+  const apiError = (error as { error?: unknown } | null)?.error;
+  if (!apiError) return "";
+  if (typeof apiError === "string") return apiError;
+  try {
+    return JSON.stringify(apiError);
+  } catch {
+    return "";
+  }
+}
+
+function isPlatformAuthError(error: unknown): boolean {
+  if (errorSource(error) === "upstream") return false;
+  if (errorStatus(error) !== 401) return false;
+  const text = `${errorMessage(error)} ${errorPayload(error)}`.toLowerCase();
+  return /invalid token|expired|auth|unauthori[sz]ed/.test(text);
+}
+
+function isCredentialOrConfigError(error: unknown): boolean {
+  const status = errorStatus(error);
+  const text = `${errorMessage(error)} ${errorPayload(error)}`.toLowerCase();
+
+  if (errorSource(error) === "upstream" && (status === 401 || status === 403)) {
+    return true;
+  }
+
+  return (
+    /api key not configured|auth not configured|endpoint not configured|provider not configured/.test(text) ||
+    /invalid api key|incorrect api key|api key.*invalid|invalid token|unauthori[sz]ed|permission denied|forbidden|credential/.test(text)
+  );
+}
+
+function hasStartedModelOutput(args: {
+  textParts: string[];
+  thinkingParts: string[];
+  toolCalls: unknown[];
+  pendingToolCalls: Map<unknown, unknown>;
+}): boolean {
+  return (
+    args.textParts.length > 0 ||
+    args.thinkingParts.length > 0 ||
+    args.toolCalls.length > 0 ||
+    args.pendingToolCalls.size > 0
+  );
+}
+
+function createStreamPayloadError(raw: unknown): Error {
+  const payload = raw as {
+    type?: unknown;
+    message?: unknown;
+    status?: unknown;
+    provider?: unknown;
+    model?: unknown;
+  };
+  const status = typeof payload.status === "number" ? payload.status : undefined;
+  const message =
+    typeof payload.message === "string"
+      ? payload.message
+      : errorMessage(raw);
+  const err = new Error(
+    status ? `Provider error (${status}): ${message}` : message,
+  );
+  const annotated = err as Error & {
+    status?: number;
+    source?: string;
+    type?: unknown;
+    provider?: unknown;
+    model?: unknown;
+  };
+  annotated.status = status;
+  annotated.source = "upstream";
+  annotated.type = payload.type;
+  annotated.provider = payload.provider;
+  annotated.model = payload.model;
+  return annotated;
+}
+
 /** Convert internal QueryMessage[] to OpenAI ChatCompletionMessageParam[]. */
-function toOpenAIMessages(
+export function toOpenAIMessages(
   messages: QueryMessage[],
   systemPrompt?: string,
   model?: string,
@@ -160,79 +281,104 @@ function toOpenAIMessages(
     if (typeof msg.content === "string" || msg.content === null) {
       const textContent = (msg.content ?? "") as string;
       if (msg.role === "assistant") {
-        result.push({ role: "assistant", content: textContent });
+        // ── Native round-trip: use _native when available ──
+        if (msg._native) {
+          const { _native, ...rest } = msg;
+          // Spread native fields first, then override role to ensure correctness.
+          // The _native object carries reasoning_content, reasoning_details,
+          // tool_calls, and any provider-specific fields exactly as captured.
+          const nativeMsg = { ..._native, ...rest } as any;
+          nativeMsg.role = "assistant";
+          result.push(nativeMsg);
+        } else {
+          result.push({ role: "assistant", content: textContent });
+        }
       } else {
         result.push({ role: "user", content: textContent });
       }
     } else if (Array.isArray(msg.content)) {
       if (msg.role === "assistant") {
-        const textParts = (msg.content as ContentBlockAPI[])
-          .filter((b) => b.type === "text")
-          .map((b) => (b as { type: "text"; text: string }).text)
-          .join("");
+        // ── Native round-trip: use _native when available ──
+        if (msg._native) {
+          const { _native, ...rest } = msg;
+          const nativeMsg = { ..._native, ...rest } as any;
+          nativeMsg.role = "assistant";
+          // Content from _native takes precedence — it has the exact
+          // string the provider returned. The content field in `rest`
+          // is the legacy text for display compatibility.
+          if (_native.content !== undefined) {
+            nativeMsg.content = _native.content;
+          }
+          result.push(nativeMsg);
+        } else {
+          const textParts = (msg.content as ContentBlockAPI[])
+            .filter((b) => b.type === "text")
+            .map((b) => (b as { type: "text"; text: string }).text)
+            .join("");
 
-        // MiniMax M2.7/M3: preserve thinking for reasoning continuity
-        const thinkingParts = (msg.content as ContentBlockAPI[])
-          .filter((b) => b.type === "thinking")
-          .map((b) => (b as { type: "thinking"; thinking: string }).thinking)
-          .join("");
+          // MiniMax M2.7/M3: preserve thinking for reasoning continuity
+          const thinkingParts = (msg.content as ContentBlockAPI[])
+            .filter((b) => b.type === "thinking")
+            .map((b) => (b as { type: "thinking"; thinking: string }).thinking)
+            .join("");
 
-        const toolCallBlocks = (msg.content as ContentBlockAPI[]).filter(
-          (b) => b.type === "tool_call",
-        );
+          const toolCallBlocks = (msg.content as ContentBlockAPI[]).filter(
+            (b) => b.type === "tool_call",
+          );
 
-        const toolCalls: OpenAI.ChatCompletionMessageToolCall[] =
-          toolCallBlocks.map((b, index) => {
-            const tc = b as {
-              type: "tool_call";
-              id: string;
-              name: string;
-              arguments: string;
-              thoughtSignature?: string;
-            };
-            const toolCall: any = {
-              id: tc.id,
-              type: "function" as const,
-              function: {
-                name: tc.name,
-                arguments: tc.arguments,
-              },
-            };
-            // Gemini OpenAI compatibility expects thought signatures under
-            // tool_calls[].extra_content.google.thought_signature. Per the
-            // Gemini 3 docs, only the first parallel function call carries a
-            // signature, but that first call in each current-turn step is
-            // mandatory. For history transferred from non-Gemini providers,
-            // Google documents skip_thought_signature_validator as the dummy
-            // fallback. Do not add it to subsequent parallel calls.
-            const thoughtSignature =
-              tc.thoughtSignature ||
-              (needsGemini3FunctionCallSignature && index === 0
-                ? "skip_thought_signature_validator"
-                : undefined);
-            if (thoughtSignature) {
-              toolCall.extra_content = {
-                google: {
-                  thought_signature: thoughtSignature,
+          const toolCalls: OpenAI.ChatCompletionMessageToolCall[] =
+            toolCallBlocks.map((b, index) => {
+              const tc = b as {
+                type: "tool_call";
+                id: string;
+                name: string;
+                arguments: string;
+                thoughtSignature?: string;
+              };
+              const toolCall: any = {
+                id: tc.id,
+                type: "function" as const,
+                function: {
+                  name: tc.name,
+                  arguments: tc.arguments,
                 },
               };
-            }
-            return toolCall as OpenAI.ChatCompletionMessageToolCall;
-          });
+              // Gemini OpenAI compatibility expects thought signatures under
+              // tool_calls[].extra_content.google.thought_signature. Per the
+              // Gemini 3 docs, only the first parallel function call carries a
+              // signature, but that first call in each current-turn step is
+              // mandatory. For history transferred from non-Gemini providers,
+              // Google documents skip_thought_signature_validator as the dummy
+              // fallback. Do not add it to subsequent parallel calls.
+              const thoughtSignature =
+                tc.thoughtSignature ||
+                (needsGemini3FunctionCallSignature && index === 0
+                  ? "skip_thought_signature_validator"
+                  : undefined);
+              if (thoughtSignature) {
+                toolCall.extra_content = {
+                  google: {
+                    thought_signature: thoughtSignature,
+                  },
+                };
+              }
+              return toolCall as OpenAI.ChatCompletionMessageToolCall;
+            });
 
-        const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
-          role: "assistant",
-          content: textParts || null,
-        };
-        if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
+          const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
+            role: "assistant",
+            content: textParts || null,
+          };
+          if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
 
-        // MiniMax: preserve thinking in content with <think> tags OR as reasoning_details
-        // For models that support reasoning_content/reasoning_details, we add it as a separate field
-        if (thinkingParts) {
-          (assistantMsg as any).reasoning_content = thinkingParts;
+          // MiniMax: preserve thinking in content with <think> tags OR as reasoning_details
+          // For models that support reasoning_content/reasoning_details, we add it as a separate field
+          if (thinkingParts) {
+            (assistantMsg as any).reasoning_content = thinkingParts;
+          }
+
+          result.push(assistantMsg);
         }
-
-        result.push(assistantMsg);
       } else {
         // user message: split into text + tool result messages
         const textParts: string[] = [];
@@ -309,7 +455,6 @@ export async function* query(
 ): AsyncGenerator<QueryStreamEvent, QueryTerminal> {
   const {
     systemPrompt,
-    client,
     model,
     tools,
     executeTool,
@@ -322,6 +467,8 @@ export async function* query(
     extraHeaders,
     onResponseHeaders,
   } = params;
+  let client = params.client;
+  const refreshClient = params.refreshClient;
 
   let state: LoopState = {
     messages: [...params.messages],
@@ -338,7 +485,7 @@ export async function* query(
   let thinkingOnlyRecoveryCount = 0;
 
   // eslint-disable-next-line no-constant-condition
-  while (true) {
+  queryLoop: while (true) {
     const {
       messages,
       autoCompactTracking,
@@ -513,6 +660,29 @@ export async function* query(
     const contentBuffer: string[] = [];
     let thinkMode = false; // true when inside <think>...</think> or <thought>...</thought>
 
+    // ── Native delta accumulator for provider round-trip ──
+    // Captures raw fields from every streaming chunk delta so the
+    // native assistant message can be reconstructed exactly as the
+    // provider returned it — preserving reasoning_details structure,
+    // signatures, and any unknown fields that the UI layer discards.
+    const KNOWN_DELTA_KEYS = new Set([
+      'content', 'reasoning_content', 'reasoning_details',
+      'tool_calls', 'role', 'function_call',
+    ]);
+    const nativeAccumulator = {
+      reasoningContent: '' as string,
+      reasoningDetails: [] as unknown[],
+      toolCallExtras: new Map<number, Record<string, unknown>>(),
+      extraDeltaFields: {} as Record<string, unknown>,
+    };
+
+    let authRefreshAttempts = 0;
+    let credentialConfigRetries = 0;
+
+    // Retry the same model turn only before any assistant output/tool call has
+    // been emitted. Retrying after visible output could duplicate text or tools.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
     try {
       const streamParams: Record<string, unknown> = {
         model,
@@ -556,39 +726,8 @@ export async function* query(
           };
         }
 
-        if (chunk?.type === "worker_status") {
-          yield {
-            type: "worker_status",
-            phase:
-              chunk.phase === "attempting" || chunk.phase === "connected"
-                ? chunk.phase
-                : "retrying",
-            message:
-              typeof chunk.message === "string"
-                ? chunk.message
-                : "Worker status update",
-            provider:
-              typeof chunk.provider === "string" ? chunk.provider : undefined,
-            model: typeof chunk.model === "string" ? chunk.model : undefined,
-            attempt:
-              typeof chunk.attempt === "number" ? chunk.attempt : undefined,
-            maxAttempts:
-              typeof chunk.maxAttempts === "number"
-                ? chunk.maxAttempts
-                : undefined,
-            httpStatus:
-              typeof chunk.httpStatus === "number"
-                ? chunk.httpStatus
-                : undefined,
-            retryInMs:
-              typeof chunk.retryInMs === "number" ? chunk.retryInMs : undefined,
-          };
-          continue;
-        }
-
-        if (chunk?.type === "billing") {
-          yield { type: "billing_update", billing: chunk as BillingSSEEvent };
-          continue;
+        if (chunk?.error) {
+          throw createStreamPayloadError(chunk.error);
         }
 
         // Defensive: skip chunks that are null/undefined or lack choices array
@@ -614,6 +753,7 @@ export async function* query(
         if (delta?.reasoning_content) {
           const reasoning = delta.reasoning_content;
           assistantThinkingParts.push(reasoning);
+          nativeAccumulator.reasoningContent += reasoning;
           yield { type: "thinking_delta", thinking: reasoning };
         }
 
@@ -623,9 +763,25 @@ export async function* query(
           Array.isArray(delta.reasoning_details)
         ) {
           for (const detail of delta.reasoning_details) {
+            // Preserve the raw detail object as-is for native round-trip —
+            // it may contain type, signature, or other fields beyond .text
+            nativeAccumulator.reasoningDetails.push(detail);
             if (detail?.text) {
               assistantThinkingParts.push(detail.text);
               yield { type: "thinking_delta", thinking: detail.text };
+            }
+          }
+        }
+
+        // Capture unknown/extra delta fields for native round-trip.
+        // These are provider-specific fields not in the standard OpenAI
+        // schema (e.g. MiniMax reasoning_extra, Gemini safety_ratings).
+        if (delta) {
+          for (const key of Object.keys(delta)) {
+            if (KNOWN_DELTA_KEYS.has(key)) continue;
+            const val = (delta as any)[key];
+            if (val !== undefined && val !== null) {
+              nativeAccumulator.extraDeltaFields[key] = val;
             }
           }
         }
@@ -763,6 +919,23 @@ export async function* query(
             if (sig && !pending.thoughtSignature) {
               pending.thoughtSignature = sig;
             }
+
+            // Capture non-standard tool call fields for native round-trip.
+            // Known fields (index, id, type, function) are excluded — the
+            // rest is preserved as-is (e.g. extra_content, custom metadata).
+            const tcKnownKeys = new Set(['index', 'id', 'type', 'function']);
+            for (const key of Object.keys(tc)) {
+              if (tcKnownKeys.has(key)) continue;
+              const val = (tc as any)[key];
+              if (val !== undefined && val !== null) {
+                let extras = nativeAccumulator.toolCallExtras.get(tc.index);
+                if (!extras) {
+                  extras = {};
+                  nativeAccumulator.toolCallExtras.set(tc.index, extras);
+                }
+                extras[key] = val;
+              }
+            }
           }
         }
 
@@ -812,8 +985,79 @@ export async function* query(
 
       // Get final message for usage/stop reason (not needed with standard stream)
       // Usage and finish_reason are already captured from chunks above
+      break;
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
+      const outputStarted = hasStartedModelOutput({
+        textParts: assistantTextParts,
+        thinkingParts: assistantThinkingParts,
+        toolCalls: collectedToolCalls,
+        pendingToolCalls,
+      });
+
+      if (
+        !outputStarted &&
+        isPlatformAuthError(error)
+      ) {
+        if (refreshClient && authRefreshAttempts < PLATFORM_AUTH_REFRESH_ATTEMPTS) {
+          authRefreshAttempts++;
+          yield {
+            type: "agent_status",
+            phase: "retrying",
+            message: "Authentication token expired. Refreshing and retrying...",
+            attempt: authRefreshAttempts,
+            maxAttempts: PLATFORM_AUTH_REFRESH_ATTEMPTS,
+            httpStatus: errorStatus(error),
+          };
+          const refreshed = await refreshClient();
+          if (refreshed) {
+            client = refreshed;
+            continue;
+          }
+        }
+        yield {
+          type: "error",
+          message: "Authentication expired. Please sign in again.",
+        };
+        return {
+          reason: "error",
+          turnCount: state.turnCount,
+          totalInputTokens,
+          totalOutputTokens,
+        };
+      }
+
+      if (
+        !outputStarted &&
+        isCredentialOrConfigError(error) &&
+        credentialConfigRetries < CREDENTIAL_CONFIG_MAX_RETRIES
+      ) {
+        const nextRetry = credentialConfigRetries + 1;
+        yield {
+          type: "agent_status",
+          phase: "retrying",
+          message: `Provider credential/configuration error. Retrying ${nextRetry}/${CREDENTIAL_CONFIG_MAX_RETRIES} in 30s...`,
+          attempt: nextRetry,
+          maxAttempts: CREDENTIAL_CONFIG_MAX_RETRIES,
+          httpStatus: errorStatus(error),
+          retryInMs: CREDENTIAL_CONFIG_RETRY_DELAY_MS,
+        };
+        const completedDelay = await abortableDelay(
+          CREDENTIAL_CONFIG_RETRY_DELAY_MS,
+          signal,
+        );
+        if (!completedDelay) {
+          yield { type: "interrupted" };
+          return {
+            reason: "aborted",
+            turnCount: state.turnCount,
+            totalInputTokens,
+            totalOutputTokens,
+          };
+        }
+        credentialConfigRetries = nextRetry;
+        continue;
+      }
 
       // ── Collapse recovery on prompt_too_long ──
       const MAX_COLLAPSE_RECOVERY = 3;
@@ -834,7 +1078,7 @@ export async function* query(
             messages: recovery.messages as QueryMessage[],
             collapseRecoveryAttempts: state.collapseRecoveryAttempts + 1,
           };
-          continue;
+          continue queryLoop;
         }
       }
 
@@ -857,6 +1101,7 @@ export async function* query(
         totalOutputTokens,
       };
     }
+    }
 
     // ── Record usage ──
 
@@ -866,7 +1111,68 @@ export async function* query(
       onUsage?.(turnUsage.prompt_tokens, turnUsage.completion_tokens);
     }
 
-    yield { type: "message_stop", stopReason, usage: turnUsage };
+    // ── Build provider-native state for round-trip ──
+    // Reconstruct the assistant message as the provider would have
+    // returned it non-streaming. Preserves reasoning_content,
+    // reasoning_details, tool_calls with extra fields, and any
+    // unknown delta fields. Used by rebuildConversationHistory for
+    // exact native round-trip instead of text-based reconstruction.
+    const nativeAssistantMessage: Record<string, unknown> = {
+      role: 'assistant',
+      content: assistantTextParts.join('') || null,
+    };
+    if (nativeAccumulator.reasoningContent) {
+      nativeAssistantMessage.reasoning_content = nativeAccumulator.reasoningContent;
+    }
+    if (nativeAccumulator.reasoningDetails.length > 0) {
+      nativeAssistantMessage.reasoning_details = nativeAccumulator.reasoningDetails;
+    }
+    if (collectedToolCalls.length > 0) {
+      nativeAssistantMessage.tool_calls = collectedToolCalls.map((tc, idx) => {
+        const tcNative: Record<string, unknown> = {
+          id: tc.id,
+          type: 'function',
+          function: {
+            name: tc.name,
+            arguments: tc.argsJson,
+          },
+        };
+        // Merge per-tool-call extra fields captured from delta
+        const extras = nativeAccumulator.toolCallExtras.get(idx);
+        if (extras) {
+          Object.assign(tcNative, extras);
+        }
+        return tcNative;
+      });
+    }
+    // Merge any unknown delta-level fields (provider-specific extras)
+    for (const [key, val] of Object.entries(nativeAccumulator.extraDeltaFields)) {
+      if (!(key in nativeAssistantMessage)) {
+        nativeAssistantMessage[key] = val;
+      }
+    }
+
+    const turnProviderState: ProviderState = {
+      provider: model,
+      protocol: 'openai-chat',
+      nativeAssistantMessage,
+      capturedAt: Date.now(),
+    };
+
+    // Safe debug log — sizes and presence only, never content
+    const nativeSize = JSON.stringify(nativeAssistantMessage).length;
+    const hasReasoning = !!nativeAssistantMessage.reasoning_content;
+    const hasReasoningDetails = nativeAccumulator.reasoningDetails.length > 0;
+    const tcCount = collectedToolCalls.length;
+    const extraFieldCount = Object.keys(nativeAccumulator.extraDeltaFields).length;
+    // eslint-disable-next-line no-console
+    console.debug(
+      `[query] providerState captured: ${nativeSize}B, ` +
+      `reasoning=${hasReasoning}, reasoning_details=${hasReasoningDetails}, ` +
+      `tool_calls=${tcCount}, extra_fields=${extraFieldCount}`,
+    );
+
+    yield { type: "message_stop", stopReason, usage: turnUsage, providerState: turnProviderState };
 
     // ── Build assistant message and add to history ──
 

@@ -548,6 +548,29 @@ class ToolExecutor {
       return 'Blocked: .env files contain secrets and cannot be read or modified by the agent. Ask the developer what environment variables are needed, or create a .env.example with placeholder values.'
     }
 
+    // Path scope check — file tools targeting paths outside all allowed
+    // roots (project + additionalDirectories) prompt the user for access.
+    const FILE_SCOPE_TOOLS = new Set([
+      'read_file', 'write_file', 'edit_file', 'create_file',
+      'delete_file', 'rename_file', 'copy_file', 'list_directory',
+      'search_files', 'glob', 'path_exists', 'append_file',
+    ])
+    const pathForScope = (input.file_path || input.oldPath || input.directory || '') as string
+    if (pathForScope && FILE_SCOPE_TOOLS.has(toolName)) {
+      const scopeCheck = this.checkPathScope(pathForScope)
+      if (!scopeCheck.allowed) {
+        const decision = await usePermissionStore.getState()
+          .requestPathAccess(pathForScope, scopeCheck.directoryToAdd)
+        this.recordPermission(toolCallId, decision)
+        if (!decision.approved) {
+          const reason = decision.denyReason
+            ? ` User says: ${decision.denyReason}`
+            : ' Ask the user how to proceed.'
+          return `Blocked: "${pathForScope}" is outside the ${scopeCheck.scopeName}.${reason}`
+        }
+      }
+    }
+
     // /plan architect mode — block implementation tools so the architect role
     // cannot drift into building the project. The model's *system prompt*
     // already forbids these (see planCommand.ts:buildArchitectSystemPrompt),
@@ -988,13 +1011,10 @@ ${preview}
     if (!toolCallId) return
 
     // Accumulate full output into commandLogs for the terminal-style log viewer.
-    // Each chunk may contain multiple lines — split and append individually.
+    // Each chunk may contain multiple lines. Append in one store update to
+    // avoid React/Zustand nested update explosions on verbose commands.
     const chunks = data.split('\n')
-    for (const chunk of chunks) {
-      if (chunk.length > 0) {
-        useChatStore.getState().appendToolCallCommandLog(toolCallId, chunk)
-      }
-    }
+    useChatStore.getState().appendToolCallCommandLogs(toolCallId, chunks)
 
     // Show the last meaningful line as progress (single-line summary)
     const lines = data.trim().split('\n')
@@ -1202,19 +1222,69 @@ ${preview}
     throw new Error('No project is open. Cannot perform file operations without an active project.')
   }
 
-  private validatePathWithinProject(filePath: string): void {
-    const scopeRoot = this.cmdModeCwd || this.getProjectRoot()
-    const resolvedPath = this.resolveToAbsolute(filePath)
-    const root = normalizePath(scopeRoot)
-    const target = normalizePath(resolvedPath)
-    const isWindowsPath = /^[A-Z]:\//.test(root)
-    const rootCmp = isWindowsPath ? root.toLowerCase() : root
-    const targetCmp = isWindowsPath ? target.toLowerCase() : target
+  /** All directories the agent is allowed to access: project root + user-approved extras. */
+  private getAllowedRoots(): string[] {
+    const roots: string[] = []
+    const projectRoot = this.cmdModeCwd || this.getProjectRoot()
+    if (projectRoot) roots.push(projectRoot)
+    const { additionalDirectories } = usePermissionStore.getState()
+    for (const dir of additionalDirectories) roots.push(dir)
+    return roots
+  }
 
-    if (targetCmp === rootCmp || targetCmp.startsWith(`${rootCmp}/`)) return
+  private isPathWithinRoots(normalizedTarget: string, roots: string[]): boolean {
+    const isWindowsPath = /^[A-Z]:\//.test(normalizedTarget)
+    const targetCmp = isWindowsPath ? normalizedTarget.toLowerCase() : normalizedTarget
+    for (const root of roots) {
+      const rootNorm = normalizePath(root)
+      const rootCmp = isWindowsPath ? rootNorm.toLowerCase() : rootNorm
+      if (targetCmp === rootCmp || targetCmp.startsWith(`${rootCmp}/`)) return true
+    }
+    return false
+  }
+
+  private validatePathWithinProject(filePath: string): void {
+    const resolvedPath = this.resolveToAbsolute(filePath)
+    const target = normalizePath(resolvedPath)
+    if (this.isPathWithinRoots(target, this.getAllowedRoots())) return
 
     const scopeName = this.cmdModeCwd ? 'working directory' : 'project directory'
     throw new Error(`Access denied: path "${filePath}" is outside the ${scopeName}`)
+  }
+
+  /** Check if a file path is within any allowed root. Returns the top-level
+   *  directory that would need to be approved if the path is outside scope. */
+  private checkPathScope(filePath: string): { allowed: boolean; directoryToAdd: string; scopeName: string } {
+    const resolvedPath = this.resolveToAbsolute(filePath)
+    const target = normalizePath(resolvedPath)
+    const roots = this.getAllowedRoots()
+
+    if (this.isPathWithinRoots(target, roots)) {
+      return { allowed: true, directoryToAdd: '', scopeName: '' }
+    }
+
+    // Find the top-level directory to suggest adding.
+    // Walk up from the file until we find a directory that shares a common
+    // parent with the project root — that sibling directory is the natural
+    // "grant access to X" scope.
+    const projectRoot = normalizePath(this.cmdModeCwd || this.getProjectRoot())
+    const parts = target.split('/')
+    const rootParts = projectRoot.split('/')
+
+    // Find common prefix length
+    let commonLen = 0
+    for (let i = 0; i < Math.min(parts.length, rootParts.length); i++) {
+      if (parts[i] === rootParts[i]) commonLen = i + 1
+      else break
+    }
+
+    // The directory to add is the first divergent segment from the target side
+    // e.g. root=/Users/me/project, target=/Users/me/other/src/file.ts
+    //   commonLen=3 (/Users/me), directoryToAdd=/Users/me/other
+    const directoryToAdd = parts.slice(0, commonLen + 1).join('/') || target
+
+    const scopeName = this.cmdModeCwd ? 'working directory' : 'project directory'
+    return { allowed: false, directoryToAdd, scopeName }
   }
   
   /**
@@ -1331,7 +1401,7 @@ ${preview}
    * Silent for safe tools (`source: 'safe_tool'`) — no decision was made,
    * recording it would just clutter every read_file with a permission stamp.
    */
-  private recordPermission(toolCallId: string | undefined, decision: { approved: boolean; prompted: boolean; source: string; promptKind?: 'sensitive_file' | 'dangerous_command' | 'browser_action' | null; denyReason?: string }): void {
+  private recordPermission(toolCallId: string | undefined, decision: { approved: boolean; prompted: boolean; source: string; promptKind?: import('../../stores/permissionStore').PromptReason; denyReason?: string }): void {
     if (!toolCallId) return
     if (decision.source === 'safe_tool') return
     // Dynamic import keeps toolExecutor free of a hard chatStore dep at module load.
@@ -1534,11 +1604,6 @@ ${preview}
   private simpleHash(str: string): number { return simpleHash(str) }
 
   private validateCommand(command: string): void {
-    const compoundOperator = this.findCompoundShellOperator(command)
-    if (compoundOperator) {
-      throw new Error(`Command blocked: compound shell operator "${compoundOperator}" detected. Run one terminal action per tool call, observe the result, then issue the next command. Use the tool's cwd parameter instead of "cd ... && ..."; for SSH, run separate ssh commands instead of chaining remote commands.`)
-    }
-
     // Read-only mode: block file-writing shell operations (verification agents).
     // Allow common test/lint/typecheck commands even if they contain patterns
     // that look like writes (e.g., npm test may use internal redirects).
@@ -1555,58 +1620,6 @@ ${preview}
         }
       }
     }
-  }
-
-  private findCompoundShellOperator(command: string): string | null {
-    const topLevel = this.findShellOperatorOutsideQuotes(command)
-    if (topLevel) return topLevel
-
-    // SSH hides the real shell workflow inside the quoted remote command:
-    //   ssh root@host "apt-get update && apt-get upgrade -y"
-    // Treat that remote command as agent-authored shell too, so terminal-mode
-    // output remains step-by-step instead of one opaque remote script.
-    if (/^\s*ssh\b/.test(command)) {
-      const quotedRemote = command.match(/\s(['"])([\s\S]*)\1\s*$/)
-      if (quotedRemote) {
-        return this.findShellOperatorOutsideQuotes(quotedRemote[2])
-      }
-    }
-
-    return null
-  }
-
-  private findShellOperatorOutsideQuotes(command: string): string | null {
-    let quote: '"' | "'" | null = null
-    let escaped = false
-
-    for (let i = 0; i < command.length; i++) {
-      const ch = command[i]
-      const next = command[i + 1]
-
-      if (escaped) {
-        escaped = false
-        continue
-      }
-      if (ch === '\\') {
-        escaped = true
-        continue
-      }
-      if (quote) {
-        if (ch === quote) quote = null
-        continue
-      }
-      if (ch === '"' || ch === "'") {
-        quote = ch
-        continue
-      }
-
-      if (ch === '&' && next === '&') return '&&'
-      if (ch === '|' && next === '|') return '||'
-      if (ch === '|') return '|'
-      if (ch === ';') return ';'
-    }
-
-    return null
   }
 
   private async ensureAgentShellListeners(): Promise<void> {
@@ -1628,11 +1641,10 @@ ${preview}
 
         if (session.activeToolCallId) {
           const lines = clean.split('\n')
-          for (const line of lines) {
-            if (line.length > 0) {
-              useChatStore.getState().appendToolCallCommandLog(session.activeToolCallId, line.replace(/\r/g, ''))
-            }
-          }
+          useChatStore.getState().appendToolCallCommandLogs(
+            session.activeToolCallId,
+            lines.map(line => line.replace(/\r/g, '')),
+          )
         }
       }),
       listen<PtyExitEvent>('pty-exit', (event) => {
@@ -1668,10 +1680,6 @@ ${preview}
     if (!command) throw new Error('Agent shell input cannot be empty.')
     if (command.includes('\n')) {
       throw new Error('Agent shell input must contain exactly one terminal action. Send separate agent_shell_write calls for multiple lines.')
-    }
-    const compoundOperator = this.findCompoundShellOperator(command)
-    if (compoundOperator) {
-      throw new Error(`Agent shell input blocked: compound shell operator "${compoundOperator}" detected. Send one command, read the output, then send the next command.`)
     }
     return command
   }
