@@ -14,6 +14,44 @@ const target = positionalArgs[0];
 const isUnsignedBuild = flags.has('--unsigned');
 const requireUpdaterArtifacts = flags.has('--require-updater-artifacts');
 const isWindowsTarget = target?.includes('windows') || (os.platform() === 'win32' && !target);
+const tauriConfigPath = path.join(__dirname, '../src-tauri/tauri.conf.json');
+let unsignedWindowsConfigPath = '';
+
+function getWindowsCertificateThumbprint() {
+  try {
+    const config = JSON.parse(fs.readFileSync(tauriConfigPath, 'utf8'));
+    return config?.bundle?.windows?.certificateThumbprint || '';
+  } catch {
+    return '';
+  }
+}
+
+function hasWindowsSigningCertificate(thumbprint) {
+  if (!thumbprint || os.platform() !== 'win32') {
+    return false;
+  }
+
+  const command = [
+    `$thumb = '${thumbprint.replace(/'/g, "''")}';`,
+    '$paths = @("Cert:\\CurrentUser\\My\\$thumb", "Cert:\\LocalMachine\\My\\$thumb");',
+    '$cert = Get-ChildItem -Path $paths -ErrorAction SilentlyContinue |',
+    '  Where-Object { $_.HasPrivateKey } |',
+    '  Select-Object -First 1;',
+    'if ($cert) { exit 0 } else { exit 1 }'
+  ].join(' ');
+
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    command
+  ], {
+    stdio: 'ignore',
+    shell: false
+  });
+
+  return result.status === 0;
+}
 
 // Check if TAURI_SIGNING_PRIVATE_KEY is already set
 if (!process.env.TAURI_SIGNING_PRIVATE_KEY && !isUnsignedBuild) {
@@ -65,6 +103,31 @@ if (target) {
   args.push('--target', target);
 }
 
+if (isUnsignedBuild) {
+  args.push('--no-sign');
+} else if (isWindowsTarget) {
+  const thumbprint = getWindowsCertificateThumbprint();
+  if (!hasWindowsSigningCertificate(thumbprint)) {
+    console.warn('\nWindows code-signing certificate is not installed or has no private key.');
+    console.warn(`Skipping Authenticode signing for this local build: ${thumbprint || 'no thumbprint configured'}`);
+    console.warn('Install the certificate in CurrentUser\\My or LocalMachine\\My to produce signed Windows installers.\n');
+
+    if (requireUpdaterArtifacts) {
+      unsignedWindowsConfigPath = path.join(os.tmpdir(), `tauri-windows-no-codesign-${process.pid}.json`);
+      fs.writeFileSync(unsignedWindowsConfigPath, JSON.stringify({
+        bundle: {
+          windows: {
+            certificateThumbprint: null
+          }
+        }
+      }));
+      args.push('--config', unsignedWindowsConfigPath);
+    } else {
+      args.push('--no-sign');
+    }
+  }
+}
+
 console.log(`🚀 Running build command: npx ${args.join(' ')}\n`);
 
 const result = spawnSync('npx', args, {
@@ -78,8 +141,15 @@ const result = spawnSync('npx', args, {
 });
 
 if (result.status !== 0) {
+  if (unsignedWindowsConfigPath) {
+    fs.rmSync(unsignedWindowsConfigPath, { force: true });
+  }
   console.error(`\n❌ Build failed with exit code: ${result.status}`);
   process.exit(result.status || 1);
+}
+
+if (unsignedWindowsConfigPath) {
+  fs.rmSync(unsignedWindowsConfigPath, { force: true });
 }
 
 // Run move-builds.mjs
