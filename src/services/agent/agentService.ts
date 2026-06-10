@@ -509,7 +509,7 @@ class AgentService {
               event.usage.completion_tokens,
             );
           }
-          callbacks.onTurnComplete(turnNumber);
+          callbacks.onTurnComplete(turnNumber, event.providerState);
           break;
 
         case "compact_start":

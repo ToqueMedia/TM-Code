@@ -11,7 +11,7 @@
  */
 
 import type OpenAI from "openai";
-import type { ContentBlockAPI } from "../../types/chat";
+import type { ContentBlockAPI, ProviderState } from "../../types/chat";
 import {
   microcompact,
   applyToolResultBudget,
@@ -47,6 +47,12 @@ const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
 export interface QueryMessage {
   role: "user" | "assistant";
   content: string | ContentBlockAPI[] | null;
+  /**
+   * Provider-native fields for exact round-trip (assistant only).
+   * When present, toOpenAIMessages spreads these into the API message
+   * instead of reconstructing from content blocks.
+   */
+  _native?: Record<string, unknown>;
 }
 
 /** Stream events yielded to the caller for UI rendering. */
@@ -57,7 +63,7 @@ export type QueryStreamEvent =
   | { type: "tool_use_delta"; id: string; input: string }
   | { type: "tool_use_stop"; id: string }
   | { type: "message_start" }
-  | { type: "message_stop"; stopReason: string; usage?: OpenAI.CompletionUsage }
+  | { type: "message_stop"; stopReason: string; usage?: OpenAI.CompletionUsage; providerState?: ProviderState }
   | {
       type: "tool_result";
       toolUseId: string;
@@ -260,7 +266,7 @@ function createStreamPayloadError(raw: unknown): Error {
 }
 
 /** Convert internal QueryMessage[] to OpenAI ChatCompletionMessageParam[]. */
-function toOpenAIMessages(
+export function toOpenAIMessages(
   messages: QueryMessage[],
   systemPrompt?: string,
   model?: string,
@@ -275,79 +281,104 @@ function toOpenAIMessages(
     if (typeof msg.content === "string" || msg.content === null) {
       const textContent = (msg.content ?? "") as string;
       if (msg.role === "assistant") {
-        result.push({ role: "assistant", content: textContent });
+        // ── Native round-trip: use _native when available ──
+        if (msg._native) {
+          const { _native, ...rest } = msg;
+          // Spread native fields first, then override role to ensure correctness.
+          // The _native object carries reasoning_content, reasoning_details,
+          // tool_calls, and any provider-specific fields exactly as captured.
+          const nativeMsg = { ..._native, ...rest } as any;
+          nativeMsg.role = "assistant";
+          result.push(nativeMsg);
+        } else {
+          result.push({ role: "assistant", content: textContent });
+        }
       } else {
         result.push({ role: "user", content: textContent });
       }
     } else if (Array.isArray(msg.content)) {
       if (msg.role === "assistant") {
-        const textParts = (msg.content as ContentBlockAPI[])
-          .filter((b) => b.type === "text")
-          .map((b) => (b as { type: "text"; text: string }).text)
-          .join("");
+        // ── Native round-trip: use _native when available ──
+        if (msg._native) {
+          const { _native, ...rest } = msg;
+          const nativeMsg = { ..._native, ...rest } as any;
+          nativeMsg.role = "assistant";
+          // Content from _native takes precedence — it has the exact
+          // string the provider returned. The content field in `rest`
+          // is the legacy text for display compatibility.
+          if (_native.content !== undefined) {
+            nativeMsg.content = _native.content;
+          }
+          result.push(nativeMsg);
+        } else {
+          const textParts = (msg.content as ContentBlockAPI[])
+            .filter((b) => b.type === "text")
+            .map((b) => (b as { type: "text"; text: string }).text)
+            .join("");
 
-        // MiniMax M2.7/M3: preserve thinking for reasoning continuity
-        const thinkingParts = (msg.content as ContentBlockAPI[])
-          .filter((b) => b.type === "thinking")
-          .map((b) => (b as { type: "thinking"; thinking: string }).thinking)
-          .join("");
+          // MiniMax M2.7/M3: preserve thinking for reasoning continuity
+          const thinkingParts = (msg.content as ContentBlockAPI[])
+            .filter((b) => b.type === "thinking")
+            .map((b) => (b as { type: "thinking"; thinking: string }).thinking)
+            .join("");
 
-        const toolCallBlocks = (msg.content as ContentBlockAPI[]).filter(
-          (b) => b.type === "tool_call",
-        );
+          const toolCallBlocks = (msg.content as ContentBlockAPI[]).filter(
+            (b) => b.type === "tool_call",
+          );
 
-        const toolCalls: OpenAI.ChatCompletionMessageToolCall[] =
-          toolCallBlocks.map((b, index) => {
-            const tc = b as {
-              type: "tool_call";
-              id: string;
-              name: string;
-              arguments: string;
-              thoughtSignature?: string;
-            };
-            const toolCall: any = {
-              id: tc.id,
-              type: "function" as const,
-              function: {
-                name: tc.name,
-                arguments: tc.arguments,
-              },
-            };
-            // Gemini OpenAI compatibility expects thought signatures under
-            // tool_calls[].extra_content.google.thought_signature. Per the
-            // Gemini 3 docs, only the first parallel function call carries a
-            // signature, but that first call in each current-turn step is
-            // mandatory. For history transferred from non-Gemini providers,
-            // Google documents skip_thought_signature_validator as the dummy
-            // fallback. Do not add it to subsequent parallel calls.
-            const thoughtSignature =
-              tc.thoughtSignature ||
-              (needsGemini3FunctionCallSignature && index === 0
-                ? "skip_thought_signature_validator"
-                : undefined);
-            if (thoughtSignature) {
-              toolCall.extra_content = {
-                google: {
-                  thought_signature: thoughtSignature,
+          const toolCalls: OpenAI.ChatCompletionMessageToolCall[] =
+            toolCallBlocks.map((b, index) => {
+              const tc = b as {
+                type: "tool_call";
+                id: string;
+                name: string;
+                arguments: string;
+                thoughtSignature?: string;
+              };
+              const toolCall: any = {
+                id: tc.id,
+                type: "function" as const,
+                function: {
+                  name: tc.name,
+                  arguments: tc.arguments,
                 },
               };
-            }
-            return toolCall as OpenAI.ChatCompletionMessageToolCall;
-          });
+              // Gemini OpenAI compatibility expects thought signatures under
+              // tool_calls[].extra_content.google.thought_signature. Per the
+              // Gemini 3 docs, only the first parallel function call carries a
+              // signature, but that first call in each current-turn step is
+              // mandatory. For history transferred from non-Gemini providers,
+              // Google documents skip_thought_signature_validator as the dummy
+              // fallback. Do not add it to subsequent parallel calls.
+              const thoughtSignature =
+                tc.thoughtSignature ||
+                (needsGemini3FunctionCallSignature && index === 0
+                  ? "skip_thought_signature_validator"
+                  : undefined);
+              if (thoughtSignature) {
+                toolCall.extra_content = {
+                  google: {
+                    thought_signature: thoughtSignature,
+                  },
+                };
+              }
+              return toolCall as OpenAI.ChatCompletionMessageToolCall;
+            });
 
-        const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
-          role: "assistant",
-          content: textParts || null,
-        };
-        if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
+          const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
+            role: "assistant",
+            content: textParts || null,
+          };
+          if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
 
-        // MiniMax: preserve thinking in content with <think> tags OR as reasoning_details
-        // For models that support reasoning_content/reasoning_details, we add it as a separate field
-        if (thinkingParts) {
-          (assistantMsg as any).reasoning_content = thinkingParts;
+          // MiniMax: preserve thinking in content with <think> tags OR as reasoning_details
+          // For models that support reasoning_content/reasoning_details, we add it as a separate field
+          if (thinkingParts) {
+            (assistantMsg as any).reasoning_content = thinkingParts;
+          }
+
+          result.push(assistantMsg);
         }
-
-        result.push(assistantMsg);
       } else {
         // user message: split into text + tool result messages
         const textParts: string[] = [];
@@ -629,6 +660,22 @@ export async function* query(
     const contentBuffer: string[] = [];
     let thinkMode = false; // true when inside <think>...</think> or <thought>...</thought>
 
+    // ── Native delta accumulator for provider round-trip ──
+    // Captures raw fields from every streaming chunk delta so the
+    // native assistant message can be reconstructed exactly as the
+    // provider returned it — preserving reasoning_details structure,
+    // signatures, and any unknown fields that the UI layer discards.
+    const KNOWN_DELTA_KEYS = new Set([
+      'content', 'reasoning_content', 'reasoning_details',
+      'tool_calls', 'role', 'function_call',
+    ]);
+    const nativeAccumulator = {
+      reasoningContent: '' as string,
+      reasoningDetails: [] as unknown[],
+      toolCallExtras: new Map<number, Record<string, unknown>>(),
+      extraDeltaFields: {} as Record<string, unknown>,
+    };
+
     let authRefreshAttempts = 0;
     let credentialConfigRetries = 0;
 
@@ -706,6 +753,7 @@ export async function* query(
         if (delta?.reasoning_content) {
           const reasoning = delta.reasoning_content;
           assistantThinkingParts.push(reasoning);
+          nativeAccumulator.reasoningContent += reasoning;
           yield { type: "thinking_delta", thinking: reasoning };
         }
 
@@ -715,9 +763,25 @@ export async function* query(
           Array.isArray(delta.reasoning_details)
         ) {
           for (const detail of delta.reasoning_details) {
+            // Preserve the raw detail object as-is for native round-trip —
+            // it may contain type, signature, or other fields beyond .text
+            nativeAccumulator.reasoningDetails.push(detail);
             if (detail?.text) {
               assistantThinkingParts.push(detail.text);
               yield { type: "thinking_delta", thinking: detail.text };
+            }
+          }
+        }
+
+        // Capture unknown/extra delta fields for native round-trip.
+        // These are provider-specific fields not in the standard OpenAI
+        // schema (e.g. MiniMax reasoning_extra, Gemini safety_ratings).
+        if (delta) {
+          for (const key of Object.keys(delta)) {
+            if (KNOWN_DELTA_KEYS.has(key)) continue;
+            const val = (delta as any)[key];
+            if (val !== undefined && val !== null) {
+              nativeAccumulator.extraDeltaFields[key] = val;
             }
           }
         }
@@ -854,6 +918,23 @@ export async function* query(
               tcAny?.extra_content?.google?.thoughtSignature;
             if (sig && !pending.thoughtSignature) {
               pending.thoughtSignature = sig;
+            }
+
+            // Capture non-standard tool call fields for native round-trip.
+            // Known fields (index, id, type, function) are excluded — the
+            // rest is preserved as-is (e.g. extra_content, custom metadata).
+            const tcKnownKeys = new Set(['index', 'id', 'type', 'function']);
+            for (const key of Object.keys(tc)) {
+              if (tcKnownKeys.has(key)) continue;
+              const val = (tc as any)[key];
+              if (val !== undefined && val !== null) {
+                let extras = nativeAccumulator.toolCallExtras.get(tc.index);
+                if (!extras) {
+                  extras = {};
+                  nativeAccumulator.toolCallExtras.set(tc.index, extras);
+                }
+                extras[key] = val;
+              }
             }
           }
         }
@@ -1030,7 +1111,68 @@ export async function* query(
       onUsage?.(turnUsage.prompt_tokens, turnUsage.completion_tokens);
     }
 
-    yield { type: "message_stop", stopReason, usage: turnUsage };
+    // ── Build provider-native state for round-trip ──
+    // Reconstruct the assistant message as the provider would have
+    // returned it non-streaming. Preserves reasoning_content,
+    // reasoning_details, tool_calls with extra fields, and any
+    // unknown delta fields. Used by rebuildConversationHistory for
+    // exact native round-trip instead of text-based reconstruction.
+    const nativeAssistantMessage: Record<string, unknown> = {
+      role: 'assistant',
+      content: assistantTextParts.join('') || null,
+    };
+    if (nativeAccumulator.reasoningContent) {
+      nativeAssistantMessage.reasoning_content = nativeAccumulator.reasoningContent;
+    }
+    if (nativeAccumulator.reasoningDetails.length > 0) {
+      nativeAssistantMessage.reasoning_details = nativeAccumulator.reasoningDetails;
+    }
+    if (collectedToolCalls.length > 0) {
+      nativeAssistantMessage.tool_calls = collectedToolCalls.map((tc, idx) => {
+        const tcNative: Record<string, unknown> = {
+          id: tc.id,
+          type: 'function',
+          function: {
+            name: tc.name,
+            arguments: tc.argsJson,
+          },
+        };
+        // Merge per-tool-call extra fields captured from delta
+        const extras = nativeAccumulator.toolCallExtras.get(idx);
+        if (extras) {
+          Object.assign(tcNative, extras);
+        }
+        return tcNative;
+      });
+    }
+    // Merge any unknown delta-level fields (provider-specific extras)
+    for (const [key, val] of Object.entries(nativeAccumulator.extraDeltaFields)) {
+      if (!(key in nativeAssistantMessage)) {
+        nativeAssistantMessage[key] = val;
+      }
+    }
+
+    const turnProviderState: ProviderState = {
+      provider: model,
+      protocol: 'openai-chat',
+      nativeAssistantMessage,
+      capturedAt: Date.now(),
+    };
+
+    // Safe debug log — sizes and presence only, never content
+    const nativeSize = JSON.stringify(nativeAssistantMessage).length;
+    const hasReasoning = !!nativeAssistantMessage.reasoning_content;
+    const hasReasoningDetails = nativeAccumulator.reasoningDetails.length > 0;
+    const tcCount = collectedToolCalls.length;
+    const extraFieldCount = Object.keys(nativeAccumulator.extraDeltaFields).length;
+    // eslint-disable-next-line no-console
+    console.debug(
+      `[query] providerState captured: ${nativeSize}B, ` +
+      `reasoning=${hasReasoning}, reasoning_details=${hasReasoningDetails}, ` +
+      `tool_calls=${tcCount}, extra_fields=${extraFieldCount}`,
+    );
+
+    yield { type: "message_stop", stopReason, usage: turnUsage, providerState: turnProviderState };
 
     // ── Build assistant message and add to history ──
 

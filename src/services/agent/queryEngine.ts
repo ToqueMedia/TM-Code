@@ -192,12 +192,13 @@ export class QueryEngine {
  * Helper: convert TM Code's ConversationMessage[] to QueryMessage[].
  */
 export function toQueryMessages(
-  history: Array<{ role: string; content: string | ContentBlockAPI[] | null }>,
+  history: Array<{ role: string; content: string | ContentBlockAPI[] | null; _native?: Record<string, unknown> }>,
 ): QueryMessage[] {
   return history
     .filter(m => m.role === 'user' || m.role === 'assistant')
     .map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
+      ...(m._native ? { _native: m._native } : {}),
     }))
 }

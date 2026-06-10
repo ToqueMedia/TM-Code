@@ -8,7 +8,7 @@
  * breaking the circular dependency chain.
  */
 
-import type { ContentPart } from '../../types/chat'
+import type { ContentPart, ProviderState } from '../../types/chat'
 import type { OpenAIToolDefinition } from './toolExecutor'
 import type OpenAI from 'openai'
 
@@ -60,7 +60,7 @@ export interface AgentCallbacks {
   onToolResult: (toolId: string, toolName: string, result: string, isError: boolean) => void
 
   /** Turn completed. */
-  onTurnComplete: (turnNumber: number) => void
+  onTurnComplete: (turnNumber: number, providerState?: ProviderState) => void
 
   /** Loop finished. */
   onDone: (finalText: string) => void

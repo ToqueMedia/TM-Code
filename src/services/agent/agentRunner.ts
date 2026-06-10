@@ -362,9 +362,12 @@ async function runAgentInternal(
         // Tool finished — we are now waiting for the model's next response.
         agentStore.setStatus('awaiting_response')
       },
-      onTurnComplete: () => {
-        logger.info('agent', '✓ Turn complete')
+      onTurnComplete: (turnNumber, providerState) => {
+        logger.info('agent', `✓ Turn ${turnNumber} complete`)
         useChatStore.getState().incrementTurnCount()
+        if (providerState) {
+          useChatStore.getState().setProviderState(providerState)
+        }
       },
       onDone: () => {
         flushBufferedDeltas()
