@@ -202,10 +202,49 @@ interface SingleTerminalProps {
 // Cache of active start_pty_shell invocations to prevent StrictMode concurrency races
 const spawnPromises = new Map<string, Promise<string>>()
 
+// ─── Deteção de port split-brain ─────────────────────────────────────────────
+//
+// Incidente real (2026-06-11): dois dev servers no MESMO número de porto em
+// famílias de endereço diferentes — Vite do projeto A em `[::1]:5173` (Node
+// ≥17 resolve `localhost` IPv6-first) e Vite do projeto B em `*:5173` IPv4.
+// Ambos anunciam "localhost:5173"; o browser (IPv6 primeiro) abre SEMPRE o
+// projeto A, e o user conclui que o painel correu o projeto errado.
+//
+// Quando um dev server anuncia um URL aqui no painel, sondamos as duas
+// famílias do porto (Rust `check_port_split` — compara status + hash do
+// corpo); conteúdos diferentes ⇒ dois servidores ⇒ aviso escrito no próprio
+// xterm com os URLs desambiguados. Só display — nada é injetado no PTY.
+
+const DEV_URL_ANNOUNCEMENT_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1?\]|0\.0\.0\.0):(\d{2,5})\//
+
+function checkPortSplitAndWarn(term: Terminal, port: number): void {
+  // Pequena folga: alguns frameworks anunciam o URL um tick antes de o
+  // listener estar plenamente pronto.
+  setTimeout(() => {
+    invoke<{ ipv4Reachable: boolean; ipv6Reachable: boolean; split: boolean }>(
+      'check_port_split', { port },
+    )
+      .then(info => {
+        if (!info.split) return
+        const y = '\x1b[33m'
+        const b = '\x1b[1m'
+        const r = '\x1b[0m'
+        term.writeln('')
+        term.writeln(`${y}⚠ TM Code: porto ${b}${port}${r}${y} dividido entre DOIS servidores (IPv4 ≠ IPv6).${r}`)
+        term.writeln(`${y}  "localhost:${port}" no browser pode abrir OUTRO projeto.${r}`)
+        term.writeln(`${y}  Verifica qual é qual: ${b}http://127.0.0.1:${port}${r}${y} vs ${b}http://[::1]:${port}${r}`)
+      })
+      .catch(() => { /* sonda é best-effort */ })
+  }, 600)
+}
+
 const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, onReady }: SingleTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
+  // Portos já sondados nesta sessão de terminal — um aviso por porto chega;
+  // re-anúncios (restart do dev server) não voltam a sondar.
+  const probedPortsRef = useRef<Set<number>>(new Set())
   const removeTerminal = useTerminalPanelStore(s => s.removeTerminal)
 
   const {
@@ -302,6 +341,16 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       if (disposed) return
       if (event.payload.session_id !== sessionId) return
       term.write(event.payload.data)
+      // Anúncio de dev server (Vite/Next/etc.) → sonda de split-brain do
+      // porto, uma vez por porto nesta sessão.
+      const announced = event.payload.data.match(DEV_URL_ANNOUNCEMENT_RE)
+      if (announced) {
+        const port = parseInt(announced[1], 10)
+        if (port > 0 && !probedPortsRef.current.has(port)) {
+          probedPortsRef.current.add(port)
+          checkPortSplitAndWarn(term, port)
+        }
+      }
       if (completions.length > 0) closeMenu()
     }).then((fn) => {
       if (disposed) fn()

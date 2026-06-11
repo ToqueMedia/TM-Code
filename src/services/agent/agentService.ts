@@ -195,7 +195,17 @@ class AgentService {
     }
     resolveAllPendingDiffApprovals(false);
     import("../../stores/permissionStore")
-      .then((m) => m.usePermissionStore.getState().resetAutoApprove())
+      .then((m) => {
+        // RACE FIX (2026-06-11): cancelar o loop tem de resolver + limpar o
+        // prompt de permissão pendente E a fila. Sem isto, o stop do CMD
+        // mode (stopAgent → cancelLoop) deixava o diálogo no ecrã; um
+        // "Aprovar" tardio resolvia a Promise e a tool EXECUTAVA num run já
+        // morto (escrita de ficheiro/comando com a UI em idle). O chat mode
+        // já chamava clearPending no seu handleStop — isto centraliza para
+        // todos os caminhos de cancelamento (stop, switch de projeto, erro).
+        m.usePermissionStore.getState().clearPending();
+        m.usePermissionStore.getState().resetAutoApprove();
+      })
       .catch(() => {});
     import("../../stores/credentialRequestStore")
       .then((m) => m.useCredentialRequestStore.getState().clearAll())
@@ -402,8 +412,14 @@ class AgentService {
     };
 
     // 3. Build tool definitions in OpenAI format
+    // web_search NUNCA vai no schema: modelos com pesquisa nativa
+    // (supportsSearch, ex.: qwen3.7-max-2026-06-08) pesquisam SERVER-SIDE
+    // via extraBody.enable_search injetado pelo worker — expor uma function
+    // tool convidaria o modelo a chamá-la em vez de usar a capacidade
+    // nativa. E o execute local desta tool aponta para o /v1/messages do
+    // proxy ANTIGO (removido) — reativá-la seria um erro garantido.
     const filteredTools = this.tools.filter((t) => {
-      if (t.function.name === "web_search") return false; // MiMo doesn't support native search
+      if (t.function.name === "web_search") return false;
       return true;
     });
     const openaiTools: OpenAI.ChatCompletionTool[] = filteredTools.map((t) => ({
@@ -630,6 +646,12 @@ class AgentService {
       headers.get("X-TM-Speed-Applied") === "true";
     try {
       useTmSpeedStore.getState().setApplied(this.lastResponseSpeedApplied);
+      // Id do modelo ativo (ex.: "mimo-v2.5-pro") — alimenta o gate de
+      // visibilidade do /speed por modelo (tmSpeedStore.isSpeedModelEligible).
+      const activeModel = headers.get("X-TM-Model");
+      if (activeModel) {
+        useTmSpeedStore.getState().setActiveModelId(activeModel);
+      }
     } catch {
       /* non-critical */
     }
@@ -641,8 +663,12 @@ class AgentService {
     }
 
     try {
-      const modelName = headers.get("X-Model-Name");
-      const modelProvider = headers.get("X-Model-Provider");
+      // O data-plane atual envia X-TM-Model/X-TM-Provider (id do modelo da
+      // config ativa); X-Model-Name/X-Model-Provider eram do gateway antigo.
+      // O fallback liga o lookup de MODEL_PROFILES (context window, filtro
+      // do web_search por supportsSearch) ao worker real.
+      const modelName = headers.get("X-Model-Name") ?? headers.get("X-TM-Model");
+      const modelProvider = headers.get("X-Model-Provider") ?? headers.get("X-TM-Provider");
       const thinkingModeRaw = headers.get("X-Model-Thinking-Mode");
       const contextWindowRaw = headers.get("X-Model-Context-Window");
       const byokActiveRaw = headers.get("X-BYOK-Active");

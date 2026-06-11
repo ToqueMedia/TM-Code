@@ -1,4 +1,4 @@
-import { useBillingStore, isBlocked, isInOverage, type MeResponse } from '../billingStore'
+import { useBillingStore, isBlocked, isInOverage, persistBillingCache, getCachedBillingUid, type MeResponse } from '../billingStore'
 
 beforeEach(() => {
   useBillingStore.getState().reset()
@@ -129,6 +129,84 @@ describe('billingStore', () => {
       useBillingStore.getState().addLastRequestTokens(500)
       useBillingStore.getState().resetLastRequestStats()
       expect(useBillingStore.getState().lastTokensUsed).toBe(0)
+    })
+  })
+
+  describe('boot cache (arranque sem flash de plano)', () => {
+    it('persistBillingCache + getCachedBillingUid round-trip', () => {
+      useBillingStore.getState().updateFromMe({
+        plan: 'max',
+        isActive: true,
+        billing: {
+          consumedPct: 0.1,
+          tokensConsumed: 12_000_000,
+          tokenBudget: 129_810_000,
+          cycleEnd: '2026-06-30',
+          extraUsageBalance: 0,
+          status: 'allowed',
+        },
+      })
+      persistBillingCache('uid-abc')
+      expect(getCachedBillingUid()).toBe('uid-abc')
+      const raw = JSON.parse(localStorage.getItem('tm-billing-cache-v1')!)
+      expect(raw.plan).toBe('max')
+      expect(raw.tokensConsumed).toBe(12_000_000)
+    })
+
+    it('reset() (logout/troca de conta) apaga a cache', () => {
+      persistBillingCache('uid-abc')
+      useBillingStore.getState().reset()
+      expect(getCachedBillingUid()).toBeNull()
+      expect(localStorage.getItem('tm-billing-cache-v1')).toBeNull()
+    })
+
+    it('o boot hidrata a store a partir da cache (módulo isolado)', () => {
+      localStorage.setItem('tm-billing-cache-v1', JSON.stringify({
+        v: 1,
+        uid: 'uid-cached',
+        savedAt: Date.now(),
+        plan: 'pro',
+        isActive: true,
+        consumedPct: 0.42,
+        tokensConsumed: 8_800_000,
+        tokenBudget: 20_910_000,
+        cycleEnd: '2026-06-30',
+        status: 'allowed',
+        tmsRemaining: 100_000,
+      }))
+      jest.isolateModules(() => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const fresh = require('../billingStore') as typeof import('../billingStore')
+        const state = fresh.useBillingStore.getState()
+        expect(state.plan).toBe('pro')
+        expect(state.tokensConsumed).toBe(8_800_000)
+        expect(state.consumedPct).toBeCloseTo(0.42, 4)
+        // isLoaded continua false — o /v1/me desta sessão ainda não veio.
+        expect(state.isLoaded).toBe(false)
+      })
+      localStorage.removeItem('tm-billing-cache-v1')
+    })
+
+    it('cache expirada (>7 dias) é ignorada no boot', () => {
+      localStorage.setItem('tm-billing-cache-v1', JSON.stringify({
+        v: 1,
+        uid: 'uid-old',
+        savedAt: Date.now() - 8 * 24 * 60 * 60 * 1000,
+        plan: 'pro',
+        isActive: true,
+        consumedPct: 0.42,
+        tokensConsumed: 8_800_000,
+        tokenBudget: 20_910_000,
+        cycleEnd: '2026-05-31',
+        status: 'allowed',
+        tmsRemaining: 0,
+      }))
+      jest.isolateModules(() => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const fresh = require('../billingStore') as typeof import('../billingStore')
+        expect(fresh.useBillingStore.getState().plan).toBe('explorer')
+      })
+      localStorage.removeItem('tm-billing-cache-v1')
     })
   })
 

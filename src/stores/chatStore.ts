@@ -581,6 +581,17 @@ export function resolveAllPendingDiffApprovals(approved: boolean) {
   pendingDiffApprovals.clear()
 }
 
+/**
+ * True enquanto o agente está BLOQUEADO à espera de uma decisão de diff do
+ * utilizador. Usado pelo gate de pausa global do toolExecutor — ao contrário
+ * do array `pendingDiffs` (que pode reter entradas para a UI depois de um
+ * abort), este mapa existe exatamente durante a espera e é limpo por
+ * resolveAllPendingDiffApprovals em todos os caminhos de cancelamento.
+ */
+export function hasPendingDiffApprovals(): boolean {
+  return pendingDiffApprovals.size > 0
+}
+
 // Streaming delta buffer (50ms flush window).
 //
 // We use a SINGLE ordered queue, not two separate buffers. The previous

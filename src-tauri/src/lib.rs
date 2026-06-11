@@ -641,6 +641,12 @@ pub fn run() {
 
     builder
         .setup(move |app| {
+            // Guardião de porto: reserva o lado IPv4 de portos de dev
+            // meio-ocupados (servidor externo só em [::1]) para que dev
+            // servers lançados dentro do TM Code saltem automaticamente
+            // para o próximo porto livre. Ver commands/port_guard.rs.
+            commands::port_guard::start_port_guard();
+
             // ── File-association launch args ───────────────────────────
             // On Windows/Linux, "Open with TM Code" launches the binary
             // with file paths in argv[1..]. macOS routes these through
@@ -1216,6 +1222,7 @@ pub fn run() {
             run_streaming_command,
             start_dev_server,
             get_interactive_shell_info,
+            check_port_split,
             start_pty_shell,
             write_to_pty,
             resize_pty,

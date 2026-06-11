@@ -206,11 +206,14 @@ function UserMessageAttachments({ attachments }: { attachments: Attachment[] }) 
   if (attachments.length === 0) return null
 
   // Terminal mode never renders image pixels — images appear as the
-  // claude-vaz text chip `[Image #N]` (history.ts:59), numbered 1-based in
-  // attachment order. Thumbnails are a chat-mode affordance only.
+  // claude-vaz text chip `[Image #N]` (history.ts:59). O número vem do
+  // pasteMarker (igual ao texto inserido no input); fallback posicional
+  // para mensagens antigas sem marker.
   const imageNumbers = new Map<string, number>()
   for (const att of attachments) {
-    if (att.type === 'image') imageNumbers.set(att.id, imageNumbers.size + 1)
+    if (att.type === 'image') {
+      imageNumbers.set(att.id, att.pasteMarker ?? imageNumbers.size + 1)
+    }
   }
 
   return (

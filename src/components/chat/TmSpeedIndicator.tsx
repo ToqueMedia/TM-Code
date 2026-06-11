@@ -7,7 +7,7 @@
  * speedModel não publicado) — nesse caso não há cobrança 3x.
  */
 import { Flex, Text } from '@chakra-ui/react'
-import { useTmSpeedStore } from '../../stores/tmSpeedStore'
+import { useTmSpeedStore, isSpeedModelEligible } from '../../stores/tmSpeedStore'
 import { useTranslation } from '@/i18n/useTranslation'
 import { tokens } from '@/theme/tokens'
 
@@ -15,8 +15,12 @@ export default function TmSpeedIndicator() {
   const t = useTranslation()
   const enabled = useTmSpeedStore(s => s.enabled)
   const applied = useTmSpeedStore(s => s.applied)
+  const activeModelId = useTmSpeedStore(s => s.activeModelId)
 
   if (!enabled) return null
+  // Modelo ativo fora da família MiMo V2.5 Pro → o /speed está oculto e o
+  // worker degrada sempre; o badge seria intenção sem efeito possível.
+  if (!isSpeedModelEligible(activeModelId)) return null
 
   return (
     <Flex

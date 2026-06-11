@@ -28,11 +28,14 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
   if (attachments.length === 0) return null
 
   // Terminal mode never renders image pixels — images show as the claude-vaz
-  // `[Image #N]` text chip, numbered 1-based in attachment order. Thumbnails
-  // are a chat-mode affordance only.
+  // `[Image #N]` text chip. O número vem do pasteMarker (o MESMO que foi
+  // inserido como texto no input — têm de coincidir); fallback posicional
+  // para anexos antigos sem marker.
   const imageNumbers = new Map<string, number>()
   for (const att of attachments) {
-    if (att.type === 'image') imageNumbers.set(att.id, imageNumbers.size + 1)
+    if (att.type === 'image') {
+      imageNumbers.set(att.id, att.pasteMarker ?? imageNumbers.size + 1)
+    }
   }
 
   return (

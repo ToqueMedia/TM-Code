@@ -56,6 +56,7 @@ function firestoreUserDoc(opts: {
   tokensConsumed?: number
   extraUsageBalance?: number
   cycleEnd?: string
+  tokenBudgetOverride?: number
 } = {}): Response {
   return Response.json({
     fields: {
@@ -66,6 +67,9 @@ function firestoreUserDoc(opts: {
             tokensConsumed: { integerValue: String(opts.tokensConsumed ?? 0) },
             extraUsageBalance: { integerValue: String(opts.extraUsageBalance ?? 0) },
             cycleEnd: { stringValue: opts.cycleEnd ?? '2026-12-31' },
+            ...(opts.tokenBudgetOverride !== undefined
+              ? { tokenBudgetOverride: { integerValue: String(opts.tokenBudgetOverride) } }
+              : {}),
           },
         },
       },
@@ -357,6 +361,21 @@ test('non-streaming bodies do not get stream_options injected', async () => {
   assert.equal(fetcher.calls[0].body.stream_options, undefined)
 })
 
+test('config extraBody is merged without overriding client fields', async () => {
+  const config = { ...activeConfig, extraBody: { enable_search: true, temperature: 0.9 } }
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  await handleRequest(
+    request('/v1/chat/completions', { messages: [], temperature: 0.2 }),
+    env({ ACTIVE_AI_CONFIG_JSON: JSON.stringify(config) }),
+    { fetcher },
+  )
+
+  // enable_search injetado (pesquisa nativa Qwen/DashScope)…
+  assert.equal(fetcher.calls[0].body.enable_search, true)
+  // …mas temperature do CLIENTE vence sobre o extraBody.
+  assert.equal(fetcher.calls[0].body.temperature, 0.2)
+})
+
 test('client-provided stream_options is never overwritten', async () => {
   const body = { stream: true, stream_options: { include_usage: false } }
   const fetcher = fakeFetcher(Response.json({ ok: true }))
@@ -622,6 +641,20 @@ test('billing: enforce mode rejects an exhausted budget with 402 before the upst
   assert.equal(fetcher.calls.length, 0)
 })
 
+test('billing: tokenBudgetOverride (gift) supersedes the plan budget in the gate', async () => {
+  // Gift com override 3M num explorer (plano 1.5M), consumidos 2M:
+  // sem o override o gate rejeitava; com ele, 2M/3M = 67% → allowed.
+  const fetcher = fakeFetcher(
+    Response.json({ ok: true }),
+    () => firestoreUserDoc({ plan: 'explorer', tokensConsumed: 2_000_000, tokenBudgetOverride: 3_000_000 }),
+  )
+  const res = await handleRequest(request(), env({ BUDGET_ENFORCEMENT: 'enforce' }), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-budget-status'), 'allowed')
+  assert.ok(Math.abs(parseFloat(res.headers.get('x-budget-pct') ?? '0') - 2 / 3) < 0.001)
+})
+
 test('billing: enforce mode lets an overage user through (extraUsageBalance > 0)', async () => {
   const fetcher = fakeFetcher(
     Response.json({ ok: true }),
@@ -771,6 +804,43 @@ test('billing: BUDGET_ENFORCEMENT=off skips the Firestore read, headers and comm
 
   assert.equal(res.headers.get('x-budget-status'), null)
   assert.equal(fetcher.firestoreCalls.length, 0)
+})
+
+test('billing: client disconnect mid-stream still settles and commits the partial estimate', async () => {
+  // Stream que nunca fecha sozinho — simula um provider a meio da geração.
+  const encoder = new TextEncoder()
+  let pushChunk: ((s: string) => void) | null = null
+  const endless = new ReadableStream<Uint8Array>({
+    start(controller) {
+      pushChunk = (s: string) => controller.enqueue(encoder.encode(s))
+    },
+  })
+  const fetcher = fakeFetcher(new Response(endless, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  }))
+  const { tasks, ctx } = collectorCtx()
+
+  const res = await handleRequest(
+    request('/v1/chat/completions', { stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    env(),
+    { fetcher, ctx },
+  )
+
+  // Lê um chunk e DESLIGA (cancel) — o caminho que deixava o waitUntil
+  // pendurado ("waitUntil() tasks did not complete within the allowed time")
+  // e perdia o commit.
+  const reader = res.body!.getReader()
+  pushChunk!('data: {"choices":[{"delta":{"content":"partial output"}}]}\n\n')
+  await reader.read()
+  await reader.cancel()
+
+  await Promise.all(tasks)
+
+  const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
+  assert.equal(commits.length, 1)
+  const committed = parseInt(commits[0].body.writes[0].transform.fieldTransforms[0].increment.integerValue, 10)
+  assert.ok(committed > 0) // estimativa parcial — nunca zero, nunca pendurado
 })
 
 test('billing: provider errors are never billed', async () => {

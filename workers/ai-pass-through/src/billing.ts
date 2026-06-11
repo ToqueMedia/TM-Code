@@ -86,6 +86,11 @@ export interface UserBudgetState {
   tokensConsumed: number
   extraUsageBalance: number
   cycleEnd: string
+  /** Cap por utilizador que SUBSTITUI o budget do plano quando presente
+   *  (gifts do admin — `tokenBudget.tokenBudgetOverride` no Firestore).
+   *  Sem isto, um gift com override acima do budget do plano levava 402
+   *  indevido em enforce; abaixo, sub-enforçava. */
+  tokenBudgetOverride?: number
 }
 
 const STATE_CACHE_MS = 60_000
@@ -135,6 +140,7 @@ export async function getUserBudgetState(
     'tokenBudget.tokensConsumed',
     'tokenBudget.extraUsageBalance',
     'tokenBudget.cycleEnd',
+    'tokenBudget.tokenBudgetOverride',
   ].map(p => `mask.fieldPaths=${encodeURIComponent(p)}`).join('&')
   const url = `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents/users/${encodeURIComponent(userId)}?${mask}`
 
@@ -152,11 +158,13 @@ export async function getUserBudgetState(
       const plan = doc.fields?.userPlan?.stringValue
       const budget = doc.fields?.tokenBudget?.mapValue?.fields ?? {}
       if (typeof plan === 'string' && plan) {
+        const overrideRaw = intField(budget['tokenBudgetOverride'])
         state = {
           plan,
           tokensConsumed: Math.max(0, intField(budget['tokensConsumed'])),
           extraUsageBalance: Math.max(0, intField(budget['extraUsageBalance'])),
           cycleEnd: (budget['cycleEnd'] as { stringValue?: string } | undefined)?.stringValue ?? '',
+          tokenBudgetOverride: overrideRaw > 0 ? overrideRaw : undefined,
         }
       }
     } else {
@@ -207,7 +215,9 @@ const BUDGET_WARNING_THRESHOLD = 0.8
 const BUDGET_CRITICAL_THRESHOLD = 0.95
 
 export function checkCostBudget(state: UserBudgetState, budgets: Record<string, number>): CostBudgetCheck {
-  const tokenBudget = budgets[state.plan] ?? 0
+  // Override por utilizador (gifts) substitui o budget do plano — mesma
+  // semântica do tokenBudgetOverride na web/control-plane.
+  const tokenBudget = state.tokenBudgetOverride ?? budgets[state.plan] ?? 0
   const tokensConsumed = Math.max(0, state.tokensConsumed)
   const overageAvailable = Math.max(0, state.extraUsageBalance)
 

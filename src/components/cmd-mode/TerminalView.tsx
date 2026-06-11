@@ -341,7 +341,30 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         e.preventDefault()
         e.stopPropagation()
         wasAtBottomRef.current = true
-        scrollToBottom()
+        scrollToBottom('instant')
+        return
+      }
+      // Shift+PageUp / Shift+PageDown — scrollback por teclado, como num
+      // terminal real (iTerm2/Terminal.app). O Shift evita conflito com o
+      // caret do textarea do prompt (que está quase sempre focado). No
+      // macOS, fn+Shift+↑/↓ produz exatamente estas teclas.
+      if (e.shiftKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
+        const el = scrollRef.current
+        if (el) {
+          e.preventDefault()
+          e.stopPropagation()
+          const delta = Math.max(120, Math.floor(el.clientHeight * 0.85))
+          if (e.key === 'PageUp') {
+            wasAtBottomRef.current = false
+            el.scrollTop = Math.max(0, el.scrollTop - delta)
+          } else {
+            el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + delta)
+            // Chegou ao fundo → retoma o stick-to-bottom.
+            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 4) {
+              wasAtBottomRef.current = true
+            }
+          }
+        }
         return
       }
       // Ctrl+K — clear input line (native terminal behavior).
@@ -492,7 +515,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   // This prevents the scroll-jump effect when the user sends a message.
   useLayoutEffect(() => {
     if (wasAtBottomRef.current) {
-      scrollToBottom()
+      scrollToBottom('instant')
     }
   }, [messages.length, scrollToBottom])
 
@@ -509,12 +532,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
 
     // 2. Force scroll during streaming if user was at bottom
     if (isStreaming && wasAtBottomRef.current) {
-      scrollToBottom()
+      scrollToBottom('instant')
     }
 
     // 3. When streaming ends, force final scroll after DOM settles
     if (prevStreamingRef.current && !isStreaming && wasAtBottomRef.current) {
-      const timer = setTimeout(() => scrollToBottom(), 80)
+      const timer = setTimeout(() => scrollToBottom('instant'), 80)
       prevStreamingRef.current = isStreaming
       return () => clearTimeout(timer)
     }
@@ -777,10 +800,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
                 <ErrorBoundary key={msg.id}>
                   <Box
                     css={{
-                      animation: 'msgFadeIn 0.12s ease-out',
+                      animation: 'msgFadeIn 0.1s ease-out',
                       '@keyframes msgFadeIn': {
-                        from: { opacity: '0', transform: 'translateY(3px)' },
-                        to: { opacity: '1', transform: 'translateY(0)' },
+                        from: { opacity: '0' },
+                        to: { opacity: '1' },
                       },
                     }}
                   >
@@ -819,7 +842,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           justifyContent="center"
           onClick={() => {
             wasAtBottomRef.current = true
-            scrollToBottom()
+            scrollToBottom('instant')
           }}
           zIndex={10}
           transition="all 0.15s"

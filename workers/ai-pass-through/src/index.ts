@@ -33,7 +33,11 @@ interface PreparedBody {
   chars: number
 }
 
-async function bodyWithActiveModel(request: Request, model: string): Promise<PreparedBody> {
+async function bodyWithActiveModel(
+  request: Request,
+  model: string,
+  extraBody?: Record<string, unknown>,
+): Promise<PreparedBody> {
   let parsed: unknown
   try {
     parsed = await request.json()
@@ -45,13 +49,22 @@ async function bodyWithActiveModel(request: Request, model: string): Promise<Pre
     throw new HttpError(400, 'tm_bad_request', 'Request body must be a JSON object.')
   }
 
+  const clientBody = parsed as Record<string, unknown>
+
+  // extraBody da config ativa (ex.: DashScope enable_search) — só campos
+  // que o cliente NÃO definiu, para nunca sobrepor intenção explícita.
+  const merged: Record<string, unknown> = { ...clientBody }
+  if (extraBody) {
+    for (const [key, value] of Object.entries(extraBody)) {
+      if (!(key in merged)) merged[key] = value
+    }
+  }
+  merged.model = model
+
   // `stream_options.include_usage` garante que providers OpenAI-compatible
   // devolvem o objeto `usage` no chunk final — é a fonte autoritativa da
   // contabilidade de billing (usage.ts / billing.ts).
-  const withUsage = injectStreamOptions({
-    ...(parsed as Record<string, unknown>),
-    model,
-  })
+  const withUsage = injectStreamOptions(merged)
 
   const body = JSON.stringify(withUsage)
   return { body, chars: body.length }
@@ -118,7 +131,7 @@ async function handleChatCompletions(
   const model = speedApplied && config.speedModel ? config.speedModel : config.model
 
   const upstreamUrl = buildUpstreamUrl(config)
-  const prepared = await bodyWithActiveModel(request, model)
+  const prepared = await bodyWithActiveModel(request, model, config.extraBody)
   const { headers: upstreamHeaders, providerKey } = buildUpstreamHeaders(request, config, env)
 
   let upstream: Response
@@ -160,6 +173,17 @@ async function handleChatCompletions(
     const asOverage = budgetCheck?.asOverage ?? false
     waitUntil(observer.done.then(async (usage) => {
       if (!usage) return
+      // Observabilidade do fallback: quando o provider omite o objeto
+      // `usage` (apesar do include_usage), cobramos por estimativa de
+      // bytes — grosseira. Este log permite medir a frequência e o drift
+      // em produção; se aparecer com regularidade, o provider/config
+      // precisa de atenção, não a estimativa de mais precisão.
+      if (!usage.authoritative) {
+        console.warn(
+          `[billing] usage ESTIMATED (provider omitted usage object) user=${user.userId} ` +
+          `prompt≈${usage.promptTokens} completion≈${usage.completionTokens}`,
+        )
+      }
       const rawTokens = Math.ceil((usage.promptTokens + usage.completionTokens) * multiplier)
       await commitTokenConsumption({
         env,

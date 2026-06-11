@@ -225,6 +225,13 @@ function TaskText({ task }: { task: AgentTask }) {
 }
 
 function StatusIcon({ status }: { status: AgentTask['status'] }) {
+  // O spin só roda enquanto o AGENTE está ativo. Tarefas que ficam
+  // in_progress depois do run terminar (o agente nem sempre fecha o tracker)
+  // deixavam uma animação infinita montada em idle — a re-rasterização
+  // contínua do layer fazia o texto vizinho "tremer" nos dois modos mesmo
+  // com tudo parado (causa raiz dos tremeliques pós-run, 2026-06-11).
+  const agentStatus = useAgentStore(s => s.status)
+  const agentActive = agentStatus !== 'idle' && agentStatus !== 'error'
   if (status === 'completed') {
     return <FiCheck size={11} color={tokens.colors.accent.green} />
   }
@@ -234,13 +241,13 @@ function StatusIcon({ status }: { status: AgentTask['status'] }) {
         as={FiLoader}
         boxSize="11px"
         color={tokens.colors.accent.primary}
-        css={{
+        css={agentActive ? {
           animation: 'agentTaskSpin 1.4s linear infinite',
           '@keyframes agentTaskSpin': {
             '0%': { transform: 'rotate(0deg)' },
             '100%': { transform: 'rotate(360deg)' },
           },
-        }}
+        } : undefined}
       />
     )
   }

@@ -46,6 +46,12 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     ? obj.speedModel.trim()
     : undefined
 
+  // Campos extra de request do provider (ex.: DashScope enable_search para
+  // a pesquisa nativa do Qwen). Só objetos planos são aceites.
+  const extraBody = obj.extraBody && typeof obj.extraBody === 'object' && !Array.isArray(obj.extraBody)
+    ? obj.extraBody as Record<string, unknown>
+    : undefined
+
   return {
     provider: assertString(obj.provider, 'provider'),
     model: assertString(obj.model, 'model'),
@@ -56,6 +62,7 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     authScheme,
     apiKeyEnv: assertString(obj.apiKeyEnv, 'apiKeyEnv'),
     enabled,
+    extraBody,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   }
 }

@@ -8,13 +8,24 @@ import {
 
 describe('modelProfiles', () => {
   describe('MODEL_PROFILES registry', () => {
-    it('contains all 4 model profiles', () => {
+    it('contains all 4 model profiles (plus the qwen alias key)', () => {
       const ids = Object.keys(MODEL_PROFILES)
       expect(ids).toContain('mimo-v2.5-pro-1m')
       expect(ids).toContain('glm-5.1')
+      expect(ids).toContain('qwen3.7-max-2026-06-08')
+      // Alias do id antigo — aponta para o MESMO perfil do snapshot datado
+      // enquanto o backend não republicar a config ativa.
       expect(ids).toContain('qwen3.7-max')
+      expect(MODEL_PROFILES['qwen3.7-max']).toBe(MODEL_PROFILES['qwen3.7-max-2026-06-08'])
       expect(ids).toContain('mimo-v2.5-1m')
-      expect(ids.length).toBe(4)
+      expect(ids.length).toBe(5)
+    })
+
+    it('qwen3.7-max-2026-06-08 has native vision and search', () => {
+      const qwen = MODEL_PROFILES['qwen3.7-max-2026-06-08']
+      expect(qwen.modelId).toBe('qwen3.7-max-2026-06-08')
+      expect(qwen.supportsAttachments).toBe(true)
+      expect(qwen.supportsSearch).toBe(true)
     })
 
     it('mimo-v2.5-pro-1m has correct specs', () => {
@@ -44,9 +55,10 @@ describe('modelProfiles', () => {
   })
 
   describe('getAllModelProfiles', () => {
-    it('returns all 4 profiles', () => {
+    it('returns all 4 profiles (alias deduped)', () => {
       const all = getAllModelProfiles()
       expect(all.length).toBe(4)
+      expect(all.filter(p => p.id.startsWith('qwen3.7-max')).length).toBe(1)
     })
   })
 

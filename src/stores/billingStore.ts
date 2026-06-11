@@ -99,7 +99,7 @@ interface BillingActions {
   reset: () => void
 }
 
-const INITIAL_STATE: BillingState = {
+const DEFAULT_STATE: BillingState = {
   plan: 'explorer',
   isActive: true,
   isLoaded: false,
@@ -112,6 +112,106 @@ const INITIAL_STATE: BillingState = {
   lastTokensUsed: 0,
   noCredits: false,
 }
+
+// ── Cache local do snapshot de billing (arranque sem flash de plano) ──
+//
+// Sem isto, a IDE abria com os defaults (explorer) e o plano real só
+// aparecia depois de Firebase restore → App Check → /v1/me — segundos de
+// UI errada em cada arranque (pedido do user 2026-06-11). A cache guarda o
+// ÚLTIMO snapshot autoritativo por utilizador; o boot hidrata a store de
+// forma síncrona antes do primeiro render, e o /v1/me seguinte corrige e
+// re-grava. É display-only — nenhuma decisão de cobrança vive no cliente
+// ([[billing-single-source-of-truth]]); o enforcement real é o worker.
+//
+// Invalidação: troca de conta (uid difere → firebaseAuth faz reset),
+// logout (reset limpa), e idade > 7 dias (o ciclo provavelmente rolou —
+// melhor defaults do que números antigos).
+
+const BILLING_CACHE_KEY = 'tm-billing-cache-v1'
+const BILLING_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+
+interface BillingCacheRecord {
+  v: 1
+  uid: string
+  savedAt: number
+  plan: UserPlanName
+  isActive: boolean
+  consumedPct: number
+  tokensConsumed: number
+  tokenBudget: number
+  cycleEnd: string
+  status: CostBudgetStatus
+  tmsRemaining: number
+}
+
+function loadBillingCache(): BillingCacheRecord | null {
+  try {
+    const raw = localStorage.getItem(BILLING_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as BillingCacheRecord
+    if (parsed?.v !== 1 || typeof parsed.uid !== 'string') return null
+    if (Date.now() - (parsed.savedAt ?? 0) > BILLING_CACHE_MAX_AGE_MS) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+/** uid do snapshot em cache — firebaseAuth compara com o uid restaurado e
+ *  faz reset quando a conta mudou (não mostrar o plano de outro user). */
+export function getCachedBillingUid(): string | null {
+  return loadBillingCache()?.uid ?? null
+}
+
+/** Grava o estado atual como snapshot de arranque. Chamado pelo
+ *  firebaseAuth logo após cada updateFromMe (que tem o uid). */
+export function persistBillingCache(uid: string): void {
+  try {
+    const s = useBillingStore.getState()
+    const record: BillingCacheRecord = {
+      v: 1,
+      uid,
+      savedAt: Date.now(),
+      plan: s.plan,
+      isActive: s.isActive,
+      consumedPct: s.consumedPct,
+      tokensConsumed: s.tokensConsumed,
+      tokenBudget: s.tokenBudget,
+      cycleEnd: s.cycleEnd,
+      status: s.status,
+      tmsRemaining: s.tmsRemaining,
+    }
+    localStorage.setItem(BILLING_CACHE_KEY, JSON.stringify(record))
+  } catch {
+    /* quota/indisponível — a cache é só otimização de arranque */
+  }
+}
+
+function clearBillingCache(): void {
+  try { localStorage.removeItem(BILLING_CACHE_KEY) } catch { /* noop */ }
+}
+
+/** Estado inicial: defaults + snapshot em cache quando existe. `isLoaded`
+ *  continua false — semanticamente significa "o /v1/me desta sessão ainda
+ *  não respondeu"; os valores hidratados são otimistas (stale-then-refresh). */
+function buildInitialState(): BillingState {
+  const cached = loadBillingCache()
+  if (!cached) return DEFAULT_STATE
+  return {
+    ...DEFAULT_STATE,
+    plan: cached.plan,
+    isActive: cached.isActive,
+    consumedPct: cached.consumedPct,
+    tokensConsumed: cached.tokensConsumed,
+    tokenBudget: cached.tokenBudget,
+    cycleEnd: cached.cycleEnd,
+    status: cached.status,
+    tmsRemaining: cached.tmsRemaining,
+    noCredits: cached.status === 'rejected',
+  }
+}
+
+const INITIAL_STATE: BillingState = buildInitialState()
 
 /** Check if a status reflects "no more service available". */
 export function isBlocked(status: CostBudgetStatus): boolean {
@@ -229,6 +329,9 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
   clearNoCredits: () => set({ noCredits: false }),
 
   reset: () => {
-    set({ ...INITIAL_STATE })
+    // Logout/troca de conta: volta aos VERDADEIROS defaults (não ao
+    // snapshot hidratado) e apaga a cache de arranque.
+    clearBillingCache()
+    set({ ...DEFAULT_STATE })
   },
 }))

@@ -130,7 +130,10 @@ export function observeUsage(
     }
   }
 
-  const transform = new TransformStream<Uint8Array, Uint8Array>({
+  // `cancel` faz parte do Streams spec moderno (suportado pelo runtime dos
+  // Workers e por Node 20+), mas a lib DOM do TypeScript desta versão ainda
+  // não o declara em Transformer — daí a interseção explícita.
+  const transformer: Transformer<Uint8Array, Uint8Array> & { cancel?: () => void } = {
     transform(chunk, controller) {
       // Identity primeiro — o cliente recebe os bytes tal e qual, mesmo que
       // a observação abaixo falhe por qualquer razão.
@@ -153,7 +156,16 @@ export function observeUsage(
       } catch { /* best-effort */ }
       finish()
     },
-  })
+    // Cliente desligou a meio do stream (cancel propaga do readable):
+    // liquida com o que foi observado até aqui. Sem isto, `done` nunca
+    // resolvia nesses casos e o commit ficava pendurado no waitUntil até o
+    // runtime o cancelar — "waitUntil() tasks did not complete within the
+    // allowed time" nos logs e tokens consumidos NÃO cobrados.
+    cancel() {
+      finish()
+    },
+  }
+  const transform = new TransformStream<Uint8Array, Uint8Array>(transformer)
 
   return {
     body: upstreamBody.pipeThrough(transform),

@@ -673,9 +673,17 @@ export function useCmdPromptLogic() {
       const blocks: ContentBlock[] = []
       if (prompt.length > 0) blocks.push({ type: 'text', text: prompt })
       for (const att of draftAttachments) {
+        // Paridade claude-vaz (handlePromptSubmit.ts:178): uma imagem com
+        // chip `[Image #N]` só é enviada se o placeholder ainda estiver no
+        // texto — o utilizador apagar o texto é a forma de remover a imagem
+        // sem tocar na bar de anexos.
+        if (att.type === 'image' && att.pasteMarker !== undefined
+            && !prompt.includes(`[Image #${att.pasteMarker}]`)) {
+          continue
+        }
         blocks.push({ type: 'attachment', attachment: att })
       }
-      value = blocks
+      value = blocks.length === 1 && blocks[0].type === 'text' ? prompt : blocks
       clearAttachments()
     } else {
       value = prompt

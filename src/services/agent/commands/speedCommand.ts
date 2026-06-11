@@ -1,5 +1,5 @@
 import { useChatStore } from '../../../stores/chatStore'
-import { useTmSpeedStore } from '../../../stores/tmSpeedStore'
+import { useTmSpeedStore, isSpeedModelEligible } from '../../../stores/tmSpeedStore'
 import { useBillingStore } from '../../../stores/billingStore'
 import type { UserPlanName } from '../../../stores/billingStore'
 import FirebaseAuthService from '../../auth/firebaseAuth'
@@ -25,6 +25,14 @@ export async function executeSpeed(
   const currentPlan = useBillingStore.getState().plan
   if (!SPEED_ALLOWED_PLANS.includes(currentPlan)) {
     chatStore.addSystemMessage(t('speed.planRequired'))
+    return
+  }
+
+  // Gate por modelo: o speed é uma variante do MiMo V2.5 Pro. O comando fica
+  // oculto nos menus quando o modelo ativo é outro (visibleWhen no registry),
+  // mas quem o digitar por extenso recebe a explicação em vez de um no-op.
+  if (!isSpeedModelEligible(useTmSpeedStore.getState().activeModelId)) {
+    chatStore.addSystemMessage(t('speed.modelRequired'))
     return
   }
 

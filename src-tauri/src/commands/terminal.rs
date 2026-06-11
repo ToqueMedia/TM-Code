@@ -358,6 +358,62 @@ pub async fn get_interactive_shell_info() -> InteractiveShellInfo {
     pick_interactive_shell_info()
 }
 
+/// Resultado da sonda de split-brain de porto (ver `check_port_split`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortSplitInfo {
+    pub ipv4_reachable: bool,
+    pub ipv6_reachable: bool,
+    /// true quando AMBAS as famílias respondem com conteúdo DIFERENTE —
+    /// dois servidores distintos a partilhar o mesmo número de porto.
+    pub split: bool,
+}
+
+/// Deteta "port split-brain": dois dev servers no MESMO número de porto em
+/// famílias de endereço diferentes (um em `127.0.0.1`, outro em `[::1]`).
+///
+/// Cenário real (2026-06-11): Vite do projeto A vinculado a `[::1]:5173`
+/// (Node ≥17 resolve `localhost` IPv6-first) + Vite do projeto B vinculado a
+/// `*:5173` IPv4 — ambos os binds têm sucesso, ambos anunciam
+/// "localhost:5173", e o browser (IPv6 primeiro) abre SEMPRE o projeto A.
+///
+/// Estratégia: GET às duas famílias e comparação de status + prefixo do
+/// corpo. Um único servidor dual-stack responde igual nas duas → split=false;
+/// servidores diferentes divergem no bundle/título → split=true. Sondas com
+/// timeout curto — isto corre uma vez por anúncio de URL no terminal.
+#[tauri::command]
+pub async fn check_port_split(port: u16) -> PortSplitInfo {
+    async fn probe(url: &str) -> Option<(u16, u64)> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(900))
+            .build()
+            .ok()?;
+        let resp = client
+            .get(url)
+            .header("accept", "text/html")
+            .send()
+            .await
+            .ok()?;
+        let status = resp.status().as_u16();
+        let bytes = resp.bytes().await.ok()?;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes[..bytes.len().min(4096)].hash(&mut hasher);
+        Some((status, hasher.finish()))
+    }
+
+    let url_v4 = format!("http://127.0.0.1:{}/", port);
+    let url_v6 = format!("http://[::1]:{}/", port);
+    let (v4, v6) = tokio::join!(probe(&url_v4), probe(&url_v6));
+
+    let split = matches!((&v4, &v6), (Some(a), Some(b)) if a != b);
+    PortSplitInfo {
+        ipv4_reachable: v4.is_some(),
+        ipv6_reachable: v6.is_some(),
+        split,
+    }
+}
+
 /// Build a command with sandbox if enabled, otherwise plain host command.
 pub fn build_sandboxed_host_command(command: &str, project_path: &PathBuf) -> Command {
     if let Some(cmd) = super::sandbox::sandboxed_command(command, project_path, &[]) {

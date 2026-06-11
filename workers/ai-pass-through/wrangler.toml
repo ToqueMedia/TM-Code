@@ -17,8 +17,9 @@ preview_id = "replace-with-active-ai-config-kv-id"
 [vars]
 ACTIVE_AI_CONFIG_KEY = "active"
 # Billing: 'off' (kill-switch) | 'shadow' (contabiliza + emite headers, nunca
-# bloqueia) | 'enforce' (rejected → 402). Subir para 'enforce' só depois de
-# validar os commits em shadow. Secrets FIREBASE_CLIENT_EMAIL /
+# bloqueia) | 'enforce' (rejected → 402 tm_budget_exhausted, tratado pela
+# IDE). Promovido a 'enforce' em 2026-06-11 depois de validar os commits SA
+# em produção (logs "[billing] committed"). Secrets FIREBASE_CLIENT_EMAIL /
 # FIREBASE_PRIVATE_KEY (wrangler secret put) ativam o modo service-account
 # nos reads/commits do Firestore; sem eles usa o ID token do utilizador.
-BUDGET_ENFORCEMENT = "shadow"
+BUDGET_ENFORCEMENT = "enforce"

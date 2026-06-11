@@ -30,7 +30,7 @@ import {
   type AppCheckToken,
 } from 'firebase/app-check'
 import { useAuthStore } from '../../stores/authStore'
-import { useBillingStore } from '../../stores/billingStore'
+import { useBillingStore, persistBillingCache, getCachedBillingUid } from '../../stores/billingStore'
 import { useFeaturesStore } from '../../stores/featuresStore'
 import { usePromotionsStore } from '../../stores/promotionsStore'
 import { useByokStore } from '../../stores/byokStore'
@@ -236,6 +236,14 @@ class FirebaseAuthService {
         this.unsubscribeSubscriptionDocListener()
         this.unsubscribePromotionsListener()
         return
+      }
+
+      // Cache de arranque do billing: se o snapshot hidratado pertence a
+      // OUTRA conta (troca de utilizador sem logout limpo), descarta-o já —
+      // mostrar o plano de outro user até ao /v1/me seria pior do que o
+      // flash de explorer que a cache existe para evitar.
+      if (getCachedBillingUid() !== null && getCachedBillingUid() !== user.uid) {
+        useBillingStore.getState().reset()
       }
 
       // Preserve `isAdmin` across token refreshes. onAuthStateChanged fires
@@ -661,6 +669,14 @@ class FirebaseAuthService {
         useBillingStore.getState().updateFromMe(data)
         useFeaturesStore.getState().updateFromMe(data.features)
         usePromotionsStore.getState().updateFromMe(data.promotions)
+
+        // Snapshot de arranque: o próximo boot hidrata o billingStore daqui
+        // de forma síncrona (antes do primeiro render) — elimina o flash de
+        // "explorer" enquanto o /v1/me não responde. Ver billingStore.ts.
+        {
+          const cacheUid = this.currentUser?.uid
+          if (cacheUid) persistBillingCache(cacheUid)
+        }
 
         // BYOK catalog: load ONCE per session. BYOK is always available
         // (no feature flag, no per-plan check) so we kick off the catalog

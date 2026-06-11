@@ -190,6 +190,33 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     return () => window.removeEventListener('cmd-clear-input', onClear)
   }, [handleInputChange, textareaRef])
 
+  // cmd-insert-text — chip `[Image #N]` inserido no texto quando uma imagem
+  // é colada/anexada (paridade claude-vaz: o placeholder vive NO input; no
+  // submit a imagem só segue se o placeholder ainda lá estiver). Inserção na
+  // posição do caret, com o caret reposto a seguir ao texto inserido.
+  useEffect(() => {
+    const onInsert = (e: Event) => {
+      const text = (e as CustomEvent<string>).detail
+      if (!text) return
+      const ta = textareaRef.current
+      const current = ta?.value ?? ''
+      const start = ta?.selectionStart ?? current.length
+      const end = ta?.selectionEnd ?? current.length
+      const next = current.slice(0, start) + text + current.slice(end)
+      handleInputChange(next)
+      requestAnimationFrame(() => {
+        const el = textareaRef.current
+        if (el) {
+          el.focus()
+          const caret = start + text.length
+          el.setSelectionRange(caret, caret)
+        }
+      })
+    }
+    window.addEventListener('cmd-insert-text', onInsert)
+    return () => window.removeEventListener('cmd-insert-text', onInsert)
+  }, [handleInputChange, textareaRef])
+
   // Sync textarea scroll → highlight overlay so the colored slash-command
   // span stays under the actual glyphs when content scrolls past 6 rows.
   const [scrollTop, setScrollTop] = useState(0)

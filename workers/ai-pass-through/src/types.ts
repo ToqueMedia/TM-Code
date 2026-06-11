@@ -15,6 +15,15 @@ export interface ActiveAIConfig {
   authScheme: 'Bearer' | 'none'
   apiKeyEnv: string
   enabled: boolean
+  /**
+   * Campos extra de request específicos do provider, merged no corpo de
+   * CADA pedido (depois do model, antes do stream_options). Config-driven
+   * para o worker continuar provider-agnóstico — ex.: DashScope
+   * `{"enable_search": true}` ativa a pesquisa web NATIVA do Qwen sem
+   * nenhuma tool client-side. Campos já presentes no corpo do cliente
+   * NÃO são sobrepostos.
+   */
+  extraBody?: Record<string, unknown>
   updatedAt?: string
 }
 

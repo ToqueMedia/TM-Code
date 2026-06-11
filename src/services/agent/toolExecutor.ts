@@ -44,7 +44,9 @@ import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
 import type { AgentCallbacks } from './types'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, hasPendingDiffApprovals } from '../../stores/chatStore'
+import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
+import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 
 // === Types ===
 
@@ -550,6 +552,19 @@ class ToolExecutor {
       // resolver drops the mention silently instead of inlining the refusal.
       throw new Error('.env files are blocked from mention resolution')
     }
+    // Ficheiros sensíveis (credentials, chaves, etc.) PERGUNTAM mesmo em
+    // menção (decisão do user 2026-06-11): @credentials.json sem prompt
+    // relaxava a proteção que o read_file normal tem. Negado → throw → a
+    // menção é descartada silenciosamente (o user acabou de decidir isso
+    // no diálogo; nenhum conteúdo chega ao modelo).
+    if (toolName === 'read_file' && this.isSensitiveFile(filePath)) {
+      const decision = await usePermissionStore.getState().requestPermission(
+        'read_file', input, 'sensitive_file',
+      )
+      if (!decision.approved) {
+        throw new Error('sensitive-file mention denied by user')
+      }
+    }
     return tool.execute(input)
   }
 
@@ -623,6 +638,32 @@ class ToolExecutor {
     return changed
   }
 
+  /**
+   * Bloqueia enquanto houver uma intervenção obrigatória do utilizador
+   * pendente (gate de pausa global — ver o call-site no execute()).
+   * Polling de 120ms em vez de subscriptions: só corre enquanto um gate
+   * está aberto (caso raro e human-paced), e evita gerir 4 subscrições
+   * zustand com cleanup por chamada concorrente. O abort interrompe a
+   * espera imediatamente no próximo tick.
+   */
+  private async waitForUserGates(signal?: AbortSignal): Promise<void> {
+    const gateOpen = (): boolean => {
+      try {
+        if (usePermissionStore.getState().pendingPermission) return true
+        if (useAskUserQuestionStore.getState().pending.size > 0) return true
+        if (useCredentialRequestStore.getState().pending.size > 0) return true
+        if (hasPendingDiffApprovals()) return true
+      } catch {
+        return false
+      }
+      return false
+    }
+    while (gateOpen()) {
+      if (signal?.aborted) return
+      await new Promise(resolve => setTimeout(resolve, 120))
+    }
+  }
+
   async execute(
     toolName: string,
     input: Record<string, unknown>,
@@ -646,6 +687,19 @@ class ToolExecutor {
     // skip permission prompts and execution entirely. Tools that have
     // expensive side effects (subprocess spawn, network) check the signal
     // again mid-execution via input._abortSignal — that's their job.
+    if (signal?.aborted) {
+      return `Tool ${toolName} aborted before execution (user cancelled).`
+    }
+
+    // PAUSA GLOBAL (2026-06-11, pedido do user): enquanto houver QUALQUER
+    // intervenção obrigatória do utilizador pendente — prompt de permissão,
+    // ask_user_question, request_credentials, aprovação de diff — NENHUM
+    // outro tool pode começar a executar. Sem isto, tool calls paralelas
+    // (concurrencySafe) e safe-tools auto-aprovadas continuavam a correr
+    // por trás do diálogo, nos dois modos. Não há deadlock: o tool que CRIA
+    // o gate já passou esta entrada (o seu prompt abre depois), e todos os
+    // gates são resolvidos pelo utilizador ou limpos no cancelLoop.
+    await this.waitForUserGates(signal)
     if (signal?.aborted) {
       return `Tool ${toolName} aborted before execution (user cancelled).`
     }
@@ -779,6 +833,13 @@ class ToolExecutor {
             : ' Ask the user what they want instead.'
           return `Permission denied by user for ${dangerousMatch}.${reason}`
         }
+        // RACE FIX: o utilizador pode ter feito stop ENQUANTO o diálogo
+        // estava aberto e o clique de aprovação correr contra o abort. A
+        // aprovação não pode ressuscitar um run cancelado — re-verificar o
+        // signal DEPOIS do await, não só à entrada do execute().
+        if (signal?.aborted) {
+          return `Tool ${toolName} aborted before execution (user cancelled).`
+        }
         dangerousAlreadyApproved = true
       }
     }
@@ -808,6 +869,12 @@ class ToolExecutor {
           ? ` User says: ${decision.denyReason}`
           : ' Ask the user what they want instead or suggest an alternative approach.'
         return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}.${reason}`
+      }
+      // RACE FIX: aprovação que chega depois de um stop não pode executar a
+      // tool num run morto — re-verificar o signal DEPOIS do await (a
+      // verificação à entrada do execute() aconteceu antes do diálogo).
+      if (signal?.aborted) {
+        return `Tool ${toolName} aborted before execution (user cancelled).`
       }
     }
 

@@ -11,6 +11,15 @@ export interface Attachment {
   sizeBytes?: number
   /** Base64 data URI — only for images (populated at attach-time for thumbnail preview) */
   base64?: string
+  /**
+   * Número do chip `[Image #N]` (paridade claude-vaz, history.ts:59) —
+   * atribuído quando uma imagem é colada/anexada no CMD mode. O mesmo texto
+   * é inserido no input; no submit, a imagem só é enviada se o placeholder
+   * ainda estiver no texto (apagar o texto remove a imagem — claude-vaz
+   * handlePromptSubmit.ts:178). Estável após atribuição: remoções de outros
+   * anexos não renumeram.
+   */
+  pasteMarker?: number
 }
 
 /** Ordered content block — tracks interleaving of reasoning, text and tool

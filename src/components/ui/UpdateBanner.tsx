@@ -31,15 +31,10 @@ function UpdateBanner() {
   return (
     <AnimatePresence>
       <MotionBox
-        initial={{ y: -70, opacity: 0, scale: 0.95 }}
-        animate={{ y: 0, opacity: 1, scale: 1 }}
-        exit={{ y: -70, opacity: 0, scale: 0.95 }}
-        transition={{ 
-          type: "spring",
-          stiffness: 300,
-          damping: 30,
-          mass: 0.8
-        }}
+        initial={{ y: -70, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        exit={{ y: -70, opacity: 0 }}
+        transition={{ duration: 0.2, ease: 'easeOut' }}
         style={{ 
           position: 'fixed', 
           top: '52px', 
