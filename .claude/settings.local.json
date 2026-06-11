@@ -360,7 +360,17 @@
       "Bash(sed -n 290,330p /Users/ithustle/dev/claude-vaz/utils/file.ts)",
       "Bash(sed -n 400,415p /Users/ithustle/dev/claude-vaz/tools/FileEditTool/utils.ts)",
       "Bash(sed -n 1,73p /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestoreHelpers.ts)",
-      "Bash(sed -n 82,200p /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestoreHelpers.ts)"
+      "Bash(sed -n 82,200p /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestoreHelpers.ts)",
+      "Bash(sed -n 96,130p /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/types.ts)",
+      "Bash(sed -n 155,175p /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/types.ts)",
+      "Bash(sed -n 195,235p /Users/ithustle/dev/web/toquemedia-studio/packages/functions/src/controller/controllerMomenuPayment.ts)",
+      "Bash(sed -n 615,655p /Users/ithustle/dev/web/toquemedia-studio/packages/functions/src/controller/controllerMomenuPayment.ts)",
+      "Bash(sed -n 495,530p /Users/ithustle/dev/web/toquemedia-studio/packages/functions/src/controller/controllerDodoPayment.ts)",
+      "Bash(sed -n 1265,1305p /Users/ithustle/dev/web/toquemedia-studio/packages/functions/src/controller/controllerDodoPayment.ts)",
+      "Bash(sed -n 175,200p /Users/ithustle/dev/web/toquemedia-studio/packages/functions/src/controller/controllerMomenuPayment.ts)",
+      "Bash(sed -n 596,618p /Users/ithustle/dev/web/toquemedia-studio/packages/functions/src/controller/controllerMomenuPayment.ts)",
+      "Bash(yarn build:shared)",
+      "Bash(yarn build:functions)"
     ]
   }
 }

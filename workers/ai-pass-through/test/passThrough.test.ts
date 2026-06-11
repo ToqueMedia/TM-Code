@@ -728,6 +728,10 @@ test('billing: overage commit decrements extraUsageBalance and floors it at 0', 
   assert.equal(transforms[0].fieldPath, 'tokenBudget.tokensConsumed')
   assert.equal(transforms[1].fieldPath, 'tokenBudget.extraUsageBalance')
   assert.equal(transforms[1].increment.integerValue, '-150')
+  // overageConsumed rastreia o overage pago — input do carry-over no reset
+  // de ciclo (não cobrar duas vezes o excedente já pago via saldo extra).
+  assert.equal(transforms[2].fieldPath, 'tokenBudget.overageConsumed')
+  assert.equal(transforms[2].increment.integerValue, '150')
   // Floor a 0 como transform separado, depois do increment.
   assert.equal(writes[1].transform.fieldTransforms[0].fieldPath, 'tokenBudget.extraUsageBalance')
   assert.equal(writes[1].transform.fieldTransforms[0].maximum.integerValue, '0')

@@ -265,6 +265,14 @@ export async function commitTokenConsumption(args: CommitArgs): Promise<boolean>
       fieldPath: 'tokenBudget.extraUsageBalance',
       increment: { integerValue: String(-rawTokens) },
     })
+    // Rastreio do overage pago neste ciclo — o carry-over do reset de ciclo
+    // (control-plane firestore.ts computeCarryOver) subtrai-o do overshoot
+    // para o excedente já pago via saldo extra não ser cobrado duas vezes
+    // no ciclo seguinte.
+    transforms.push({
+      fieldPath: 'tokenBudget.overageConsumed',
+      increment: { integerValue: String(rawTokens) },
+    })
   }
 
   const writes: Array<Record<string, unknown>> = [{
