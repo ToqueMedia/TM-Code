@@ -42,9 +42,14 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     throw new HttpError(500, 'tm_active_config_invalid', 'Active AI config enabled must be boolean.')
   }
 
+  const speedModel = typeof obj.speedModel === 'string' && obj.speedModel.trim() !== ''
+    ? obj.speedModel.trim()
+    : undefined
+
   return {
     provider: assertString(obj.provider, 'provider'),
     model: assertString(obj.model, 'model'),
+    speedModel,
     baseUrl: assertString(obj.baseUrl, 'baseUrl').replace(/\/+$/, ''),
     chatCompletionsPath: assertString(obj.chatCompletionsPath, 'chatCompletionsPath'),
     authHeader: assertString(obj.authHeader, 'authHeader'),

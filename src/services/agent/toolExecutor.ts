@@ -283,9 +283,17 @@ class ToolExecutor {
   /** Shared context — passed to domain registration functions. */
   private readonly ctx: ToolRegistrationContext
 
+  /** Home dir cache para expandir `~/...` em resolveToAbsolute (que é sync).
+   *  Populado fire-and-forget no arranque; até resolver, paths com `~` caem
+   *  no comportamento antigo (tratados como relativos). */
+  private homeDir: string | null = null
+
   private constructor() {
     this.ctx = this.buildContext()
     this.registerTools()
+    void invoke<string>('get_home_directory')
+      .then((home) => { this.homeDir = home })
+      .catch(() => { /* sem home dir, `~` não expande — não é fatal */ })
   }
 
   static getInstance(): ToolExecutor {
@@ -552,8 +560,8 @@ class ToolExecutor {
     // roots (project + additionalDirectories) prompt the user for access.
     const FILE_SCOPE_TOOLS = new Set([
       'read_file', 'write_file', 'edit_file', 'create_file',
-      'delete_file', 'rename_file', 'copy_file', 'list_directory',
-      'search_files', 'glob', 'path_exists', 'append_file',
+      'create_directory', 'delete_file', 'rename_file', 'copy_file',
+      'list_directory', 'search_files', 'glob', 'path_exists', 'append_file',
       'execute_command', 'execute_command_background', 'agent_shell_start'
     ])
     const pathForScope = (input.file_path || input.oldPath || input.directory || input.cwd || '') as string
@@ -1295,6 +1303,13 @@ ${preview}
    */
   private resolveToAbsolute(p: string): string {
     if (!p) return p
+    // `~` / `~/x` — expand to the user's home dir (mirrors claude-vaz). Sem
+    // isto, `~/Documents` era tratado como relativo e virava
+    // `<project>/~/Documents` — um not-found confuso em vez de um prompt
+    // de acesso ao diretório real.
+    if (this.homeDir && (p === '~' || p.startsWith('~/'))) {
+      return p === '~' ? this.homeDir : `${this.homeDir.replace(/\/+$/, '')}/${p.slice(2)}`
+    }
     // Already absolute
     if (p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p)) {
       return p

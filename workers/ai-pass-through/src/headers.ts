@@ -8,6 +8,7 @@ const DEFAULT_ALLOWED_HEADERS = [
   'Accept',
   'X-Firebase-AppCheck',
   'X-Request-Type',
+  'X-TM-Speed',
   'X-Conversation-Id',
   'x-app',
   'x-stainless-lang',
@@ -46,6 +47,7 @@ export function buildCorsHeaders(request: Request): Headers {
     'X-TM-Request-Id',
     'X-TM-Provider',
     'X-TM-Model',
+    'X-TM-Speed-Applied',
     'X-TM-Upstream-Status',
     'X-TM-Config-Source',
     'X-TM-Config-Key',
@@ -120,6 +122,7 @@ export function buildResponseHeaders(upstream: Response, meta: {
   requestId: string
   provider: string
   model: string
+  speedApplied: boolean
   configSource: 'kv' | 'env'
   configKey: string
 }): Headers {
@@ -144,6 +147,7 @@ export function buildResponseHeaders(upstream: Response, meta: {
   headers.set('x-tm-request-id', meta.requestId)
   headers.set('x-tm-provider', meta.provider)
   headers.set('x-tm-model', meta.model)
+  headers.set('x-tm-speed-applied', meta.speedApplied ? 'true' : 'false')
   headers.set('x-tm-upstream-status', String(upstream.status))
   headers.set('x-tm-config-source', meta.configSource)
   headers.set('x-tm-config-key', meta.configKey)

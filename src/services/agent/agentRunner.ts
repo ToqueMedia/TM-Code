@@ -437,10 +437,15 @@ async function runAgentInternal(
           useChatStore.getState().finalizeAssistantMessage()
         }
       },
-      onUsageUpdate: (inputTokens, outputTokens) => {
-        logger.info('agent', `→ Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out`)
+      onUsageUpdate: (inputTokens, outputTokens, billingMultiplier = 1) => {
+        logger.info('agent', `→ Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out${billingMultiplier > 1 ? ` (billed ${billingMultiplier}x — TM Speed)` : ''}`)
         useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
-        const authoritativeTotal = inputTokens + outputTokens
+        // TM Speed cobra `billingMultiplier`x (3x) sobre os tokens reais do
+        // turno. As estimativas live (applyLiveTokenEstimate) correm sempre a
+        // 1x — sub-estimar é seguro porque a correção aqui é monotónica
+        // (só corrige para cima); estimar a 3x à partida sobre-cobraria de
+        // forma irreversível quando o worker degrada o speed (no-op/plano).
+        const authoritativeTotal = Math.ceil((inputTokens + outputTokens) * billingMultiplier)
         const correction = authoritativeTotal - estimatedBilledTokens
         if (correction > 0) {
           useBillingStore.getState().addEstimatedUsage(correction)

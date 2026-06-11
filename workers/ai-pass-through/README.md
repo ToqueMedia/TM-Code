@@ -20,7 +20,7 @@ The Worker:
 - forwards the request to the configured provider endpoint;
 - returns the upstream status, safe headers, and `upstream.body` directly.
 
-It does not choose provider/model by user, plan, request body, or route. It has no provider routes, retries, billing parser, stream parser, SSE wrapper, provider adapter, or AI SDK.
+It does not choose provider/model by user, request body, or route. The only request-driven switch is `X-TM-Speed: true` → `speedModel` (when published and the user's plan is eligible; see below). It has no provider routes, retries, billing parser, stream parser, SSE wrapper, provider adapter, or AI SDK.
 
 ## Active Config
 
@@ -30,6 +30,7 @@ The Control Plane/Admin publishes this JSON to KV:
 {
   "provider": "mimo",
   "model": "mimo-v2.5-pro",
+  "speedModel": "mimo-v2.5-pro-ultraspeed",
   "baseUrl": "https://api.xiaomimimo.com/v1",
   "chatCompletionsPath": "/chat/completions",
   "authHeader": "api-key",
@@ -39,6 +40,16 @@ The Control Plane/Admin publishes this JSON to KV:
   "updatedAt": "2026-06-09T00:00:00Z"
 }
 ```
+
+`speedModel` is optional and powers TM Speed (`/speed` in the IDE): when a request
+arrives with `X-TM-Speed: true`, the Worker injects `speedModel` instead of `model`.
+The header is consumed here and never forwarded upstream (all `x-tm-*` request
+headers are stripped). Eligibility is enforced server-side: the Worker reads
+`users/{uid}.userPlan` via Firestore REST with the caller's own ID token (cached
+60s per user) and only applies speed for `pro`/`max`. Any other case — speedModel
+not published, plan not eligible, lookup failure — degrades to `model` instead of
+failing, and the response carries `X-TM-Speed-Applied: true|false` so the IDE only
+applies the 3x billing multiplier when speed was actually served.
 
 Bearer provider example:
 

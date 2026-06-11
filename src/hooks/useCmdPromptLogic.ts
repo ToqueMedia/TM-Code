@@ -15,6 +15,7 @@ import {
   subscribeToCommandQueue,
 } from '../services/agent/messageQueue'
 import { useQueueProcessor } from './useQueueProcessor'
+import { getQueryGuard } from '../services/agent/queryGuard'
 import { useAttachments } from './useAttachments'
 import QuickOpenService, { type QuickOpenItem } from '../services/quickOpenService'
 import { extractAndResolveMentions } from '../services/attachmentService'
@@ -423,11 +424,26 @@ export function useCmdPromptLogic() {
   // ─── Queue processor ───
 
   const executeQueuedInput = useCallback(async (commands: QueuedCommand[]): Promise<void> => {
-    for (const cmd of commands) {
-      // Pass the full PromptValue through — executePrompt handles both
-      // string and ContentBlock[] (extracting text for slash/shell dispatch,
-      // passing attachments to the agent boundary).
-      await executePrompt(cmd.value)
+    // Reserva o QueryGuard SINCRONAMENTE antes de qualquer await — mesma
+    // proteção do chat-mode (usePromptBar.executeQueuedInput). Sem isto, o
+    // executePrompt tem vários awaits antes do tryStart() e, nessa janela,
+    // o useQueueProcessor re-dispara com isQueryActive=false e despacha um
+    // SEGUNDO runAgentLoop concorrente — dois loops a mutar a mesma mensagem
+    // de streaming in-place, cascata de erros e re-renders (#185 em produção).
+    const queryGuard = getQueryGuard()
+    if (!queryGuard.reserve()) return
+    try {
+      for (const cmd of commands) {
+        // Pass the full PromptValue through — executePrompt handles both
+        // string and ContentBlock[] (extracting text for slash/shell dispatch,
+        // passing attachments to the agent boundary).
+        await executePrompt(cmd.value)
+      }
+    } finally {
+      // No-op quando o guard já está idle (run terminou) ou running (loop
+      // ativo) — só limpa a reserva se nunca chegámos ao tryStart() (ex.:
+      // executePrompt saiu por um early-return de erro antes do agent loop).
+      queryGuard.cancelReservation()
     }
   }, [executePrompt])
 

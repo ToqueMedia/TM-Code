@@ -1286,6 +1286,7 @@ pub fn run() {
             delete_checkpoint_project,
             set_active_project,
             clear_active_project,
+            set_agent_allowed_directories,
             fim_completion,
             git_diff_lines,
             git_status_files,

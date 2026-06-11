@@ -64,6 +64,20 @@ function persistPermissions(): void {
     .catch(() => { /* persistence failure must not break the permission flow */ })
 }
 
+/** Fire-and-forget sync of `additionalDirectories` to the Rust side. The
+ *  terminal/PTY commands clamp cwd via `clamp_to_allowed` (container.rs),
+ *  which only knows the directories we push here — without this sync, a
+ *  user-approved external directory would pass the frontend permission
+ *  check and then be silently clamped back to the project root by Rust.
+ *  Must be called after EVERY mutation of `additionalDirectories`
+ *  (grant, revoke, reset, hydrate). */
+function syncAllowedDirectoriesToRust(): void {
+  const dirs = Array.from(usePermissionStore.getState().additionalDirectories)
+  void import('@/utils/invokeMetrics')
+    .then(({ invoke }) => invoke('set_agent_allowed_directories', { directories: dirs }))
+    .catch(() => { /* sync failure must not break the permission flow */ })
+}
+
 /** Global tool allowlist — persisted in localStorage (cross-project). */
 const GLOBAL_TOOLS_KEY = 'permission_globalToolAllowlist'
 function loadGlobalToolAllowlist(): Set<string> {
@@ -96,6 +110,7 @@ export function hydrateApprovedScopes(
   if (directories) patch.additionalDirectories = directories
   if (projectPath != null) patch.projectPath = projectPath
   usePermissionStore.setState(patch)
+  syncAllowedDirectoriesToRust()
 }
 
 const SAFE_TOOLS = new Set([
@@ -355,6 +370,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         const dirs = new Set(get().additionalDirectories)
         dirs.add(pendingPermission.pathAccessTarget)
         set({ pendingPermission: null, autoDenyAll: false, additionalDirectories: dirs })
+        syncAllowedDirectoriesToRust()
         void logPermission(`✓ Acesso permitido a \`${pendingPermission.pathAccessTarget}\` (sessão)`, 'success')
       } else {
         set({ pendingPermission: null, autoDenyAll: false })
@@ -421,6 +437,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         const dirs = new Set(get().additionalDirectories)
         dirs.add(pendingPermission.pathAccessTarget)
         set({ pendingPermission: null, additionalDirectories: dirs, autoDenyAll: false })
+        syncAllowedDirectoriesToRust()
         pendingPermission.resolve({
           approved: true,
           prompted: true,
@@ -538,6 +555,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     saveAutoApproveDiffs(false)
     const empty = new Set<'core' | 'mcp'>()
     set({ approvedScopes: empty, projectToolAllowlist: new Set(), additionalDirectories: new Set(), autoApproveDiffs: false, autoDenyAll: false })
+    syncAllowedDirectoriesToRust()
     persistPermissions()
   },
 
@@ -546,6 +564,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     if (dirs.has(path)) return
     dirs.add(path)
     set({ additionalDirectories: dirs })
+    syncAllowedDirectoriesToRust()
     if (persist) persistPermissions()
   },
 
@@ -553,6 +572,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     const dirs = new Set(get().additionalDirectories)
     if (!dirs.delete(path)) return
     set({ additionalDirectories: dirs })
+    syncAllowedDirectoriesToRust()
     persistPermissions()
   },
 

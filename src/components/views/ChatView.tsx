@@ -22,6 +22,7 @@ import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import PostCompactSurvey from '../chat/PostCompactSurvey'
 import ChatSkeleton from '../chat/ChatSkeleton'
 import ModelIndicator from '../chat/ModelIndicator'
+import TmSpeedIndicator from '../chat/TmSpeedIndicator'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
 const CheckpointPanel = lazy(() => import('../chat/CheckpointPanel'))
@@ -380,6 +381,7 @@ function ChatView() {
                 </Text>
               </Flex>
             )}
+            <TmSpeedIndicator />
             <ModelIndicator />
             {!showModelIndicator && (
               <CreditIndicator

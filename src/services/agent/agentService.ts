@@ -51,7 +51,7 @@ import {
   mechanicalFallback,
   buildInternalMessagesFromSession,
 } from "./contextManager";
-import { DEFAULT_CONTEXT_WINDOW } from "./agentConfig";
+import { DEFAULT_CONTEXT_WINDOW, TM_SPEED_BILLING_MULTIPLIER } from "./agentConfig";
 
 // ── Re-exports for backward compatibility ──
 
@@ -85,6 +85,14 @@ class AgentService {
 
   private lightweightOptions: LightweightAgentOptions | null = null;
   private queryEngine: QueryEngine | null = null;
+
+  // Última resposta HTTP confirmou TM Speed (`X-TM-Speed-Applied: true`)?
+  // Os headers chegam no início de cada resposta e o `message_stop` desse
+  // mesmo turno chega depois (sequencial), por isso um campo simples por
+  // resposta é suficiente para parear turno ↔ multiplicador de cobrança.
+  // Só é atualizado em runs não-lightweight (lightweight não envia o header
+  // X-TM-Speed nem liga onResponseHeaders) e é reposto no início de cada run.
+  private lastResponseSpeedApplied = false;
 
   // ── Delegated state ──
   private sessionState: SessionState;
@@ -416,6 +424,10 @@ class AgentService {
     // 6. Build extra headers — X-Request-Type is sticky across turns
     const extraHeaders = this.buildExtraHeaders();
 
+    // Reset por run: evita que um run anterior servido em speed "vaze" o
+    // multiplicador para o primeiro turno deste run antes dos headers chegarem.
+    this.lastResponseSpeedApplied = false;
+
     // 7. Create QueryEngine
     const engine = new QueryEngine({
       client,
@@ -509,6 +521,9 @@ class AgentService {
             callbacks.onUsageUpdate(
               event.usage.prompt_tokens,
               event.usage.completion_tokens,
+              !this.lightweightOptions && this.lastResponseSpeedApplied
+                ? TM_SPEED_BILLING_MULTIPLIER
+                : 1,
             );
           }
           callbacks.onTurnComplete(turnNumber, event.providerState);
@@ -595,6 +610,17 @@ class AgentService {
    * stream, so missing budget headers are expected.
    */
   private applyStreamingResponseHeaders(headers: Headers): void {
+    // Atualizado a CADA resposta (ausência do header ⇒ false), nunca latched —
+    // o admin pode despublicar o speedModel a meio de um run e os turnos
+    // seguintes devem voltar a cobrar 1x.
+    this.lastResponseSpeedApplied =
+      headers.get("X-TM-Speed-Applied") === "true";
+    try {
+      useTmSpeedStore.getState().setApplied(this.lastResponseSpeedApplied);
+    } catch {
+      /* non-critical */
+    }
+
     try {
       useBillingStore.getState().updateFromHeaders(headers);
     } catch {

@@ -1252,11 +1252,14 @@ describe('J: Path validation', () => {
     expect(result).toContain('outside the project directory')
   })
 
-  it('create_directory validates path before creating', async () => {
+  it('create_directory goes through the path-access prompt like other file tools', async () => {
+    // Antes, create_directory não estava em FILE_SCOPE_TOOLS e rebentava com
+    // um throw "Access denied" sem nunca mostrar o prompt de acesso — o
+    // contrato correto é o soft-block com mensagem acionável (igual a
+    // read_file/write_file), deixando o utilizador conceder o diretório.
     const exec = freshExecutor()
-    await expect(
-      exec.execute('create_directory', { file_path: '/etc' })
-    ).rejects.toThrow('outside the project directory')
+    const result = await exec.execute('create_directory', { file_path: '/etc' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('glob validates directory before listing files', async () => {

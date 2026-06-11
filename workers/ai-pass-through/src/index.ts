@@ -1,5 +1,6 @@
 import { getActiveConfig, buildUpstreamUrl } from './activeConfig'
 import { authenticateUser } from './auth'
+import { isSpeedAllowedForUser } from './planGate'
 import { HttpError, jsonError, methodNotAllowed } from './errors'
 import { buildResponseHeaders, buildUpstreamHeaders, corsPreflight, withCors } from './headers'
 import { createRequestId, logRequest } from './logging'
@@ -43,10 +44,24 @@ async function handleChatCompletions(
   const user = await authenticateUser(request, env)
   const active = await getActiveConfig(env)
   const config = active.config
-  const upstreamUrl = buildUpstreamUrl(config)
-  const requestBody = await bodyWithActiveModel(request, config.model)
-  const { headers: upstreamHeaders, providerKey } = buildUpstreamHeaders(request, config, env)
   const fetcher = options.fetcher ?? globalThis
+
+  // TM Speed (`/speed` na IDE): a app envia `X-TM-Speed: true` como sinal de
+  // routing para ESTE worker — o header nunca segue upstream (o filtro x-tm-*
+  // em headers.ts continua a aplicar-se). Só troca de modelo se o admin tiver
+  // publicado `speedModel` na config ativa E o plano do utilizador for elegível
+  // (planGate.ts); em qualquer outro caso o pedido segue no modelo normal em
+  // vez de falhar, para o toggle da IDE nunca quebrar o chat. A resposta leva
+  // `X-TM-Speed-Applied` para a IDE só cobrar o multiplicador quando o speed
+  // foi REALMENTE servido.
+  const speedRequested = request.headers.get('x-tm-speed') === 'true'
+  const speedApplied = speedRequested && !!config.speedModel
+    && await isSpeedAllowedForUser(request, env, user.userId, fetcher)
+  const model = speedApplied && config.speedModel ? config.speedModel : config.model
+
+  const upstreamUrl = buildUpstreamUrl(config)
+  const requestBody = await bodyWithActiveModel(request, model)
+  const { headers: upstreamHeaders, providerKey } = buildUpstreamHeaders(request, config, env)
 
   let upstream: Response
   try {
@@ -73,7 +88,7 @@ async function handleChatCompletions(
     requestId,
     userId: user.userId,
     provider: config.provider,
-    model: config.model,
+    model,
     upstreamStatus: upstream.status,
     durationMs,
     providerKey,
@@ -87,7 +102,8 @@ async function handleChatCompletions(
     headers: buildResponseHeaders(upstream, {
       requestId,
       provider: config.provider,
-      model: config.model,
+      model,
+      speedApplied,
       configSource: active.source,
       configKey: active.key,
     }),

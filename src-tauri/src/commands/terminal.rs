@@ -1,4 +1,4 @@
-use super::container::{clamp_to_project, ActiveProjectState};
+use super::container::{clamp_to_allowed, ActiveProjectState};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -610,7 +610,7 @@ pub async fn execute_command(
     if let Some(ref ap) = project {
         // App-level isolation: sandbox the command to the project directory
         let working_dir = match &cwd {
-            Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+            Some(dir) => PathBuf::from(clamp_to_allowed(dir, ap)),
             None => PathBuf::from(&ap.project_path),
         };
         let cmd = build_sandboxed_host_command(&command, &working_dir);
@@ -738,7 +738,7 @@ pub async fn run_streaming_command(
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
     let mut cmd = if let Some(ref ap) = project {
-        let working_dir = PathBuf::from(clamp_to_project(&cwd, &ap.project_path));
+        let working_dir = PathBuf::from(clamp_to_allowed(&cwd, ap));
         build_sandboxed_host_command(&command, &working_dir)
     } else {
         build_host_command(&command, &PathBuf::from(&cwd))
@@ -827,7 +827,7 @@ pub async fn start_dev_server(
 
     let mut cmd = if let Some(ref ap) = project {
         // App-level isolation: sandbox the dev server command
-        let clamped = clamp_to_project(&cwd, &ap.project_path);
+        let clamped = clamp_to_allowed(&cwd, ap);
         let mut c = build_sandboxed_host_command(&command, &PathBuf::from(&clamped));
         c.env("FORCE_COLOR", "0")
             .env("NO_COLOR", "1")
@@ -1097,7 +1097,7 @@ pub async fn start_pty_shell(
     let (shell_cmd, shell_args, working_dir) = if let Some(ref ap) = project {
         // App-level isolation: clamp cwd to project directory
         let working_dir = match &cwd {
-            Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+            Some(dir) => PathBuf::from(clamp_to_allowed(dir, ap)),
             None => PathBuf::from(&ap.project_path),
         };
 
@@ -1690,7 +1690,7 @@ pub async fn change_directory(
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
     let effective_path = if let Some(ref ap) = project {
-        clamp_to_project(&path, &ap.project_path)
+        clamp_to_allowed(&path, ap)
     } else {
         path
     };
@@ -1710,7 +1710,7 @@ pub async fn change_directory(
 
     // After canonicalization, re-check that we're still inside the project
     if let Some(ref ap) = project {
-        let clamped = clamp_to_project(&canonical.to_string_lossy(), &ap.project_path);
+        let clamped = clamp_to_allowed(&canonical.to_string_lossy(), ap);
         return Ok(clamped);
     }
 
@@ -1797,7 +1797,7 @@ pub async fn get_completions(
 
     // Resolve working directory
     let working_dir = match (&cwd, &project) {
-        (Some(dir), Some(ap)) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+        (Some(dir), Some(ap)) => PathBuf::from(clamp_to_allowed(dir, ap)),
         (Some(dir), None) => PathBuf::from(dir),
         (None, Some(ap)) => PathBuf::from(&ap.project_path),
         (None, None) => env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?,

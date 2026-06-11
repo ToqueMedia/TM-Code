@@ -343,7 +343,12 @@
       "Bash(sed -n '285,330p' src/hooks/useCmdPromptLogic.ts)",
       "Bash(sed -n '14,22p' src/stores/settingsStore.ts)",
       "Bash(sed -n '288,300p' src/stores/settingsStore.ts)",
-      "Bash(lsof -nP -iTCP:9099 -iTCP:1420 -sTCP:LISTEN)"
+      "Bash(lsof -nP -iTCP:9099 -iTCP:1420 -sTCP:LISTEN)",
+      "Bash(yarn test:ai-worker)",
+      "Bash(yarn typecheck *)",
+      "Bash(IS_REACT_ACT_ENVIRONMENT=true yarn test src/components/views/__tests__/ChatView.error185.test.tsx)",
+      "Bash(sed -n '575,600p' /Users/ithustle/dev/deskotp/exodus-ide/src/stores/httpClientStore.ts)",
+      "Bash(sed -n '730,760p' /Users/ithustle/dev/deskotp/exodus-ide/src/stores/projectStore.ts)"
     ]
   }
 }

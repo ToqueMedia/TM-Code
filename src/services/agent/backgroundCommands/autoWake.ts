@@ -24,13 +24,6 @@ const WAKE_DEBOUNCE_MS = 500
 const pendingCommands = new Map<string, BackgroundCommandWake>()
 let pendingWake = false
 let subscribed = false
-const BUSY_AGENT_STATUSES = new Set([
-  'awaiting_response',
-  'reasoning',
-  'generating',
-  'applying',
-  'compressing',
-])
 
 function ensureIdleListener(): void {
   if (subscribed) return
@@ -65,8 +58,12 @@ function doWake(): void {
   wakeTimer = null
   if (pendingCommands.size === 0) return
 
+  // Defer em QUALQUER estado não-idle — incluindo 'error'. A lista antiga de
+  // estados "busy" não incluía 'error', por isso um upstream em baixo gerava
+  // wake → run falhada → mais uma mensagem de erro por cada evento, alimentando
+  // a cascata de erros no chat. Mesma semântica do subAgents/autoWake.ts.
   const agentStatus = useAgentStore.getState().status
-  if (BUSY_AGENT_STATUSES.has(agentStatus)) {
+  if (agentStatus !== 'idle') {
     pendingWake = true
     ensureIdleListener()
     logger.info('agent', `→ Background command auto-wake deferred (agent is ${agentStatus})`)

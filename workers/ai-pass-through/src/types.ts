@@ -5,6 +5,10 @@ export interface KVNamespace {
 export interface ActiveAIConfig {
   provider: string
   model: string
+  /** Modelo alternativo usado quando o pedido chega com `X-TM-Speed: true`
+   * (TM Speed / `/speed` na IDE). Ausente → o toggle é um no-op e o pedido
+   * usa `model`; o worker nunca falha por o speed model não estar publicado. */
+  speedModel?: string
   baseUrl: string
   chatCompletionsPath: string
   authHeader: string
@@ -27,6 +31,8 @@ export interface Env {
   AUTH_MODE?: 'firebase_jwt' | 'firebase_emulator' | 'test_static'
   TEST_USER_TOKEN?: string
   FIREBASE_PROJECT_ID?: string
+  /** Override da base do Firestore REST (testes/emulador). Default: produção. */
+  FIRESTORE_REST_BASE?: string
   FIREBASE_ISSUER?: string
   FIREBASE_JWKS_URL?: string
   [key: string]: unknown

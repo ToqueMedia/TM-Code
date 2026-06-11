@@ -4,6 +4,7 @@ import path from 'node:path'
 import test, { beforeEach } from 'node:test'
 import { clearActiveConfigCache } from '../src/activeConfig'
 import { handleRequest } from '../src/index'
+import { clearPlanCache } from '../src/planGate'
 import type { Env } from '../src/types'
 
 const activeConfig = {
@@ -22,6 +23,7 @@ function env(overrides: Partial<Env> = {}): Env {
   return {
     AUTH_MODE: 'test_static',
     TEST_USER_TOKEN: 'valid-user-token',
+    FIREBASE_PROJECT_ID: 'tm-test',
     ACTIVE_AI_CONFIG_JSON: JSON.stringify(activeConfig),
     MIMO_API_KEY: ' "mimo-secret" ',
     ...overrides,
@@ -63,7 +65,51 @@ function fakeFetcher(response: Response) {
 
 beforeEach(() => {
   clearActiveConfigCache()
+  clearPlanCache()
 })
+
+/** Fetcher que separa o lookup de plano (Firestore REST) do upstream do provider. */
+function speedFetcher(opts: {
+  plan?: string
+  planResponse?: () => Response
+  upstreamResponse?: () => Response
+}) {
+  const upstreamCalls: Array<{ input: RequestInfo | URL; body: any; headers: Headers }> = []
+  const planCalls: Array<{ input: RequestInfo | URL; headers: Headers }> = []
+  return {
+    upstreamCalls,
+    planCalls,
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const url = String(input)
+      const headers = new Headers(init?.headers)
+      if (url.includes('firestore.googleapis.com')) {
+        planCalls.push({ input, headers })
+        if (opts.planResponse) return opts.planResponse()
+        return Response.json({ fields: { userPlan: { stringValue: opts.plan ?? 'explorer' } } })
+      }
+      upstreamCalls.push({
+        input,
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body,
+        headers,
+      })
+      return opts.upstreamResponse ? opts.upstreamResponse() : Response.json({ ok: true })
+    },
+  }
+}
+
+function speedRequest(body: Record<string, unknown> = {}) {
+  return new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer valid-user-token',
+      'content-type': 'application/json',
+      'x-tm-speed': 'true',
+    },
+    body: JSON.stringify(body),
+  })
+}
+
+const SPEED_CONFIG_JSON = JSON.stringify({ ...activeConfig, speedModel: 'mimo-v2.5-pro-ultraspeed' })
 
 test('only POST /v1/chat/completions exists; provider routes return 404', async () => {
   const fetcher = fakeFetcher(Response.json({ ok: true }))
@@ -143,6 +189,86 @@ test('worker injects active model and does not decide provider from request', as
   assert.equal(String(fetcher.calls[0].input), 'https://provider.test/v1/chat/completions')
   assert.equal(fetcher.calls[0].body.model, activeConfig.model)
   assert.equal(fetcher.calls[0].body.provider, 'client-choice-ignored')
+})
+
+test('X-TM-Speed + paid plan switches to speedModel; header never reaches upstream', async () => {
+  const fetcher = speedFetcher({ plan: 'pro' })
+  const res = await handleRequest(
+    speedRequest({ model: 'client-model-replaced', messages: [] }),
+    env({ ACTIVE_AI_CONFIG_JSON: SPEED_CONFIG_JSON }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(fetcher.planCalls.length, 1)
+  assert.equal(fetcher.planCalls[0].headers.get('authorization'), 'Bearer valid-user-token')
+  assert.equal(fetcher.upstreamCalls[0].body.model, 'mimo-v2.5-pro-ultraspeed')
+  assert.equal(fetcher.upstreamCalls[0].headers.get('x-tm-speed'), null)
+  assert.equal(res.headers.get('x-tm-model'), 'mimo-v2.5-pro-ultraspeed')
+  assert.equal(res.headers.get('x-tm-speed-applied'), 'true')
+})
+
+test('X-TM-Speed on a non-eligible plan degrades to the active model instead of 403', async () => {
+  const fetcher = speedFetcher({ plan: 'explorer' })
+  const res = await handleRequest(
+    speedRequest(),
+    env({ ACTIVE_AI_CONFIG_JSON: SPEED_CONFIG_JSON }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(fetcher.upstreamCalls[0].body.model, activeConfig.model)
+  assert.equal(res.headers.get('x-tm-speed-applied'), 'false')
+})
+
+test('plan lookup failure degrades to the active model and keeps serving', async () => {
+  const fetcher = speedFetcher({ planResponse: () => new Response('boom', { status: 500 }) })
+  const res = await handleRequest(
+    speedRequest(),
+    env({ ACTIVE_AI_CONFIG_JSON: SPEED_CONFIG_JSON }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(fetcher.upstreamCalls[0].body.model, activeConfig.model)
+  assert.equal(res.headers.get('x-tm-speed-applied'), 'false')
+})
+
+test('plan verdict is cached: second speed request does not re-hit Firestore', async () => {
+  const fetcher = speedFetcher({ plan: 'max' })
+  const testEnv = env({ ACTIVE_AI_CONFIG_JSON: SPEED_CONFIG_JSON })
+
+  await handleRequest(speedRequest(), testEnv, { fetcher })
+  await handleRequest(speedRequest(), testEnv, { fetcher })
+
+  assert.equal(fetcher.planCalls.length, 1)
+  assert.equal(fetcher.upstreamCalls.length, 2)
+  assert.equal(fetcher.upstreamCalls[1].body.model, 'mimo-v2.5-pro-ultraspeed')
+})
+
+test('X-TM-Speed without published speedModel falls back without any plan lookup', async () => {
+  const fetcher = speedFetcher({ plan: 'pro' })
+  const res = await handleRequest(speedRequest(), env(), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(fetcher.planCalls.length, 0)
+  assert.equal(fetcher.upstreamCalls[0].body.model, activeConfig.model)
+  assert.equal(res.headers.get('x-tm-speed-applied'), 'false')
+})
+
+test('speedModel published but X-TM-Speed absent keeps the active model', async () => {
+  const fetcher = speedFetcher({ plan: 'pro' })
+  const res = await handleRequest(
+    request(),
+    env({ ACTIVE_AI_CONFIG_JSON: SPEED_CONFIG_JSON }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(fetcher.planCalls.length, 0)
+  assert.equal(fetcher.upstreamCalls[0].body.model, activeConfig.model)
+  assert.equal(res.headers.get('x-tm-model'), activeConfig.model)
+  assert.equal(res.headers.get('x-tm-speed-applied'), 'false')
 })
 
 test('body is preserved except for the active model field', async () => {
