@@ -159,8 +159,15 @@ export async function getUserBudgetState(
           cycleEnd: (budget['cycleEnd'] as { stringValue?: string } | undefined)?.stringValue ?? '',
         }
       }
+    } else {
+      // Degradação é deliberadamente silenciosa para o chat, mas tem de ser
+      // VISÍVEL nos logs — um PEM mal formatado ou rules a negar a leitura
+      // tornariam o billing um no-op sem nenhum sinal.
+      const text = await response.text().catch(() => '')
+      console.warn(`[billing] budget read failed (${response.status}) user=${userId}: ${text.slice(0, 200)}`)
     }
-  } catch {
+  } catch (error) {
+    console.warn('[billing] budget read threw:', error)
     state = null
   }
 
@@ -289,6 +296,11 @@ export async function commitTokenConsumption(args: CommitArgs): Promise<boolean>
       console.error(`[billing] commit failed (${response.status}) user=${userId} tokens=${rawTokens}: ${text.slice(0, 200)}`)
       return false
     }
+    // Log de sucesso deliberado (1 linha/pedido): na fase shadow é a
+    // evidência de que a cadeia SA → Firestore funciona em produção; com os
+    // Workers Logs persistentes ([observability] no wrangler.toml) fica
+    // consultável no dashboard sem precisar de um `wrangler tail` aberto.
+    console.info(`[billing] committed ${rawTokens} tokens user=${userId} mode=${asOverage ? 'overage' : 'cycle'}`)
     bumpCachedConsumption(userId, rawTokens, asOverage)
     return true
   } catch (error) {

@@ -2,6 +2,13 @@ name = "ai-pass-through-worker"
 main = "src/index.ts"
 compatibility_date = "2026-06-02"
 
+# Workers Logs persistentes — os console.* (incl. [billing] committed/failed)
+# ficam consultáveis no dashboard (Observability → Logs) sem precisar de um
+# `wrangler tail` aberto no momento do pedido. Essencial para validar a fase
+# shadow do billing de forma assíncrona.
+[observability]
+enabled = true
+
 [[kv_namespaces]]
 binding = "ACTIVE_AI_CONFIG"
 id = "b4052457452a4e84aedf332e055c4b1a"
