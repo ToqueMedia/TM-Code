@@ -18,7 +18,6 @@ import { useQueueProcessor } from './useQueueProcessor'
 import { getQueryGuard } from '../services/agent/queryGuard'
 import { useAttachments } from './useAttachments'
 import QuickOpenService, { type QuickOpenItem } from '../services/quickOpenService'
-import { extractAndResolveMentions } from '../services/attachmentService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../utils/mentionParser'
 import { preprocessHashtags } from '../services/agent/hashtagRegistry'
 import { useHashtagMenu } from '../components/prompt/useHashtagMenu'
@@ -407,17 +406,18 @@ export function useCmdPromptLogic() {
     }
     chatStore.addUserMessage(textPrompt, attachments, promptBlocks)
 
-    // Resolve @mentions before sending — appends <mentioned_files> context to the prompt
-    const mentionContext = path ? await extractAndResolveMentions(textPrompt, path) : ''
-    const fullPrompt = mentionContext ? `${textPrompt}\n\n${mentionContext}` : textPrompt
-
-    await runAgentWithCallbacks(fullPrompt, {
+    // @-mentions resolve inside agentRunner (atMentions.ts, claude-vaz
+    // parity) — AFTER enableCmdMode so path scoping matches CMD mode.
+    // Resolving here (as the old <mentioned_files> flow did) would validate
+    // against the wrong scope and skip the readFileState bookkeeping.
+    await runAgentWithCallbacks(textPrompt, {
       addUserMessage: false,
       userMessageText: textPrompt,
       userMessageAttachments: attachments,
       userMessageBlocks: promptBlocks,
       useConversationHistory: true,
       cmdOnlyMode: true,
+      mentionText: textPrompt,
     })
   }, [allCommands, findCommand, extractArgs, currentProject])
 

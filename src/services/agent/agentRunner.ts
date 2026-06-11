@@ -10,11 +10,11 @@ import AgentService from './agentService'
 import type { OpenAIContentPart } from './types'
 import ContextBuilder from './contextBuilder'
 import ToolExecutor from './toolExecutor'
-import FirebaseAuthService from '../auth/firebaseAuth'
 import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
-import { resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../attachmentService'
+import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText } from './promptValueHelpers'
+import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from './atMentions'
 import type { Attachment, PromptBlock } from '../../types/chat'
 
 interface RunAgentOptions {
@@ -52,6 +52,15 @@ interface RunAgentOptions {
    * producing PLAN.md. When set, ContextBuilder is bypassed entirely.
    */
   systemPromptOverride?: string
+  /**
+   * Raw USER-TYPED text to resolve @-mentions from (atMentions.ts). Set by
+   * callers that forward real user input (CMD mode executePrompt). When
+   * unset, mentions resolve from the text blocks of `modelMessageBlocks` /
+   * `userMessageBlocks` if present — system-generated prompts (autoWake,
+   * compaction, slash internals) carry neither and get NO mention
+   * resolution, same scoping as before the claude-vaz parity port.
+   */
+  mentionText?: string
 }
 
 const APPROX_CHARS_PER_TOKEN = 4
@@ -115,6 +124,7 @@ async function runAgentInternal(
     cmdOnlyMode = false,
     skipStartAssistantMessage = false,
     systemPromptOverride,
+    mentionText,
   } = options
 
   const chatStore = useChatStore.getState()
@@ -295,23 +305,54 @@ async function runAgentInternal(
     logger.info('agent', `→ Processing attachments (${imageCount} images, ${fileCount} files)...`)
     const attachStart = Date.now()
     const promptResolvers = {
-      resolveMentions: extractAndResolveMentions,
       resolveAttachmentXml: resolveAttachments,
       resolveImageDataUri: resolveImageToDataUri,
     }
 
     // Multimodal path — only when there are actual images AND the plan supports it.
     if (hasImageAttachments && supportsMultimodal) {
-      const parts = await buildContentParts(blocksForModel, projectPath, promptResolvers)
+      const parts = await buildContentParts(blocksForModel, promptResolvers)
       if (parts) userContent = parts
     }
 
     // Text fallback — handles file/folder attachments (resolveAttachmentXml)
     // AND image placeholders when multimodal isn't available or failed.
     if (typeof userContent === 'string') {
-      userContent = await buildAugmentedPrompt(blocksForModel, projectPath, promptResolvers)
+      userContent = await buildAugmentedPrompt(blocksForModel, promptResolvers)
     }
     logger.info('agent', `✓ Content parts built (${Date.now() - attachStart}ms)`)
+  }
+
+  // ── @-mentions + external-modification sweep (claude-vaz parity) ──
+  // Resolves user-typed @path mentions into synthetic read_file /
+  // list_directory tool context appended AFTER the prompt, and injects
+  // "Note: X was modified..." reminders for files the model has in context
+  // that changed on disk. Runs AFTER enableCmdMode so path scoping matches
+  // the turn's execution mode. See atMentions.ts for the full rationale.
+  const mentionSource = mentionText
+    ?? (blocksForModel
+      ? blocksForModel.filter(b => b.type === 'text').map(b => b.text).join('\n')
+      : null)
+  try {
+    const mentionResolution = mentionSource
+      ? await resolveMentionContext(mentionSource)
+      : { contextText: '', imageParts: [] }
+    const changedContext = await collectChangedFileContext()
+    if (mentionResolution.contextText || mentionResolution.imageParts.length > 0 || changedContext) {
+      const applied = applyMentionResolution(
+        userContent, mentionResolution, changedContext, supportsMultimodal,
+      )
+      userContent = applied.userContent
+      // Persist on the user bubble (added above OR by the caller when
+      // addUserMessage=false) so rebuildConversationHistory re-emits the
+      // context on follow-up turns instead of letting it evaporate.
+      if (applied.persistedContext) {
+        useChatStore.getState().setMentionContextOnLastUserMessage(applied.persistedContext)
+      }
+    }
+  } catch {
+    // Mention resolution must never block a send — worst case the model
+    // reads the files itself via tools.
   }
 
   const history = supportsMultimodal
@@ -324,12 +365,16 @@ async function runAgentInternal(
   const loopStartTime = Date.now()
   let firstTextReceived = false
   let firstReasoningReceived = false
+  // Estimativas LOCAIS são apenas para o ctx-pill (chatStore) — a
+  // contabilidade de billing é exclusiva do worker ai-pass-through (único
+  // ponto de verdade): ele observa o `usage` real de cada resposta, aplica o
+  // multiplicador do TM Speed e comita ao Firestore. O estado de billing da
+  // IDE move-se pelos headers X-Budget-* de cada turno + /v1/me.
   const initialPromptEstimate = estimateTokensFromText(systemPrompt)
     + estimateTokensFromValue(history)
     + estimateTokensFromValue(userContent)
   let estimatedPromptTokens = 0
   let estimatedOutputTokens = 0
-  let estimatedBilledTokens = 0
   const applyLiveTokenEstimate = (inputDelta: number, outputDelta: number) => {
     if (inputDelta > 0) estimatedPromptTokens += inputDelta
     if (outputDelta > 0) estimatedOutputTokens += outputDelta
@@ -340,14 +385,9 @@ async function runAgentInternal(
         estimatedOutputTokens,
       )
     }
-
-    const billableDelta = Math.max(0, inputDelta) + Math.max(0, outputDelta)
-    if (billableDelta > 0) {
-      estimatedBilledTokens += billableDelta
-      useBillingStore.getState().addEstimatedUsage(billableDelta)
-    }
   }
 
+  useBillingStore.getState().resetLastRequestStats()
   applyLiveTokenEstimate(initialPromptEstimate, 0)
   logger.info('agent', '→ Agent loop starting...')
 
@@ -438,19 +478,12 @@ async function runAgentInternal(
         }
       },
       onUsageUpdate: (inputTokens, outputTokens, billingMultiplier = 1) => {
-        logger.info('agent', `→ Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out${billingMultiplier > 1 ? ` (billed ${billingMultiplier}x — TM Speed)` : ''}`)
+        logger.info('agent', `→ Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out${billingMultiplier > 1 ? ` (billed ${billingMultiplier}x — TM Speed, server-side)` : ''}`)
         useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
-        // TM Speed cobra `billingMultiplier`x (3x) sobre os tokens reais do
-        // turno. As estimativas live (applyLiveTokenEstimate) correm sempre a
-        // 1x — sub-estimar é seguro porque a correção aqui é monotónica
-        // (só corrige para cima); estimar a 3x à partida sobre-cobraria de
-        // forma irreversível quando o worker degrada o speed (no-op/plano).
-        const authoritativeTotal = Math.ceil((inputTokens + outputTokens) * billingMultiplier)
-        const correction = authoritativeTotal - estimatedBilledTokens
-        if (correction > 0) {
-          useBillingStore.getState().addEstimatedUsage(correction)
-          estimatedBilledTokens += correction
-        }
+        // Display-only: alimenta a stat "último pedido" (ApiKeysSection).
+        // A cobrança real (incl. multiplicador do TM Speed) acontece no
+        // worker — nada de matemática de consumo no cliente.
+        useBillingStore.getState().addLastRequestTokens(inputTokens + outputTokens)
       },
       onContextCompression: (event) => {
         if (event.type === 'hooks_start') {
@@ -480,17 +513,11 @@ async function runAgentInternal(
     // when no session was active (no-op).
     browserSession.endSession()
 
-    // Persist latest tokens consumed to Firestore
-    try {
-      const billingState = useBillingStore.getState()
-      if (billingState.tokensConsumed > 0) {
-        FirebaseAuthService.getInstance().persistTokensConsumed(
-          billingState.tokensConsumed,
-          billingState.tmsRemaining
-        ).catch(() => {})
-      }
-    } catch (err) {
-      logger.warn('agent', 'Failed to persist billing tokens consumed:', err)
-    }
+    // NOTA (2026-06): o antigo persistTokensConsumed (write client-side de
+    // valores ABSOLUTOS de consumo no Firestore) foi removido — a
+    // contabilidade é agora exclusiva do worker ai-pass-through (increments
+    // atómicos server-side). Reintroduzir writes de billing no cliente
+    // recriaria o last-writer-wins entre dispositivos e o clobber do
+    // cycle-reset que motivaram a migração.
   }
 }

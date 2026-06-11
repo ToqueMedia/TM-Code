@@ -35,7 +35,23 @@ export interface Env {
   FIRESTORE_REST_BASE?: string
   FIREBASE_ISSUER?: string
   FIREBASE_JWKS_URL?: string
+  /** Service account para reads/commits de billing ao Firestore (bypass de
+   *  Security Rules + App Check). Ausentes → degrada para o ID token do
+   *  utilizador (self-read/write permitido pelas rules atuais). */
+  FIREBASE_CLIENT_EMAIL?: string
+  FIREBASE_PRIVATE_KEY?: string
+  /** 'off' | 'shadow' (default) | 'enforce' — ver billing.ts. */
+  BUDGET_ENFORCEMENT?: string
+  /** Override JSON dos budgets por plano (ver billing.ts resolvePlanBudgets). */
+  PLAN_BUDGETS_JSON?: string
+  /** Multiplicador de cobrança do TM Speed (default 3). */
+  TM_SPEED_BILLING_MULTIPLIER?: string
   [key: string]: unknown
+}
+
+/** Subconjunto do ExecutionContext do Workers runtime usado pelo handler. */
+export interface WaitUntilContext {
+  waitUntil(promise: Promise<unknown>): void
 }
 
 export interface AuthenticatedUser {

@@ -442,6 +442,17 @@ class AgentService {
       onResponseHeaders: this.lightweightOptions
         ? undefined
         : (headers) => this.applyStreamingResponseHeaders(headers),
+      // External-modification sweep between tool rounds (claude-vaz parity —
+      // its query loop runs getAttachmentMessages after every tool batch).
+      // Main agent only: the ToolExecutor read state is a shared singleton,
+      // and a sub-agent draining the sweep would steal the notification from
+      // the main conversation.
+      collectInterTurnContext: this.lightweightOptions
+        ? undefined
+        : async () => {
+            const { collectChangedFileContext } = await import("./atMentions");
+            return collectChangedFileContext();
+          },
       // Usage is reported via message_stop events — do NOT add onUsage
       // callback here or output tokens will be double-counted (SUM semantics).
     });
@@ -605,9 +616,11 @@ class AgentService {
   }
 
   /**
-   * Streaming responses may expose safe metadata in HTTP headers. The
-   * dedicated AI pass-through Worker does not inject billing events into the
-   * stream, so missing budget headers are expected.
+   * Streaming responses expose safe metadata in HTTP headers. The AI
+   * pass-through Worker emits X-Plan / X-Budget-* on every response (estado
+   * de billing pré-voo — o worker é o único ponto de contabilidade); nada é
+   * injetado no corpo do stream. Headers ausentes continuam tolerados (BYOK
+   * bypassa o worker; BUDGET_ENFORCEMENT=off desliga o billing).
    */
   private applyStreamingResponseHeaders(headers: Headers): void {
     // Atualizado a CADA resposta (ausência do header ⇒ false), nunca latched —

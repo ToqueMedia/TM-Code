@@ -98,6 +98,14 @@ interface ChatActions {
   setActiveSession: (sessionId: string) => void
   addUserMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
   /**
+   * Attach resolved @-mention / changed-file context to the most recent user
+   * message so rebuildConversationHistory re-emits it on follow-up turns.
+   * Called by the prompt boundaries (usePromptBar / agentRunner) right after
+   * applyMentionResolution — the target bubble was created moments earlier
+   * in the same serialized send flow.
+   */
+  setMentionContextOnLastUserMessage: (context: string) => void
+  /**
    * Insert a user message BEFORE the streaming assistant message.
    * Used by mid-turn drain to keep visual order correct:
    *   user_msg → queued_user_msg → assistant_response
@@ -884,10 +892,22 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
 
     if (msg.role === 'user') {
       const parts = userMessageToContentParts(msg)
-      history.push({
-        role: 'user',
-        content: parts ?? msg.content,
-      })
+      // Re-emit the @-mention / changed-file context that was appended to
+      // this message at send-time (claude-vaz keeps attachment messages in
+      // the transcript — dropping them here would make mentioned-file
+      // content vanish from the model's view after the first turn).
+      const ctx = msg.mentionContext
+      if (parts) {
+        history.push({
+          role: 'user',
+          content: ctx ? [...parts, { type: 'text', text: ctx }] : parts,
+        })
+      } else {
+        history.push({
+          role: 'user',
+          content: ctx ? `${msg.content}\n${ctx}` : msg.content,
+        })
+      }
     } else if (msg.role === 'assistant') {
       // ── Native round-trip: prefer providerState when available ──
       // When the assistant message has a captured native state from the
@@ -1286,6 +1306,32 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       debouncedSave()
       return messageId
+    },
+
+    setMentionContextOnLastUserMessage: (context: string) => {
+      if (!context) return
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        // The target is always the user bubble created moments earlier in the
+        // same (serialized) send flow — walk back to the last user message.
+        let idx = -1
+        for (let i = session.messages.length - 1; i >= 0; i--) {
+          if (session.messages[i].role === 'user') { idx = i; break }
+        }
+        if (idx === -1) return state
+
+        const messages = [...session.messages]
+        messages[idx] = { ...messages[idx], mentionContext: context }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        return { sessions: updatedSessions }
+      })
+      debouncedSave()
     },
 
     insertUserMessageBeforeAssistant: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => {

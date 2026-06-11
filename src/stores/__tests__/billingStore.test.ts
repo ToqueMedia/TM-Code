@@ -98,8 +98,11 @@ describe('billingStore', () => {
     })
   })
 
-  describe('addEstimatedUsage', () => {
-    it('optimistically advances cycle usage when pass-through responses have no billing headers', () => {
+  describe('last-request stats (display-only)', () => {
+    // A contabilidade de consumo é exclusiva do worker ai-pass-through —
+    // o cliente NUNCA mexe em tokensConsumed/consumedPct localmente. O store
+    // só acumula a stat de display do "último pedido".
+    it('accumulates per-turn tokens without touching consumption state', () => {
       useBillingStore.getState().updateFromMe({
         plan: 'pro',
         isActive: true,
@@ -113,13 +116,19 @@ describe('billingStore', () => {
         },
       })
 
-      useBillingStore.getState().addEstimatedUsage(125)
+      useBillingStore.getState().addLastRequestTokens(125)
+      useBillingStore.getState().addLastRequestTokens(75)
 
       const state = useBillingStore.getState()
-      expect(state.tokensConsumed).toBe(375)
-      expect(state.consumedPct).toBeCloseTo(0.375, 4)
-      expect(state.lastTokensUsed).toBe(125)
-      expect(state.noCredits).toBe(false)
+      expect(state.lastTokensUsed).toBe(200)
+      expect(state.tokensConsumed).toBe(250)       // intocado
+      expect(state.consumedPct).toBeCloseTo(0.25, 4) // intocado
+    })
+
+    it('resetLastRequestStats zeroes the stat at the start of a new run', () => {
+      useBillingStore.getState().addLastRequestTokens(500)
+      useBillingStore.getState().resetLastRequestStats()
+      expect(useBillingStore.getState().lastTokensUsed).toBe(0)
     })
   })
 

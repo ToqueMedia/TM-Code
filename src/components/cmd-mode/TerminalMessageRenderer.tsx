@@ -205,48 +205,49 @@ const attachmentIcons = {
 function UserMessageAttachments({ attachments }: { attachments: Attachment[] }) {
   if (attachments.length === 0) return null
 
+  // Terminal mode never renders image pixels — images appear as the
+  // claude-vaz text chip `[Image #N]` (history.ts:59), numbered 1-based in
+  // attachment order. Thumbnails are a chat-mode affordance only.
+  const imageNumbers = new Map<string, number>()
+  for (const att of attachments) {
+    if (att.type === 'image') imageNumbers.set(att.id, imageNumbers.size + 1)
+  }
+
   return (
     <Flex gap={2} flexWrap="wrap" mt={1.5} ml={4}>
       {attachments.map(att => {
         const Icon = attachmentIcons[att.type]
-        const isImage = att.type === 'image'
+
+        if (att.type === 'image') {
+          return (
+            <Text
+              key={att.id}
+              fontSize="12px"
+              fontFamily={tokens.fontFamily.mono}
+              color={tokens.colors.text.muted}
+              lineHeight="1.55"
+              whiteSpace="nowrap"
+            >
+              [Image #{imageNumbers.get(att.id)}]
+            </Text>
+          )
+        }
 
         return (
           <Flex
             key={att.id}
             align="center"
             gap={1.5}
-            pl={isImage && att.base64 ? 0 : 1.5}
+            pl={1.5}
             pr={2}
-            py={isImage && att.base64 ? 0 : '2px'}
+            py="2px"
             bg="rgba(255, 255, 255, 0.03)"
             border="1px solid rgba(255, 255, 255, 0.06)"
             borderRadius="5px"
             maxW="200px"
             overflow="hidden"
           >
-            {isImage && att.base64 ? (
-              <Box
-                w="28px"
-                h="28px"
-                borderRadius="4px 0 0 4px"
-                overflow="hidden"
-                flexShrink={0}
-              >
-                <img
-                  src={att.base64}
-                  alt={att.name}
-                  style={{
-                    width: '100%',
-                    height: '100%',
-                    objectFit: 'cover',
-                    display: 'block',
-                  }}
-                />
-              </Box>
-            ) : (
-              <Icon size={11} color={tokens.colors.text.muted} style={{ flexShrink: 0 }} />
-            )}
+            <Icon size={11} color={tokens.colors.text.muted} style={{ flexShrink: 0 }} />
             <Text
               fontSize="10px"
               fontFamily={tokens.fontFamily.mono}

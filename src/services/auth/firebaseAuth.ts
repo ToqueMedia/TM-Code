@@ -831,25 +831,15 @@ class FirebaseAuthService {
     })
   }
 
-  async persistTokensConsumed(tokensConsumed: number, extraUsageBalance?: number): Promise<void> {
-    const uid = this.currentUser?.uid
-    if (!uid) return
-    try {
-      const updateData: any = {
-        tokenBudget: {
-          tokensConsumed
-        }
-      }
-      if (extraUsageBalance !== undefined) {
-        updateData.extraUsageBalance = extraUsageBalance
-      }
-      await setDoc(doc(getFirebaseDb(), COLLECTIONS.USERS, uid), updateData, { merge: true })
-      console.info(`[billing] Persisted tokensConsumed=${tokensConsumed}, extraUsageBalance=${extraUsageBalance} to Firestore`)
-    } catch (err) {
-      console.warn('[billing] Failed to persist tokensConsumed to Firestore:', err)
-    }
-  }
-
+  // NOTA (2026-06): persistTokensConsumed foi removido. Escrevia valores
+  // ABSOLUTOS de consumo calculados no cliente em users/{uid} (last-writer-
+  // wins entre dispositivos, clobber do cycle-reset do servidor — e o
+  // extraUsageBalance ia para o caminho errado, raiz em vez de
+  // tokenBudget.extraUsageBalance, pelo que as deduções de overage nunca
+  // persistiam). A contabilidade é agora exclusiva do worker ai-pass-through
+  // (increments atómicos server-side com o usage real do provider). Isto
+  // também permite fechar as Security Rules de escrita dos campos de billing
+  // ao cliente.
 }
 
 // Automatically register our App Check token provider with tauriFetch

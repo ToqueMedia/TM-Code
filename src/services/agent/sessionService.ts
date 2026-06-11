@@ -548,6 +548,11 @@ class SessionService {
     if (typeof msg.turnInputTokens === 'number') sanitized.turnInputTokens = msg.turnInputTokens
     if (typeof msg.turnOutputTokens === 'number') sanitized.turnOutputTokens = msg.turnOutputTokens
 
+    // @-mention context must survive reloads — rebuildConversationHistory
+    // re-emits it on every follow-up turn (claude-vaz keeps the equivalent
+    // attachment messages in the persisted transcript).
+    if (msg.mentionContext) sanitized.mentionContext = msg.mentionContext
+
     // Persist attachment metadata WITHOUT base64. The base64 data URI is
     // potentially several MB per image and would bloat the encrypted
     // session file. On reload, attachments come back with only metadata

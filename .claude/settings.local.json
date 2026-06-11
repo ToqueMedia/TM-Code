@@ -348,7 +348,19 @@
       "Bash(yarn typecheck *)",
       "Bash(IS_REACT_ACT_ENVIRONMENT=true yarn test src/components/views/__tests__/ChatView.error185.test.tsx)",
       "Bash(sed -n '575,600p' /Users/ithustle/dev/deskotp/exodus-ide/src/stores/httpClientStore.ts)",
-      "Bash(sed -n '730,760p' /Users/ithustle/dev/deskotp/exodus-ide/src/stores/projectStore.ts)"
+      "Bash(sed -n '730,760p' /Users/ithustle/dev/deskotp/exodus-ide/src/stores/projectStore.ts)",
+      "Bash(sed -n 1,60p /Users/ithustle/dev/deskotp/exodus-ide/src/services/agent/permissionPersistence.ts)",
+      "Bash(sed -n 1,60p /Users/ithustle/dev/deskotp/exodus-ide/src/services/agent/sessionService.ts)",
+      "Bash(sed -n 430,460p /Users/ithustle/dev/claude-vaz/utils/attachments.ts)",
+      "Bash(sed -n 1890,1975p /Users/ithustle/dev/claude-vaz/utils/attachments.ts)",
+      "Bash(sed -n 810,830p /Users/ithustle/dev/claude-vaz/utils/attachments.ts)",
+      "Bash(sed -n 760,800p /Users/ithustle/dev/claude-vaz/utils/attachments.ts)",
+      "Bash(sed -n 3095,3130p /Users/ithustle/dev/claude-vaz/utils/messages.ts)",
+      "Bash(sed -n 4240,4300p /Users/ithustle/dev/claude-vaz/utils/messages.ts)",
+      "Bash(sed -n 290,330p /Users/ithustle/dev/claude-vaz/utils/file.ts)",
+      "Bash(sed -n 400,415p /Users/ithustle/dev/claude-vaz/tools/FileEditTool/utils.ts)",
+      "Bash(sed -n 1,73p /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestoreHelpers.ts)",
+      "Bash(sed -n 82,200p /Users/ithustle/dev/deskotp/toquemedia-studio-api/src/firestoreHelpers.ts)"
     ]
   }
 }

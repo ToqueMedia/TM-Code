@@ -27,6 +27,14 @@ function formatSize(bytes?: number): string {
 function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttachmentBarProps) {
   if (attachments.length === 0) return null
 
+  // Terminal mode never renders image pixels — images show as the claude-vaz
+  // `[Image #N]` text chip, numbered 1-based in attachment order. Thumbnails
+  // are a chat-mode affordance only.
+  const imageNumbers = new Map<string, number>()
+  for (const att of attachments) {
+    if (att.type === 'image') imageNumbers.set(att.id, imageNumbers.size + 1)
+  }
+
   return (
     <Box
       px={3}
@@ -95,11 +103,12 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
         </Flex>
       )}
 
-      {/* Attachment thumbnails */}
+      {/* Attachment chips */}
       <Flex gap={2} flexWrap="wrap">
         {attachments.map(att => {
           const Icon = typeIcons[att.type]
           const isImage = att.type === 'image'
+          const imageLabel = `[Image #${imageNumbers.get(att.id) ?? 0}]`
           const sizeStr = formatSize(att.sizeBytes)
 
           return (
@@ -107,9 +116,9 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
               key={att.id}
               align="center"
               gap={2}
-              pl={isImage && att.base64 ? 0 : 2}
+              pl={2}
               pr={1.5}
-              py={isImage && att.base64 ? 0 : '3px'}
+              py="3px"
               bg="rgba(255, 255, 255, 0.04)"
               border="1px solid rgba(255, 255, 255, 0.06)"
               borderRadius="6px"
@@ -123,34 +132,13 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
               position="relative"
               role="group"
             >
-              {/* Thumbnail or icon */}
-              {isImage && att.base64 ? (
-                <Box
-                  w="36px"
-                  h="36px"
-                  borderRadius="5px 0 0 5px"
-                  overflow="hidden"
-                  flexShrink={0}
-                >
-                  <img
-                    src={att.base64}
-                    alt={att.name}
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      objectFit: 'cover',
-                      display: 'block',
-                    }}
-                  />
-                </Box>
-              ) : (
-                <Box flexShrink={0} display="flex" alignItems="center">
-                  <Icon size={13} color={tokens.colors.text.muted} />
-                </Box>
-              )}
+              {/* Icon */}
+              <Box flexShrink={0} display="flex" alignItems="center">
+                <Icon size={13} color={tokens.colors.text.muted} />
+              </Box>
 
-              {/* Name + size */}
-              <Flex direction="column" minW={0} flex="1" py={isImage && att.base64 ? '4px' : 0}>
+              {/* Label: images use the [Image #N] chip text, others name + size */}
+              <Flex direction="column" minW={0} flex="1">
                 <Text
                   fontSize="11px"
                   fontFamily={tokens.fontFamily.mono}
@@ -158,7 +146,7 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
                   truncate
                   lineHeight="1.3"
                 >
-                  {att.name}
+                  {isImage ? imageLabel : att.name}
                 </Text>
                 {sizeStr && (
                   <Text
@@ -167,7 +155,7 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
                     color={tokens.colors.text.disabled}
                     lineHeight="1.3"
                   >
-                    {sizeStr}
+                    {isImage ? `${att.name}${sizeStr ? ` · ${sizeStr}` : ''}` : sizeStr}
                   </Text>
                 )}
               </Flex>

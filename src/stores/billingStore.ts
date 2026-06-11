@@ -44,10 +44,19 @@ export interface MeResponse {
 
 // ── Store ──
 //
-// The backend is the source of truth. The store receives data from:
-//   1. /v1/me on app launch + window focus + post-purchase deep link
-//      (event-driven, NEVER polling — see memory feedback_no_polling.md)
-//   2. Response headers, when an administrative gateway returns budget metadata
+// O servidor é o ÚNICO ponto de verdade da contabilidade (2026-06): o worker
+// ai-pass-through observa o `usage` de cada resposta, aplica o multiplicador
+// do TM Speed e comita increments atómicos ao Firestore — a IDE não estima,
+// não corrige e não persiste consumo (o antigo `persistTokensConsumed` +
+// `addEstimatedUsage` foram removidos; eram a fonte das inconsistências:
+// chat-mode sem billing, correção por turno errada, write absoluto
+// last-writer-wins a esmagar o cycle-reset do servidor).
+//
+// O store recebe dados de:
+//   1. /v1/me no arranque + window focus + deep link pós-compra
+//      (event-driven, NUNCA polling — ver memória feedback_no_polling.md)
+//   2. Headers X-Budget-*/X-Plan em CADA resposta do worker de IA
+//      (estado pré-voo do turno — lag de ~1 turno em relação ao commit).
 
 interface BillingState {
   // Identity
@@ -62,12 +71,13 @@ interface BillingState {
   cycleEnd: string           // "YYYY-MM-DD"
   status: CostBudgetStatus
 
-  // Overage credits (canonical: tmsQuota.purchasedBalance on the backend)
+  // Overage credits (canonical: tokenBudget.extraUsageBalance on the backend)
   tmsRemaining: number
 
-  // Last request stats (for UI feedback)
+  // Last request stats (display-only — fed by the authoritative per-turn
+  // usage, never used for accounting). ApiKeysSection uses it for the BYOK
+  // cost estimate.
   lastTokensUsed: number
-  lastUsedOverage: boolean
 
   // Emergency stop
   noCredits: boolean
@@ -76,7 +86,11 @@ interface BillingState {
 interface BillingActions {
   updateFromHeaders: (headers: Headers) => void
   updateFromMe: (data: MeResponse) => void
-  addEstimatedUsage: (tokens: number) => void
+  /** Display-only: accumulate the authoritative per-turn token total for the
+   *  "last request" stat. No consumption math happens client-side. */
+  addLastRequestTokens: (tokens: number) => void
+  /** Zero the per-request stat at the start of a new agent run. */
+  resetLastRequestStats: () => void
   setNoCredits: () => void
   /** Clear noCredits flag without changing the underlying status — used by
    *  agentService before each request as an optimistic "maybe it's resolved" reset.
@@ -96,7 +110,6 @@ const INITIAL_STATE: BillingState = {
   status: 'allowed',
   tmsRemaining: 0,
   lastTokensUsed: 0,
-  lastUsedOverage: false,
   noCredits: false,
 }
 
@@ -140,8 +153,11 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
   ...INITIAL_STATE,
 
   /**
-   * Apply budget headers if a gateway response includes them. The new AI
-   * pass-through Worker does not add billing headers, so absence is normal.
+   * Apply the budget headers the AI pass-through worker emits on every
+   * response (X-Plan / X-Budget-* — pre-flight state read from Firestore,
+   * so they lag the in-flight turn's commit by one turn). Absence is still
+   * tolerated: BYOK traffic bypasses the worker, and BUDGET_ENFORCEMENT=off
+   * disables the billing path entirely.
    *
    * Updates BOTH consumedPct AND tokensConsumed (from X-Tokens-Consumed) so
    * the dropdown's absolute count stays consistent with the % indicator.
@@ -201,57 +217,12 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
     })
   },
 
-  /**
-   * Local optimistic usage used while the AI data-plane Worker streams
-   * provider output. The pass-through Worker intentionally no longer emits
-   * billing headers, so this keeps the header pill moving until /v1/me or
-   * an administrative gateway response provides the authoritative numbers.
-   */
-  addEstimatedUsage: (tokens) => {
+  addLastRequestTokens: (tokens) => {
     if (!Number.isFinite(tokens) || tokens <= 0) return
-    const rounded = Math.ceil(tokens)
-    set(state => {
-      const tokensConsumed = state.tokensConsumed + rounded
-      const consumedPct = state.tokenBudget > 0
-        ? tokensConsumed / state.tokenBudget
-        : state.consumedPct
-
-      // Overage deduction: if they are in overage, deduct tokens from tmsRemaining
-      let tmsRemaining = state.tmsRemaining
-      const isOverage = state.status === 'allowed_overage' || consumedPct > 1
-      if (isOverage) {
-        tmsRemaining = Math.max(0, tmsRemaining - rounded)
-      }
-
-      let status = state.status
-      let noCredits = state.noCredits
-      if (isOverage && tmsRemaining <= 0) {
-        status = 'rejected'
-        noCredits = true
-      } else {
-        status =
-          state.status === 'rejected' || state.status === 'allowed_overage'
-            ? state.status
-            : consumedPct >= 1
-              ? 'allowed_critical'
-              : consumedPct >= 0.95
-                ? 'allowed_critical'
-                : consumedPct >= 0.8
-                  ? 'allowed_warning'
-                  : state.status
-      }
-
-      return {
-        tokensConsumed,
-        consumedPct,
-        status,
-        tmsRemaining,
-        noCredits,
-        lastTokensUsed: state.lastTokensUsed + rounded,
-        lastUsedOverage: state.lastUsedOverage || isOverage,
-      }
-    })
+    set(state => ({ lastTokensUsed: state.lastTokensUsed + Math.ceil(tokens) }))
   },
+
+  resetLastRequestStats: () => set({ lastTokensUsed: 0 }),
 
   setNoCredits: () => set({ noCredits: true, status: 'rejected' }),
 

@@ -20,7 +20,48 @@ The Worker:
 - forwards the request to the configured provider endpoint;
 - returns the upstream status, safe headers, and `upstream.body` directly.
 
-It does not choose provider/model by user, request body, or route. The only request-driven switch is `X-TM-Speed: true` → `speedModel` (when published and the user's plan is eligible; see below). It has no provider routes, retries, billing parser, stream parser, SSE wrapper, provider adapter, or AI SDK.
+It does not choose provider/model by user, request body, or route. The only request-driven switch is `X-TM-Speed: true` → `speedModel` (when published and the user's plan is eligible; see below). It has no provider routes, retries, SSE wrapper, provider adapter, or AI SDK. The single sanctioned exception to "no stream parsing" is `usage.ts` (see Billing below): an identity transform that OBSERVES the final `usage` chunk — bytes out are byte-identical to bytes in, guarded by tests.
+
+## Billing (single source of truth)
+
+The Worker is the ONLY place token consumption is accounted (2026-06). The IDE
+never estimates, corrects, or persists usage — it just displays what the server
+reports (`/v1/me` + the headers below).
+
+Per request:
+
+1. **Pre-flight** — one cached (60s/user) Firestore read of `users/{uid}`
+   (`userPlan` + `tokenBudget.*`). The same state feeds the cost-budget gate
+   AND TM Speed eligibility (no extra round-trips).
+2. **Usage capture** — `stream_options.include_usage: true` is injected into
+   streaming bodies so the provider returns the real `usage` object in the
+   final chunk; `usage.ts` observes it without touching the bytes. Fallback
+   when a provider omits usage: a coarse byte estimate.
+3. **Commit** — after the stream ends, `ctx.waitUntil` fires an atomic
+   Firestore increment of `tokenBudget.tokensConsumed` (and decrements
+   `tokenBudget.extraUsageBalance` with a floor at 0 in overage). The TM Speed
+   3x multiplier is applied HERE, server-side, only when speed was served.
+4. **Headers** — every response carries the pre-flight state for the IDE:
+   `X-Plan`, `X-Budget-Status`, `X-Budget-Pct`, `X-Tokens-Consumed`,
+   `X-Extra-Tokens`, `X-Cycle-End`.
+
+Rollout is governed by `BUDGET_ENFORCEMENT` (wrangler.toml `[vars]`):
+
+| Mode      | Gate                | Accounting + headers |
+|-----------|---------------------|----------------------|
+| `off`     | none                | none (kill-switch)   |
+| `shadow`  | never blocks        | yes (default)        |
+| `enforce` | `rejected` → 402 `tm_budget_exhausted` | yes |
+
+Firestore auth: with `FIREBASE_CLIENT_EMAIL` + `FIREBASE_PRIVATE_KEY` secrets
+set, reads/commits use the service account (bypasses Security Rules + App
+Check — and allows LOCKING client writes to `tokenBudget.*` in the rules).
+Without them it falls back to the caller's own ID token (self-read/write under
+current rules), so the deploy works before the secrets are added.
+
+Plan budgets default to the control-plane constants and can be overridden with
+`PLAN_BUDGETS_JSON` (e.g. `{"pro": 20910000}`). The speed multiplier can be
+tuned with `TM_SPEED_BILLING_MULTIPLIER` (default 3).
 
 ## Active Config
 
@@ -44,12 +85,12 @@ The Control Plane/Admin publishes this JSON to KV:
 `speedModel` is optional and powers TM Speed (`/speed` in the IDE): when a request
 arrives with `X-TM-Speed: true`, the Worker injects `speedModel` instead of `model`.
 The header is consumed here and never forwarded upstream (all `x-tm-*` request
-headers are stripped). Eligibility is enforced server-side: the Worker reads
-`users/{uid}.userPlan` via Firestore REST with the caller's own ID token (cached
-60s per user) and only applies speed for `pro`/`max`. Any other case — speedModel
-not published, plan not eligible, lookup failure — degrades to `model` instead of
-failing, and the response carries `X-TM-Speed-Applied: true|false` so the IDE only
-applies the 3x billing multiplier when speed was actually served.
+headers are stripped). Eligibility is enforced server-side from the SAME cached
+user state the billing pre-flight reads (`users/{uid}.userPlan`, 60s/user) and
+only applies for `pro`/`max`. Any other case — speedModel not published, plan not
+eligible, lookup failure — degrades to `model` instead of failing. The response
+carries `X-TM-Speed-Applied: true|false` for the IDE's visual indicator; the 3x
+billing multiplier is applied server-side in the usage commit (see Billing).
 
 Bearer provider example:
 

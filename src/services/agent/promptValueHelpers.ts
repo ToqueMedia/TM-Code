@@ -48,17 +48,21 @@ export const MAX_MULTIMODAL_PAYLOAD_BYTES = 20 * 1024 * 1024
 // without reaching into the Tauri IPC layer. Production call sites
 // wire the real implementations from attachmentService.
 //
-// All three resolvers are bundled into a single PromptResolvers object
+// The resolvers are bundled into a single PromptResolvers object
 // passed to the helpers — keeps call sites immune to argument
 // reordering and makes adding a new resolver in the future a typed
 // change at every site.
+//
+// NOTE: @-mention resolution no longer lives here. Mentions are resolved
+// ONCE over the whole user input and appended AFTER the prompt as synthetic
+// tool-call context (claude-vaz parity) — see atMentions.ts
+// `resolveMentionContext` / `applyMentionResolution`, called by the prompt
+// boundaries (usePromptBar / agentRunner) after these helpers run.
 
-export type MentionResolver = (text: string, projectPath: string) => Promise<string>
 export type AttachmentXmlResolver = (attachments: Attachment[]) => Promise<string>
 export type ImageDataUriResolver = (attachment: Attachment) => Promise<string | null>
 
 export type PromptResolvers = {
-  resolveMentions: MentionResolver
   resolveAttachmentXml: AttachmentXmlResolver
   resolveImageDataUri: ImageDataUriResolver
 }
@@ -96,25 +100,18 @@ export function extractDisplayFromValue(value: PromptValue): { text: string; att
  */
 export async function buildAugmentedPrompt(
   value: PromptValue,
-  projectPath: string,
   resolvers: PromptResolvers,
 ): Promise<string> {
-  const { resolveMentions, resolveAttachmentXml } = resolvers
+  const { resolveAttachmentXml } = resolvers
 
   if (typeof value === 'string') {
-    let augmented = value || t('prompt.fallbackAnalyzeFiles')
-    const mentionContext = await resolveMentions(augmented, projectPath)
-    if (mentionContext) augmented += mentionContext
-    return augmented
+    return value || t('prompt.fallbackAnalyzeFiles')
   }
 
   const parts: string[] = []
   for (const block of value) {
     if (block.type === 'text') {
-      let text = block.text
-      const mentionContext = await resolveMentions(text, projectPath)
-      if (mentionContext) text += mentionContext
-      if (text.length > 0) parts.push(text)
+      if (block.text.length > 0) parts.push(block.text)
     } else {
       const xml = await resolveAttachmentXml([block.attachment])
       if (xml) parts.push(xml.trim())
@@ -145,11 +142,10 @@ export type BuildContentPartsOptions = {
 
 export async function buildContentParts(
   value: PromptValue,
-  projectPath: string,
   resolvers: PromptResolvers,
   options: BuildContentPartsOptions = {},
 ): Promise<OpenAIContentPart[] | null> {
-  const { resolveMentions, resolveAttachmentXml, resolveImageDataUri } = resolvers
+  const { resolveAttachmentXml, resolveImageDataUri } = resolvers
   const maxPerImage = options.maxPerImageBytes ?? MAX_PER_IMAGE_BYTES
   const maxTotal = options.maxTotalBytes ?? MAX_MULTIMODAL_PAYLOAD_BYTES
 
@@ -162,10 +158,7 @@ export async function buildContentParts(
 
   for (const block of blocks) {
     if (block.type === 'text') {
-      let text = block.text
-      const mentionContext = await resolveMentions(text, projectPath)
-      if (mentionContext) text += mentionContext
-      if (text.length > 0) parts.push({ type: 'text', text })
+      if (block.text.length > 0) parts.push({ type: 'text', text: block.text })
     } else {
       const att = block.attachment
       if (att.type === 'image') {

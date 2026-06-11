@@ -299,6 +299,16 @@ export interface ChatMessage {
   /** Attachments included with this message (metadata only — content is resolved into message.content at send-time) */
   attachments?: Attachment[]
   /**
+   * Synthetic tool-call context resolved from @-mentions (and the
+   * external-modification sweep) on this USER message — the
+   * `<system-reminder>` blocks appended after the prompt at send-time.
+   * Persisted so rebuildConversationHistory re-emits it on follow-up turns;
+   * claude-vaz keeps attachment messages in the transcript and without this
+   * field the mentioned-file content would evaporate from the model's view
+   * after the first turn. Never rendered in the chat bubble.
+   */
+  mentionContext?: string
+  /**
    * Original interleaved order of text and attachments at enqueue/send
    * time. When present, this is the canonical source for reconstructing
    * the message: rebuildConversationHistory walks promptBlocks in order

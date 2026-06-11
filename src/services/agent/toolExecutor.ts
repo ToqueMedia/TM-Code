@@ -38,6 +38,7 @@ import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
 import { createFileStateCacheWithSizeLimit, type FileStateCache } from './toolExecutor/fileStateCache'
 import { checkReadDedup } from './toolExecutor/readDedup'
+import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
 import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
@@ -474,6 +475,152 @@ class ToolExecutor {
     survivors.sort((a, b) => a[0] - b[0])
     this.largeResultRangesShown.set(id, survivors)
     return firstOverlap
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // @-mention surface — used exclusively by atMentions.ts
+  // ══════════════════════════════════════════════════════════════
+  //
+  // Mirrors claude-vaz's at-mention pipeline (utils/attachments.ts
+  // `processAtMentionedFiles` → `generateFileAttachment`), which executes
+  // the REAL FileReadTool for mentioned files so the model-visible result,
+  // the read-state bookkeeping, and the dedup behaviour are byte-identical
+  // to a model-initiated call. The permission layer is skipped on purpose:
+  // the user explicitly named the target in their prompt (claude-vaz only
+  // checks deny rules — `isFileReadDenied` — for at-mentions). The hard
+  // blocks survive: `.env` is refused here, and path-scope validation
+  // throws inside the tool handlers themselves.
+
+  /**
+   * Resolve a mention token to the absolute path the read tools will use.
+   * Exposed so atMentions.ts renders the synthetic "Called the read_file
+   * tool with the following input" line with the SAME path the tool call
+   * actually received — claude-vaz shows the expanded absolute path too.
+   */
+  resolveMentionPath(p: string): string {
+    return this.resolveToAbsolute(p)
+  }
+
+  /** Whether a mentioned path is inside the agent's allowed scope.
+   *  Out-of-scope mentions are dropped silently — same outcome as
+   *  claude-vaz's deny-rule check returning null. */
+  isMentionPathAllowed(p: string): boolean {
+    try {
+      this.validatePathWithinProject(p)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Whether the model already has a fresh FULL view of this file in context.
+   * Maps claude-vaz's `already_read_file` check (attachments.ts:3077-3120 —
+   * entry timestamp matches the file mtime exactly): when true, the mention
+   * renders to NOTHING because re-sending the content would only burn
+   * cache_creation tokens. TM Code's freshness primitive is `fsVersion`
+   * (no cheap per-file stat over Tauri IPC): offset === undefined means the
+   * entry holds the whole file (full read, write_file or edit_file), and an
+   * unchanged global fsVersion guarantees no tool writes happened since.
+   * Conservative like the read dedup: external edits bump nothing, but the
+   * external-change sweep (`collectExternallyChangedFiles`) covers that side.
+   */
+  isFileFreshInContext(filePath: string): boolean {
+    const abs = this.resolveToAbsolute(filePath)
+    const entry = this.readFileState.get(abs)
+    return !!entry && entry.offset === undefined && entry.fsVersion === getFsVersion()
+  }
+
+  /**
+   * Execute a read-only tool handler directly for @-mention resolution,
+   * bypassing the permission/abort/plan-mode layers of `execute()` (the
+   * mention is user-initiated; there is no model tool_call to gate).
+   * Path-scope validation still throws inside the handlers; `.env` stays
+   * hard-blocked here exactly as in `execute()`.
+   */
+  async executeForMention(
+    toolName: 'read_file' | 'list_directory',
+    input: Record<string, unknown>,
+  ): Promise<string> {
+    const tool = this.tools.get(toolName)
+    if (!tool) throw new Error(`Unknown tool: ${toolName}`)
+    const filePath = (input.file_path || '') as string
+    if (this.isEnvFile(filePath)) {
+      // Same hard block as execute() — thrown (not returned) so the mention
+      // resolver drops the mention silently instead of inlining the refusal.
+      throw new Error('.env files are blocked from mention resolution')
+    }
+    return tool.execute(input)
+  }
+
+  /**
+   * External-modification sweep — port of claude-vaz's `getChangedFiles`
+   * (utils/attachments.ts:2063-2140). Walks every full-view entry in
+   * `readFileState`, stats the file, and when the disk content diverged
+   * from what the model last saw, returns a post-edit snippet (changed
+   * hunks, line-numbered) for the "Note: X was modified..." reminder.
+   *
+   * State is updated in place on detection (claude-vaz re-runs
+   * FileReadTool.call, which refreshes readFileState) so:
+   *   - the next sweep doesn't re-fire for the same edit, and
+   *   - read-before-write enforcement accepts an edit_file without a
+   *     fresh read — the model HAS the current content via the snippet.
+   *
+   * Ranged reads (offset set) are skipped — claude-vaz has the same TODO
+   * (offset/limit entries return null). Partial injected views are skipped
+   * too: there is no full baseline to diff against.
+   */
+  async collectExternallyChangedFiles(): Promise<Array<{ path: string; snippet: string }>> {
+    const changed: Array<{ path: string; snippet: string }> = []
+    // Snapshot first — set() during LRU iteration would mutate recency order.
+    const entries = Array.from(this.readFileState.entries())
+    for (const [path, entry] of entries) {
+      if (entry.offset !== undefined || entry.limit !== undefined) continue
+      if (entry.isPartialView) continue
+
+      // Cheap mtime gate before paying for a full read. stat failure means
+      // deleted/unreadable — skip (claude-vaz returns null on read failure).
+      let mtimeMs: number | null = null
+      try {
+        const { stat } = await import('@tauri-apps/plugin-fs')
+        const info = await stat(path)
+        mtimeMs = info.mtime ? new Date(info.mtime).getTime() : null
+      } catch {
+        continue
+      }
+      if (mtimeMs !== null && mtimeMs <= entry.timestamp) continue
+
+      let current: string
+      try {
+        current = await invoke<string>('read_file', { path })
+      } catch {
+        continue
+      }
+      const newHash = simpleHash(current)
+      const previousContent = entry.content
+      const touchedOnly = newHash === entry.hash
+
+      // Refresh state even when content is identical — bumps the stored
+      // timestamp past the new mtime so the sweep stops re-stat-reading
+      // a file that was merely touched.
+      const now = Date.now()
+      this.readFileTimestamps.set(path, { timestamp: now, hash: newHash })
+      this.readFileState.set(path, {
+        content: current,
+        timestamp: now,
+        offset: entry.offset,
+        limit: entry.limit,
+        hash: newHash,
+        fsVersion: getFsVersion(),
+      })
+
+      if (touchedOnly) continue
+      const snippet = getSnippetForTwoFileDiff(previousContent, current)
+      // Whitespace-only/no-hunk edits yield '' — claude-vaz skips those.
+      if (snippet === '') continue
+      changed.push({ path, snippet })
+    }
+    return changed
   }
 
   async execute(
