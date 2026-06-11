@@ -53,11 +53,21 @@ Rollout is governed by `BUDGET_ENFORCEMENT` (wrangler.toml `[vars]`):
 | `shadow`  | never blocks        | yes (default)        |
 | `enforce` | `rejected` → 402 `tm_budget_exhausted` | yes |
 
-Firestore auth: with `FIREBASE_CLIENT_EMAIL` + `FIREBASE_PRIVATE_KEY` secrets
-set, reads/commits use the service account (bypasses Security Rules + App
-Check — and allows LOCKING client writes to `tokenBudget.*` in the rules).
-Without them it falls back to the caller's own ID token (self-read/write under
-current rules), so the deploy works before the secrets are added.
+Firestore auth: billing against REAL Firestore **requires** the service
+account (`FIREBASE_CLIENT_EMAIL` + `FIREBASE_PRIVATE_KEY`) since the Security
+Rules lock-down (2026-06-11): client tokens are denied on `tokenBudget.*`
+writes (rules) and on REST reads (App Check enforcement). Without the SA the
+worker **disables billing cleanly** (one loud warn, no per-request 403 spam).
+The user-token path remains usable only for unit tests (`AUTH_MODE:
+test_static`) and the emulator (`firebase_emulator` / `FIRESTORE_REST_BASE`).
+
+For **local dev with billing active**, add the SA to `.dev.vars`:
+
+```bash
+# workers/ai-pass-through/.dev.vars
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxx@maiplayer-ac56d.iam.gserviceaccount.com
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+```
 
 Plan budgets default to the control-plane constants and can be overridden with
 `PLAN_BUDGETS_JSON` (e.g. `{"pro": 20910000}`). The speed multiplier can be

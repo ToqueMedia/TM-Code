@@ -405,7 +405,12 @@
       "Bash(echo \"build-exit=$?\")",
       "Bash(ps -axo pid,ppid,command)",
       "Bash(yarn tauri:build:mac-arm64)",
-      "Bash(ls -la ~/Desktop/builds-desktop/v0.7.5/TM.Code_0.7.5_aarch64.dmg)"
+      "Bash(ls -la ~/Desktop/builds-desktop/v0.7.5/TM.Code_0.7.5_aarch64.dmg)",
+      "Bash(lsof -iTCP -sTCP:LISTEN -n -P -p 8550)",
+      "Bash(ps -p 8550 -o command=)",
+      "Bash(sed -i '' 's/\"version\": \"0.7.5\"/\"version\": \"0.7.6\"/' package.json src-tauri/tauri.conf.json)",
+      "Bash(sed -i '' 's/^version = \"0.7.5\"/version = \"0.7.6\"/' src-tauri/Cargo.toml)",
+      "Bash(ls -la ~/Desktop/builds-desktop/v0.7.6/)"
     ]
   }
 }

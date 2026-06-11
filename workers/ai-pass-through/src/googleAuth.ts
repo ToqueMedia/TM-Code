@@ -107,6 +107,13 @@ export async function resolveFirestoreAuthHeaders(
   idToken: string,
   fetcher: Fetcher,
 ): Promise<Record<string, string>> {
+  // Emulador (FIRESTORE_REST_BASE definido): `Bearer owner` é o token de
+  // bypass admin do Firestore Emulator — mesmo padrão do control-plane.
+  // Sem ele, as Security Rules carregadas no emulador negariam as escritas
+  // de tokenBudget tal como em produção.
+  if (typeof env.FIRESTORE_REST_BASE === 'string' && env.FIRESTORE_REST_BASE !== '') {
+    return { authorization: 'Bearer owner', 'content-type': 'application/json' }
+  }
   const email = typeof env.FIREBASE_CLIENT_EMAIL === 'string' ? env.FIREBASE_CLIENT_EMAIL : ''
   const key = typeof env.FIREBASE_PRIVATE_KEY === 'string' ? env.FIREBASE_PRIVATE_KEY : ''
   if (email && key) {

@@ -3,6 +3,7 @@ import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import test, { beforeEach } from 'node:test'
 import { clearActiveConfigCache } from '../src/activeConfig'
+import { resolveEnforcementMode, resetBillingDisabledWarning } from '../src/billing'
 import { handleRequest } from '../src/index'
 import { clearPlanCache } from '../src/planGate'
 import type { Env } from '../src/types'
@@ -788,6 +789,37 @@ test('billing: provider without usage falls back to a byte estimate (never zero)
   assert.equal(commits.length, 1)
   const committed = parseInt(commits[0].body.writes[0].transform.fieldTransforms[0].increment.integerValue, 10)
   assert.ok(committed > 0)
+})
+
+test('billing: sem service account contra Firestore real → billing desliga (sem 403 spam)', () => {
+  // wrangler dev sem secrets no .dev.vars: o user-token path é negado pelas
+  // rules fechadas + App Check → em vez de um 403 por pedido, o billing
+  // resolve para 'off' com um warn único. Testes (test_static), emulador
+  // (firebase_emulator/FIRESTORE_REST_BASE) e produção (SA presente)
+  // mantêm o modo configurado.
+  resetBillingDisabledWarning()
+
+  // Firestore real + sem SA → off, independentemente do configurado.
+  assert.equal(resolveEnforcementMode({ AUTH_MODE: 'firebase_jwt', BUDGET_ENFORCEMENT: 'enforce' }), 'off')
+  assert.equal(resolveEnforcementMode({ AUTH_MODE: 'firebase_jwt' }), 'off')
+
+  // SA presente → modo configurado.
+  assert.equal(resolveEnforcementMode({
+    AUTH_MODE: 'firebase_jwt',
+    BUDGET_ENFORCEMENT: 'enforce',
+    FIREBASE_CLIENT_EMAIL: 'sa@test.iam',
+    FIREBASE_PRIVATE_KEY: 'k',
+  }), 'enforce')
+
+  // test_static / emulador (REST_BASE) → user-token path utilizável → modo configurado.
+  assert.equal(resolveEnforcementMode({ AUTH_MODE: 'test_static' }), 'shadow')
+  assert.equal(resolveEnforcementMode({ FIRESTORE_REST_BASE: 'http://127.0.0.1:8082' }), 'shadow')
+  // AUTH_MODE=firebase_emulator SOZINHO não chega — sem REST_BASE as
+  // escritas iriam para o Firestore REAL com token de emulador (403).
+  assert.equal(resolveEnforcementMode({ AUTH_MODE: 'firebase_emulator' }), 'off')
+
+  // 'off' explícito continua off.
+  assert.equal(resolveEnforcementMode({ AUTH_MODE: 'test_static', BUDGET_ENFORCEMENT: 'off' }), 'off')
 })
 
 test('billing: BUDGET_ENFORCEMENT=off skips the Firestore read, headers and commit', async () => {

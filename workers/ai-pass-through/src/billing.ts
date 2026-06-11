@@ -68,10 +68,53 @@ export function resolvePlanBudgets(env: Env): Record<string, number> {
 
 export type BudgetEnforcementMode = 'off' | 'shadow' | 'enforce'
 
+let warnedBillingDisabled = false
+
 export function resolveEnforcementMode(env: Env): BudgetEnforcementMode {
   const raw = typeof env.BUDGET_ENFORCEMENT === 'string' ? env.BUDGET_ENFORCEMENT.toLowerCase() : ''
-  if (raw === 'off' || raw === 'enforce') return raw
-  return 'shadow'
+  const configured: BudgetEnforcementMode =
+    raw === 'off' || raw === 'enforce' ? raw : 'shadow'
+  if (configured === 'off') return 'off'
+
+  // Desde o fecho das Security Rules (2026-06-11), o billing contra o
+  // Firestore REAL exige service account: o fallback por ID token do
+  // utilizador é negado nas escritas de tokenBudget (rules) e nas leituras
+  // REST (App Check enforcement) → 403 PERMISSION_DENIED por pedido, zero
+  // contabilidade e spam de erros — o sintoma clássico do wrangler dev sem
+  // secrets no .dev.vars. Sem SA, desligar o billing LIMPA e RUIDOSAMENTE
+  // é o único comportamento honesto.
+  //
+  // O sinal de "alvo não-produção" é EXCLUSIVAMENTE FIRESTORE_REST_BASE
+  // (emulador) ou test_static (fetcher mockado). AUTH_MODE=firebase_emulator
+  // sozinho NÃO chega: diz como validamos o JWT do user, não para onde vão
+  // as escritas — o .dev.vars típico tem firebase_emulator sem REST_BASE e
+  // o billing batia no Firestore de PRODUÇÃO com token de emulador (403
+  // garantido, o bug original deste gate).
+  const hasServiceAccount =
+    typeof env.FIREBASE_CLIENT_EMAIL === 'string' && env.FIREBASE_CLIENT_EMAIL !== '' &&
+    typeof env.FIREBASE_PRIVATE_KEY === 'string' && env.FIREBASE_PRIVATE_KEY !== ''
+  const userTokenPathUsable =
+    env.AUTH_MODE === 'test_static' ||
+    (typeof env.FIRESTORE_REST_BASE === 'string' && env.FIRESTORE_REST_BASE !== '')
+
+  if (!hasServiceAccount && !userTokenPathUsable) {
+    if (!warnedBillingDisabled) {
+      warnedBillingDisabled = true
+      console.warn(
+        '[billing] DISABLED: FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY ausentes e o Firestore real ' +
+        'nega o caminho por ID token (Security Rules + App Check). Para billing em dev local, adiciona ' +
+        'os secrets da service account ao .dev.vars; para silenciar de propósito, BUDGET_ENFORCEMENT=off.',
+      )
+    }
+    return 'off'
+  }
+
+  return configured
+}
+
+/** Reset do aviso único — usado pelos testes. */
+export function resetBillingDisabledWarning(): void {
+  warnedBillingDisabled = false
 }
 
 export function resolveSpeedMultiplier(env: Env): number {
