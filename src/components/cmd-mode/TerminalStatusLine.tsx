@@ -14,6 +14,7 @@ import { useMcpStore } from "../../stores/mcpStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { usePermissionStore } from "../../stores/permissionStore";
 import { useBillingStore } from "../../stores/billingStore";
+import { useTmSpeedStore } from "../../stores/tmSpeedStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useBackgroundCommandStore } from "../../stores/backgroundCommandStore";
 import { stopAgent } from "../../services/agent/cmdModeCommands";
@@ -63,6 +64,8 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   const mcpIsInitializing = useMcpStore((s) => s.isInitializing);
   const mcpError = useMcpStore((s) => s.error);
   const autoApproveDiffs = usePermissionStore((s) => s.autoApproveDiffs);
+  const tmSpeedEnabled = useTmSpeedStore((s) => s.enabled);
+  const tmSpeedApplied = useTmSpeedStore((s) => s.applied);
   const queuedCommands = useSyncExternalStore(
     subscribeToCommandQueue,
     getCommandQueueSnapshot,
@@ -336,6 +339,20 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
           >
             {cfg.label}
           </Text>
+
+          {tmSpeedEnabled && (
+            <Text
+              fontSize="13px"
+              color={tokens.colors.accent.orange}
+              fontFamily={tokens.fontFamily.mono}
+              fontWeight="600"
+              whiteSpace="nowrap"
+              flexShrink={0}
+              title={tmSpeedApplied ? t("speed.indicatorTooltip") : t("speed.indicatorTooltipPending")}
+            >
+              ⚡ {t("speed.indicator")}
+            </Text>
+          )}
 
           {segments.length > 0 && (
             <Text

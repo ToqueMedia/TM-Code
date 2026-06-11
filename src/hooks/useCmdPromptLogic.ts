@@ -15,9 +15,9 @@ import {
   subscribeToCommandQueue,
 } from '../services/agent/messageQueue'
 import { useQueueProcessor } from './useQueueProcessor'
+import { getQueryGuard } from '../services/agent/queryGuard'
 import { useAttachments } from './useAttachments'
 import QuickOpenService, { type QuickOpenItem } from '../services/quickOpenService'
-import { extractAndResolveMentions } from '../services/attachmentService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../utils/mentionParser'
 import { preprocessHashtags } from '../services/agent/hashtagRegistry'
 import { useHashtagMenu } from '../components/prompt/useHashtagMenu'
@@ -406,28 +406,44 @@ export function useCmdPromptLogic() {
     }
     chatStore.addUserMessage(textPrompt, attachments, promptBlocks)
 
-    // Resolve @mentions before sending — appends <mentioned_files> context to the prompt
-    const mentionContext = path ? await extractAndResolveMentions(textPrompt, path) : ''
-    const fullPrompt = mentionContext ? `${textPrompt}\n\n${mentionContext}` : textPrompt
-
-    await runAgentWithCallbacks(fullPrompt, {
+    // @-mentions resolve inside agentRunner (atMentions.ts, claude-vaz
+    // parity) — AFTER enableCmdMode so path scoping matches CMD mode.
+    // Resolving here (as the old <mentioned_files> flow did) would validate
+    // against the wrong scope and skip the readFileState bookkeeping.
+    await runAgentWithCallbacks(textPrompt, {
       addUserMessage: false,
       userMessageText: textPrompt,
       userMessageAttachments: attachments,
       userMessageBlocks: promptBlocks,
       useConversationHistory: true,
       cmdOnlyMode: true,
+      mentionText: textPrompt,
     })
   }, [allCommands, findCommand, extractArgs, currentProject])
 
   // ─── Queue processor ───
 
   const executeQueuedInput = useCallback(async (commands: QueuedCommand[]): Promise<void> => {
-    for (const cmd of commands) {
-      // Pass the full PromptValue through — executePrompt handles both
-      // string and ContentBlock[] (extracting text for slash/shell dispatch,
-      // passing attachments to the agent boundary).
-      await executePrompt(cmd.value)
+    // Reserva o QueryGuard SINCRONAMENTE antes de qualquer await — mesma
+    // proteção do chat-mode (usePromptBar.executeQueuedInput). Sem isto, o
+    // executePrompt tem vários awaits antes do tryStart() e, nessa janela,
+    // o useQueueProcessor re-dispara com isQueryActive=false e despacha um
+    // SEGUNDO runAgentLoop concorrente — dois loops a mutar a mesma mensagem
+    // de streaming in-place, cascata de erros e re-renders (#185 em produção).
+    const queryGuard = getQueryGuard()
+    if (!queryGuard.reserve()) return
+    try {
+      for (const cmd of commands) {
+        // Pass the full PromptValue through — executePrompt handles both
+        // string and ContentBlock[] (extracting text for slash/shell dispatch,
+        // passing attachments to the agent boundary).
+        await executePrompt(cmd.value)
+      }
+    } finally {
+      // No-op quando o guard já está idle (run terminou) ou running (loop
+      // ativo) — só limpa a reserva se nunca chegámos ao tryStart() (ex.:
+      // executePrompt saiu por um early-return de erro antes do agent loop).
+      queryGuard.cancelReservation()
     }
   }, [executePrompt])
 
@@ -657,9 +673,17 @@ export function useCmdPromptLogic() {
       const blocks: ContentBlock[] = []
       if (prompt.length > 0) blocks.push({ type: 'text', text: prompt })
       for (const att of draftAttachments) {
+        // Paridade claude-vaz (handlePromptSubmit.ts:178): uma imagem com
+        // chip `[Image #N]` só é enviada se o placeholder ainda estiver no
+        // texto — o utilizador apagar o texto é a forma de remover a imagem
+        // sem tocar na bar de anexos.
+        if (att.type === 'image' && att.pasteMarker !== undefined
+            && !prompt.includes(`[Image #${att.pasteMarker}]`)) {
+          continue
+        }
         blocks.push({ type: 'attachment', attachment: att })
       }
-      value = blocks
+      value = blocks.length === 1 && blocks[0].type === 'text' ? prompt : blocks
       clearAttachments()
     } else {
       value = prompt

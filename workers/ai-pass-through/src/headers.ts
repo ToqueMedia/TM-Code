@@ -8,6 +8,7 @@ const DEFAULT_ALLOWED_HEADERS = [
   'Accept',
   'X-Firebase-AppCheck',
   'X-Request-Type',
+  'X-TM-Speed',
   'X-Conversation-Id',
   'x-app',
   'x-stainless-lang',
@@ -46,9 +47,17 @@ export function buildCorsHeaders(request: Request): Headers {
     'X-TM-Request-Id',
     'X-TM-Provider',
     'X-TM-Model',
+    'X-TM-Speed-Applied',
     'X-TM-Upstream-Status',
     'X-TM-Config-Source',
     'X-TM-Config-Key',
+    // Billing — consumidos por billingStore.updateFromHeaders na IDE.
+    'X-Plan',
+    'X-Budget-Status',
+    'X-Budget-Pct',
+    'X-Tokens-Consumed',
+    'X-Extra-Tokens',
+    'X-Cycle-End',
     'Retry-After',
     'X-RateLimit-Limit',
     'X-RateLimit-Remaining',
@@ -116,12 +125,24 @@ export function buildUpstreamHeaders(request: Request, config: ActiveAIConfig, e
   return { headers, providerKey }
 }
 
+export interface BudgetHeaderMeta {
+  plan: string
+  status: string
+  consumedPct: number
+  tokensConsumed: number
+  extraUsageBalance: number
+  cycleEnd: string
+}
+
 export function buildResponseHeaders(upstream: Response, meta: {
   requestId: string
   provider: string
   model: string
+  speedApplied: boolean
   configSource: 'kv' | 'env'
   configKey: string
+  /** Estado de billing pré-voo (ausente quando o lookup falhou ou billing off). */
+  budget?: BudgetHeaderMeta
 }): Headers {
   const headers = new Headers()
   const contentType = upstream.headers.get('content-type')
@@ -144,8 +165,20 @@ export function buildResponseHeaders(upstream: Response, meta: {
   headers.set('x-tm-request-id', meta.requestId)
   headers.set('x-tm-provider', meta.provider)
   headers.set('x-tm-model', meta.model)
+  headers.set('x-tm-speed-applied', meta.speedApplied ? 'true' : 'false')
   headers.set('x-tm-upstream-status', String(upstream.status))
   headers.set('x-tm-config-source', meta.configSource)
   headers.set('x-tm-config-key', meta.configKey)
+
+  // Billing pré-voo — nomes exatos que billingStore.updateFromHeaders já
+  // consome na IDE (estavam mortos desde a remoção do proxy worker antigo).
+  if (meta.budget) {
+    headers.set('x-plan', meta.budget.plan)
+    headers.set('x-budget-status', meta.budget.status)
+    headers.set('x-budget-pct', meta.budget.consumedPct.toFixed(4))
+    headers.set('x-tokens-consumed', String(meta.budget.tokensConsumed))
+    headers.set('x-extra-tokens', String(meta.budget.extraUsageBalance))
+    if (meta.budget.cycleEnd) headers.set('x-cycle-end', meta.budget.cycleEnd)
+  }
   return headers
 }

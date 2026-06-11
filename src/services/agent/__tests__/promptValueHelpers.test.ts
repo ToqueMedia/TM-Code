@@ -39,17 +39,17 @@ const mkFile = (id: string): Attachment => ({
 // Reconstructed in beforeEach so any future jest.spyOn / mockImplementation
 // is scoped to a single test, never leaking to siblings. The shared
 // `defaultResolvers` reference is replaced fresh each time.
-let noMentions: (text: string, projectPath: string) => Promise<string>
+//
+// NOTE: @-mention resolution moved out of these helpers to atMentions.ts
+// (claude-vaz parity port) — see atMentions.test.ts for that coverage.
 let xmlForAttachments: (atts: Attachment[]) => Promise<string>
 let dataUriForImage: (att: Attachment) => Promise<string | null>
 let defaultResolvers: {
-  resolveMentions: typeof noMentions
   resolveAttachmentXml: typeof xmlForAttachments
   resolveImageDataUri: typeof dataUriForImage
 }
 
 beforeEach(() => {
-  noMentions = async () => ''
   xmlForAttachments = async (atts: Attachment[]) =>
     atts.length === 0
       ? ''
@@ -58,7 +58,6 @@ beforeEach(() => {
         '\n</attachments>'
   dataUriForImage = async (att: Attachment) => att.base64 ?? null
   defaultResolvers = {
-    resolveMentions: noMentions,
     resolveAttachmentXml: xmlForAttachments,
     resolveImageDataUri: dataUriForImage,
   }
@@ -99,23 +98,18 @@ describe('extractDisplayFromValue', () => {
 })
 
 describe('buildAugmentedPrompt — string path', () => {
-  it('returns the string unchanged when there are no mentions', async () => {
-    const result = await buildAugmentedPrompt('fix the bug', '/proj', defaultResolvers)
+  it('returns the string unchanged', async () => {
+    const result = await buildAugmentedPrompt('fix the bug', defaultResolvers)
     expect(result).toBe('fix the bug')
   })
 
-  it('appends mention context when resolver returns text', async () => {
-    const resolvers = {
-      ...defaultResolvers,
-      resolveMentions: async () => '\n\n<mentioned_files>\n...file contents...\n</mentioned_files>',
-    }
-    const result = await buildAugmentedPrompt('fix @src/foo.ts', '/proj', resolvers)
-    expect(result).toContain('fix @src/foo.ts')
-    expect(result).toContain('<mentioned_files>')
+  it('passes @-mention text through untouched — resolution happens in atMentions.ts', async () => {
+    const result = await buildAugmentedPrompt('fix @src/foo.ts', defaultResolvers)
+    expect(result).toBe('fix @src/foo.ts')
   })
 
   it('falls back to a placeholder for empty strings', async () => {
-    const result = await buildAugmentedPrompt('', '/proj', defaultResolvers)
+    const result = await buildAugmentedPrompt('', defaultResolvers)
     expect(result).toBe(t('prompt.fallbackAnalyzeFiles'))
   })
 })
@@ -130,7 +124,7 @@ describe('buildAugmentedPrompt — block path', () => {
       { type: 'text', text: 'second text' },
       { type: 'attachment', attachment: img2 },
     ]
-    const result = await buildAugmentedPrompt(value, '/proj', defaultResolvers)
+    const result = await buildAugmentedPrompt(value, defaultResolvers)
 
     // Verify the ordering is preserved: text1 → img1 → text2 → img2
     const idx1 = result.indexOf('first text')
@@ -144,7 +138,7 @@ describe('buildAugmentedPrompt — block path', () => {
   })
 
   it('falls back to placeholder when blocks produce no text', async () => {
-    const result = await buildAugmentedPrompt([], '/proj', defaultResolvers)
+    const result = await buildAugmentedPrompt([], defaultResolvers)
     expect(result).toBe(t('prompt.fallbackAnalyzeFiles'))
   })
 })
@@ -153,8 +147,7 @@ describe('buildContentParts — multimodal vision path', () => {
   it('returns null when there are no image attachments', async () => {
     const result = await buildContentParts(
       'just text',
-      '/proj',
-      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
+      { resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
     expect(result).toBeNull()
   })
@@ -166,8 +159,7 @@ describe('buildContentParts — multimodal vision path', () => {
     ]
     const result = await buildContentParts(
       value,
-      '/proj',
-      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
+      { resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
     expect(result).toBeNull()
   })
@@ -183,8 +175,7 @@ describe('buildContentParts — multimodal vision path', () => {
     ]
     const result = await buildContentParts(
       value,
-      '/proj',
-      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
+      { resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
 
     expect(result).not.toBeNull()
@@ -219,8 +210,7 @@ describe('buildContentParts — multimodal vision path', () => {
     ]
     const result = await buildContentParts(
       value,
-      '/proj',
-      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
+      { resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
 
     expect(result).not.toBeNull()
@@ -241,8 +231,7 @@ describe('buildContentParts — multimodal vision path', () => {
     ]
     const result = await buildContentParts(
       value,
-      '/proj',
-      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
+      { resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
 
     expect(result).not.toBeNull()
@@ -259,8 +248,7 @@ describe('buildContentParts — multimodal vision path', () => {
     ]
     const result = await buildContentParts(
       value,
-      '/proj',
-      { resolveMentions: noMentions, resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
+      { resolveAttachmentXml: xmlForAttachments, resolveImageDataUri: dataUriForImage },
     )
 
     expect(result).not.toBeNull()
@@ -270,25 +258,6 @@ describe('buildContentParts — multimodal vision path', () => {
       text: t('prompt.fallbackAnalyzeImages'),
     })
     expect(result![1].type).toBe('image_url')
-  })
-
-  it('resolves mentions inside text blocks and appends to the same text part', async () => {
-    const resolvers = {
-      ...defaultResolvers,
-      resolveMentions: async (text: string) =>
-        text.includes('@') ? '\n\n<mentioned_files>resolved</mentioned_files>' : '',
-    }
-    const img = mkImage('i')
-    const value: ContentBlock[] = [
-      { type: 'text', text: 'fix @src/foo.ts' },
-      { type: 'attachment', attachment: img },
-    ]
-    const result = await buildContentParts(value, '/proj', resolvers)
-
-    expect(result).not.toBeNull()
-    const textPart = result!.find(p => p.type === 'text') as { type: 'text'; text: string }
-    expect(textPart.text).toContain('fix @src/foo.ts')
-    expect(textPart.text).toContain('<mentioned_files>')
   })
 
   it('rejects whitespace-only text parts and prepends a fallback', async () => {
@@ -301,7 +270,7 @@ describe('buildContentParts — multimodal vision path', () => {
       { type: 'text', text: '   ' }, // whitespace only
       { type: 'attachment', attachment: img },
     ]
-    const result = await buildContentParts(value, '/proj', defaultResolvers)
+    const result = await buildContentParts(value, defaultResolvers)
 
     expect(result).not.toBeNull()
     // Whitespace text was kept (length > 0) but a fallback was prepended.
@@ -325,7 +294,7 @@ describe('buildContentParts — multimodal vision path', () => {
       { type: 'attachment', attachment: mkImage('big') },
       { type: 'attachment', attachment: mkImage('small') },
     ]
-    const result = await buildContentParts(value, '/proj', resolvers, tinyOptions)
+    const result = await buildContentParts(value, resolvers, tinyOptions)
 
     expect(result).not.toBeNull()
     const imageParts = result!.filter(p => p.type === 'image_url')
@@ -346,7 +315,7 @@ describe('buildContentParts — multimodal vision path', () => {
       { type: 'attachment', attachment: mkImage('a') },
       { type: 'attachment', attachment: mkImage('b') },
     ]
-    const result = await buildContentParts(value, '/proj', resolvers, tinyOptions)
+    const result = await buildContentParts(value, resolvers, tinyOptions)
 
     // No images survived → null (caller falls back to text path).
     expect(result).toBeNull()
@@ -365,7 +334,7 @@ describe('buildContentParts — multimodal vision path', () => {
       { type: 'attachment', attachment: mkImage('b') },
       { type: 'attachment', attachment: mkImage('c') },
     ]
-    const result = await buildContentParts(value, '/proj', resolvers, tinyOptions)
+    const result = await buildContentParts(value, resolvers, tinyOptions)
 
     expect(result).toBeNull()
   })
@@ -378,7 +347,7 @@ describe('buildContentParts — multimodal vision path', () => {
       { type: 'text', text: 'small' },
       { type: 'attachment', attachment: mkImage('tiny') },
     ]
-    const result = await buildContentParts(value, '/proj', defaultResolvers)
+    const result = await buildContentParts(value, defaultResolvers)
 
     expect(result).not.toBeNull()
     expect(MAX_MULTIMODAL_PAYLOAD_BYTES).toBeGreaterThan(0)

@@ -126,6 +126,16 @@ export interface QueryParams {
   extraHeaders?: Record<string, string>;
   /** Called as soon as streaming response headers are available. */
   onResponseHeaders?: (headers: Headers) => void;
+  /**
+   * Inter-turn attachment collector — claude-vaz parity (query.ts runs
+   * getAttachmentMessages after every tool round). Called after each batch
+   * of tool results; a non-empty return is appended as a user text message
+   * AFTER the tool results ("Be careful to do this after tool calls are
+   * done" — interleaving regular user content between tool_result messages
+   * errors on some providers). Currently carries the external-modification
+   * sweep ("Note: X was modified..." reminders). Must never throw.
+   */
+  collectInterTurnContext?: () => Promise<string>;
 }
 
 /** Terminal return value. */
@@ -1104,6 +1114,30 @@ export async function* query(
         pendingToolCalls,
       });
 
+      // Orçamento esgotado — o gate do worker (BUDGET_ENFORCEMENT=enforce)
+      // rejeitou com 402 tm_budget_exhausted. Não é retryable: marca o
+      // billing store para o agentRunner/usePromptBar bloquearem o próximo
+      // turno localmente e o CreditIndicator mostrar o estado.
+      if (errorStatus(error) === 402) {
+        try {
+          const { useBillingStore } = await import("../../stores/billingStore");
+          useBillingStore.getState().setNoCredits();
+        } catch {
+          /* non-critical */
+        }
+        yield {
+          type: "error",
+          message:
+            "Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.",
+        };
+        return {
+          reason: "error",
+          turnCount: state.turnCount,
+          totalInputTokens,
+          totalOutputTokens,
+        };
+      }
+
       if (
         !outputStarted &&
         isPlatformAuthError(error)
@@ -1462,10 +1496,30 @@ export async function* query(
       content: toolResultBlocks,
     };
 
+    // ── Inter-turn attachments (claude-vaz parity) ──
+    // After the tool round, give the host a chance to inject context the
+    // model should see before its next response — today the external-
+    // modification sweep ("Note: X was modified..."). Appended AFTER the
+    // tool results, mirroring claude-vaz's ordering constraint.
+    const interTurnMessages: QueryMessage[] = [];
+    if (params.collectInterTurnContext) {
+      try {
+        const interTurnContext = await params.collectInterTurnContext();
+        if (interTurnContext) {
+          interTurnMessages.push({
+            role: "user",
+            content: [{ type: "text", text: interTurnContext }],
+          });
+        }
+      } catch {
+        // The sweep is best-effort — never let it break the loop.
+      }
+    }
+
     // ── Update state for next iteration ──
 
     state = {
-      messages: [...updatedMessages, toolResultMessage],
+      messages: [...updatedMessages, toolResultMessage, ...interTurnMessages],
       autoCompactTracking: tracking,
       maxOutputTokensRecoveryCount: 0,
       continuationCount: 0,

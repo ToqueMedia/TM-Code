@@ -353,7 +353,7 @@ function MainLayout() {
               initial={{ width: 0, opacity: 0 }}
               animate={{ width: 240, opacity: 1 }}
               exit={{ width: 0, opacity: 0 }}
-              transition={{ type: 'spring', stiffness: 420, damping: 36, mass: 0.9 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
               style={{ overflow: 'hidden', flexShrink: 0, height: '100%' }}
             >
               <ProjectsSidebar />

@@ -25,7 +25,8 @@ import { guardScaffoldReapply } from './scaffoldReapplyGuard'
 import { scaffoldKeyLabel, type ScaffoldKey } from '../../services/scaffoldingDetector'
 import { t } from '@/i18n'
 import { runAuthFlow, runDesignFlow } from '../../services/agent/commands/authCommand'
-import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri, extractAndResolveMentions } from '../../services/attachmentService'
+import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri } from '../../services/attachmentService'
+import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from '../../services/agent/atMentions'
 import {
   enqueue as enqueueMessage,
   clearCommandQueue as clearMessageQueue,
@@ -695,7 +696,6 @@ export function usePromptBar() {
     // Bundle the Tauri-backed resolvers once — both helpers consume the
     // same shape, so call sites are immune to argument reordering.
     const promptResolvers = {
-      resolveMentions: extractAndResolveMentions,
       resolveAttachmentXml: resolveAttachments,
       resolveImageDataUri: resolveImageToDataUri,
     }
@@ -704,13 +704,42 @@ export function usePromptBar() {
       // Multimodal path — build content parts. If buildContentParts
       // returns null (no images survived disk read / size limits / size
       // budget), fall through to the text path.
-      const parts = await buildContentParts(content, projectPath, promptResolvers)
+      const parts = await buildContentParts(content, promptResolvers)
       if (parts) userContent = parts
     }
 
     if (userContent === null) {
       // Text-only path — interleaved `<attached_image>` placeholders.
-      userContent = await buildAugmentedPrompt(content, projectPath, promptResolvers)
+      userContent = await buildAugmentedPrompt(content, promptResolvers)
+    }
+
+    // ── @-mentions + external-modification sweep (claude-vaz parity) ──
+    // Mentions resolve ONCE over the full user text and append AFTER the
+    // prompt as synthetic read_file/list_directory tool context wrapped in
+    // <system-reminder> blocks (atMentions.ts has the full rationale). The
+    // sweep covers files the model has in context that changed on disk
+    // since it last saw them — claude-vaz injects the same note at turn
+    // start via getAttachmentMessages.
+    try {
+      const mentionResolution = await resolveMentionContext(display.text)
+      const changedContext = await collectChangedFileContext()
+      if (mentionResolution.contextText || mentionResolution.imageParts.length > 0 || changedContext) {
+        const applied = applyMentionResolution(
+          userContent, mentionResolution, changedContext, supportsAttachments,
+        )
+        userContent = applied.userContent
+        // Persist on the user bubble so rebuildConversationHistory re-emits
+        // the context on follow-up turns (it would otherwise evaporate —
+        // history is rebuilt from display messages after every turn). With
+        // skipUserMessage the bubble was added by the caller — still the
+        // last user message in this serialized send flow.
+        if (applied.persistedContext) {
+          chatStore.setMentionContextOnLastUserMessage(applied.persistedContext)
+        }
+      }
+    } catch {
+      // Mention resolution must never block a send — worst case the model
+      // reads the files itself via tools.
     }
 
     // Track whether the agent loop ended with an error.
@@ -756,6 +785,10 @@ export function usePromptBar() {
         : downgradeHistoryToText(rawHistory)
       const agentService = AgentService.getInstance()
       agentService.setSystemPrompt(systemPrompt)
+
+      // Novo pedido → zera a stat de display "último pedido" (paridade com
+      // agentRunner; a contabilidade real vive no worker ai-pass-through).
+      useBillingStore.getState().resetLastRequestStats()
 
       await agentService.runAgentLoop(userContent, history, {
         onTextDelta: (delta) => {
@@ -851,6 +884,9 @@ export function usePromptBar() {
         },
         onUsageUpdate: (inputTokens, outputTokens) => {
           useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
+          // Display-only ("último pedido" em ApiKeysSection). A cobrança real
+          // é exclusiva do worker ai-pass-through — ver billingStore.ts.
+          useBillingStore.getState().addLastRequestTokens(inputTokens + outputTokens)
         },
         onContextCompression: (event) => {
           if (event.type === 'hooks_start') {

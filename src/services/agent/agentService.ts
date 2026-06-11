@@ -51,7 +51,7 @@ import {
   mechanicalFallback,
   buildInternalMessagesFromSession,
 } from "./contextManager";
-import { DEFAULT_CONTEXT_WINDOW } from "./agentConfig";
+import { DEFAULT_CONTEXT_WINDOW, TM_SPEED_BILLING_MULTIPLIER } from "./agentConfig";
 
 // ── Re-exports for backward compatibility ──
 
@@ -85,6 +85,14 @@ class AgentService {
 
   private lightweightOptions: LightweightAgentOptions | null = null;
   private queryEngine: QueryEngine | null = null;
+
+  // Última resposta HTTP confirmou TM Speed (`X-TM-Speed-Applied: true`)?
+  // Os headers chegam no início de cada resposta e o `message_stop` desse
+  // mesmo turno chega depois (sequencial), por isso um campo simples por
+  // resposta é suficiente para parear turno ↔ multiplicador de cobrança.
+  // Só é atualizado em runs não-lightweight (lightweight não envia o header
+  // X-TM-Speed nem liga onResponseHeaders) e é reposto no início de cada run.
+  private lastResponseSpeedApplied = false;
 
   // ── Delegated state ──
   private sessionState: SessionState;
@@ -187,7 +195,17 @@ class AgentService {
     }
     resolveAllPendingDiffApprovals(false);
     import("../../stores/permissionStore")
-      .then((m) => m.usePermissionStore.getState().resetAutoApprove())
+      .then((m) => {
+        // RACE FIX (2026-06-11): cancelar o loop tem de resolver + limpar o
+        // prompt de permissão pendente E a fila. Sem isto, o stop do CMD
+        // mode (stopAgent → cancelLoop) deixava o diálogo no ecrã; um
+        // "Aprovar" tardio resolvia a Promise e a tool EXECUTAVA num run já
+        // morto (escrita de ficheiro/comando com a UI em idle). O chat mode
+        // já chamava clearPending no seu handleStop — isto centraliza para
+        // todos os caminhos de cancelamento (stop, switch de projeto, erro).
+        m.usePermissionStore.getState().clearPending();
+        m.usePermissionStore.getState().resetAutoApprove();
+      })
       .catch(() => {});
     import("../../stores/credentialRequestStore")
       .then((m) => m.useCredentialRequestStore.getState().clearAll())
@@ -394,8 +412,14 @@ class AgentService {
     };
 
     // 3. Build tool definitions in OpenAI format
+    // web_search NUNCA vai no schema: modelos com pesquisa nativa
+    // (supportsSearch, ex.: qwen3.7-max-2026-06-08) pesquisam SERVER-SIDE
+    // via extraBody.enable_search injetado pelo worker — expor uma function
+    // tool convidaria o modelo a chamá-la em vez de usar a capacidade
+    // nativa. E o execute local desta tool aponta para o /v1/messages do
+    // proxy ANTIGO (removido) — reativá-la seria um erro garantido.
     const filteredTools = this.tools.filter((t) => {
-      if (t.function.name === "web_search") return false; // MiMo doesn't support native search
+      if (t.function.name === "web_search") return false;
       return true;
     });
     const openaiTools: OpenAI.ChatCompletionTool[] = filteredTools.map((t) => ({
@@ -416,6 +440,10 @@ class AgentService {
     // 6. Build extra headers — X-Request-Type is sticky across turns
     const extraHeaders = this.buildExtraHeaders();
 
+    // Reset por run: evita que um run anterior servido em speed "vaze" o
+    // multiplicador para o primeiro turno deste run antes dos headers chegarem.
+    this.lastResponseSpeedApplied = false;
+
     // 7. Create QueryEngine
     const engine = new QueryEngine({
       client,
@@ -430,6 +458,17 @@ class AgentService {
       onResponseHeaders: this.lightweightOptions
         ? undefined
         : (headers) => this.applyStreamingResponseHeaders(headers),
+      // External-modification sweep between tool rounds (claude-vaz parity —
+      // its query loop runs getAttachmentMessages after every tool batch).
+      // Main agent only: the ToolExecutor read state is a shared singleton,
+      // and a sub-agent draining the sweep would steal the notification from
+      // the main conversation.
+      collectInterTurnContext: this.lightweightOptions
+        ? undefined
+        : async () => {
+            const { collectChangedFileContext } = await import("./atMentions");
+            return collectChangedFileContext();
+          },
       // Usage is reported via message_stop events — do NOT add onUsage
       // callback here or output tokens will be double-counted (SUM semantics).
     });
@@ -509,6 +548,9 @@ class AgentService {
             callbacks.onUsageUpdate(
               event.usage.prompt_tokens,
               event.usage.completion_tokens,
+              !this.lightweightOptions && this.lastResponseSpeedApplied
+                ? TM_SPEED_BILLING_MULTIPLIER
+                : 1,
             );
           }
           callbacks.onTurnComplete(turnNumber, event.providerState);
@@ -590,11 +632,30 @@ class AgentService {
   }
 
   /**
-   * Streaming responses may expose safe metadata in HTTP headers. The
-   * dedicated AI pass-through Worker does not inject billing events into the
-   * stream, so missing budget headers are expected.
+   * Streaming responses expose safe metadata in HTTP headers. The AI
+   * pass-through Worker emits X-Plan / X-Budget-* on every response (estado
+   * de billing pré-voo — o worker é o único ponto de contabilidade); nada é
+   * injetado no corpo do stream. Headers ausentes continuam tolerados (BYOK
+   * bypassa o worker; BUDGET_ENFORCEMENT=off desliga o billing).
    */
   private applyStreamingResponseHeaders(headers: Headers): void {
+    // Atualizado a CADA resposta (ausência do header ⇒ false), nunca latched —
+    // o admin pode despublicar o speedModel a meio de um run e os turnos
+    // seguintes devem voltar a cobrar 1x.
+    this.lastResponseSpeedApplied =
+      headers.get("X-TM-Speed-Applied") === "true";
+    try {
+      useTmSpeedStore.getState().setApplied(this.lastResponseSpeedApplied);
+      // Id do modelo ativo (ex.: "mimo-v2.5-pro") — alimenta o gate de
+      // visibilidade do /speed por modelo (tmSpeedStore.isSpeedModelEligible).
+      const activeModel = headers.get("X-TM-Model");
+      if (activeModel) {
+        useTmSpeedStore.getState().setActiveModelId(activeModel);
+      }
+    } catch {
+      /* non-critical */
+    }
+
     try {
       useBillingStore.getState().updateFromHeaders(headers);
     } catch {
@@ -602,8 +663,12 @@ class AgentService {
     }
 
     try {
-      const modelName = headers.get("X-Model-Name");
-      const modelProvider = headers.get("X-Model-Provider");
+      // O data-plane atual envia X-TM-Model/X-TM-Provider (id do modelo da
+      // config ativa); X-Model-Name/X-Model-Provider eram do gateway antigo.
+      // O fallback liga o lookup de MODEL_PROFILES (context window, filtro
+      // do web_search por supportsSearch) ao worker real.
+      const modelName = headers.get("X-Model-Name") ?? headers.get("X-TM-Model");
+      const modelProvider = headers.get("X-Model-Provider") ?? headers.get("X-TM-Provider");
       const thinkingModeRaw = headers.get("X-Model-Thinking-Mode");
       const contextWindowRaw = headers.get("X-Model-Context-Window");
       const byokActiveRaw = headers.get("X-BYOK-Active");

@@ -44,10 +44,19 @@ export interface MeResponse {
 
 // ── Store ──
 //
-// The backend is the source of truth. The store receives data from:
-//   1. /v1/me on app launch + window focus + post-purchase deep link
-//      (event-driven, NEVER polling — see memory feedback_no_polling.md)
-//   2. Response headers, when an administrative gateway returns budget metadata
+// O servidor é o ÚNICO ponto de verdade da contabilidade (2026-06): o worker
+// ai-pass-through observa o `usage` de cada resposta, aplica o multiplicador
+// do TM Speed e comita increments atómicos ao Firestore — a IDE não estima,
+// não corrige e não persiste consumo (o antigo `persistTokensConsumed` +
+// `addEstimatedUsage` foram removidos; eram a fonte das inconsistências:
+// chat-mode sem billing, correção por turno errada, write absoluto
+// last-writer-wins a esmagar o cycle-reset do servidor).
+//
+// O store recebe dados de:
+//   1. /v1/me no arranque + window focus + deep link pós-compra
+//      (event-driven, NUNCA polling — ver memória feedback_no_polling.md)
+//   2. Headers X-Budget-*/X-Plan em CADA resposta do worker de IA
+//      (estado pré-voo do turno — lag de ~1 turno em relação ao commit).
 
 interface BillingState {
   // Identity
@@ -62,12 +71,13 @@ interface BillingState {
   cycleEnd: string           // "YYYY-MM-DD"
   status: CostBudgetStatus
 
-  // Overage credits (canonical: tmsQuota.purchasedBalance on the backend)
+  // Overage credits (canonical: tokenBudget.extraUsageBalance on the backend)
   tmsRemaining: number
 
-  // Last request stats (for UI feedback)
+  // Last request stats (display-only — fed by the authoritative per-turn
+  // usage, never used for accounting). ApiKeysSection uses it for the BYOK
+  // cost estimate.
   lastTokensUsed: number
-  lastUsedOverage: boolean
 
   // Emergency stop
   noCredits: boolean
@@ -76,7 +86,11 @@ interface BillingState {
 interface BillingActions {
   updateFromHeaders: (headers: Headers) => void
   updateFromMe: (data: MeResponse) => void
-  addEstimatedUsage: (tokens: number) => void
+  /** Display-only: accumulate the authoritative per-turn token total for the
+   *  "last request" stat. No consumption math happens client-side. */
+  addLastRequestTokens: (tokens: number) => void
+  /** Zero the per-request stat at the start of a new agent run. */
+  resetLastRequestStats: () => void
   setNoCredits: () => void
   /** Clear noCredits flag without changing the underlying status — used by
    *  agentService before each request as an optimistic "maybe it's resolved" reset.
@@ -85,7 +99,7 @@ interface BillingActions {
   reset: () => void
 }
 
-const INITIAL_STATE: BillingState = {
+const DEFAULT_STATE: BillingState = {
   plan: 'explorer',
   isActive: true,
   isLoaded: false,
@@ -96,9 +110,108 @@ const INITIAL_STATE: BillingState = {
   status: 'allowed',
   tmsRemaining: 0,
   lastTokensUsed: 0,
-  lastUsedOverage: false,
   noCredits: false,
 }
+
+// ── Cache local do snapshot de billing (arranque sem flash de plano) ──
+//
+// Sem isto, a IDE abria com os defaults (explorer) e o plano real só
+// aparecia depois de Firebase restore → App Check → /v1/me — segundos de
+// UI errada em cada arranque (pedido do user 2026-06-11). A cache guarda o
+// ÚLTIMO snapshot autoritativo por utilizador; o boot hidrata a store de
+// forma síncrona antes do primeiro render, e o /v1/me seguinte corrige e
+// re-grava. É display-only — nenhuma decisão de cobrança vive no cliente
+// ([[billing-single-source-of-truth]]); o enforcement real é o worker.
+//
+// Invalidação: troca de conta (uid difere → firebaseAuth faz reset),
+// logout (reset limpa), e idade > 7 dias (o ciclo provavelmente rolou —
+// melhor defaults do que números antigos).
+
+const BILLING_CACHE_KEY = 'tm-billing-cache-v1'
+const BILLING_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+
+interface BillingCacheRecord {
+  v: 1
+  uid: string
+  savedAt: number
+  plan: UserPlanName
+  isActive: boolean
+  consumedPct: number
+  tokensConsumed: number
+  tokenBudget: number
+  cycleEnd: string
+  status: CostBudgetStatus
+  tmsRemaining: number
+}
+
+function loadBillingCache(): BillingCacheRecord | null {
+  try {
+    const raw = localStorage.getItem(BILLING_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as BillingCacheRecord
+    if (parsed?.v !== 1 || typeof parsed.uid !== 'string') return null
+    if (Date.now() - (parsed.savedAt ?? 0) > BILLING_CACHE_MAX_AGE_MS) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+/** uid do snapshot em cache — firebaseAuth compara com o uid restaurado e
+ *  faz reset quando a conta mudou (não mostrar o plano de outro user). */
+export function getCachedBillingUid(): string | null {
+  return loadBillingCache()?.uid ?? null
+}
+
+/** Grava o estado atual como snapshot de arranque. Chamado pelo
+ *  firebaseAuth logo após cada updateFromMe (que tem o uid). */
+export function persistBillingCache(uid: string): void {
+  try {
+    const s = useBillingStore.getState()
+    const record: BillingCacheRecord = {
+      v: 1,
+      uid,
+      savedAt: Date.now(),
+      plan: s.plan,
+      isActive: s.isActive,
+      consumedPct: s.consumedPct,
+      tokensConsumed: s.tokensConsumed,
+      tokenBudget: s.tokenBudget,
+      cycleEnd: s.cycleEnd,
+      status: s.status,
+      tmsRemaining: s.tmsRemaining,
+    }
+    localStorage.setItem(BILLING_CACHE_KEY, JSON.stringify(record))
+  } catch {
+    /* quota/indisponível — a cache é só otimização de arranque */
+  }
+}
+
+function clearBillingCache(): void {
+  try { localStorage.removeItem(BILLING_CACHE_KEY) } catch { /* noop */ }
+}
+
+/** Estado inicial: defaults + snapshot em cache quando existe. `isLoaded`
+ *  continua false — semanticamente significa "o /v1/me desta sessão ainda
+ *  não respondeu"; os valores hidratados são otimistas (stale-then-refresh). */
+function buildInitialState(): BillingState {
+  const cached = loadBillingCache()
+  if (!cached) return DEFAULT_STATE
+  return {
+    ...DEFAULT_STATE,
+    plan: cached.plan,
+    isActive: cached.isActive,
+    consumedPct: cached.consumedPct,
+    tokensConsumed: cached.tokensConsumed,
+    tokenBudget: cached.tokenBudget,
+    cycleEnd: cached.cycleEnd,
+    status: cached.status,
+    tmsRemaining: cached.tmsRemaining,
+    noCredits: cached.status === 'rejected',
+  }
+}
+
+const INITIAL_STATE: BillingState = buildInitialState()
 
 /** Check if a status reflects "no more service available". */
 export function isBlocked(status: CostBudgetStatus): boolean {
@@ -140,8 +253,11 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
   ...INITIAL_STATE,
 
   /**
-   * Apply budget headers if a gateway response includes them. The new AI
-   * pass-through Worker does not add billing headers, so absence is normal.
+   * Apply the budget headers the AI pass-through worker emits on every
+   * response (X-Plan / X-Budget-* — pre-flight state read from Firestore,
+   * so they lag the in-flight turn's commit by one turn). Absence is still
+   * tolerated: BYOK traffic bypasses the worker, and BUDGET_ENFORCEMENT=off
+   * disables the billing path entirely.
    *
    * Updates BOTH consumedPct AND tokensConsumed (from X-Tokens-Consumed) so
    * the dropdown's absolute count stays consistent with the % indicator.
@@ -201,63 +317,21 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
     })
   },
 
-  /**
-   * Local optimistic usage used while the AI data-plane Worker streams
-   * provider output. The pass-through Worker intentionally no longer emits
-   * billing headers, so this keeps the header pill moving until /v1/me or
-   * an administrative gateway response provides the authoritative numbers.
-   */
-  addEstimatedUsage: (tokens) => {
+  addLastRequestTokens: (tokens) => {
     if (!Number.isFinite(tokens) || tokens <= 0) return
-    const rounded = Math.ceil(tokens)
-    set(state => {
-      const tokensConsumed = state.tokensConsumed + rounded
-      const consumedPct = state.tokenBudget > 0
-        ? tokensConsumed / state.tokenBudget
-        : state.consumedPct
-
-      // Overage deduction: if they are in overage, deduct tokens from tmsRemaining
-      let tmsRemaining = state.tmsRemaining
-      const isOverage = state.status === 'allowed_overage' || consumedPct > 1
-      if (isOverage) {
-        tmsRemaining = Math.max(0, tmsRemaining - rounded)
-      }
-
-      let status = state.status
-      let noCredits = state.noCredits
-      if (isOverage && tmsRemaining <= 0) {
-        status = 'rejected'
-        noCredits = true
-      } else {
-        status =
-          state.status === 'rejected' || state.status === 'allowed_overage'
-            ? state.status
-            : consumedPct >= 1
-              ? 'allowed_critical'
-              : consumedPct >= 0.95
-                ? 'allowed_critical'
-                : consumedPct >= 0.8
-                  ? 'allowed_warning'
-                  : state.status
-      }
-
-      return {
-        tokensConsumed,
-        consumedPct,
-        status,
-        tmsRemaining,
-        noCredits,
-        lastTokensUsed: state.lastTokensUsed + rounded,
-        lastUsedOverage: state.lastUsedOverage || isOverage,
-      }
-    })
+    set(state => ({ lastTokensUsed: state.lastTokensUsed + Math.ceil(tokens) }))
   },
+
+  resetLastRequestStats: () => set({ lastTokensUsed: 0 }),
 
   setNoCredits: () => set({ noCredits: true, status: 'rejected' }),
 
   clearNoCredits: () => set({ noCredits: false }),
 
   reset: () => {
-    set({ ...INITIAL_STATE })
+    // Logout/troca de conta: volta aos VERDADEIROS defaults (não ao
+    // snapshot hidratado) e apaga a cache de arranque.
+    clearBillingCache()
+    set({ ...DEFAULT_STATE })
   },
 }))

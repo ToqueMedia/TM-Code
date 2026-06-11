@@ -29,7 +29,11 @@ function FallbackUI({
       display="flex"
       alignItems="center"
       justifyContent="center"
-      height="100vh"
+      // 100% do CONTAINER, nunca 100vh: este boundary envolve subtrees dentro
+      // de layouts flex — um fallback de viewport inteiro empurrava o resto da
+      // UI para fora do ecrã ("tela distorcida") quando um descendente crashava.
+      height="100%"
+      minHeight="160px"
       width="100%"
       bg="bg.canvas"
     >

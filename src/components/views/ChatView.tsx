@@ -22,6 +22,7 @@ import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import PostCompactSurvey from '../chat/PostCompactSurvey'
 import ChatSkeleton from '../chat/ChatSkeleton'
 import ModelIndicator from '../chat/ModelIndicator'
+import TmSpeedIndicator from '../chat/TmSpeedIndicator'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
 const CheckpointPanel = lazy(() => import('../chat/CheckpointPanel'))
@@ -222,7 +223,7 @@ function ChatView() {
   // This prevents the scroll-jump effect when the user sends a message.
   useLayoutEffect(() => {
     if (wasAtBottomRef.current) {
-      scrollToBottom()
+      scrollToBottom('instant')
     }
   }, [messages.length, scrollToBottom])
 
@@ -230,7 +231,7 @@ function ChatView() {
   // conditions caused by the 50ms buffer flush + in-place mutations.
   useEffect(() => {
     if (isStreaming && wasAtBottomRef.current) {
-      scrollToBottom()
+      scrollToBottom('instant')
     }
   }, [streamingVersion, isStreaming, scrollToBottom])
 
@@ -240,7 +241,7 @@ function ChatView() {
     if (prevStreamingRef.current && !isStreaming) {
       if (wasAtBottomRef.current) {
         // Delay to let DOM settle after finalization + indicator unmount
-        const timer = setTimeout(() => scrollToBottom(), 80)
+        const timer = setTimeout(() => scrollToBottom('instant'), 80)
         return () => clearTimeout(timer)
       }
     }
@@ -380,6 +381,7 @@ function ChatView() {
                 </Text>
               </Flex>
             )}
+            <TmSpeedIndicator />
             <ModelIndicator />
             {!showModelIndicator && (
               <CreditIndicator
@@ -435,7 +437,7 @@ function ChatView() {
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 380, damping: 38, mass: 1 }}
+            transition={{ duration: 0.16, ease: 'easeOut' }}
             style={{ flexShrink: 0, overflow: 'hidden' }}
           >
             <Flex
@@ -721,7 +723,7 @@ function ChatView() {
             boxShadow="0 4px 12px rgba(0,0,0,0.3)"
             transition={`all ${tokens.transition.fast}`}
             _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-            onClick={() => scrollToBottom()}
+            onClick={() => scrollToBottom('instant')}
             zIndex={10}
           >
             ↓

@@ -57,13 +57,17 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
       // Fallback padrão
       return (
-        <div 
+        <div
           style={{
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
-            height: '100vh',
+            // 100% do container, nunca 100vh — ver ui/ErrorBoundary.tsx: o
+            // fallback de viewport inteiro dentro de um flex parent distorcia
+            // o layout e escondia o resto da UI quando um descendente crashava.
+            height: '100%',
+            minHeight: '160px',
             backgroundColor: '#1e2028',
             color: '#e6edf3',
             fontFamily: 'system-ui, -apple-system, sans-serif',

@@ -245,6 +245,106 @@ describe('A: execute() orchestration', () => {
     expect(result).toContain('aborted before execution')
   })
 
+  it('GLOBAL PAUSE: a tool waits while another tool\'s permission dialog is open', async () => {
+    // Pedido do user (2026-06-11): quando há intervenção obrigatória do
+    // utilizador pendente, NADA pode correr. Tools paralelas/auto-aprovadas
+    // têm de esperar no gate de entrada até o diálogo resolver.
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue('file content' as never)
+
+    const originalImpl = () => ({
+      requestPermission: mockRequestPermission,
+      requestPathAccess: mockRequestPathAccess,
+      autoApproveDiffs: false,
+      additionalDirectories: [] as string[],
+    })
+    try {
+      // Gate aberto: outro tool tem um diálogo de permissão no ecrã.
+      let dialogOpen = true
+      mockGetState_permission.mockImplementation(() => ({
+        ...originalImpl(),
+        pendingPermission: dialogOpen ? { id: 'p1', toolName: 'write_file', args: {} } : null,
+      }) as ReturnType<typeof originalImpl>)
+
+      const pending = exec.execute('read_file', { file_path: '/projects/test-app/x.txt' })
+
+      // Enquanto o diálogo está aberto, o IPC do read_file NÃO pode disparar.
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(mockInvoke).not.toHaveBeenCalledWith('read_file', expect.anything())
+
+      // Utilizador resolve o diálogo → o tool retoma e executa.
+      dialogOpen = false
+      const result = await pending
+      expect(result).toContain('file content')
+      expect(mockInvoke).toHaveBeenCalledWith('read_file', expect.anything())
+    } finally {
+      mockGetState_permission.mockImplementation(originalImpl)
+    }
+  })
+
+  it('MENTION: sensitive-file mentions prompt for permission (denied → throw)', async () => {
+    // Decisão do user (2026-06-11): @credentials.json em menção NÃO bypassa
+    // o prompt de ficheiro sensível do read_file normal.
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue('secret content' as never)
+
+    mockRequestPermission.mockResolvedValueOnce({ approved: false, prompted: true, source: 'user' })
+    await expect(
+      exec.executeForMention('read_file', { file_path: '/projects/test-app/credentials.json' }),
+    ).rejects.toThrow('denied')
+    expect(mockRequestPermission).toHaveBeenCalledWith(
+      'read_file',
+      expect.objectContaining({ file_path: '/projects/test-app/credentials.json' }),
+      'sensitive_file',
+    )
+    expect(mockInvoke).not.toHaveBeenCalledWith('read_file', expect.anything())
+
+    // Aprovado → lê normalmente.
+    mockRequestPermission.mockResolvedValueOnce({ approved: true, prompted: true, source: 'user' })
+    const content = await exec.executeForMention('read_file', { file_path: '/projects/test-app/credentials.json' })
+    expect(content).toContain('secret content')
+  })
+
+  it('MENTION: non-sensitive mentions read without any prompt', async () => {
+    const exec = freshExecutor()
+    mockInvoke.mockResolvedValue('plain content' as never)
+    const content = await exec.executeForMention('read_file', { file_path: '/projects/test-app/app.tsx' })
+    expect(content).toContain('plain content')
+    expect(mockRequestPermission).not.toHaveBeenCalled()
+  })
+
+  it('RACE: approval landing AFTER an abort does not execute the tool', async () => {
+    // Sequência real: agente pede permissão (diálogo aberto) → user faz stop
+    // (abort) → user clica "Aprovar". A aprovação resolve a Promise mas a
+    // tool NÃO pode executar num run morto — o signal é re-verificado depois
+    // do await (não só à entrada do execute()).
+    const exec = freshExecutor()
+    const controller = new AbortController()
+    mockInvoke.mockResolvedValue('file content' as never)
+
+    let resolveDecision: (d: unknown) => void = () => {}
+    mockRequestPermission.mockReturnValueOnce(
+      new Promise(resolve => { resolveDecision = resolve }),
+    )
+
+    const pending = exec.execute(
+      'write_file',
+      { file_path: '/projects/test-app/out.txt', content: 'x' },
+      undefined,
+      controller.signal,
+    )
+
+    // Stop do user enquanto o diálogo está aberto…
+    controller.abort()
+    // …e a aprovação chega DEPOIS do abort.
+    resolveDecision({ approved: true, prompted: true, source: 'user' })
+
+    const result = await pending
+    expect(result).toContain('aborted before execution')
+    // O handler da tool nunca corre — nenhum write_file chega ao IPC.
+    expect(mockInvoke).not.toHaveBeenCalledWith('write_file', expect.anything())
+  })
+
   it('returns skip notice for passive tools', async () => {
     const exec = freshExecutor()
     // Register a passive tool
@@ -1252,11 +1352,14 @@ describe('J: Path validation', () => {
     expect(result).toContain('outside the project directory')
   })
 
-  it('create_directory validates path before creating', async () => {
+  it('create_directory goes through the path-access prompt like other file tools', async () => {
+    // Antes, create_directory não estava em FILE_SCOPE_TOOLS e rebentava com
+    // um throw "Access denied" sem nunca mostrar o prompt de acesso — o
+    // contrato correto é o soft-block com mensagem acionável (igual a
+    // read_file/write_file), deixando o utilizador conceder o diretório.
     const exec = freshExecutor()
-    await expect(
-      exec.execute('create_directory', { file_path: '/etc' })
-    ).rejects.toThrow('outside the project directory')
+    const result = await exec.execute('create_directory', { file_path: '/etc' })
+    expect(result).toContain('outside the project directory')
   })
 
   it('glob validates directory before listing files', async () => {

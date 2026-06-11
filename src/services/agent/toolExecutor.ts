@@ -38,12 +38,15 @@ import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
 import { createFileStateCacheWithSizeLimit, type FileStateCache } from './toolExecutor/fileStateCache'
 import { checkReadDedup } from './toolExecutor/readDedup'
+import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
 import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
 import type { AgentCallbacks } from './types'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, hasPendingDiffApprovals } from '../../stores/chatStore'
+import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
+import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 
 // === Types ===
 
@@ -283,9 +286,17 @@ class ToolExecutor {
   /** Shared context — passed to domain registration functions. */
   private readonly ctx: ToolRegistrationContext
 
+  /** Home dir cache para expandir `~/...` em resolveToAbsolute (que é sync).
+   *  Populado fire-and-forget no arranque; até resolver, paths com `~` caem
+   *  no comportamento antigo (tratados como relativos). */
+  private homeDir: string | null = null
+
   private constructor() {
     this.ctx = this.buildContext()
     this.registerTools()
+    void invoke<string>('get_home_directory')
+      .then((home) => { this.homeDir = home })
+      .catch(() => { /* sem home dir, `~` não expande — não é fatal */ })
   }
 
   static getInstance(): ToolExecutor {
@@ -468,6 +479,191 @@ class ToolExecutor {
     return firstOverlap
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // @-mention surface — used exclusively by atMentions.ts
+  // ══════════════════════════════════════════════════════════════
+  //
+  // Mirrors claude-vaz's at-mention pipeline (utils/attachments.ts
+  // `processAtMentionedFiles` → `generateFileAttachment`), which executes
+  // the REAL FileReadTool for mentioned files so the model-visible result,
+  // the read-state bookkeeping, and the dedup behaviour are byte-identical
+  // to a model-initiated call. The permission layer is skipped on purpose:
+  // the user explicitly named the target in their prompt (claude-vaz only
+  // checks deny rules — `isFileReadDenied` — for at-mentions). The hard
+  // blocks survive: `.env` is refused here, and path-scope validation
+  // throws inside the tool handlers themselves.
+
+  /**
+   * Resolve a mention token to the absolute path the read tools will use.
+   * Exposed so atMentions.ts renders the synthetic "Called the read_file
+   * tool with the following input" line with the SAME path the tool call
+   * actually received — claude-vaz shows the expanded absolute path too.
+   */
+  resolveMentionPath(p: string): string {
+    return this.resolveToAbsolute(p)
+  }
+
+  /** Whether a mentioned path is inside the agent's allowed scope.
+   *  Out-of-scope mentions are dropped silently — same outcome as
+   *  claude-vaz's deny-rule check returning null. */
+  isMentionPathAllowed(p: string): boolean {
+    try {
+      this.validatePathWithinProject(p)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Whether the model already has a fresh FULL view of this file in context.
+   * Maps claude-vaz's `already_read_file` check (attachments.ts:3077-3120 —
+   * entry timestamp matches the file mtime exactly): when true, the mention
+   * renders to NOTHING because re-sending the content would only burn
+   * cache_creation tokens. TM Code's freshness primitive is `fsVersion`
+   * (no cheap per-file stat over Tauri IPC): offset === undefined means the
+   * entry holds the whole file (full read, write_file or edit_file), and an
+   * unchanged global fsVersion guarantees no tool writes happened since.
+   * Conservative like the read dedup: external edits bump nothing, but the
+   * external-change sweep (`collectExternallyChangedFiles`) covers that side.
+   */
+  isFileFreshInContext(filePath: string): boolean {
+    const abs = this.resolveToAbsolute(filePath)
+    const entry = this.readFileState.get(abs)
+    return !!entry && entry.offset === undefined && entry.fsVersion === getFsVersion()
+  }
+
+  /**
+   * Execute a read-only tool handler directly for @-mention resolution,
+   * bypassing the permission/abort/plan-mode layers of `execute()` (the
+   * mention is user-initiated; there is no model tool_call to gate).
+   * Path-scope validation still throws inside the handlers; `.env` stays
+   * hard-blocked here exactly as in `execute()`.
+   */
+  async executeForMention(
+    toolName: 'read_file' | 'list_directory',
+    input: Record<string, unknown>,
+  ): Promise<string> {
+    const tool = this.tools.get(toolName)
+    if (!tool) throw new Error(`Unknown tool: ${toolName}`)
+    const filePath = (input.file_path || '') as string
+    if (this.isEnvFile(filePath)) {
+      // Same hard block as execute() — thrown (not returned) so the mention
+      // resolver drops the mention silently instead of inlining the refusal.
+      throw new Error('.env files are blocked from mention resolution')
+    }
+    // Ficheiros sensíveis (credentials, chaves, etc.) PERGUNTAM mesmo em
+    // menção (decisão do user 2026-06-11): @credentials.json sem prompt
+    // relaxava a proteção que o read_file normal tem. Negado → throw → a
+    // menção é descartada silenciosamente (o user acabou de decidir isso
+    // no diálogo; nenhum conteúdo chega ao modelo).
+    if (toolName === 'read_file' && this.isSensitiveFile(filePath)) {
+      const decision = await usePermissionStore.getState().requestPermission(
+        'read_file', input, 'sensitive_file',
+      )
+      if (!decision.approved) {
+        throw new Error('sensitive-file mention denied by user')
+      }
+    }
+    return tool.execute(input)
+  }
+
+  /**
+   * External-modification sweep — port of claude-vaz's `getChangedFiles`
+   * (utils/attachments.ts:2063-2140). Walks every full-view entry in
+   * `readFileState`, stats the file, and when the disk content diverged
+   * from what the model last saw, returns a post-edit snippet (changed
+   * hunks, line-numbered) for the "Note: X was modified..." reminder.
+   *
+   * State is updated in place on detection (claude-vaz re-runs
+   * FileReadTool.call, which refreshes readFileState) so:
+   *   - the next sweep doesn't re-fire for the same edit, and
+   *   - read-before-write enforcement accepts an edit_file without a
+   *     fresh read — the model HAS the current content via the snippet.
+   *
+   * Ranged reads (offset set) are skipped — claude-vaz has the same TODO
+   * (offset/limit entries return null). Partial injected views are skipped
+   * too: there is no full baseline to diff against.
+   */
+  async collectExternallyChangedFiles(): Promise<Array<{ path: string; snippet: string }>> {
+    const changed: Array<{ path: string; snippet: string }> = []
+    // Snapshot first — set() during LRU iteration would mutate recency order.
+    const entries = Array.from(this.readFileState.entries())
+    for (const [path, entry] of entries) {
+      if (entry.offset !== undefined || entry.limit !== undefined) continue
+      if (entry.isPartialView) continue
+
+      // Cheap mtime gate before paying for a full read. stat failure means
+      // deleted/unreadable — skip (claude-vaz returns null on read failure).
+      let mtimeMs: number | null = null
+      try {
+        const { stat } = await import('@tauri-apps/plugin-fs')
+        const info = await stat(path)
+        mtimeMs = info.mtime ? new Date(info.mtime).getTime() : null
+      } catch {
+        continue
+      }
+      if (mtimeMs !== null && mtimeMs <= entry.timestamp) continue
+
+      let current: string
+      try {
+        current = await invoke<string>('read_file', { path })
+      } catch {
+        continue
+      }
+      const newHash = simpleHash(current)
+      const previousContent = entry.content
+      const touchedOnly = newHash === entry.hash
+
+      // Refresh state even when content is identical — bumps the stored
+      // timestamp past the new mtime so the sweep stops re-stat-reading
+      // a file that was merely touched.
+      const now = Date.now()
+      this.readFileTimestamps.set(path, { timestamp: now, hash: newHash })
+      this.readFileState.set(path, {
+        content: current,
+        timestamp: now,
+        offset: entry.offset,
+        limit: entry.limit,
+        hash: newHash,
+        fsVersion: getFsVersion(),
+      })
+
+      if (touchedOnly) continue
+      const snippet = getSnippetForTwoFileDiff(previousContent, current)
+      // Whitespace-only/no-hunk edits yield '' — claude-vaz skips those.
+      if (snippet === '') continue
+      changed.push({ path, snippet })
+    }
+    return changed
+  }
+
+  /**
+   * Bloqueia enquanto houver uma intervenção obrigatória do utilizador
+   * pendente (gate de pausa global — ver o call-site no execute()).
+   * Polling de 120ms em vez de subscriptions: só corre enquanto um gate
+   * está aberto (caso raro e human-paced), e evita gerir 4 subscrições
+   * zustand com cleanup por chamada concorrente. O abort interrompe a
+   * espera imediatamente no próximo tick.
+   */
+  private async waitForUserGates(signal?: AbortSignal): Promise<void> {
+    const gateOpen = (): boolean => {
+      try {
+        if (usePermissionStore.getState().pendingPermission) return true
+        if (useAskUserQuestionStore.getState().pending.size > 0) return true
+        if (useCredentialRequestStore.getState().pending.size > 0) return true
+        if (hasPendingDiffApprovals()) return true
+      } catch {
+        return false
+      }
+      return false
+    }
+    while (gateOpen()) {
+      if (signal?.aborted) return
+      await new Promise(resolve => setTimeout(resolve, 120))
+    }
+  }
+
   async execute(
     toolName: string,
     input: Record<string, unknown>,
@@ -491,6 +687,19 @@ class ToolExecutor {
     // skip permission prompts and execution entirely. Tools that have
     // expensive side effects (subprocess spawn, network) check the signal
     // again mid-execution via input._abortSignal — that's their job.
+    if (signal?.aborted) {
+      return `Tool ${toolName} aborted before execution (user cancelled).`
+    }
+
+    // PAUSA GLOBAL (2026-06-11, pedido do user): enquanto houver QUALQUER
+    // intervenção obrigatória do utilizador pendente — prompt de permissão,
+    // ask_user_question, request_credentials, aprovação de diff — NENHUM
+    // outro tool pode começar a executar. Sem isto, tool calls paralelas
+    // (concurrencySafe) e safe-tools auto-aprovadas continuavam a correr
+    // por trás do diálogo, nos dois modos. Não há deadlock: o tool que CRIA
+    // o gate já passou esta entrada (o seu prompt abre depois), e todos os
+    // gates são resolvidos pelo utilizador ou limpos no cancelLoop.
+    await this.waitForUserGates(signal)
     if (signal?.aborted) {
       return `Tool ${toolName} aborted before execution (user cancelled).`
     }
@@ -552,8 +761,8 @@ class ToolExecutor {
     // roots (project + additionalDirectories) prompt the user for access.
     const FILE_SCOPE_TOOLS = new Set([
       'read_file', 'write_file', 'edit_file', 'create_file',
-      'delete_file', 'rename_file', 'copy_file', 'list_directory',
-      'search_files', 'glob', 'path_exists', 'append_file',
+      'create_directory', 'delete_file', 'rename_file', 'copy_file',
+      'list_directory', 'search_files', 'glob', 'path_exists', 'append_file',
       'execute_command', 'execute_command_background', 'agent_shell_start'
     ])
     const pathForScope = (input.file_path || input.oldPath || input.directory || input.cwd || '') as string
@@ -624,6 +833,13 @@ class ToolExecutor {
             : ' Ask the user what they want instead.'
           return `Permission denied by user for ${dangerousMatch}.${reason}`
         }
+        // RACE FIX: o utilizador pode ter feito stop ENQUANTO o diálogo
+        // estava aberto e o clique de aprovação correr contra o abort. A
+        // aprovação não pode ressuscitar um run cancelado — re-verificar o
+        // signal DEPOIS do await, não só à entrada do execute().
+        if (signal?.aborted) {
+          return `Tool ${toolName} aborted before execution (user cancelled).`
+        }
         dangerousAlreadyApproved = true
       }
     }
@@ -653,6 +869,12 @@ class ToolExecutor {
           ? ` User says: ${decision.denyReason}`
           : ' Ask the user what they want instead or suggest an alternative approach.'
         return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}.${reason}`
+      }
+      // RACE FIX: aprovação que chega depois de um stop não pode executar a
+      // tool num run morto — re-verificar o signal DEPOIS do await (a
+      // verificação à entrada do execute() aconteceu antes do diálogo).
+      if (signal?.aborted) {
+        return `Tool ${toolName} aborted before execution (user cancelled).`
       }
     }
 
@@ -1295,6 +1517,13 @@ ${preview}
    */
   private resolveToAbsolute(p: string): string {
     if (!p) return p
+    // `~` / `~/x` — expand to the user's home dir (mirrors claude-vaz). Sem
+    // isto, `~/Documents` era tratado como relativo e virava
+    // `<project>/~/Documents` — um not-found confuso em vez de um prompt
+    // de acesso ao diretório real.
+    if (this.homeDir && (p === '~' || p.startsWith('~/'))) {
+      return p === '~' ? this.homeDir : `${this.homeDir.replace(/\/+$/, '')}/${p.slice(2)}`
+    }
     // Already absolute
     if (p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p)) {
       return p

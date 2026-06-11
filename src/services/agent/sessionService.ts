@@ -37,6 +37,9 @@ export function captureByokSnapshot(): ByokSessionSnapshot | null {
 
 const MAX_SESSIONS_PER_PROJECT = 50
 const MAX_TOOL_RESULT_LENGTH = 2000
+/** Teto do mentionContext persistido por mensagem (~30K chars ≈ 7.5K tokens).
+ *  Display/contexto continua completo em memória; só o disco é capado. */
+const MAX_MENTION_CONTEXT_PERSIST = 30_000
 /** Legacy home-dir root for sessions written before the 2026-05 migration
  *  to `<project>/.toquemedia/sessions/`. Kept only as the SOURCE side of
  *  the one-shot migration in `migrateLegacySessions`; nothing else reads
@@ -547,6 +550,20 @@ class SessionService {
     if (typeof msg.turnDurationMs === 'number') sanitized.turnDurationMs = msg.turnDurationMs
     if (typeof msg.turnInputTokens === 'number') sanitized.turnInputTokens = msg.turnInputTokens
     if (typeof msg.turnOutputTokens === 'number') sanitized.turnOutputTokens = msg.turnOutputTokens
+
+    // @-mention context must survive reloads — rebuildConversationHistory
+    // re-emits it on every follow-up turn (claude-vaz keeps the equivalent
+    // attachment messages in the persisted transcript). CAPPED on disk: uma
+    // menção pode carregar até 2000 linhas de ficheiro; persistir isso por
+    // mensagem inchava os ficheiros de sessão (encriptar + escrever em cada
+    // autosave). Em memória fica completo durante a sessão; após reload o
+    // modelo vê o prefixo + nota para reler com read_file se precisar.
+    if (msg.mentionContext) {
+      sanitized.mentionContext = msg.mentionContext.length > MAX_MENTION_CONTEXT_PERSIST
+        ? msg.mentionContext.slice(0, MAX_MENTION_CONTEXT_PERSIST)
+          + '\n<system-reminder>[mention context truncated on session reload — re-read the file with read_file if its tail matters]</system-reminder>'
+        : msg.mentionContext
+    }
 
     // Persist attachment metadata WITHOUT base64. The base64 data URI is
     // potentially several MB per image and would bloat the encrypted

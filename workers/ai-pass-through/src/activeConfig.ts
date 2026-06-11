@@ -42,15 +42,27 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     throw new HttpError(500, 'tm_active_config_invalid', 'Active AI config enabled must be boolean.')
   }
 
+  const speedModel = typeof obj.speedModel === 'string' && obj.speedModel.trim() !== ''
+    ? obj.speedModel.trim()
+    : undefined
+
+  // Campos extra de request do provider (ex.: DashScope enable_search para
+  // a pesquisa nativa do Qwen). Só objetos planos são aceites.
+  const extraBody = obj.extraBody && typeof obj.extraBody === 'object' && !Array.isArray(obj.extraBody)
+    ? obj.extraBody as Record<string, unknown>
+    : undefined
+
   return {
     provider: assertString(obj.provider, 'provider'),
     model: assertString(obj.model, 'model'),
+    speedModel,
     baseUrl: assertString(obj.baseUrl, 'baseUrl').replace(/\/+$/, ''),
     chatCompletionsPath: assertString(obj.chatCompletionsPath, 'chatCompletionsPath'),
     authHeader: assertString(obj.authHeader, 'authHeader'),
     authScheme,
     apiKeyEnv: assertString(obj.apiKeyEnv, 'apiKeyEnv'),
     enabled,
+    extraBody,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   }
 }

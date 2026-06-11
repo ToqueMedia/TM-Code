@@ -1,4 +1,4 @@
-use super::container::{clamp_to_project, ActiveProjectState};
+use super::container::{clamp_to_allowed, ActiveProjectState};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -358,6 +358,62 @@ pub async fn get_interactive_shell_info() -> InteractiveShellInfo {
     pick_interactive_shell_info()
 }
 
+/// Resultado da sonda de split-brain de porto (ver `check_port_split`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortSplitInfo {
+    pub ipv4_reachable: bool,
+    pub ipv6_reachable: bool,
+    /// true quando AMBAS as famílias respondem com conteúdo DIFERENTE —
+    /// dois servidores distintos a partilhar o mesmo número de porto.
+    pub split: bool,
+}
+
+/// Deteta "port split-brain": dois dev servers no MESMO número de porto em
+/// famílias de endereço diferentes (um em `127.0.0.1`, outro em `[::1]`).
+///
+/// Cenário real (2026-06-11): Vite do projeto A vinculado a `[::1]:5173`
+/// (Node ≥17 resolve `localhost` IPv6-first) + Vite do projeto B vinculado a
+/// `*:5173` IPv4 — ambos os binds têm sucesso, ambos anunciam
+/// "localhost:5173", e o browser (IPv6 primeiro) abre SEMPRE o projeto A.
+///
+/// Estratégia: GET às duas famílias e comparação de status + prefixo do
+/// corpo. Um único servidor dual-stack responde igual nas duas → split=false;
+/// servidores diferentes divergem no bundle/título → split=true. Sondas com
+/// timeout curto — isto corre uma vez por anúncio de URL no terminal.
+#[tauri::command]
+pub async fn check_port_split(port: u16) -> PortSplitInfo {
+    async fn probe(url: &str) -> Option<(u16, u64)> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(900))
+            .build()
+            .ok()?;
+        let resp = client
+            .get(url)
+            .header("accept", "text/html")
+            .send()
+            .await
+            .ok()?;
+        let status = resp.status().as_u16();
+        let bytes = resp.bytes().await.ok()?;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes[..bytes.len().min(4096)].hash(&mut hasher);
+        Some((status, hasher.finish()))
+    }
+
+    let url_v4 = format!("http://127.0.0.1:{}/", port);
+    let url_v6 = format!("http://[::1]:{}/", port);
+    let (v4, v6) = tokio::join!(probe(&url_v4), probe(&url_v6));
+
+    let split = matches!((&v4, &v6), (Some(a), Some(b)) if a != b);
+    PortSplitInfo {
+        ipv4_reachable: v4.is_some(),
+        ipv6_reachable: v6.is_some(),
+        split,
+    }
+}
+
 /// Build a command with sandbox if enabled, otherwise plain host command.
 pub fn build_sandboxed_host_command(command: &str, project_path: &PathBuf) -> Command {
     if let Some(cmd) = super::sandbox::sandboxed_command(command, project_path, &[]) {
@@ -610,7 +666,7 @@ pub async fn execute_command(
     if let Some(ref ap) = project {
         // App-level isolation: sandbox the command to the project directory
         let working_dir = match &cwd {
-            Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+            Some(dir) => PathBuf::from(clamp_to_allowed(dir, ap)),
             None => PathBuf::from(&ap.project_path),
         };
         let cmd = build_sandboxed_host_command(&command, &working_dir);
@@ -738,7 +794,7 @@ pub async fn run_streaming_command(
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
     let mut cmd = if let Some(ref ap) = project {
-        let working_dir = PathBuf::from(clamp_to_project(&cwd, &ap.project_path));
+        let working_dir = PathBuf::from(clamp_to_allowed(&cwd, ap));
         build_sandboxed_host_command(&command, &working_dir)
     } else {
         build_host_command(&command, &PathBuf::from(&cwd))
@@ -827,7 +883,7 @@ pub async fn start_dev_server(
 
     let mut cmd = if let Some(ref ap) = project {
         // App-level isolation: sandbox the dev server command
-        let clamped = clamp_to_project(&cwd, &ap.project_path);
+        let clamped = clamp_to_allowed(&cwd, ap);
         let mut c = build_sandboxed_host_command(&command, &PathBuf::from(&clamped));
         c.env("FORCE_COLOR", "0")
             .env("NO_COLOR", "1")
@@ -1097,7 +1153,7 @@ pub async fn start_pty_shell(
     let (shell_cmd, shell_args, working_dir) = if let Some(ref ap) = project {
         // App-level isolation: clamp cwd to project directory
         let working_dir = match &cwd {
-            Some(dir) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+            Some(dir) => PathBuf::from(clamp_to_allowed(dir, ap)),
             None => PathBuf::from(&ap.project_path),
         };
 
@@ -1690,7 +1746,7 @@ pub async fn change_directory(
     let project = active_project.lock().map_err(|_| "Lock error")?.clone();
 
     let effective_path = if let Some(ref ap) = project {
-        clamp_to_project(&path, &ap.project_path)
+        clamp_to_allowed(&path, ap)
     } else {
         path
     };
@@ -1710,7 +1766,7 @@ pub async fn change_directory(
 
     // After canonicalization, re-check that we're still inside the project
     if let Some(ref ap) = project {
-        let clamped = clamp_to_project(&canonical.to_string_lossy(), &ap.project_path);
+        let clamped = clamp_to_allowed(&canonical.to_string_lossy(), ap);
         return Ok(clamped);
     }
 
@@ -1797,7 +1853,7 @@ pub async fn get_completions(
 
     // Resolve working directory
     let working_dir = match (&cwd, &project) {
-        (Some(dir), Some(ap)) => PathBuf::from(clamp_to_project(dir, &ap.project_path)),
+        (Some(dir), Some(ap)) => PathBuf::from(clamp_to_allowed(dir, ap)),
         (Some(dir), None) => PathBuf::from(dir),
         (None, Some(ap)) => PathBuf::from(&ap.project_path),
         (None, None) => env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?,

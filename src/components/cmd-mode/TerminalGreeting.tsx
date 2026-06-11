@@ -12,6 +12,18 @@ interface TerminalGreetingProps {
   projectPath: string
 }
 
+// Banner ASCII (figlet "ANSI Regular") — boas-vindas estilo terminal nativo
+// (neofetch/btop). Substitui a listagem completa de comandos no arranque:
+// os comandos agora aparecem UM de cada vez como dica rotativa abaixo —
+// menos parede de texto, mais descoberta progressiva (pedido do user
+// 2026-06-11). whiteSpace=pre + fontSize fixo pequeno para não rebentar em
+// split-pane; o banner é decorativo, por isso aria-hidden + sem seleção.
+const ASCII_BANNER = `████████ ███    ███      ██████  ██████  ██████  ███████
+   ██    ████  ████     ██      ██    ██ ██   ██ ██
+   ██    ██ ████ ██     ██      ██    ██ ██   ██ █████
+   ██    ██  ██  ██     ██      ██    ██ ██   ██ ██
+   ██    ██      ██      ██████  ██████  ██████  ███████`
+
 export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: TerminalGreetingProps) {
   const t = useTranslation()
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
@@ -36,20 +48,53 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
     return () => { cancelled = true }
   }, [projectPath])
 
-  const commands = useMemo(() => {
-    const entries = [...CMD_MODE_COMMANDS, ...slashCommandRegistry.listCommands()]
+  // Pool de dicas: cada comando vira uma dica individual + as dicas fixas de
+  // navegação. Uma dica aleatória por montagem — abrir o Terminal Mode várias
+  // vezes vai expondo o catálogo inteiro sem nunca despejar a lista completa.
+  const tip = useMemo(() => {
+    const commandTips = [...CMD_MODE_COMMANDS, ...slashCommandRegistry.listCommands()]
       .filter(c => c.enabled)
-      .map(c => [c.name, c.description] as [string, string])
+      .map(c => `${c.name} — ${c.description}`)
     const seen = new Set<string>()
-    return entries.filter(([name]) => (seen.has(name) ? false : (seen.add(name), true)))
-  }, [])
+    const unique = commandTips.filter(tipText => {
+      const name = tipText.split(' ')[0]
+      return seen.has(name) ? false : (seen.add(name), true)
+    })
+    const staticTips = [
+      t('terminalMode.greeting.tipHelp'),
+      `↑ ↓ — ${t('terminalMode.greeting.navigateHistory')}`,
+      `@ — ${t('terminalMode.greeting.mentionFile')}`,
+      `! — ${t('terminalMode.greeting.runShell')}`,
+    ]
+    const pool = [...unique, ...staticTips]
+    return pool[Math.floor(Math.random() * pool.length)]
+  }, [t])
 
   return (
     <Box mb={2} fontFamily={tokens.fontFamily.mono}>
-      <Text fontSize="13px" color={tokens.colors.terminal.green} fontWeight="600">
-        {t('terminalMode.greeting.title')}
+      {/* Banner ASCII */}
+      <Box
+        as="pre"
+        aria-hidden
+        userSelect="none"
+        fontSize="9px"
+        lineHeight="1.25"
+        letterSpacing="0"
+        color={tokens.colors.accent.purple}
+        opacity={0.85}
+        whiteSpace="pre"
+        overflow="hidden"
+        fontFamily={tokens.fontFamily.mono}
+        m={0}
+        mt={1}
+      >
+        {ASCII_BANNER}
+      </Box>
+
+      <Text fontSize="12px" color={tokens.colors.terminal.green} fontWeight="600" mt={2}>
+        {t('terminalMode.greeting.welcome')}
       </Text>
-      <Text fontSize="13px" color={tokens.colors.text.disabled} mt="2px">
+      <Text fontSize="12px" color={tokens.colors.text.disabled} mt="2px">
         {projectName}&nbsp;&nbsp;
         <Text as="span" opacity={0.5}>{projectPath}</Text>
       </Text>
@@ -61,45 +106,25 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
           )}
         </Text>
       )}
+
       <Box mt={2} mb={1} h="1px" bg="rgba(255,255,255,0.06)" />
-      {/* Column width is the max command name (+2ch padding) — auto-scales as new
-          commands land. ch unit respects the monospace font metrics across
-          platforms; prior 72px hard-coded clipped longer command names. */}
-      <Box fontSize="13px" lineHeight="1.8">
-        {commands.map(([cmd, desc]) => (
-          <Flex key={cmd} gap={2} align="baseline">
-            <Text
-              fontFamily={tokens.fontFamily.mono}
-              fontSize="13px"
-              color={tokens.colors.accent.purple}
-              fontWeight="600"
-              flexShrink={0}
-              whiteSpace="nowrap"
-              minW="16ch"
-            >
-              {cmd}
-            </Text>
-            <Text fontFamily={tokens.fontFamily.mono} fontSize="13px" color={tokens.colors.text.muted}>
-              {desc}
-            </Text>
-          </Flex>
-        ))}
-        <Flex gap={2} align="baseline" mt="2px">
-          <Text
-            fontFamily={tokens.fontFamily.mono}
-            fontSize="13px"
-            color={tokens.colors.text.disabled}
-            flexShrink={0}
-            whiteSpace="nowrap"
-            minW="16ch"
-          >
-            ↑ ↓
-          </Text>
-          <Text fontFamily={tokens.fontFamily.mono} fontSize="13px" color={tokens.colors.text.disabled}>
-            {t('terminalMode.greeting.navigateHistory')}  ·  <Text as="span" color={tokens.colors.accent.purple}>@</Text> {t('terminalMode.greeting.mentionFile')}  ·  <Text as="span" color={tokens.colors.accent.purple}>!</Text> {t('terminalMode.greeting.runShell')}
-          </Text>
-        </Flex>
-      </Box>
+
+      {/* Dica rotativa — uma por sessão, em vez da lista completa de comandos */}
+      <Flex gap={2} align="baseline" mt={1}>
+        <Text
+          fontFamily={tokens.fontFamily.mono}
+          fontSize="12px"
+          color={tokens.colors.accent.purple}
+          fontWeight="600"
+          flexShrink={0}
+        >
+          {t('terminalMode.greeting.tipLabel')}
+        </Text>
+        <Text fontFamily={tokens.fontFamily.mono} fontSize="12px" color={tokens.colors.text.muted}>
+          {tip}
+        </Text>
+      </Flex>
+
       {sandboxEnabled && (
         <Flex align="center" gap={1.5} mt={2}>
           <Text fontSize="10px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono}>⚠</Text>

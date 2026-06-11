@@ -14,6 +14,7 @@ pub mod http_client;
 pub mod issue_reporter;
 pub mod mcp;
 pub mod memory;
+pub mod port_guard;
 pub mod project;
 pub mod sandbox;
 pub mod screenshot;

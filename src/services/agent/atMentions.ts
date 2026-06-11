@@ -1,0 +1,371 @@
+/**
+ * @-mention resolution — full port of claude-vaz's at-mention pipeline.
+ *
+ * What changed vs the old `<mentioned_files>` XML approach (attachmentService
+ * `extractAndResolveMentions`, removed 2026-06): mentioned files used to be
+ * inlined as XML inside the user's own prompt text, which (a) gave the
+ * mentioned file the weight of a user instruction — anchoring the model on
+ * the wrong file when the user mentioned one file but described a problem in
+ * another, (b) bypassed the read-state bookkeeping (no dedup, no
+ * read-before-write credit, no external-change detection), and (c) evaporated
+ * from the conversation history after the turn (rebuildConversationHistory
+ * only kept the display text).
+ *
+ * The claude-vaz mechanism (utils/attachments.ts `processAtMentionedFiles` →
+ * `generateFileAttachment`; rendering in utils/messages.ts
+ * `normalizeAttachmentForAPI` + `createToolUseMessage` /
+ * `createToolResultMessage`):
+ *
+ *   1. Mentions are extracted with support for quoted paths (`@"my file.ts"`)
+ *      and line ranges (`@file.ts#L10-20`); `#heading` fragments are stripped.
+ *   2. Each mentioned file is read through the REAL read tool, so state
+ *      effects (readFileState, readFileTimestamps, dedup) are identical to a
+ *      model-initiated read_file call.
+ *   3. The result is rendered as a synthetic tool-call transcript — two
+ *      `<system-reminder>` blocks appended AFTER the user's prompt:
+ *        "Called the read_file tool with the following input: {...}"
+ *        "Result of calling the read_file tool:\n<content>"
+ *      The model perceives a neutral "I already read this file" fact instead
+ *      of a user instruction — soft anchoring, no "START there" bias.
+ *   4. Files the model already has a fresh full view of render to NOTHING
+ *      (claude-vaz `already_read_file` → []).
+ *   5. Oversized files fall back to the first MAX_LINES_TO_READ lines plus a
+ *      meta note telling the model it can read more — never the 256 KB error.
+ *   6. Denied/missing/binary targets are dropped silently (claude-vaz returns
+ *      null from generateFileAttachment for all of these).
+ *   7. Directories render as a synthetic list_directory call (claude-vaz uses
+ *      a synthetic Bash `ls`; list_directory is TM Code's equivalent tool).
+ *
+ * The external-modification sweep (`collectChangedFileContext`) is the
+ * companion piece — claude-vaz's `getChangedFiles` — injected at turn start
+ * (call sites) and between tool rounds (query.ts `collectInterTurnContext`).
+ */
+
+import ToolExecutor from './toolExecutor'
+import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
+import { resolveImageToDataUri } from '../attachmentService'
+import type { OpenAIContentPart } from './types'
+
+/** Truncated-read fallback for oversized files — claude-vaz MAX_LINES_TO_READ. */
+export const MAX_LINES_TO_READ = 2000
+
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'])
+// Never readable as UTF-8 text — mentions of these drop silently, matching
+// claude-vaz where FileReadTool.validateInput fails → attachment is null.
+const BINARY_EXTENSIONS = new Set([
+  'pdf', 'zip', 'tar', 'gz', 'bz2', '7z', 'rar',
+  'mp3', 'wav', 'flac', 'ogg', 'm4a',
+  'mp4', 'mov', 'webm', 'mkv', 'avi',
+  'ttf', 'otf', 'woff', 'woff2', 'eot',
+  'exe', 'dll', 'so', 'dylib', 'bin',
+])
+
+export function wrapInSystemReminder(content: string): string {
+  return `<system-reminder>\n${content}\n</system-reminder>`
+}
+
+// ── Extraction (verbatim ports of claude-vaz utils/attachments.ts) ───────
+
+/**
+ * Extract filenames mentioned with @, including line-range syntax
+ * (`@file.txt#L10-20`) and quoted paths for files with spaces
+ * (`@"my/file with spaces.txt"`). Agent mentions (`@"name (agent)"`)
+ * are skipped. Port of claude-vaz `extractAtMentionedFiles`.
+ */
+export function extractAtMentionedFiles(content: string): string[] {
+  const quotedAtMentionRegex = /(^|\s)@"([^"]+)"/g
+  const regularAtMentionRegex = /(^|\s)@([^\s]+)\b/g
+
+  const quotedMatches: string[] = []
+  const regularMatches: string[] = []
+
+  let match: RegExpExecArray | null
+  while ((match = quotedAtMentionRegex.exec(content)) !== null) {
+    if (match[2] && !match[2].endsWith(' (agent)')) {
+      quotedMatches.push(match[2])
+    }
+  }
+
+  const regularMatchArray = content.match(regularAtMentionRegex) || []
+  regularMatchArray.forEach(m => {
+    const filename = m.slice(m.indexOf('@') + 1)
+    // Don't include if it starts with a quote (already handled as quoted)
+    if (!filename.startsWith('"')) {
+      regularMatches.push(filename)
+    }
+  })
+
+  return Array.from(new Set([...quotedMatches, ...regularMatches]))
+}
+
+export interface AtMentionedFileLines {
+  filename: string
+  lineStart?: number
+  lineEnd?: number
+}
+
+/**
+ * Parse mentions like "file.txt#L10-20", "file.txt#heading", or "file.txt".
+ * Line ranges become offset/limit; non-line-range fragments are stripped.
+ * Port of claude-vaz `parseAtMentionedFileLines`.
+ */
+export function parseAtMentionedFileLines(mention: string): AtMentionedFileLines {
+  const match = mention.match(/^([^#]+)(?:#L(\d+)(?:-(\d+))?)?(?:#[^#]*)?$/)
+
+  if (!match) {
+    return { filename: mention }
+  }
+
+  const [, filename, lineStartStr, lineEndStr] = match
+  const lineStart = lineStartStr ? parseInt(lineStartStr, 10) : undefined
+  const lineEnd = lineEndStr ? parseInt(lineEndStr, 10) : lineStart
+
+  return { filename: filename ?? mention, lineStart, lineEnd }
+}
+
+// ── Resolution ────────────────────────────────────────────────────────────
+
+export interface MentionImagePart {
+  /** "Called the read_file tool..." reminder rendered next to the image. */
+  reminder: string
+  dataUri: string
+  displayPath: string
+}
+
+export interface MentionResolution {
+  /** Rendered system-reminder blocks, newline-joined. '' when nothing resolved. */
+  contextText: string
+  /** Image mentions — appended as image_url parts on multimodal plans. */
+  imageParts: MentionImagePart[]
+}
+
+const EMPTY_RESOLUTION: MentionResolution = { contextText: '', imageParts: [] }
+
+type ResolvedBlock =
+  | { kind: 'text'; text: string }
+  | { kind: 'image'; part: MentionImagePart }
+
+/** The synthetic tool-call pair — claude-vaz `createToolUseMessage` +
+ *  `createToolResultMessage` (utils/messages.ts:4308-4333), both wrapped in
+ *  system-reminder by `wrapMessagesInSystemReminder`. The result uses the
+ *  raw string (not JSON-escaped) — claude-vaz keeps newlines literal to
+ *  avoid wasting ~1 token per line on `\n` escapes. */
+function renderToolPair(toolName: string, input: Record<string, unknown>, result: string): ResolvedBlock[] {
+  return [
+    { kind: 'text', text: wrapInSystemReminder(`Called the ${toolName} tool with the following input: ${JSON.stringify(input)}`) },
+    { kind: 'text', text: wrapInSystemReminder(`Result of calling the ${toolName} tool:\n${result}`) },
+  ]
+}
+
+function getExtension(p: string): string {
+  const name = p.replace(/\\/g, '/').split('/').pop() || ''
+  const dot = name.lastIndexOf('.')
+  return dot === -1 ? '' : name.slice(dot + 1).toLowerCase()
+}
+
+async function resolveOneMention(token: string, executor: ToolExecutor): Promise<ResolvedBlock[]> {
+  try {
+    const { filename, lineStart, lineEnd } = parseAtMentionedFileLines(token)
+    // TM Code's autocomplete inserts a trailing '/' on directory mentions;
+    // strip it (claude-vaz's regex already drops it via the \b boundary).
+    const cleaned = filename.replace(/[\\/]+$/, '')
+    if (!cleaned) return []
+
+    const absolutePath = executor.resolveMentionPath(cleaned)
+    // Out-of-scope → silent drop, same outcome as claude-vaz's deny rules.
+    if (!executor.isMentionPathAllowed(absolutePath)) return []
+
+    const ext = getExtension(absolutePath)
+    if (IMAGE_EXTENSIONS.has(ext)) {
+      // claude-vaz inlines mentioned images as a Read tool result with an
+      // image block. OpenAI-compatible tool results are text-only, so the
+      // image ships as an image_url part in the user message instead; the
+      // reminder line keeps the synthetic-tool-call framing.
+      const dataUri = await resolveImageToDataUri({
+        id: '', type: 'image', name: absolutePath.split('/').pop() || absolutePath, path: absolutePath,
+      })
+      if (!dataUri) return []
+      return [{
+        kind: 'image',
+        part: {
+          reminder: wrapInSystemReminder(`Called the read_file tool with the following input: ${JSON.stringify({ file_path: absolutePath })}`),
+          dataUri,
+          displayPath: absolutePath,
+        },
+      }]
+    }
+    if (BINARY_EXTENSIONS.has(ext)) return []
+
+    // Trailing slash is authoritative in TM Code's autocomplete; otherwise
+    // stat decides (claude-vaz does the same stat probe).
+    let isDirectory = /[\\/]$/.test(filename)
+    if (!isDirectory) {
+      try {
+        const { stat } = await import('@tauri-apps/plugin-fs')
+        isDirectory = !!(await stat(absolutePath)).isDirectory
+      } catch {
+        // stat failure → fall through to the file path; a read failure
+        // below drops the mention (claude-vaz fallthrough comment).
+      }
+    }
+
+    if (isDirectory) {
+      // claude-vaz renders directories as a synthetic Bash `ls` (direct
+      // children only); list_directory with maxDepth 1 is TM Code's
+      // equivalent. The rendered input MUST match the actual call so the
+      // synthetic transcript is self-consistent.
+      const input = { file_path: absolutePath, maxDepth: 1 }
+      const listing = await executor.executeForMention('list_directory', input)
+      return renderToolPair('list_directory', input, listing)
+    }
+
+    // Fresh full view already in context → render nothing
+    // (claude-vaz `already_read_file` normalizes to []).
+    if (lineStart === undefined && executor.isFileFreshInContext(absolutePath)) return []
+
+    const input: Record<string, unknown> = { file_path: absolutePath }
+    if (lineStart !== undefined) {
+      input.offset = lineStart
+      if (lineEnd !== undefined) input.limit = lineEnd - lineStart + 1
+    }
+
+    const result = await executor.executeForMention('read_file', input)
+    if (result === FILE_UNCHANGED_STUB) return []
+    if (result.startsWith('File not found:')) return []
+    if (result.startsWith('Blocked:')) return []
+
+    if (/^Error: File is .+ exceeds the 256 KB read cap/.test(result)) {
+      // Oversize → truncated read of the first MAX_LINES_TO_READ lines plus
+      // a meta note — claude-vaz `readTruncatedFile` + the "too large" note
+      // appended by normalizeAttachmentForAPI for truncated attachments.
+      const truncatedInput = { file_path: absolutePath, offset: 1, limit: MAX_LINES_TO_READ }
+      const truncated = await executor.executeForMention('read_file', truncatedInput)
+      if (truncated.startsWith('Error:') || truncated.startsWith('File not found:')) return []
+      return [
+        ...renderToolPair('read_file', truncatedInput, truncated),
+        { kind: 'text', text: wrapInSystemReminder(`Note: The file ${absolutePath} was too large and has been truncated to the first ${MAX_LINES_TO_READ} lines. Don't tell the user about this truncation. Use read_file to read more of the file if you need.`) },
+      ]
+    }
+    if (result.startsWith('Error:')) return []
+
+    return renderToolPair('read_file', input, result)
+  } catch {
+    // Any failure (path scope, .env block, IPC error) drops the mention
+    // silently — claude-vaz logs the error event and returns null.
+    return []
+  }
+}
+
+/**
+ * Resolve every @-mention in `input` into synthetic tool-call context.
+ *
+ * Slash-command inputs are skipped — their expansion pipeline owns mention
+ * extraction (claude-vaz gates the same way in processUserInput.ts:496-499).
+ *
+ * State effects are real: each resolved file lands in readFileState /
+ * readFileTimestamps exactly as if the model had called read_file, so dedup,
+ * read-before-write credit and the external-change sweep all see it.
+ */
+export async function resolveMentionContext(input: string): Promise<MentionResolution> {
+  if (!input || input.trim().startsWith('/')) return EMPTY_RESOLUTION
+  const mentions = extractAtMentionedFiles(input)
+  if (mentions.length === 0) return EMPTY_RESOLUTION
+
+  const executor = ToolExecutor.getInstance()
+  // Parallel resolution (claude-vaz uses Promise.all); flatten preserves
+  // mention order so the transcript reads in the order the user wrote.
+  const resolved = await Promise.all(mentions.map(m => resolveOneMention(m, executor)))
+
+  const textBlocks: string[] = []
+  const imageParts: MentionImagePart[] = []
+  for (const blocks of resolved) {
+    for (const block of blocks) {
+      if (block.kind === 'text') textBlocks.push(block.text)
+      else imageParts.push(block.part)
+    }
+  }
+  return { contextText: textBlocks.join('\n'), imageParts }
+}
+
+// ── External-modification sweep ───────────────────────────────────────────
+
+/**
+ * Render the "Note: X was modified..." reminders for files the model has in
+ * context that changed on disk outside the agent's tools. Wording is the
+ * claude-vaz `edited_text_file` message verbatim (utils/messages.ts:3541).
+ * Returns '' when nothing changed. Never throws — a sweep failure must not
+ * break a turn.
+ */
+export async function collectChangedFileContext(): Promise<string> {
+  try {
+    const changed = await ToolExecutor.getInstance().collectExternallyChangedFiles()
+    if (changed.length === 0) return ''
+    return changed
+      .map(({ path, snippet }) => wrapInSystemReminder(
+        `Note: ${path} was modified, either by the user or by a linter. This change was intentional, so make sure to take it into account as you proceed (ie. don't revert it unless the user asks you to). Don't tell the user this, since they are already aware. Here are the relevant changes (shown with line numbers):\n${snippet}`,
+      ))
+      .join('\n')
+  } catch {
+    return ''
+  }
+}
+
+// ── Application at the prompt boundary ────────────────────────────────────
+
+export interface AppliedMentionResolution {
+  userContent: string | OpenAIContentPart[]
+  /** Text suffix persisted on the user ChatMessage (`mentionContext`) so
+   *  rebuildConversationHistory re-emits it on follow-up turns — claude-vaz
+   *  keeps attachment messages in the transcript; without this the context
+   *  would evaporate after the first turn. Image parts are NOT persisted
+   *  (same lifetime as pasted images: in-session only). */
+  persistedContext: string
+}
+
+/**
+ * Append a MentionResolution (+ optional changed-file context) to the
+ * outgoing user content, claude-vaz ordering: the user's own message first,
+ * attachment context after (processTextPrompt returns
+ * `[userMessage, ...attachmentMessages]`; at the API boundary they merge
+ * into the same user turn).
+ */
+export function applyMentionResolution(
+  userContent: string | OpenAIContentPart[],
+  resolution: MentionResolution,
+  changedFileContext: string,
+  supportsMultimodal: boolean,
+): AppliedMentionResolution {
+  const textPieces: string[] = []
+  if (resolution.contextText) textPieces.push(resolution.contextText)
+
+  let content = userContent
+  if (resolution.imageParts.length > 0) {
+    if (supportsMultimodal) {
+      const parts: OpenAIContentPart[] = typeof content === 'string'
+        ? [{ type: 'text', text: content }]
+        : [...content]
+      for (const img of resolution.imageParts) {
+        parts.push({ type: 'text', text: img.reminder })
+        parts.push({ type: 'image_url', image_url: { url: img.dataUri } })
+      }
+      content = parts
+    } else {
+      for (const img of resolution.imageParts) {
+        textPieces.push(wrapInSystemReminder(`Image referenced at ${img.displayPath} — the active model is text-only, so the image could not be shown.`))
+      }
+    }
+  }
+
+  if (changedFileContext) textPieces.push(changedFileContext)
+
+  const suffix = textPieces.join('\n')
+  if (suffix) {
+    if (typeof content === 'string') {
+      content = `${content}\n${suffix}`
+    } else {
+      content = [...content, { type: 'text', text: suffix }]
+    }
+  }
+
+  return { userContent: content, persistedContext: suffix }
+}

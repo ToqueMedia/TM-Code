@@ -62,8 +62,22 @@ export function useAttachments(options: UseAttachmentsOptions = {}) {
   const attachments = localState ? cmdAttachments : storeAttachments
 
   const addAttachment = useCallback((att: Attachment) => {
-    if (localState) cmdAddAttachment(att)
-    else storeAdd(att)
+    if (localState) {
+      // CMD mode + imagem: paridade claude-vaz — atribui o número do chip
+      // `[Image #N]` (estável; nunca renumera) e insere o MESMO texto no
+      // input via evento (o estado do input vive em useCmdPromptLogic).
+      // No submit, a imagem só é enviada se o placeholder ainda estiver no
+      // texto — apagar o texto remove a imagem (handlePromptSubmit:178).
+      if (att.type === 'image' && att.pasteMarker === undefined) {
+        const existing = useCmdAttachmentStore.getState().attachments
+        const next = existing.reduce((max, a) => Math.max(max, a.pasteMarker ?? 0), 0) + 1
+        att = { ...att, pasteMarker: next }
+        window.dispatchEvent(new CustomEvent('cmd-insert-text', { detail: `[Image #${next}] ` }))
+      }
+      cmdAddAttachment(att)
+    } else {
+      storeAdd(att)
+    }
   }, [localState, cmdAddAttachment, storeAdd])
 
   const removeAttachment = useCallback((id: string) => {

@@ -55,6 +55,8 @@ export interface QueryEngineOptions {
   extraHeaders?: Record<string, string>
   /** Called as soon as streaming response headers are available. */
   onResponseHeaders?: (headers: Headers) => void
+  /** Inter-turn attachment collector — see QueryParams.collectInterTurnContext. */
+  collectInterTurnContext?: () => Promise<string>
 }
 
 export interface QueryEngineState {
@@ -159,6 +161,7 @@ export class QueryEngine {
       compactInstructions: this.options.compactInstructions,
       extraHeaders: this.options.extraHeaders,
       onResponseHeaders: this.options.onResponseHeaders,
+      collectInterTurnContext: this.options.collectInterTurnContext,
     }
 
     try {

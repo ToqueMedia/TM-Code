@@ -101,20 +101,26 @@ const GLM_5_1: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
-// Qwen 3.7 Max — Alibaba China (DashScope)
+// Qwen 3.7 Max (snapshot 2026-06-08) — Alibaba China (DashScope)
 //
 // Alibaba Cloud flagship. 1M context window, toggleable thinking.
 // Sampling: temp 0.6, top_p 0.95, top_k 20.
+//
+// Snapshot 2026-06-08 substitui o qwen3.7-max base (2026-06-11): traz
+// Visual Understanding e web search NATIVOS — supportsAttachments e
+// supportsSearch ligados significam que o modelo dispensa os sidecars
+// correspondentes (a pesquisa é executada pelo provider, não localmente;
+// imagens vão como image_url no payload).
 // ─────────────────────────────────────────────────
 
 const QWEN_3_7_MAX: ModelProfile = {
-  id: 'qwen3.7-max',
+  id: 'qwen3.7-max-2026-06-08',
   name: 'Qwen 3.7 Max',
   persona: {
     name: 'Qwen Max',
-    tagline: 'Flagship Alibaba Cloud — 1M contexto, raciocínio toggleable',
+    tagline: 'Flagship Alibaba Cloud — 1M contexto, visão e pesquisa nativas',
   },
-  modelId: 'qwen3.7-max',
+  modelId: 'qwen3.7-max-2026-06-08',
   contextWindow: 1_000_000,
   maxOutputTokens: 65_536,
 
@@ -130,8 +136,8 @@ const QWEN_3_7_MAX: ModelProfile = {
   thinkingMandatory: false,
 
   preserveReasoning: false,
-  supportsAttachments: false,
-  supportsSearch: false,
+  supportsAttachments: true,
+  supportsSearch: true,
   counterweights: [],
 }
 
@@ -211,6 +217,10 @@ const MIMO_V2_5_1M: ModelProfile = {
 
 export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'glm-5.1': GLM_5_1,
+  'qwen3.7-max-2026-06-08': QWEN_3_7_MAX,
+  // Alias do id antigo → mesmo perfil. O backend pode continuar a reportar
+  // 'qwen3.7-max' em X-Model-Name até a config ativa ser republicada com o
+  // snapshot datado; sem o alias o lookup falhava para o perfil default.
   'qwen3.7-max': QWEN_3_7_MAX,
   'mimo-v2.5-pro-1m': MIMO_V2_5_PRO_1M,
   'mimo-v2.5-1m': MIMO_V2_5_1M,
@@ -223,7 +233,12 @@ export function getModelProfile(modelId: string): ModelProfile {
 }
 
 export function getAllModelProfiles(): ModelProfile[] {
-  return Object.values(MODEL_PROFILES)
+  // Dedupe por id — o registry tem chaves-alias (ex.: 'qwen3.7-max' →
+  // mesmo perfil do snapshot datado) que não podem duplicar listagens.
+  const seen = new Set<string>()
+  return Object.values(MODEL_PROFILES).filter(p =>
+    seen.has(p.id) ? false : (seen.add(p.id), true),
+  )
 }
 
 /**

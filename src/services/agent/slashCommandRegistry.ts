@@ -6,8 +6,9 @@ import { executeE2E } from './commands/e2eCommand'
 import { executeReview } from './commands/reviewCommand'
 import { executeCompact } from './commands/compactCommand'
 import { executeSpeed } from './commands/speedCommand'
+import { useTmSpeedStore, isSpeedModelEligible } from '../../stores/tmSpeedStore'
 import type { UserPlanName } from '../../stores/billingStore'
-import type { TranslationKey } from '../../i18n'
+import { t, type TranslationKey } from '../../i18n'
 
 /** A canonical argument value the user can pick after the command name. */
 export interface SlashCommandArg {
@@ -74,6 +75,15 @@ export interface SlashCommand {
    * project is open.
    */
   requiresProject?: boolean
+  /**
+   * Gate de visibilidade dinâmico, avaliado em CADA listCommands() (menus,
+   * dicas do greeting). `false` → o comando não aparece em lado nenhum, mas
+   * `getCommand()` continua a resolvê-lo para quem o digitar por extenso —
+   * o execute() do comando é responsável pela mensagem de indisponibilidade
+   * nesse caso. Usado pelo /speed: oculto quando o modelo ativo não é a
+   * família MiMo V2.5 Pro (o speed é uma variante desse modelo).
+   */
+  visibleWhen?: () => boolean
 }
 
 export function isSlashCommandAllowedForPlan(command: SlashCommand, plan: UserPlanName): boolean {
@@ -97,7 +107,7 @@ class SlashCommandRegistry {
   private registerDefaults(): void {
     this.register({
       name: '/init',
-      description: 'Initialize project — analyze structure, detect framework, generate TMS.md',
+      description: t('slashCmd.init.desc'),
       enabled: true,
       execute: executeInit,
       argHint: '[optional: extra context for the analysis]',
@@ -105,7 +115,7 @@ class SlashCommandRegistry {
 
     this.register({
       name: '/plan',
-      description: 'Architect a feature or full app — research the codebase, produce PLAN.md with approval card and seeded task list',
+      description: t('slashCmd.plan.desc'),
       enabled: true,
       execute: executePlan,
       argHint: '[feature or full app to plan]',
@@ -113,7 +123,7 @@ class SlashCommandRegistry {
 
     this.register({
       name: '/debug',
-      description: 'Debug an error or symptom — hypothesis-driven investigation with reasoning ON',
+      description: t('slashCmd.debug.desc'),
       enabled: true,
       execute: executeDebug,
       argHint: '[error message or symptom]',
@@ -121,7 +131,7 @@ class SlashCommandRegistry {
 
     this.register({
       name: '/payments',
-      description: 'Integrate MoMenu Payments — fetches API skills and implements (MCX, E-kwanza, Referencia)',
+      description: t('slashCmd.payments.desc'),
       enabled: true,
       execute: executePayments,
       argHint: '[provider: mcx | e-kwanza | referencia]',
@@ -129,7 +139,7 @@ class SlashCommandRegistry {
 
     this.register({
       name: '/te2e',
-      description: 'Validate the live preview by driving a real browser — exploratory, per-action permission, no spec files',
+      description: t('slashCmd.te2e.desc'),
       enabled: true,
       execute: executeE2E,
       requiresPaidPlan: true,
@@ -138,7 +148,7 @@ class SlashCommandRegistry {
 
     this.register({
       name: '/review',
-      description: 'Critical code review by a fresh sub-agent — bugs, anti-patterns, fragile workarounds, ranked by severity. Read-only.',
+      description: t('slashCmd.review.desc'),
       enabled: true,
       execute: executeReview,
       argHint: '[optional: focus area or path]',
@@ -146,7 +156,7 @@ class SlashCommandRegistry {
 
     this.register({
       name: '/compact',
-      description: 'Compact conversation context — compress old messages into a summary to free tokens',
+      description: t('slashCmd.compact.desc'),
       enabled: true,
       execute: executeCompact,
       argHint: '[optional: custom instructions for summarization]',
@@ -154,13 +164,17 @@ class SlashCommandRegistry {
 
     this.register({
       name: '/speed',
-      description: 'Toggle TM Speed — faster agent responses for Pro and Max',
+      description: t('slashCmd.speed.desc'),
       enabled: true,
       execute: executeSpeed,
       requiresPaidPlan: true,
       allowedPlans: ['pro', 'max'],
       planGateMessageKey: 'speed.planRequired',
       requiresProject: false,
+      // Oculto quando o modelo ativo não é a família MiMo V2.5 Pro — o TM
+      // Speed é uma variante desse modelo; com outro modelo publicado na
+      // config ativa o toggle seria um no-op enganador (2026-06-11).
+      visibleWhen: () => isSpeedModelEligible(useTmSpeedStore.getState().activeModelId),
     })
 
     // Note: `/auth` was removed in favour of the `#auth-email-password` and
@@ -188,7 +202,14 @@ class SlashCommandRegistry {
   }
 
   listCommands(): SlashCommand[] {
-    return Array.from(this.commands.values())
+    return Array.from(this.commands.values()).filter(cmd => {
+      try {
+        return cmd.visibleWhen ? cmd.visibleWhen() : true
+      } catch {
+        // Um gate que rebenta nunca pode esconder/partir o menu inteiro.
+        return true
+      }
+    })
   }
 
   filterCommands(prefix: string): SlashCommand[] {

@@ -2,6 +2,13 @@ name = "ai-pass-through-worker"
 main = "src/index.ts"
 compatibility_date = "2026-06-02"
 
+# Workers Logs persistentes — os console.* (incl. [billing] committed/failed)
+# ficam consultáveis no dashboard (Observability → Logs) sem precisar de um
+# `wrangler tail` aberto no momento do pedido. Essencial para validar a fase
+# shadow do billing de forma assíncrona.
+[observability]
+enabled = true
+
 [[kv_namespaces]]
 binding = "ACTIVE_AI_CONFIG"
 id = "b4052457452a4e84aedf332e055c4b1a"
@@ -9,3 +16,10 @@ preview_id = "replace-with-active-ai-config-kv-id"
 
 [vars]
 ACTIVE_AI_CONFIG_KEY = "active"
+# Billing: 'off' (kill-switch) | 'shadow' (contabiliza + emite headers, nunca
+# bloqueia) | 'enforce' (rejected → 402 tm_budget_exhausted, tratado pela
+# IDE). Promovido a 'enforce' em 2026-06-11 depois de validar os commits SA
+# em produção (logs "[billing] committed"). Secrets FIREBASE_CLIENT_EMAIL /
+# FIREBASE_PRIVATE_KEY (wrangler secret put) ativam o modo service-account
+# nos reads/commits do Firestore; sem eles usa o ID token do utilizador.
+BUDGET_ENFORCEMENT = "enforce"
