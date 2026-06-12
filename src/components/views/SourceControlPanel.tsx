@@ -3,7 +3,7 @@ import { Flex, Text, Box, HStack } from '@chakra-ui/react'
 import {
   VscCheck, VscRefresh, VscAdd, VscRemove, VscDiscard,
   VscChevronDown, VscChevronRight, VscSparkle,
-  VscCloudUpload, VscCloudDownload,
+  VscRepoPull, VscRepoPush, VscError, VscSourceControl,
 } from 'react-icons/vsc'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog'
@@ -25,6 +25,9 @@ type FeedbackType = 'success' | 'error' | null
 const ROW_HEIGHT = 28
 const TM_CODE_COMMIT_SIGNATURE = 'Co-Authored-By: TM Code <tm.code@toquemedia.net>'
 
+// The signature is invisible to the user (never shown in the textarea) and is
+// appended at commit time — so both AI-generated and hand-typed messages get
+// signed, and the textarea stays clean (user request, 2026-06-12).
 function ensureTmCodeCommitSignature(message: string): string {
   const trimmed = message.trim()
   if (!trimmed) return ''
@@ -32,14 +35,18 @@ function ensureTmCodeCommitSignature(message: string): string {
   return `${trimmed}\n\n${TM_CODE_COMMIT_SIGNATURE}`
 }
 
+/** Strip any TM Code trailer the AI may still emit, so it never reaches the textarea. */
+function stripTmCodeCommitSignature(message: string): string {
+  return message.replace(/\n*^Co-Authored-By:\s*TM Code\s*<[^>]*>\s*$/gim, '').trim()
+}
+
 // ── Styles (injected once) ──────────────────────────────────────────────
 
 const PANEL_STYLES = `
 .sc-textarea {
   width: 100%;
-  min-height: 30px;
-  max-height: 360px;
-  padding: 6px 32px 6px 8px;
+  min-height: 48px;
+  padding: 8px 32px 8px 10px;
   border: 1px solid ${tokens.colors.border.input};
   border-radius: 4px;
   background: ${tokens.colors.bg.input};
@@ -49,7 +56,7 @@ const PANEL_STYLES = `
   line-height: 18px;
   resize: none;
   outline: none;
-  overflow-y: auto;
+  overflow-y: hidden;
   box-sizing: border-box;
 }
 .sc-textarea::placeholder {
@@ -82,6 +89,11 @@ const PANEL_STYLES = `
 .sc-btn:active {
   transform: scale(0.92);
 }
+.sc-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 .sc-btn.accent:hover {
   color: ${tokens.colors.accent.primary};
   background: ${tokens.colors.accent.primarySubtle};
@@ -96,6 +108,108 @@ const PANEL_STYLES = `
 }
 .sc-spin { animation: sc-spin 0.7s linear infinite; }
 @keyframes sc-spin { to { transform: rotate(360deg); } }
+
+/* Rows: hover highlight; per-item actions stay hidden until hover (VS Code
+   pattern) so the list reads as a clean file list instead of a button grid. */
+.sc-row {
+  transition: background ${tokens.transition.fast};
+}
+.sc-row:hover {
+  background: ${tokens.colors.bg.hoverSubtle};
+}
+.sc-row .sc-actions {
+  opacity: 0;
+  transition: opacity ${tokens.transition.fast};
+}
+.sc-row:hover .sc-actions,
+.sc-row .sc-actions:focus-within {
+  opacity: 1;
+}
+
+/* Unified commit button (primary / ghost variants) */
+.sc-commit {
+  width: 100%;
+  height: 28px;
+  border-radius: 4px;
+  border: none;
+  background: ${tokens.colors.accent.primary};
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: ${tokens.fontFamily.ui};
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all ${tokens.transition.fast};
+}
+.sc-commit:hover:not(:disabled) {
+  background: ${tokens.colors.accent.primaryDark};
+}
+.sc-commit:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.sc-commit.ghost {
+  border: 1px solid ${tokens.colors.accent.primaryMuted};
+  background: ${tokens.colors.accent.primarySubtle};
+  color: ${tokens.colors.accent.primary};
+}
+.sc-commit.ghost:hover:not(:disabled) {
+  background: ${tokens.colors.accent.primaryHover};
+  border-color: ${tokens.colors.accent.primaryBorder};
+}
+.sc-commit:disabled:not(.busy) {
+  background: ${tokens.colors.bg.whiteSubtle};
+  color: ${tokens.colors.text.disabled};
+  border: none;
+  cursor: default;
+}
+.sc-commit.busy {
+  opacity: 0.75;
+  cursor: progress;
+}
+
+/* Labeled mini-buttons (Pull / Push on the branch row) — icon-only cloud
+   buttons read as ambiguous; an explicit label removes the guesswork. */
+.sc-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid ${tokens.colors.border.input};
+  border-radius: 4px;
+  background: transparent;
+  color: ${tokens.colors.text.secondary};
+  font-size: 11px;
+  font-weight: 500;
+  font-family: ${tokens.fontFamily.ui};
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all ${tokens.transition.fast};
+}
+.sc-mini:hover:not(:disabled) {
+  color: ${tokens.colors.text.primary};
+  background: ${tokens.colors.bg.hoverSubtle};
+  border-color: ${tokens.colors.border.inputAlt};
+}
+.sc-mini:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.sc-mini:disabled {
+  opacity: 0.45;
+  cursor: progress;
+}
+
+/* Feedback banner slide-in */
+.sc-feedback {
+  animation: sc-feedback-in 0.16s ease-out;
+}
+@keyframes sc-feedback-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 `
 
 function SourceControlPanel() {
@@ -132,11 +246,14 @@ function SourceControlPanel() {
 
   // ── Auto-resize textarea ─────────────────────────────────────────────
 
+  // No scroll inside the box: it grows to fit the whole message. Trade-off:
+  // a very long message squeezes the file list (flex:1) — preferred over a
+  // scrollbar inside a commit box (user request, 2026-06-12).
   const resizeTextarea = useCallback(() => {
     const el = textareaRef.current
     if (!el) return
-    el.style.height = '30px'
-    el.style.height = `${Math.min(el.scrollHeight, 360)}px`
+    el.style.height = '48px'
+    el.style.height = `${Math.max(el.scrollHeight, 48)}px`
   }, [])
 
   useEffect(() => {
@@ -224,10 +341,10 @@ function SourceControlPanel() {
     if (staged.length === 0) { showFeedback('error', t('sourceControl.stageFilesFirst')); return }
     setCommitting(true)
     try {
-      await GitService.commit(projectPath, commitMsg.trim())
+      await GitService.commit(projectPath, ensureTmCodeCommitSignature(commitMsg))
       if (!mountedRef.current) return
       setCommitMsg('')
-      if (textareaRef.current) textareaRef.current.style.height = '30px'
+      if (textareaRef.current) textareaRef.current.style.height = '48px'
       showFeedback('success', t('sourceControl.committedTo').replace('{branch}', branch))
       await loadStatus()
     } catch (e) {
@@ -243,10 +360,10 @@ function SourceControlPanel() {
     setCommitting(true)
     try {
       await GitService.stageAll(projectPath)
-      await GitService.commit(projectPath, commitMsg.trim())
+      await GitService.commit(projectPath, ensureTmCodeCommitSignature(commitMsg))
       if (!mountedRef.current) return
       setCommitMsg('')
-      if (textareaRef.current) textareaRef.current.style.height = '30px'
+      if (textareaRef.current) textareaRef.current.style.height = '48px'
       showFeedback('success', t('sourceControl.committedAllTo').replace('{branch}', branch))
       await loadStatus()
     } catch (e) {
@@ -286,7 +403,7 @@ function SourceControlPanel() {
     try {
       const { invoke: inv } = await import('@tauri-apps/api/core')
       const diffBase = staged.length > 0 ? 'git diff --cached' : 'git diff HEAD'
-      const maxDiffChars = 14_000
+      const maxDiffChars = 24_000
       const diffResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
         'execute_command',
         { command: `${diffBase} --stat --compact-summary`, cwd: projectPath, timeoutSecs: 8 }
@@ -338,18 +455,19 @@ Base the message on the actual diff hunks and changed files below. Mention concr
 Format:
 <type>(<scope>): <subject line, max 72 chars>
 
-<body: 3-6 bullet points explaining what changed and why>
+<body: 6-12 bullet points explaining what changed, why, and the impact>
 
 Rules:
 - type: feat, fix, refactor, chore, docs, style, perf, test
 - scope: the main area affected (component, service, worker endpoint, etc.)
 - subject: imperative mood, lowercase, no period, specific to the main change
 - body: each line starts with "- "
-- body bullets must be concrete and derived from file-level diffs, not generic summaries
-- prefer explaining user-visible behavior and integration impact over implementation trivia
-- sign the commit message with this exact final trailer:
-${TM_CODE_COMMIT_SIGNATURE}
-- do not add any user name, user email, "Signed-off-by" user trailer, or other attribution
+- be THOROUGH: cover every meaningful change visible in the diff — new functions/components, changed behavior, removed code, edge cases handled, UI/UX adjustments, config/dependency changes
+- group related bullets by area (e.g. UI, service, worker) when multiple areas changed
+- for each significant bullet, include the "why" or the user-visible effect, not just the "what"
+- call out breaking changes or migrations explicitly with "BREAKING:" if the diff shows any
+- do not pad with filler: every bullet must be backed by the diff, but do not omit real changes either
+- do not add any signature, trailer, attribution, user name or email — the app appends those automatically
 - Output ONLY the commit message, no quotes, no markdown, no explanation
 
 Files changed:
@@ -368,7 +486,7 @@ Diff hunks:
 ${diffDetail}`,
           }],
           temperature: 0.2,
-          max_tokens: 700,
+          max_tokens: 1200,
           stream: false,
         }),
       })
@@ -379,7 +497,7 @@ ${diffDetail}`,
 
       if (aiMsg) {
         const cleaned = aiMsg.replace(/^["'`]+|["'`]+$/g, '').replace(/^(commit message:?\s*)/i, '').trim()
-        setCommitMsg(ensureTmCodeCommitSignature(cleaned))
+        setCommitMsg(stripTmCodeCommitSignature(cleaned))
         requestAnimationFrame(resizeTextarea)
       } else {
         showFeedback('error', 'AI returned empty message')
@@ -410,28 +528,54 @@ ${diffDetail}`,
 
       {/* Header */}
       <Flex align="center" justify="space-between" px={3} h="34px" flexShrink={0} borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}>
-        <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.secondary} textTransform="uppercase" letterSpacing="0.05em">
-          Source Control
-        </Text>
-        <HStack gap={0}>
-          <button className="sc-btn" title={t('sourceControl.pullBtn')} onClick={handlePull}>
-            {pulling ? <span className="sc-spin"><VscCloudDownload size={13} /></span> : <VscCloudDownload size={13} />}
-          </button>
-          <button className="sc-btn" title={t('sourceControl.pushBtn')} onClick={handlePush}>
-            {pushing ? <span className="sc-spin"><VscCloudUpload size={13} /></span> : <VscCloudUpload size={13} />}
-          </button>
-          <button className="sc-btn" title={t("view.refresh")} onClick={() => loadStatus(true)}>
-            {loading ? <span className="sc-spin"><VscRefresh size={13} /></span> : <VscRefresh size={13} />}
-          </button>
+        <HStack gap={1.5}>
+          <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.secondary} textTransform="uppercase" letterSpacing="0.05em">
+            Source Control
+          </Text>
+          {files.length > 0 && (
+            <Text
+              as="span"
+              fontSize="9px"
+              fontWeight="700"
+              fontFamily={tokens.fontFamily.mono}
+              color={tokens.colors.badge.notificationText}
+              bg={tokens.colors.accent.primary}
+              borderRadius="full"
+              px="5px"
+              lineHeight="14px"
+              minW="14px"
+              textAlign="center"
+            >
+              {files.length}
+            </Text>
+          )}
         </HStack>
+        <button type="button" className="sc-btn" title={t("view.refresh")} aria-label={t("view.refresh")} onClick={() => loadStatus(true)} disabled={loading}>
+          {loading ? <span className="sc-spin"><VscRefresh size={13} /></span> : <VscRefresh size={13} />}
+        </button>
       </Flex>
 
-      {/* Branch badge */}
+      {/* Branch + sync row: explicit labeled Pull/Push next to the branch they act on */}
       {branch && (
-        <Flex px={3} py={1} flexShrink={0} borderBottom={`1px solid ${tokens.colors.border.glass}`}>
-          <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-            {branch}
-          </Text>
+        <Flex align="center" gap={1.5} px={2.5} py="5px" flexShrink={0} borderBottom={`1px solid ${tokens.colors.border.glass}`}>
+          <Flex align="center" gap={1.5} minW={0} flex={1} title={branch}>
+            <VscSourceControl size={12} color={tokens.colors.text.muted} style={{ flexShrink: 0 }} />
+            <Text fontSize="11px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono} lineClamp={1}>
+              {branch}
+            </Text>
+          </Flex>
+          <button type="button" className="sc-mini" title={t('sourceControl.pullBtn')} onClick={handlePull} disabled={pulling}>
+            {pulling
+              ? <span className="sc-spin" style={{ display: 'inline-flex' }}><VscRepoPull size={12} /></span>
+              : <VscRepoPull size={12} />}
+            Pull
+          </button>
+          <button type="button" className="sc-mini" title={t('sourceControl.pushBtn')} onClick={handlePush} disabled={pushing}>
+            {pushing
+              ? <span className="sc-spin" style={{ display: 'inline-flex' }}><VscRepoPush size={12} /></span>
+              : <VscRepoPush size={12} />}
+            Push
+          </button>
         </Flex>
       )}
 
@@ -452,9 +596,11 @@ ${diffDetail}`,
         />
         {files.length > 0 && (
           <button
+            type="button"
             className="sc-btn accent"
             style={{ position: 'absolute', right: 14, top: 12 }}
             title={t('sourceControl.generateCommit')}
+            aria-label={t('sourceControl.generateCommit')}
             onClick={handleGenerateCommitMsg}
             disabled={generating}
           >
@@ -469,58 +615,38 @@ ${diffDetail}`,
 
       {/* Commit / Stage All & Commit buttons */}
       <Box px={2.5} pb={1.5} pt={0.5} flexShrink={0}>
-        {canCommit ? (
-          <button
-            style={{
-              width: '100%', height: 28, borderRadius: 4, border: 'none',
-              background: tokens.colors.accent.primary, color: '#fff',
-              fontSize: 12, fontWeight: 600, fontFamily: tokens.fontFamily.ui,
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-              opacity: committing ? 0.6 : 1, transition: `all ${tokens.transition.fast}`,
-            }}
-            onClick={handleCommit}
-          >
-            <VscCheck size={13} /> Commit
-          </button>
-        ) : canStageAndCommit ? (
-          <button
-            style={{
-              width: '100%', height: 28, borderRadius: 4,
-              border: `1px solid ${tokens.colors.accent.primaryMuted}`,
-              background: tokens.colors.accent.primarySubtle, color: tokens.colors.accent.primary,
-              fontSize: 12, fontWeight: 600, fontFamily: tokens.fontFamily.ui,
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-              opacity: committing ? 0.6 : 1, transition: `all ${tokens.transition.fast}`,
-            }}
-            onClick={handleStageAllAndCommit}
-          >
-            <VscAdd size={13} /> Stage All & Commit
-          </button>
-        ) : (
-          <button
-            style={{
-              width: '100%', height: 28, borderRadius: 4, border: 'none',
-              background: tokens.colors.accent.primarySubtle, color: tokens.colors.text.disabled,
-              fontSize: 12, fontWeight: 600, fontFamily: tokens.fontFamily.ui,
-              cursor: 'default', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            }}
-            disabled
-          >
-            <VscCheck size={13} /> Commit
-          </button>
-        )}
+        <button
+          type="button"
+          className={`sc-commit${canStageAndCommit ? ' ghost' : ''}${committing ? ' busy' : ''}`}
+          onClick={canCommit ? handleCommit : canStageAndCommit ? handleStageAllAndCommit : undefined}
+          disabled={(!canCommit && !canStageAndCommit) || committing}
+        >
+          {committing ? (
+            <Box w="12px" h="12px" borderRadius="full" border="2px solid transparent" borderTopColor="currentColor" className="sc-spin" />
+          ) : canStageAndCommit ? (
+            <VscAdd size={13} />
+          ) : (
+            <VscCheck size={13} />
+          )}
+          {canStageAndCommit ? 'Stage All & Commit' : 'Commit'}
+        </button>
       </Box>
 
       {/* Feedback */}
       {feedback.type && (
-        <Box px={2.5} pb={1.5} flexShrink={0}>
+        <Box px={2.5} pb={1.5} flexShrink={0} role="status" aria-live="polite">
           <Flex
+            className="sc-feedback"
             align="center" gap={1.5} px={2} py="5px" borderRadius="4px"
             bg={feedback.type === 'success' ? tokens.colors.accent.greenSubtle : tokens.colors.accent.redSubtle}
             border={`1px solid ${feedback.type === 'success' ? tokens.colors.accent.greenMuted : tokens.colors.accent.redMuted}`}
           >
-            <VscCheck size={11} color={feedback.type === 'success' ? tokens.colors.accent.green : tokens.colors.accent.red} />
-            <Text fontSize="11px" color={feedback.type === 'success' ? tokens.colors.accent.greenBright : tokens.colors.accent.red} lineClamp={2}>
+            <Box flexShrink={0} display="flex">
+              {feedback.type === 'success'
+                ? <VscCheck size={11} color={tokens.colors.accent.green} />
+                : <VscError size={11} color={tokens.colors.accent.red} />}
+            </Box>
+            <Text fontSize="11px" color={feedback.type === 'success' ? tokens.colors.accent.greenBright : tokens.colors.accent.red} lineClamp={2} title={feedback.msg}>
               {feedback.msg}
             </Text>
           </Flex>
@@ -530,9 +656,15 @@ ${diffDetail}`,
       {/* File list */}
       <Box flex={1} overflow="hidden">
         {files.length === 0 && !loading && (
-          <Flex direction="column" align="center" justify="center" py={8} gap={2}>
-            <VscCheck size={16} color={tokens.colors.text.disabled} />
-            <Text fontSize="12px" color={tokens.colors.text.muted}>{t("view.noChanges")}</Text>
+          <Flex direction="column" align="center" justify="center" py={10} gap={2.5}>
+            <Flex
+              align="center" justify="center" w="34px" h="34px" borderRadius="full"
+              bg={tokens.colors.accent.greenSubtle}
+              border={`1px solid ${tokens.colors.accent.greenMuted}`}
+            >
+              <VscCheck size={16} color={tokens.colors.accent.greenBright} />
+            </Flex>
+            <Text fontSize="12px" fontWeight="500" color={tokens.colors.text.secondary}>{t("view.noChanges")}</Text>
             <Text fontSize="11px" color={tokens.colors.text.disabled}>{t("view.workingTreeClean")}</Text>
           </Flex>
         )}
@@ -638,26 +770,31 @@ const SectionHeader = memo<{
   onStageAll: () => void; onUnstageAll: () => void; onDiscardAll: () => void
 }>(({ label, count, isOpen, onToggle, section, onStageAll, onUnstageAll, onDiscardAll }) => (
   <div
+    className="sc-row"
     style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 8px', height: ROW_HEIGHT, cursor: 'pointer', userSelect: 'none' }}
     onClick={onToggle}
+    role="button"
+    aria-expanded={isOpen}
   >
-    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
       {isOpen ? <VscChevronDown size={11} color={tokens.colors.text.muted} /> : <VscChevronRight size={11} color={tokens.colors.text.muted} />}
-      <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.text.secondary }}>{label}</span>
+      <span style={{ fontSize: 11, fontWeight: 600, color: tokens.colors.text.secondary, textTransform: 'uppercase', letterSpacing: '0.03em' }}>{label}</span>
     </div>
     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }} onClick={e => e.stopPropagation()}>
-      {section === 'staged' ? (
-        <button className="sc-btn" title={t("view.unstageAll")} onClick={onUnstageAll}><VscRemove size={13} /></button>
-      ) : (
-        <>
-          <button className="sc-btn red" title={t("view.discardAllChanges")} onClick={onDiscardAll}><VscDiscard size={12} /></button>
-          <button className="sc-btn green" title={t("view.stageAll")} onClick={onStageAll}><VscAdd size={13} /></button>
-        </>
-      )}
+      <span className="sc-actions" style={{ display: 'flex', gap: 2 }}>
+        {section === 'staged' ? (
+          <button type="button" className="sc-btn" title={t("view.unstageAll")} aria-label={t("view.unstageAll")} onClick={onUnstageAll}><VscRemove size={13} /></button>
+        ) : (
+          <>
+            <button type="button" className="sc-btn red" title={t("view.discardAllChanges")} aria-label={t("view.discardAllChanges")} onClick={onDiscardAll}><VscDiscard size={12} /></button>
+            <button type="button" className="sc-btn green" title={t("view.stageAll")} aria-label={t("view.stageAll")} onClick={onStageAll}><VscAdd size={13} /></button>
+          </>
+        )}
+      </span>
       <span style={{
         fontSize: 10, fontWeight: 600, color: tokens.colors.text.secondary,
         fontFamily: tokens.fontFamily.mono, lineHeight: '18px',
-        padding: '0 5px', borderRadius: 9999, background: 'rgba(255,255,255,0.1)', minWidth: 18, textAlign: 'center',
+        padding: '0 5px', borderRadius: 9999, background: tokens.colors.bg.whiteOverlay, minWidth: 18, textAlign: 'center',
       }}>
         {count}
       </span>
@@ -681,8 +818,10 @@ const FileRow = memo<{
 
   return (
     <div
+      className="sc-row"
       style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px 0 20px', height: ROW_HEIGHT, cursor: 'pointer' }}
       onClick={() => onOpenFile(file.path)}
+      title={file.path}
     >
       {iconUrl ? (
         <img src={iconUrl} alt="" style={{ width: 14, height: 14, flexShrink: 0 }} />
@@ -690,7 +829,16 @@ const FileRow = memo<{
         <div style={{ width: 14, height: 14, flexShrink: 0 }} />
       )}
 
-      <span style={{ fontSize: 12, color: tokens.colors.text.primary, whiteSpace: 'nowrap', flexShrink: 0 }}>
+      {/* Filename tinted by git status + strike-through on deletions — the
+          VS Code convention, so state reads at a glance without the letter. */}
+      <span style={{
+        fontSize: 12,
+        color: cfg.color,
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
+        textDecoration: file.status === 'deleted' ? 'line-through' : 'none',
+        opacity: file.status === 'deleted' ? 0.75 : 1,
+      }}>
         {fileName}
       </span>
 
@@ -698,13 +846,13 @@ const FileRow = memo<{
         {dirPath && `${dirPath}`}
       </span>
 
-      <div style={{ display: 'flex', flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+      <div className="sc-actions" style={{ display: 'flex', flexShrink: 0 }} onClick={e => e.stopPropagation()}>
         {section === 'staged' ? (
-          <button className="sc-btn" title={t('sourceControl.unstageBtn')} onClick={() => onUnstageFile(file.path)}><VscRemove size={12} /></button>
+          <button type="button" className="sc-btn" title={t('sourceControl.unstageBtn')} aria-label={t('sourceControl.unstageBtn')} onClick={() => onUnstageFile(file.path)}><VscRemove size={12} /></button>
         ) : (
           <>
-            <button className="sc-btn red" title={t('sourceControl.discardBtn')} onClick={() => onDiscardFile(file.path)}><VscDiscard size={11} /></button>
-            <button className="sc-btn green" title={t('sourceControl.stageBtn')} onClick={() => onStageFile(file.path)}><VscAdd size={12} /></button>
+            <button type="button" className="sc-btn red" title={t('sourceControl.discardBtn')} aria-label={t('sourceControl.discardBtn')} onClick={() => onDiscardFile(file.path)}><VscDiscard size={11} /></button>
+            <button type="button" className="sc-btn green" title={t('sourceControl.stageBtn')} aria-label={t('sourceControl.stageBtn')} onClick={() => onStageFile(file.path)}><VscAdd size={12} /></button>
           </>
         )}
       </div>
