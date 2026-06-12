@@ -2166,7 +2166,7 @@ ${preview}
           type: 'object',
           properties: {
             query: { type: 'string', description: 'Search pattern (text or regex)' },
-            directory: { type: 'string', description: 'Absolute path to search directory' },
+            directory: { type: 'string', description: 'Absolute path to a directory to search in, or a single file to search within' },
             caseSensitive: { type: 'boolean', description: 'Case sensitive search. Default: false' },
             useRegex: { type: 'boolean', description: 'Interpret query as regex. Default: false' },
             includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' }

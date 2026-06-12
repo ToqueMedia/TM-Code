@@ -74,7 +74,14 @@ pub async fn search_in_files(
     }
 
     let directory_path = PathBuf::from(&directory);
-    if !directory_path.exists() || !directory_path.is_dir() {
+    // Aceita diretório OU ficheiro: os modelos falam o dialeto do Grep do
+    // Claude Code (o `path` de lá aceita ambos) e passam frequentemente um
+    // ficheiro para "procurar só neste ficheiro" — o rg e o grep aceitam
+    // um ficheiro como alvo nativamente, portanto rejeitar era uma
+    // restrição artificial (erro visto em produção 2026-06-12 com
+    // search(release-station) sobre .../routes/users.ts). O findstr do
+    // Windows trata o caso ficheiro no próprio call-site.
+    if !directory_path.exists() {
         return Err(format!(
             "Directory does not exist or is not a directory: {}",
             directory
@@ -511,7 +518,13 @@ async fn search_with_findstr(
     }
 
     // findstr pattern and file spec
-    cmd.arg(query).arg(format!("{}\\*", directory));
+    // Alvo ficheiro → passa o caminho tal e qual; `ficheiro\*` não casaria nada.
+    let findstr_target = if std::path::Path::new(directory).is_file() {
+        directory.to_string()
+    } else {
+        format!("{}\\*", directory)
+    };
+    cmd.arg(query).arg(findstr_target);
 
     // Hide console window on Windows.
     // tokio::process::Command has an inherent `creation_flags` method on Windows,
