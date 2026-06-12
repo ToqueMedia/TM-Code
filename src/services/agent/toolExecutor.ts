@@ -130,6 +130,18 @@ interface InteractiveShellInfo {
 
 const AGENT_SHELL_MAX_BUFFER_CHARS = 200_000
 
+// Tools whose execution can change git state. After any of these completes,
+// we nudge the shared git poller + Monaco gutters via 'git:refreshGutter'
+// (debounced on the listener side) — in an agent-first IDE the agent's own
+// edits are the dominant source of git changes, so this makes the Source
+// Control panel reactive instead of waiting for the background tick.
+// execute_command* are included because shell commands (git commit, mv, …)
+// mutate the worktree too.
+const GIT_MUTATING_TOOLS = new Set([
+  'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file',
+  'copy_file', 'create_directory', 'execute_command', 'execute_command_background',
+])
+
 // === Abort helpers ===
 
 /**
@@ -893,6 +905,14 @@ class ToolExecutor {
     if (memoryScope) execInput._memoryScope = memoryScope
 
     const result = await tool.execute(execInput)
+
+    // Reactive git refresh — see GIT_MUTATING_TOOLS. Fire-and-forget; blocked
+    // and permission-denied calls returned earlier, so this only fires for
+    // tools that actually ran.
+    if (GIT_MUTATING_TOOLS.has(toolName)) {
+      window.dispatchEvent(new CustomEvent('git:refreshGutter', { detail: '' }))
+    }
+
     // Diff results must never be truncated — the UI needs full JSON for InlineDiff,
     // and agentService needs it for approval and readFileTimestamps updates.
     try {

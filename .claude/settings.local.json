@@ -434,7 +434,11 @@
       "Bash(npx remotion *)",
       "Bash(mdls -name kMDItemDurationSeconds -name kMDItemPixelWidth -name kMDItemPixelHeight out/tmcode-promo.mp4)",
       "Bash(ffmpeg -y -loglevel error -i public/assets/audio/tmcode-promo-track-raw.mp3 -t 42 -af \"afade=t=in:st=0:d=0.8,afade=t=out:st=39.0:d=3.0\" -b:a 256k public/assets/audio/tmcode-promo-track.mp3)",
-      "Bash(afinfo out/tmcode-promo.mp4)"
+      "Bash(afinfo out/tmcode-promo.mp4)",
+      "Bash(sed -n '100,118p' src/components/views/EditorToolbar.tsx)",
+      "Bash(sed -n '30,45p' src/utils/projectStatusMonitor.ts)",
+      "Bash(sed -n '1,6p')",
+      "Bash(sed -n '955,1032p' src/services/agent/toolExecutor.ts)"
     ]
   }
 }

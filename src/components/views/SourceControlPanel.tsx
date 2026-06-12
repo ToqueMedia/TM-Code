@@ -10,6 +10,8 @@ import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { GitService, type GitFileStatus } from '@/services/gitService'
+import { acquireGitStatusPolling, refreshGitStatus } from '@/services/gitStatusPoller'
+import { useGitStatusStore } from '@/stores/gitStatusStore'
 import { useCurrentProject } from '@/hooks/useProjectState'
 import { getFileIconByExtension } from '@/utils/iconMapper'
 
@@ -185,9 +187,15 @@ function SourceControlPanel() {
   const projectPath = currentProject?.path ?? ''
   const projectName = currentProject?.name ?? ''
 
-  const [files, setFiles] = useState<GitFileStatus[]>([])
-  const [branch, setBranch] = useState('')
-  const [loading, setLoading] = useState(false)
+  // Git state comes from the shared store (one poller app-wide) — see
+  // services/gitStatusPoller.ts for the refresh strategy.
+  const files = useGitStatusStore(s => s.files)
+  const branch = useGitStatusStore(s => s.branch)
+  const loading = useGitStatusStore(s => s.loading)
+  const ahead = useGitStatusStore(s => s.ahead)
+  const behind = useGitStatusStore(s => s.behind)
+  const hasUpstream = useGitStatusStore(s => s.hasUpstream)
+
   const [commitMsg, setCommitMsg] = useState('')
   const [committing, setCommitting] = useState(false)
   const [stagedOpen, setStagedOpen] = useState(true)
@@ -195,12 +203,8 @@ function SourceControlPanel() {
   const [feedback, setFeedback] = useState<{ type: FeedbackType; msg: string }>({ type: null, msg: '' })
   const [generating, setGenerating] = useState(false)
   const [syncing, setSyncing] = useState(false)
-  // Commits not yet pushed / not yet pulled vs upstream — drives the
-  // post-commit "Pull & Push" state of the main button. null = no upstream.
-  const [aheadBehind, setAheadBehind] = useState<{ ahead: number; behind: number } | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const loadingRef = useRef(false)
   const mountedRef = useRef(true)
 
   useEffect(() => {
@@ -230,50 +234,12 @@ function SourceControlPanel() {
     resizeTextarea()
   }, [commitMsg, resizeTextarea])
 
-  // ── Load git status ──────────────────────────────────────────────────
-
-  const loadStatus = useCallback(async (showSpinner = false) => {
-    if (!projectPath || loadingRef.current) return
-    loadingRef.current = true
-    if (showSpinner && mountedRef.current) setLoading(true)
-    try {
-      const [statusFiles, branchName] = await Promise.all([
-        GitService.getStatusFiles(projectPath),
-        GitService.getCurrentBranch(projectPath),
-      ])
-      if (mountedRef.current) { setFiles(statusFiles); setBranch(branchName) }
-      // Ahead/behind vs upstream — fails harmlessly when there is no remote
-      // or no upstream configured (button then never enters sync mode).
-      try {
-        const { invoke: inv } = await import('@tauri-apps/api/core')
-        const res = await inv<{ stdout: string; success: boolean }>(
-          'execute_command',
-          { command: 'git rev-list --left-right --count @{upstream}...HEAD', cwd: projectPath, timeoutSecs: 5 },
-        )
-        if (mountedRef.current) {
-          if (res.success) {
-            const [behind = 0, ahead = 0] = res.stdout.trim().split(/\s+/).map(Number)
-            setAheadBehind({ ahead: ahead || 0, behind: behind || 0 })
-          } else {
-            setAheadBehind(null)
-          }
-        }
-      } catch {
-        if (mountedRef.current) setAheadBehind(null)
-      }
-    } catch {
-      if (mountedRef.current) setFiles([])
-    } finally {
-      if (showSpinner && mountedRef.current) setLoading(false)
-      loadingRef.current = false
-    }
-  }, [projectPath])
+  // ── Git status subscription (shared poller) ──────────────────────────
 
   useEffect(() => {
-    loadStatus(true)
-    const id = setInterval(() => loadStatus(false), 6000)
-    return () => clearInterval(id)
-  }, [loadStatus])
+    if (!projectPath) return
+    return acquireGitStatusPolling(projectPath)
+  }, [projectPath])
 
   const staged = files.filter(f => f.staged)
   const unstaged = files.filter(f => !f.staged)
@@ -285,38 +251,38 @@ function SourceControlPanel() {
   }, [projectPath])
 
   const onStageFile = useCallback(async (path: string) => {
-    try { await GitService.stageFile(projectPath, path); await loadStatus(); refreshGutter(path) }
+    try { await GitService.stageFile(projectPath, path); await refreshGitStatus(); refreshGutter(path) }
     catch (e) { showFeedback('error', t('sourceControl.stage').replace('{file}', String(e))) }
-  }, [projectPath, loadStatus, showFeedback, refreshGutter])
+  }, [projectPath, showFeedback, refreshGutter])
 
   const onUnstageFile = useCallback(async (path: string) => {
-    try { await GitService.unstageFile(projectPath, path); await loadStatus(); refreshGutter(path) }
+    try { await GitService.unstageFile(projectPath, path); await refreshGitStatus(); refreshGutter(path) }
     catch (e) { showFeedback('error', t('sourceControl.unstage').replace('{file}', String(e))) }
-  }, [projectPath, loadStatus, showFeedback, refreshGutter])
+  }, [projectPath, showFeedback, refreshGutter])
 
   const stageAll = useCallback(async () => {
-    try { await GitService.stageAll(projectPath); await loadStatus() }
+    try { await GitService.stageAll(projectPath); await refreshGitStatus() }
     catch (e) { showFeedback('error', t('sourceControl.stageAll').replace('{file}', String(e))) }
-  }, [projectPath, loadStatus, showFeedback])
+  }, [projectPath, showFeedback])
 
   const unstageAll = useCallback(async () => {
-    try { await GitService.unstageAll(projectPath); await loadStatus() }
+    try { await GitService.unstageAll(projectPath); await refreshGitStatus() }
     catch (e) { showFeedback('error', t('sourceControl.unstageAll').replace('{file}', String(e))) }
-  }, [projectPath, loadStatus, showFeedback])
+  }, [projectPath, showFeedback])
 
   const onDiscardFile = useCallback(async (path: string) => {
     const ok = await tauriConfirm(t('sourceControl.discardConfirm').replace('{file}', path.split('/').pop() || path), { title: t('sourceControl.discardTitle'), kind: 'warning' })
     if (!ok) return
-    try { await GitService.discardFile(projectPath, path); await loadStatus() }
+    try { await GitService.discardFile(projectPath, path); await refreshGitStatus() }
     catch (e) { showFeedback('error', t('sourceControl.discardFile').replace('{file}', String(e))) }
-  }, [projectPath, loadStatus, showFeedback])
+  }, [projectPath, showFeedback])
 
   const discardAll = useCallback(async () => {
     const ok = await tauriConfirm(t('sourceControl.discardAllConfirm'), { title: t('sourceControl.discardAllTitle'), kind: 'warning' })
     if (!ok) return
-    try { await GitService.discardAll(projectPath); await loadStatus() }
+    try { await GitService.discardAll(projectPath); await refreshGitStatus() }
     catch (e) { showFeedback('error', t('sourceControl.discardAll').replace('{file}', String(e))) }
-  }, [projectPath, loadStatus, showFeedback])
+  }, [projectPath, showFeedback])
 
   const onOpenFile = useCallback((relPath: string) => {
     if (!projectPath) return
@@ -335,12 +301,12 @@ function SourceControlPanel() {
       setCommitMsg('')
       if (textareaRef.current) textareaRef.current.style.height = '48px'
       showFeedback('success', t('sourceControl.committedTo').replace('{branch}', branch))
-      await loadStatus()
+      await refreshGitStatus()
     } catch (e) {
       if (mountedRef.current) showFeedback('error', t('sourceControl.commit').replace('{file}', String(e)))
     }
     if (mountedRef.current) setCommitting(false)
-  }, [projectPath, commitMsg, staged.length, loadStatus, showFeedback, branch])
+  }, [projectPath, commitMsg, staged.length, showFeedback, branch])
 
   // ── Stage All & Commit (quick action) ────────────────────────────────
 
@@ -354,12 +320,12 @@ function SourceControlPanel() {
       setCommitMsg('')
       if (textareaRef.current) textareaRef.current.style.height = '48px'
       showFeedback('success', t('sourceControl.committedAllTo').replace('{branch}', branch))
-      await loadStatus()
+      await refreshGitStatus()
     } catch (e) {
       if (mountedRef.current) showFeedback('error', t('sourceControl.commit').replace('{file}', String(e)))
     }
     if (mountedRef.current) setCommitting(false)
-  }, [projectPath, commitMsg, loadStatus, showFeedback, branch])
+  }, [projectPath, commitMsg, showFeedback, branch])
 
   // ── Sync (pull, then push) ───────────────────────────────────────────
   // After a commit the main button becomes "Pull & Push": one click brings
@@ -382,9 +348,9 @@ function SourceControlPanel() {
       showFeedback('error', t('sourceControl.push').replace('{file}', e instanceof Error ? e.message : String(e)))
     } finally {
       setSyncing(false)
-      await loadStatus()
+      await refreshGitStatus()
     }
-  }, [projectPath, branch, showFeedback, loadStatus, syncing])
+  }, [projectPath, branch, showFeedback, syncing])
 
   // ── AI commit message ────────────────────────────────────────────────
 
@@ -511,7 +477,7 @@ ${diffDetail}`,
   const canCommit = commitMsg.trim().length > 0 && staged.length > 0
   const canStageAndCommit = commitMsg.trim().length > 0 && staged.length === 0 && unstaged.length > 0
   // Working tree clean but commits to sync → the main button becomes "Pull & Push".
-  const canSync = files.length === 0 && !!aheadBehind && (aheadBehind.ahead > 0 || aheadBehind.behind > 0)
+  const canSync = files.length === 0 && hasUpstream && (ahead > 0 || behind > 0)
 
   // ── Render ───────────────────────────────────────────────────────────
 
@@ -543,7 +509,7 @@ ${diffDetail}`,
             </Text>
           )}
         </HStack>
-        <button type="button" className="sc-btn" title={t("view.refresh")} aria-label={t("view.refresh")} onClick={() => loadStatus(true)} disabled={loading}>
+        <button type="button" className="sc-btn" title={t("view.refresh")} aria-label={t("view.refresh")} onClick={() => refreshGitStatus({ spinner: true })} disabled={loading}>
           {loading ? <span className="sc-spin"><VscRefresh size={13} /></span> : <VscRefresh size={13} />}
         </button>
       </Flex>
@@ -557,11 +523,11 @@ ${diffDetail}`,
               {branch}
             </Text>
           </Flex>
-          {aheadBehind && (aheadBehind.ahead > 0 || aheadBehind.behind > 0) && (
+          {hasUpstream && (ahead > 0 || behind > 0) && (
             <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} flexShrink={0}>
-              {aheadBehind.behind > 0 && `${aheadBehind.behind}↓`}
-              {aheadBehind.behind > 0 && aheadBehind.ahead > 0 && ' '}
-              {aheadBehind.ahead > 0 && `${aheadBehind.ahead}↑`}
+              {behind > 0 && `${behind}↓`}
+              {behind > 0 && ahead > 0 && ' '}
+              {ahead > 0 && `${ahead}↑`}
             </Text>
           )}
         </Flex>
@@ -628,7 +594,7 @@ ${diffDetail}`,
           {canCommit || canStageAndCommit || committing
             ? (canStageAndCommit ? 'Stage All & Commit' : 'Commit')
             : canSync || syncing
-              ? `Pull & Push${aheadBehind && aheadBehind.ahead > 0 ? ` (${aheadBehind.ahead}↑)` : ''}`
+              ? `Pull & Push${ahead > 0 ? ` (${ahead}↑)` : ''}`
               : 'Commit'}
         </button>
       </Box>

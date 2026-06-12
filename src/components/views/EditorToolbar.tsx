@@ -1,9 +1,10 @@
-import { memo, useState, useEffect } from 'react'
+import { memo, useEffect } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
 import { VscComment, VscFiles, VscTerminal, VscSourceControl, VscSearch } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
-import { GitService } from '@/services/gitService'
+import { acquireGitStatusPolling } from '@/services/gitStatusPoller'
+import { useGitStatusStore } from '@/stores/gitStatusStore'
 import { useCurrentProject } from '@/hooks/useProjectState'
 
 export type SidebarPanel = 'explorer' | 'search' | 'sourceControl' | null
@@ -99,14 +100,14 @@ function EditorToolbar({
   }
 
   const currentProject = useCurrentProject()
-  const [gitCount, setGitCount] = useState(0)
+  // Badge count comes from the shared git-status store — this used to be a
+  // second 6s setInterval firing duplicate git_status_files IPCs alongside
+  // the SourceControlPanel's own poll (see services/gitStatusPoller.ts).
+  const gitCount = useGitStatusStore(s => s.files.length)
 
   useEffect(() => {
-    if (!currentProject?.path) { setGitCount(0); return }
-    const fetch = () => GitService.getStatusFiles(currentProject.path).then(f => setGitCount(f.length)).catch(() => {})
-    fetch()
-    const id = setInterval(fetch, 6000)
-    return () => clearInterval(id)
+    if (!currentProject?.path) return
+    return acquireGitStatusPolling(currentProject.path)
   }, [currentProject?.path])
 
   return (
