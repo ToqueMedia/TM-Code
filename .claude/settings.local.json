@@ -410,7 +410,13 @@
       "Bash(ps -p 8550 -o command=)",
       "Bash(sed -i '' 's/\"version\": \"0.7.5\"/\"version\": \"0.7.6\"/' package.json src-tauri/tauri.conf.json)",
       "Bash(sed -i '' 's/^version = \"0.7.5\"/version = \"0.7.6\"/' src-tauri/Cargo.toml)",
-      "Bash(ls -la ~/Desktop/builds-desktop/v0.7.6/)"
+      "Bash(ls -la ~/Desktop/builds-desktop/v0.7.6/)",
+      "Bash(dig +short api.stepfun.ai)",
+      "Bash(dig +short api.stepfun.com)",
+      "Bash(dig +short generativelanguage.googleapis.com)",
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(echo \"worker tsc exit: $?\")",
+      "Bash(dig +short api.minimax.io)"
     ]
   }
 }

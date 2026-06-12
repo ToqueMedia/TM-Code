@@ -29,12 +29,12 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
   }
 
   const obj = parsed as Record<string, unknown>
-  const authScheme = obj.authScheme === 'Bearer' || obj.authScheme === 'none'
+  const authScheme = obj.authScheme === 'Bearer' || obj.authScheme === 'none' || obj.authScheme === 'google_oauth'
     ? obj.authScheme
     : null
 
   if (!authScheme) {
-    throw new HttpError(500, 'tm_active_config_invalid', 'Active AI config authScheme must be "Bearer" or "none".')
+    throw new HttpError(500, 'tm_active_config_invalid', 'Active AI config authScheme must be "Bearer", "none" or "google_oauth".')
   }
 
   const enabled = obj.enabled

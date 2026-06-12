@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
+import { generateKeyPairSync } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import test, { beforeEach } from 'node:test'
 import { clearActiveConfigCache } from '../src/activeConfig'
-import { resolveEnforcementMode, resetBillingDisabledWarning } from '../src/billing'
+import { clearJwksCache } from '../src/auth'
+import { clearPlanBudgetCache, resolveEnforcementMode, resetBillingDisabledWarning } from '../src/billing'
+import { clearAccessTokenCache } from '../src/googleAuth'
 import { handleRequest } from '../src/index'
 import { clearPlanCache } from '../src/planGate'
 import type { Env } from '../src/types'
@@ -84,15 +87,24 @@ function firestoreUserDoc(opts: {
  * em `firestoreCalls`; tudo o resto vai para `response` e conta em `calls` —
  * preserva as asserções históricas de "quantas vezes o upstream foi chamado".
  */
-function fakeFetcher(response: Response, firestoreDoc?: () => Response) {
+function fakeFetcher(response: Response, firestoreDoc?: () => Response, planDoc?: () => Response) {
   const calls: Array<{ input: RequestInfo | URL; init?: RequestInit; body: any; headers: Headers }> = []
   const firestoreCalls: Array<{ input: RequestInfo | URL; method: string; body: any; headers: Headers }> = []
+  const planQueryCalls: Array<{ body: any }> = []
   return {
     calls,
     firestoreCalls,
+    planQueryCalls,
     async fetch(input: RequestInfo | URL, init?: RequestInit) {
       const url = String(input)
       const headers = new Headers(init?.headers)
+      // Lookup do budget do plano (subscription_plans via runQuery) tem
+      // contagem própria — NÃO entra em firestoreCalls para preservar as
+      // asserções históricas de reads (users/{uid}) e commits.
+      if (url.includes(':runQuery')) {
+        planQueryCalls.push({ body: typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body })
+        return planDoc ? planDoc() : Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      }
       if (url.includes('firestore.googleapis.com')) {
         firestoreCalls.push({
           input,
@@ -110,6 +122,20 @@ function fakeFetcher(response: Response, firestoreDoc?: () => Response) {
   }
 }
 
+/** Resposta runQuery com um doc de subscription_plans (tokenBudget do admin). */
+function planBudgetDoc(tokenBudget: number): Response {
+  return Response.json([{
+    document: {
+      name: 'projects/tm-test/databases/(default)/documents/subscription_plans/auto-id',
+      fields: {
+        planKey: { stringValue: 'whatever' },
+        tokenBudget: { integerValue: String(tokenBudget) },
+      },
+    },
+    readTime: '2026-06-12T00:00:00Z',
+  }])
+}
+
 /** ctx de teste — coleciona promises do waitUntil para await explícito. */
 function collectorCtx() {
   const tasks: Promise<unknown>[] = []
@@ -122,6 +148,8 @@ function collectorCtx() {
 beforeEach(() => {
   clearActiveConfigCache()
   clearPlanCache()
+  clearAccessTokenCache()
+  clearPlanBudgetCache()
 })
 
 /** Fetcher que separa o lookup de plano (Firestore REST) do upstream do provider. */
@@ -138,6 +166,11 @@ function speedFetcher(opts: {
     async fetch(input: RequestInfo | URL, init?: RequestInit) {
       const url = String(input)
       const headers = new Headers(init?.headers)
+      // Budget do plano (runQuery a subscription_plans): sem doc → fallback
+      // hardcoded; não conta em planCalls (asserções de cache do user read).
+      if (url.includes(':runQuery')) {
+        return Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      }
       if (url.includes('firestore.googleapis.com')) {
         planCalls.push({ input, headers })
         if (opts.planResponse) return opts.planResponse()
@@ -433,6 +466,29 @@ test('transport failure returns 502 and does not retry', async () => {
   assert.equal(upstreamCalls, 1)
 })
 
+test('upstream that never sends headers is aborted with 504 instead of hanging', async () => {
+  // O cenário do hang detector em produção: o provider aceita a ligação e
+  // nunca responde. O timeout de headers aborta e devolve um 504 limpo que o
+  // SDK da IDE consegue tratar — em vez de o runtime matar o pedido.
+  const fetcher = {
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      if (String(input).includes('firestore.googleapis.com')) return firestoreUserDoc()
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        )
+      })
+    },
+  }
+
+  const res = await handleRequest(request(), env({ UPSTREAM_HEADER_TIMEOUT_MS: '25' }), { fetcher })
+
+  assert.equal(res.status, 504)
+  assert.match(await res.text(), /tm_upstream_timeout/)
+})
+
 test('streaming chunks are returned without worker_status, billing, or manual DONE injection', async () => {
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
@@ -504,6 +560,88 @@ test('firebase_emulator auth accepts unsigned emulator JWT payload', async () =>
 
   assert.equal(res.status, 200)
   assert.equal(fetcher.calls.length, 1)
+})
+
+// ── JWKS: verificação RS256 real + cache por isolate ──────────────────────
+
+async function rs256TestToken(): Promise<{ token: string; jwk: JsonWebKey & { kid?: string } }> {
+  const pair = await crypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) },
+    true,
+    ['sign', 'verify'],
+  )
+  const jwk = await crypto.subtle.exportKey('jwk', pair.publicKey) as JsonWebKey & { kid?: string }
+  jwk.kid = 'test-kid'
+
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  const header = encode({ alg: 'RS256', kid: 'test-kid' })
+  const payload = encode({
+    aud: 'tm-test',
+    iss: 'https://securetoken.google.com/tm-test',
+    sub: 'jwks-user',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    pair.privateKey,
+    new TextEncoder().encode(`${header}.${payload}`),
+  )
+  return { token: `${header}.${payload}.${Buffer.from(signature).toString('base64url')}`, jwk }
+}
+
+function jwtRequest(token: string): Request {
+  return new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: '{}',
+  })
+}
+
+test('firebase_jwt: JWKS is fetched once per isolate and reused across requests', async (t) => {
+  clearJwksCache()
+  const { token, jwk } = await rs256TestToken()
+
+  let jwksFetches = 0
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes('/jwk/')) {
+      jwksFetches += 1
+      return Response.json({ keys: [jwk] }, { headers: { 'cache-control': 'public, max-age=3600' } })
+    }
+    return originalFetch(input, init)
+  }) as typeof fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const testEnv = env({ AUTH_MODE: 'firebase_jwt' })
+
+  const first = await handleRequest(jwtRequest(token), testEnv, { fetcher })
+  const second = await handleRequest(jwtRequest(token), testEnv, { fetcher })
+
+  assert.equal(first.status, 200)
+  assert.equal(second.status, 200)
+  // Antes da cache eram 2 — um subrequest ao Google por pedido, sem timeout.
+  assert.equal(jwksFetches, 1)
+  assert.equal(fetcher.calls.length, 2)
+})
+
+test('firebase_jwt: JWKS unreachable without warm cache fails closed with 503', async (t) => {
+  clearJwksCache()
+  const { token } = await rs256TestToken()
+
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes('/jwk/')) throw new Error('network down')
+    return originalFetch(input, init)
+  }) as typeof fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const res = await handleRequest(jwtRequest(token), env({ AUTH_MODE: 'firebase_jwt' }), { fetcher })
+
+  assert.equal(res.status, 503)
+  assert.match(await res.text(), /tm_auth_config_error/)
+  assert.equal(fetcher.calls.length, 0)
 })
 
 test('client Authorization is replaced by active provider api-key', async () => {
@@ -667,6 +805,55 @@ test('billing: enforce mode lets an overage user through (extraUsageBalance > 0)
   assert.equal(res.headers.get('x-budget-status'), 'allowed_overage')
 })
 
+test('billing: admin tokenBudget from subscription_plans supersedes the hardcoded map', async () => {
+  // Cenário real (2026-06-12): admin publicou ~25.5M para o vibe, hardcoded
+  // é 10.82M. User com 12M consumidos: o mapa antigo dava 402; com o budget
+  // do admin é 12/25.5 = 47% → allowed.
+  const fetcher = fakeFetcher(
+    Response.json({ ok: true }),
+    () => firestoreUserDoc({ plan: 'vibe', tokensConsumed: 12_000_000 }),
+    () => planBudgetDoc(25_500_000),
+  )
+  const res = await handleRequest(request(), env({ BUDGET_ENFORCEMENT: 'enforce' }), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-budget-status'), 'allowed')
+  assert.ok(Math.abs(parseFloat(res.headers.get('x-budget-pct') ?? '0') - 12 / 25.5) < 0.001)
+  // A query foi mesmo a subscription_plans filtrada por planKey.
+  assert.equal(fetcher.planQueryCalls.length, 1)
+  const q = fetcher.planQueryCalls[0].body.structuredQuery
+  assert.equal(q.from[0].collectionId, 'subscription_plans')
+  assert.equal(q.where.fieldFilter.value.stringValue, 'vibe')
+})
+
+test('billing: plan budget falls back to the hardcoded map when the admin doc is missing', async () => {
+  // runQuery sem documento (default do fakeFetcher) → explorer mantém 1.5M
+  // e 2M consumidos continuam a dar 402, como nos testes históricos.
+  const fetcher = fakeFetcher(
+    Response.json({ ok: true }),
+    () => firestoreUserDoc({ plan: 'explorer', tokensConsumed: 2_000_000 }),
+  )
+  const res = await handleRequest(request(), env({ BUDGET_ENFORCEMENT: 'enforce' }), { fetcher })
+
+  assert.equal(res.status, 402)
+  assert.equal(fetcher.planQueryCalls.length, 1)
+})
+
+test('billing: plan budget read is cached across consecutive requests', async () => {
+  const fetcher = fakeFetcher(
+    Response.json({ ok: true }),
+    () => firestoreUserDoc({ plan: 'vibe', tokensConsumed: 1_000 }),
+    () => planBudgetDoc(25_500_000),
+  )
+  const testEnv = env({ BUDGET_ENFORCEMENT: 'enforce' })
+
+  await handleRequest(request(), testEnv, { fetcher })
+  await handleRequest(request(), testEnv, { fetcher })
+
+  assert.equal(fetcher.planQueryCalls.length, 1)
+  assert.equal(fetcher.calls.length, 2)
+})
+
 test('billing: usage from the final SSE chunk is committed as an atomic increment', async () => {
   const fetcher = fakeFetcher(sseUpstream([
     'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
@@ -712,6 +899,9 @@ test('billing: TM Speed served applies the 3x multiplier server-side', async () 
     firestoreCalls: [] as Array<{ method: string; body: any }>,
     async fetch(input: RequestInfo | URL, init?: RequestInit) {
       const url = String(input)
+      if (url.includes(':runQuery')) {
+        return Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      }
       if (url.includes('firestore.googleapis.com')) {
         const method = init?.method ?? 'GET'
         this.firestoreCalls.push({
@@ -897,4 +1087,133 @@ test('billing: pre-flight read is cached across consecutive turns', async () => 
 
   const reads = fetcher.firestoreCalls.filter(c => c.method === 'GET')
   assert.equal(reads.length, 1)
+})
+
+// ── google_oauth (Vertex AI) ──────────────────────────────────────────────
+//
+// A Vertex não aceita API key estática: o apiKeyEnv aponta para o JSON da
+// service account e o worker minta um access token OAuth2 por pedido (com
+// cache). Estes testes assinam com uma chave RSA real gerada em memória —
+// o mint usa WebCrypto a sério, só o endpoint OAuth é mockado.
+
+const vertexPrivateKeyPem = (() => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  return privateKey.export({ type: 'pkcs8', format: 'pem' }) as string
+})()
+
+const vertexServiceAccountJson = JSON.stringify({
+  client_email: 'vertex-sa@tm-test.iam.gserviceaccount.com',
+  private_key: vertexPrivateKeyPem,
+})
+
+const vertexActiveConfig = {
+  provider: 'gemini',
+  model: 'google/gemini-3.5-flash',
+  baseUrl: 'https://aiplatform.googleapis.com/v1/projects/tm-test/locations/global/endpoints/openapi',
+  chatCompletionsPath: '/chat/completions',
+  authHeader: 'Authorization',
+  authScheme: 'google_oauth',
+  apiKeyEnv: 'VERTEX_AI_SERVICE_ACCOUNT_JSON',
+  enabled: true,
+}
+
+/** Fetcher que distingue OAuth, Firestore e upstream Vertex. */
+function vertexFetcher(opts: { oauthResponse?: () => Response; upstreamResponse?: () => Response } = {}) {
+  const oauthCalls: Array<{ body: string }> = []
+  const upstreamCalls: Array<{ input: RequestInfo | URL; body: any; headers: Headers }> = []
+  return {
+    oauthCalls,
+    upstreamCalls,
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com')) {
+        oauthCalls.push({ body: String(init?.body) })
+        return opts.oauthResponse
+          ? opts.oauthResponse()
+          : Response.json({ access_token: 'vertex-access-token', expires_in: 3600 })
+      }
+      if (url.includes(':runQuery')) {
+        return Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      }
+      if (url.includes('firestore.googleapis.com')) {
+        if ((init?.method ?? 'GET') === 'POST') return Response.json({ writeResults: [] })
+        return firestoreUserDoc()
+      }
+      upstreamCalls.push({
+        input,
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body,
+        headers: new Headers(init?.headers),
+      })
+      return opts.upstreamResponse ? opts.upstreamResponse() : Response.json({ ok: true })
+    },
+  }
+}
+
+function vertexEnv(overrides: Partial<Env> = {}): Env {
+  return env({
+    ACTIVE_AI_CONFIG_JSON: JSON.stringify(vertexActiveConfig),
+    VERTEX_AI_SERVICE_ACCOUNT_JSON: vertexServiceAccountJson,
+    ...overrides,
+  })
+}
+
+test('google_oauth: mints an OAuth token and sends it as Bearer upstream', async () => {
+  const fetcher = vertexFetcher()
+
+  const res = await handleRequest(request(), vertexEnv(), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(fetcher.oauthCalls.length, 1)
+  // O JWT assinado pede o scope cloud-platform (Vertex), não datastore —
+  // o scope vive no payload base64url da assertion, não no corpo urlencoded.
+  const assertion = new URLSearchParams(fetcher.oauthCalls[0].body).get('assertion') ?? ''
+  const jwtPayload = JSON.parse(Buffer.from(assertion.split('.')[1], 'base64url').toString())
+  assert.equal(jwtPayload.scope, 'https://www.googleapis.com/auth/cloud-platform')
+  assert.equal(fetcher.upstreamCalls.length, 1)
+  const call = fetcher.upstreamCalls[0]
+  assert.equal(
+    String(call.input),
+    'https://aiplatform.googleapis.com/v1/projects/tm-test/locations/global/endpoints/openapi/chat/completions',
+  )
+  assert.equal(call.headers.get('authorization'), 'Bearer vertex-access-token')
+  // O modelo publicado leva o prefixo de publisher exigido pela Vertex.
+  assert.equal(call.body.model, 'google/gemini-3.5-flash')
+})
+
+test('google_oauth: token is cached across consecutive requests', async () => {
+  const fetcher = vertexFetcher()
+  const testEnv = vertexEnv()
+
+  await handleRequest(request(), testEnv, { fetcher })
+  await handleRequest(request(), testEnv, { fetcher })
+
+  assert.equal(fetcher.oauthCalls.length, 1)
+  assert.equal(fetcher.upstreamCalls.length, 2)
+})
+
+test('google_oauth: missing/invalid service account JSON → 500 tm_provider_secret_missing', async () => {
+  for (const value of [undefined, '', 'not-json', '{"client_email":"x"}']) {
+    clearActiveConfigCache()
+    const fetcher = vertexFetcher()
+    const res = await handleRequest(
+      request(),
+      vertexEnv({ VERTEX_AI_SERVICE_ACCOUNT_JSON: value }),
+      { fetcher },
+    )
+    assert.equal(res.status, 500)
+    const body = await res.json() as { error: { type: string } }
+    assert.equal(body.error.type, 'tm_provider_secret_missing')
+    assert.equal(fetcher.upstreamCalls.length, 0)
+  }
+})
+
+test('google_oauth: OAuth exchange failure → 502 tm_provider_auth_failed, upstream never called', async () => {
+  const fetcher = vertexFetcher({ oauthResponse: () => new Response('denied', { status: 403 }) })
+
+  const res = await handleRequest(request(), vertexEnv(), { fetcher })
+
+  assert.equal(res.status, 502)
+  const body = await res.json() as { error: { type: string } }
+  assert.equal(body.error.type, 'tm_provider_auth_failed')
+  assert.equal(fetcher.upstreamCalls.length, 0)
 })

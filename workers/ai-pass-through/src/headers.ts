@@ -1,6 +1,7 @@
-import type { ActiveAIConfig, Env } from './types'
+import type { ActiveAIConfig, Env, Fetcher } from './types'
 import { cleanSecret } from './secrets'
 import { HttpError } from './errors'
+import { mintAccessToken, OAUTH_SCOPE_CLOUD_PLATFORM } from './googleAuth'
 
 const DEFAULT_ALLOWED_HEADERS = [
   'Authorization',
@@ -97,10 +98,15 @@ function shouldForwardRequestHeader(name: string): boolean {
   return lower === 'content-type' || lower === 'accept' || lower === 'accept-encoding'
 }
 
-export function buildUpstreamHeaders(request: Request, config: ActiveAIConfig, env: Env): {
+export async function buildUpstreamHeaders(
+  request: Request,
+  config: ActiveAIConfig,
+  env: Env,
+  fetcher: Fetcher,
+): Promise<{
   headers: Headers
   providerKey: string
-} {
+}> {
   const headers = new Headers()
   for (const [name, value] of request.headers) {
     if (shouldForwardRequestHeader(name)) headers.set(name, value)
@@ -110,12 +116,42 @@ export function buildUpstreamHeaders(request: Request, config: ActiveAIConfig, e
     headers.set('content-type', 'application/json')
   }
 
+  headers.delete('authorization')
+
+  // Vertex AI (google_oauth): não existe API key estática — `apiKeyEnv`
+  // aponta para o JSON completo da service account e o token OAuth2 é
+  // mintado aqui (cache ~55 min em googleAuth.ts, por isso o custo do
+  // round-trip ao oauth2.googleapis.com é ~1×/hora/isolate). O providerKey
+  // devolvido para logging é o client_email — nunca o token.
+  if (config.authScheme === 'google_oauth') {
+    const raw = env[config.apiKeyEnv]
+    let sa: { client_email?: string; private_key?: string } | null = null
+    if (typeof raw === 'string' && raw.trim() !== '') {
+      try {
+        sa = JSON.parse(raw) as { client_email?: string; private_key?: string }
+      } catch {
+        sa = null
+      }
+    }
+    if (!sa?.client_email || !sa?.private_key) {
+      throw new HttpError(500, 'tm_provider_secret_missing', 'Active provider service account is not configured.')
+    }
+    let token: string
+    try {
+      token = await mintAccessToken(sa.client_email, sa.private_key, fetcher, OAUTH_SCOPE_CLOUD_PLATFORM)
+    } catch (error) {
+      console.error('[ai-pass-through] google_oauth token mint failed:', error)
+      throw new HttpError(502, 'tm_provider_auth_failed', 'Unable to authenticate with the active AI provider.')
+    }
+    headers.set(config.authHeader, `Bearer ${token}`)
+    return { headers, providerKey: sa.client_email }
+  }
+
   const providerKey = cleanSecret(env[config.apiKeyEnv], config.authScheme)
   if (!providerKey) {
     throw new HttpError(500, 'tm_provider_secret_missing', 'Active provider API key is not configured.')
   }
 
-  headers.delete('authorization')
   if (config.authScheme === 'Bearer') {
     headers.set(config.authHeader, `Bearer ${providerKey}`)
   } else {
