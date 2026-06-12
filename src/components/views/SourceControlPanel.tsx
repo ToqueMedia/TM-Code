@@ -3,7 +3,7 @@ import { Flex, Text, Box, HStack } from '@chakra-ui/react'
 import {
   VscCheck, VscRefresh, VscAdd, VscRemove, VscDiscard,
   VscChevronDown, VscChevronRight, VscSparkle,
-  VscRepoPull, VscRepoPush, VscError, VscSourceControl,
+  VscSync, VscError, VscSourceControl,
 } from 'react-icons/vsc'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog'
@@ -170,38 +170,6 @@ const PANEL_STYLES = `
   cursor: progress;
 }
 
-/* Labeled mini-buttons (Pull / Push on the branch row) — icon-only cloud
-   buttons read as ambiguous; an explicit label removes the guesswork. */
-.sc-mini {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 20px;
-  padding: 0 8px;
-  border: 1px solid ${tokens.colors.border.input};
-  border-radius: 4px;
-  background: transparent;
-  color: ${tokens.colors.text.secondary};
-  font-size: 11px;
-  font-weight: 500;
-  font-family: ${tokens.fontFamily.ui};
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all ${tokens.transition.fast};
-}
-.sc-mini:hover:not(:disabled) {
-  color: ${tokens.colors.text.primary};
-  background: ${tokens.colors.bg.hoverSubtle};
-  border-color: ${tokens.colors.border.inputAlt};
-}
-.sc-mini:active:not(:disabled) {
-  transform: translateY(1px);
-}
-.sc-mini:disabled {
-  opacity: 0.45;
-  cursor: progress;
-}
-
 /* Feedback banner slide-in */
 .sc-feedback {
   animation: sc-feedback-in 0.16s ease-out;
@@ -226,8 +194,10 @@ function SourceControlPanel() {
   const [changesOpen, setChangesOpen] = useState(true)
   const [feedback, setFeedback] = useState<{ type: FeedbackType; msg: string }>({ type: null, msg: '' })
   const [generating, setGenerating] = useState(false)
-  const [pushing, setPushing] = useState(false)
-  const [pulling, setPulling] = useState(false)
+  const [syncing, setSyncing] = useState(false)
+  // Commits not yet pushed / not yet pulled vs upstream — drives the
+  // post-commit "Pull & Push" state of the main button. null = no upstream.
+  const [aheadBehind, setAheadBehind] = useState<{ ahead: number; behind: number } | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadingRef = useRef(false)
@@ -272,6 +242,25 @@ function SourceControlPanel() {
         GitService.getCurrentBranch(projectPath),
       ])
       if (mountedRef.current) { setFiles(statusFiles); setBranch(branchName) }
+      // Ahead/behind vs upstream — fails harmlessly when there is no remote
+      // or no upstream configured (button then never enters sync mode).
+      try {
+        const { invoke: inv } = await import('@tauri-apps/api/core')
+        const res = await inv<{ stdout: string; success: boolean }>(
+          'execute_command',
+          { command: 'git rev-list --left-right --count @{upstream}...HEAD', cwd: projectPath, timeoutSecs: 5 },
+        )
+        if (mountedRef.current) {
+          if (res.success) {
+            const [behind = 0, ahead = 0] = res.stdout.trim().split(/\s+/).map(Number)
+            setAheadBehind({ ahead: ahead || 0, behind: behind || 0 })
+          } else {
+            setAheadBehind(null)
+          }
+        }
+      } catch {
+        if (mountedRef.current) setAheadBehind(null)
+      }
     } catch {
       if (mountedRef.current) setFiles([])
     } finally {
@@ -372,28 +361,30 @@ function SourceControlPanel() {
     if (mountedRef.current) setCommitting(false)
   }, [projectPath, commitMsg, loadStatus, showFeedback, branch])
 
-  // ── Push / Pull ──────────────────────────────────────────────────────
+  // ── Sync (pull, then push) ───────────────────────────────────────────
+  // After a commit the main button becomes "Pull & Push": one click brings
+  // the branch up to date and publishes the new commits, in that order.
 
-  const handlePush = useCallback(async () => {
-    if (!projectPath || pushing) return
-    setPushing(true)
+  const handleSync = useCallback(async () => {
+    if (!projectPath || syncing) return
+    setSyncing(true)
+    try {
+      await GitService.pull(projectPath)
+    } catch (e) {
+      showFeedback('error', t('sourceControl.pull').replace('{file}', e instanceof Error ? e.message : String(e)))
+      setSyncing(false)
+      return
+    }
     try {
       const result = await GitService.push(projectPath)
       showFeedback('success', result || t('sourceControl.pushedTo').replace('{branch}', branch))
-    } catch (e) { showFeedback('error', t('sourceControl.push').replace('{file}', e instanceof Error ? e.message : String(e))) }
-    finally { setPushing(false) }
-  }, [projectPath, branch, showFeedback, pushing])
-
-  const handlePull = useCallback(async () => {
-    if (!projectPath || pulling) return
-    setPulling(true)
-    try {
-      const result = await GitService.pull(projectPath)
-      showFeedback('success', result || t('sourceControl.pulledFrom').replace('{branch}', branch))
+    } catch (e) {
+      showFeedback('error', t('sourceControl.push').replace('{file}', e instanceof Error ? e.message : String(e)))
+    } finally {
+      setSyncing(false)
       await loadStatus()
-    } catch (e) { showFeedback('error', t('sourceControl.pull').replace('{file}', e instanceof Error ? e.message : String(e))) }
-    finally { setPulling(false) }
-  }, [projectPath, branch, showFeedback, loadStatus, pulling])
+    }
+  }, [projectPath, branch, showFeedback, loadStatus, syncing])
 
   // ── AI commit message ────────────────────────────────────────────────
 
@@ -519,6 +510,8 @@ ${diffDetail}`,
 
   const canCommit = commitMsg.trim().length > 0 && staged.length > 0
   const canStageAndCommit = commitMsg.trim().length > 0 && staged.length === 0 && unstaged.length > 0
+  // Working tree clean but commits to sync → the main button becomes "Pull & Push".
+  const canSync = files.length === 0 && !!aheadBehind && (aheadBehind.ahead > 0 || aheadBehind.behind > 0)
 
   // ── Render ───────────────────────────────────────────────────────────
 
@@ -555,7 +548,7 @@ ${diffDetail}`,
         </button>
       </Flex>
 
-      {/* Branch + sync row: explicit labeled Pull/Push next to the branch they act on */}
+      {/* Branch row — name + ahead/behind counters vs upstream */}
       {branch && (
         <Flex align="center" gap={1.5} px={2.5} py="5px" flexShrink={0} borderBottom={`1px solid ${tokens.colors.border.glass}`}>
           <Flex align="center" gap={1.5} minW={0} flex={1} title={branch}>
@@ -564,18 +557,13 @@ ${diffDetail}`,
               {branch}
             </Text>
           </Flex>
-          <button type="button" className="sc-mini" title={t('sourceControl.pullBtn')} onClick={handlePull} disabled={pulling}>
-            {pulling
-              ? <span className="sc-spin" style={{ display: 'inline-flex' }}><VscRepoPull size={12} /></span>
-              : <VscRepoPull size={12} />}
-            Pull
-          </button>
-          <button type="button" className="sc-mini" title={t('sourceControl.pushBtn')} onClick={handlePush} disabled={pushing}>
-            {pushing
-              ? <span className="sc-spin" style={{ display: 'inline-flex' }}><VscRepoPush size={12} /></span>
-              : <VscRepoPush size={12} />}
-            Push
-          </button>
+          {aheadBehind && (aheadBehind.ahead > 0 || aheadBehind.behind > 0) && (
+            <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} flexShrink={0}>
+              {aheadBehind.behind > 0 && `${aheadBehind.behind}↓`}
+              {aheadBehind.behind > 0 && aheadBehind.ahead > 0 && ' '}
+              {aheadBehind.ahead > 0 && `${aheadBehind.ahead}↑`}
+            </Text>
+          )}
         </Flex>
       )}
 
@@ -613,22 +601,35 @@ ${diffDetail}`,
         )}
       </Box>
 
-      {/* Commit / Stage All & Commit buttons */}
+      {/* Main action button — Commit → Stage All & Commit → Pull & Push.
+          Right after a commit the working tree is clean and ahead > 0, so the
+          same button flips to syncing the branch (pull, then push). */}
       <Box px={2.5} pb={1.5} pt={0.5} flexShrink={0}>
         <button
           type="button"
-          className={`sc-commit${canStageAndCommit ? ' ghost' : ''}${committing ? ' busy' : ''}`}
-          onClick={canCommit ? handleCommit : canStageAndCommit ? handleStageAllAndCommit : undefined}
-          disabled={(!canCommit && !canStageAndCommit) || committing}
+          className={`sc-commit${canStageAndCommit ? ' ghost' : ''}${committing || syncing ? ' busy' : ''}`}
+          onClick={
+            canCommit ? handleCommit
+            : canStageAndCommit ? handleStageAllAndCommit
+            : canSync ? handleSync
+            : undefined
+          }
+          disabled={(!canCommit && !canStageAndCommit && !canSync) || committing || syncing}
         >
-          {committing ? (
+          {committing || syncing ? (
             <Box w="12px" h="12px" borderRadius="full" border="2px solid transparent" borderTopColor="currentColor" className="sc-spin" />
           ) : canStageAndCommit ? (
             <VscAdd size={13} />
+          ) : canSync ? (
+            <VscSync size={13} />
           ) : (
             <VscCheck size={13} />
           )}
-          {canStageAndCommit ? 'Stage All & Commit' : 'Commit'}
+          {canCommit || canStageAndCommit || committing
+            ? (canStageAndCommit ? 'Stage All & Commit' : 'Commit')
+            : canSync || syncing
+              ? `Pull & Push${aheadBehind && aheadBehind.ahead > 0 ? ` (${aheadBehind.ahead}↑)` : ''}`
+              : 'Commit'}
         </button>
       </Box>
 
