@@ -25,18 +25,15 @@ function formatSize(bytes?: number): string {
 }
 
 function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttachmentBarProps) {
-  if (attachments.length === 0) return null
-
-  // Terminal mode never renders image pixels — images show as the claude-vaz
-  // `[Image #N]` text chip. O número vem do pasteMarker (o MESMO que foi
-  // inserido como texto no input — têm de coincidir); fallback posicional
-  // para anexos antigos sem marker.
-  const imageNumbers = new Map<string, number>()
-  for (const att of attachments) {
-    if (att.type === 'image') {
-      imageNumbers.set(att.id, att.pasteMarker ?? imageNumbers.size + 1)
-    }
-  }
+  // Imagens NÃO renderizam chip no terminal: o token `[Image #N]` no input É
+  // a representação visível, e apagá-lo remove a imagem do envio (prune por
+  // pasteMarker em useCmdPromptLogic ~l.680). O chip duplicava a informação
+  // e pesava a UI (pedido do user 2026-06-12) — a imagem segue na mensagem
+  // na mesma, só não aparece. Ficheiros/pastas mantêm chip porque não têm
+  // token no texto (o X do chip é a única forma de os remover).
+  const visibleAttachments = attachments.filter(att => att.type !== 'image')
+  const hasImages = attachments.length > visibleAttachments.length
+  if (visibleAttachments.length === 0 && !(showImageWarning && hasImages)) return null
 
   return (
     <Box
@@ -106,12 +103,10 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
         </Flex>
       )}
 
-      {/* Attachment chips */}
+      {/* Attachment chips — só ficheiros/pastas; imagens vivem como token no input */}
       <Flex gap={2} flexWrap="wrap">
-        {attachments.map(att => {
+        {visibleAttachments.map(att => {
           const Icon = typeIcons[att.type]
-          const isImage = att.type === 'image'
-          const imageLabel = `[Image #${imageNumbers.get(att.id) ?? 0}]`
           const sizeStr = formatSize(att.sizeBytes)
 
           return (
@@ -149,7 +144,7 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
                   truncate
                   lineHeight="1.3"
                 >
-                  {isImage ? imageLabel : att.name}
+                  {att.name}
                 </Text>
                 {sizeStr && (
                   <Text
@@ -158,7 +153,7 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
                     color={tokens.colors.text.disabled}
                     lineHeight="1.3"
                   >
-                    {isImage ? `${att.name}${sizeStr ? ` · ${sizeStr}` : ''}` : sizeStr}
+                    {sizeStr}
                   </Text>
                 )}
               </Flex>

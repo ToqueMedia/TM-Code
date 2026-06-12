@@ -8,7 +8,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
-import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
+import FirebaseAuthService from '../auth/firebaseAuth'
 import { registerTaskTools } from './toolExecutor/taskOps'
 import { registerMemoryTools } from './toolExecutor/memoryOps'
 import { registerInteractionTools } from './toolExecutor/interactionOps'
@@ -32,7 +32,7 @@ import {
 } from './toolExecutor/checks'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
-import { resolveWorkerUrl } from '../../utils/devUrls'
+import { resolveWorkerUrl, resolveAIWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
@@ -1651,16 +1651,21 @@ ${preview}
   private matchStateMutatingCommand(command: string): string | null { return matchStateMutatingCommand(command) }
 
   /**
-   * Sub-call to the worker proxy that delegates a web_search query to a
-   * DashScope model with native enable_search (Qwen 3.6 Plus on the backend).
+   * Sub-chamada ao DATA-plane que delega a query de web_search ao sidecar
+   * publicado no KV (`sidecar:web_search` — Qwen Plus com enable_search).
    *
-   * Invoked ONLY when the current model lacks native web_search
-   * (e.g. GLM-5.1). DeepSeek V3.2 and Qwen on DashScope have native search
-   * and never reach this code path — the provider resolves the tool_call
-   * server-side and streams the answer back directly.
+   * Invocada APENAS quando o modelo ativo não tem pesquisa nativa. Modelos
+   * DashScope com enable_search resolvem a tool server-side e nunca chegam
+   * aqui.
    *
-   * The request uses X-Request-Type: 'web_search' — the proxy forces the
-   * model + enable_search based on that header (see proxy.ts).
+   * Histórico (2026-06-12): esta função apontava para `/v1/messages` no
+   * CONTROL-plane em formato Anthropic — rota extinta com o proxy antigo,
+   * pelo que TODA a chamada devolvia 404 e a tool estava morta para os
+   * modelos sem pesquisa nativa. Agora: POST OpenAI-compatible no data-plane
+   * com X-Request-Type: 'web_search'; o worker roteia para o sidecar e a
+   * resposta diz quem serviu via X-TM-Config-Key. Sem sidecar publicado, o
+   * pedido cai no modelo ativo — que pode não ter pesquisa real; nesse caso
+   * devolvemos erro honesto em vez de resultados alucinados.
    */
   private async runWebSearchSubCall(query: string, maxResults: number, abortSignal?: AbortSignal): Promise<string> {
     if (abortSignal?.aborted) return 'web_search aborted by user.'
@@ -1668,29 +1673,27 @@ ${preview}
     if (!token) return 'web_search error: authentication required.'
 
     const body = {
-      system: `You are a web search assistant. Use the native web_search tool to answer the user's query with up-to-date information. Return a concise summary with sources (title + URL). Do not add commentary.`,
+      model: 'tm-active-model', // substituído pelo worker (sidecar ou ativo)
+      stream: false,
+      max_tokens: 4096,
       messages: [
+        {
+          role: 'system',
+          content: 'You are a web search assistant. Use your native web search capability to answer the user\'s query with up-to-date information. Return a concise summary with sources (title + URL). Do not add commentary.',
+        },
         { role: 'user', content: `Search the web for: ${query}\n\nReturn up to ${maxResults} results.` },
       ],
-      max_tokens: 4096,
     }
 
-    const url = `${resolveWorkerUrl()}/v1/messages`
+    const url = `${resolveAIWorkerUrl()}/v1/chat/completions`
     let response: Response
     try {
-      let appCheck: Record<string, string> = {}
-      try {
-        appCheck = await getAppCheckHeader()
-      } catch (err) {
-        console.warn('[toolExecutor] failed to get App Check header:', err)
-      }
       response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
           'X-Request-Type': 'web_search',
-          ...appCheck,
         },
         body: JSON.stringify(body),
         signal: abortSignal,
@@ -1705,41 +1708,16 @@ ${preview}
       return `web_search error: HTTP ${response.status}. ${detail.slice(0, 200)}`
     }
 
-    // The worker returns an OpenAI SSE stream. We only need the final text,
-    // so accumulate choices[].delta.content into a single string.
-    const reader = response.body?.getReader()
-    if (!reader) return 'web_search error: empty response body.'
-
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let answer = ''
-    try {
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const data = line.slice(6).trim()
-          if (!data || data === '[DONE]') continue
-          try {
-            const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }
-            const content = chunk.choices?.[0]?.delta?.content
-            if (content) {
-              answer += content
-            }
-          } catch { /* ignore malformed SSE frames */ }
-        }
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return 'web_search aborted by user.'
-      return `web_search error: stream read failure (${err instanceof Error ? err.message : String(err)}).`
-    } finally {
-      try { reader.releaseLock() } catch { /* noop */ }
+    // Sem sidecar publicado, o worker serviu com o modelo ATIVO — que não
+    // tem pesquisa real. Devolver os tokens dele seria entregar resultados
+    // alucinados como se fossem da web; erro honesto é estritamente melhor.
+    if (response.headers.get('x-tm-config-key') !== 'sidecar:web_search') {
+      return 'web_search error: no search sidecar is published and the active model has no native web search. Tell the user web search is currently unavailable.'
     }
 
+    const data = await response.json().catch(() => null) as
+      { choices?: Array<{ message?: { content?: string } }> } | null
+    const answer = data?.choices?.[0]?.message?.content ?? ''
     return answer.trim() || 'web_search returned no results.'
   }
 

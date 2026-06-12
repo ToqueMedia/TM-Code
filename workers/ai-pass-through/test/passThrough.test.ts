@@ -1272,3 +1272,99 @@ test('header timeout: streaming 120s default, non-streaming 300s default, env ov
   // Valores inválidos caem no default.
   assert.equal(resolveUpstreamHeaderTimeout({ UPSTREAM_HEADER_TIMEOUT_MS: 'abc' } as Env, true), 120_000)
 })
+
+// ── Sidecars por X-Request-Type ───────────────────────────────────────────
+
+const utilitySidecarConfig = {
+  provider: 'dashscope',
+  model: 'qwen3.7-plus',
+  baseUrl: 'https://sidecar.test/v1',
+  chatCompletionsPath: '/chat/completions',
+  authHeader: 'Authorization',
+  authScheme: 'Bearer',
+  apiKeyEnv: 'DASHSCOPE_API_KEY',
+  enabled: true,
+}
+
+function kvEnv(sidecars: Record<string, string>, overrides: Partial<Env> = {}): Env {
+  return env({
+    DASHSCOPE_API_KEY: 'dash-secret',
+    ACTIVE_AI_CONFIG: {
+      get: async (key: string) =>
+        key === 'active' ? JSON.stringify(activeConfig) : (sidecars[key] ?? null),
+    },
+    ...overrides,
+  })
+}
+
+function typedRequest(requestType: string) {
+  return new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer valid-user-token',
+      'content-type': 'application/json',
+      'x-request-type': requestType,
+    },
+    body: JSON.stringify({ messages: [] }),
+  })
+}
+
+test('sidecar: X-Request-Type web_search routes to the published sidecar config', async () => {
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const res = await handleRequest(
+    typedRequest('web_search'),
+    kvEnv({ 'sidecar:web_search': JSON.stringify(utilitySidecarConfig) }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(String(fetcher.calls[0].input), 'https://sidecar.test/v1/chat/completions')
+  assert.equal(fetcher.calls[0].body.model, 'qwen3.7-plus')
+  assert.equal(fetcher.calls[0].headers.get('authorization'), 'Bearer dash-secret')
+  // O cliente distingue quem serviu pelo X-TM-Config-Key.
+  assert.equal(res.headers.get('x-tm-config-key'), 'sidecar:web_search')
+  assert.equal(res.headers.get('x-tm-model'), 'qwen3.7-plus')
+})
+
+test('sidecar: memory-* and summarize share the utility sidecar', async () => {
+  for (const type of ['memory-extractor', 'memory-selector', 'memory-distiller', 'summarize']) {
+    clearActiveConfigCache()
+    const fetcher = fakeFetcher(Response.json({ ok: true }))
+    const res = await handleRequest(
+      typedRequest(type),
+      kvEnv({ 'sidecar:utility': JSON.stringify(utilitySidecarConfig) }),
+      { fetcher },
+    )
+    assert.equal(res.headers.get('x-tm-config-key'), 'sidecar:utility', type)
+  }
+})
+
+test('sidecar: unpublished type falls back to the active config', async () => {
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const res = await handleRequest(typedRequest('fim'), kvEnv({}), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(String(fetcher.calls[0].input), 'https://provider.test/v1/chat/completions')
+  assert.equal(res.headers.get('x-tm-config-key'), 'active')
+})
+
+test('sidecar: invalid or disabled sidecar degrades silently to active', async () => {
+  for (const bad of ['not-json', JSON.stringify({ ...utilitySidecarConfig, enabled: false })]) {
+    clearActiveConfigCache()
+    const fetcher = fakeFetcher(Response.json({ ok: true }))
+    const res = await handleRequest(
+      typedRequest('vision'),
+      kvEnv({ 'sidecar:vision': bad }),
+      { fetcher },
+    )
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('x-tm-config-key'), 'active')
+  }
+})
+
+test('sidecar: unknown request types never consult the KV sidecar namespace', async () => {
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const res = await handleRequest(typedRequest('totally-unknown'), kvEnv({}), { fetcher })
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'active')
+})

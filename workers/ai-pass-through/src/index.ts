@@ -1,4 +1,4 @@
-import { getActiveConfig, buildUpstreamUrl } from './activeConfig'
+import { getConfigForRequest, buildUpstreamUrl } from './activeConfig'
 import { authenticateUser } from './auth'
 import {
   checkCostBudget,
@@ -109,7 +109,12 @@ async function handleChatCompletions(
   const requestId = createRequestId(request)
   const startedAt = Date.now()
   const user = await authenticateUser(request, env)
-  const active = await getActiveConfig(env)
+  // Sidecars (X-Request-Type → KV `sidecar:*`): web_search, vision, fim e a
+  // família memory-*/summarize correm em modelos baratos/especializados
+  // publicados pelo admin; sem sidecar publicado, segue a config ativa.
+  // O header NUNCA segue upstream (filtro em headers.ts) e a resposta leva
+  // X-TM-Config-Key para o cliente saber quem serviu.
+  const active = await getConfigForRequest(env, request.headers.get('x-request-type'))
   const config = active.config
   const fetcher = options.fetcher ?? globalThis
   const waitUntil = options.ctx?.waitUntil?.bind(options.ctx) ?? ((p: Promise<unknown>) => { void p })

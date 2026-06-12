@@ -419,7 +419,22 @@
       "Bash(dig +short api.minimax.io)",
       "Bash(echo \"tsc exit: $?\")",
       "Bash(echo \"tsc: $?\")",
-      "Bash(echo \"IDE tsc: $?\")"
+      "Bash(echo \"IDE tsc: $?\")",
+      "Bash(sed -n 40,75p /Users/ithustle/dev/deskotp/exodus-ide/src/services/agent/modelProfiles.ts)",
+      "Bash(sed -n 150,186p /Users/ithustle/dev/deskotp/exodus-ide/src/services/agent/modelProfiles.ts)",
+      "Bash(sed -n 10,25p /Users/ithustle/dev/deskotp/exodus-ide/src/services/agent/__tests__/modelProfiles.test.ts)",
+      "Bash(sed -n 55,64p /Users/ithustle/dev/deskotp/exodus-ide/src/services/agent/__tests__/modelProfiles.test.ts)",
+      "Bash(yarn install *)",
+      "Bash(sed -n '29,40p' src/components/ConfirmModal.tsx)",
+      "Bash(sed -n '38,46p' src/components/ReceptionLoginMock.tsx)",
+      "Bash(sed -n '74,100p' src/components/AdminUserManagementMock.tsx)",
+      "Bash(sed -n '25,45p' src/components/ConfirmModal.tsx)",
+      "Bash(sed -n '30,50p' src/components/ReceptionLoginMock.tsx)",
+      "Bash(sed -n '40,100p' src/components/AdminUserManagementMock.tsx)",
+      "Bash(npx remotion *)",
+      "Bash(mdls -name kMDItemDurationSeconds -name kMDItemPixelWidth -name kMDItemPixelHeight out/tmcode-promo.mp4)",
+      "Bash(ffmpeg -y -loglevel error -i public/assets/audio/tmcode-promo-track-raw.mp3 -t 42 -af \"afade=t=in:st=0:d=0.8,afade=t=out:st=39.0:d=3.0\" -b:a 256k public/assets/audio/tmcode-promo-track.mp3)",
+      "Bash(afinfo out/tmcode-promo.mp4)"
     ]
   }
 }

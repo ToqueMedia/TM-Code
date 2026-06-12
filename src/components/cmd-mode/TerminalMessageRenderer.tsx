@@ -221,38 +221,17 @@ const attachmentIcons = {
 }
 
 function UserMessageAttachments({ attachments }: { attachments: Attachment[] }) {
-  if (attachments.length === 0) return null
-
-  // Terminal mode never renders image pixels — images appear as the
-  // claude-vaz text chip `[Image #N]` (history.ts:59). O número vem do
-  // pasteMarker (igual ao texto inserido no input); fallback posicional
-  // para mensagens antigas sem marker.
-  const imageNumbers = new Map<string, number>()
-  for (const att of attachments) {
-    if (att.type === 'image') {
-      imageNumbers.set(att.id, att.pasteMarker ?? imageNumbers.size + 1)
-    }
-  }
+  // Imagens não renderizam nada aqui: o texto da mensagem já contém o token
+  // `[Image #N]` que o user viu no input — o chip extra era duplicação
+  // (pedido 2026-06-12, par do CmdAttachmentBar). Só ficheiros/pastas têm
+  // representação própria.
+  const visibleAttachments = attachments.filter(att => att.type !== 'image')
+  if (visibleAttachments.length === 0) return null
 
   return (
     <Flex gap={2} flexWrap="wrap" mt={1.5} ml={4}>
-      {attachments.map(att => {
+      {visibleAttachments.map(att => {
         const Icon = attachmentIcons[att.type]
-
-        if (att.type === 'image') {
-          return (
-            <Text
-              key={att.id}
-              fontSize="12px"
-              fontFamily={tokens.fontFamily.mono}
-              color={tokens.colors.text.muted}
-              lineHeight="1.55"
-              whiteSpace="nowrap"
-            >
-              [Image #{imageNumbers.get(att.id)}]
-            </Text>
-          )
-        }
 
         return (
           <Flex

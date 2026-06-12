@@ -215,6 +215,61 @@ const MIMO_V2_5_1M: ModelProfile = {
 // Registry
 // ─────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────
+// Gemini 3.5 Flash / 3.1 Pro — Google (Vertex AI)
+//
+// SEM perfil próprio, o Gemini caía no default MiMo (supportsAttachments:
+// false) e as imagens eram convertidas em marcador de texto em vez de
+// image_url — o modelo respondia "não recebi nenhuma imagem" (visto em
+// produção 2026-06-12). Gemini é multimodal nativo.
+//
+// Thinking: sempre-on no próprio modelo; NÃO usa enable_thinking (o
+// parâmetro é ignorado pela Vertex). Os pensamentos só aparecem no stream
+// quando a config ativa publica extraBody google.thinking_config.
+// include_thoughts — e chegam como delta.content marcado com
+// extra_content.google.thought=true (roteado em query.ts). thinkingParam
+// null evita enviar lixo de outros dialetos.
+// ─────────────────────────────────────────────────
+
+const GEMINI_3_5_FLASH: ModelProfile = {
+  id: 'gemini-3.5-flash',
+  name: 'Gemini 3.5 Flash',
+  persona: {
+    name: 'Gemini Flash',
+    tagline: 'Google Vertex — multimodal nativo, thinking sempre ativo',
+  },
+  modelId: 'google/gemini-3.5-flash',
+  contextWindow: 1_048_576,
+  maxOutputTokens: 65_536,
+
+  temperature: 1.0,
+  reasoningTemperature: null,
+  topP: 0.95,
+  topK: null,
+
+  thinkingMode: 'mandatory',
+  supportsThinking: true,
+  thinkingParam: null,
+  thinkingBudget: null,
+  thinkingMandatory: true,
+
+  preserveReasoning: false,
+  supportsAttachments: true,
+  supportsSearch: false,
+  counterweights: [],
+}
+
+const GEMINI_3_1_PRO: ModelProfile = {
+  ...GEMINI_3_5_FLASH,
+  id: 'gemini-3.1-pro-preview',
+  name: 'Gemini 3.1 Pro Preview',
+  persona: {
+    name: 'Gemini Pro',
+    tagline: 'Google Vertex — topo de gama multimodal, thinking sempre ativo',
+  },
+  modelId: 'google/gemini-3.1-pro-preview',
+}
+
 export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'glm-5.1': GLM_5_1,
   'qwen3.7-max-2026-06-08': QWEN_3_7_MAX,
@@ -224,6 +279,13 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'qwen3.7-max': QWEN_3_7_MAX,
   'mimo-v2.5-pro-1m': MIMO_V2_5_PRO_1M,
   'mimo-v2.5-1m': MIMO_V2_5_1M,
+  // Gemini: registado sob o id do preset E sob o id raw com prefixo de
+  // publisher — o X-TM-Model do worker reporta 'google/gemini-…' (é o que
+  // o agentStore.modelName recebe), o /v1/me reporta o id do preset.
+  'gemini-3.5-flash': GEMINI_3_5_FLASH,
+  'google/gemini-3.5-flash': GEMINI_3_5_FLASH,
+  'gemini-3.1-pro-preview': GEMINI_3_1_PRO,
+  'google/gemini-3.1-pro-preview': GEMINI_3_1_PRO,
 }
 
 export const DEFAULT_MODEL_ID = 'mimo-v2.5-pro-1m'
