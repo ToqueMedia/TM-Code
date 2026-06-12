@@ -59,10 +59,22 @@ function extractImageSrc(result: string): string | null {
   return null
 }
 
-function buildReadSummary(toolName: string, result: string | undefined): string | null {
+function buildReadSummary(
+  toolName: string,
+  result: string | undefined,
+  input?: Record<string, unknown>,
+): string | null {
   if (!result) return null
   if (toolName === 'read_file') {
     const lines = result.split('\n').length
+    // Leitura paginada (offset/limit): mostrar o INTERVALO em vez da
+    // contagem — com o colapso de reads consecutivos do mesmo ficheiro,
+    // a linha única lê-se "lines 101–200" e vai-se substituindo a cada
+    // chamada, como o user pediu (2026-06-12).
+    const offset = typeof input?.offset === 'number' && input.offset >= 1 ? Math.floor(input.offset) : null
+    if (offset !== null) {
+      return `lines ${offset}–${offset + lines - 1}`
+    }
     return `${lines} line${lines !== 1 ? 's' : ''}`
   }
   if (toolName === 'list_directory') {
@@ -140,8 +152,8 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
       : tokens.colors.accent.green
 
   const readSummary = useMemo(
-    () => isReadTool && !isRunning ? buildReadSummary(toolCall.toolName, toolCall.result) : null,
-    [isReadTool, isRunning, toolCall.toolName, toolCall.result],
+    () => isReadTool && !isRunning ? buildReadSummary(toolCall.toolName, toolCall.result, toolCall.input) : null,
+    [isReadTool, isRunning, toolCall.toolName, toolCall.result, toolCall.input],
   )
 
   const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(toolCall.toolName)

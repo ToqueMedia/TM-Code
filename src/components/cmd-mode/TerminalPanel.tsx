@@ -258,6 +258,17 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
     closeMenu,
   } = useTerminalAutocomplete({ sessionId, projectPath })
 
+  // O listener de pty-output vive num effect com deps [sessionId, projectPath]
+  // — o closure captura o `completions` do PRIMEIRO render (sempre []), pelo
+  // que `completions.length > 0` lá dentro era perpetuamente falso e o menu
+  // de autocomplete nunca fechava com output novo do shell (flicker: menu
+  // pendurado por cima de um comando a correr). Ref sincronizado resolve sem
+  // re-subscrever o listener a cada keystroke.
+  const completionsOpenRef = useRef(false)
+  useEffect(() => {
+    completionsOpenRef.current = completions.length > 0
+  }, [completions.length])
+
   // Boot xterm + PTY
   useEffect(() => {
     if (!containerRef.current) return
@@ -351,7 +362,7 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
           checkPortSplitAndWarn(term, port)
         }
       }
-      if (completions.length > 0) closeMenu()
+      if (completionsOpenRef.current) closeMenu()
     }).then((fn) => {
       if (disposed) fn()
       else unlistenOutput = fn
@@ -469,7 +480,10 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
   }, [sessionId, projectPath])
 
   return (
-    <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative">
+    // data-pty-terminal: marcador que os handlers globais de teclado do
+    // TerminalView usam para NÃO interceptar teclas destinadas ao shell
+    // (^C/^L/^K/^U/Esc) — o helper-textarea do xterm vive dentro deste Box.
+    <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative" data-pty-terminal>
       {(completions.length > 0 || isLoading) && menuPosition && (
         <TerminalAutocomplete
           completions={completions}
@@ -553,6 +567,10 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
   // Keyboard shortcuts for terminal management
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // O painel continua MONTADO quando escondido (close() é display:none
+      // para manter os PTYs vivos) — sem este guard, Ctrl+T/W no prompt do
+      // chat criava/MATAVA terminais invisíveis com o painel fechado.
+      if (!useTerminalPanelStore.getState().isOpen) return
       const isCtrl = e.ctrlKey || e.metaKey
 
       // Ctrl+T: Add new terminal

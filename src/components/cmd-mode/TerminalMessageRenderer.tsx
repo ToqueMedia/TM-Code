@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import ReactMarkdown from 'react-markdown'
 import { FiFile, FiFolder, FiImage } from 'react-icons/fi'
@@ -169,6 +169,24 @@ function ContentBlocksRenderer({
         }
         if (block.type === 'tool_call') {
           const tc = toolCallMap.get(block.toolCallId)
+          // Leituras CONSECUTIVAS do mesmo ficheiro colapsam numa linha só:
+          // renderizamos apenas a ÚLTIMA da sequência — quando o agente faz
+          // a leitura seguinte (offset novo), a anterior desaparece e a
+          // linha "substitui-se" em vez de empilhar 5× o mesmo path
+          // (verbosidade reportada 2026-06-12). O subtítulo mostra o
+          // intervalo de linhas do read mais recente (toolDisplay).
+          if (tc?.toolName === 'read_file') {
+            const path = typeof tc.input?.file_path === 'string' ? tc.input.file_path : null
+            const next = optimizedBlocks[i + 1]
+            const nextCall = next?.type === 'tool_call' ? toolCallMap.get(next.toolCallId) : null
+            if (
+              path &&
+              nextCall?.toolName === 'read_file' &&
+              nextCall.input?.file_path === path
+            ) {
+              return null
+            }
+          }
           if (tc && isAgentShellTool(tc.toolName)) {
             const previous = optimizedBlocks[i - 1]
             const previousCall = previous?.type === 'tool_call' ? toolCallMap.get(previous.toolCallId) : null
@@ -545,10 +563,10 @@ function TerminalMessageRendererInner({
 }
 
 // ─── TerminalReasoningBlock ────────────────────────────────────────────────
-// Live reasoning with film-credits effect during streaming, collapsible after.
-// Same UX as chat-mode ReasoningBlock but styled for the terminal aesthetic.
-
-const CREDITS_HEIGHT_PX = 140
+// FECHADO durante o streaming, com shimmer no label "THINKING" a sinalizar
+// atividade; expansível só depois de terminar (decisão de UX 2026-06-12 —
+// substitui o credits-roll aberto). Mesma UX do ReasoningBlock do chat,
+// estética terminal.
 
 function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
   content: string
@@ -556,28 +574,8 @@ function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
   durationMs?: number
 }) {
   const [expanded, setExpanded] = useState(false)
-  const scrollRef = useRef<HTMLDivElement | null>(null)
-  const userScrolledRef = useRef(false)
 
-  // Auto-scroll: credits-roll effect — stick to bottom while content grows.
-  useEffect(() => {
-    const node = scrollRef.current
-    if (!node || userScrolledRef.current) return
-    node.scrollTop = node.scrollHeight
-  }, [content])
-
-  function handleScroll(e: React.UIEvent<HTMLDivElement>): void {
-    const node = e.currentTarget
-    const distanceFromBottom = node.scrollHeight - node.clientHeight - node.scrollTop
-    userScrolledRef.current = distanceFromBottom > 12
-  }
-
-  // Reset scroll tracking when streaming starts
-  useEffect(() => {
-    if (isStreaming) userScrolledRef.current = false
-  }, [isStreaming])
-
-  const isExpanded = isStreaming || expanded
+  const isExpanded = !isStreaming && expanded
 
   // Duration label
   const durationLabel = useMemo(() => {
@@ -625,7 +623,24 @@ function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
                 />
               ))}
             </Flex>
-            <Text fontSize="10px" color={tokens.colors.accent.purple} fontFamily={tokens.fontFamily.mono} fontWeight="600" letterSpacing="0.05em">
+            <Text
+              fontSize="10px"
+              fontFamily={tokens.fontFamily.mono}
+              fontWeight="600"
+              letterSpacing="0.05em"
+              css={{
+                background: 'linear-gradient(90deg, rgba(163,113,247,0.35) 25%, rgba(163,113,247,1) 50%, rgba(163,113,247,0.35) 75%)',
+                backgroundSize: '200% 100%',
+                WebkitBackgroundClip: 'text',
+                backgroundClip: 'text',
+                color: 'transparent',
+                animation: 'terminalThinkingShimmer 1.8s linear infinite',
+                '@keyframes terminalThinkingShimmer': {
+                  from: { backgroundPosition: '200% 0' },
+                  to: { backgroundPosition: '-200% 0' },
+                },
+              }}
+            >
               THINKING
             </Text>
           </Flex>
@@ -646,30 +661,20 @@ function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
         )}
       </Flex>
 
-      {/* Content — fixed height + credits effect during streaming, auto after */}
+      {/* Content — só visível depois do streaming terminar, a pedido. */}
       {isExpanded && (
         <Box
-          ref={scrollRef}
-          onScroll={handleScroll}
           ml="6px"
           pl={2}
           borderLeft={`2px solid ${tokens.colors.accent.purpleMuted}`}
-          height={isStreaming ? `${CREDITS_HEIGHT_PX}px` : 'auto'}
-          maxH={isStreaming ? `${CREDITS_HEIGHT_PX}px` : '240px'}
+          maxH="240px"
           overflowY="auto"
           py="6px"
           px="8px"
           css={{
             '&::-webkit-scrollbar': { width: '3px' },
             '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.08)', borderRadius: '2px' },
-            ...(isStreaming ? {
-              maskImage: 'linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%)',
-              WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%)',
-            } : {}),
           }}
-          display={isStreaming ? 'flex' : 'block'}
-          flexDirection={isStreaming ? 'column' : undefined}
-          justifyContent={isStreaming ? 'flex-end' : undefined}
           maxW="100%"
         >
           <Text

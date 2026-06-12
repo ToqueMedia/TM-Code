@@ -23,8 +23,11 @@ interface DataViewerActions {
   setActiveTable: (table: string | null) => void
   setPage: (page: number) => void
   setPageSize: (size: PageSize) => void
-  /** Restore the saved source preference for a project, if any. */
-  hydrateFromProject: (projectId: string, fallback: DataSource) => void
+  /** Restore the saved source preference for a project, if any. `available`
+   *  limita a preferência às fontes que existem AGORA — uma preferência
+   *  'prod' guardada numa sessão anterior não pode sobreviver a um .env que
+   *  perdeu o TMDB_*. */
+  hydrateFromProject: (projectId: string, fallback: DataSource, available?: DataSource[]) => void
   reset: () => void
 }
 
@@ -67,9 +70,10 @@ export const useDataViewerStore = create<DataViewerState & DataViewerActions>()(
     set({ pageSize: size, page: 1 })
   },
 
-  hydrateFromProject: (projectId, fallback) => {
+  hydrateFromProject: (projectId, fallback, available) => {
     const stored = loadStoredSource(projectId)
-    set({ source: stored ?? fallback, activeTable: null, page: 1 })
+    const valid = stored && (!available || available.includes(stored)) ? stored : fallback
+    set({ source: valid, activeTable: null, page: 1 })
   },
 
   reset: () => {

@@ -325,6 +325,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       setChatTextFontSize(CHAT_TEXT_FONT_SIZE_OPTIONS[nextIdx])
     }
     const handler = (e: KeyboardEvent) => {
+      // Teclas nascidas dentro do PTY embebido pertencem ao SHELL, não a nós:
+      // ^C tem de chegar ao processo (SIGINT via xterm onData → write_to_pty),
+      // ^L é clear do shell, ^K/^U são readline. Sem este bail-out, parar um
+      // comando no TerminalPanel com o agente ativo matava o AGENTE e o
+      // comando continuava a correr — o oposto da intenção (report 2026-06-12).
+      // O xterm também trata a cópia (evento DOM 'copy') por si.
+      if ((e.target as HTMLElement | null)?.closest?.('[data-pty-terminal]')) return
       // Ctrl/Cmd+C — stop agent when it is active, including non-streaming tool phases.
       // If the user has selected text in chat, prompt, terminal output, or Monaco,
       // leave the browser/editor copy behavior untouched.
@@ -421,6 +428,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     }
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      // Escape dentro do PTY embebido é uma tecla do shell/TUI (vim, less,
+      // fzf...) — deixá-la chegar ao xterm em vez de fechar o painel. O
+      // painel fecha-se com Esc quando o foco está fora dele, ou no toggle.
+      if ((e.target as HTMLElement | null)?.closest?.('[data-pty-terminal]')) return
       if (pendingPermissionRef.current) return
       // AskUserQuestion component handles its own Escape — don't exit CMD mode.
       if (hasPendingAskUserQuestionRef.current) return
@@ -594,6 +605,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const terminalOpen = useTerminalPanelStore(s => s.isOpen)
   const terminalWidthPref = useTerminalPanelStore(s => s.widthPx)
   const setTerminalWidth = useTerminalPanelStore(s => s.setWidth)
+  // Subscrito (não getState() no render): hoje todas as transições de
+  // instances coincidem com mudanças de isOpen, mas um read não-reactivo
+  // no JSX fica obsoleto no instante em que alguém adicionar uma ação ao
+  // store que mexa em instances sem tocar num campo subscrito — e o painel
+  // ficaria montado/desmontado errado sem re-render. Com subscrição, a
+  // condição é sempre verdade-do-store.
+  const hasTerminalInstances = useTerminalPanelStore(s => s.instances.length > 0)
 
   // Suppress prompt input focus until the terminal panel's PTY is ready.
   // onReady callback fires when start_pty_shell succeeds — clears the flag
@@ -893,7 +911,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       {/* Keep TerminalPanel mounted when instances exist — CSS display toggle
           prevents unmount/remount which would call start_pty_shell on existing
           sessions. Instances persist after non-destructive close(). */}
-      {useTerminalPanelStore.getState().instances.length > 0 && (
+      {hasTerminalInstances && (
         <Flex display={terminalOpen ? 'flex' : 'none'} flexShrink={0}>
           <Box
             width="4px"

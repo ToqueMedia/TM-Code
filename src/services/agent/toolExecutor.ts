@@ -2649,7 +2649,7 @@ ${preview}
         input_schema: {
           type: 'object',
           properties: {
-            pattern: { type: 'string', description: 'Glob pattern (e.g., "**/*.tsx", "src/**/*.test.ts", "**/package.json")' },
+            pattern: { type: 'string', description: 'Glob pattern (e.g., "**/*.tsx", "src/**/*.test.ts", "**/package.json"). "**" must be its own path segment ("**/name"); to match "contains", use "**/*name*"' },
             directory: { type: 'string', description: 'Absolute path to search from. Default: project root' }
           },
           required: ['pattern']

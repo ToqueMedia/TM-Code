@@ -731,6 +731,25 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
               if (block.type === 'tool_call') {
                 const tc = message.toolCalls?.find(t => t.id === block.toolCallId)
                 if (tc) {
+                  // Leituras CONSECUTIVAS do mesmo ficheiro colapsam numa
+                  // linha só — renderiza apenas a ÚLTIMA da sequência, a
+                  // linha "substitui-se" a cada novo offset em vez de
+                  // empilhar o mesmo path (paridade com o CMD mode,
+                  // verbosidade reportada 2026-06-12).
+                  if (tc.toolName === 'read_file') {
+                    const path = typeof tc.input?.file_path === 'string' ? tc.input.file_path : null
+                    const next = message.contentBlocks?.[idx + 1]
+                    const nextCall = next?.type === 'tool_call'
+                      ? message.toolCalls?.find(t => t.id === next.toolCallId)
+                      : null
+                    if (
+                      path &&
+                      nextCall?.toolName === 'read_file' &&
+                      nextCall.input?.file_path === path
+                    ) {
+                      return null
+                    }
+                  }
                   if (isAgentShellTool(tc.toolName)) {
                     const previous = message.contentBlocks?.[idx - 1]
                     const previousCall = previous?.type === 'tool_call'

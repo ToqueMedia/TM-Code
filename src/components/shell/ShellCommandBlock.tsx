@@ -235,6 +235,87 @@ function getLineColor(line: string, isError: boolean): string {
   return tokens.colors.terminal.foreground
 }
 
+// ─── Revelação progressiva + auto abrir/fechar (UX 2026-06-12) ──────────────
+//
+// O resultado de um comando chega de uma vez (toolCall.result) quando ele
+// termina — despejado instantaneamente, o user não "vê acontecer". Este hook
+// revela as linhas em passos curtos (efeito streaming, capped a ~2.5s no
+// total para outputs longos), o scroll interno acompanha, e no fim o bloco
+// FECHA sozinho (o header fica clicável para reabrir). Histórico carregado
+// do disco nunca anima nem abre — só pedidos cuja execução foi testemunhada
+// neste mount.
+
+const REVEAL_TICK_MS = 40
+const REVEAL_MAX_DURATION_MS = 2500
+const AUTO_COLLAPSE_DELAY_MS = 700
+
+function useProgressiveReveal(total: number, animate: boolean): number {
+  const [visible, setVisible] = useState(() => (animate ? 0 : total))
+  const targetRef = useRef(total)
+  targetRef.current = total
+
+  useEffect(() => {
+    if (!animate) {
+      setVisible(total)
+      return
+    }
+    if (total <= 0) return
+    // Passo dimensionado para o reveal completo nunca exceder o cap — 2
+    // linhas/tick no mínimo para outputs curtos ainda parecerem vivos.
+    const perTick = Math.max(2, Math.ceil(total / (REVEAL_MAX_DURATION_MS / REVEAL_TICK_MS)))
+    const id = window.setInterval(() => {
+      setVisible(v => {
+        if (v >= targetRef.current) {
+          window.clearInterval(id)
+          return v
+        }
+        return Math.min(targetRef.current, v + perTick)
+      })
+    }, REVEAL_TICK_MS)
+    return () => window.clearInterval(id)
+  }, [total, animate])
+
+  return Math.min(visible, total)
+}
+
+/**
+ * Estado expandido com gestão automática: aberto enquanto corre/revela,
+ * fecha sozinho `AUTO_COLLAPSE_DELAY_MS` depois de terminar. O clique do
+ * user no header sobrepõe-se ao automatismo a partir desse momento.
+ * `witnessed` = a execução começou neste mount (histórico fica fechado).
+ */
+function useAutoExpand(isRunning: boolean, revealing: boolean): {
+  expanded: boolean
+  witnessed: boolean
+  toggle: () => void
+} {
+  const witnessedRef = useRef(isRunning)
+  if (isRunning) witnessedRef.current = true
+  const witnessed = witnessedRef.current
+
+  const [userToggled, setUserToggled] = useState<boolean | null>(null)
+  const [autoCollapsed, setAutoCollapsed] = useState(false)
+
+  useEffect(() => {
+    if (!witnessed) return
+    if (isRunning || revealing) {
+      setAutoCollapsed(false)
+      return
+    }
+    const id = setTimeout(() => setAutoCollapsed(true), AUTO_COLLAPSE_DELAY_MS)
+    return () => clearTimeout(id)
+  }, [witnessed, isRunning, revealing])
+
+  const autoExpanded = witnessed && !autoCollapsed
+  const expanded = userToggled ?? autoExpanded
+
+  return {
+    expanded,
+    witnessed,
+    toggle: () => setUserToggled(prev => !(prev ?? expanded)),
+  }
+}
+
 function StatusIcon({ status }: { status: ToolCallDisplay['status'] }) {
   if (status === 'running') {
     return (
@@ -272,7 +353,6 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
   mode,
   nested = false,
 }: ShellCommandBlockProps) {
-  const [expanded, setExpanded] = useState(mode === 'terminal')
   const command = getDisplayCommand(toolCall)
   const cwd = typeof toolCall.input?.cwd === 'string' ? toolCall.input.cwd : ''
   const isRunning = toolCall.status === 'running'
@@ -281,11 +361,30 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
   const resultText = getResultWithoutExitCode(toolCall.result)
   const resultLines = useMemo(() => splitResultLines(resultText), [resultText])
   const logLines = toolCall.commandLogs || []
-  const visibleResultLines = expanded ? resultLines : resultLines.slice(0, 8)
-  const visibleLogLines = expanded ? logLines : logLines.slice(-8)
-  const hasMore = resultLines.length > visibleResultLines.length || logLines.length > visibleLogLines.length
+
+  // Revelação progressiva do resultado (só quando vimos o comando a correr
+  // neste mount) + bloco auto-gerido: aberto durante a execução, fecha
+  // sozinho no fim; clique reabre.
+  const witnessedRunRef = useRef(isRunning)
+  if (isRunning) witnessedRunRef.current = true
+  const animateReveal = witnessedRunRef.current
+  const revealCount = useProgressiveReveal(resultLines.length, animateReveal)
+  const revealing = animateReveal && revealCount < resultLines.length
+  const { expanded, toggle } = useAutoExpand(isRunning, revealing)
+
+  const visibleResultLines = animateReveal ? resultLines.slice(0, revealCount) : resultLines
+  const visibleLogLines = logLines
   const hasBody = isRunning || logLines.length > 0 || resultLines.length > 0 || !!toolCall.progressText
   const promptSymbol = mode === 'terminal' ? '%' : '$'
+
+  // Scroll interno acompanha o output enquanto corre/revela.
+  const outputScrollRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!expanded) return
+    if (!isRunning && !revealing) return
+    const node = outputScrollRef.current
+    if (node) node.scrollTop = node.scrollHeight
+  }, [expanded, isRunning, revealing, revealCount, logLines.length])
 
   const borderColor = isRunning
     ? 'rgba(240, 192, 0, 0.16)'
@@ -318,7 +417,7 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
         borderBottom={hasBody ? '1px solid rgba(255,255,255,0.06)' : undefined}
         cursor={hasBody ? 'pointer' : 'default'}
         onClick={() => {
-          if (hasBody) setExpanded(v => !v)
+          if (hasBody) toggle()
         }}
       >
         <StatusIcon status={toolCall.status} />
@@ -386,6 +485,7 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
 
         {hasBody && expanded && (
           <Box
+            ref={outputScrollRef}
             mt="6px"
             maxH={mode === 'terminal' ? '360px' : '280px'}
             overflowY="auto"
@@ -457,20 +557,6 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
               />
             )}
 
-            {hasMore && (
-              <Text
-                mt="5px"
-                fontSize="10px"
-                color={tokens.colors.text.disabled}
-                cursor="pointer"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  setExpanded(true)
-                }}
-              >
-                {resultLines.length + logLines.length - visibleResultLines.length - visibleLogLines.length} more lines
-              </Text>
-            )}
           </Box>
         )}
       </Box>
@@ -483,7 +569,6 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
   mode,
   nested = false,
 }: ShellSessionBlockProps) {
-  const [expanded, setExpanded] = useState(true)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const isRunning = toolCalls.some(tc => tc.status === 'running')
   const last = toolCalls[toolCalls.length - 1]
@@ -530,13 +615,23 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
 
     return entries
   }, [toolCalls, shellOutputKey])
-  const visibleTranscript = expanded ? transcript : transcript.slice(-12)
-  const hasMore = transcript.length > visibleTranscript.length
+
+  // Revelação progressiva + auto abrir/fechar — mesmo contrato do
+  // ShellCommandBlock: sessões testemunhadas neste mount abrem e revelam o
+  // transcript a ritmo legível; ao terminar, o bloco fecha e o header fica
+  // como recibo clicável. Histórico monta fechado e sem animação.
+  const witnessedRunRef = useRef(isRunning)
+  if (isRunning) witnessedRunRef.current = true
+  const animateReveal = witnessedRunRef.current
+  const revealCount = useProgressiveReveal(transcript.length, animateReveal)
+  const revealing = animateReveal && revealCount < transcript.length
+  const { expanded, toggle } = useAutoExpand(isRunning, revealing)
+  const visibleTranscript = animateReveal ? transcript.slice(0, revealCount) : transcript
 
   useEffect(() => {
     if (!expanded || !scrollRef.current) return
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-  }, [expanded, shellOutputKey, transcript.length])
+  }, [expanded, shellOutputKey, transcript.length, revealCount])
 
   const borderColor = isRunning
     ? 'rgba(240, 192, 0, 0.16)'
@@ -566,9 +661,9 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
         px={mode === 'terminal' ? 2 : 3}
         py={mode === 'terminal' ? '6px' : '8px'}
         bg={mode === 'terminal' ? 'rgba(255,255,255,0.025)' : 'rgba(255,255,255,0.035)'}
-        borderBottom="1px solid rgba(255,255,255,0.06)"
+        borderBottom={expanded ? '1px solid rgba(255,255,255,0.06)' : undefined}
         cursor="pointer"
-        onClick={() => setExpanded(v => !v)}
+        onClick={toggle}
       >
         <StatusIcon status={isCurrentError ? 'failed' : isRunning ? 'running' : 'completed'} />
         <Box color={tokens.colors.text.muted} flexShrink={0}>
@@ -611,6 +706,7 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
         </Box>
       </Flex>
 
+      {expanded && (
       <Box
         ref={scrollRef}
         px={mode === 'terminal' ? 2 : 3}
@@ -624,12 +720,6 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
           '&::-webkit-scrollbar-track': { background: 'transparent' },
         }}
       >
-        {hasMore && (
-          <Text mb="5px" fontSize="10px" color={tokens.colors.text.disabled}>
-            {transcript.length - visibleTranscript.length} earlier lines hidden
-          </Text>
-        )}
-
         {visibleTranscript.map((entry) => (
           entry.type === 'command' ? (
             <Flex key={entry.id} align="flex-start" gap={2} minW={0} mb="2px">
@@ -721,6 +811,7 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
           </>
         )}
       </Box>
+      )}
     </Box>
   )
 })

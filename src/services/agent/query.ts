@@ -41,6 +41,25 @@ const PLATFORM_AUTH_REFRESH_ATTEMPTS = 1;
 const CREDENTIAL_CONFIG_MAX_RETRIES = 3;
 const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
 
+// 429 do upstream (visto em produção 2026-06-12 com a Vertex: quota
+// por-minuto do projeto GCP, intermitente — 200s entre 429s). Escada
+// crescente para atravessar a janela de quota; o Retry-After do provider,
+// quando presente nos headers do erro, tem precedência (capped a 60s).
+const RATE_LIMIT_MAX_RETRIES = 3;
+const RATE_LIMIT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
+
+/** Lê o Retry-After (segundos) dos headers de um APIError do SDK, se existir. */
+function retryAfterMs(error: unknown): number | null {
+  const headers = (error as { headers?: Record<string, string> | Headers } | null)?.headers;
+  if (!headers) return null;
+  const raw = typeof (headers as Headers).get === 'function'
+    ? (headers as Headers).get('retry-after')
+    : (headers as Record<string, string>)['retry-after'];
+  const seconds = raw ? Number(raw) : NaN;
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return Math.min(seconds, 60) * 1000;
+}
+
 // ── Types ──
 
 /** Message shape used throughout the query loop. */
@@ -797,6 +816,7 @@ export async function* query(
 
     let authRefreshAttempts = 0;
     let credentialConfigRetries = 0;
+    let rateLimitRetries = 0;
 
     // Retry the same model turn only before any assistant output/tool call has
     // been emitted. Retrying after visible output could duplicate text or tools.
@@ -865,6 +885,25 @@ export async function* query(
 
         // Debug: log first chunks to see reasoning_content vs content structure
         if (!delta) continue;
+
+        // Gemini (Vertex/AI Studio OpenAI-compat): com include_thoughts, os
+        // pensamentos chegam como delta.content NORMAL marcado com
+        // `extra_content.google.thought: true` — NÃO existe reasoning_content
+        // (verificado empiricamente 2026-06-12 contra a Vertex). Sem este
+        // desvio, o thinking do Gemini aparecia misturado na resposta
+        // visível. NOTA: `thought_signature` em extra_content aparece também
+        // em deltas de resposta normal — só `thought === true` marca
+        // reasoning.
+        if (
+          delta?.content &&
+          (delta as any)?.extra_content?.google?.thought === true
+        ) {
+          const reasoning = String(delta.content);
+          assistantThinkingParts.push(reasoning);
+          nativeAccumulator.reasoningContent += reasoning;
+          yield { type: "thinking_delta", thinking: reasoning };
+          continue;
+        }
 
         // Reasoning/thinking content (OpenAI-compatible format)
         // MiniMax M3: reasoning_details field when reasoning_split=True
@@ -1199,6 +1238,43 @@ export async function* query(
           };
         }
         credentialConfigRetries = nextRetry;
+        continue;
+      }
+
+      // ── 429 rate limit do upstream — retry 3x com escada crescente ──
+      // Só antes de qualquer output (o 429 chega sempre pré-stream; se já
+      // houve output, repetir duplicaria conteúdo). O Retry-After do
+      // provider, quando presente, substitui o degrau da escada.
+      if (
+        !outputStarted &&
+        errorStatus(error) === 429 &&
+        rateLimitRetries < RATE_LIMIT_MAX_RETRIES
+      ) {
+        const nextRetry = rateLimitRetries + 1;
+        const delayMs =
+          retryAfterMs(error) ??
+          RATE_LIMIT_RETRY_DELAYS_MS[rateLimitRetries] ??
+          RATE_LIMIT_RETRY_DELAYS_MS[RATE_LIMIT_RETRY_DELAYS_MS.length - 1];
+        yield {
+          type: "agent_status",
+          phase: "retrying",
+          message: `Provider rate limit (429). Retrying ${nextRetry}/${RATE_LIMIT_MAX_RETRIES} in ${Math.round(delayMs / 1000)}s...`,
+          attempt: nextRetry,
+          maxAttempts: RATE_LIMIT_MAX_RETRIES,
+          httpStatus: 429,
+          retryInMs: delayMs,
+        };
+        const completedDelay = await abortableDelay(delayMs, signal);
+        if (!completedDelay) {
+          yield { type: "interrupted" };
+          return {
+            reason: "aborted",
+            turnCount: state.turnCount,
+            totalInputTokens,
+            totalOutputTokens,
+          };
+        }
+        rateLimitRetries = nextRetry;
         continue;
       }
 

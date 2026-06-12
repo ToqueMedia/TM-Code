@@ -2,6 +2,24 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiChevronRight, FiChevronDown } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
+
+/** Shimmer do estado "a pensar" — gradiente a varrer o texto para mostrar
+ *  atividade sem expor o conteúdo (o bloco fica FECHADO durante o stream;
+ *  decisão de UX 2026-06-12, substitui o credits-roll aberto). */
+const SHIMMER_TEXT_CSS = {
+  background:
+    'linear-gradient(90deg, rgba(255,255,255,0.30) 25%, rgba(255,255,255,0.95) 50%, rgba(255,255,255,0.30) 75%)',
+  backgroundSize: '200% 100%',
+  WebkitBackgroundClip: 'text',
+  backgroundClip: 'text',
+  color: 'transparent',
+  animation: 'thinkingShimmer 1.8s linear infinite',
+  '@keyframes thinkingShimmer': {
+    from: { backgroundPosition: '200% 0' },
+    to: { backgroundPosition: '-200% 0' },
+  },
+} as const
 
 interface ReasoningBlockProps {
   content: string
@@ -72,29 +90,11 @@ function useLiveElapsed(isRunning: boolean): number {
   return elapsedMs
 }
 
-/** Streaming-window height — fixed so text scrolls up like film credits. */
-const CREDITS_HEIGHT_PX = 140
-
 function ReasoningBlock({ content, isVisible, isStreaming, durationMs, messageId, blockIndex, onToggle }: ReasoningBlockProps) {
-  const isExpanded = isStreaming || isVisible
-
-  // Auto-scroll: stick to the bottom while content grows so the latest line
-  // is always visible (movie-credits roll). Honors manual scroll-up: once the
-  // user scrolls away from the bottom we stop auto-following.
-  const scrollRef = useRef<HTMLDivElement | null>(null)
-  const userScrolledRef = useRef(false)
-  useEffect(() => {
-    const node = scrollRef.current
-    if (!node) return
-    if (userScrolledRef.current) return
-    node.scrollTop = node.scrollHeight
-  }, [content])
-
-  function handleScroll(e: React.UIEvent<HTMLDivElement>): void {
-    const node = e.currentTarget
-    const distanceFromBottom = node.scrollHeight - node.clientHeight - node.scrollTop
-    userScrolledRef.current = distanceFromBottom > 12
-  }
+  // FECHADO durante o streaming (o shimmer no header sinaliza atividade);
+  // expansível apenas depois de terminar. Substitui o antigo credits-roll
+  // aberto — o user pediu thinking discreto enquanto acontece, legível depois.
+  const isExpanded = !isStreaming && isVisible
 
   // Live timer during streaming ("A pensar · 8s"). Falls back to the final
   // durationMs once the stream ends and the parent passes it down.
@@ -116,21 +116,27 @@ function ReasoningBlock({ content, isVisible, isStreaming, durationMs, messageId
       <Flex
         align="center"
         gap={1.5}
-        cursor="pointer"
-        onClick={(e) => onToggle(e.currentTarget as HTMLElement, messageId, blockIndex)}
+        cursor={isStreaming ? 'default' : 'pointer'}
+        onClick={(e) => {
+          if (isStreaming) return
+          onToggle(e.currentTarget as HTMLElement, messageId, blockIndex)
+        }}
         py="5px"
         px="8px"
         borderRadius="6px"
-        _hover={{ bg: 'rgba(255, 255, 255, 0.04)' }}
+        _hover={isStreaming ? undefined : { bg: 'rgba(255, 255, 255, 0.04)' }}
         transition="background 0.12s"
         userSelect="none"
       >
-        <Box color={tokens.colors.text.disabled} transition="transform 0.15s" flexShrink={0}>
-          {isExpanded ? <FiChevronDown size={12} /> : <FiChevronRight size={12} />}
-        </Box>
+        {!isStreaming && (
+          <Box color={tokens.colors.text.disabled} transition="transform 0.15s" flexShrink={0}>
+            {isExpanded ? <FiChevronDown size={12} /> : <FiChevronRight size={12} />}
+          </Box>
+        )}
 
         {isStreaming ? (
-          /* Streaming: animated dots + live elapsed ("A pensar · 8s") */
+          /* Streaming: bloco fechado — pontos + label shimmer ("A pensar... · 8s")
+             mostram que há atividade sem despejar o conteúdo. */
           <Flex gap="6px" align="center">
             <Flex gap="3px" align="center">
               {[0, 1, 2].map(i => (
@@ -144,11 +150,10 @@ function ReasoningBlock({ content, isVisible, isStreaming, durationMs, messageId
                 />
               ))}
             </Flex>
-            {streamingLabel && (
-              <Text fontSize="11px" color={tokens.colors.text.muted} fontWeight="500" letterSpacing="0.01em">
-                {streamingLabel}
-              </Text>
-            )}
+            <Text fontSize="11px" fontWeight="500" letterSpacing="0.01em" css={SHIMMER_TEXT_CSS}>
+              {t('titlebar.reasoning')}
+              {streamingLabel ? ` · ${streamingLabel}` : ''}
+            </Text>
           </Flex>
         ) : (
           /* Done: collapsed-ready label with final duration */
@@ -167,36 +172,18 @@ function ReasoningBlock({ content, isVisible, isStreaming, durationMs, messageId
 
       {isExpanded && (
         <Box
-          ref={scrollRef}
-          onScroll={handleScroll}
           mt="4px"
           ml="6px"
           pl={3}
           borderLeft={`2px solid rgba(254, 16, 99, 0.15)`}
-          /* Fixed height during streaming gives the credits-roll effect:
-             text appears at the bottom edge and scrolls up. After streaming
-             ends we let it size to content so the user can review at leisure. */
-          height={isStreaming ? `${CREDITS_HEIGHT_PX}px` : 'auto'}
-          maxH={isStreaming ? `${CREDITS_HEIGHT_PX}px` : '320px'}
+          maxH="320px"
           overflowY="auto"
           py="10px"
           px="12px"
           css={{
             '&::-webkit-scrollbar': { width: '3px' },
             '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.08)', borderRadius: '2px' },
-            /* Cinematic top + bottom fade — only during streaming. The mask
-               makes new text "emerge" at the bottom edge and fade out at top
-               as it scrolls past, mimicking film-credits playback. */
-            ...(isStreaming
-              ? {
-                  maskImage: 'linear-gradient(to bottom, transparent 0%, black 25%, black 75%, transparent 100%)',
-                  WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 25%, black 75%, transparent 100%)',
-                }
-              : {}),
           }}
-          display={isStreaming ? 'flex' : 'block'}
-          flexDirection={isStreaming ? 'column' : undefined}
-          justifyContent={isStreaming ? 'flex-end' : undefined}
         >
           <Text
             fontSize="12px"

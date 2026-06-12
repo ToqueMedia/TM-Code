@@ -32,21 +32,34 @@ function notFound(): Response {
 // primeiro byte, daí a folga). Sem isto, um provider que aceita a ligação e
 // nunca responde deixava o pedido pendurado até o runtime o matar com "code
 // had hung and would never generate a response" (visto em produção,
-// 2026-06-11) — e a IDE via um chat morto sem erro. Knob por env para ajustar
+// 2026-06-11) — e a IDE via um chat morto sem erro. Knobs por env para ajustar
 // sem deploy de código.
+//
+// DOIS limites, escolhidos pelo `stream` do corpo: num pedido streaming os
+// headers chegam com o primeiro chunk, por isso headers tardios ≈ hang real.
+// Num pedido NÃO-streaming os headers só chegam quando a geração INTEIRA
+// termina — a compactação da IDE (contextManager: transcript completo,
+// stream:false, max_tokens 16k) excede 120s legitimamente em modelos com
+// thinking, e o limite curto convertia-a num 504 falso-positivo (visto em
+// produção 2026-06-12, Vertex Gemini saudável a 2-5s em pedidos normais).
 const DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS = 120_000
+const DEFAULT_UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS = 300_000
 
-function resolveUpstreamHeaderTimeout(env: Env): number {
-  const raw = typeof env.UPSTREAM_HEADER_TIMEOUT_MS === 'string'
-    ? Number(env.UPSTREAM_HEADER_TIMEOUT_MS)
-    : NaN
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS
+export function resolveUpstreamHeaderTimeout(env: Env, streamRequested: boolean): number {
+  const envKey = streamRequested ? 'UPSTREAM_HEADER_TIMEOUT_MS' : 'UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS'
+  const fallback = streamRequested
+    ? DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS
+    : DEFAULT_UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS
+  const raw = typeof env[envKey] === 'string' ? Number(env[envKey]) : NaN
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback
 }
 
 interface PreparedBody {
   body: string
   /** Tamanho do corpo final em chars — input do fallback de estimativa. */
   chars: number
+  /** `stream: true` no corpo — seleciona o timeout de headers adequado. */
+  streamRequested: boolean
 }
 
 async function bodyWithActiveModel(
@@ -83,7 +96,7 @@ async function bodyWithActiveModel(
   const withUsage = injectStreamOptions(merged)
 
   const body = JSON.stringify(withUsage)
-  return { body, chars: body.length }
+  return { body, chars: body.length, streamRequested: merged.stream === true }
 }
 
 async function handleChatCompletions(
@@ -169,7 +182,7 @@ async function handleChatCompletions(
   const headerTimer = setTimeout(() => {
     upstreamHeadersTimedOut = true
     upstreamAbort.abort()
-  }, resolveUpstreamHeaderTimeout(env))
+  }, resolveUpstreamHeaderTimeout(env, prepared.streamRequested))
 
   let upstream: Response
   try {

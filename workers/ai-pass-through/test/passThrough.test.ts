@@ -483,7 +483,38 @@ test('upstream that never sends headers is aborted with 504 instead of hanging',
     },
   }
 
-  const res = await handleRequest(request(), env({ UPSTREAM_HEADER_TIMEOUT_MS: '25' }), { fetcher })
+  // stream:true → usa o knob de streaming; um pedido sem stream cairia no
+  // knob não-streaming (300s default) e este teste demoraria 5 minutos.
+  const res = await handleRequest(
+    request('/v1/chat/completions', { stream: true }),
+    env({ UPSTREAM_HEADER_TIMEOUT_MS: '25' }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 504)
+  assert.match(await res.text(), /tm_upstream_timeout/)
+})
+
+test('non-streaming request honours the dedicated non-stream timeout knob', async () => {
+  const fetcher = {
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      if (String(input).includes(':runQuery')) return Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      if (String(input).includes('firestore.googleapis.com')) return firestoreUserDoc()
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        )
+      })
+    },
+  }
+
+  const res = await handleRequest(
+    request(), // corpo sem stream → não-streaming
+    env({ UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS: '25' }),
+    { fetcher },
+  )
 
   assert.equal(res.status, 504)
   assert.match(await res.text(), /tm_upstream_timeout/)
@@ -1216,4 +1247,28 @@ test('google_oauth: OAuth exchange failure → 502 tm_provider_auth_failed, upst
   const body = await res.json() as { error: { type: string } }
   assert.equal(body.error.type, 'tm_provider_auth_failed')
   assert.equal(fetcher.upstreamCalls.length, 0)
+})
+
+// ── Timeout de headers por tipo de pedido ─────────────────────────────────
+
+test('header timeout: streaming 120s default, non-streaming 300s default, env overrides respected', async () => {
+  const { resolveUpstreamHeaderTimeout } = await import('../src/index')
+
+  assert.equal(resolveUpstreamHeaderTimeout({} as Env, true), 120_000)
+  assert.equal(resolveUpstreamHeaderTimeout({} as Env, false), 300_000)
+  assert.equal(
+    resolveUpstreamHeaderTimeout({ UPSTREAM_HEADER_TIMEOUT_MS: '60000' } as Env, true),
+    60_000,
+  )
+  assert.equal(
+    resolveUpstreamHeaderTimeout({ UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS: '600000' } as Env, false),
+    600_000,
+  )
+  // Knob de um tipo não contamina o outro.
+  assert.equal(
+    resolveUpstreamHeaderTimeout({ UPSTREAM_HEADER_TIMEOUT_MS: '60000' } as Env, false),
+    300_000,
+  )
+  // Valores inválidos caem no default.
+  assert.equal(resolveUpstreamHeaderTimeout({ UPSTREAM_HEADER_TIMEOUT_MS: 'abc' } as Env, true), 120_000)
 })

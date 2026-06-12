@@ -416,7 +416,10 @@
       "Bash(dig +short generativelanguage.googleapis.com)",
       "WebFetch(domain:ai.google.dev)",
       "Bash(echo \"worker tsc exit: $?\")",
-      "Bash(dig +short api.minimax.io)"
+      "Bash(dig +short api.minimax.io)",
+      "Bash(echo \"tsc exit: $?\")",
+      "Bash(echo \"tsc: $?\")",
+      "Bash(echo \"IDE tsc: $?\")"
     ]
   }
 }

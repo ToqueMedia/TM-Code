@@ -98,7 +98,15 @@ function buildPrompt(
     ``,
     `3. Implement the auth-proxy backend in your chosen stack — endpoints from the skill: POST /api/auth/proxy/{signup,signin,google,refresh} + POST /api/auth/sync. The proxy forwards to the platform's auth API using the public client key in .env (the auth-proxy skill has the exact request shape for each endpoint). For JWT verification on /api/auth/sync, use the JWKS pattern from the skill (jose / jsonwebtoken / python-jose / golang-jwt depending on stack).`,
     ``,
-    `4. Persist users via the platform data layer — see the Publishing section of your system prompt. The auth-proxy is concerned with sign-in flow only; the user record (uid PK, email unique, name, avatarUrl, role, createdAt, updatedAt) is stored using \`firebase-admin\` under \`apps/{APP_ID}/users\`, NOT in a local SQL DB. The publish-backend skill has the exact shape. Custom columns are nullable or have defaults — sync runs from JWT data on first sign-in.`,
+    // NOTA histórica: este passo dizia "stored using firebase-admin under
+    // apps/{APP_ID}/users, NOT in a local SQL DB" — fóssil da data layer
+    // Firestore anterior à migração TMDB/Drizzle, em contradição directa com
+    // a secção Publishing e com os skills auth-proxy/publish-backend. O
+    // modelo obedecia, instanciava firebase-admin sem credenciais Admin (que
+    // o projeto deliberadamente não tem — ver hard rules) e o /api/auth/sync
+    // rebentava em runtime com "Could not load the default credentials"
+    // (reportado em produção, 2026-06-12).
+    `4. Persist users via the platform data layer — Drizzle + libSQL, exactly as the Publishing section of your system prompt and the \`publish-backend\` skill describe. The auth-proxy is concerned with sign-in flow only; the user record (uid PK, email unique, name, avatarUrl, role, createdAt, updatedAt) lives in the project's OWN \`users\` table: local SQLite file (\`DATABASE_URL=file:./dev.db\`) in dev, TM Code Database (\`TMDB_URL\`/\`TMDB_TOKEN\` via \`provision_database()\`) in prod. Do NOT use \`firebase-admin\` for persistence — the project has no Admin credentials by design, and \`admin.initializeApp()\` without them crashes the sync route at runtime with "Could not load the default credentials". Custom columns are nullable or have defaults — sync runs from JWT data on first sign-in.`,
     ``,
     `5. Implement the frontend per the skill recipe:`,
     `   - src/lib/firebase.ts (init only — only onAuthStateChanged is allowed from firebase/auth)`,
@@ -131,7 +139,7 @@ function buildPrompt(
     `Hard rules:`,
     `- The .env file is managed by the platform — \`request_credentials\` is the only legitimate write path, and TM Code uses it only for third-party developer keys (OpenAI, Stripe, etc.), never for platform-managed credentials.`,
     `- Use the public client key in .env (the one provision_auth just wrote) for the auth-proxy's outbound calls. Admin SDK keys / service-account files / infrastructure tokens live only on the platform side and the project does not have them; \`request_credentials\` for them is incorrect.`,
-    `- The auth-proxy itself is a thin REST forwarder — it does NOT install \`firebase-admin\`. The data layer (the user record persistence) is a separate concern and uses \`firebase-admin\` per the Publishing section.`,
+    `- \`firebase-admin\` does not belong in ANY layer of this scaffold: the auth-proxy is a thin REST forwarder (JWT verification via JWKS), and the user-record persistence is Drizzle + libSQL per the publish-backend skill. If you find yourself writing \`admin.initializeApp()\`, stop — that path requires Admin credentials the project does not have and crashes at runtime.`,
     `- Client-side: only \`onAuthStateChanged\` is imported from \`firebase/auth\`. signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, signOut go through the proxy instead — the popup family is silently blocked in the IDE's preview webview.`,
     `- After a successful proxy signup or signin, call /api/auth/sync to upsert the user record via the platform data layer.`,
     `- Use authFetch (or the project's equivalent) for protected API calls.`,

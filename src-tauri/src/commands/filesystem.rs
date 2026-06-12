@@ -187,6 +187,42 @@ fn copy_dir_safe(src: &Path, dst: &Path, visited: &mut HashSet<PathBuf>) -> std:
     Ok(())
 }
 
+/// Normaliza o padrão para o dialecto estrito da crate `glob`. Os modelos
+/// escrevem no dialecto dos globbers JS (minimatch/fast-glob), onde `**`
+/// colado a texto degrada para `*` (`dispenser**` ≡ `dispenser*`); a crate
+/// rejeita isso com "recursive wildcards must form a single path component"
+/// (visto em produção 2026-06-12 com `**/dispenser**`). Colapsar runs de
+/// 2+ asteriscos para `*` em qualquer segmento que não seja exactamente
+/// `**` reproduz o comportamento JS — o agente nunca vê o erro.
+fn normalize_glob_pattern(pattern: &str) -> String {
+    pattern
+        .split('/')
+        .map(|segment| {
+            if segment == "**" || !segment.contains("**") {
+                return segment.to_string();
+            }
+            let mut out = String::with_capacity(segment.len());
+            let mut star_run = 0usize;
+            for c in segment.chars() {
+                if c == '*' {
+                    star_run += 1;
+                } else {
+                    if star_run > 0 {
+                        out.push('*');
+                        star_run = 0;
+                    }
+                    out.push(c);
+                }
+            }
+            if star_run > 0 {
+                out.push('*');
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[tauri::command]
 pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String>, String> {
     // Block path traversal in pattern
@@ -198,6 +234,7 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
         return Err("Invalid glob pattern: absolute paths are not allowed".to_string());
     }
 
+    let pattern = normalize_glob_pattern(&pattern);
     let full_pattern = format!("{}/{}", directory, pattern);
 
     // Canonicalize directory to compare results against
@@ -697,4 +734,45 @@ pub async fn delete_agent_state(project_path: String, filename: String) -> Resul
         return Ok(());
     }
     std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {}: {}", filename, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_glob_pattern;
+
+    #[test]
+    fn normalize_keeps_valid_patterns_untouched() {
+        assert_eq!(normalize_glob_pattern("**/*.tsx"), "**/*.tsx");
+        assert_eq!(normalize_glob_pattern("src/**/*.test.ts"), "src/**/*.test.ts");
+        assert_eq!(normalize_glob_pattern("**/package.json"), "**/package.json");
+        assert_eq!(normalize_glob_pattern("*.rs"), "*.rs");
+    }
+
+    #[test]
+    fn normalize_collapses_recursive_wildcards_glued_to_text() {
+        // O caso real de produção (2026-06-12): dialecto JS aceite, crate glob não.
+        assert_eq!(normalize_glob_pattern("**/dispenser**"), "**/dispenser*");
+        assert_eq!(normalize_glob_pattern("**dispenser"), "*dispenser");
+        assert_eq!(normalize_glob_pattern("dispenser**/index.ts"), "dispenser*/index.ts");
+        assert_eq!(normalize_glob_pattern("**/foo**bar/**"), "**/foo*bar/**");
+    }
+
+    #[test]
+    fn normalize_collapses_three_plus_stars_like_js_globbers() {
+        assert_eq!(normalize_glob_pattern("***"), "*");
+        assert_eq!(normalize_glob_pattern("**/a***b"), "**/a*b");
+    }
+
+    #[test]
+    fn normalized_patterns_are_accepted_by_the_glob_crate() {
+        // O contrato que importa: depois de normalizar, Pattern::new nunca
+        // devolve "recursive wildcards must form a single path component".
+        for raw in ["**/dispenser**", "**name", "a**/b**c/***", "**/ok/*.ts"] {
+            let normalized = normalize_glob_pattern(raw);
+            assert!(
+                glob::Pattern::new(&normalized).is_ok(),
+                "pattern `{raw}` normalizado para `{normalized}` ainda é inválido"
+            );
+        }
+    }
 }
