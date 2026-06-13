@@ -563,6 +563,9 @@ class SessionService {
         ? msg.mentionContext.slice(0, MAX_MENTION_CONTEXT_PERSIST)
           + '\n<system-reminder>[mention context truncated on session reload — re-read the file with read_file if its tail matters]</system-reminder>'
         : msg.mentionContext
+      // Paths the snapshot covers — lets the reload-time rebuild still void a
+      // snapshot a later tool superseded (mentionContext staleness fix).
+      if (msg.mentionedPaths?.length) sanitized.mentionedPaths = msg.mentionedPaths
     }
 
     // Persist attachment metadata WITHOUT base64. The base64 data URI is

@@ -32,6 +32,7 @@ import {
   createLoopDetectorState,
   resetLoopDetector,
 } from "./loopDetector";
+import { contentAsText } from "./promptValueHelpers";
 
 // ── Constants ──
 
@@ -155,6 +156,13 @@ export interface QueryParams {
    * sweep ("Note: X was modified..." reminders). Must never throw.
    */
   collectInterTurnContext?: () => Promise<string>;
+  /**
+   * Live active-model limits for the auto-compact decision. Called fresh each
+   * loop iteration because the active model (and thus its context window) is
+   * injected server-side and only learned from the first response's headers.
+   * Returning { contextWindow: null } keeps the legacy 1M-estimate fallback.
+   */
+  getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null };
 }
 
 /** Terminal return value. */
@@ -604,9 +612,16 @@ export async function* query(
     compactInstructions,
     extraHeaders,
     onResponseHeaders,
+    getContextLimits,
   } = params;
   let client = params.client;
   const refreshClient = params.refreshClient;
+
+  // Real provider occupancy from the previous turn (prompt_tokens +
+  // completion_tokens), fed into the auto-compact decision so it tracks the
+  // active model's real window instead of a hardcoded 1M char-estimate.
+  // Undefined until the first response is recorded.
+  let lastTurnRealOccupancy: number | undefined;
 
   let state: LoopState = {
     messages: [...params.messages],
@@ -687,6 +702,16 @@ export async function* query(
     ) => {
       // Side-call: use the same client to summarize
       const prompt = getCompactPrompt(compactInstructions);
+      // Narrate the FULL content — tool calls AND tool results — into the
+      // summarizer input, not just the conversational text. Filtering to
+      // text-only blocks (the old behaviour) stripped every file read, edit,
+      // command output and error before summarization, then the prompt asked
+      // the model to capture "file edits, errors, code patterns" it could no
+      // longer see — structurally forcing it to omit or invent (context
+      // pollution audit, 2026-06-12). The messages reaching here have already
+      // passed applyToolResultBudget + snip + microcompact above, so tool
+      // results are size-bounded. contentAsText renders tool_call as
+      // `[tool: name(args)]` and inlines the (bounded) tool_result text.
       const compactMessages: OpenAI.ChatCompletionMessageParam[] = [
         { role: "system", content: prompt },
         ...msgs.map(
@@ -695,10 +720,7 @@ export async function* query(
             content:
               typeof m.content === "string"
                 ? m.content
-                : (m.content as ContentBlockAPI[])
-                    .filter((b) => b.type === "text")
-                    .map((b) => (b as { type: "text"; text: string }).text)
-                    .join("\n"),
+                : contentAsText(m.content as ContentBlockAPI[]),
           }),
         ),
       ];
@@ -717,12 +739,18 @@ export async function* query(
       }
     };
 
+    const ctxLimits = getContextLimits?.();
     const autoResult = await autoCompact(
       messagesForQuery,
       systemPrompt,
       compactFn,
       tracking,
       snipTokensFreed,
+      {
+        contextWindow: ctxLimits?.contextWindow ?? null,
+        maxOutputTokens: ctxLimits?.maxOutputTokens ?? null,
+        realOccupancyTokens: lastTurnRealOccupancy ?? null,
+      },
     );
 
     if (autoResult.wasCompacted && autoResult.postCompactMessages) {
@@ -1328,6 +1356,11 @@ export async function* query(
       totalInputTokens += turnUsage.prompt_tokens;
       totalOutputTokens += turnUsage.completion_tokens;
       onUsage?.(turnUsage.prompt_tokens, turnUsage.completion_tokens);
+      // Real occupancy for the NEXT iteration's compaction decision. input
+      // already includes all prior history; output rolls into the next
+      // prompt — their sum is the true "how full is the window right now"
+      // (matches utils/contextWindow.ts totalContextTokens + the UI pill).
+      lastTurnRealOccupancy = turnUsage.prompt_tokens + turnUsage.completion_tokens;
     }
 
     // ── Build provider-native state for round-trip ──

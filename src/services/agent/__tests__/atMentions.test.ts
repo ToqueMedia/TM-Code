@@ -250,7 +250,7 @@ describe('applyMentionResolution', () => {
   it('appends the context after a string prompt (claude-vaz ordering)', () => {
     const applied = applyMentionResolution(
       'fix the bug',
-      { contextText: wrapInSystemReminder('ctx'), imageParts: [] },
+      { contextText: wrapInSystemReminder('ctx'), imageParts: [], resolvedPaths: [] },
       '',
       true,
     )
@@ -261,7 +261,7 @@ describe('applyMentionResolution', () => {
   it('appends a text part to content-part arrays', () => {
     const applied = applyMentionResolution(
       [{ type: 'text', text: 'prompt' }],
-      { contextText: 'CTX', imageParts: [] },
+      { contextText: 'CTX', imageParts: [], resolvedPaths: [] },
       '',
       true,
     )
@@ -273,7 +273,7 @@ describe('applyMentionResolution', () => {
   it('promotes string content to parts when image mentions exist on multimodal plans', () => {
     const applied = applyMentionResolution(
       'see this',
-      { contextText: '', imageParts: [{ reminder: 'R', dataUri: 'data:x', displayPath: '/p.png' }] },
+      { contextText: '', imageParts: [{ reminder: 'R', dataUri: 'data:x', displayPath: '/p.png' }], resolvedPaths: [] },
       '',
       true,
     )
@@ -284,7 +284,7 @@ describe('applyMentionResolution', () => {
   it('degrades image mentions to a text note on text-only plans', () => {
     const applied = applyMentionResolution(
       'see this',
-      { contextText: '', imageParts: [{ reminder: 'R', dataUri: 'data:x', displayPath: '/p.png' }] },
+      { contextText: '', imageParts: [{ reminder: 'R', dataUri: 'data:x', displayPath: '/p.png' }], resolvedPaths: [] },
       '',
       false,
     )
@@ -296,7 +296,7 @@ describe('applyMentionResolution', () => {
   it('joins mention context and changed-file context in order', () => {
     const applied = applyMentionResolution(
       'prompt',
-      { contextText: 'MENTIONS', imageParts: [] },
+      { contextText: 'MENTIONS', imageParts: [], resolvedPaths: [] },
       'CHANGED',
       true,
     )
@@ -304,7 +304,7 @@ describe('applyMentionResolution', () => {
   })
 
   it('is a no-op when there is nothing to apply', () => {
-    const applied = applyMentionResolution('prompt', { contextText: '', imageParts: [] }, '', true)
+    const applied = applyMentionResolution('prompt', { contextText: '', imageParts: [], resolvedPaths: [] }, '', true)
     expect(applied.userContent).toBe('prompt')
     expect(applied.persistedContext).toBe('')
   })

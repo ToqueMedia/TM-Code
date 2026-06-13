@@ -104,7 +104,8 @@ interface ChatActions {
    * applyMentionResolution — the target bubble was created moments earlier
    * in the same serialized send flow.
    */
-  setMentionContextOnLastUserMessage: (context: string) => void
+  setMentionContextOnLastUserMessage: (context: string, mentionedPaths?: string[]) => void
+  setAttachmentPathsOnLastUserMessage: (paths: Record<string, string>) => void
   /**
    * Insert a user message BEFORE the streaming assistant message.
    * Used by mid-turn drain to keep visual order correct:
@@ -948,13 +949,88 @@ function nativeToolCallIds(native: Record<string, unknown>): string[] {
  *   - Thinking/reasoning → thinking content blocks
  *   - Strictly alternating user/assistant messages (no consecutive same-role)
  */
+/** Normalize a path for cross-format comparison (abs vs rel, win vs posix). */
+function normPath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+/** True when two paths refer to the same file across abs/rel forms. */
+function samePath(a: string, b: string): boolean {
+  const na = normPath(a)
+  const nb = normPath(b)
+  return na === nb || na.endsWith('/' + nb) || nb.endsWith('/' + na)
+}
+
+/** Extract the file path a tool call targets, if any. */
+function toolCallPath(input: Record<string, unknown> | undefined): string | null {
+  if (!input) return null
+  const p = input.file_path ?? input.path
+  return typeof p === 'string' && p.length > 0 ? p : null
+}
+
+/**
+ * Flatten every tool-call file path with the index of the message that issued
+ * it. Used to detect when a later tool call superseded an earlier @-mention
+ * snapshot, so the stale body isn't re-emitted to contradict the fresh result.
+ */
+function collectToolTouches(messages: ChatMessage[]): Array<{ path: string; index: number }> {
+  const touches: Array<{ path: string; index: number }> = []
+  messages.forEach((m, index) => {
+    if (m.role !== 'assistant' || !m.toolCalls?.length) return
+    for (const tc of m.toolCalls) {
+      const p = toolCallPath(tc.input)
+      if (p) touches.push({ path: p, index })
+    }
+  })
+  return touches
+}
+
+/**
+ * Reconcile a user message's persisted @-mention context against later tool
+ * activity. Returns the context to emit (possibly modified) or undefined to
+ * skip it. Never throws — falls back to the verbatim context on any doubt.
+ *
+ *  - No mentionContext → undefined (nothing to emit).
+ *  - No mentionedPaths (old session / changed-file-only) → verbatim (can't
+ *    reconcile without knowing which paths the snapshot froze).
+ *  - All snapshotted paths superseded by a later tool call → a compact pointer
+ *    instead of the stale bodies.
+ *  - Some superseded → prepend a targeted warning, keep the snapshot (surgical
+ *    per-file removal of the joined system-reminder blocks is too fragile —
+ *    a file containing `</system-reminder>` would break parsing).
+ */
+function reconcileMentionContext(
+  msg: ChatMessage,
+  msgIndex: number,
+  toolTouches: Array<{ path: string; index: number }>,
+): string | undefined {
+  const ctx = msg.mentionContext
+  if (!ctx) return undefined
+  const paths = msg.mentionedPaths
+  if (!paths || paths.length === 0) return ctx
+
+  const superseded = paths.filter(p =>
+    toolTouches.some(t => t.index > msgIndex && samePath(p, t.path)),
+  )
+  if (superseded.length === 0) return ctx
+
+  const list = superseded.join(', ')
+  if (superseded.length === paths.length) {
+    return `<system-reminder>Earlier you were shown the content of ${list} via @-mention. ${superseded.length === 1 ? 'That file has' : 'Those files have'} since been read or edited by tools below — the current content is in those later tool results. The original snapshot is omitted here to avoid showing a stale version; re-read with read_file if you need it.</system-reminder>`
+  }
+  return (
+    `<system-reminder>Note: the @-mention snapshot below is STALE for ${list} — ${superseded.length === 1 ? 'that file was' : 'those files were'} read or edited by tools further down; trust the later tool results for ${superseded.length === 1 ? 'it' : 'them'}, not the snapshot.</system-reminder>\n${ctx}`
+  )
+}
+
 // Exported for tests — pure function, no store access.
 export function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessage[] {
   const history: ConversationMessage[] = []
+  const toolTouches = collectToolTouches(messages)
 
-  for (const msg of messages) {
+  messages.forEach((msg, msgIndex) => {
     // System messages are UI-only status lines — never send to the LLM
-    if (msg.role === 'system') continue
+    if (msg.role === 'system') return
 
     if (msg.role === 'user') {
       const parts = userMessageToContentParts(msg)
@@ -962,7 +1038,15 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
       // this message at send-time (claude-vaz keeps attachment messages in
       // the transcript — dropping them here would make mentioned-file
       // content vanish from the model's view after the first turn).
-      const ctx = msg.mentionContext
+      //
+      // Staleness reconciliation: an @-mention freezes a file's content at
+      // send time. If a LATER tool call read or edited that file, the fresh
+      // version is already in the transcript below — re-emitting the frozen
+      // snapshot would feed the model two contradictory versions of the same
+      // file (context pollution audit, 2026-06-12). When every snapshotted
+      // path was superseded, void the whole block with a pointer; when only
+      // some were, prepend a targeted warning and keep the rest.
+      const ctx = reconcileMentionContext(msg, msgIndex, toolTouches)
       if (parts) {
         history.push({
           role: 'user',
@@ -1009,7 +1093,7 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
         // message_stop): intentionally emit NOTHING for them — their
         // tool_call is in no assistant message, so a synthetic result would
         // be an orphan the normalizer strips at the API boundary anyway.
-        continue
+        return
       }
 
       // ── Native round-trip: prefer providerState when available ──
@@ -1076,9 +1160,64 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
     } else {
       history.push({ role: msg.role, content: msg.content })
     }
-  }
+  })
 
   return history
+}
+
+/**
+ * Re-read pasted-image base64 from the disk cache (via attachment.path) back
+ * into the in-memory session messages after a reload, then rebuild history so
+ * the agent can re-view the image without the user re-sending. Base64 is kept
+ * IN MEMORY ONLY (raw setState, no markDirty) — it stays absent from disk, the
+ * cache file is the source of truth. Background + best-effort; bounded to
+ * image attachments that have a path but lost their base64 on save.
+ */
+async function rehydrateSessionImages(sessionId: string): Promise<void> {
+  try {
+    const state = useChatStore.getState()
+    if (state.activeSessionId !== sessionId) return
+    const session = state.sessions.get(sessionId)
+    if (!session) return
+
+    const targets: Attachment[] = []
+    for (const m of session.messages) {
+      if (m.role !== 'user' || !m.attachments?.length) continue
+      for (const a of m.attachments) {
+        if (a.type === 'image' && a.path && !a.base64) targets.push(a)
+      }
+    }
+    if (targets.length === 0) return
+
+    const { resolveImageToDataUri } = await import('../services/attachmentService')
+    const resolved = new Map<string, string>()
+    for (const att of targets) {
+      const dataUri = await resolveImageToDataUri(att)
+      if (dataUri) resolved.set(att.id, dataUri)
+    }
+    if (resolved.size === 0) return
+
+    useChatStore.setState(s => {
+      if (s.activeSessionId !== sessionId) return s
+      const sess = s.sessions.get(sessionId)
+      if (!sess) return s
+      const messages = sess.messages.map(m => {
+        if (m.role !== 'user' || !m.attachments?.length) return m
+        let changed = false
+        const attachments = m.attachments.map(a => {
+          const b64 = resolved.get(a.id)
+          if (b64 && !a.base64) { changed = true; return { ...a, base64: b64 } }
+          return a
+        })
+        return changed ? { ...m, attachments } : m
+      })
+      const sessions = new Map(s.sessions)
+      sessions.set(sessionId, { ...sess, messages })
+      return { sessions, conversationHistory: rebuildConversationHistory(messages) }
+    })
+  } catch {
+    /* best-effort — a miss just means the image isn't re-viewable this run */
+  }
 }
 
 export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
@@ -1370,7 +1509,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       return messageId
     },
 
-    setMentionContextOnLastUserMessage: (context: string) => {
+    setMentionContextOnLastUserMessage: (context: string, mentionedPaths?: string[]) => {
       if (!context) return
       set(state => {
         const { activeSessionId, sessions } = state
@@ -1387,7 +1526,44 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (idx === -1) return state
 
         const messages = [...session.messages]
-        messages[idx] = { ...messages[idx], mentionContext: context }
+        messages[idx] = {
+          ...messages[idx],
+          mentionContext: context,
+          ...(mentionedPaths && mentionedPaths.length > 0 ? { mentionedPaths } : {}),
+        }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        return { sessions: updatedSessions }
+      })
+      debouncedSave()
+    },
+
+    // Stamp disk-cache paths onto the last user message's image attachments,
+    // so the path survives persistence (base64 is stripped on save) and the
+    // image is re-resolvable from disk after reload (image cache feature,
+    // 2026-06-13). Keyed by attachment id.
+    setAttachmentPathsOnLastUserMessage: (paths: Record<string, string>) => {
+      if (!paths || Object.keys(paths).length === 0) return
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        let idx = -1
+        for (let i = session.messages.length - 1; i >= 0; i--) {
+          if (session.messages[i].role === 'user') { idx = i; break }
+        }
+        if (idx === -1) return state
+        const target = session.messages[idx]
+        if (!target.attachments?.length) return state
+
+        const attachments = target.attachments.map(a =>
+          paths[a.id] && !a.path ? { ...a, path: paths[a.id] } : a,
+        )
+        const messages = [...session.messages]
+        messages[idx] = { ...target, attachments }
 
         const updatedSessions = new Map(sessions)
         updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
@@ -3001,6 +3177,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
 
         await sessionService.setActiveSessionId(projectPath, sessionId)
+
+        // Re-hydrate pasted-image base64 from the disk cache (base64 was
+        // stripped on save; the attachment kept its cache `path`). Background
+        // + best-effort: when done it patches base64 into the in-memory
+        // messages and rebuilds history so the agent can re-view the image on
+        // the next turn without the user re-sending (image cache, 2026-06-13).
+        void rehydrateSessionImages(sessionId)
       } finally {
         set({ isLoadingSession: false })
       }
@@ -3254,6 +3437,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       if (state.activeSessionId === sessionId) {
         useCheckpointStore.getState().clear()
       }
+
+      // Clean up the session's pasted-image disk cache (best-effort).
+      void import('../services/imageCacheService')
+        .then(({ removeSessionImageCache }) => removeSessionImageCache(sessionId))
+        .catch(() => { /* non-fatal */ })
     },
 
     cleanupOnExit: async (projectPath: string) => {

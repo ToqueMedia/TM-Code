@@ -173,6 +173,22 @@ async function runAgentInternal(
     logger.info('agent', `→ User message sent (${(userMessageText || prompt).length} chars)`)
   }
 
+  // Persist pasted images to the session's disk cache and stamp their paths
+  // onto the just-added user message, so the agent can re-view them after a
+  // reload without the user re-sending (the in-memory base64 is stripped on
+  // save). Fire-and-forget — the path stamp triggers its own debounced save.
+  if (userMessageAttachments?.some(a => a.type === 'image' && !a.path && a.base64)) {
+    const sid = chatStore.activeSessionId
+    if (sid) {
+      void import('../imageCacheService').then(async ({ storeSessionImages }) => {
+        const paths = await storeSessionImages(sid, userMessageAttachments)
+        if (Object.keys(paths).length > 0) {
+          useChatStore.getState().setAttachmentPathsOnLastUserMessage(paths)
+        }
+      }).catch(() => { /* cache miss → falls back to re-send behaviour */ })
+    }
+  }
+
   // Stop before starting an assistant turn when billing has already told us
   // service is blocked. This prevents reload + queued "continue" from
   // replaying into the API and creating a credit-error loop.
@@ -379,7 +395,7 @@ async function runAgentInternal(
   try {
     const mentionResolution = mentionSource
       ? await resolveMentionContext(mentionSource)
-      : { contextText: '', imageParts: [] }
+      : { contextText: '', imageParts: [], resolvedPaths: [] }
     const changedContext = await collectChangedFileContext()
     if (mentionResolution.contextText || mentionResolution.imageParts.length > 0 || changedContext) {
       const applied = applyMentionResolution(
@@ -390,7 +406,7 @@ async function runAgentInternal(
       // addUserMessage=false) so rebuildConversationHistory re-emits the
       // context on follow-up turns instead of letting it evaporate.
       if (applied.persistedContext) {
-        useChatStore.getState().setMentionContextOnLastUserMessage(applied.persistedContext)
+        useChatStore.getState().setMentionContextOnLastUserMessage(applied.persistedContext, applied.resolvedPaths)
       }
     }
   } catch {

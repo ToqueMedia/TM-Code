@@ -88,6 +88,93 @@ function userMsg(content: string): ChatMessage {
   return { id: 'u1', role: 'user', content, timestamp: ts }
 }
 
+describe('rebuildConversationHistory — @-mention staleness reconciliation', () => {
+  function userWithMention(content: string, ctx: string, mentionedPaths: string[]): ChatMessage {
+    return { id: 'u1', role: 'user', content, timestamp: ts, mentionContext: ctx, mentionedPaths }
+  }
+
+  function assistantReading(path: string): ChatMessage {
+    return {
+      id: 'a1',
+      role: 'assistant',
+      content: 'ok',
+      timestamp: ts,
+      toolCalls: [{ id: 't1', toolName: 'edit_file', input: { file_path: path }, result: 'done', status: 'completed', timestamp: ts }],
+      providerStates: [nativeTurn('ok', [{ id: 't1', name: 'edit_file' }])],
+    }
+  }
+
+  const SNAPSHOT = '<system-reminder>Result of calling the read_file tool:\nOLD CONTENT</system-reminder>'
+
+  function lastUserText(history: ReturnType<typeof rebuildConversationHistory>): string {
+    const userMsgs = history.filter(m => m.role === 'user')
+    const first = userMsgs[0]
+    return typeof first.content === 'string'
+      ? first.content
+      : (first.content as Array<{ type: string; text?: string }>).map(p => p.text ?? '').join('')
+  }
+
+  it('voids the snapshot when the only mentioned file was later edited', () => {
+    const history = rebuildConversationHistory([
+      userWithMention('look at @/abs/config.ts', SNAPSHOT, ['/abs/config.ts']),
+      assistantReading('/abs/config.ts'),
+    ])
+    const text = lastUserText(history)
+    expect(text).not.toContain('OLD CONTENT')
+    expect(text).toContain('via @-mention')
+    expect(text).toContain('/abs/config.ts')
+  })
+
+  it('keeps the snapshot verbatim when the file was NOT later touched', () => {
+    const history = rebuildConversationHistory([
+      userWithMention('look at @/abs/config.ts', SNAPSHOT, ['/abs/config.ts']),
+      { id: 'a1', role: 'assistant', content: 'just talking', timestamp: ts },
+    ])
+    expect(lastUserText(history)).toContain('OLD CONTENT')
+  })
+
+  it('matches abs mentioned path against a relative tool-call path', () => {
+    const history = rebuildConversationHistory([
+      userWithMention('@/Users/x/proj/src/config.ts', SNAPSHOT, ['/Users/x/proj/src/config.ts']),
+      assistantReading('src/config.ts'),
+    ])
+    expect(lastUserText(history)).not.toContain('OLD CONTENT')
+  })
+
+  it('prepends a targeted warning but keeps the block when only some files were superseded', () => {
+    const twoFiles = `${SNAPSHOT}\n<system-reminder>Result of calling the read_file tool:\nUNTOUCHED</system-reminder>`
+    const history = rebuildConversationHistory([
+      userWithMention('@/abs/a.ts @/abs/b.ts', twoFiles, ['/abs/a.ts', '/abs/b.ts']),
+      assistantReading('/abs/a.ts'),
+    ])
+    const text = lastUserText(history)
+    expect(text).toContain('STALE for /abs/a.ts')
+    expect(text).toContain('UNTOUCHED') // the still-fresh sibling survives
+  })
+
+  it('emits verbatim when mentionedPaths is absent (old session)', () => {
+    const history = rebuildConversationHistory([
+      { id: 'u1', role: 'user', content: 'q', timestamp: ts, mentionContext: SNAPSHOT },
+      assistantReading('/abs/config.ts'),
+    ])
+    expect(lastUserText(history)).toContain('OLD CONTENT')
+  })
+
+  it('does not void when the tool touch is in an EARLIER message (only later supersedes)', () => {
+    const history = rebuildConversationHistory([
+      assistantReading('/abs/config.ts'),
+      userWithMention('now @/abs/config.ts', SNAPSHOT, ['/abs/config.ts']),
+    ])
+    // The mention came AFTER the edit → its snapshot is the freshest, keep it.
+    const userMsgs = history.filter(m => m.role === 'user')
+    const mentionMsg = userMsgs[userMsgs.length - 1]
+    const text = typeof mentionMsg.content === 'string'
+      ? mentionMsg.content
+      : (mentionMsg.content as Array<{ text?: string }>).map(p => p.text ?? '').join('')
+    expect(text).toContain('OLD CONTENT')
+  })
+})
+
 describe('rebuildConversationHistory — per-turn providerStates', () => {
   it('emits one assistant + tool_results pair PER internal turn, in order', () => {
     const assistant: ChatMessage = {

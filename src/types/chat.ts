@@ -330,6 +330,11 @@ export interface ChatMessage {
    * after the first turn. Never rendered in the chat bubble.
    */
   mentionContext?: string
+  /** Absolute paths of the file-content snapshots frozen in mentionContext.
+   *  rebuildConversationHistory voids the snapshot for any path a later tool
+   *  call superseded, so the model never sees a stale @-mention body
+   *  contradicting a fresh tool result (context pollution audit, 2026-06-12). */
+  mentionedPaths?: string[]
   /**
    * Original interleaved order of text and attachments at enqueue/send
    * time. When present, this is the canonical source for reconstructing

@@ -1096,8 +1096,22 @@ class ToolExecutor {
     }
     const nearCap = this.largeResults.size >= ToolExecutor.LARGE_RESULT_MAX_ENTRIES - 2
 
-    const previewSize = 2000
-    const preview = result.slice(0, previewSize)
+    const previewBudget = 2000
+    // Cut on a line boundary so the preview never ends mid-token / mid-JSON.
+    // A raw slice(0, 2000) produced syntactically-broken fragments (half a
+    // JSON object, a truncated identifier) that a model could try to parse as
+    // a complete result (context pollution audit, 2026-06-12). Honor the
+    // boundary only when it still keeps a substantial preview, so an early
+    // newline near the start doesn't collapse the preview to nothing. When the
+    // output is one giant line (e.g. minified JSON) there is no newline to cut
+    // on — fall back to the hard budget; the marker's guard still applies.
+    const lastNewline = result.lastIndexOf('\n', previewBudget)
+    // Include the newline in the preview (cut AFTER it) so the preview is
+    // whole lines and the continuation offset lands on the next line's first
+    // char — not on a leading '\n'.
+    const previewEnd = lastNewline >= previewBudget * 0.5 ? lastNewline + 1 : Math.min(previewBudget, result.length)
+    const preview = result.slice(0, previewEnd)
+    const omitted = result.length - previewEnd
     const totalSize = result.length > 1024
       ? `${(result.length / 1024).toFixed(1)}KB`
       : `${result.length} chars`
@@ -1105,17 +1119,20 @@ class ToolExecutor {
     // B1: was "byte ${previewSize}" — the unit is JS string code units,
     //     not bytes (matters for non-ASCII content like emoji / CJK).
     // B2: explicit offset-to-continue, so the model doesn't waste a call
-    //     re-reading the preview region from offset 0.
+    //     re-reading the preview region from offset 0. Uses previewEnd (the
+    //     ACTUAL chars shown after the line-boundary cut), not the nominal
+    //     budget — otherwise the chars between the cut and 2000 would be
+    //     silently skipped on continuation.
     // B3: terminology now matches the read_large_result suffix.
     // B4: cap-approaching nudge.
     const capNote = nearCap
       ? ` [warning: ${this.largeResults.size}/${ToolExecutor.LARGE_RESULT_MAX_ENTRIES} cached large results — oldest will be evicted as new ones arrive; save what you need now.]`
       : ''
-    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the first ${previewSize} characters are shown below. Continue from offset ${previewSize} unless you need a specific slice — call read_large_result("${refId}", offset: ${previewSize}). Do not reason about content past character ${previewSize} from this preview alone.${capNote}</system-reminder>
+    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the first ${previewEnd} characters are shown below, cut at a line boundary. Continue from offset ${previewEnd} unless you need a specific slice — call read_large_result("${refId}", offset: ${previewEnd}). Do not reason about content past character ${previewEnd} from this preview alone — the preview ends mid-output and the remainder may change the meaning.${capNote}</system-reminder>
 
-Preview (first ${previewSize} characters):
+Preview (first ${previewEnd} characters):
 ${preview}
-...
+<system-reminder>[end of partial view — ${omitted} more character${omitted === 1 ? '' : 's'} omitted; read_large_result("${refId}", offset: ${previewEnd}) for the rest]</system-reminder>
 `
   }
 

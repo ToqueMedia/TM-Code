@@ -180,6 +180,36 @@ const PANEL_STYLES = `
   from { opacity: 0; transform: translateY(-3px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* File list scroll area — reserve the scrollbar gutter so the status letter
+   at the right edge is never clipped by the overlay scrollbar, and render a
+   thin custom scrollbar instead of the chunky default. */
+.sc-scroll {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+.sc-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+.sc-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sc-scroll::-webkit-scrollbar-thumb {
+  background: ${tokens.colors.scrollbar.explorerThumb};
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.sc-scroll:hover::-webkit-scrollbar-thumb {
+  background: ${tokens.colors.scrollbar.explorerThumbHover};
+  background-clip: padding-box;
+}
+.sc-scroll::-webkit-scrollbar-thumb:active {
+  background: ${tokens.colors.scrollbar.explorerThumbActive};
+  background-clip: padding-box;
+}
 `
 
 function SourceControlPanel() {
@@ -699,7 +729,7 @@ const VirtualFileList = memo<{
   })
 
   return (
-    <div ref={scrollRef} style={{ height: '100%', overflow: 'auto' }}>
+    <div ref={scrollRef} className="sc-scroll">
       <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
         {virtualizer.getVirtualItems().map(vItem => {
           const item = items[vItem.index]
@@ -796,37 +826,49 @@ const FileRow = memo<{
         <div style={{ width: 14, height: 14, flexShrink: 0 }} />
       )}
 
-      {/* Filename tinted by git status + strike-through on deletions — the
-          VS Code convention, so state reads at a glance without the letter. */}
-      <span style={{
-        fontSize: 12,
-        color: cfg.color,
-        whiteSpace: 'nowrap',
-        flexShrink: 0,
-        textDecoration: file.status === 'deleted' ? 'line-through' : 'none',
-        opacity: file.status === 'deleted' ? 0.75 : 1,
-      }}>
-        {fileName}
-      </span>
-
-      <span style={{ flex: 1, fontSize: 11, color: tokens.colors.text.disabled, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {dirPath && `${dirPath}`}
-      </span>
-
-      <div className="sc-actions" style={{ display: 'flex', flexShrink: 0 }} onClick={e => e.stopPropagation()}>
-        {section === 'staged' ? (
-          <button type="button" className="sc-btn" title={t('sourceControl.unstageBtn')} aria-label={t('sourceControl.unstageBtn')} onClick={() => onUnstageFile(file.path)}><VscRemove size={12} /></button>
-        ) : (
-          <>
-            <button type="button" className="sc-btn red" title={t('sourceControl.discardBtn')} aria-label={t('sourceControl.discardBtn')} onClick={() => onDiscardFile(file.path)}><VscDiscard size={11} /></button>
-            <button type="button" className="sc-btn green" title={t('sourceControl.stageBtn')} aria-label={t('sourceControl.stageBtn')} onClick={() => onStageFile(file.path)}><VscAdd size={12} /></button>
-          </>
+      {/* Name + path share one shrinkable box that truncates as a unit. This
+          keeps the right cluster (actions + status letter) pinned, so the
+          M/U/A column stays aligned no matter how long the filename is — a
+          long name no longer pushes the status letter out of place. */}
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 6, overflow: 'hidden' }}>
+        {/* Filename tinted by git status + strike-through on deletions — the
+            VS Code convention, so state reads at a glance without the letter. */}
+        <span style={{
+          fontSize: 12,
+          color: cfg.color,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          flexShrink: 1,
+          minWidth: 0,
+          textDecoration: file.status === 'deleted' ? 'line-through' : 'none',
+          opacity: file.status === 'deleted' ? 0.75 : 1,
+        }}>
+          {fileName}
+        </span>
+        {dirPath && (
+          <span style={{ flexShrink: 1000000, fontSize: 11, color: tokens.colors.text.disabled, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+            {dirPath}
+          </span>
         )}
       </div>
 
-      <span style={{ fontSize: 11, fontWeight: 700, fontFamily: tokens.fontFamily.mono, color: cfg.color, flexShrink: 0, width: 14, textAlign: 'right' }}>
-        {cfg.label}
-      </span>
+      {/* Right cluster — pinned, fixed-width status column so M/U/A align. */}
+      <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
+        <div className="sc-actions" style={{ display: 'flex' }} onClick={e => e.stopPropagation()}>
+          {section === 'staged' ? (
+            <button type="button" className="sc-btn" title={t('sourceControl.unstageBtn')} aria-label={t('sourceControl.unstageBtn')} onClick={() => onUnstageFile(file.path)}><VscRemove size={12} /></button>
+          ) : (
+            <>
+              <button type="button" className="sc-btn red" title={t('sourceControl.discardBtn')} aria-label={t('sourceControl.discardBtn')} onClick={() => onDiscardFile(file.path)}><VscDiscard size={11} /></button>
+              <button type="button" className="sc-btn green" title={t('sourceControl.stageBtn')} aria-label={t('sourceControl.stageBtn')} onClick={() => onStageFile(file.path)}><VscAdd size={12} /></button>
+            </>
+          )}
+        </div>
+        <span style={{ fontSize: 11, fontWeight: 700, fontFamily: tokens.fontFamily.mono, color: cfg.color, flexShrink: 0, width: 12, textAlign: 'center' }}>
+          {cfg.label}
+        </span>
+      </div>
     </div>
   )
 }, (prev, next) =>
