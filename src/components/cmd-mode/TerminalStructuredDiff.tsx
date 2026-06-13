@@ -142,12 +142,10 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
         </Flex>
       )}
 
-      {/* Diff body */}
+      {/* Diff body — flat: no card border/radius/fill. The per-row green/red
+          backgrounds and the left gutter are the only structure (refined-terminal). */}
       <Box
-        borderRadius="3px"
         overflow="hidden"
-        border="1px solid rgba(255,255,255,0.06)"
-        bg="rgba(255,255,255,0.015)"
         fontFamily={tokens.fontFamily.mono}
         fontSize="12px"
         lineHeight="1.5"
@@ -159,11 +157,11 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
                 key={`h-${i}`}
                 px={2}
                 py="2px"
-                bg="rgba(163,113,247,0.05)"
                 borderTop={i === 0 ? undefined : '1px solid rgba(255,255,255,0.04)'}
                 borderBottom="1px solid rgba(255,255,255,0.04)"
               >
-                <Text fontSize="10px" color={tokens.colors.accent.purple} fontFamily={tokens.fontFamily.mono} letterSpacing="0.02em" opacity={0.7}>
+                {/* Dim neutral hunk line — no colored band (refined-terminal). */}
+                <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} letterSpacing="0.02em">
                   {row.label}
                 </Text>
               </Box>
@@ -174,7 +172,8 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
           const isRemove = row.kind === 'remove'
           const bg = isAdd ? tokens.colors.diff.addedBg : isRemove ? tokens.colors.diff.removedBg : 'transparent'
           const fg = isAdd ? tokens.colors.diff.addedText : isRemove ? tokens.colors.diff.removedText : tokens.colors.text.secondary
-          const marker = isAdd ? '+' : isRemove ? '−' : ' '
+          // ASCII '-' (not U+2212) so copy-as-diff stays valid for removed lines.
+          const marker = isAdd ? '+' : isRemove ? '-' : ' '
           const lineNo = isRemove
             ? row.oldNo
             : isAdd

@@ -252,7 +252,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
           justify="center"
           bg="rgba(163, 113, 247, 0.06)"
           border="2px dashed rgba(163, 113, 247, 0.3)"
-          borderRadius="4px"
+          borderRadius={0}
           pointerEvents="none"
         >
           <Text
@@ -449,7 +449,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             h="24px"
             mt="2px"
             ml={1}
-            borderRadius="4px"
+            borderRadius={tokens.radius.sm}
             cursor="pointer"
             color={tokens.colors.text.muted}
             transition="all 0.15s"

@@ -14,11 +14,14 @@ import SubAgentCard from '../chat/SubAgentCard'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import { useChatStore } from '../../stores/chatStore'
 import { groupConsecutiveAgentShellCalls, isAgentShellTool, ShellCommandBlock, ShellSessionBlock } from '../shell/ShellCommandBlock'
+import { Spinner, DOTS_FRAMES } from './terminalSpinner'
 
 const USER_PROMPT_COLOR = tokens.colors.accent.purple
-const USER_TEXT_COLOR = '#f2ecff'
+// Tokenized (same values, detox of hard-coded hex/rgba) — refined-terminal.
+const USER_TEXT_COLOR = tokens.colors.terminal.userText
 const ASSISTANT_MARKER_COLOR = tokens.colors.terminal.cyan
-const ASSISTANT_TEXT_COLOR = '#b9c7d9'
+const ASSISTANT_TEXT_COLOR = tokens.colors.terminal.assistantText
+const ASSISTANT_RAIL_COLOR = tokens.colors.terminal.assistantRail
 
 // ─── Special card renderer (plan_approval, credential_request, ask_user_question) ───
 
@@ -287,8 +290,6 @@ function TerminalMessageRendererInner({
         pl={2}
         pr={2}
         borderLeft={`2px solid ${USER_PROMPT_COLOR}`}
-        bg="rgba(163, 113, 247, 0.035)"
-        borderRadius="0 4px 4px 0"
       >
         <Flex gap={1.5} align="flex-start">
           <Text
@@ -399,7 +400,7 @@ function TerminalMessageRendererInner({
       overflowX="hidden"
       wordBreak="break-word"
       style={{ overflowWrap: 'anywhere' }}
-      borderLeft={`2px solid rgba(17, 168, 205, 0.28)`}
+      borderLeft={`2px solid ${ASSISTANT_RAIL_COLOR}`}
       pl={2.5}
     >
       <Flex align="center" gap={1.5} mb={message.content || hasContentBlocks || message.toolCalls?.length ? 1 : 0}>
@@ -424,25 +425,14 @@ function TerminalMessageRendererInner({
           TM Code
         </Text>
       </Flex>
-      {/* Waiting dots — only when streaming with no visible content yet */}
+      {/* Waiting indicator — only when streaming with no visible content yet.
+          Hard-step accumulating-dots frame-swap replaces the eased `pulseDot`
+          breathing trio (refined-terminal: one sanctioned activity animation). */}
       {isStreaming && !message.content && (!message.toolCalls || message.toolCalls.length === 0) && (
-        <Flex gap="5px" align="center" py={1.5}>
-          {[0, 1, 2].map(i => (
-            <Box
-              key={i}
-              w="4px"
-              h="4px"
-              borderRadius="full"
-              bg={tokens.colors.accent.purple}
-              css={{
-                animation: `pulseDot 1.4s ease-in-out ${i * 0.2}s infinite`,
-                '@keyframes pulseDot': {
-                  '0%, 80%, 100%': { opacity: 0.15, transform: 'scale(0.7)' },
-                  '40%': { opacity: 1, transform: 'scale(1)' },
-                },
-              }}
-            />
-          ))}
+        <Flex align="center" py={1.5} color={tokens.colors.accent.purple}>
+          <Text fontFamily={tokens.fontFamily.mono} fontSize="14px" lineHeight="1">
+            <Spinner active frames={DOTS_FRAMES} />
+          </Text>
         </Flex>
       )}
 
@@ -578,47 +568,23 @@ function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
         onClick={() => { if (!isStreaming) setExpanded(e => !e) }}
         py="3px"
         px="6px"
-        borderRadius="4px"
         _hover={isStreaming ? undefined : { bg: 'rgba(255, 255, 255, 0.03)' }}
         userSelect="none"
       >
         {isStreaming ? (
-          <Flex gap="4px" align="center">
-            <Flex gap="2px" align="center">
-              {[0, 1, 2].map(i => (
-                <Box
-                  key={i}
-                  w="3px"
-                  h="3px"
-                  borderRadius="full"
-                  bg={tokens.colors.accent.purple}
-                  css={{
-                    animation: `terminalPulse 1.4s ease-in-out ${i * 0.2}s infinite`,
-                    '@keyframes terminalPulse': {
-                      '0%, 80%, 100%': { opacity: 0.15, transform: 'scale(0.7)' },
-                      '40%': { opacity: 1, transform: 'scale(1)' },
-                    },
-                  }}
-                />
-              ))}
-            </Flex>
+          // Refined-terminal: static dim THINKING with a leading hard-step
+          // spinner — replaces the eased `terminalPulse` dots and the
+          // `terminalThinkingShimmer` gradient text-clip animation.
+          <Flex gap="4px" align="center" color={tokens.colors.accent.purple}>
+            <Text fontFamily={tokens.fontFamily.mono} fontSize="10px" lineHeight="1">
+              <Spinner active />
+            </Text>
             <Text
               fontSize="10px"
               fontFamily={tokens.fontFamily.mono}
               fontWeight="600"
               letterSpacing="0.05em"
-              css={{
-                background: 'linear-gradient(90deg, rgba(163,113,247,0.35) 25%, rgba(163,113,247,1) 50%, rgba(163,113,247,0.35) 75%)',
-                backgroundSize: '200% 100%',
-                WebkitBackgroundClip: 'text',
-                backgroundClip: 'text',
-                color: 'transparent',
-                animation: 'terminalThinkingShimmer 1.8s linear infinite',
-                '@keyframes terminalThinkingShimmer': {
-                  from: { backgroundPosition: '200% 0' },
-                  to: { backgroundPosition: '-200% 0' },
-                },
-              }}
+              opacity={0.7}
             >
               THINKING
             </Text>

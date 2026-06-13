@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -21,6 +20,7 @@ import { BillingOverageBanner } from './BillingOverageBanner'
 import { ErrorBoundary } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
+import { TerminalCompactionIndicator } from './TerminalCompactionIndicator'
 import AgentTasksPanel from '../chat/AgentTasksPanel'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useAttachments } from '../../hooks/useAttachments'
@@ -781,23 +781,15 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
               </Text>
             </Box>
           ) : (
-            <AnimatePresence mode="wait">
-              {messages.length === 0 && !hasEverHadMessages ? (
-                <motion.div
-                  key="greeting"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0, transition: { duration: 0.15 } }}
-                >
-                  <TerminalGreeting projectPath={projectPath} />
-                </motion.div>
-              ) : (
-                <motion.div
-                  key="messages"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1, transition: { duration: 0.2 } }}
-                >
-                  <Box pb={1} data-selectable="true">
+            // Instant conditional swap (no framer-motion crossfade) — native
+            // terminals print without an opacity tween. Same condition + children.
+            messages.length === 0 && !hasEverHadMessages ? (
+              <Box key="greeting">
+                <TerminalGreeting projectPath={projectPath} />
+              </Box>
+            ) : (
+              <Box key="messages">
+                <Box pb={1} data-selectable="true">
               {canLoadMore && (
                 <Box
                   as="button"
@@ -811,7 +803,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
                   py={2}
                   px={2}
                   mb={1}
-                  borderRadius="4px"
+                  borderRadius={tokens.radius.sm}
                   bg={tokens.colors.bg.hoverSubtle}
                   border={`1px solid ${tokens.colors.border.panel}`}
                   cursor="pointer"
@@ -827,15 +819,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
               )}
               {visibleItems.map(msg => (
                 <ErrorBoundary key={msg.id}>
-                  <Box
-                    css={{
-                      animation: 'msgFadeIn 0.1s ease-out',
-                      '@keyframes msgFadeIn': {
-                        from: { opacity: '0' },
-                        to: { opacity: '1' },
-                      },
-                    }}
-                  >
+                  {/* Instant print — no fade-in animation (native terminal feel). */}
+                  <Box>
                     <TerminalMessageRenderer
                       message={msg}
                       isStreaming={msg.id === streamingMessageId}
@@ -843,10 +828,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
                   </Box>
                 </ErrorBoundary>
               ))}
+              {/* Inline compaction progress — appears at the tail of the
+                  scrollback while the agent compresses context. */}
+              <TerminalCompactionIndicator />
             </Box>
-                </motion.div>
-              )}
-            </AnimatePresence>
+              </Box>
+            )
           )}
         </Box>
       </Box>
@@ -861,7 +848,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           as="button"
           w="28px"
           h="28px"
-          borderRadius="full"
+          borderRadius={tokens.radius.sm}
           bg="rgba(163, 113, 247, 0.15)"
           border="1px solid rgba(163, 113, 247, 0.3)"
           color={tokens.colors.accent.purple}
@@ -874,9 +861,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
             scrollToBottom('instant')
           }}
           zIndex={10}
-          transition="all 0.15s"
-          _hover={{ bg: 'rgba(163, 113, 247, 0.25)', transform: 'scale(1.1)' }}
-          _active={{ transform: 'scale(0.95)' }}
+          transition="background 0.15s"
+          _hover={{ bg: 'rgba(163, 113, 247, 0.25)' }}
+          // Refined-terminal: press feedback via a bg shift, not a scale bounce.
+          _active={{ bg: 'rgba(163, 113, 247, 0.4)' }}
           aria-label="Scroll to bottom"
         >
           <FiChevronDown size={16} />

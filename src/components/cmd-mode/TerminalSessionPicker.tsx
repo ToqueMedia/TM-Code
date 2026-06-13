@@ -123,7 +123,6 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
       bottom={0}
       zIndex={500}
       bg="rgba(10, 10, 10, 0.82)"
-      backdropFilter="blur(6px)"
       display="flex"
       justifyContent="center"
       alignItems="flex-start"
@@ -135,9 +134,9 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
         maxW="720px"
         maxH="70vh"
         bg={tokens.colors.terminal.background}
-        border="1px solid rgba(163, 113, 247, 0.25)"
-        boxShadow="0 10px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(163, 113, 247, 0.08)"
-        borderRadius="4px"
+        // Refined-terminal: flat bordered panel — 1px hairline, no shadow/glow ring.
+        border={`1px solid ${tokens.colors.border.default}`}
+        borderRadius={tokens.radius.sm}
         overflow="hidden"
         display="flex"
         flexDirection="column"
@@ -234,7 +233,7 @@ export const TerminalSessionPicker = memo(function TerminalSessionPicker({
                       {isActive && (
                         <Text
                           fontSize="9px"
-                          color={tokens.colors.accent.orange}
+                          color={tokens.colors.accent.purple}
                           fontFamily={tokens.fontFamily.mono}
                           fontWeight="600"
                           letterSpacing="0.08em"

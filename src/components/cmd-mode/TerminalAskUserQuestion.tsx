@@ -44,16 +44,16 @@ function TabBar({
             px={2}
             py="4px"
             cursor="pointer"
-            borderBottom={isActive ? `2px solid ${tokens.colors.accent.primary}` : '2px solid transparent'}
-            bg={isActive ? 'rgba(254, 16, 99, 0.06)' : 'transparent'}
+            borderBottom={isActive ? `2px solid ${tokens.colors.accent.purple}` : '2px solid transparent'}
+            bg={isActive ? tokens.colors.accent.purpleSubtle : 'transparent'}
             transition="all 0.12s"
-            _hover={{ bg: isActive ? 'rgba(254, 16, 99, 0.06)' : 'rgba(255, 255, 255, 0.03)' }}
+            _hover={{ bg: isActive ? tokens.colors.accent.purpleSubtle : 'rgba(255, 255, 255, 0.03)' }}
           >
             <Text
               fontSize="11px"
               fontFamily={tokens.fontFamily.mono}
               fontWeight="600"
-              color={isActive ? tokens.colors.accent.primary : tokens.colors.text.muted}
+              color={isActive ? tokens.colors.accent.purple : tokens.colors.text.muted}
             >
               {isActive ? '●' : '○'}
             </Text>
@@ -77,16 +77,16 @@ function TabBar({
         px={2}
         py="4px"
         cursor="pointer"
-        borderBottom={activeTab === tabCount - 1 ? `2px solid ${tokens.colors.accent.primary}` : '2px solid transparent'}
-        bg={activeTab === tabCount - 1 ? 'rgba(254, 16, 99, 0.06)' : 'transparent'}
+        borderBottom={activeTab === tabCount - 1 ? `2px solid ${tokens.colors.accent.purple}` : '2px solid transparent'}
+        bg={activeTab === tabCount - 1 ? tokens.colors.accent.purpleSubtle : 'transparent'}
         transition="all 0.12s"
-        _hover={{ bg: activeTab === tabCount - 1 ? 'rgba(254, 16, 99, 0.06)' : 'rgba(255, 255, 255, 0.03)' }}
+        _hover={{ bg: activeTab === tabCount - 1 ? tokens.colors.accent.purpleSubtle : 'rgba(255, 255, 255, 0.03)' }}
       >
         <Text
           fontSize="11px"
           fontFamily={tokens.fontFamily.mono}
           fontWeight="600"
-          color={activeTab === tabCount - 1 ? tokens.colors.accent.primary : tokens.colors.text.muted}
+          color={activeTab === tabCount - 1 ? tokens.colors.accent.purple : tokens.colors.text.muted}
         >
           {activeTab === tabCount - 1 ? '●' : allAnswered ? '✓' : '○'}
         </Text>
@@ -134,7 +134,7 @@ function QuestionPanel({
       <Text
         fontSize="10px"
         fontFamily={tokens.fontFamily.mono}
-        color={tokens.colors.accent.primary}
+        color={tokens.colors.accent.purple}
         fontWeight="700"
         textTransform="uppercase"
         letterSpacing="0.08em"
@@ -163,7 +163,7 @@ function QuestionPanel({
             gap={2}
             py="3px"
             px={1}
-            borderRadius="3px"
+            borderRadius={tokens.radius.sm}
             bg={isFocused ? 'rgba(255, 255, 255, 0.04)' : 'transparent'}
             transition="background 0.1s"
           >
@@ -179,7 +179,7 @@ function QuestionPanel({
             <Text
               fontSize="12px"
               fontFamily={tokens.fontFamily.mono}
-              color={isSelected ? tokens.colors.accent.primary : tokens.colors.text.muted}
+              color={isSelected ? tokens.colors.accent.purple : tokens.colors.text.muted}
               fontWeight="600"
               w="14px"
               textAlign="center"
@@ -213,7 +213,7 @@ function QuestionPanel({
         gap={2}
         py="3px"
         px={1}
-        borderRadius="3px"
+        borderRadius={tokens.radius.sm}
         bg={isOtherFocusedOption ? 'rgba(255, 255, 255, 0.04)' : 'transparent'}
         transition="background 0.1s"
       >
@@ -229,7 +229,7 @@ function QuestionPanel({
         <Text
           fontSize="12px"
           fontFamily={tokens.fontFamily.mono}
-          color={isOtherSelected ? tokens.colors.accent.primary : tokens.colors.text.muted}
+          color={isOtherSelected ? tokens.colors.accent.purple : tokens.colors.text.muted}
           fontWeight="600"
           w="14px"
           textAlign="center"
@@ -258,10 +258,10 @@ function QuestionPanel({
               onKeyDown={onOtherKeyDown}
               bg="rgba(0, 0, 0, 0.2)"
               border="1px solid rgba(255, 255, 255, 0.12)"
-              borderRadius="4px"
+              borderRadius={tokens.radius.sm}
               color={tokens.colors.text.primary}
               _placeholder={{ color: tokens.colors.text.muted }}
-              _focus={{ borderColor: tokens.colors.accent.primary, outline: 'none' }}
+              _focus={{ borderColor: tokens.colors.accent.purple, outline: 'none' }}
             />
           )}
         </Box>
@@ -286,7 +286,7 @@ function SummaryPanel({
       <Text
         fontSize="10px"
         fontFamily={tokens.fontFamily.mono}
-        color={tokens.colors.accent.primary}
+        color={tokens.colors.accent.purple}
         fontWeight="700"
         textTransform="uppercase"
         letterSpacing="0.08em"
@@ -551,7 +551,7 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
       data-question-root
       tabIndex={-1}
       mb={3}
-      borderLeft={`2px solid ${tokens.colors.accent.primary}`}
+      borderLeft={`2px solid ${tokens.colors.accent.purple}`}
       pl={3}
       py={2}
       outline="none"
@@ -579,6 +579,7 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
       </Box>
 
       {/* Key hints */}
+      {/* Refined-terminal: bare bracketed keycaps in the mono font, no filled pills. */}
       <Flex
         align="center"
         gap={3}
@@ -587,24 +588,24 @@ export const TerminalAskUserQuestion = memo(function TerminalAskUserQuestion({
         userSelect="none"
       >
         <Flex align="center" gap={1}>
-          <Box as="span" px="4px" py="1px" borderRadius="3px" bg="rgba(255, 255, 255, 0.06)" border="1px solid rgba(255, 255, 255, 0.1)" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">←→</Box>
+          <Text as="span" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">[←→]</Text>
           <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.7}>tabs</Text>
         </Flex>
         {!isSummaryTab && (
           <Flex align="center" gap={1}>
-            <Box as="span" px="4px" py="1px" borderRadius="3px" bg="rgba(255, 255, 255, 0.06)" border="1px solid rgba(255, 255, 255, 0.1)" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">↑↓</Box>
+            <Text as="span" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">[↑↓]</Text>
             <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.7}>navigate</Text>
           </Flex>
         )}
         <Flex align="center" gap={1}>
-          <Box as="span" px="4px" py="1px" borderRadius="3px" bg="rgba(255, 255, 255, 0.06)" border="1px solid rgba(255, 255, 255, 0.1)" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">↵</Box>
+          <Text as="span" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">[↵]</Text>
           <Text fontSize="10px" color={isSummaryTab && allAnswered ? tokens.colors.terminal.green : tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.7}>
             {isSummaryTab ? (submitting ? 'submitting...' : 'submit') : 'select'}
           </Text>
         </Flex>
         <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.4}>·</Text>
         <Flex align="center" gap={1}>
-          <Box as="span" px="4px" py="1px" borderRadius="3px" bg="rgba(255, 255, 255, 0.06)" border="1px solid rgba(255, 255, 255, 0.1)" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">esc</Box>
+          <Text as="span" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">[esc]</Text>
           <Text fontSize="10px" color={tokens.colors.accent.red} fontFamily={tokens.fontFamily.mono} opacity={0.7}>cancel</Text>
         </Flex>
       </Flex>

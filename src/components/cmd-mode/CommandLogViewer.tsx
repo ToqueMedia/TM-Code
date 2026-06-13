@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { Spinner } from './terminalSpinner'
 
 interface CommandLogViewerProps {
   /** Accumulated log lines from the streaming command. */
@@ -51,23 +52,22 @@ export const CommandLogViewer = memo(function CommandLogViewer({
   const visibleLogs = expanded || !showToggle ? logs : logs.slice(-compactLines)
 
   return (
+    // Flat: log output flows flush, bound only by a left gutter in the state
+    // color (yellow while running, hairline otherwise). No card border/radius/fill,
+    // no header chrome bar (refined-terminal).
     <Box
       mt="3px"
-      borderRadius="4px"
-      overflow="hidden"
-      border={`1px solid ${isRunning ? 'rgba(240, 192, 0, 0.1)' : 'rgba(255, 255, 255, 0.04)'}`}
-      bg="rgba(0, 0, 0, 0.25)"
+      pl={2}
+      borderLeft={`2px solid ${isRunning ? tokens.colors.toolCall.runningText : tokens.colors.border.default}`}
     >
-      {/* Header bar with toggle */}
+      {/* Toggle row — flush, no chrome bar */}
       {showToggle && (
         <Flex
           align="center"
           justify="space-between"
-          px={2}
           py="3px"
-          borderBottom={`1px solid rgba(255, 255, 255, 0.04)`}
           cursor="pointer"
-          _hover={{ bg: 'rgba(255, 255, 255, 0.02)' }}
+          _hover={{ opacity: 0.8 }}
           onClick={() => setExpanded(!expanded)}
         >
           <Text
@@ -78,20 +78,11 @@ export const CommandLogViewer = memo(function CommandLogViewer({
             {expanded ? `▲ ${totalLines} lines` : `▼ ${totalLines} lines (showing last ${compactLines})`}
           </Text>
           {isRunning && (
-            <Flex align="center" gap={1}>
-              <Box
-                w="5px"
-                h="5px"
-                borderRadius="full"
-                bg={tokens.colors.toolCall.runningText}
-                css={{
-                  animation: 'logPulse 1.4s ease-in-out infinite',
-                  '@keyframes logPulse': {
-                    '0%, 100%': { opacity: 0.35 },
-                    '50%': { opacity: 1 },
-                  },
-                }}
-              />
+            <Flex align="center" gap={1} color={tokens.colors.toolCall.runningText}>
+              {/* Hard-step spinner replaces the eased `logPulse` dot. */}
+              <Text fontSize="10px" fontFamily={tokens.fontFamily.mono} lineHeight="1">
+                <Spinner active />
+              </Text>
               <Text fontSize="10px" color={tokens.colors.toolCall.runningText} fontFamily={tokens.fontFamily.mono}>
                 streaming
               </Text>
@@ -107,7 +98,7 @@ export const CommandLogViewer = memo(function CommandLogViewer({
         maxH={expanded || !showToggle ? '320px' : `${compactLines * 18 + 8}px`}
         overflowY="auto"
         overflowX="hidden"
-        px={2}
+        pr={2}
         py="4px"
         css={{
           '&::-webkit-scrollbar': { width: '4px', height: '4px' },

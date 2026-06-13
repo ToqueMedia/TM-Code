@@ -81,8 +81,8 @@ export const TerminalCodeBlock = memo(function TerminalCodeBlock({ block }: Term
         </Text>
       </Flex>
 
-      {/* Code */}
-      <Box borderRadius="2px" bg="rgba(0,0,0,0.35)" overflow="hidden" border="1px solid rgba(255,255,255,0.04)">
+      {/* Code — flat surface: ≤2px radius, 1px hairline only, no shadow. */}
+      <Box borderRadius={tokens.radius.sm} bg="rgba(0,0,0,0.35)" overflow="hidden" border="1px solid rgba(255,255,255,0.04)">
         <Suspense fallback={<CodeFallback code={block.code} />}>
           <LazyHighlighter language={lang}>{block.code}</LazyHighlighter>
         </Suspense>

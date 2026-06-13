@@ -8,7 +8,6 @@
 import { memo, useCallback, useMemo, useSyncExternalStore } from "react";
 import { useAgentElapsed } from "../../hooks/useAgentElapsed";
 import { Box, Flex, Text } from "@chakra-ui/react";
-import { FiArrowDown, FiArrowUp, FiSquare } from "react-icons/fi";
 import { useChatStore } from "../../stores/chatStore";
 import { useMcpStore } from "../../stores/mcpStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -301,31 +300,23 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
         justify="space-between"
         px={3}
         py="5px"
-        borderTop="1px solid rgba(255,255,255,0.04)"
-        bg="rgba(0,0,0,0.2)"
+        borderTop={`1px solid ${tokens.colors.terminal.chromeHairlineFaint}`}
+        bg={tokens.colors.terminal.statusbarBg}
         minH="24px"
         flexShrink={0}
       >
         {/* Left: status dot + label + info */}
         <Flex align="center" gap={2} overflow="hidden">
-          {/* Status dot */}
+          {/* Status dot — refined-terminal: flat static marker in the semantic
+              cfg.color. The breathing 'sPulse' eased animation was removed
+              (terminals don't pulse); the squared 2px shape replaces the 'full'
+              pill. Per-state colors are semantic and unchanged. */}
           <Box
             w="5px"
             h="5px"
-            borderRadius="full"
+            borderRadius={tokens.radius.sm}
             bg={cfg.color}
             flexShrink={0}
-            css={
-              cfg.pulse
-                ? {
-                    animation: "sPulse 1.5s ease-in-out infinite",
-                    "@keyframes sPulse": {
-                      "0%, 100%": { opacity: 1 },
-                      "50%": { opacity: 0.25 },
-                    },
-                  }
-                : undefined
-            }
           />
           <Text
             fontSize="13px"
@@ -350,7 +341,9 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               flexShrink={0}
               title={tmSpeedApplied ? t("speed.indicatorTooltip") : t("speed.indicatorTooltipPending")}
             >
-              ⚡ {t("speed.indicator")}
+              {/* Refined-terminal: emoji '⚡' replaced by a single-color text
+                  marker '✦' in the same accent.orange. */}
+              ✦ {t("speed.indicator")}
             </Text>
           )}
 
@@ -402,29 +395,19 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               {isStreaming && combinedTok > 0 && (
                 <>
                   {" · "}
+                  {/* Refined-terminal: react-icons arrows replaced by mono
+                      Unicode text glyphs '↑'/'↓' in the same semantic colors
+                      (orange = sending, green = receiving); no verticalAlign
+                      nudge needed for in-flow text. */}
                   {isSending && (
-                    <Box
-                      as="span"
-                      display="inline-flex"
-                      alignItems="center"
-                      color={tokens.colors.accent.orange}
-                      mr="3px"
-                      verticalAlign="-2px"
-                    >
-                      <FiArrowUp size={10} strokeWidth={2.5} />
-                    </Box>
+                    <Text as="span" color={tokens.colors.accent.orange} mr="3px">
+                      ↑
+                    </Text>
                   )}
                   {isReceiving && (
-                    <Box
-                      as="span"
-                      display="inline-flex"
-                      alignItems="center"
-                      color={tokens.colors.accent.green}
-                      mr="3px"
-                      verticalAlign="-2px"
-                    >
-                      <FiArrowDown size={10} strokeWidth={2.5} />
-                    </Box>
+                    <Text as="span" color={tokens.colors.accent.green} mr="3px">
+                      ↓
+                    </Text>
                   )}
                   {formatTokens(combinedTok)}
                 </>
@@ -441,18 +424,26 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               justifyContent="center"
               w="18px"
               h="18px"
-              borderRadius="3px"
+              borderRadius={tokens.radius.sm}
               bg="transparent"
               color={tokens.colors.accent.red}
               cursor="pointer"
-              transition="all 0.1s"
+              transition="background-color 0.1s"
               _hover={{ bg: "rgba(248,81,73,0.1)" }}
-              _active={{ transform: "scale(0.9)" }}
               onClick={handleStop}
               aria-label={t("misc.stop")}
               title={`${t("misc.stop")} (Esc)`}
             >
-              <FiSquare size={10} />
+              {/* Refined-terminal: FiSquare SVG replaced by the mono '■' text
+                  glyph; no press-shrink transform. */}
+              <Text
+                as="span"
+                fontFamily={tokens.fontFamily.mono}
+                fontSize="10px"
+                lineHeight="1"
+              >
+                ■
+              </Text>
             </Box>
           )}
         </Flex>

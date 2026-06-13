@@ -5,6 +5,7 @@ import { tokens } from '@/theme/tokens'
 import { TerminalStructuredDiff } from './TerminalStructuredDiff'
 import { getToolDisplay, getToolSubtitle, shortenPath } from './toolDisplay'
 import { isShellTool, ShellCommandBlock } from '../shell/ShellCommandBlock'
+import { Spinner } from './terminalSpinner'
 
 interface TerminalToolCallProps {
   toolCall: ToolCallDisplay
@@ -206,20 +207,12 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
           color={statusColor}
           flexShrink={0}
           lineHeight="1"
-          css={
-            isRunning
-              ? {
-                  display: 'inline-block',
-                  animation: 'toolSpin 1.1s linear infinite',
-                  '@keyframes toolSpin': {
-                    '0%': { transform: 'rotate(0deg)' },
-                    '100%': { transform: 'rotate(360deg)' },
-                  },
-                }
-              : undefined
-          }
         >
-          {isRunning ? '⟳' : '●'}
+          {/* Refined-terminal: hard-step frame-swap spinner (replaces the eased
+              CSS `toolSpin` rotation of the old '⟳'). Rendered via <Spinner>
+              (not the useSpinnerFrame hook) so no hook sits after this
+              component's isShellTool early-return — keeps rules-of-hooks clean. */}
+          {isRunning ? <Spinner active /> : '●'}
         </Text>
 
         <Text
@@ -244,7 +237,7 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
             borderColor="rgba(46,160,67,0.35)"
             px="5px"
             py="0px"
-            borderRadius="3px"
+            borderRadius={tokens.radius.sm}
             fontWeight="700"
             letterSpacing="0.08em"
           >
@@ -297,29 +290,23 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
           />
         )}
 
-        {/* Screenshots — always visible (browser_take_screenshot, etc.) */}
+        {/* Screenshots — always visible (browser_take_screenshot, etc.).
+            Flat: no rounded corners; a 1px hairline is the only separation cue. */}
         {screenshotSrc && (
-          <Box mt="3px" borderRadius="4px" overflow="hidden" maxW="480px">
+          <Box mt="3px" overflow="hidden" maxW="480px">
             <Image
               src={screenshotSrc}
               alt="Screenshot"
               w="100%"
-              borderRadius="4px"
               border="1px solid rgba(255,255,255,0.06)"
             />
           </Box>
         )}
 
-        {/* Task updates: show unfinished/new tasks inline. Completed lists stay hidden. */}
+        {/* Task updates: show unfinished/new tasks inline. Completed lists stay hidden.
+            Flat: flows flush under the body's left gutter — no card border/fill/radius. */}
         {taskListResult && (
-          <Box
-            mt="3px"
-            px={2}
-            py="5px"
-            borderRadius="3px"
-            bg="rgba(255,255,255,0.025)"
-            border="1px solid rgba(255,255,255,0.06)"
-          >
+          <Box mt="3px" py="2px">
             <Text
               fontSize="12px"
               color={tokens.colors.text.secondary}
@@ -332,16 +319,10 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
           </Box>
         )}
 
-        {/* Error result for any tool — always shown for debugging */}
+        {/* Error result for any tool — always shown for debugging.
+            Flat: the semantic red lives in the text/gutter, not a filled card. */}
         {isError && toolCall.result && !hasDiff && !isReadTool && !isSubAgentSpawner && (
-          <Box
-            mt="3px"
-            px={2}
-            py="4px"
-            borderRadius="3px"
-            bg="rgba(248,81,73,0.04)"
-            border="1px solid rgba(248,81,73,0.12)"
-          >
+          <Box mt="3px" py="2px">
             <Text
               fontSize="12px"
               color={tokens.colors.accent.red}
@@ -379,22 +360,13 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
           </Text>
         )}
 
-        {/* Live progress — shown when commandLogs is not populated (single-line fallback) */}
+        {/* Live progress — shown when commandLogs is not populated (single-line fallback).
+            Hard-step frame-swap spinner replaces the eased `toolProgressPulse` dot. */}
         {(!toolCall.commandLogs || toolCall.commandLogs.length === 0) && toolCall.progressText && (
-          <Flex align="center" gap={1.5} mt="3px">
-            <Box
-              w="6px"
-              h="6px"
-              borderRadius="full"
-              bg={tokens.colors.toolCall.runningText}
-              css={{
-                animation: 'toolProgressPulse 1.4s ease-in-out infinite',
-                '@keyframes toolProgressPulse': {
-                  '0%, 100%': { opacity: 0.35, transform: 'scale(0.9)' },
-                  '50%': { opacity: 1, transform: 'scale(1.1)' },
-                },
-              }}
-            />
+          <Flex align="center" gap={1.5} mt="3px" color={tokens.colors.toolCall.runningText}>
+            <Text fontSize="11px" fontFamily={tokens.fontFamily.mono} lineHeight="1">
+              <Spinner active />
+            </Text>
             <Text fontSize="11px" color={tokens.colors.toolCall.runningText} fontFamily={tokens.fontFamily.mono}>
               {toolCall.progressText}
             </Text>
