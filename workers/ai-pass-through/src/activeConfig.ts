@@ -3,10 +3,37 @@ import type { ActiveAIConfig, Env, ResolvedActiveAIConfig } from './types'
 
 const CONFIG_CACHE_MS = 5_000
 
-let cachedConfig: { value: ResolvedActiveAIConfig; expiresAt: number } | null = null
+let configCache = new Map<string, { value: ResolvedActiveAIConfig; expiresAt: number }>()
 
 export function clearActiveConfigCache(): void {
-  cachedConfig = null
+  configCache = new Map()
+}
+
+// ── Sidecars ──────────────────────────────────────────────────────────────
+//
+// O proxy antigo roteava por X-Request-Type para modelos baratos/especiali-
+// zados; a migração para o pass-through deixou esses headers a apontar para
+// o vazio (web_search a 404, memory-* a pagar preço de flagship no modelo
+// ativo, visão inexistente — análise 2026-06-12). Este mapa restaura o
+// mecanismo de forma config-driven: cada tipo aponta para uma config no KV
+// (`sidecar:*`, mesmo schema da ativa, publicada pelo admin). Sidecar
+// ausente/inválido/desativado → degrada SILENCIOSAMENTE para a config ativa
+// — o chat nunca parte por causa de um sidecar; o cliente distingue pelo
+// header X-TM-Config-Key da resposta.
+
+const REQUEST_TYPE_TO_SIDECAR_KEY: Record<string, string> = {
+  'web_search': 'sidecar:web_search',
+  'vision': 'sidecar:vision',
+  'fim': 'sidecar:fim',
+  'memory-extractor': 'sidecar:utility',
+  'memory-selector': 'sidecar:utility',
+  'memory-distiller': 'sidecar:utility',
+  'summarize': 'sidecar:utility',
+}
+
+export function sidecarKeyForRequestType(requestType: string | null): string | null {
+  if (!requestType) return null
+  return REQUEST_TYPE_TO_SIDECAR_KEY[requestType.trim().toLowerCase()] ?? null
 }
 
 function assertString(value: unknown, field: keyof ActiveAIConfig): string {
@@ -29,12 +56,12 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
   }
 
   const obj = parsed as Record<string, unknown>
-  const authScheme = obj.authScheme === 'Bearer' || obj.authScheme === 'none'
+  const authScheme = obj.authScheme === 'Bearer' || obj.authScheme === 'none' || obj.authScheme === 'google_oauth'
     ? obj.authScheme
     : null
 
   if (!authScheme) {
-    throw new HttpError(500, 'tm_active_config_invalid', 'Active AI config authScheme must be "Bearer" or "none".')
+    throw new HttpError(500, 'tm_active_config_invalid', 'Active AI config authScheme must be "Bearer", "none" or "google_oauth".')
   }
 
   const enabled = obj.enabled
@@ -68,9 +95,10 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
 }
 
 export async function getActiveConfig(env: Env, now = Date.now()): Promise<ResolvedActiveAIConfig> {
-  if (cachedConfig && cachedConfig.expiresAt > now) return cachedConfig.value
-
   const key = env.ACTIVE_AI_CONFIG_KEY || 'active'
+  const cached = configCache.get(key)
+  if (cached && cached.expiresAt > now) return cached.value
+
   const kvRaw = env.ACTIVE_AI_CONFIG ? await env.ACTIVE_AI_CONFIG.get(key) : null
   const envRaw = typeof env.ACTIVE_AI_CONFIG_JSON === 'string' ? env.ACTIVE_AI_CONFIG_JSON : null
   const source: ResolvedActiveAIConfig['source'] = kvRaw ? 'kv' : 'env'
@@ -86,8 +114,41 @@ export async function getActiveConfig(env: Env, now = Date.now()): Promise<Resol
   }
 
   const resolved = { config, source, key }
-  cachedConfig = { value: resolved, expiresAt: now + CONFIG_CACHE_MS }
+  configCache.set(key, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
   return resolved
+}
+
+/**
+ * Resolve a config para um pedido: sidecar publicado para o X-Request-Type
+ * quando existe e está ativo, senão a config ativa. Sidecar com JSON
+ * inválido ou disabled NUNCA propaga erro — degrada para a ativa com um
+ * warn nos logs (um sidecar mal publicado não pode partir o produto).
+ */
+export async function getConfigForRequest(
+  env: Env,
+  requestType: string | null,
+  now = Date.now(),
+): Promise<ResolvedActiveAIConfig> {
+  const sidecarKey = sidecarKeyForRequestType(requestType)
+  if (sidecarKey && env.ACTIVE_AI_CONFIG) {
+    const cached = configCache.get(sidecarKey)
+    if (cached && cached.expiresAt > now) return cached.value
+
+    const raw = await env.ACTIVE_AI_CONFIG.get(sidecarKey)
+    if (raw) {
+      try {
+        const config = parseActiveConfig(raw)
+        if (config.enabled) {
+          const resolved: ResolvedActiveAIConfig = { config, source: 'kv', key: sidecarKey }
+          configCache.set(sidecarKey, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
+          return resolved
+        }
+      } catch (error) {
+        console.warn(`[ai-pass-through] sidecar config ${sidecarKey} invalid, falling back to active:`, error)
+      }
+    }
+  }
+  return getActiveConfig(env, now)
 }
 
 export function buildUpstreamUrl(config: ActiveAIConfig): string {

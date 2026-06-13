@@ -12,7 +12,12 @@ export interface ActiveAIConfig {
   baseUrl: string
   chatCompletionsPath: string
   authHeader: string
-  authScheme: 'Bearer' | 'none'
+  /** 'Bearer'/'none': `apiKeyEnv` aponta para uma API key estática.
+   *  'google_oauth': `apiKeyEnv` aponta para o JSON COMPLETO de uma service
+   *  account Google (client_email + private_key) — o worker minta um access
+   *  token OAuth2 (scope cloud-platform) por pedido, com cache de ~55 min.
+   *  É o esquema exigido pela Vertex AI, que não aceita API keys estáticas. */
+  authScheme: 'Bearer' | 'none' | 'google_oauth'
   apiKeyEnv: string
   enabled: boolean
   /**
@@ -55,6 +60,14 @@ export interface Env {
   PLAN_BUDGETS_JSON?: string
   /** Multiplicador de cobrança do TM Speed (default 3). */
   TM_SPEED_BILLING_MULTIPLIER?: string
+  /** Timeout (ms) até aos HEADERS do upstream em pedidos STREAMING — default
+   *  120000. Só cobre o tempo até ao primeiro byte; o stream em si não tem
+   *  limite. */
+  UPSTREAM_HEADER_TIMEOUT_MS?: string
+  /** Timeout (ms) até aos HEADERS em pedidos NÃO-streaming — default 300000.
+   *  Mais folgado: sem stream, os headers só chegam quando a geração inteira
+   *  termina (ex.: compactação da IDE com transcript completo). */
+  UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS?: string
   [key: string]: unknown
 }
 

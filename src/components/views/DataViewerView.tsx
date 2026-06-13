@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiArrowLeft } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
@@ -53,9 +53,20 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
   // One-shot guard for the "opened" telemetry event — fires once per mount.
   const openedTrackedRef = useRef(false)
 
-  const project: ProjectContext | null = currentProject
-    ? { path: currentProject.path, id: currentProject.id, name: currentProject.name }
-    : null
+  // useMemo com deps primitivas, NÃO um literal por render: este objecto é
+  // dependência do useCallback de fetchTablesOnce, que é dependência do
+  // efeito das tabelas. Com identidade nova a cada render, o efeito corria
+  // após CADA render e os seus próprios setState (tablesLoading true→false)
+  // geravam o render seguinte — loop perpétuo de efeito↔render, mascarado
+  // pelo cache do service (sem rede, mas CPU e spinner a tremer). O efeito
+  // das rows já usava primitivas nas deps por este exacto motivo.
+  const project: ProjectContext | null = useMemo(
+    () =>
+      currentProject
+        ? { path: currentProject.path, id: currentProject.id, name: currentProject.name }
+        : null,
+    [currentProject?.path, currentProject?.id, currentProject?.name],
+  )
 
   useEffect(() => {
     if (openedTrackedRef.current) return
@@ -84,7 +95,15 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
         setHasProd(result.hasProdConfig)
         const fallback: DataSource =
           devDbExists ? 'dev' : result.hasProdConfig ? 'prod' : 'dev'
-        hydrate(project.id, fallback)
+        // A lista de fontes disponíveis acompanha o fallback: sem ela, uma
+        // preferência 'prod' persistida de uma sessão anterior hidratava
+        // mesmo com o .env já sem TMDB_* — e o viewer abria num erro
+        // "Database not provisioned" em vez de cair para dev.
+        const available: DataSource[] = [
+          ...(devDbExists ? (['dev'] as const) : []),
+          ...(result.hasProdConfig ? (['prod'] as const) : []),
+        ]
+        hydrate(project.id, fallback, available)
         setDetectReady(true)
       })
       .catch((err) => {

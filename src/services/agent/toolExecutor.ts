@@ -8,7 +8,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
-import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
+import FirebaseAuthService from '../auth/firebaseAuth'
 import { registerTaskTools } from './toolExecutor/taskOps'
 import { registerMemoryTools } from './toolExecutor/memoryOps'
 import { registerInteractionTools } from './toolExecutor/interactionOps'
@@ -32,7 +32,7 @@ import {
 } from './toolExecutor/checks'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
-import { resolveWorkerUrl } from '../../utils/devUrls'
+import { resolveWorkerUrl, resolveAIWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
@@ -129,6 +129,18 @@ interface InteractiveShellInfo {
 }
 
 const AGENT_SHELL_MAX_BUFFER_CHARS = 200_000
+
+// Tools whose execution can change git state. After any of these completes,
+// we nudge the shared git poller + Monaco gutters via 'git:refreshGutter'
+// (debounced on the listener side) — in an agent-first IDE the agent's own
+// edits are the dominant source of git changes, so this makes the Source
+// Control panel reactive instead of waiting for the background tick.
+// execute_command* are included because shell commands (git commit, mv, …)
+// mutate the worktree too.
+const GIT_MUTATING_TOOLS = new Set([
+  'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file',
+  'copy_file', 'create_directory', 'execute_command', 'execute_command_background',
+])
 
 // === Abort helpers ===
 
@@ -893,6 +905,14 @@ class ToolExecutor {
     if (memoryScope) execInput._memoryScope = memoryScope
 
     const result = await tool.execute(execInput)
+
+    // Reactive git refresh — see GIT_MUTATING_TOOLS. Fire-and-forget; blocked
+    // and permission-denied calls returned earlier, so this only fires for
+    // tools that actually ran.
+    if (GIT_MUTATING_TOOLS.has(toolName)) {
+      window.dispatchEvent(new CustomEvent('git:refreshGutter', { detail: '' }))
+    }
+
     // Diff results must never be truncated — the UI needs full JSON for InlineDiff,
     // and agentService needs it for approval and readFileTimestamps updates.
     try {
@@ -1076,8 +1096,22 @@ class ToolExecutor {
     }
     const nearCap = this.largeResults.size >= ToolExecutor.LARGE_RESULT_MAX_ENTRIES - 2
 
-    const previewSize = 2000
-    const preview = result.slice(0, previewSize)
+    const previewBudget = 2000
+    // Cut on a line boundary so the preview never ends mid-token / mid-JSON.
+    // A raw slice(0, 2000) produced syntactically-broken fragments (half a
+    // JSON object, a truncated identifier) that a model could try to parse as
+    // a complete result (context pollution audit, 2026-06-12). Honor the
+    // boundary only when it still keeps a substantial preview, so an early
+    // newline near the start doesn't collapse the preview to nothing. When the
+    // output is one giant line (e.g. minified JSON) there is no newline to cut
+    // on — fall back to the hard budget; the marker's guard still applies.
+    const lastNewline = result.lastIndexOf('\n', previewBudget)
+    // Include the newline in the preview (cut AFTER it) so the preview is
+    // whole lines and the continuation offset lands on the next line's first
+    // char — not on a leading '\n'.
+    const previewEnd = lastNewline >= previewBudget * 0.5 ? lastNewline + 1 : Math.min(previewBudget, result.length)
+    const preview = result.slice(0, previewEnd)
+    const omitted = result.length - previewEnd
     const totalSize = result.length > 1024
       ? `${(result.length / 1024).toFixed(1)}KB`
       : `${result.length} chars`
@@ -1085,17 +1119,20 @@ class ToolExecutor {
     // B1: was "byte ${previewSize}" — the unit is JS string code units,
     //     not bytes (matters for non-ASCII content like emoji / CJK).
     // B2: explicit offset-to-continue, so the model doesn't waste a call
-    //     re-reading the preview region from offset 0.
+    //     re-reading the preview region from offset 0. Uses previewEnd (the
+    //     ACTUAL chars shown after the line-boundary cut), not the nominal
+    //     budget — otherwise the chars between the cut and 2000 would be
+    //     silently skipped on continuation.
     // B3: terminology now matches the read_large_result suffix.
     // B4: cap-approaching nudge.
     const capNote = nearCap
       ? ` [warning: ${this.largeResults.size}/${ToolExecutor.LARGE_RESULT_MAX_ENTRIES} cached large results — oldest will be evicted as new ones arrive; save what you need now.]`
       : ''
-    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the first ${previewSize} characters are shown below. Continue from offset ${previewSize} unless you need a specific slice — call read_large_result("${refId}", offset: ${previewSize}). Do not reason about content past character ${previewSize} from this preview alone.${capNote}</system-reminder>
+    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the first ${previewEnd} characters are shown below, cut at a line boundary. Continue from offset ${previewEnd} unless you need a specific slice — call read_large_result("${refId}", offset: ${previewEnd}). Do not reason about content past character ${previewEnd} from this preview alone — the preview ends mid-output and the remainder may change the meaning.${capNote}</system-reminder>
 
-Preview (first ${previewSize} characters):
+Preview (first ${previewEnd} characters):
 ${preview}
-...
+<system-reminder>[end of partial view — ${omitted} more character${omitted === 1 ? '' : 's'} omitted; read_large_result("${refId}", offset: ${previewEnd}) for the rest]</system-reminder>
 `
   }
 
@@ -1651,16 +1688,21 @@ ${preview}
   private matchStateMutatingCommand(command: string): string | null { return matchStateMutatingCommand(command) }
 
   /**
-   * Sub-call to the worker proxy that delegates a web_search query to a
-   * DashScope model with native enable_search (Qwen 3.6 Plus on the backend).
+   * Sub-chamada ao DATA-plane que delega a query de web_search ao sidecar
+   * publicado no KV (`sidecar:web_search` — Qwen Plus com enable_search).
    *
-   * Invoked ONLY when the current model lacks native web_search
-   * (e.g. GLM-5.1). DeepSeek V3.2 and Qwen on DashScope have native search
-   * and never reach this code path — the provider resolves the tool_call
-   * server-side and streams the answer back directly.
+   * Invocada APENAS quando o modelo ativo não tem pesquisa nativa. Modelos
+   * DashScope com enable_search resolvem a tool server-side e nunca chegam
+   * aqui.
    *
-   * The request uses X-Request-Type: 'web_search' — the proxy forces the
-   * model + enable_search based on that header (see proxy.ts).
+   * Histórico (2026-06-12): esta função apontava para `/v1/messages` no
+   * CONTROL-plane em formato Anthropic — rota extinta com o proxy antigo,
+   * pelo que TODA a chamada devolvia 404 e a tool estava morta para os
+   * modelos sem pesquisa nativa. Agora: POST OpenAI-compatible no data-plane
+   * com X-Request-Type: 'web_search'; o worker roteia para o sidecar e a
+   * resposta diz quem serviu via X-TM-Config-Key. Sem sidecar publicado, o
+   * pedido cai no modelo ativo — que pode não ter pesquisa real; nesse caso
+   * devolvemos erro honesto em vez de resultados alucinados.
    */
   private async runWebSearchSubCall(query: string, maxResults: number, abortSignal?: AbortSignal): Promise<string> {
     if (abortSignal?.aborted) return 'web_search aborted by user.'
@@ -1668,29 +1710,27 @@ ${preview}
     if (!token) return 'web_search error: authentication required.'
 
     const body = {
-      system: `You are a web search assistant. Use the native web_search tool to answer the user's query with up-to-date information. Return a concise summary with sources (title + URL). Do not add commentary.`,
+      model: 'tm-active-model', // substituído pelo worker (sidecar ou ativo)
+      stream: false,
+      max_tokens: 4096,
       messages: [
+        {
+          role: 'system',
+          content: 'You are a web search assistant. Use your native web search capability to answer the user\'s query with up-to-date information. Return a concise summary with sources (title + URL). Do not add commentary.',
+        },
         { role: 'user', content: `Search the web for: ${query}\n\nReturn up to ${maxResults} results.` },
       ],
-      max_tokens: 4096,
     }
 
-    const url = `${resolveWorkerUrl()}/v1/messages`
+    const url = `${resolveAIWorkerUrl()}/v1/chat/completions`
     let response: Response
     try {
-      let appCheck: Record<string, string> = {}
-      try {
-        appCheck = await getAppCheckHeader()
-      } catch (err) {
-        console.warn('[toolExecutor] failed to get App Check header:', err)
-      }
       response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
           'X-Request-Type': 'web_search',
-          ...appCheck,
         },
         body: JSON.stringify(body),
         signal: abortSignal,
@@ -1705,41 +1745,16 @@ ${preview}
       return `web_search error: HTTP ${response.status}. ${detail.slice(0, 200)}`
     }
 
-    // The worker returns an OpenAI SSE stream. We only need the final text,
-    // so accumulate choices[].delta.content into a single string.
-    const reader = response.body?.getReader()
-    if (!reader) return 'web_search error: empty response body.'
-
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let answer = ''
-    try {
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const data = line.slice(6).trim()
-          if (!data || data === '[DONE]') continue
-          try {
-            const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }
-            const content = chunk.choices?.[0]?.delta?.content
-            if (content) {
-              answer += content
-            }
-          } catch { /* ignore malformed SSE frames */ }
-        }
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return 'web_search aborted by user.'
-      return `web_search error: stream read failure (${err instanceof Error ? err.message : String(err)}).`
-    } finally {
-      try { reader.releaseLock() } catch { /* noop */ }
+    // Sem sidecar publicado, o worker serviu com o modelo ATIVO — que não
+    // tem pesquisa real. Devolver os tokens dele seria entregar resultados
+    // alucinados como se fossem da web; erro honesto é estritamente melhor.
+    if (response.headers.get('x-tm-config-key') !== 'sidecar:web_search') {
+      return 'web_search error: no search sidecar is published and the active model has no native web search. Tell the user web search is currently unavailable.'
     }
 
+    const data = await response.json().catch(() => null) as
+      { choices?: Array<{ message?: { content?: string } }> } | null
+    const answer = data?.choices?.[0]?.message?.content ?? ''
     return answer.trim() || 'web_search returned no results.'
   }
 
@@ -2166,7 +2181,7 @@ ${preview}
           type: 'object',
           properties: {
             query: { type: 'string', description: 'Search pattern (text or regex)' },
-            directory: { type: 'string', description: 'Absolute path to search directory' },
+            directory: { type: 'string', description: 'Absolute path to a directory to search in, or a single file to search within' },
             caseSensitive: { type: 'boolean', description: 'Case sensitive search. Default: false' },
             useRegex: { type: 'boolean', description: 'Interpret query as regex. Default: false' },
             includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' }
@@ -2649,7 +2664,7 @@ ${preview}
         input_schema: {
           type: 'object',
           properties: {
-            pattern: { type: 'string', description: 'Glob pattern (e.g., "**/*.tsx", "src/**/*.test.ts", "**/package.json")' },
+            pattern: { type: 'string', description: 'Glob pattern (e.g., "**/*.tsx", "src/**/*.test.ts", "**/package.json"). "**" must be its own path segment ("**/name"); to match "contains", use "**/*name*"' },
             directory: { type: 'string', description: 'Absolute path to search from. Default: project root' }
           },
           required: ['pattern']

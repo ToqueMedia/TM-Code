@@ -1,8 +1,7 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { CMD_MODE_COMMANDS } from '../../services/agent/cmdModeCommands'
-import { slashCommandRegistry } from '../../services/agent/slashCommandRegistry'
+import { buildTipPool } from './terminalTips'
 import { tokens } from '@/theme/tokens'
 import { basename } from '@/utils/platform'
 import { useTranslation } from '@/i18n/useTranslation'
@@ -52,21 +51,7 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
   // navegação. Uma dica aleatória por montagem — abrir o Terminal Mode várias
   // vezes vai expondo o catálogo inteiro sem nunca despejar a lista completa.
   const tip = useMemo(() => {
-    const commandTips = [...CMD_MODE_COMMANDS, ...slashCommandRegistry.listCommands()]
-      .filter(c => c.enabled)
-      .map(c => `${c.name} — ${c.description}`)
-    const seen = new Set<string>()
-    const unique = commandTips.filter(tipText => {
-      const name = tipText.split(' ')[0]
-      return seen.has(name) ? false : (seen.add(name), true)
-    })
-    const staticTips = [
-      t('terminalMode.greeting.tipHelp'),
-      `↑ ↓ — ${t('terminalMode.greeting.navigateHistory')}`,
-      `@ — ${t('terminalMode.greeting.mentionFile')}`,
-      `! — ${t('terminalMode.greeting.runShell')}`,
-    ]
-    const pool = [...unique, ...staticTips]
+    const pool = buildTipPool(t)
     return pool[Math.floor(Math.random() * pool.length)]
   }, [t])
 

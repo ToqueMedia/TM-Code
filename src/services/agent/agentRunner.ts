@@ -14,6 +14,8 @@ import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
 import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText } from './promptValueHelpers'
+import { describeImagesViaSidecar } from './visionSidecar'
+import { MODEL_PROFILES, getProfileForPlan } from './modelProfiles'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from './atMentions'
 import type { Attachment, PromptBlock } from '../../types/chat'
 
@@ -171,6 +173,22 @@ async function runAgentInternal(
     logger.info('agent', `→ User message sent (${(userMessageText || prompt).length} chars)`)
   }
 
+  // Persist pasted images to the session's disk cache and stamp their paths
+  // onto the just-added user message, so the agent can re-view them after a
+  // reload without the user re-sending (the in-memory base64 is stripped on
+  // save). Fire-and-forget — the path stamp triggers its own debounced save.
+  if (userMessageAttachments?.some(a => a.type === 'image' && !a.path && a.base64)) {
+    const sid = chatStore.activeSessionId
+    if (sid) {
+      void import('../imageCacheService').then(async ({ storeSessionImages }) => {
+        const paths = await storeSessionImages(sid, userMessageAttachments)
+        if (Object.keys(paths).length > 0) {
+          useChatStore.getState().setAttachmentPathsOnLastUserMessage(paths)
+        }
+      }).catch(() => { /* cache miss → falls back to re-send behaviour */ })
+    }
+  }
+
   // Stop before starting an assistant turn when billing has already told us
   // service is blocked. This prevents reload + queued "continue" from
   // replaying into the API and creating a credit-error loop.
@@ -310,17 +328,58 @@ async function runAgentInternal(
     }
 
     // Multimodal path — only when there are actual images AND the plan supports it.
+    // Capability vs política: o PLANO decide se imagens são permitidas
+    // (billing); o PERFIL do modelo decide COMO chegam — image_url nativo
+    // para modelos com visão, descrição via sidecar:vision para os cegos.
+    let visionDescribed = false
     if (hasImageAttachments && supportsMultimodal) {
+      const modelName = useAgentStore.getState().modelName
+      const activeProfile = modelName && MODEL_PROFILES[modelName]
+        ? MODEL_PROFILES[modelName]
+        : getProfileForPlan(billingPlan)
+
       const parts = await buildContentParts(blocksForModel, promptResolvers)
-      if (parts) userContent = parts
+      if (parts && activeProfile.supportsAttachments) {
+        userContent = parts
+      } else if (parts) {
+        // Modelo ativo sem visão → o sidecar descreve; o agente principal
+        // recebe texto. Sidecar indisponível → null → fallback XML honesto.
+        const description = await describeImagesViaSidecar(parts)
+        if (description) {
+          const textOnly = await buildAugmentedPrompt(blocksForModel, promptResolvers)
+          userContent =
+            `${textOnly}\n\n<image_description source="vision-sidecar">\n${description}\n</image_description>`
+          visionDescribed = true
+        }
+      }
     }
 
     // Text fallback — handles file/folder attachments (resolveAttachmentXml)
     // AND image placeholders when multimodal isn't available or failed.
-    if (typeof userContent === 'string') {
+    if (typeof userContent === 'string' && !visionDescribed) {
       userContent = await buildAugmentedPrompt(blocksForModel, promptResolvers)
     }
     logger.info('agent', `✓ Content parts built (${Date.now() - attachStart}ms)`)
+
+    // Diagnóstico decisivo do caminho das imagens — quando um utilizador
+    // reporta "o modelo diz que não recebeu a imagem", esta linha diz a
+    // verdade num relance (report 2026-06-12, Gemini/Vertex).
+    if (hasImageAttachments) {
+      const sentAsParts = typeof userContent !== 'string'
+        && userContent.some(p => p.type === 'image_url')
+      if (sentAsParts) {
+        logger.info('agent', `✓ ${imageCount} image(s) embedded as image_url parts`)
+      } else if (visionDescribed) {
+        logger.info('agent', `✓ ${imageCount} image(s) described via vision sidecar (active model has no vision)`)
+      } else {
+        logger.warn(
+          'agent',
+          `⚠ image(s) DEGRADED to text placeholder — model will never see pixels. ` +
+          `plan=${billingPlan} supportsMultimodal=${supportsMultimodal} ` +
+          `(null parts = resolveImageDataUri failed or byte cap; or vision sidecar unavailable)`,
+        )
+      }
+    }
   }
 
   // ── @-mentions + external-modification sweep (claude-vaz parity) ──
@@ -336,7 +395,7 @@ async function runAgentInternal(
   try {
     const mentionResolution = mentionSource
       ? await resolveMentionContext(mentionSource)
-      : { contextText: '', imageParts: [] }
+      : { contextText: '', imageParts: [], resolvedPaths: [] }
     const changedContext = await collectChangedFileContext()
     if (mentionResolution.contextText || mentionResolution.imageParts.length > 0 || changedContext) {
       const applied = applyMentionResolution(
@@ -347,7 +406,7 @@ async function runAgentInternal(
       // addUserMessage=false) so rebuildConversationHistory re-emits the
       // context on follow-up turns instead of letting it evaporate.
       if (applied.persistedContext) {
-        useChatStore.getState().setMentionContextOnLastUserMessage(applied.persistedContext)
+        useChatStore.getState().setMentionContextOnLastUserMessage(applied.persistedContext, applied.resolvedPaths)
       }
     }
   } catch {

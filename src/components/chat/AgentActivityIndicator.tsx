@@ -3,6 +3,7 @@ import { Flex, Text, Box } from "@chakra-ui/react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentElapsed } from "../../hooks/useAgentElapsed";
+import { useCompactionProgress, formatCompactElapsed } from "../../hooks/useCompactionProgress";
 import { tokens } from "@/theme/tokens";
 import { t } from "@/i18n/useTranslation";
 
@@ -53,6 +54,9 @@ function AgentActivityIndicator() {
   const totalTokensUsed = useChatStore((s) => s.totalTokensUsed);
   // Session-mode elapsed: total wall time per request, freezes during permission waits.
   const { elapsedMs: elapsed } = useAgentElapsed("session");
+  // Compaction progress — synthetic time-eased estimate; active only while the
+  // agent is compressing context. Drives the polished progress bar below.
+  const compaction = useCompactionProgress();
   const sessionStartRef = useRef(0);
   const prevStreamingRef = useRef(false);
   const prevOutputTokensRef = useRef(0);
@@ -88,6 +92,95 @@ function AgentActivityIndicator() {
     }
     prevStreamingRef.current = isStreaming;
   }, [isStreaming]);
+
+  // Compaction takes over the indicator with a polished gradient progress bar.
+  // Placed before the !isStreaming guard so it also surfaces during a manual
+  // /compact (where the streaming flag may not be set).
+  if (compaction.active) {
+    const compactLabel = t("chat.compact.compacting").replace(/[.…]+\s*$/, "");
+    return (
+      <Flex
+        direction="column"
+        gap="7px"
+        py="10px"
+        px={3}
+        position="sticky"
+        bottom={0}
+        bg={tokens.colors.bg.app}
+        zIndex={1}
+        borderTop="1px solid rgba(255, 255, 255, 0.04)"
+      >
+        <Flex align="center" gap="8px">
+          <Box
+            w="6px"
+            h="6px"
+            borderRadius="full"
+            bg={tokens.colors.accent.purple}
+            flexShrink={0}
+            css={{
+              animation: "compactDot 1.5s ease-in-out infinite",
+              "@keyframes compactDot": {
+                "0%, 100%": { opacity: 1 },
+                "50%": { opacity: 0.3 },
+              },
+            }}
+          />
+          <Text
+            fontSize="12.5px"
+            color={tokens.colors.text.secondary}
+            fontWeight={500}
+            flex="1"
+            minW={0}
+            whiteSpace="nowrap"
+            overflow="hidden"
+            textOverflow="ellipsis"
+          >
+            {compactLabel}…
+          </Text>
+          <Text
+            fontSize="11.5px"
+            color={tokens.colors.text.disabled}
+            fontFamily={tokens.fontFamily.mono}
+            whiteSpace="nowrap"
+          >
+            {formatCompactElapsed(compaction.elapsedMs)}
+          </Text>
+        </Flex>
+        <Flex align="center" gap="10px">
+          <Box
+            flex="1"
+            h="5px"
+            borderRadius="full"
+            bg="rgba(255, 255, 255, 0.07)"
+            overflow="hidden"
+            position="relative"
+          >
+            <Box
+              position="absolute"
+              left={0}
+              top={0}
+              bottom={0}
+              borderRadius="full"
+              width={`${compaction.percent}%`}
+              bg={`linear-gradient(90deg, ${tokens.colors.accent.purple} 0%, ${tokens.colors.accent.primary} 100%)`}
+              boxShadow={`0 0 8px ${tokens.colors.accent.primaryGlow}`}
+              transition="width 0.25s ease-out"
+            />
+          </Box>
+          <Text
+            fontSize="11px"
+            color={tokens.colors.text.muted}
+            fontFamily={tokens.fontFamily.mono}
+            minW="34px"
+            textAlign="right"
+            css={{ fontVariantNumeric: "tabular-nums" }}
+          >
+            {compaction.percent}%
+          </Text>
+        </Flex>
+      </Flex>
+    );
+  }
 
   if (!isStreaming) return null;
 

@@ -1,6 +1,5 @@
 import { memo } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
-import { FiX, FiFile, FiFolder, FiImage, FiAlertTriangle, FiArrowUpRight } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import type { Attachment } from '../../types/chat'
@@ -11,10 +10,11 @@ interface CmdAttachmentBarProps {
   showImageWarning: boolean
 }
 
-const typeIcons = {
-  file: FiFile,
-  folder: FiFolder,
-  image: FiImage,
+// Single-color text glyph per attachment type (no multicolor SVG pictograms).
+const typeGlyphs: Record<Attachment['type'], string> = {
+  file: '▪',
+  folder: '▸',
+  image: '▪',
 }
 
 function formatSize(bytes?: number): string {
@@ -25,18 +25,15 @@ function formatSize(bytes?: number): string {
 }
 
 function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttachmentBarProps) {
-  if (attachments.length === 0) return null
-
-  // Terminal mode never renders image pixels — images show as the claude-vaz
-  // `[Image #N]` text chip. O número vem do pasteMarker (o MESMO que foi
-  // inserido como texto no input — têm de coincidir); fallback posicional
-  // para anexos antigos sem marker.
-  const imageNumbers = new Map<string, number>()
-  for (const att of attachments) {
-    if (att.type === 'image') {
-      imageNumbers.set(att.id, att.pasteMarker ?? imageNumbers.size + 1)
-    }
-  }
+  // Imagens NÃO renderizam chip no terminal: o token `[Image #N]` no input É
+  // a representação visível, e apagá-lo remove a imagem do envio (prune por
+  // pasteMarker em useCmdPromptLogic ~l.680). O chip duplicava a informação
+  // e pesava a UI (pedido do user 2026-06-12) — a imagem segue na mensagem
+  // na mesma, só não aparece. Ficheiros/pastas mantêm chip porque não têm
+  // token no texto (o X do chip é a única forma de os remover).
+  const visibleAttachments = attachments.filter(att => att.type !== 'image')
+  const hasImages = attachments.length > visibleAttachments.length
+  if (visibleAttachments.length === 0 && !(showImageWarning && hasImages)) return null
 
   return (
     <Box
@@ -45,155 +42,104 @@ function CmdAttachmentBar({ attachments, onRemove, showImageWarning }: CmdAttach
       pb={1}
       borderTop="1px solid rgba(255, 255, 255, 0.04)"
     >
-      {/* Billing warning with upgrade CTA */}
+      {/* Billing warning — flat warning LINE in terminal yellow (no rounded
+          card / orange tint). Upgrade CTA demoted to a bracketed text control. */}
       {showImageWarning && (
         <Flex
-          align="center"
+          align="baseline"
           gap={2}
-          px={2.5}
-          py={1.5}
           mb={2}
-          bg="rgba(247, 127, 0, 0.06)"
-          border="1px solid rgba(247, 127, 0, 0.15)"
-          borderRadius="6px"
+          fontFamily={tokens.fontFamily.mono}
         >
-          <Box color={tokens.colors.accent.orange} flexShrink={0} display="flex" alignItems="center">
-            <FiAlertTriangle size={12} />
-          </Box>
           <Text
             fontSize="11px"
-            color={tokens.colors.accent.orange}
-            fontFamily={tokens.fontFamily.mono}
+            color={tokens.colors.terminal.yellow}
             flex="1"
             lineHeight="1.4"
           >
-            {t('terminalMode.imageNotSupported')}
+            {'! '}{t('terminalMode.imageNotSupported')}
           </Text>
-          <Flex
+          <Text
             as="button"
-            align="center"
-            gap={1}
-            px={2}
-            py="2px"
-            borderRadius="4px"
-            bg="rgba(254, 16, 99, 0.1)"
-            border="1px solid rgba(254, 16, 99, 0.25)"
+            fontSize="11px"
+            color={tokens.colors.accent.purple}
+            fontWeight="600"
+            flexShrink={0}
             cursor="pointer"
-            transition="all 0.15s"
-            _hover={{
-              bg: 'rgba(254, 16, 99, 0.18)',
-              borderColor: 'rgba(254, 16, 99, 0.4)',
-            }}
+            userSelect="none"
             onClick={() => {
               // Open billing/upgrade page
               import('@tauri-apps/plugin-opener').then(({ openUrl }) => {
                 openUrl('https://toquemedia.com/pricing')
               }).catch(() => {})
             }}
-            flexShrink={0}
           >
-            <Text
-              fontSize="10px"
-              fontFamily={tokens.fontFamily.mono}
-              color={tokens.colors.accent.primary}
-              fontWeight="600"
-              letterSpacing="0.02em"
-            >
-              {t('terminalMode.upgradeToPro')}
-            </Text>
-            <FiArrowUpRight size={10} color={tokens.colors.accent.primary} />
-          </Flex>
+            [{t('terminalMode.upgradeToPro')} ↗]
+          </Text>
         </Flex>
       )}
 
-      {/* Attachment chips */}
-      <Flex gap={2} flexWrap="wrap">
-        {attachments.map(att => {
-          const Icon = typeIcons[att.type]
-          const isImage = att.type === 'image'
-          const imageLabel = `[Image #${imageNumbers.get(att.id) ?? 0}]`
+      {/* Attachments as inline mono text tokens — só ficheiros/pastas; imagens
+          vivem como token no input. One dense line per attachment: leading
+          single-color glyph, name (+ size), and an always-visible bracketed
+          [x] remove affordance (the X is plain text, no hover-reveal). */}
+      <Box>
+        {visibleAttachments.map(att => {
+          const glyph = typeGlyphs[att.type]
           const sizeStr = formatSize(att.sizeBytes)
 
           return (
             <Flex
               key={att.id}
-              align="center"
-              gap={2}
-              pl={2}
-              pr={1.5}
-              py="3px"
-              bg="rgba(255, 255, 255, 0.04)"
-              border="1px solid rgba(255, 255, 255, 0.06)"
-              borderRadius="6px"
-              maxW="240px"
-              overflow="hidden"
-              transition="all 0.15s"
-              _hover={{
-                bg: 'rgba(255, 255, 255, 0.06)',
-                borderColor: 'rgba(255, 255, 255, 0.1)',
-              }}
-              position="relative"
-              role="group"
+              align="baseline"
+              gap={1.5}
+              fontFamily={tokens.fontFamily.mono}
+              lineHeight="1.6"
+              maxW="100%"
             >
-              {/* Icon */}
-              <Box flexShrink={0} display="flex" alignItems="center">
-                <Icon size={13} color={tokens.colors.text.muted} />
-              </Box>
+              {/* Type glyph */}
+              <Text fontSize="11px" color={tokens.colors.text.muted} flexShrink={0} userSelect="none">
+                {glyph}
+              </Text>
 
-              {/* Label: images use the [Image #N] chip text, others name + size */}
-              <Flex direction="column" minW={0} flex="1">
-                <Text
-                  fontSize="11px"
-                  fontFamily={tokens.fontFamily.mono}
-                  color={tokens.colors.text.secondary}
-                  truncate
-                  lineHeight="1.3"
-                >
-                  {isImage ? imageLabel : att.name}
+              {/* Name */}
+              <Text
+                fontSize="11px"
+                color={tokens.colors.text.secondary}
+                truncate
+                minW={0}
+              >
+                {att.name}
+              </Text>
+
+              {/* Size (optional) */}
+              {sizeStr && (
+                <Text fontSize="11px" color={tokens.colors.text.disabled} flexShrink={0}>
+                  {sizeStr}
                 </Text>
-                {sizeStr && (
-                  <Text
-                    fontSize="9px"
-                    fontFamily={tokens.fontFamily.mono}
-                    color={tokens.colors.text.disabled}
-                    lineHeight="1.3"
-                  >
-                    {isImage ? `${att.name}${sizeStr ? ` · ${sizeStr}` : ''}` : sizeStr}
-                  </Text>
-                )}
-              </Flex>
+              )}
 
-              {/* Remove button */}
-              <Box
+              {/* Always-visible bracketed remove affordance */}
+              <Text
                 as="button"
-                flexShrink={0}
-                display="flex"
-                alignItems="center"
-                justifyContent="center"
-                w="18px"
-                h="18px"
-                borderRadius="4px"
-                cursor="pointer"
+                fontSize="11px"
                 color={tokens.colors.text.disabled}
-                transition="all 0.1s"
-                opacity={0}
-                _groupHover={{ opacity: 1 }}
-                _hover={{
-                  color: tokens.colors.text.primary,
-                  bg: 'rgba(255, 255, 255, 0.08)',
-                }}
+                flexShrink={0}
+                cursor="pointer"
+                userSelect="none"
+                _hover={{ color: tokens.colors.text.primary }}
                 onClick={(e: React.MouseEvent) => {
                   e.stopPropagation()
                   onRemove(att.id)
                 }}
                 aria-label={t('terminalMode.removeAttachment')}
               >
-                <FiX size={11} />
-              </Box>
+                [x]
+              </Text>
             </Flex>
           )
         })}
-      </Flex>
+      </Box>
     </Box>
   )
 }

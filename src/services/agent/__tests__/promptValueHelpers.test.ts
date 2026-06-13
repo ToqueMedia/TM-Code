@@ -385,6 +385,34 @@ describe('contentAsText', () => {
     ]
     expect(contentAsText(parts)).toBe('before\n[image]\nafter')
   })
+
+  // Compaction feeds contentAsText output to the summarizer (query.ts /
+  // agentService manual paths). These narrations are what stops the summarizer
+  // from being blind to the actual work (context pollution audit, 2026-06-12).
+  it('narrates tool_call blocks as [tool: name(args)]', () => {
+    const parts = [
+      { type: 'text', text: 'let me read it' },
+      { type: 'tool_call', id: 't1', name: 'read_file', arguments: '{"file_path":"a.ts"}' },
+    ] as unknown as ContentPart[]
+    expect(contentAsText(parts)).toBe('let me read it\n[tool: read_file({"file_path":"a.ts"})]')
+  })
+
+  it('inlines tool_result content (the file read / command output the summarizer needs)', () => {
+    const parts = [
+      { type: 'tool_result', toolCallId: 't1', content: 'line1\nline2' },
+    ] as unknown as ContentPart[]
+    expect(contentAsText(parts)).toBe('line1\nline2')
+  })
+
+  it('narrates a full assistant turn: thinking + text + tool_call + result in order', () => {
+    const parts = [
+      { type: 'thinking', thinking: 'reasoning' },
+      { type: 'text', text: 'editing now' },
+      { type: 'tool_call', id: 't1', name: 'edit_file', arguments: '{}' },
+      { type: 'tool_result', toolCallId: 't1', content: 'File updated: a.ts' },
+    ] as unknown as ContentPart[]
+    expect(contentAsText(parts)).toBe('reasoning\nediting now\n[tool: edit_file({})]\nFile updated: a.ts')
+  })
 })
 
 describe('downgradeHistoryToText', () => {

@@ -1,11 +1,11 @@
-import { getActiveConfig, buildUpstreamUrl } from './activeConfig'
+import { getConfigForRequest, buildUpstreamUrl } from './activeConfig'
 import { authenticateUser } from './auth'
 import {
   checkCostBudget,
   commitTokenConsumption,
   getUserBudgetState,
   resolveEnforcementMode,
-  resolvePlanBudgets,
+  resolvePlanBudgetFor,
   resolveSpeedMultiplier,
   type CostBudgetCheck,
   type UserBudgetState,
@@ -27,10 +27,39 @@ function notFound(): Response {
   return jsonError(404, 'tm_not_found', 'Not found.')
 }
 
+// Timeout até aos HEADERS do upstream — o stream em si não tem limite (gerações
+// longas são normais; modelos de reasoning demoram dezenas de segundos até ao
+// primeiro byte, daí a folga). Sem isto, um provider que aceita a ligação e
+// nunca responde deixava o pedido pendurado até o runtime o matar com "code
+// had hung and would never generate a response" (visto em produção,
+// 2026-06-11) — e a IDE via um chat morto sem erro. Knobs por env para ajustar
+// sem deploy de código.
+//
+// DOIS limites, escolhidos pelo `stream` do corpo: num pedido streaming os
+// headers chegam com o primeiro chunk, por isso headers tardios ≈ hang real.
+// Num pedido NÃO-streaming os headers só chegam quando a geração INTEIRA
+// termina — a compactação da IDE (contextManager: transcript completo,
+// stream:false, max_tokens 16k) excede 120s legitimamente em modelos com
+// thinking, e o limite curto convertia-a num 504 falso-positivo (visto em
+// produção 2026-06-12, Vertex Gemini saudável a 2-5s em pedidos normais).
+const DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS = 120_000
+const DEFAULT_UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS = 300_000
+
+export function resolveUpstreamHeaderTimeout(env: Env, streamRequested: boolean): number {
+  const envKey = streamRequested ? 'UPSTREAM_HEADER_TIMEOUT_MS' : 'UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS'
+  const fallback = streamRequested
+    ? DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS
+    : DEFAULT_UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS
+  const raw = typeof env[envKey] === 'string' ? Number(env[envKey]) : NaN
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback
+}
+
 interface PreparedBody {
   body: string
   /** Tamanho do corpo final em chars — input do fallback de estimativa. */
   chars: number
+  /** `stream: true` no corpo — seleciona o timeout de headers adequado. */
+  streamRequested: boolean
 }
 
 async function bodyWithActiveModel(
@@ -67,7 +96,7 @@ async function bodyWithActiveModel(
   const withUsage = injectStreamOptions(merged)
 
   const body = JSON.stringify(withUsage)
-  return { body, chars: body.length }
+  return { body, chars: body.length, streamRequested: merged.stream === true }
 }
 
 async function handleChatCompletions(
@@ -80,7 +109,12 @@ async function handleChatCompletions(
   const requestId = createRequestId(request)
   const startedAt = Date.now()
   const user = await authenticateUser(request, env)
-  const active = await getActiveConfig(env)
+  // Sidecars (X-Request-Type → KV `sidecar:*`): web_search, vision, fim e a
+  // família memory-*/summarize correm em modelos baratos/especializados
+  // publicados pelo admin; sem sidecar publicado, segue a config ativa.
+  // O header NUNCA segue upstream (filtro em headers.ts) e a resposta leva
+  // X-TM-Config-Key para o cliente saber quem serviu.
+  const active = await getConfigForRequest(env, request.headers.get('x-request-type'))
   const config = active.config
   const fetcher = options.fetcher ?? globalThis
   const waitUntil = options.ctx?.waitUntil?.bind(options.ctx) ?? ((p: Promise<unknown>) => { void p })
@@ -93,12 +127,17 @@ async function handleChatCompletions(
   // enforce.
   const idToken = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim()
   const enforcement = resolveEnforcementMode(env)
-  const budgets = resolvePlanBudgets(env)
   let budgetState: UserBudgetState | null = null
   let budgetCheck: CostBudgetCheck | null = null
   if (enforcement !== 'off') {
     budgetState = await getUserBudgetState(env, user.userId, idToken, fetcher)
-    budgetCheck = budgetState ? checkCostBudget(budgetState, budgets) : null
+    if (budgetState) {
+      // Budget do plano vem do subscription_plans do admin (cache 5 min em
+      // billing.ts); hardcoded/PLAN_BUDGETS_JSON só como fallback — senão o
+      // gate 402 e o consumedPct dos headers divergem da web/control-plane.
+      const planBudget = await resolvePlanBudgetFor(env, budgetState.plan, idToken, fetcher)
+      budgetCheck = checkCostBudget(budgetState, { [budgetState.plan]: planBudget })
+    }
     if (enforcement === 'enforce' && budgetCheck && !budgetCheck.allowed) {
       return jsonError(
         402,
@@ -132,7 +171,23 @@ async function handleChatCompletions(
 
   const upstreamUrl = buildUpstreamUrl(config)
   const prepared = await bodyWithActiveModel(request, model, config.extraBody)
-  const { headers: upstreamHeaders, providerKey } = buildUpstreamHeaders(request, config, env)
+  const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
+
+  // O signal do upstream é um controller próprio em vez de request.signal
+  // direto: o abort do cliente continua a propagar (listener abaixo, durante
+  // TODO o ciclo de vida do fetch, corpo incluído), mas ganhamos um segundo
+  // gatilho — o timeout de headers — sem nunca cortar um stream já em curso
+  // (o timer é limpo assim que os headers chegam).
+  const upstreamAbort = new AbortController()
+  const propagateClientAbort = (): void => upstreamAbort.abort()
+  if (request.signal.aborted) propagateClientAbort()
+  else request.signal.addEventListener('abort', propagateClientAbort, { once: true })
+
+  let upstreamHeadersTimedOut = false
+  const headerTimer = setTimeout(() => {
+    upstreamHeadersTimedOut = true
+    upstreamAbort.abort()
+  }, resolveUpstreamHeaderTimeout(env, prepared.streamRequested))
 
   let upstream: Response
   try {
@@ -140,10 +195,16 @@ async function handleChatCompletions(
       method: request.method,
       headers: upstreamHeaders,
       body: prepared.body,
-      signal: request.signal,
+      signal: upstreamAbort.signal,
     })
   } catch {
+    if (upstreamHeadersTimedOut) {
+      console.error(`[ai-pass-through] upstream header timeout user=${user.userId} url=${upstreamUrl}`)
+      return jsonError(504, 'tm_upstream_timeout', 'Active AI provider did not respond in time.')
+    }
     return jsonError(502, 'tm_upstream_transport_error', 'Unable to reach active AI provider.')
+  } finally {
+    clearTimeout(headerTimer)
   }
 
   const durationMs = Date.now() - startedAt

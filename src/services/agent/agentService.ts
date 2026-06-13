@@ -35,6 +35,7 @@ import type { ContentPart } from "../../types/chat";
 
 import type OpenAI from "openai";
 import { createAgentClient, createSubAgentClient } from "./sdkClient";
+import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 
@@ -469,6 +470,19 @@ class AgentService {
             const { collectChangedFileContext } = await import("./atMentions");
             return collectChangedFileContext();
           },
+      // Live active-model limits for auto-compact. modelContextWindow is the
+      // real window learned from the response headers (X-Model-Context-Window);
+      // MODEL_PROFILES is the fallback and the source of maxOutputTokens. Read
+      // fresh each iteration because the active model is injected server-side
+      // and only known after the first response.
+      getContextLimits: () => {
+        const { modelContextWindow, modelName } = useAgentStore.getState();
+        const profile = modelName ? MODEL_PROFILES[modelName] : undefined;
+        return {
+          contextWindow: modelContextWindow ?? profile?.contextWindow ?? null,
+          maxOutputTokens: profile?.maxOutputTokens ?? null,
+        };
+      },
       // Usage is reported via message_stop events — do NOT add onUsage
       // callback here or output tokens will be double-counted (SUM semantics).
     });
@@ -1062,6 +1076,13 @@ class AgentService {
         content: `Compactação parcial: ${oldMessages.length} mensagens resumidas, ${recentMessages.length} preservadas.`,
         timestamp: Date.now(),
       };
+      // Narrate structured content (tool_call/tool_result blocks) into
+      // readable text instead of JSON.stringify-ing it. The stringified form
+      // re-entered the next turn as literal `[{"type":"tool_call",...}]`
+      // prose — pseudo-structure the model read as data, with tool_calls and
+      // results no longer paired (context pollution audit, 2026-06-12).
+      // contentAsText renders `[tool: name(args)]` + result text, the same
+      // narration the mechanical compact fallback uses.
       const recentChatMessages: import("@/types/chat").ChatMessage[] =
         recentMessages.map((m) => ({
           id: generateId("msg"),
@@ -1069,7 +1090,7 @@ class AgentService {
           content:
             typeof m.content === "string"
               ? m.content
-              : JSON.stringify(m.content),
+              : contentAsText(m.content),
           timestamp: Date.now(),
         }));
       chatStore.replaceMessages([
@@ -1111,7 +1132,11 @@ class AgentService {
     const { getCompactPrompt } = await import("./compact/prompt");
     const systemPrompt = getCompactPrompt();
 
-    // Filter to text-only content for the compact call
+    // Narrate the full content (tool calls + bounded tool results) for the
+    // compact call — NOT text-only. Stripping tool blocks before
+    // summarization made the summarizer blind to every file edit, command
+    // output and error it was then asked to preserve (context pollution
+    // audit, 2026-06-12).
     const compactMessages = messages
       .filter((m) => m.role === "user" || m.role === "assistant")
       .map((m) => ({
@@ -1119,18 +1144,9 @@ class AgentService {
         content:
           typeof m.content === "string"
             ? m.content
-            : (m.content as ContentBlockAPI[])
-                .filter((b) => b.type === "text")
-                .map((b) => ({
-                  type: "text" as const,
-                  text: (b as { type: "text"; text: string }).text,
-                })),
+            : contentAsText(m.content as ContentBlockAPI[]),
       }))
-      .filter((m) =>
-        typeof m.content === "string"
-          ? m.content.length > 0
-          : (m.content as any[]).length > 0,
-      );
+      .filter((m) => m.content.length > 0);
 
     try {
       const extraHeaders: Record<string, string> | undefined =
@@ -1189,6 +1205,8 @@ class AgentService {
     const model = this.resolveModel();
     const { getCompactPrompt } = await import("./compact/prompt");
 
+    // Narrate full content (tool calls + bounded tool results) — see the
+    // matching comment in runCompactViaSDK; text-only blinded the summarizer.
     const compactMessages = messages
       .filter((m) => m.role === "user" || m.role === "assistant")
       .map((m) => ({
@@ -1196,18 +1214,9 @@ class AgentService {
         content:
           typeof m.content === "string"
             ? m.content
-            : (m.content as ContentBlockAPI[])
-                .filter((b) => b.type === "text")
-                .map((b) => ({
-                  type: "text" as const,
-                  text: (b as { type: "text"; text: string }).text,
-                })),
+            : contentAsText(m.content as ContentBlockAPI[]),
       }))
-      .filter((m) =>
-        typeof m.content === "string"
-          ? m.content.length > 0
-          : (m.content as any[]).length > 0,
-      );
+      .filter((m) => m.content.length > 0);
 
     const extraHeaders: Record<string, string> | undefined =
       this.requestType ? { "X-Request-Type": this.requestType } : undefined;

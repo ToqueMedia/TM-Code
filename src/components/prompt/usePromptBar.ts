@@ -734,7 +734,7 @@ export function usePromptBar() {
         // skipUserMessage the bubble was added by the caller — still the
         // last user message in this serialized send flow.
         if (applied.persistedContext) {
-          chatStore.setMentionContextOnLastUserMessage(applied.persistedContext)
+          chatStore.setMentionContextOnLastUserMessage(applied.persistedContext, applied.resolvedPaths)
         }
       }
     } catch {

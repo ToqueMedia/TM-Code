@@ -137,9 +137,18 @@ export interface MentionResolution {
   contextText: string
   /** Image mentions — appended as image_url parts on multimodal plans. */
   imageParts: MentionImagePart[]
+  /**
+   * Absolute paths of files whose CONTENT was frozen into contextText (the
+   * read_file snapshots). rebuildConversationHistory uses these to detect when
+   * a later tool call superseded the snapshot, so the stale body is replaced
+   * with a pointer instead of contradicting the fresh tool result (context
+   * pollution audit, 2026-06-12). Directory listings / images are excluded —
+   * only file-content snapshots carry the contradiction risk.
+   */
+  resolvedPaths: string[]
 }
 
-const EMPTY_RESOLUTION: MentionResolution = { contextText: '', imageParts: [] }
+const EMPTY_RESOLUTION: MentionResolution = { contextText: '', imageParts: [], resolvedPaths: [] }
 
 type ResolvedBlock =
   | { kind: 'text'; text: string }
@@ -163,17 +172,26 @@ function getExtension(p: string): string {
   return dot === -1 ? '' : name.slice(dot + 1).toLowerCase()
 }
 
-async function resolveOneMention(token: string, executor: ToolExecutor): Promise<ResolvedBlock[]> {
+/** Blocks for one mention, plus the path whose file CONTENT they froze (if any). */
+interface OneMention {
+  blocks: ResolvedBlock[]
+  /** Set only when a read_file body was rendered — the snapshot that can go stale. */
+  contentPath?: string
+}
+
+const NO_MENTION: OneMention = { blocks: [] }
+
+async function resolveOneMention(token: string, executor: ToolExecutor): Promise<OneMention> {
   try {
     const { filename, lineStart, lineEnd } = parseAtMentionedFileLines(token)
     // TM Code's autocomplete inserts a trailing '/' on directory mentions;
     // strip it (claude-vaz's regex already drops it via the \b boundary).
     const cleaned = filename.replace(/[\\/]+$/, '')
-    if (!cleaned) return []
+    if (!cleaned) return NO_MENTION
 
     const absolutePath = executor.resolveMentionPath(cleaned)
     // Out-of-scope → silent drop, same outcome as claude-vaz's deny rules.
-    if (!executor.isMentionPathAllowed(absolutePath)) return []
+    if (!executor.isMentionPathAllowed(absolutePath)) return NO_MENTION
 
     const ext = getExtension(absolutePath)
     if (IMAGE_EXTENSIONS.has(ext)) {
@@ -184,17 +202,17 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
       const dataUri = await resolveImageToDataUri({
         id: '', type: 'image', name: absolutePath.split('/').pop() || absolutePath, path: absolutePath,
       })
-      if (!dataUri) return []
-      return [{
+      if (!dataUri) return NO_MENTION
+      return { blocks: [{
         kind: 'image',
         part: {
           reminder: wrapInSystemReminder(`Called the read_file tool with the following input: ${JSON.stringify({ file_path: absolutePath })}`),
           dataUri,
           displayPath: absolutePath,
         },
-      }]
+      }] }
     }
-    if (BINARY_EXTENSIONS.has(ext)) return []
+    if (BINARY_EXTENSIONS.has(ext)) return NO_MENTION
 
     // Trailing slash is authoritative in TM Code's autocomplete; otherwise
     // stat decides (claude-vaz does the same stat probe).
@@ -216,12 +234,13 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
       // synthetic transcript is self-consistent.
       const input = { file_path: absolutePath, maxDepth: 1 }
       const listing = await executor.executeForMention('list_directory', input)
-      return renderToolPair('list_directory', input, listing)
+      // Directory listing — not a file-content snapshot, so no contentPath.
+      return { blocks: renderToolPair('list_directory', input, listing) }
     }
 
     // Fresh full view already in context → render nothing
     // (claude-vaz `already_read_file` normalizes to []).
-    if (lineStart === undefined && executor.isFileFreshInContext(absolutePath)) return []
+    if (lineStart === undefined && executor.isFileFreshInContext(absolutePath)) return NO_MENTION
 
     const input: Record<string, unknown> = { file_path: absolutePath }
     if (lineStart !== undefined) {
@@ -230,9 +249,9 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
     }
 
     const result = await executor.executeForMention('read_file', input)
-    if (result === FILE_UNCHANGED_STUB) return []
-    if (result.startsWith('File not found:')) return []
-    if (result.startsWith('Blocked:')) return []
+    if (result === FILE_UNCHANGED_STUB) return NO_MENTION
+    if (result.startsWith('File not found:')) return NO_MENTION
+    if (result.startsWith('Blocked:')) return NO_MENTION
 
     if (/^Error: File is .+ exceeds the 256 KB read cap/.test(result)) {
       // Oversize → truncated read of the first MAX_LINES_TO_READ lines plus
@@ -240,19 +259,22 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
       // appended by normalizeAttachmentForAPI for truncated attachments.
       const truncatedInput = { file_path: absolutePath, offset: 1, limit: MAX_LINES_TO_READ }
       const truncated = await executor.executeForMention('read_file', truncatedInput)
-      if (truncated.startsWith('Error:') || truncated.startsWith('File not found:')) return []
-      return [
-        ...renderToolPair('read_file', truncatedInput, truncated),
-        { kind: 'text', text: wrapInSystemReminder(`Note: The file ${absolutePath} was too large and has been truncated to the first ${MAX_LINES_TO_READ} lines. Don't tell the user about this truncation. Use read_file to read more of the file if you need.`) },
-      ]
+      if (truncated.startsWith('Error:') || truncated.startsWith('File not found:')) return NO_MENTION
+      return {
+        blocks: [
+          ...renderToolPair('read_file', truncatedInput, truncated),
+          { kind: 'text', text: wrapInSystemReminder(`Note: The file ${absolutePath} was too large and has been truncated to the first ${MAX_LINES_TO_READ} lines. Don't tell the user about this truncation. Use read_file to read more of the file if you need.`) },
+        ],
+        contentPath: absolutePath,
+      }
     }
-    if (result.startsWith('Error:')) return []
+    if (result.startsWith('Error:')) return NO_MENTION
 
-    return renderToolPair('read_file', input, result)
+    return { blocks: renderToolPair('read_file', input, result), contentPath: absolutePath }
   } catch {
     // Any failure (path scope, .env block, IPC error) drops the mention
     // silently — claude-vaz logs the error event and returns null.
-    return []
+    return NO_MENTION
   }
 }
 
@@ -278,13 +300,15 @@ export async function resolveMentionContext(input: string): Promise<MentionResol
 
   const textBlocks: string[] = []
   const imageParts: MentionImagePart[] = []
-  for (const blocks of resolved) {
+  const resolvedPaths: string[] = []
+  for (const { blocks, contentPath } of resolved) {
     for (const block of blocks) {
       if (block.kind === 'text') textBlocks.push(block.text)
       else imageParts.push(block.part)
     }
+    if (contentPath) resolvedPaths.push(contentPath)
   }
-  return { contextText: textBlocks.join('\n'), imageParts }
+  return { contextText: textBlocks.join('\n'), imageParts, resolvedPaths }
 }
 
 // ── External-modification sweep ───────────────────────────────────────────
@@ -320,6 +344,9 @@ export interface AppliedMentionResolution {
    *  would evaporate after the first turn. Image parts are NOT persisted
    *  (same lifetime as pasted images: in-session only). */
   persistedContext: string
+  /** Paths of file-content snapshots inside persistedContext — persisted as
+   *  `mentionedPaths` so rebuild can void a snapshot a later tool superseded. */
+  resolvedPaths: string[]
 }
 
 /**
@@ -367,5 +394,5 @@ export function applyMentionResolution(
     }
   }
 
-  return { userContent: content, persistedContext: suffix }
+  return { userContent: content, persistedContext: suffix, resolvedPaths: resolution.resolvedPaths }
 }

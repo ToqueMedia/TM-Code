@@ -145,6 +145,13 @@ export function clearBudgetStateCache(): void {
 
 const DEFAULT_FIRESTORE_BASE = 'https://firestore.googleapis.com'
 
+// Um stall do Firestore não pode pendurar o pedido (a leitura corre no
+// pré-voo, antes da resposta) nem o waitUntil do commit — timeouts curtos;
+// os throws caem nos try/catch existentes e degradam como qualquer outra
+// falha de billing. O commit tem mais folga porque já não bloqueia ninguém.
+const FIRESTORE_READ_TIMEOUT_MS = 10_000
+const FIRESTORE_COMMIT_TIMEOUT_MS = 15_000
+
 function firestoreBase(env: Env): string {
   return typeof env.FIRESTORE_REST_BASE === 'string' && env.FIRESTORE_REST_BASE
     ? env.FIRESTORE_REST_BASE.replace(/\/+$/, '')
@@ -190,7 +197,11 @@ export async function getUserBudgetState(
   let state: UserBudgetState | null = null
   try {
     const headers = await resolveFirestoreAuthHeaders(env, idToken, fetcher)
-    const response = await fetcher.fetch(url, { method: 'GET', headers })
+    const response = await fetcher.fetch(url, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(FIRESTORE_READ_TIMEOUT_MS),
+    })
     if (response.ok) {
       const doc = await response.json() as {
         fields?: {
@@ -224,6 +235,79 @@ export async function getUserBudgetState(
 
   stateCache.set(userId, { state, expiresAt: now + STATE_CACHE_MS })
   return state
+}
+
+// ── Plan budget (admin-set em subscription_plans) ────────────────────────
+//
+// O budget VERDADEIRO de um plano é o que o admin define na web
+// (subscription_plans/{doc}.tokenBudget — docs com ID auto-gerado, o nome do
+// plano vive no campo `planKey`; mesmo lookup do getPlanConfig do
+// control-plane). O mapa hardcoded/PLAN_BUDGETS_JSON passa a ser APENAS
+// fallback — sem esta leitura, o worker bloqueava (402) utilizadores ao
+// atingir o valor hardcoded mesmo quando o admin tinha publicado um budget
+// maior (visto em produção 2026-06-12: web 25% vs IDE 59% no mesmo user).
+// Cache de 5 min por isolate: mudanças de pricing são raras e ~1 query/5min/
+// plano é ruído; falha de leitura degrada para o fallback, nunca parte o chat.
+
+const PLAN_BUDGET_CACHE_MS = 300_000
+let planBudgetCache = new Map<string, { budget: number | null; expiresAt: number }>()
+
+export function clearPlanBudgetCache(): void {
+  planBudgetCache = new Map()
+}
+
+export async function resolvePlanBudgetFor(
+  env: Env,
+  plan: string,
+  idToken: string,
+  fetcher: Fetcher,
+  now = Date.now(),
+): Promise<number> {
+  const fallback = resolvePlanBudgets(env)[plan] ?? 0
+
+  const cached = planBudgetCache.get(plan)
+  if (cached && cached.expiresAt > now) return cached.budget ?? fallback
+
+  const projectId = typeof env.FIREBASE_PROJECT_ID === 'string' ? env.FIREBASE_PROJECT_ID : ''
+  if (!projectId) return fallback
+
+  let adminBudget: number | null = null
+  try {
+    const headers = await resolveFirestoreAuthHeaders(env, idToken, fetcher)
+    const url = `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents:runQuery`
+    const response = await fetcher.fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'subscription_plans' }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: 'planKey' },
+              op: 'EQUAL',
+              value: { stringValue: plan },
+            },
+          },
+          limit: 1,
+        },
+      }),
+      signal: AbortSignal.timeout(FIRESTORE_READ_TIMEOUT_MS),
+    })
+    if (response.ok) {
+      const rows = await response.json() as Array<{ document?: { fields?: Record<string, unknown> } }>
+      const fields = Array.isArray(rows) ? rows.find(r => r.document)?.document?.fields : undefined
+      const raw = intField(fields?.['tokenBudget'])
+      adminBudget = raw > 0 ? raw : null
+    } else {
+      const text = await response.text().catch(() => '')
+      console.warn(`[billing] plan budget read failed (${response.status}) plan=${plan}: ${text.slice(0, 200)}`)
+    }
+  } catch (error) {
+    console.warn('[billing] plan budget read threw:', error)
+  }
+
+  planBudgetCache.set(plan, { budget: adminBudget, expiresAt: now + PLAN_BUDGET_CACHE_MS })
+  return adminBudget ?? fallback
 }
 
 /** Avança a cache local depois de um commit para que turnos consecutivos do
@@ -351,6 +435,7 @@ export async function commitTokenConsumption(args: CommitArgs): Promise<boolean>
       method: 'POST',
       headers,
       body: JSON.stringify({ writes }),
+      signal: AbortSignal.timeout(FIRESTORE_COMMIT_TIMEOUT_MS),
     })
     if (!response.ok) {
       const text = await response.text().catch(() => '')

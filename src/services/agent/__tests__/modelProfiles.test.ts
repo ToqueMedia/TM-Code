@@ -8,7 +8,7 @@ import {
 
 describe('modelProfiles', () => {
   describe('MODEL_PROFILES registry', () => {
-    it('contains all 4 model profiles (plus the qwen alias key)', () => {
+    it('contains all 6 model profiles (plus alias keys)', () => {
       const ids = Object.keys(MODEL_PROFILES)
       expect(ids).toContain('mimo-v2.5-pro-1m')
       expect(ids).toContain('glm-5.1')
@@ -18,7 +18,19 @@ describe('modelProfiles', () => {
       expect(ids).toContain('qwen3.7-max')
       expect(MODEL_PROFILES['qwen3.7-max']).toBe(MODEL_PROFILES['qwen3.7-max-2026-06-08'])
       expect(ids).toContain('mimo-v2.5-1m')
-      expect(ids.length).toBe(5)
+      // Gemini: id do preset + id raw com prefixo de publisher (X-TM-Model)
+      // apontam para o MESMO perfil.
+      expect(MODEL_PROFILES['google/gemini-3.5-flash']).toBe(MODEL_PROFILES['gemini-3.5-flash'])
+      expect(MODEL_PROFILES['google/gemini-3.1-pro-preview']).toBe(MODEL_PROFILES['gemini-3.1-pro-preview'])
+      expect(ids.length).toBe(9)
+    })
+
+    it('gemini profiles have native vision and mandatory thinking', () => {
+      const gemini = MODEL_PROFILES['gemini-3.5-flash']
+      expect(gemini.supportsAttachments).toBe(true)
+      expect(gemini.thinkingMandatory).toBe(true)
+      // Gemini não fala enable_thinking — nada de params de outros dialetos.
+      expect(gemini.thinkingParam).toBeNull()
     })
 
     it('qwen3.7-max-2026-06-08 has native vision and search', () => {
@@ -55,10 +67,11 @@ describe('modelProfiles', () => {
   })
 
   describe('getAllModelProfiles', () => {
-    it('returns all 4 profiles (alias deduped)', () => {
+    it('returns all 6 profiles (aliases deduped)', () => {
       const all = getAllModelProfiles()
-      expect(all.length).toBe(4)
+      expect(all.length).toBe(6)
       expect(all.filter(p => p.id.startsWith('qwen3.7-max')).length).toBe(1)
+      expect(all.filter(p => p.id.startsWith('gemini-')).length).toBe(2)
     })
   })
 

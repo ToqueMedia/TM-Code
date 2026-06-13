@@ -91,9 +91,12 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
   // explicit individual authorization from the user.
   const hideApproveAll = dangerous
 
-  const accentColor = dangerous ? tokens.colors.accent.orange : tokens.colors.accent.purple
-  const borderColor = dangerous ? 'rgba(247,127,0,0.42)' : 'rgba(163,113,247,0.34)'
-  const panelBg = dangerous ? 'rgba(247, 127, 0, 0.035)' : 'rgba(163, 113, 247, 0.035)'
+  // Refined-terminal: standardize the structural accent on purple — the gutter,
+  // border, panel tint and title no longer flip to orange for dangerous prompts.
+  // Destructive semantics are still carried by the red deny rows below.
+  const accentColor = tokens.colors.accent.purple
+  const borderColor = 'rgba(163,113,247,0.34)'
+  const panelBg = 'rgba(163, 113, 247, 0.035)'
   const promptTitle = dangerous ? t('perm.dangerousTitle') : t('terminalMode.permission.title')
   const question = toolName === 'execute_command' || promptReason === 'dangerous_command'
     ? t('perm.allowCommand')
@@ -210,8 +213,8 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
       border="1px solid"
       borderColor="rgba(255,255,255,0.08)"
       borderLeft={`3px solid ${borderColor}`}
-      borderRadius="6px"
-      boxShadow="0 8px 28px rgba(0,0,0,0.22)"
+      // Refined-terminal: flat — bound by the left gutter only, no drop shadow.
+      borderRadius={tokens.radius.sm}
       fontFamily={tokens.fontFamily.mono}
       data-ui-chrome
     >
@@ -247,7 +250,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
             <Text
               fontSize="13px"
               lineHeight="1.45"
-              color={dangerous ? tokens.colors.accent.orange : tokens.colors.text.secondary}
+              color={dangerous ? tokens.colors.accent.red : tokens.colors.text.secondary}
               wordBreak="break-word"
               overflowWrap="anywhere"
               minW={0}
@@ -258,7 +261,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
         )}
 
         {warning && (
-          <Text fontSize="11px" color={accentColor} opacity={0.92} mt={1.5}>
+          <Text fontSize="11px" color={dangerous ? tokens.colors.accent.red : accentColor} opacity={0.92} mt={1.5}>
             [{warning}]
           </Text>
         )}
@@ -292,7 +295,8 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
                 <OptionRow shortcut="a" label={t('perm.approveAll')} color={tokens.colors.accent.purple} onClick={handleApproveAllWithConfirmation} />
                 <OptionRow shortcut="n" label={t('perm.deny')} color={tokens.colors.accent.red} onClick={onDeny} />
                 <OptionRow shortcut="d" label={t('perm.denyAll')} color={tokens.colors.accent.red} onClick={onDenyAll} />
-                <OptionRow shortcut="w" label={t('perm.denyWithReason')} color={tokens.colors.accent.orange} onClick={() => setMode('writing')} />
+                {/* Refined-terminal: deny-with-reason is non-destructive — purple, not orange. */}
+                <OptionRow shortcut="w" label={t('perm.denyWithReason')} color={tokens.colors.accent.purple} onClick={() => setMode('writing')} />
               </>
             )}
           </Flex>
@@ -333,8 +337,9 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
             style={{
               width: '100%',
               background: 'rgba(0,0,0,0.28)',
-              border: `1px solid ${tokens.colors.accent.orange}44`,
-              borderRadius: '6px',
+              // Refined-terminal: purple structural accent, flat 2px radius.
+              border: `1px solid ${tokens.colors.accent.purple}44`,
+              borderRadius: tokens.radius.sm,
               padding: '8px 10px',
               fontFamily: tokens.fontFamily.mono,
               fontSize: '12px',
@@ -344,7 +349,7 @@ export const TerminalPermissionPrompt = memo(function TerminalPermissionPrompt({
             }}
           />
           <Flex align="center" gap={1.5} mt={1.5} wrap="wrap">
-            <KeyHint label="enter" description={t('terminalMode.permission.send')} color={tokens.colors.accent.orange} onClick={handleSubmitReason} />
+            <KeyHint label="enter" description={t('terminalMode.permission.send')} color={tokens.colors.accent.purple} onClick={handleSubmitReason} />
             <KeyHint label="esc" description={t('terminalMode.permission.cancel')} color={tokens.colors.text.disabled} onClick={handleCancelWriting} />
             <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} userSelect="none">
               {t('terminalMode.permission.shiftEnterHint')}
@@ -375,11 +380,11 @@ function KeyHint({
       onClick={onClick}
       cursor={isClickable ? 'pointer' : undefined}
       userSelect="none"
-      transition="all 0.15s ease"
+      // Refined-terminal: no lift/transform micro-interaction; a flat brightness
+      // change is the only hover cue.
       _hover={
         isClickable
           ? {
-              transform: 'translateY(-0.5px)',
               filter: 'brightness(1.15)',
               opacity: 1,
             }
@@ -400,11 +405,10 @@ function KeyHint({
     >
       <Box
         px="4px"
-        borderRadius="2px"
+        borderRadius={tokens.radius.sm}
         border="1px solid"
         borderColor={`${color}55`}
         bg={`${color}12`}
-        transition="all 0.15s ease"
       >
         <Text fontSize="10px" color={color} fontFamily={tokens.fontFamily.mono} fontWeight="700" lineHeight="1.6">
           {label}
@@ -437,13 +441,13 @@ function OptionRow({
       minW={0}
       px={2}
       py={1}
-      borderRadius="4px"
+      // Refined-terminal: 2px radius, flat — focus is a solid border, not a glow ring.
+      borderRadius={tokens.radius.sm}
       color={tokens.colors.text.secondary}
       bg="transparent"
       border="1px solid transparent"
       textAlign="left"
       cursor="pointer"
-      transition="all 0.12s ease"
       onClick={onClick}
       _hover={{
         bg: 'rgba(255,255,255,0.045)',
@@ -453,7 +457,6 @@ function OptionRow({
       _focusVisible={{
         outline: 'none',
         borderColor: color,
-        boxShadow: `0 0 0 1px ${color}66`,
       }}
     >
       <Text color={color} fontSize="13px" fontWeight="800" flexShrink={0} lineHeight="1.4">

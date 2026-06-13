@@ -121,7 +121,14 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
       } else if (att.type === 'image') {
         const size = att.sizeBytes ? `${Math.round(att.sizeBytes / 1024)}KB` : 'unknown size'
         const source = att.path ? `path="${att.path}"` : 'source="clipboard"'
-        return `<attached_image name="${att.name}" mime="${att.mimeType || 'image/png'}" ${source} size="${size}">\n[Image attached — this model is text-only, so the image could not be shown. Describe what you need help with, or switch to a multimodal model.]\n</attached_image>`
+        // NÃO afirmar "this model is text-only": este fallback dispara por
+        // razões transitórias (gate de plano, cap de bytes, falha de
+        // leitura) e o modelo PARAFRASEAVA a frase de volta ao utilizador
+        // como limitação permanente do produto — "o modo terminal do TM
+        // Code não processa imagens" (visto em produção 2026-06-12, Gemini
+        // multimodal a negar a própria visão). O texto agora diz só a
+        // verdade local: ESTA imagem não chegou NESTE pedido.
+        return `<attached_image name="${att.name}" mime="${att.mimeType || 'image/png'}" ${source} size="${size}">\n[An image was attached but could not be delivered with this request. Tell the user the image did not reach you this time — do NOT claim that you or this environment cannot process images in general.]\n</attached_image>`
       }
       return ''
     } catch {

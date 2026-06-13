@@ -182,6 +182,9 @@ jest.mock('../../browserSessionManager', () => ({
 // ═══════════════════════════════════════════════════════════════════════
 
 import ToolExecutor from '../toolExecutor'
+// agentStore is NOT mocked — update_tasks drives the real Zustand store, so
+// the evidence-guard tests seed and assert against it directly.
+import { useAgentStore } from '../../../stores/agentStore'
 
 // ═══════════════════════════════════════════════════════════════════════
 // Helpers
@@ -1036,6 +1039,58 @@ describe('G: Truncation and large results', () => {
     expect(full.startsWith('A'.repeat(100))).toBe(true)
   })
 
+  it('cuts the preview on a line boundary (never mid-line) for multi-line output', async () => {
+    const exec = freshExecutor()
+    // 50-char lines; the 2000-char budget lands inside a line. The cut must
+    // back up to the preceding newline so the preview ends with a whole line.
+    const line = 'x'.repeat(49) + '\n' // 50 chars incl newline
+    const bigContent = line.repeat(800) // 40000 chars
+    mockInvoke.mockResolvedValue(bigContent as never)
+
+    const result = await exec.execute('read_file', { file_path: '/projects/test-app/lines.txt' })
+
+    // Pull the preview body out from between the header and the end-marker.
+    const m = result.match(/Preview \(first (\d+) characters\):\n([\s\S]*?)\n<system-reminder>\[end of partial view/)
+    expect(m).toBeTruthy()
+    const previewEnd = Number(m![1])
+    const preview = m![2]
+    // The boundary cut keeps ≥ half the budget and lands on a line edge.
+    expect(previewEnd).toBeGreaterThanOrEqual(1000)
+    expect(previewEnd).toBeLessThanOrEqual(2000)
+    expect(previewEnd % 50).toBe(0) // exactly on a line boundary (multiple of 50)
+    // Preview body is whole lines incl. their newline — no partial trailing line.
+    expect(preview.endsWith('x'.repeat(49) + '\n')).toBe(true)
+  })
+
+  it('continuation offset equals the actual chars shown (no gap skipped)', async () => {
+    const exec = freshExecutor()
+    const line = 'y'.repeat(49) + '\n'
+    const bigContent = line.repeat(800)
+    mockInvoke.mockResolvedValue(bigContent as never)
+
+    const result = await exec.execute('read_file', { file_path: '/projects/test-app/lines.txt' })
+    // The "first N characters" count and the read_large_result offset must agree.
+    const shown = Number(result.match(/Preview \(first (\d+) characters\)/)![1])
+    const offset = Number(result.match(/read_large_result\("\w+", offset: (\d+)\)/)![1])
+    expect(offset).toBe(shown)
+
+    // Reading from that offset must continue exactly where the preview ended.
+    const id = result.match(/read_large_result\("(\w+)"/)![1]
+    const next = await exec.execute('read_large_result', { id, offset, limit: 10 })
+    expect(next.startsWith('y'.repeat(10))).toBe(true) // a fresh line start, nothing skipped
+  })
+
+  it('falls back to a hard cut for single-line (newline-free) output like minified JSON', async () => {
+    const exec = freshExecutor()
+    const bigContent = '{' + '"k":"v",'.repeat(5000) + '}' // one giant line, no \n
+    mockInvoke.mockResolvedValue(bigContent as never)
+
+    const result = await exec.execute('read_file', { file_path: '/projects/test-app/min.json' })
+    // No newline → hard budget of 2000.
+    expect(result).toContain('Preview (first 2000 characters)')
+    expect(result).toContain('read_large_result')
+  })
+
   it('read_large_result with invalid id returns error', async () => {
     const exec = freshExecutor()
 
@@ -1519,5 +1574,112 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
 
     const result = await exec.execute('execute_command_background', { command: 'echo "hello"', cwd: '/etc' })
     expect(result).toContain('outside the project directory')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+// update_tasks — evidence guard (replaces the old count-based batch ceiling)
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('update_tasks evidence guard', () => {
+  const seed = (tasks: Array<{ id: string; description: string; status: string }>) =>
+    useAgentStore.getState().setTasks(tasks as never)
+  const statusOf = (id: string) =>
+    useAgentStore.getState().tasks.find(t => t.id === id)?.status
+
+  beforeEach(() => useAgentStore.getState().setTasks([]))
+
+  it('reverts a completion sent without evidence to in_progress', async () => {
+    const exec = freshExecutor()
+    seed([{ id: '1.1', description: 'wire endpoint', status: 'in_progress' }])
+
+    const result = await exec.execute('update_tasks', { tasks: [{ id: '1.1', status: 'completed' }] })
+
+    expect(result).toContain('BLOCKED')
+    expect(result).toContain('1.1')
+    expect(statusOf('1.1')).toBe('in_progress')
+  })
+
+  it('accepts a completion that carries real verification evidence', async () => {
+    const exec = freshExecutor()
+    seed([{ id: '1.1', description: 'wire endpoint', status: 'in_progress' }])
+
+    const result = await exec.execute('update_tasks', {
+      tasks: [{ id: '1.1', status: 'completed', evidence: 'GET /users → 200 {id:1}' }],
+    })
+
+    expect(result).not.toContain('BLOCKED')
+    expect(statusOf('1.1')).toBe('completed')
+  })
+
+  it('rejects trivial affirmations ("done", "ok") as non-evidence', async () => {
+    const exec = freshExecutor()
+    seed([{ id: '1.1', description: 'x', status: 'in_progress' }])
+
+    const result = await exec.execute('update_tasks', { tasks: [{ id: '1.1', status: 'completed', evidence: 'done' }] })
+
+    expect(result).toContain('BLOCKED')
+    expect(statusOf('1.1')).toBe('in_progress')
+  })
+
+  it('completes several tasks at once when each carries its own evidence (no count ceiling, no 2+2+2 bypass needed)', async () => {
+    const exec = freshExecutor()
+    seed([
+      { id: '1.1', description: 'a', status: 'in_progress' },
+      { id: '1.2', description: 'b', status: 'in_progress' },
+      { id: '1.3', description: 'c', status: 'in_progress' },
+    ])
+
+    const result = await exec.execute('update_tasks', {
+      tasks: [
+        { id: '1.1', status: 'completed', evidence: 'tsc --noEmit clean' },
+        { id: '1.2', status: 'completed', evidence: '14 tests pass' },
+        { id: '1.3', status: 'completed', evidence: 'build succeeded' },
+      ],
+    })
+
+    expect(result).not.toContain('BLOCKED')
+    expect(statusOf('1.1')).toBe('completed')
+    expect(statusOf('1.2')).toBe('completed')
+    expect(statusOf('1.3')).toBe('completed')
+  })
+
+  it('partial accept: verified completion sticks, unverified one reverts', async () => {
+    const exec = freshExecutor()
+    seed([
+      { id: '1.1', description: 'a', status: 'in_progress' },
+      { id: '1.2', description: 'b', status: 'in_progress' },
+    ])
+
+    const result = await exec.execute('update_tasks', {
+      tasks: [
+        { id: '1.1', status: 'completed', evidence: 'tsc --noEmit clean' },
+        { id: '1.2', status: 'completed' },
+      ],
+    })
+
+    expect(result).toContain('BLOCKED')
+    expect(result).toContain('1.2')
+    expect(statusOf('1.1')).toBe('completed')
+    expect(statusOf('1.2')).toBe('in_progress')
+  })
+
+  it('persists evidence onto the stored task', async () => {
+    const exec = freshExecutor()
+    seed([{ id: '1.1', description: 'x', status: 'in_progress' }])
+
+    await exec.execute('update_tasks', { tasks: [{ id: '1.1', status: 'completed', evidence: 'tsc clean' }] })
+
+    expect(useAgentStore.getState().tasks.find(t => t.id === '1.1')?.evidence).toBe('tsc clean')
+  })
+
+  it('does not require evidence for pending/in_progress transitions', async () => {
+    const exec = freshExecutor()
+    seed([{ id: '1.1', description: 'x', status: 'pending' }])
+
+    const result = await exec.execute('update_tasks', { tasks: [{ id: '1.1', status: 'in_progress' }] })
+
+    expect(result).not.toContain('BLOCKED')
+    expect(statusOf('1.1')).toBe('in_progress')
   })
 })

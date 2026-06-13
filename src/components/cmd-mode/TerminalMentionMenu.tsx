@@ -1,6 +1,7 @@
 import { memo, useEffect, useId, useRef } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { useSpinnerFrame } from './terminalSpinner'
 import type { QuickOpenItem } from '../../services/quickOpenService'
 
 interface TerminalMentionMenuProps {
@@ -27,6 +28,9 @@ export const TerminalMentionMenu = memo(function TerminalMentionMenu({
   const menuRef = useRef<HTMLDivElement>(null)
   const listboxId = useId()
   const activeOptionId = items.length > 0 ? `${listboxId}-opt-${selectedIndex}` : undefined
+  // Hard-step frame-swap activity glyph for the "indexing" state (replaces the
+  // old eased idxPulse breathing dot). Hook must run at top level.
+  const indexingFrame = useSpinnerFrame(isBuilding)
 
   useEffect(() => {
     if (!menuRef.current) return
@@ -67,16 +71,18 @@ export const TerminalMentionMenu = memo(function TerminalMentionMenu({
         <Flex px={3} py="8px" align="center" gap={2}>
           {isBuilding ? (
             <>
-              <Box
-                w="6px"
-                h="6px"
-                borderRadius="full"
-                bg={tokens.colors.accent.purple}
-                css={{
-                  animation: 'idxPulse 1.2s ease-in-out infinite',
-                  '@keyframes idxPulse': { '0%, 100%': { opacity: 0.3 }, '50%': { opacity: 1 } },
-                }}
-              />
+              {/* Frame-swap activity glyph (hard-step) in the purple accent —
+                  replaces the eased breathing dot. */}
+              <Text
+                fontSize="11px"
+                color={tokens.colors.accent.purple}
+                fontFamily={tokens.fontFamily.mono}
+                w="10px"
+                textAlign="center"
+                flexShrink={0}
+              >
+                {indexingFrame}
+              </Text>
               <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
                 indexing project…
               </Text>
@@ -95,7 +101,7 @@ export const TerminalMentionMenu = memo(function TerminalMentionMenu({
           justify="space-between"
           align="center"
           borderBottom="1px solid rgba(255,255,255,0.04)"
-          bg="rgba(163,113,247,0.04)"
+          bg={tokens.colors.accent.purpleSubtle}
           position="sticky"
           top={0}
           zIndex={1}
@@ -132,7 +138,8 @@ export const TerminalMentionMenu = memo(function TerminalMentionMenu({
               py="5px"
               align="center"
               gap={2}
-              bg={isSelected ? 'rgba(163,113,247,0.12)' : 'transparent'}
+              // Static solid selection bar (purple), full opacity — no pulse.
+              bg={isSelected ? tokens.colors.accent.purpleHover : 'transparent'}
               borderLeft={isSelected ? `2px solid ${tokens.colors.accent.purple}` : '2px solid transparent'}
               cursor="pointer"
               onMouseDown={(e) => e.preventDefault()}

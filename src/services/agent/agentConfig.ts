@@ -79,7 +79,13 @@ export const BYOK_THINKING_BUDGET_TOKENS = 8_192
 
 // ── Summarization ──
 
-export const SUMMARIZE_TIMEOUT_MS = 90_000
+// 240s, não 90s: a compactação é NÃO-streaming (contextManager) — os headers
+// só chegam quando o resumo inteiro está gerado, e com transcript grande +
+// modelo com thinking (Vertex Gemini) 90s não chegavam (timeouts vistos em
+// produção 2026-06-12). Tem de ficar ABAIXO do timeout não-streaming do
+// worker (300s, UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS) para o erro local
+// limpo chegar antes do 504 do worker.
+export const SUMMARIZE_TIMEOUT_MS = 240_000
 
 // ── API retry ──
 

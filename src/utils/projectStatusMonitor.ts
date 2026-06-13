@@ -10,11 +10,16 @@ export interface ProjectStatus {
   lastModified?: number
 }
 
-const POLL_INTERVAL_MS = 5_000
+// 20s (was 5s) and focus-gated: deleting an open project is rare enough that
+// sub-5s detection buys nothing, and the visibility-change check below already
+// covers "it happened while the app was in background" the moment the user
+// returns — same playbook as services/gitStatusPoller.ts (2026-06-12).
+const POLL_INTERVAL_MS = 20_000
 
 /**
  * Monitors project directory health via two mechanisms:
- * 1. Active polling every 5s — detects deletion while the IDE is focused
+ * 1. Active polling every 20s, only while the window has focus — detects
+ *    deletion while the IDE is in use
  * 2. Visibility-change check — catches changes that happened while the app was in background
  */
 export class ProjectStatusMonitor {
@@ -65,8 +70,12 @@ export class ProjectStatusMonitor {
   startMonitoring() {
     if (this.listening) return
 
-    // Active polling — detects deletion while IDE is focused
-    this.pollTimer = setInterval(() => this.runCheck(), POLL_INTERVAL_MS)
+    // Active polling — detects deletion while IDE is focused. Skipped while
+    // the window is unfocused; the visibilitychange handler below runs an
+    // immediate check on return, so nothing is missed.
+    this.pollTimer = setInterval(() => {
+      if (document.hasFocus()) this.runCheck()
+    }, POLL_INTERVAL_MS)
 
     // Visibility change — immediate check when user returns to the app
     this.visibilityHandler = () => {

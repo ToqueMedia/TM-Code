@@ -17,6 +17,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { tokens } from '@/theme/tokens'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
@@ -258,6 +259,17 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
     closeMenu,
   } = useTerminalAutocomplete({ sessionId, projectPath })
 
+  // O listener de pty-output vive num effect com deps [sessionId, projectPath]
+  // — o closure captura o `completions` do PRIMEIRO render (sempre []), pelo
+  // que `completions.length > 0` lá dentro era perpetuamente falso e o menu
+  // de autocomplete nunca fechava com output novo do shell (flicker: menu
+  // pendurado por cima de um comando a correr). Ref sincronizado resolve sem
+  // re-subscrever o listener a cada keystroke.
+  const completionsOpenRef = useRef(false)
+  useEffect(() => {
+    completionsOpenRef.current = completions.length > 0
+  }, [completions.length])
+
   // Boot xterm + PTY
   useEffect(() => {
     if (!containerRef.current) return
@@ -301,6 +313,25 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
     term.loadAddon(links)
 
     term.open(containerRef.current)
+
+    // GPU renderer — must be loaded AFTER term.open() (it needs the canvas).
+    // The DOM renderer (xterm's default) renders ANSI colors flat/monochrome
+    // inside Tauri's WKWebView; the WebGL renderer applies the theme palette
+    // correctly and gives the crisp, true-color, GPU-accelerated output of a
+    // native terminal (same renderer VS Code uses). Falls back to DOM if WebGL2
+    // is unavailable or the GL context is lost (disposing the addon makes xterm
+    // revert to the DOM renderer automatically).
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => {
+        logger.warn('terminal-panel', 'WebGL context lost — falling back to DOM renderer')
+        webgl.dispose()
+      })
+      term.loadAddon(webgl)
+    } catch (err) {
+      logger.warn('terminal-panel', 'WebGL renderer unavailable, using DOM fallback:', err)
+    }
+
     termRef.current = term
     fitRef.current = fit
 
@@ -351,7 +382,7 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
           checkPortSplitAndWarn(term, port)
         }
       }
-      if (completions.length > 0) closeMenu()
+      if (completionsOpenRef.current) closeMenu()
     }).then((fn) => {
       if (disposed) fn()
       else unlistenOutput = fn
@@ -469,7 +500,10 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
   }, [sessionId, projectPath])
 
   return (
-    <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative">
+    // data-pty-terminal: marcador que os handlers globais de teclado do
+    // TerminalView usam para NÃO interceptar teclas destinadas ao shell
+    // (^C/^L/^K/^U/Esc) — o helper-textarea do xterm vive dentro deste Box.
+    <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative" data-pty-terminal>
       {(completions.length > 0 || isLoading) && menuPosition && (
         <TerminalAutocomplete
           completions={completions}
@@ -553,6 +587,10 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
   // Keyboard shortcuts for terminal management
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // O painel continua MONTADO quando escondido (close() é display:none
+      // para manter os PTYs vivos) — sem este guard, Ctrl+T/W no prompt do
+      // chat criava/MATAVA terminais invisíveis com o painel fechado.
+      if (!useTerminalPanelStore.getState().isOpen) return
       const isCtrl = e.ctrlKey || e.metaKey
 
       // Ctrl+T: Add new terminal

@@ -12,6 +12,7 @@
 import type { ContentBlockAPI } from '../../../types/chat'
 import { getCompactUserSummaryMessage } from './prompt'
 import { isContextCollapseEnabled } from '../collapse'
+import { getAutoCompactThreshold as getRealAutoCompactThreshold } from '../../../utils/contextWindow'
 
 // ── Constants ──
 
@@ -48,6 +49,56 @@ export interface AutoCompactTrackingState {
   turnCounter: number
   turnId: string
   consecutiveFailures?: number
+}
+
+/**
+ * Real model limits + real token occupancy, so the compaction decision tracks
+ * the ACTIVE model instead of a hardcoded 1M window and a char-estimate.
+ *
+ * Why this exists (context pollution audit, 2026-06-12): the legacy path
+ * hardcoded `MIMO_CONTEXT_WINDOW = 1_000_000` and triggered on
+ * `tokenCountWithEstimation` (chars/4). On any smaller-window model the agent
+ * believed it had 1M of room and could blow past the provider's real ceiling
+ * (hard context-overflow) without ever compacting — and the char-estimate
+ * ignored tool_call argument payloads entirely. When `contextWindow` is known
+ * the threshold comes from utils/contextWindow.ts (the same adaptive math the
+ * UI pressure pill uses) and the numerator is the MAX of the provider's real
+ * occupancy and the char-estimate (never under-counts either signal).
+ */
+export interface AutoCompactLimits {
+  /** Active model's real context window in tokens. null/undefined → legacy 1M fallback. */
+  contextWindow?: number | null
+  /** Active model's max output tokens (shrinks the reserved summary headroom). */
+  maxOutputTokens?: number | null
+  /**
+   * Real context occupancy: the previous turn's provider `prompt_tokens` +
+   * `completion_tokens` (cache-aware, counts everything the estimate misses).
+   * Undefined on the first turn (no response seen yet) → estimate-only.
+   */
+  realOccupancyTokens?: number | null
+}
+
+/** True when we have a real context window to reason about. */
+function hasRealWindow(limits?: AutoCompactLimits): limits is AutoCompactLimits & { contextWindow: number } {
+  return !!limits && typeof limits.contextWindow === 'number' && limits.contextWindow > 0
+}
+
+/** Threshold tokens that trigger compaction — real math when known, legacy otherwise. */
+function resolveThreshold(limits?: AutoCompactLimits): number {
+  return hasRealWindow(limits)
+    ? getRealAutoCompactThreshold(limits.contextWindow, limits.maxOutputTokens)
+    : getAutoCompactThreshold()
+}
+
+/** Best occupancy estimate: never below the provider's real reading nor the char-estimate. */
+function resolveOccupancy(
+  messages: MessageLike[],
+  snipTokensFreed: number,
+  limits?: AutoCompactLimits,
+): number {
+  const estimate = Math.max(0, tokenCountWithEstimation(messages) - snipTokensFreed)
+  const real = limits?.realOccupancyTokens
+  return typeof real === 'number' && real > 0 ? Math.max(estimate, real) : estimate
 }
 
 /** Minimal message shape for auto-compact. */
@@ -139,14 +190,18 @@ export function calculateTokenWarningState(tokenUsage: number): {
 export function shouldAutoCompact(
   messages: MessageLike[],
   snipTokensFreed = 0,
+  limits?: AutoCompactLimits,
 ): boolean {
-  const tokenCount = tokenCountWithEstimation(messages) - snipTokensFreed
-  const threshold = getAutoCompactThreshold()
-  const { isAboveAutoCompactThreshold } = calculateTokenWarningState(tokenCount)
+  const tokenCount = resolveOccupancy(messages, snipTokensFreed, limits)
+  const threshold = resolveThreshold(limits)
+  const isAboveAutoCompactThreshold = tokenCount >= threshold
 
   if (isAboveAutoCompactThreshold) {
+    const src = hasRealWindow(limits)
+      ? `window=${limits.contextWindow}${limits.realOccupancyTokens ? ` real=${limits.realOccupancyTokens}` : ''}`
+      : 'window=legacy-1M(estimate)'
     console.debug(
-      `[autoCompact] threshold exceeded: tokens=${tokenCount} threshold=${threshold}`,
+      `[autoCompact] threshold exceeded: tokens=${tokenCount} threshold=${threshold} ${src}`,
     )
   }
 
@@ -187,6 +242,7 @@ export async function autoCompact(
   compactFn: CompactFn,
   tracking?: AutoCompactTrackingState,
   snipTokensFreed?: number,
+  limits?: AutoCompactLimits,
 ): Promise<AutoCompactResult> {
   // When context collapse is active, it handles context management instead of auto-compact
   if (isContextCollapseEnabled()) {
@@ -201,13 +257,13 @@ export async function autoCompact(
     return { wasCompacted: false }
   }
 
-  const shouldCompact = shouldAutoCompact(messages, snipTokensFreed)
+  const shouldCompact = shouldAutoCompact(messages, snipTokensFreed, limits)
 
   if (!shouldCompact) {
     return { wasCompacted: false }
   }
 
-  const preCompactTokenCount = tokenCountWithEstimation(messages) - (snipTokensFreed ?? 0)
+  const preCompactTokenCount = resolveOccupancy(messages, snipTokensFreed ?? 0, limits)
 
   try {
     const summary = await compactFn(messages, systemPrompt)

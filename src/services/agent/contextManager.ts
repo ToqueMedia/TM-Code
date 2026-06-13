@@ -117,6 +117,9 @@ export async function callSummarizationAPI(
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${authToken}`,
+        // Roteia para o sidecar:utility quando publicado (modelo barato para
+        // sumarização); sem sidecar, o worker degrada para o modelo ativo.
+        'X-Request-Type': 'summarize',
         ...appCheckHeaders,
       },
       body: JSON.stringify({

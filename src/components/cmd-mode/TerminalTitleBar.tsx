@@ -49,8 +49,8 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
       px={3}
       py="11px"
       minH="38px"
-      bg="rgba(0,0,0,0.45)"
-      borderBottom="1px solid rgba(255,255,255,0.05)"
+      bg={tokens.colors.terminal.titlebarBg}
+      borderBottom={`1px solid ${tokens.colors.terminal.chromeHairline}`}
       align="center"
       justify="space-between"
       userSelect="none"
@@ -103,11 +103,13 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           <Box
             px="6px"
             py="2px"
-            borderRadius="3px"
+            borderRadius={tokens.radius.sm}
             bg="rgba(163,113,247,0.1)"
             border="1px solid rgba(163,113,247,0.2)"
             title={t('terminalMode.titlebar.thinkingAlwaysOn')}
           >
+            {/* Refined-terminal: emoji '⚡' dropped for a single-color text
+                diamond glyph in the same purple accent. */}
             <Text
               fontSize="9px"
               color={tokens.colors.accent.purple}
@@ -116,7 +118,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
               fontFamily={tokens.fontFamily.mono}
               letterSpacing="0.08em"
             >
-              ⚡ thk
+              ◆ thk
             </Text>
           </Box>
         )}
@@ -152,8 +154,8 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
           px="8px"
           py="2px"
           border="1px solid rgba(255,255,255,0.1)"
-          borderRadius="3px"
-          transition="all 0.1s"
+          borderRadius={tokens.radius.sm}
+          transition="color 0.1s"
           textTransform="uppercase"
           letterSpacing="0.1em"
           fontFamily={tokens.fontFamily.mono}

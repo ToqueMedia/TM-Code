@@ -41,11 +41,11 @@ export const TerminalAutocomplete = memo(function TerminalAutocomplete({
       maxW="320px"
       bg={tokens.colors.bg.panel}
       border={`1px solid ${tokens.colors.border.default}`}
-      borderRadius={tokens.radius.md}
+      // Flat terminal surface: sharp corners, no elevation (matches mention menu).
+      borderRadius={0}
       overflow="auto"
       maxH="200px"
       zIndex={tokens.zIndex.dropdown}
-      boxShadow={tokens.shadow.panel}
       data-no-focus-steal
       onMouseDown={(e) => e.preventDefault()}
       css={{
@@ -60,13 +60,13 @@ export const TerminalAutocomplete = memo(function TerminalAutocomplete({
         justify="space-between"
         align="center"
         borderBottom="1px solid rgba(255,255,255,0.04)"
-        bg="rgba(254,16,99,0.04)"
+        bg={tokens.colors.accent.purpleSubtle}
         position="sticky"
         top={0}
         zIndex={1}
       >
         {isLoading ? (
-          <Text fontSize="9px" color={tokens.colors.accent.primary} fontFamily={tokens.fontFamily.mono} letterSpacing="0.08em" textTransform="uppercase">
+          <Text fontSize="9px" color={tokens.colors.accent.purple} fontFamily={tokens.fontFamily.mono} letterSpacing="0.08em" textTransform="uppercase">
             Searching...
           </Text>
         ) : (
@@ -98,13 +98,14 @@ export const TerminalAutocomplete = memo(function TerminalAutocomplete({
             py="4px"
             align="center"
             gap={1.5}
-            bg={isSelected ? 'rgba(254,16,99,0.12)' : 'transparent'}
-            borderLeft={isSelected ? `2px solid ${tokens.colors.accent.primary}` : '2px solid transparent'}
+            // Static solid selection bar (purple) — matches the mention menu.
+            bg={isSelected ? tokens.colors.accent.purpleHover : 'transparent'}
+            borderLeft={isSelected ? `2px solid ${tokens.colors.accent.purple}` : '2px solid transparent'}
             cursor="pointer"
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => onSelect(item)}
             transition="background 0.08s"
-            _hover={{ bg: isSelected ? 'rgba(254,16,99,0.12)' : 'rgba(255,255,255,0.04)' }}
+            _hover={{ bg: isSelected ? tokens.colors.accent.purpleHover : 'rgba(255,255,255,0.04)' }}
           >
             <Text
               fontSize="11px"

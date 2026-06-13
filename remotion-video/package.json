@@ -1,0 +1,25 @@
+{
+  "name": "tmcode-promo-video",
+  "private": true,
+  "version": "1.0.0",
+  "description": "TM Code cinematic promo video — built with Remotion",
+  "scripts": {
+    "dev": "remotion studio src/index.ts",
+    "preview": "remotion studio src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "render": "remotion render src/index.ts TMCodePromo out/tmcode-promo.mp4 --codec=h264",
+    "render:mp4": "remotion render src/index.ts TMCodePromo out/tmcode-promo.mp4 --codec=h264",
+    "still": "remotion still src/index.ts TMCodePromo out/frame.png"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.242",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.242"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "typescript": "~5.9.3"
+  }
+}

@@ -89,7 +89,7 @@ export function getSystemSection(): string {
  - **INTERPRET SHORT MESSAGES FROM CONTEXT, NOT FROM KEYWORDS.** A short message ("Continue", "Avança", "OK", "Sure", "Fix it", "Go ahead", "Corrige", any language) means different things depending on what preceded it. **Read your own previous turn** to decide:
    - **You just diagnosed a problem and proposed a fix** → the message is approval to execute. Apply the fix immediately. Do NOT re-investigate, do NOT search for more evidence.
    - **You just asked a question or presented options** → the message is an answer to that. Follow the context.
-   - **Context was lost (budget interrupt, compaction)** → use the **live task tracker** (\`# Task tracker — LIVE STATE\` block below) as your start point. Do NOT scan the filesystem to deduce progress — filesystem existence ≠ task completion. Do NOT mark tasks completed in batches; each \`completed\` flip requires that task's acceptance criterion was verified.
+   - **Context was lost (budget interrupt, compaction)** → use the **task tracker** (\`# Task tracker\` block below) as your start point. Do NOT scan the filesystem to deduce progress — filesystem existence ≠ task completion. Do NOT mark tasks completed in batches; each \`completed\` flip requires that task's acceptance criterion was verified.
    The word itself is irrelevant — the conversation context determines the meaning.
  - **CHECKPOINT REVERT**: The IDE tracks every file you modify during a session. The developer can undo your changes at any time — either the last action ("Undo last") or all session changes ("Revert all") — using the Checkpoint panel in the chat sidebar. **If you notice that files you previously edited no longer contain your changes, this is almost certainly because the developer reverted them, NOT because your writes failed to persist.** Do not assume a bug or persistence failure. Instead, acknowledge that the changes were reverted and ask the developer what they'd like to do next.`
 }
@@ -242,7 +242,7 @@ ${totalTools} tools available. Key behaviors not obvious from tool schemas:
    **When to use:** commands that take >30 seconds — \`npm install\`, \`npm run build\`, \`tsc --noEmit\`, large compilations. Fire-and-forget: start the install in background, then continue reading/editing files while it runs. If there is no other work, end your turn and wait for auto-wake.
    **When NOT to use:** quick commands (<30s) — \`ls\`, \`cat\`, \`git status\`, \`curl\`, small \`npm test\` runs. Use \`${EXECUTE_COMMAND}\` for those — you need the output immediately to decide next steps.
  - \`${CHECK_BACKGROUND_COMMANDS}\`: see status and output of background commands. Use once after auto-wake or after doing other useful work. If commands are still running, do NOT call it repeatedly; end your turn and wait for auto-wake.
- - \`${UPDATE_TASKS}\`: show a task list to the developer with real-time progress. Use at the start of multi-step work (3+ steps) to communicate your plan. Update task statuses as you complete each step. Each call replaces the full list — always send all tasks. Update sparingly: at the start, when a task completes, and at the end — not after every single tool call.
+ - \`${UPDATE_TASKS}\`: show a task list to the developer with real-time progress. Use at the start of multi-step work (3+ steps) to communicate your plan. Update task statuses as you complete each step. **Patch semantics**: each entry is merged with the existing tracker by ID — to change only a status, send \`{ id, status }\` (description is optional when updating an existing task); new IDs are appended. You do NOT need to resend the whole list, and omitting a task does NOT delete it. Mark a task \`completed\` only when ITS acceptance criterion is verified, and include an \`evidence\` field with the signal you observed (\`"tsc --noEmit clean"\`, \`"GET /users → 200"\`, \`"14 tests pass"\`) — a completion without real evidence is reverted to in_progress, and "files exist on disk" does not count. You may complete several at once if each has its own evidence. Update sparingly: at the start, when a task completes, and at the end — not after every single tool call.
  - \`ask_user_question\`: structured multi-question form. Use when the task has genuine ambiguity that affects your implementation (stack choice, auth provider, scope ambiguity). Present 2-4 options with labels and descriptions, plus an "Other" option for free-text. Do NOT use for simple yes/no confirmations — just proceed. Do NOT use for sensitive credentials — use \`request_credentials\` for those.
  - \`${READ_SKILL}\`: load the full content of a skill listed in the "Skills available" section. Call ONCE per skill when its topic comes up — content stays in history. Avoids reading skills that are not relevant to the current task.
 ${ctx.modelProfile?.supportsSearch ? ` - **Native web search**: you can search the web directly as part of your generation (no tool call needed — the platform enables it server-side). Use it when you need pages about a topic you don't have a direct URL for — library docs, error messages, current events — then \`web_fetch\` the most promising URL to read it in full.
@@ -283,7 +283,11 @@ export async function getBackgroundCommandsSection(): Promise<string | null> {
     const errored = bgCmds.filter(c => c.status === 'error')
     const cancelled = bgCmds.filter(c => c.status === 'cancelled')
 
-    const lines: string[] = ['# Background commands']
+    const lines: string[] = ['# Background commands (status captured at turn start)']
+    lines.push(
+      `A [RUNNING] entry may have finished by the time you read this — ` +
+      `use \`check_background_commands\` for the live status instead of assuming.`,
+    )
 
     // Running: show full detail (command + elapsed)
     for (const c of running) {
@@ -559,7 +563,11 @@ export function getDevServerStatusSection(): string | null {
   if (ds.frontendUrl) lines.push(`frontend_url: ${ds.frontendUrl}`)
   if (ds.backendUrl) lines.push(`backend_url: ${ds.backendUrl}`)
 
-  return `# Dev Server (running)\n${lines.join('\n')}\n\nA dev server is ALREADY RUNNING. Do NOT call \`${START_DEV_SERVER}\` or \`npm run dev\` / \`yarn dev\` — it will fail or create a duplicate. Use \`${READ_DEV_SERVER_LOGS}\` to check for errors.`
+  // "status as of turn start" — this section is rendered once per user
+  // message and frozen for the whole tool loop. Without the caveat, after the
+  // agent itself stops/restarts the server mid-turn this block actively
+  // forbids the correct next action (context pollution audit, 2026-06-12).
+  return `# Dev Server (running — status captured at turn start)\n${lines.join('\n')}\n\nA dev server was RUNNING when this turn started. Do NOT call \`${START_DEV_SERVER}\` or \`npm run dev\` / \`yarn dev\` while it runs — it will fail or create a duplicate. Use \`${READ_DEV_SERVER_LOGS}\` to check for errors. If YOU stopped or restarted the server with tools later in this turn, trust your own tool results over this block.`
 }
 
 // ── 10b. Already-applied scaffolding (conditional) ─────────────
@@ -693,7 +701,9 @@ The developer's message includes ${hashtagSkills.length === 1 ? 'a recognised ha
 
 // ── 11. Project structure ──────────────────────────────────────
 export function getProjectStructureSection(ctx: PromptContext): string {
-  return `# Project structure\n${ctx.treeString}`
+  // Snapshot disclaimer: the tree is rendered once per user message; files
+  // the agent creates/deletes mid-turn won't appear here until the next turn.
+  return `# Project structure\n(snapshot at turn start — files you create, move or delete with tools THIS turn won't show here; trust your tool results)\n${ctx.treeString}`
 }
 
 export function getReadmeSection(ctx: PromptContext): string | null {
@@ -732,8 +742,9 @@ export function getMemorySection(ctx: PromptContext): string | null {
   const parts: string[] = ['# Persistent memory']
   parts.push(
     `Cross-session facts the developer and prior sessions established. ` +
-    `**Treat as authoritative**: when a memory contradicts the model's prior, the memory wins. ` +
-    `Each entry below is a one-line summary — use \`read_memory(scope, name)\` to load the full body when you need the *Why* / *How to apply* detail behind a feedback or project entry.`,
+    `**Trust order**: these beat your training-data priors, but they record what was true when WRITTEN — ` +
+    `if a memory conflicts with what you observe live in this session (file contents, tool results), trust the live observation and consider updating the memory. ` +
+    `Each entry below is a one-line summary — use \`read_memory(name, type)\` to load the full body when you need the *Why* / *How to apply* detail behind a feedback or project entry.`,
   )
 
   // Freshness header: appears only when at least one visible entry is past
@@ -851,12 +862,19 @@ export function getTrackerStateSection(ctx: PromptContext): string | null {
   const pending = tasks.filter(t => t.status === 'pending')
 
   const lines: string[] = []
-  lines.push(`# Task tracker — LIVE STATE (source of truth)`)
+  lines.push(`# Task tracker — snapshot at turn start (authoritative over TODO.md & filesystem)`)
   lines.push('')
   const statusParts = [`**${completed}/${tasks.length} completed**`]
   if (failed > 0) statusParts.push(`${failed} failed`)
   if (cancelled > 0) statusParts.push(`${cancelled} cancelled`)
-  lines.push(`Progress: ${statusParts.join(', ')}. This block reflects what \`${UPDATE_TASKS}\` has actually marked — NOT what's on TODO.md (stale by design), NOT what files exist on disk (filesystem ≠ completion).`)
+  lines.push(`Progress: ${statusParts.join(', ')}. This block reflects what \`${UPDATE_TASKS}\` had actually marked when this user message arrived — NOT what's on TODO.md (stale by design), NOT what files exist on disk (filesystem ≠ completion).`)
+  lines.push('')
+  // Temporal honesty: this section is rendered ONCE per user message and then
+  // frozen for the whole multi-turn tool loop. Without this line, the model
+  // reads "RESUME HERE" pointers for tasks it already flipped via update_tasks
+  // three tool-rounds ago and re-does or re-verifies finished work (context
+  // pollution audit, 2026-06-12).
+  lines.push(`**Staleness rule**: this block was captured at turn start. If YOU have called \`${UPDATE_TASKS}\` later in this same turn, the result of that call is newer than this list — trust your own most recent \`${UPDATE_TASKS}\` output, not this snapshot.`)
   lines.push('')
 
   // Render every task with its live status so the agent can see the full state.

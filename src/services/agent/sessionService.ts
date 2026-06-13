@@ -563,6 +563,9 @@ class SessionService {
         ? msg.mentionContext.slice(0, MAX_MENTION_CONTEXT_PERSIST)
           + '\n<system-reminder>[mention context truncated on session reload — re-read the file with read_file if its tail matters]</system-reminder>'
         : msg.mentionContext
+      // Paths the snapshot covers — lets the reload-time rebuild still void a
+      // snapshot a later tool superseded (mentionContext staleness fix).
+      if (msg.mentionedPaths?.length) sanitized.mentionedPaths = msg.mentionedPaths
     }
 
     // Persist attachment metadata WITHOUT base64. The base64 data URI is
@@ -623,6 +626,12 @@ class SessionService {
     // reconstructing from reasoningContent/contentBlocks.
     if (msg.providerState) {
       sanitized.providerState = msg.providerState
+    }
+    // Per-internal-turn native states — required for the per-turn history
+    // rebuild (one assistant+tool_results pair per turn). Without persisting
+    // this, a reloaded session falls back to the lossy last-turn-only path.
+    if (msg.providerStates?.length) {
+      sanitized.providerStates = msg.providerStates
     }
 
     // Don't persist isStreaming

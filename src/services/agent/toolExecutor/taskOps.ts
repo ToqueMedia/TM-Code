@@ -16,12 +16,33 @@ type StoredTask = {
   dependsOn?: string[]
   blockedBy?: string[]
   files?: string[]
+  evidence?: string
 }
 
 const TERMINAL_TASK_STATUSES = new Set<TaskStatus>(['completed', 'failed', 'cancelled'])
 
 function isTerminalTask(status: string): boolean {
   return TERMINAL_TASK_STATUSES.has(status as TaskStatus)
+}
+
+// Trivial affirmations that are NOT verification evidence — flipping a task
+// to completed with one of these (or with nothing) is the filesystem-inference
+// failure mode wearing a hat. Matched case-insensitively against the trimmed
+// evidence string. A real acceptance signal ("tsc clean", "200 OK {id:…}",
+// "12 tests green") never collapses to one of these tokens.
+const NON_EVIDENCE_TOKENS = new Set([
+  'done', 'ok', 'okay', 'yes', 'complete', 'completed', 'finished', 'fixed',
+  'works', 'working', 'good', 'n/a', 'na', 'file created', 'created', 'wrote file',
+])
+
+/** Whether `evidence` is a usable verification signal (not empty, not a
+ *  bare affirmation). Deliberately lenient on length — terse-but-real
+ *  evidence ("200 OK") must pass; only obvious non-evidence is rejected. */
+function isAdequateEvidence(evidence: string | undefined): boolean {
+  if (!evidence) return false
+  const trimmed = evidence.trim()
+  if (trimmed.length < 4) return false
+  return !NON_EVIDENCE_TOKENS.has(trimmed.toLowerCase())
 }
 
 function formatTaskUpdateResult(tasks: StoredTask[], resetArchivedList: boolean): string {
@@ -52,7 +73,7 @@ Task statuses: pending | in_progress | completed | failed | cancelled.
 
 Patch semantics: each entry in the tasks array is MERGED with the existing task by ID. To update only a status, send { id, status } — description is optional for existing tasks. New IDs (not in the current tracker) are appended. This prevents accidental task loss when the full list is not re-sent.
 
-Batch-completion rule: marking more than 2 tasks as completed in a single call reverts them to in_progress. Complete tasks one at a time with verification evidence (test output, endpoint response, etc.).`,
+Evidence rule: when you flip a task to "completed" you MUST include an "evidence" field stating how its acceptance criterion was verified — the actual signal you observed (test output "12 passed", "tsc --noEmit clean", "GET /users → 200 {id:…}", "build succeeded"). This is per-task accountability, not a formality: "files exist on disk", "done", "ok" are NOT evidence and are rejected — a completion without real evidence is reverted to in_progress. You may complete several tasks in one call, but each needs its own evidence; if you can't articulate the verification for a task, you haven't verified it — keep it in_progress.`,
       input_schema: {
         type: 'object',
         properties: {
@@ -67,6 +88,7 @@ Batch-completion rule: marking more than 2 tasks as completed in a single call r
                 dependsOn: { type: 'array', items: { type: 'string' }, description: 'IDs of tasks that must complete first' },
                 blockedBy: { type: 'array', items: { type: 'string' }, description: 'IDs of blocking tasks' },
                 files: { type: 'array', items: { type: 'string' }, description: 'Files involved in this task' },
+                evidence: { type: 'string', description: 'How this task was verified (e.g. "tsc clean", "GET /users → 200"). REQUIRED when status is "completed"; filesystem existence does not count.' },
               },
               required: ['id', 'status'],
             },
@@ -88,7 +110,7 @@ Batch-completion rule: marking more than 2 tasks as completed in a single call r
       const prev = useAgentStore.getState().tasks as StoredTask[]
       const prevCompletedIds = new Set(prev.filter(t => t.status === 'completed').map(t => t.id))
 
-      type IncomingTask = { id: string; description?: string; status: string; dependsOn?: string[]; blockedBy?: string[]; files?: string[] }
+      type IncomingTask = { id: string; description?: string; status: string; dependsOn?: string[]; blockedBy?: string[]; files?: string[]; evidence?: string }
       const incoming = input.tasks as IncomingTask[]
       const prevAllTerminal = prev.length > 0 && prev.every(t => isTerminalTask(t.status))
       const incomingAddsNewTask = incoming.some(t => !prev.some(existing => existing.id === t.id))
@@ -120,6 +142,7 @@ Batch-completion rule: marking more than 2 tasks as completed in a single call r
             ...(t.dependsOn !== undefined ? { dependsOn: t.dependsOn } : {}),
             ...(t.blockedBy !== undefined ? { blockedBy: t.blockedBy } : {}),
             ...(t.files !== undefined ? { files: t.files } : {}),
+            ...(t.evidence !== undefined ? { evidence: t.evidence } : {}),
             status,
           }
         } else {
@@ -134,19 +157,48 @@ Batch-completion rule: marking more than 2 tasks as completed in a single call r
             ...(t.dependsOn ? { dependsOn: t.dependsOn } : {}),
             ...(t.blockedBy ? { blockedBy: t.blockedBy } : {}),
             ...(t.files ? { files: t.files } : {}),
+            ...(t.evidence ? { evidence: t.evidence } : {}),
           })
         }
       }
 
       const tasks = [...merged, ...newTasks]
 
-      useAgentStore.getState().setTasks(tasks)
+      // Evidence guard — per-task accountability replaces the old blunt
+      // count ceiling. Every task freshly flipped to `completed` must carry
+      // verification evidence on its incoming entry. This targets the root
+      // cause of the 2026-05-19 failure mode (batch-completing 12→23 because
+      // files existed on disk) directly: marking N tasks done now requires
+      // articulating HOW each was verified, which "files exist" cannot. Unlike
+      // a per-call ceiling, it can't be bypassed by fractioning the call into
+      // chunks of 2, and it never reverts a genuinely-verified completion.
+      //
+      // No seed exemption: a /plan seed is all-pending (zero completions, never
+      // triggers this), so the only way to seed a `completed` task on an empty
+      // tracker is to claim done — which, after `clearTasks` on a new session,
+      // is exactly the inference path we must still gate. (Disk rehydration
+      // goes through setTasks, not this tool, so it never hits the guard.)
+      const evidenceById = new Map(incoming.map(t => [t.id, t.evidence] as const))
+      const unverifiedIds = tasks
+        .filter(t => t.status === 'completed' && !prevCompletedIds.has(t.id))
+        .filter(t => !isAdequateEvidence(evidenceById.get(t.id)))
+        .map(t => t.id)
+
+      // Revert only the unverified completions to in_progress — verified ones
+      // in the same call stick. Compute the final list BEFORE any write so the
+      // unverified-completed state never reaches the store or disk.
+      const revertSet = new Set(unverifiedIds)
+      const finalTasks = revertSet.size === 0
+        ? tasks
+        : tasks.map(t => revertSet.has(t.id) ? { ...t, status: 'in_progress' as const } : t)
+
+      useAgentStore.getState().setTasks(finalTasks)
 
       // Persist to tasks.json so the tracker survives restarts.
       const project = useProjectStore.getState().currentProject
       if (project?.path) {
         void import('../taskPersistence').then(({ saveTasksToDisk }) =>
-          saveTasksToDisk(project.path, tasks),
+          saveTasksToDisk(project.path, finalTasks),
         ).catch(() => { /* non-critical */ })
       }
 
@@ -158,35 +210,11 @@ Batch-completion rule: marking more than 2 tasks as completed in a single call r
         ctx.setPlanTasksSeeded(true)
       }
 
-      const newlyCompletedIds = tasks
-        .filter(t => t.status === 'completed' && !prevCompletedIds.has(t.id))
-        .map(t => t.id)
-
-      // Batch-completion guard — HARD enforcement. When >2 tasks are flipped
-      // to completed in one call (and it's not the initial seed), revert
-      // them to in_progress and require one-at-a-time verification.
-      // This prevents the 2026-05-19 failure mode (batch-completing 12→23
-      // in two calls because files existed on disk).
-      const wasSeed = prev.length === 0
-      const jumpSize = newlyCompletedIds.length
-      const BATCH_LIMIT = 2
-      if (!wasSeed && jumpSize > BATCH_LIMIT) {
-        // Revert the batch-completed tasks back to in_progress
-        const revertedIds = new Set(newlyCompletedIds)
-        const reverted = tasks.map(t =>
-          revertedIds.has(t.id) ? { ...t, status: 'in_progress' as const } : t
-        )
-        useAgentStore.getState().setTasks(reverted)
-        // Persist the reverted state
-        if (project?.path) {
-          void import('../taskPersistence').then(({ saveTasksToDisk }) =>
-            saveTasksToDisk(project.path, reverted),
-          ).catch(() => { /* non-critical */ })
-        }
-        return `BLOCKED: ${jumpSize} tasks were marked completed at once (IDs: ${newlyCompletedIds.join(', ')}). Batch completion is not allowed — complete tasks ONE AT A TIME with verification evidence (test output, endpoint response, etc.). The affected tasks have been reverted to in_progress. Pick the first one and verify it individually.`
+      if (revertSet.size > 0) {
+        return `BLOCKED: ${unverifiedIds.length} task(s) were marked completed without verification evidence (IDs: ${unverifiedIds.join(', ')}). A task is "completed" only when its acceptance criterion is verified — re-send each with an "evidence" field stating the signal you observed (e.g. "tsc --noEmit clean", "GET /users → 200 {id:…}", "14 tests pass"). "files exist on disk" / "done" do NOT count. These tasks have been reverted to in_progress.${unverifiedIds.length < (tasks.filter(t => t.status === 'completed' && !prevCompletedIds.has(t.id)).length) ? ' (Completions with valid evidence in this call were accepted.)' : ''}`
       }
 
-      return formatTaskUpdateResult(tasks, resetArchivedList)
+      return formatTaskUpdateResult(finalTasks, resetArchivedList)
     },
   })
 

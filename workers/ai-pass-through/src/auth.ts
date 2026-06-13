@@ -30,6 +30,58 @@ function jsonFromBase64Url(input: string): Record<string, unknown> {
   return parsed as Record<string, unknown>
 }
 
+// ── JWKS cache (por isolate) ──────────────────────────────────────────────
+//
+// Antes, CADA pedido fazia um fetch ao JWKS do Google sem timeout — um
+// subrequest de latência pura por pedido e um ponto onde um stall do Google
+// pendurava o worker inteiro (hang detector do runtime: "code had hung and
+// would never generate a response"). As keys do securetoken rodam devagar e
+// vêm com cache-control max-age de horas, por isso: cache por isolate com o
+// TTL do header, timeout curto no fetch, e fallback para a cache stale numa
+// falha de rede — auth degradar por causa de um blip do JWKS seria pior do
+// que usar keys ligeiramente antigas. Um `kid` desconhecido com cache fresca
+// é 401 SEM refetch (token forjado não pode forçar cache-bypass por pedido).
+
+type JwksKey = JsonWebKey & { kid?: string }
+
+const JWKS_FETCH_TIMEOUT_MS = 10_000
+const JWKS_FALLBACK_TTL_MS = 60 * 60 * 1000
+const JWKS_MAX_TTL_MS = 24 * 60 * 60 * 1000
+
+let jwksCache: { url: string; keys: JwksKey[]; expiresAtMs: number } | null = null
+
+export function clearJwksCache(): void {
+  jwksCache = null
+}
+
+async function fetchJwks(url: string): Promise<JwksKey[]> {
+  const response = await fetch(url, { signal: AbortSignal.timeout(JWKS_FETCH_TIMEOUT_MS) })
+  if (!response.ok) {
+    throw new Error(`JWKS fetch failed (${response.status})`)
+  }
+  const jwks = await response.json() as { keys?: JwksKey[] }
+  if (!Array.isArray(jwks.keys) || jwks.keys.length === 0) {
+    throw new Error('JWKS payload has no keys')
+  }
+  const maxAge = /max-age=(\d+)/.exec(response.headers.get('cache-control') ?? '')
+  const ttlMs = maxAge
+    ? Math.min(parseInt(maxAge[1], 10) * 1000, JWKS_MAX_TTL_MS)
+    : JWKS_FALLBACK_TTL_MS
+  jwksCache = { url, keys: jwks.keys, expiresAtMs: Date.now() + ttlMs }
+  return jwks.keys
+}
+
+async function getJwksKeys(url: string): Promise<JwksKey[]> {
+  const cached = jwksCache && jwksCache.url === url ? jwksCache : null
+  if (cached && cached.expiresAtMs > Date.now()) return cached.keys
+  try {
+    return await fetchJwks(url)
+  } catch {
+    if (cached) return cached.keys
+    throw new HttpError(503, 'tm_auth_config_error', 'Unable to verify user session.')
+  }
+}
+
 async function verifyFirebaseJwt(token: string, env: Env): Promise<AuthenticatedUser> {
   const parts = token.split('.')
   if (parts.length !== 3) {
@@ -78,13 +130,8 @@ async function verifyFirebaseJwt(token: string, env: Env): Promise<Authenticated
     ? env.FIREBASE_JWKS_URL
     : 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com'
 
-  const jwksResponse = await fetch(jwksUrl)
-  if (!jwksResponse.ok) {
-    throw new HttpError(503, 'tm_auth_config_error', 'Unable to verify user session.')
-  }
-
-  const jwks = await jwksResponse.json() as { keys?: Array<JsonWebKey & { kid?: string }> }
-  const key = jwks.keys?.find(candidate => candidate.kid === header.kid)
+  const keys = await getJwksKeys(jwksUrl)
+  const key = keys.find(candidate => candidate.kid === header.kid)
   if (!key) {
     throw new HttpError(401, 'tm_auth_error', 'Invalid or expired user session.')
   }

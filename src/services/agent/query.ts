@@ -32,6 +32,7 @@ import {
   createLoopDetectorState,
   resetLoopDetector,
 } from "./loopDetector";
+import { contentAsText } from "./promptValueHelpers";
 
 // ── Constants ──
 
@@ -40,6 +41,25 @@ const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3;
 const PLATFORM_AUTH_REFRESH_ATTEMPTS = 1;
 const CREDENTIAL_CONFIG_MAX_RETRIES = 3;
 const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
+
+// 429 do upstream (visto em produção 2026-06-12 com a Vertex: quota
+// por-minuto do projeto GCP, intermitente — 200s entre 429s). Escada
+// crescente para atravessar a janela de quota; o Retry-After do provider,
+// quando presente nos headers do erro, tem precedência (capped a 60s).
+const RATE_LIMIT_MAX_RETRIES = 3;
+const RATE_LIMIT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
+
+/** Lê o Retry-After (segundos) dos headers de um APIError do SDK, se existir. */
+function retryAfterMs(error: unknown): number | null {
+  const headers = (error as { headers?: Record<string, string> | Headers } | null)?.headers;
+  if (!headers) return null;
+  const raw = typeof (headers as Headers).get === 'function'
+    ? (headers as Headers).get('retry-after')
+    : (headers as Record<string, string>)['retry-after'];
+  const seconds = raw ? Number(raw) : NaN;
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return Math.min(seconds, 60) * 1000;
+}
 
 // ── Types ──
 
@@ -136,6 +156,13 @@ export interface QueryParams {
    * sweep ("Note: X was modified..." reminders). Must never throw.
    */
   collectInterTurnContext?: () => Promise<string>;
+  /**
+   * Live active-model limits for the auto-compact decision. Called fresh each
+   * loop iteration because the active model (and thus its context window) is
+   * injected server-side and only learned from the first response's headers.
+   * Returning { contextWindow: null } keeps the legacy 1M-estimate fallback.
+   */
+  getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null };
 }
 
 /** Terminal return value. */
@@ -585,9 +612,16 @@ export async function* query(
     compactInstructions,
     extraHeaders,
     onResponseHeaders,
+    getContextLimits,
   } = params;
   let client = params.client;
   const refreshClient = params.refreshClient;
+
+  // Real provider occupancy from the previous turn (prompt_tokens +
+  // completion_tokens), fed into the auto-compact decision so it tracks the
+  // active model's real window instead of a hardcoded 1M char-estimate.
+  // Undefined until the first response is recorded.
+  let lastTurnRealOccupancy: number | undefined;
 
   let state: LoopState = {
     messages: [...params.messages],
@@ -668,6 +702,16 @@ export async function* query(
     ) => {
       // Side-call: use the same client to summarize
       const prompt = getCompactPrompt(compactInstructions);
+      // Narrate the FULL content — tool calls AND tool results — into the
+      // summarizer input, not just the conversational text. Filtering to
+      // text-only blocks (the old behaviour) stripped every file read, edit,
+      // command output and error before summarization, then the prompt asked
+      // the model to capture "file edits, errors, code patterns" it could no
+      // longer see — structurally forcing it to omit or invent (context
+      // pollution audit, 2026-06-12). The messages reaching here have already
+      // passed applyToolResultBudget + snip + microcompact above, so tool
+      // results are size-bounded. contentAsText renders tool_call as
+      // `[tool: name(args)]` and inlines the (bounded) tool_result text.
       const compactMessages: OpenAI.ChatCompletionMessageParam[] = [
         { role: "system", content: prompt },
         ...msgs.map(
@@ -676,10 +720,7 @@ export async function* query(
             content:
               typeof m.content === "string"
                 ? m.content
-                : (m.content as ContentBlockAPI[])
-                    .filter((b) => b.type === "text")
-                    .map((b) => (b as { type: "text"; text: string }).text)
-                    .join("\n"),
+                : contentAsText(m.content as ContentBlockAPI[]),
           }),
         ),
       ];
@@ -698,12 +739,18 @@ export async function* query(
       }
     };
 
+    const ctxLimits = getContextLimits?.();
     const autoResult = await autoCompact(
       messagesForQuery,
       systemPrompt,
       compactFn,
       tracking,
       snipTokensFreed,
+      {
+        contextWindow: ctxLimits?.contextWindow ?? null,
+        maxOutputTokens: ctxLimits?.maxOutputTokens ?? null,
+        realOccupancyTokens: lastTurnRealOccupancy ?? null,
+      },
     );
 
     if (autoResult.wasCompacted && autoResult.postCompactMessages) {
@@ -797,6 +844,7 @@ export async function* query(
 
     let authRefreshAttempts = 0;
     let credentialConfigRetries = 0;
+    let rateLimitRetries = 0;
 
     // Retry the same model turn only before any assistant output/tool call has
     // been emitted. Retrying after visible output could duplicate text or tools.
@@ -865,6 +913,25 @@ export async function* query(
 
         // Debug: log first chunks to see reasoning_content vs content structure
         if (!delta) continue;
+
+        // Gemini (Vertex/AI Studio OpenAI-compat): com include_thoughts, os
+        // pensamentos chegam como delta.content NORMAL marcado com
+        // `extra_content.google.thought: true` — NÃO existe reasoning_content
+        // (verificado empiricamente 2026-06-12 contra a Vertex). Sem este
+        // desvio, o thinking do Gemini aparecia misturado na resposta
+        // visível. NOTA: `thought_signature` em extra_content aparece também
+        // em deltas de resposta normal — só `thought === true` marca
+        // reasoning.
+        if (
+          delta?.content &&
+          (delta as any)?.extra_content?.google?.thought === true
+        ) {
+          const reasoning = String(delta.content);
+          assistantThinkingParts.push(reasoning);
+          nativeAccumulator.reasoningContent += reasoning;
+          yield { type: "thinking_delta", thinking: reasoning };
+          continue;
+        }
 
         // Reasoning/thinking content (OpenAI-compatible format)
         // MiniMax M3: reasoning_details field when reasoning_split=True
@@ -1202,6 +1269,43 @@ export async function* query(
         continue;
       }
 
+      // ── 429 rate limit do upstream — retry 3x com escada crescente ──
+      // Só antes de qualquer output (o 429 chega sempre pré-stream; se já
+      // houve output, repetir duplicaria conteúdo). O Retry-After do
+      // provider, quando presente, substitui o degrau da escada.
+      if (
+        !outputStarted &&
+        errorStatus(error) === 429 &&
+        rateLimitRetries < RATE_LIMIT_MAX_RETRIES
+      ) {
+        const nextRetry = rateLimitRetries + 1;
+        const delayMs =
+          retryAfterMs(error) ??
+          RATE_LIMIT_RETRY_DELAYS_MS[rateLimitRetries] ??
+          RATE_LIMIT_RETRY_DELAYS_MS[RATE_LIMIT_RETRY_DELAYS_MS.length - 1];
+        yield {
+          type: "agent_status",
+          phase: "retrying",
+          message: `Provider rate limit (429). Retrying ${nextRetry}/${RATE_LIMIT_MAX_RETRIES} in ${Math.round(delayMs / 1000)}s...`,
+          attempt: nextRetry,
+          maxAttempts: RATE_LIMIT_MAX_RETRIES,
+          httpStatus: 429,
+          retryInMs: delayMs,
+        };
+        const completedDelay = await abortableDelay(delayMs, signal);
+        if (!completedDelay) {
+          yield { type: "interrupted" };
+          return {
+            reason: "aborted",
+            turnCount: state.turnCount,
+            totalInputTokens,
+            totalOutputTokens,
+          };
+        }
+        rateLimitRetries = nextRetry;
+        continue;
+      }
+
       // ── Collapse recovery on prompt_too_long ──
       const MAX_COLLAPSE_RECOVERY = 3;
       const isPromptTooLong =
@@ -1252,6 +1356,11 @@ export async function* query(
       totalInputTokens += turnUsage.prompt_tokens;
       totalOutputTokens += turnUsage.completion_tokens;
       onUsage?.(turnUsage.prompt_tokens, turnUsage.completion_tokens);
+      // Real occupancy for the NEXT iteration's compaction decision. input
+      // already includes all prior history; output rolls into the next
+      // prompt — their sum is the true "how full is the window right now"
+      // (matches utils/contextWindow.ts totalContextTokens + the UI pill).
+      lastTurnRealOccupancy = turnUsage.prompt_tokens + turnUsage.completion_tokens;
     }
 
     // ── Build provider-native state for round-trip ──

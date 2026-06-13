@@ -26,6 +26,10 @@ export const BillingOverageBanner = memo(function BillingOverageBanner() {
 
   if (consumedPct <= 1) return null
 
+  // Refined-terminal: flat full-width warning LINE — no rounded card, no fill
+  // box, no shadow. Semantic yellow (terminal.yellow) foreground reads as a
+  // native terminal warning; the existing low-alpha bg + 1px hairline is the
+  // only separation cue.
   return (
     <Flex
       align="center"
@@ -33,12 +37,12 @@ export const BillingOverageBanner = memo(function BillingOverageBanner() {
       px={3}
       py="5px"
       bg="rgba(247,127,0,0.06)"
-      borderBottom="1px solid rgba(247,127,0,0.15)"
+      borderBottom={`1px solid ${tokens.colors.terminal.chromeHairlineFaint}`}
       flexShrink={0}
       data-tauri-drag-region
     >
-      <Text fontSize="11px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} fontWeight="700">!</Text>
-      <Text fontSize="11px" color={tokens.colors.accent.orange} fontFamily={tokens.fontFamily.mono} opacity={0.9}>
+      <Text fontSize="11px" color={tokens.colors.terminal.yellow} fontFamily={tokens.fontFamily.mono} fontWeight="700">!</Text>
+      <Text fontSize="11px" color={tokens.colors.terminal.yellow} fontFamily={tokens.fontFamily.mono} opacity={0.9}>
         {byokInUse
           ? t('chat.byokOverBudget')
           : t('terminalMode.billing.overBudget')}

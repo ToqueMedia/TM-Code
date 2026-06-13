@@ -153,13 +153,13 @@ export const TerminalCredentialPrompt = memo(function TerminalCredentialPrompt({
   return (
     <Box
       mb={3}
-      borderLeft={`2px solid ${tokens.colors.accent.primary}`}
+      borderLeft={`2px solid ${tokens.colors.accent.purple}`}
       pl={3}
       py={2}
     >
       {/* Header */}
       <Flex align="center" gap={2} mb={2}>
-        <Text fontSize="11px" color={tokens.colors.accent.primary} fontFamily={tokens.fontFamily.mono} fontWeight="700" textTransform="uppercase" letterSpacing="0.06em">
+        <Text fontSize="11px" color={tokens.colors.accent.purple} fontFamily={tokens.fontFamily.mono} fontWeight="700" textTransform="uppercase" letterSpacing="0.06em">
           CREDENTIALS
         </Text>
         {serviceName && (
@@ -183,7 +183,7 @@ export const TerminalCredentialPrompt = memo(function TerminalCredentialPrompt({
                 {field.label}
               </Text>
               {field.required && (
-                <Text fontSize="10px" color={tokens.colors.accent.primary} fontFamily={tokens.fontFamily.mono}>
+                <Text fontSize="10px" color={tokens.colors.accent.purple} fontFamily={tokens.fontFamily.mono}>
                   *
                 </Text>
               )}
@@ -206,8 +206,8 @@ export const TerminalCredentialPrompt = memo(function TerminalCredentialPrompt({
                 style={{
                   width: '100%',
                   background: 'rgba(0, 0, 0, 0.3)',
-                  border: `1px solid ${focusIdx === idx ? tokens.colors.accent.primary : 'rgba(255, 255, 255, 0.08)'}`,
-                  borderRadius: '4px',
+                  border: `1px solid ${focusIdx === idx ? tokens.colors.accent.purple : 'rgba(255, 255, 255, 0.08)'}`,
+                  borderRadius: tokens.radius.sm,
                   padding: '6px 10px',
                   fontSize: '13px',
                   fontFamily: isPassword ? tokens.fontFamily.mono : undefined,
@@ -232,23 +232,12 @@ export const TerminalCredentialPrompt = memo(function TerminalCredentialPrompt({
         </Text>
       )}
 
-      {/* Key hints */}
+      {/* Key hints — Refined-terminal: bare bracketed keycaps, no filled pills. */}
       <Flex align="center" gap={3} mt={3} pt={2} borderTop={`1px solid rgba(255, 255, 255, 0.06)`}>
         <Flex align="center" gap={1}>
-          <Box
-            as="span"
-            px="5px"
-            py="1px"
-            borderRadius="3px"
-            bg="rgba(255, 255, 255, 0.06)"
-            border="1px solid rgba(255, 255, 255, 0.1)"
-            fontSize="10px"
-            fontFamily={tokens.fontFamily.mono}
-            color={tokens.colors.terminal.foreground}
-            fontWeight="600"
-          >
-            ⌘↵
-          </Box>
+          <Text as="span" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">
+            [⌘↵]
+          </Text>
           <Text fontSize="10px" color={tokens.colors.terminal.green} fontFamily={tokens.fontFamily.mono} opacity={0.8}>
             {submitting ? 'saving...' : 'save'}
           </Text>
@@ -257,20 +246,9 @@ export const TerminalCredentialPrompt = memo(function TerminalCredentialPrompt({
           ·
         </Text>
         <Flex align="center" gap={1}>
-          <Box
-            as="span"
-            px="5px"
-            py="1px"
-            borderRadius="3px"
-            bg="rgba(255, 255, 255, 0.06)"
-            border="1px solid rgba(255, 255, 255, 0.1)"
-            fontSize="10px"
-            fontFamily={tokens.fontFamily.mono}
-            color={tokens.colors.terminal.foreground}
-            fontWeight="600"
-          >
-            esc
-          </Box>
+          <Text as="span" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">
+            [esc]
+          </Text>
           <Text fontSize="10px" color={tokens.colors.accent.red} fontFamily={tokens.fontFamily.mono} opacity={0.8}>
             cancel
           </Text>
@@ -279,20 +257,9 @@ export const TerminalCredentialPrompt = memo(function TerminalCredentialPrompt({
           ·
         </Text>
         <Flex align="center" gap={1}>
-          <Box
-            as="span"
-            px="5px"
-            py="1px"
-            borderRadius="3px"
-            bg="rgba(255, 255, 255, 0.06)"
-            border="1px solid rgba(255, 255, 255, 0.1)"
-            fontSize="10px"
-            fontFamily={tokens.fontFamily.mono}
-            color={tokens.colors.terminal.foreground}
-            fontWeight="600"
-          >
-            tab
-          </Box>
+          <Text as="span" fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.terminal.foreground} fontWeight="600">
+            [tab]
+          </Text>
           <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono} opacity={0.8}>
             next field
           </Text>

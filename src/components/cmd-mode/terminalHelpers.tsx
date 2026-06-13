@@ -32,11 +32,11 @@ export function formatTokens(count: number): string {
 
 const inlineCodeStyle: React.CSSProperties = {
   background: 'rgba(255, 255, 255, 0.07)',
-  borderRadius: '3px',
+  borderRadius: tokens.radius.sm,
   padding: '1px 5px',
   fontSize: '12px',
   fontFamily: tokens.fontFamily.mono,
-  color: '#e6a1c0',
+  color: tokens.colors.terminal.inlineCode,
   border: '1px solid rgba(255, 255, 255, 0.05)',
   wordBreak: 'break-word',
   overflowWrap: 'anywhere',
@@ -102,13 +102,12 @@ export const terminalMarkdownComponents: Components = {
       {children}
     </span>
   ),
-  // Markdown tables — rendered with proper terminal UI/UX
+  // Markdown tables — flat (refined-terminal): no outer card/radius/border;
+  // a single 1px rule under the header is the only separation cue.
   table: ({ children }) => (
     <div style={{
       margin: '8px 0',
       overflowX: 'auto',
-      borderRadius: '4px',
-      border: '1px solid rgba(255, 255, 255, 0.08)',
     }}>
       <table style={{
         width: '100%',
@@ -123,8 +122,7 @@ export const terminalMarkdownComponents: Components = {
   ),
   thead: ({ children }) => (
     <thead style={{
-      background: 'rgba(255, 255, 255, 0.04)',
-      borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+      borderBottom: `1px solid ${tokens.colors.border.subtle}`,
     }}>
       {children}
     </thead>

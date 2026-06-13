@@ -18,6 +18,11 @@ export interface AgentTask {
   blockedBy?: string[];
   /** Files involved in this task — for prompt context and UI affordances. */
   files?: string[];
+  /** How this task's acceptance criterion was verified (test output,
+   *  endpoint response, build/typecheck pass). Required by `update_tasks`
+   *  when flipping a task to `completed` — filesystem existence does not
+   *  count. Persisted as an audit trail of why each task was marked done. */
+  evidence?: string;
 }
 
 interface AgentState {

@@ -521,7 +521,7 @@ Read ${projectPath}/TODO.md and work through the tasks under the first \`## Phas
 2. Mark it in_progress in the tracker: \`update_tasks\` with the existing task list, flipping THIS task's \`status\` to \`"in_progress"\`. Use the same task IDs the architect seeded (e.g., "1.1", "1.2") — do NOT invent new IDs and do NOT replace the list.
 3. Implement the task completely.
 4. Verify the acceptance criterion in TODO.md.
-5. Mark it done in BOTH places: change \`- [ ]\` to \`- [x]\` in TODO.md AND \`update_tasks\` with this task's status flipped to \`"completed"\`.
+5. Mark it done in BOTH places: change \`- [ ]\` to \`- [x]\` in TODO.md AND \`update_tasks\` with this task's status flipped to \`"completed"\` and an \`evidence\` field stating how you verified step 4 (the actual signal — "tsc --noEmit clean", "GET /users → 200", "tests pass"). A completion without real evidence is reverted to in_progress.
 
 The tracker and TODO.md must stay in sync — the developer's UI watches the tracker, TODO.md is the persistent record. Skipping the tracker update means the UI shows nothing happening even though work is progressing.
 

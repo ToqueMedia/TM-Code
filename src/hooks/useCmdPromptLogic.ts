@@ -390,6 +390,22 @@ export function useCmdPromptLogic() {
       return
     }
 
+    // Gate de billing para imagens TAMBÉM aqui: o handleSend bloqueia, mas
+    // mensagens ENFILEIRADAS com o agente ocupado chegam via
+    // executeQueuedInput→executePrompt e saltavam o gate — a imagem seguia
+    // pelo caminho degradado (<attached_image> XML) e o modelo "explicava"
+    // ao user que não vê imagens (análise 2026-06-12). Mesmo comportamento
+    // do handleSend: aviso accionável em vez de degradação silenciosa.
+    const hasQueuedImages = typeof promptValue !== 'string'
+      && promptValue.some(b => b.type === 'attachment' && b.attachment.type === 'image')
+    if (hasQueuedImages && useBillingStore.getState().plan === 'explorer') {
+      useChatStore.getState().addSystemMessage(
+        t('terminalMode.imageNotSupportedBlocked'),
+        'warn',
+      )
+      return
+    }
+
     // Render the user bubble FIRST — synchronously, before any await — so the
     // dequeued message appears in the transcript without a perceptible gap.
     // Previously, mention resolution + runAgentWithCallbacks's `await prev` +
@@ -655,19 +671,10 @@ export function useCmdPromptLogic() {
       return
     }
 
-    setInput('')
-    setShowCommandMenu(false)
-    setShowMentionMenu(false)
-    hashtagMenu.close()
-
-    historyRef.current = [prompt, ...historyRef.current.filter(h => h !== prompt)].slice(0, MAX_PROMPT_HISTORY)
-    historyIndexRef.current = -1
-    // Persist asynchronously — never blocks send. Never throws (service swallows IDB errors).
-    if (prompt && projectPath) {
-      void savePromptHistory(projectPath, historyRef.current)
-    }
-
-    // Build value: plain string or ContentBlock[] with attachments
+    // Build value FIRST — o prune pode deixar zero conteúdo enviável (ex.:
+    // o user apagou o token [Image #N] e o anexo órfão ainda está no store,
+    // pelo que hasAttachments engana). Decidir "há algo para enviar?" só
+    // DEPOIS do prune evita o envio de mensagem vazia (report 2026-06-12).
     let value: PromptValue
     if (hasAttachments) {
       const blocks: ContentBlock[] = []
@@ -683,10 +690,28 @@ export function useCmdPromptLogic() {
         }
         blocks.push({ type: 'attachment', attachment: att })
       }
+      if (blocks.length === 0) {
+        // Nada enviável — só anexos órfãos cujos tokens foram apagados.
+        // Limpa o resíduo e não envia nada.
+        clearAttachments()
+        return
+      }
       value = blocks.length === 1 && blocks[0].type === 'text' ? prompt : blocks
       clearAttachments()
     } else {
       value = prompt
+    }
+
+    setInput('')
+    setShowCommandMenu(false)
+    setShowMentionMenu(false)
+    hashtagMenu.close()
+
+    historyRef.current = [prompt, ...historyRef.current.filter(h => h !== prompt)].slice(0, MAX_PROMPT_HISTORY)
+    historyIndexRef.current = -1
+    // Persist asynchronously — never blocks send. Never throws (service swallows IDB errors).
+    if (prompt && projectPath) {
+      void savePromptHistory(projectPath, historyRef.current)
     }
 
     // Control commands (/exit, /new, /clear) bypass the queue — they cancel
@@ -770,6 +795,56 @@ export function useCmdPromptLogic() {
           e.preventDefault()
           setShowCommandMenu(false)
           return
+        }
+      }
+
+      // Tokens de anexo (`[Image #N]`, `[Pasted text #N ...]`) apagam-se
+      // ATOMICAMENTE: Backspace com o caret no fim/interior do token (ou
+      // Delete no início/interior) remove o token inteiro de uma vez.
+      // Apagar carácter a carácter deixava markers mutilados ("[Image #1")
+      // que já não casavam com o prune do envio — a imagem seguia na
+      // mensagem apesar de o user "ter apagado" (pedido 2026-06-12).
+      if (
+        (e.key === 'Backspace' || e.key === 'Delete') &&
+        !e.metaKey && !e.ctrlKey && !e.altKey
+      ) {
+        const ta = textareaRef.current
+        if (ta && ta.selectionStart === ta.selectionEnd) {
+          const caret = ta.selectionStart
+          const TOKEN_RE = /\[Image #\d+\]|\[Pasted text #\d+[^\]]*\]/g
+          let match: RegExpExecArray | null
+          while ((match = TOKEN_RE.exec(input)) !== null) {
+            const start = match.index
+            const end = start + match[0].length
+            if (start > caret) break
+            const hit = e.key === 'Backspace'
+              ? caret > start && caret <= end
+              : caret >= start && caret < end
+            if (hit) {
+              e.preventDefault()
+              // Token de imagem apagado → remove TAMBÉM o anexo do store.
+              // Sem isto ficava um anexo órfão invisível (os chips de imagem
+              // não renderizam no terminal) que mantinha hasAttachments=true
+              // e abria caminho ao envio de mensagem vazia.
+              const imageMarker = match[0].match(/^\[Image #(\d+)\]$/)
+              if (imageMarker) {
+                const marker = Number(imageMarker[1])
+                const orphan = draftAttachments.find(
+                  a => a.type === 'image' && a.pasteMarker === marker,
+                )
+                if (orphan) removeAttachment(orphan.id)
+              }
+              handleInputChange(input.slice(0, start) + input.slice(end))
+              requestAnimationFrame(() => {
+                const el = textareaRef.current
+                if (el) {
+                  el.selectionStart = start
+                  el.selectionEnd = start
+                }
+              })
+              return
+            }
+          }
         }
       }
 
@@ -877,6 +952,8 @@ export function useCmdPromptLogic() {
       hashtagMenu,
       input, queuedCommands,
       setInputAndCaret,
+      handleInputChange,
+      draftAttachments, removeAttachment,
     ]
   )
 

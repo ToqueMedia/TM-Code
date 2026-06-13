@@ -202,6 +202,19 @@ export const tokens = {
       brightMagenta: '#d670d6',
       brightCyan: '#29b8db',
       brightWhite: '#e5e5e5',
+
+      // --- Refined-terminal chrome (Terminal Mode) ---
+      // Centralizes values that cmd-mode previously hard-coded inline so the
+      // surface stays a single source of truth (and unblocks multi-theme).
+      // Values intentionally preserve the prior low-alpha look exactly.
+      titlebarBg: 'rgba(0, 0, 0, 0.45)',
+      statusbarBg: 'rgba(0, 0, 0, 0.2)',
+      chromeHairline: 'rgba(255, 255, 255, 0.05)',
+      chromeHairlineFaint: 'rgba(255, 255, 255, 0.04)',
+      userText: '#f2ecff',
+      assistantText: '#b9c7d9',
+      assistantRail: 'rgba(17, 168, 205, 0.28)',
+      inlineCode: '#e6a1c0',
     },
 
     // === Markdown / Code rendering ===

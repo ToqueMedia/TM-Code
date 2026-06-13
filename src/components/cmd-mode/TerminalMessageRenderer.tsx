@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import ReactMarkdown from 'react-markdown'
 import { FiFile, FiFolder, FiImage } from 'react-icons/fi'
@@ -14,11 +14,14 @@ import SubAgentCard from '../chat/SubAgentCard'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import { useChatStore } from '../../stores/chatStore'
 import { groupConsecutiveAgentShellCalls, isAgentShellTool, ShellCommandBlock, ShellSessionBlock } from '../shell/ShellCommandBlock'
+import { Spinner, DOTS_FRAMES } from './terminalSpinner'
 
 const USER_PROMPT_COLOR = tokens.colors.accent.purple
-const USER_TEXT_COLOR = '#f2ecff'
+// Tokenized (same values, detox of hard-coded hex/rgba) — refined-terminal.
+const USER_TEXT_COLOR = tokens.colors.terminal.userText
 const ASSISTANT_MARKER_COLOR = tokens.colors.terminal.cyan
-const ASSISTANT_TEXT_COLOR = '#b9c7d9'
+const ASSISTANT_TEXT_COLOR = tokens.colors.terminal.assistantText
+const ASSISTANT_RAIL_COLOR = tokens.colors.terminal.assistantRail
 
 // ─── Special card renderer (plan_approval, credential_request, ask_user_question) ───
 
@@ -169,6 +172,24 @@ function ContentBlocksRenderer({
         }
         if (block.type === 'tool_call') {
           const tc = toolCallMap.get(block.toolCallId)
+          // Leituras CONSECUTIVAS do mesmo ficheiro colapsam numa linha só:
+          // renderizamos apenas a ÚLTIMA da sequência — quando o agente faz
+          // a leitura seguinte (offset novo), a anterior desaparece e a
+          // linha "substitui-se" em vez de empilhar 5× o mesmo path
+          // (verbosidade reportada 2026-06-12). O subtítulo mostra o
+          // intervalo de linhas do read mais recente (toolDisplay).
+          if (tc?.toolName === 'read_file') {
+            const path = typeof tc.input?.file_path === 'string' ? tc.input.file_path : null
+            const next = optimizedBlocks[i + 1]
+            const nextCall = next?.type === 'tool_call' ? toolCallMap.get(next.toolCallId) : null
+            if (
+              path &&
+              nextCall?.toolName === 'read_file' &&
+              nextCall.input?.file_path === path
+            ) {
+              return null
+            }
+          }
           if (tc && isAgentShellTool(tc.toolName)) {
             const previous = optimizedBlocks[i - 1]
             const previousCall = previous?.type === 'tool_call' ? toolCallMap.get(previous.toolCallId) : null
@@ -203,38 +224,17 @@ const attachmentIcons = {
 }
 
 function UserMessageAttachments({ attachments }: { attachments: Attachment[] }) {
-  if (attachments.length === 0) return null
-
-  // Terminal mode never renders image pixels — images appear as the
-  // claude-vaz text chip `[Image #N]` (history.ts:59). O número vem do
-  // pasteMarker (igual ao texto inserido no input); fallback posicional
-  // para mensagens antigas sem marker.
-  const imageNumbers = new Map<string, number>()
-  for (const att of attachments) {
-    if (att.type === 'image') {
-      imageNumbers.set(att.id, att.pasteMarker ?? imageNumbers.size + 1)
-    }
-  }
+  // Imagens não renderizam nada aqui: o texto da mensagem já contém o token
+  // `[Image #N]` que o user viu no input — o chip extra era duplicação
+  // (pedido 2026-06-12, par do CmdAttachmentBar). Só ficheiros/pastas têm
+  // representação própria.
+  const visibleAttachments = attachments.filter(att => att.type !== 'image')
+  if (visibleAttachments.length === 0) return null
 
   return (
     <Flex gap={2} flexWrap="wrap" mt={1.5} ml={4}>
-      {attachments.map(att => {
+      {visibleAttachments.map(att => {
         const Icon = attachmentIcons[att.type]
-
-        if (att.type === 'image') {
-          return (
-            <Text
-              key={att.id}
-              fontSize="12px"
-              fontFamily={tokens.fontFamily.mono}
-              color={tokens.colors.text.muted}
-              lineHeight="1.55"
-              whiteSpace="nowrap"
-            >
-              [Image #{imageNumbers.get(att.id)}]
-            </Text>
-          )
-        }
 
         return (
           <Flex
@@ -290,8 +290,6 @@ function TerminalMessageRendererInner({
         pl={2}
         pr={2}
         borderLeft={`2px solid ${USER_PROMPT_COLOR}`}
-        bg="rgba(163, 113, 247, 0.035)"
-        borderRadius="0 4px 4px 0"
       >
         <Flex gap={1.5} align="flex-start">
           <Text
@@ -402,7 +400,7 @@ function TerminalMessageRendererInner({
       overflowX="hidden"
       wordBreak="break-word"
       style={{ overflowWrap: 'anywhere' }}
-      borderLeft={`2px solid rgba(17, 168, 205, 0.28)`}
+      borderLeft={`2px solid ${ASSISTANT_RAIL_COLOR}`}
       pl={2.5}
     >
       <Flex align="center" gap={1.5} mb={message.content || hasContentBlocks || message.toolCalls?.length ? 1 : 0}>
@@ -427,25 +425,14 @@ function TerminalMessageRendererInner({
           TM Code
         </Text>
       </Flex>
-      {/* Waiting dots — only when streaming with no visible content yet */}
+      {/* Waiting indicator — only when streaming with no visible content yet.
+          Hard-step accumulating-dots frame-swap replaces the eased `pulseDot`
+          breathing trio (refined-terminal: one sanctioned activity animation). */}
       {isStreaming && !message.content && (!message.toolCalls || message.toolCalls.length === 0) && (
-        <Flex gap="5px" align="center" py={1.5}>
-          {[0, 1, 2].map(i => (
-            <Box
-              key={i}
-              w="4px"
-              h="4px"
-              borderRadius="full"
-              bg={tokens.colors.accent.purple}
-              css={{
-                animation: `pulseDot 1.4s ease-in-out ${i * 0.2}s infinite`,
-                '@keyframes pulseDot': {
-                  '0%, 80%, 100%': { opacity: 0.15, transform: 'scale(0.7)' },
-                  '40%': { opacity: 1, transform: 'scale(1)' },
-                },
-              }}
-            />
-          ))}
+        <Flex align="center" py={1.5} color={tokens.colors.accent.purple}>
+          <Text fontFamily={tokens.fontFamily.mono} fontSize="14px" lineHeight="1">
+            <Spinner active frames={DOTS_FRAMES} />
+          </Text>
         </Flex>
       )}
 
@@ -545,10 +532,10 @@ function TerminalMessageRendererInner({
 }
 
 // ─── TerminalReasoningBlock ────────────────────────────────────────────────
-// Live reasoning with film-credits effect during streaming, collapsible after.
-// Same UX as chat-mode ReasoningBlock but styled for the terminal aesthetic.
-
-const CREDITS_HEIGHT_PX = 140
+// FECHADO durante o streaming, com shimmer no label "THINKING" a sinalizar
+// atividade; expansível só depois de terminar (decisão de UX 2026-06-12 —
+// substitui o credits-roll aberto). Mesma UX do ReasoningBlock do chat,
+// estética terminal.
 
 function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
   content: string
@@ -556,28 +543,8 @@ function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
   durationMs?: number
 }) {
   const [expanded, setExpanded] = useState(false)
-  const scrollRef = useRef<HTMLDivElement | null>(null)
-  const userScrolledRef = useRef(false)
 
-  // Auto-scroll: credits-roll effect — stick to bottom while content grows.
-  useEffect(() => {
-    const node = scrollRef.current
-    if (!node || userScrolledRef.current) return
-    node.scrollTop = node.scrollHeight
-  }, [content])
-
-  function handleScroll(e: React.UIEvent<HTMLDivElement>): void {
-    const node = e.currentTarget
-    const distanceFromBottom = node.scrollHeight - node.clientHeight - node.scrollTop
-    userScrolledRef.current = distanceFromBottom > 12
-  }
-
-  // Reset scroll tracking when streaming starts
-  useEffect(() => {
-    if (isStreaming) userScrolledRef.current = false
-  }, [isStreaming])
-
-  const isExpanded = isStreaming || expanded
+  const isExpanded = !isStreaming && expanded
 
   // Duration label
   const durationLabel = useMemo(() => {
@@ -601,31 +568,24 @@ function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
         onClick={() => { if (!isStreaming) setExpanded(e => !e) }}
         py="3px"
         px="6px"
-        borderRadius="4px"
         _hover={isStreaming ? undefined : { bg: 'rgba(255, 255, 255, 0.03)' }}
         userSelect="none"
       >
         {isStreaming ? (
-          <Flex gap="4px" align="center">
-            <Flex gap="2px" align="center">
-              {[0, 1, 2].map(i => (
-                <Box
-                  key={i}
-                  w="3px"
-                  h="3px"
-                  borderRadius="full"
-                  bg={tokens.colors.accent.purple}
-                  css={{
-                    animation: `terminalPulse 1.4s ease-in-out ${i * 0.2}s infinite`,
-                    '@keyframes terminalPulse': {
-                      '0%, 80%, 100%': { opacity: 0.15, transform: 'scale(0.7)' },
-                      '40%': { opacity: 1, transform: 'scale(1)' },
-                    },
-                  }}
-                />
-              ))}
-            </Flex>
-            <Text fontSize="10px" color={tokens.colors.accent.purple} fontFamily={tokens.fontFamily.mono} fontWeight="600" letterSpacing="0.05em">
+          // Refined-terminal: static dim THINKING with a leading hard-step
+          // spinner — replaces the eased `terminalPulse` dots and the
+          // `terminalThinkingShimmer` gradient text-clip animation.
+          <Flex gap="4px" align="center" color={tokens.colors.accent.purple}>
+            <Text fontFamily={tokens.fontFamily.mono} fontSize="10px" lineHeight="1">
+              <Spinner active />
+            </Text>
+            <Text
+              fontSize="10px"
+              fontFamily={tokens.fontFamily.mono}
+              fontWeight="600"
+              letterSpacing="0.05em"
+              opacity={0.7}
+            >
               THINKING
             </Text>
           </Flex>
@@ -646,30 +606,20 @@ function TerminalReasoningBlock({ content, isStreaming, durationMs }: {
         )}
       </Flex>
 
-      {/* Content — fixed height + credits effect during streaming, auto after */}
+      {/* Content — só visível depois do streaming terminar, a pedido. */}
       {isExpanded && (
         <Box
-          ref={scrollRef}
-          onScroll={handleScroll}
           ml="6px"
           pl={2}
           borderLeft={`2px solid ${tokens.colors.accent.purpleMuted}`}
-          height={isStreaming ? `${CREDITS_HEIGHT_PX}px` : 'auto'}
-          maxH={isStreaming ? `${CREDITS_HEIGHT_PX}px` : '240px'}
+          maxH="240px"
           overflowY="auto"
           py="6px"
           px="8px"
           css={{
             '&::-webkit-scrollbar': { width: '3px' },
             '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.08)', borderRadius: '2px' },
-            ...(isStreaming ? {
-              maskImage: 'linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%)',
-              WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%)',
-            } : {}),
           }}
-          display={isStreaming ? 'flex' : 'block'}
-          flexDirection={isStreaming ? 'column' : undefined}
-          justifyContent={isStreaming ? 'flex-end' : undefined}
           maxW="100%"
         >
           <Text

@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useChatStore } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -14,6 +13,7 @@ import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands
 import CmdModePromptInput, { type CmdModePromptInputRef } from './CmdModePromptInput'
 import { TerminalTitleBar } from './TerminalTitleBar'
 import { TerminalStatusLine } from './TerminalStatusLine'
+import { TerminalWorkingTips } from './TerminalWorkingTips'
 import { TerminalMessageRenderer } from './TerminalMessageRenderer'
 import { TerminalGreeting } from './TerminalGreeting'
 import { TerminalPanel } from './TerminalPanel'
@@ -21,6 +21,7 @@ import { BillingOverageBanner } from './BillingOverageBanner'
 import { ErrorBoundary } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
+import { TerminalCompactionIndicator } from './TerminalCompactionIndicator'
 import AgentTasksPanel from '../chat/AgentTasksPanel'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useAttachments } from '../../hooks/useAttachments'
@@ -197,9 +198,20 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   useEffect(() => {
     if (!projectPath) return
     let cancelled = false
-    const promise = import('@tauri-apps/api/core').then(({ invoke }) => {
-      if (!cancelled) return invoke('open_project', { path: projectPath })
-    })
+    const promise = import('@tauri-apps/api/core')
+      .then(({ invoke }) => {
+        if (!cancelled) return invoke<import('../../types/project').ProjectInfo>('open_project', { path: projectPath })
+      })
+      .then(async info => {
+        // Rust just wrote this folder into the recents file, but the Welcome
+        // "Recents" list renders the in-memory array — mirror the returned
+        // entry so the folder shows up immediately when the user exits back
+        // to Welcome, instead of only after an app restart.
+        if (cancelled || !info) return
+        const { useProjectStore } = await import('../../stores/projectStore')
+        useProjectStore.getState().upsertRecentProject(info)
+      })
+      .catch(() => { /* recents mirror is best-effort */ })
     return () => {
       cancelled = true
       // Await the promise so the callback stays alive until Rust responds.
@@ -325,6 +337,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       setChatTextFontSize(CHAT_TEXT_FONT_SIZE_OPTIONS[nextIdx])
     }
     const handler = (e: KeyboardEvent) => {
+      // Teclas nascidas dentro do PTY embebido pertencem ao SHELL, não a nós:
+      // ^C tem de chegar ao processo (SIGINT via xterm onData → write_to_pty),
+      // ^L é clear do shell, ^K/^U são readline. Sem este bail-out, parar um
+      // comando no TerminalPanel com o agente ativo matava o AGENTE e o
+      // comando continuava a correr — o oposto da intenção (report 2026-06-12).
+      // O xterm também trata a cópia (evento DOM 'copy') por si.
+      if ((e.target as HTMLElement | null)?.closest?.('[data-pty-terminal]')) return
       // Ctrl/Cmd+C — stop agent when it is active, including non-streaming tool phases.
       // If the user has selected text in chat, prompt, terminal output, or Monaco,
       // leave the browser/editor copy behavior untouched.
@@ -421,6 +440,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     }
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      // Escape dentro do PTY embebido é uma tecla do shell/TUI (vim, less,
+      // fzf...) — deixá-la chegar ao xterm em vez de fechar o painel. O
+      // painel fecha-se com Esc quando o foco está fora dele, ou no toggle.
+      if ((e.target as HTMLElement | null)?.closest?.('[data-pty-terminal]')) return
       if (pendingPermissionRef.current) return
       // AskUserQuestion component handles its own Escape — don't exit CMD mode.
       if (hasPendingAskUserQuestionRef.current) return
@@ -594,6 +617,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const terminalOpen = useTerminalPanelStore(s => s.isOpen)
   const terminalWidthPref = useTerminalPanelStore(s => s.widthPx)
   const setTerminalWidth = useTerminalPanelStore(s => s.setWidth)
+  // Subscrito (não getState() no render): hoje todas as transições de
+  // instances coincidem com mudanças de isOpen, mas um read não-reactivo
+  // no JSX fica obsoleto no instante em que alguém adicionar uma ação ao
+  // store que mexa em instances sem tocar num campo subscrito — e o painel
+  // ficaria montado/desmontado errado sem re-render. Com subscrição, a
+  // condição é sempre verdade-do-store.
+  const hasTerminalInstances = useTerminalPanelStore(s => s.instances.length > 0)
 
   // Suppress prompt input focus until the terminal panel's PTY is ready.
   // onReady callback fires when start_pty_shell succeeds — clears the flag
@@ -752,23 +782,15 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
               </Text>
             </Box>
           ) : (
-            <AnimatePresence mode="wait">
-              {messages.length === 0 && !hasEverHadMessages ? (
-                <motion.div
-                  key="greeting"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0, transition: { duration: 0.15 } }}
-                >
-                  <TerminalGreeting projectPath={projectPath} />
-                </motion.div>
-              ) : (
-                <motion.div
-                  key="messages"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1, transition: { duration: 0.2 } }}
-                >
-                  <Box pb={1} data-selectable="true">
+            // Instant conditional swap (no framer-motion crossfade) — native
+            // terminals print without an opacity tween. Same condition + children.
+            messages.length === 0 && !hasEverHadMessages ? (
+              <Box key="greeting">
+                <TerminalGreeting projectPath={projectPath} />
+              </Box>
+            ) : (
+              <Box key="messages">
+                <Box pb={1} data-selectable="true">
               {canLoadMore && (
                 <Box
                   as="button"
@@ -782,7 +804,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
                   py={2}
                   px={2}
                   mb={1}
-                  borderRadius="4px"
+                  borderRadius={tokens.radius.sm}
                   bg={tokens.colors.bg.hoverSubtle}
                   border={`1px solid ${tokens.colors.border.panel}`}
                   cursor="pointer"
@@ -798,15 +820,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
               )}
               {visibleItems.map(msg => (
                 <ErrorBoundary key={msg.id}>
-                  <Box
-                    css={{
-                      animation: 'msgFadeIn 0.1s ease-out',
-                      '@keyframes msgFadeIn': {
-                        from: { opacity: '0' },
-                        to: { opacity: '1' },
-                      },
-                    }}
-                  >
+                  {/* Instant print — no fade-in animation (native terminal feel). */}
+                  <Box>
                     <TerminalMessageRenderer
                       message={msg}
                       isStreaming={msg.id === streamingMessageId}
@@ -814,10 +829,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
                   </Box>
                 </ErrorBoundary>
               ))}
+              {/* Inline compaction progress — appears at the tail of the
+                  scrollback while the agent compresses context. */}
+              <TerminalCompactionIndicator />
             </Box>
-                </motion.div>
-              )}
-            </AnimatePresence>
+              </Box>
+            )
           )}
         </Box>
       </Box>
@@ -832,7 +849,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           as="button"
           w="28px"
           h="28px"
-          borderRadius="full"
+          borderRadius={tokens.radius.sm}
           bg="rgba(163, 113, 247, 0.15)"
           border="1px solid rgba(163, 113, 247, 0.3)"
           color={tokens.colors.accent.purple}
@@ -845,9 +862,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
             scrollToBottom('instant')
           }}
           zIndex={10}
-          transition="all 0.15s"
-          _hover={{ bg: 'rgba(163, 113, 247, 0.25)', transform: 'scale(1.1)' }}
-          _active={{ transform: 'scale(0.95)' }}
+          transition="background 0.15s"
+          _hover={{ bg: 'rgba(163, 113, 247, 0.25)' }}
+          // Refined-terminal: press feedback via a bg shift, not a scale bounce.
+          _active={{ bg: 'rgba(163, 113, 247, 0.4)' }}
           aria-label="Scroll to bottom"
         >
           <FiChevronDown size={16} />
@@ -882,6 +900,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       {/* Task list — appears when the agent defines tasks, hides when all complete */}
       <AgentTasksPanel />
 
+      {/* Rotating tips — only while the agent is working; first at 2 min, then
+          every 2 min. Sits directly above the status bar (chrome, not scrollback). */}
+      <TerminalWorkingTips />
+
       <Box flexShrink={0} data-tauri-drag-region>
         <TerminalStatusLine />
       </Box>
@@ -893,7 +915,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       {/* Keep TerminalPanel mounted when instances exist — CSS display toggle
           prevents unmount/remount which would call start_pty_shell on existing
           sessions. Instances persist after non-destructive close(). */}
-      {useTerminalPanelStore.getState().instances.length > 0 && (
+      {hasTerminalInstances && (
         <Flex display={terminalOpen ? 'flex' : 'none'} flexShrink={0}>
           <Box
             width="4px"

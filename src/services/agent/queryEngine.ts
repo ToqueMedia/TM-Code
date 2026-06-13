@@ -57,6 +57,8 @@ export interface QueryEngineOptions {
   onResponseHeaders?: (headers: Headers) => void
   /** Inter-turn attachment collector — see QueryParams.collectInterTurnContext. */
   collectInterTurnContext?: () => Promise<string>
+  /** Live active-model limits for auto-compact — see QueryParams.getContextLimits. */
+  getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null }
 }
 
 export interface QueryEngineState {
@@ -162,6 +164,7 @@ export class QueryEngine {
       extraHeaders: this.options.extraHeaders,
       onResponseHeaders: this.options.onResponseHeaders,
       collectInterTurnContext: this.options.collectInterTurnContext,
+      getContextLimits: this.options.getContextLimits,
     }
 
     try {

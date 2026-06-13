@@ -1,12 +1,17 @@
 import { invoke } from '@/utils/invokeMetrics';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useAiCompletionStore } from '../stores/aiCompletionStore';
+import { resolveAIWorkerUrl } from '../utils/devUrls';
 import { logger } from '../utils/logger';
 
-const DASHSCOPE_FIM_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
-const DASHSCOPE_FIM_MODEL = 'qwen2.5-coder-7b-instruct'
-const DASHSCOPE_API_KEY = import.meta.env.VITE_DASHSCOPE_API_KEY || ''
-const USE_CLOUD_FIM = import.meta.env.VITE_USE_EMULATORS === 'false' && !!DASHSCOPE_API_KEY
+// Histórico (2026-06-12): este serviço chamava a DashScope BEIJING
+// diretamente do cliente com uma key VITE_ que, se definida, embarcava no
+// bundle distribuído — leak por design, sem billing nem gate (desenho
+// anterior à arquitetura de dois workers). Como a env var nunca foi
+// definida em produção, o caminho cloud estava simplesmente MORTO e o
+// autocomplete só funcionava para quem tem Ollama local. Agora: o FIM passa
+// pelo data-plane com X-Request-Type: 'fim' → sidecar barato publicado no
+// KV; a key vive só no worker e o consumo entra no billing normal.
 
 class AICompletionService {
   private static instance: AICompletionService;
@@ -17,6 +22,10 @@ class AICompletionService {
   private errorCooldownMs = 10_000;
   private pendingStatus: 'idle' | 'loading' | 'error' | null = null;
   private abortController: AbortController | null = null;
+  /** Desliga o caminho cloud na sessão quando o worker responde SEM o
+   *  sidecar:fim — completar a cada tecla no modelo flagship ativo seria
+   *  queimar tokens caros; sem sidecar, só o fallback Ollama local serve. */
+  private cloudFimUnavailable = false;
 
   static getInstance(): AICompletionService {
     if (!this.instance) this.instance = new AICompletionService();
@@ -44,7 +53,7 @@ class AICompletionService {
     logger.info('ai-completion', `[req #${requestId}] ${autocomplete.model} | prefix: ${prefix.length} chars | suffix: ${suffix.length} chars`);
 
     try {
-      const result = USE_CLOUD_FIM
+      const result = !this.cloudFimUnavailable
         ? await this.cloudFimCompletion(prefix, suffix)
         : await invoke<string>('fim_completion', {
             ollamaUrl: autocomplete.ollamaUrl,
@@ -94,19 +103,24 @@ class AICompletionService {
     this.setStatus('idle');
   }
 
-  /** FIM completion via DashScope cloud (production) */
+  /** FIM completion via data-plane (sidecar:fim publicado no KV). */
   private async cloudFimCompletion(prefix: string, suffix: string): Promise<string> {
     this.abortController?.abort()
     this.abortController = new AbortController()
 
-    const res = await fetch(DASHSCOPE_FIM_URL, {
+    const { default: FirebaseAuthService } = await import('./auth/firebaseAuth')
+    const token = await FirebaseAuthService.getInstance().getIdToken()
+    if (!token) throw new Error('FIM: not authenticated')
+
+    const res = await fetch(`${resolveAIWorkerUrl()}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${DASHSCOPE_API_KEY}`,
+        'Authorization': `Bearer ${token}`,
+        'X-Request-Type': 'fim',
       },
       body: JSON.stringify({
-        model: DASHSCOPE_FIM_MODEL,
+        model: 'tm-active-model', // substituído pelo worker (sidecar:fim)
         messages: [{
           role: 'user',
           content: `<|fim_prefix|>${prefix}<|fim_suffix|>${suffix}<|fim_middle|>`,
@@ -120,7 +134,16 @@ class AICompletionService {
     })
 
     if (!res.ok) {
-      throw new Error(`DashScope FIM ${res.status}`)
+      throw new Error(`FIM ${res.status}`)
+    }
+
+    // Sem sidecar publicado, o pedido foi servido pelo modelo ATIVO —
+    // flagship caro a cada tecla. Desliga o caminho cloud para a sessão e
+    // descarta este resultado; o fallback Ollama assume (se existir).
+    if (res.headers.get('x-tm-config-key') !== 'sidecar:fim') {
+      this.cloudFimUnavailable = true
+      logger.info('ai-completion', 'cloud FIM disabled: no sidecar:fim published (active model would be billed per keystroke)')
+      return ''
     }
 
     const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> }

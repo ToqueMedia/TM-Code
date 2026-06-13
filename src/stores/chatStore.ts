@@ -104,7 +104,8 @@ interface ChatActions {
    * applyMentionResolution — the target bubble was created moments earlier
    * in the same serialized send flow.
    */
-  setMentionContextOnLastUserMessage: (context: string) => void
+  setMentionContextOnLastUserMessage: (context: string, mentionedPaths?: string[]) => void
+  setAttachmentPathsOnLastUserMessage: (paths: Record<string, string>) => void
   /**
    * Insert a user message BEFORE the streaming assistant message.
    * Used by mid-turn drain to keep visual order correct:
@@ -885,6 +886,60 @@ function userMessageToContentParts(msg: ChatMessage): ContentPart[] | null {
 }
 
 /**
+ * Build the tool_result block for one UI tool call — shared by the per-turn
+ * and legacy rebuild paths so diff-sanitization and the size cap stay in one
+ * place. `tc` may be undefined when an id appears in a native assistant
+ * message but the UI entry was lost; treat it like an interrupted call.
+ */
+function buildToolResultBlock(tc: ToolCallDisplay | undefined, toolCallId: string): ContentBlockAPI {
+  // Orphan tool call: agent was cancelled mid-execution
+  if (!tc || tc.status === 'running' || tc.result === undefined) {
+    return {
+      type: 'tool_result',
+      toolCallId,
+      content: 'Tool call was interrupted.',
+    }
+  }
+
+  let resultContent = tc.result || ''
+
+  // Sanitize diff JSON
+  try {
+    const parsed = JSON.parse(resultContent)
+    if (parsed.type === 'diff') {
+      resultContent = `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
+    }
+  } catch { /* not JSON */ }
+
+  // Truncate large results. Surface the original size and an explicit
+  // recovery hint so the model knows the tail it saw in the original
+  // turn is gone from THIS rebuild — it can re-read the source or ask
+  // the user for the relevant slice instead of silently making things
+  // up about content it can no longer see.
+  if (resultContent.length > MAX_TOOL_RESULT_CHARS) {
+    const origLen = resultContent.length
+    resultContent =
+      resultContent.slice(0, MAX_TOOL_RESULT_CHARS)
+      + `\n\n<system-reminder>This tool result was ${origLen} chars in the original turn but only the first ${MAX_TOOL_RESULT_CHARS} are kept in this rebuilt history (~${origLen - MAX_TOOL_RESULT_CHARS} chars dropped). If reasoning about content past byte ${MAX_TOOL_RESULT_CHARS} matters for the current task, re-read the source (read_file / re-run the search) rather than guessing.</system-reminder>`
+  }
+
+  return {
+    type: 'tool_result',
+    toolCallId,
+    content: resultContent,
+  }
+}
+
+/** Extract the tool_call ids advertised by a native assistant message. */
+function nativeToolCallIds(native: Record<string, unknown>): string[] {
+  const rawCalls = native.tool_calls
+  if (!Array.isArray(rawCalls)) return []
+  return rawCalls
+    .map(c => (c as { id?: unknown } | null)?.id)
+    .filter((id): id is string => typeof id === 'string')
+}
+
+/**
  * Rebuild conversation history in Anthropic Messages API format.
  *
  * Anthropic format differences from OpenAI:
@@ -894,12 +949,88 @@ function userMessageToContentParts(msg: ChatMessage): ContentPart[] | null {
  *   - Thinking/reasoning → thinking content blocks
  *   - Strictly alternating user/assistant messages (no consecutive same-role)
  */
-function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessage[] {
-  const history: ConversationMessage[] = []
+/** Normalize a path for cross-format comparison (abs vs rel, win vs posix). */
+function normPath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '')
+}
 
-  for (const msg of messages) {
+/** True when two paths refer to the same file across abs/rel forms. */
+function samePath(a: string, b: string): boolean {
+  const na = normPath(a)
+  const nb = normPath(b)
+  return na === nb || na.endsWith('/' + nb) || nb.endsWith('/' + na)
+}
+
+/** Extract the file path a tool call targets, if any. */
+function toolCallPath(input: Record<string, unknown> | undefined): string | null {
+  if (!input) return null
+  const p = input.file_path ?? input.path
+  return typeof p === 'string' && p.length > 0 ? p : null
+}
+
+/**
+ * Flatten every tool-call file path with the index of the message that issued
+ * it. Used to detect when a later tool call superseded an earlier @-mention
+ * snapshot, so the stale body isn't re-emitted to contradict the fresh result.
+ */
+function collectToolTouches(messages: ChatMessage[]): Array<{ path: string; index: number }> {
+  const touches: Array<{ path: string; index: number }> = []
+  messages.forEach((m, index) => {
+    if (m.role !== 'assistant' || !m.toolCalls?.length) return
+    for (const tc of m.toolCalls) {
+      const p = toolCallPath(tc.input)
+      if (p) touches.push({ path: p, index })
+    }
+  })
+  return touches
+}
+
+/**
+ * Reconcile a user message's persisted @-mention context against later tool
+ * activity. Returns the context to emit (possibly modified) or undefined to
+ * skip it. Never throws — falls back to the verbatim context on any doubt.
+ *
+ *  - No mentionContext → undefined (nothing to emit).
+ *  - No mentionedPaths (old session / changed-file-only) → verbatim (can't
+ *    reconcile without knowing which paths the snapshot froze).
+ *  - All snapshotted paths superseded by a later tool call → a compact pointer
+ *    instead of the stale bodies.
+ *  - Some superseded → prepend a targeted warning, keep the snapshot (surgical
+ *    per-file removal of the joined system-reminder blocks is too fragile —
+ *    a file containing `</system-reminder>` would break parsing).
+ */
+function reconcileMentionContext(
+  msg: ChatMessage,
+  msgIndex: number,
+  toolTouches: Array<{ path: string; index: number }>,
+): string | undefined {
+  const ctx = msg.mentionContext
+  if (!ctx) return undefined
+  const paths = msg.mentionedPaths
+  if (!paths || paths.length === 0) return ctx
+
+  const superseded = paths.filter(p =>
+    toolTouches.some(t => t.index > msgIndex && samePath(p, t.path)),
+  )
+  if (superseded.length === 0) return ctx
+
+  const list = superseded.join(', ')
+  if (superseded.length === paths.length) {
+    return `<system-reminder>Earlier you were shown the content of ${list} via @-mention. ${superseded.length === 1 ? 'That file has' : 'Those files have'} since been read or edited by tools below — the current content is in those later tool results. The original snapshot is omitted here to avoid showing a stale version; re-read with read_file if you need it.</system-reminder>`
+  }
+  return (
+    `<system-reminder>Note: the @-mention snapshot below is STALE for ${list} — ${superseded.length === 1 ? 'that file was' : 'those files were'} read or edited by tools further down; trust the later tool results for ${superseded.length === 1 ? 'it' : 'them'}, not the snapshot.</system-reminder>\n${ctx}`
+  )
+}
+
+// Exported for tests — pure function, no store access.
+export function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessage[] {
+  const history: ConversationMessage[] = []
+  const toolTouches = collectToolTouches(messages)
+
+  messages.forEach((msg, msgIndex) => {
     // System messages are UI-only status lines — never send to the LLM
-    if (msg.role === 'system') continue
+    if (msg.role === 'system') return
 
     if (msg.role === 'user') {
       const parts = userMessageToContentParts(msg)
@@ -907,7 +1038,15 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
       // this message at send-time (claude-vaz keeps attachment messages in
       // the transcript — dropping them here would make mentioned-file
       // content vanish from the model's view after the first turn).
-      const ctx = msg.mentionContext
+      //
+      // Staleness reconciliation: an @-mention freezes a file's content at
+      // send time. If a LATER tool call read or edited that file, the fresh
+      // version is already in the transcript below — re-emitting the frozen
+      // snapshot would feed the model two contradictory versions of the same
+      // file (context pollution audit, 2026-06-12). When every snapshotted
+      // path was superseded, void the whole block with a pointer; when only
+      // some were, prepend a targeted warning and keep the rest.
+      const ctx = reconcileMentionContext(msg, msgIndex, toolTouches)
       if (parts) {
         history.push({
           role: 'user',
@@ -920,9 +1059,47 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
         })
       }
     } else if (msg.role === 'assistant') {
+      // ── Per-internal-turn round-trip (providerStates[]) ──
+      // One user request can produce N internal assistant turns, all streamed
+      // into this single bubble. Emitting them as ONE assistant message with
+      // the last turn's native state advertised only the last turn's
+      // tool_calls while results existed for every turn — the normalizer then
+      // dropped the unmatched results and the model lost its own prior work
+      // (context pollution audit, 2026-06-12). Re-emit one assistant +
+      // tool_results pair PER turn, in order, exactly as the loop ran them.
+      const turnStates = msg.providerStates
+      if (turnStates && turnStates.length > 0) {
+        const byId = new Map((msg.toolCalls ?? []).map(tc => [tc.id, tc]))
+        for (const ps of turnStates) {
+          const native = ps.nativeAssistantMessage
+          if (!native) continue
+          history.push({
+            role: 'assistant',
+            // '' fallback on purpose: msg.content concatenates ALL turns'
+            // text — reusing it per turn would duplicate it N times. _native
+            // carries the real per-turn content at the API boundary.
+            content: typeof native.content === 'string' ? native.content : '',
+            _native: native,
+          })
+          const ids = nativeToolCallIds(native)
+          if (ids.length > 0) {
+            history.push({
+              role: 'user',
+              content: ids.map(id => buildToolResultBlock(byId.get(id), id)),
+            })
+          }
+        }
+        // Tool calls never committed in any native turn (loop aborted before
+        // message_stop): intentionally emit NOTHING for them — their
+        // tool_call is in no assistant message, so a synthetic result would
+        // be an orphan the normalizer strips at the API boundary anyway.
+        return
+      }
+
       // ── Native round-trip: prefer providerState when available ──
-      // When the assistant message has a captured native state from the
-      // provider, use it as the source of truth for the next API call.
+      // (Legacy single-state path — sessions persisted before providerStates
+      // existed.) When the assistant message has a captured native state from
+      // the provider, use it as the source of truth for the next API call.
       // This preserves reasoning_content, reasoning_details, signatures,
       // tool_calls, and any provider-specific fields exactly as returned.
       const native = msg.providerState?.nativeAssistantMessage
@@ -971,63 +1148,76 @@ function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessag
       }
 
       // Tool results → single user message with tool_result content blocks
-      // (tool results are in role:'user' messages with tool_result content blocks)
+      // (tool results are in role:'user' messages with tool_result content
+      // blocks). Legacy path only — the providerStates branch above already
+      // emitted per-turn results and `continue`d.
       if (msg.toolCalls?.length) {
-        const toolResultBlocks: ContentBlockAPI[] = []
-
-        for (const tc of msg.toolCalls) {
-          // Orphan tool call: agent was cancelled mid-execution
-          if (tc.status === 'running' || tc.result === undefined) {
-            toolResultBlocks.push({
-              type: 'tool_result',
-              toolCallId: tc.id,
-              content: 'Tool call was interrupted.',
-            })
-            continue
-          }
-
-          let resultContent = tc.result || ''
-
-          // Sanitize diff JSON
-          try {
-            const parsed = JSON.parse(resultContent)
-            if (parsed.type === 'diff') {
-              resultContent = `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
-            }
-          } catch { /* not JSON */ }
-
-          // Truncate large results. Surface the original size and an explicit
-          // recovery hint so the model knows the tail it saw in the original
-          // turn is gone from THIS rebuild — it can re-read the source or ask
-          // the user for the relevant slice instead of silently making things
-          // up about content it can no longer see.
-          if (resultContent.length > MAX_TOOL_RESULT_CHARS) {
-            const origLen = resultContent.length
-            resultContent =
-              resultContent.slice(0, MAX_TOOL_RESULT_CHARS)
-              + `\n\n<system-reminder>This tool result was ${origLen} chars in the original turn but only the first ${MAX_TOOL_RESULT_CHARS} are kept in this rebuilt history (~${origLen - MAX_TOOL_RESULT_CHARS} chars dropped). If reasoning about content past byte ${MAX_TOOL_RESULT_CHARS} matters for the current task, re-read the source (read_file / re-run the search) rather than guessing.</system-reminder>`
-          }
-
-          toolResultBlocks.push({
-            type: 'tool_result',
-            toolCallId: tc.id,
-            content: resultContent,
-          })
-        }
-
-        if (toolResultBlocks.length > 0) {
-          history.push({
-            role: 'user',
-            content: toolResultBlocks,
-          })
-        }
+        history.push({
+          role: 'user',
+          content: msg.toolCalls.map(tc => buildToolResultBlock(tc, tc.id)),
+        })
       }
     } else {
       history.push({ role: msg.role, content: msg.content })
     }
-  }
+  })
 
   return history
+}
+
+/**
+ * Re-read pasted-image base64 from the disk cache (via attachment.path) back
+ * into the in-memory session messages after a reload, then rebuild history so
+ * the agent can re-view the image without the user re-sending. Base64 is kept
+ * IN MEMORY ONLY (raw setState, no markDirty) — it stays absent from disk, the
+ * cache file is the source of truth. Background + best-effort; bounded to
+ * image attachments that have a path but lost their base64 on save.
+ */
+async function rehydrateSessionImages(sessionId: string): Promise<void> {
+  try {
+    const state = useChatStore.getState()
+    if (state.activeSessionId !== sessionId) return
+    const session = state.sessions.get(sessionId)
+    if (!session) return
+
+    const targets: Attachment[] = []
+    for (const m of session.messages) {
+      if (m.role !== 'user' || !m.attachments?.length) continue
+      for (const a of m.attachments) {
+        if (a.type === 'image' && a.path && !a.base64) targets.push(a)
+      }
+    }
+    if (targets.length === 0) return
+
+    const { resolveImageToDataUri } = await import('../services/attachmentService')
+    const resolved = new Map<string, string>()
+    for (const att of targets) {
+      const dataUri = await resolveImageToDataUri(att)
+      if (dataUri) resolved.set(att.id, dataUri)
+    }
+    if (resolved.size === 0) return
+
+    useChatStore.setState(s => {
+      if (s.activeSessionId !== sessionId) return s
+      const sess = s.sessions.get(sessionId)
+      if (!sess) return s
+      const messages = sess.messages.map(m => {
+        if (m.role !== 'user' || !m.attachments?.length) return m
+        let changed = false
+        const attachments = m.attachments.map(a => {
+          const b64 = resolved.get(a.id)
+          if (b64 && !a.base64) { changed = true; return { ...a, base64: b64 } }
+          return a
+        })
+        return changed ? { ...m, attachments } : m
+      })
+      const sessions = new Map(s.sessions)
+      sessions.set(sessionId, { ...sess, messages })
+      return { sessions, conversationHistory: rebuildConversationHistory(messages) }
+    })
+  } catch {
+    /* best-effort — a miss just means the image isn't re-viewable this run */
+  }
 }
 
 export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
@@ -1319,7 +1509,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       return messageId
     },
 
-    setMentionContextOnLastUserMessage: (context: string) => {
+    setMentionContextOnLastUserMessage: (context: string, mentionedPaths?: string[]) => {
       if (!context) return
       set(state => {
         const { activeSessionId, sessions } = state
@@ -1336,7 +1526,44 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (idx === -1) return state
 
         const messages = [...session.messages]
-        messages[idx] = { ...messages[idx], mentionContext: context }
+        messages[idx] = {
+          ...messages[idx],
+          mentionContext: context,
+          ...(mentionedPaths && mentionedPaths.length > 0 ? { mentionedPaths } : {}),
+        }
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        return { sessions: updatedSessions }
+      })
+      debouncedSave()
+    },
+
+    // Stamp disk-cache paths onto the last user message's image attachments,
+    // so the path survives persistence (base64 is stripped on save) and the
+    // image is re-resolvable from disk after reload (image cache feature,
+    // 2026-06-13). Keyed by attachment id.
+    setAttachmentPathsOnLastUserMessage: (paths: Record<string, string>) => {
+      if (!paths || Object.keys(paths).length === 0) return
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        let idx = -1
+        for (let i = session.messages.length - 1; i >= 0; i--) {
+          if (session.messages[i].role === 'user') { idx = i; break }
+        }
+        if (idx === -1) return state
+        const target = session.messages[idx]
+        if (!target.attachments?.length) return state
+
+        const attachments = target.attachments.map(a =>
+          paths[a.id] && !a.path ? { ...a, path: paths[a.id] } : a,
+        )
+        const messages = [...session.messages]
+        messages[idx] = { ...target, attachments }
 
         const updatedSessions = new Map(sessions)
         updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
@@ -2641,9 +2868,16 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
       if (msg && msg.role === 'assistant') {
-        // Replace — the last turn's native state is the source of truth
-        // for continuing the conversation (earlier turns are already in
-        // the messages array with their own providerState if they had one).
+        // APPEND one entry per internal turn. The whole multi-turn agent loop
+        // streams into this single bubble (streamingMessageId persists across
+        // internal turns), so overwriting here kept only the LAST turn's
+        // native message while msg.toolCalls accumulated every turn's calls —
+        // rebuildConversationHistory then emitted tool_results whose
+        // tool_call_ids appeared in no assistant message, and the normalizer
+        // silently dropped them (model lost its own prior work). The array
+        // preserves every turn for a faithful per-turn rebuild.
+        msg.providerStates = [...(msg.providerStates ?? []), providerState]
+        // Back-compat mirror: last turn, read by legacy paths and old code.
         msg.providerState = providerState
         session.updatedAt = Date.now()
       }
@@ -2943,6 +3177,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
 
         await sessionService.setActiveSessionId(projectPath, sessionId)
+
+        // Re-hydrate pasted-image base64 from the disk cache (base64 was
+        // stripped on save; the attachment kept its cache `path`). Background
+        // + best-effort: when done it patches base64 into the in-memory
+        // messages and rebuilds history so the agent can re-view the image on
+        // the next turn without the user re-sending (image cache, 2026-06-13).
+        void rehydrateSessionImages(sessionId)
       } finally {
         set({ isLoadingSession: false })
       }
@@ -3196,6 +3437,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       if (state.activeSessionId === sessionId) {
         useCheckpointStore.getState().clear()
       }
+
+      // Clean up the session's pasted-image disk cache (best-effort).
+      void import('../services/imageCacheService')
+        .then(({ removeSessionImageCache }) => removeSessionImageCache(sessionId))
+        .catch(() => { /* non-fatal */ })
     },
 
     cleanupOnExit: async (projectPath: string) => {
