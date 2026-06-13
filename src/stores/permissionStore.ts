@@ -371,10 +371,8 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         dirs.add(pendingPermission.pathAccessTarget)
         set({ pendingPermission: null, autoDenyAll: false, additionalDirectories: dirs })
         syncAllowedDirectoriesToRust()
-        void logPermission(`✓ Acesso permitido a \`${pendingPermission.pathAccessTarget}\` (sessão)`, 'success')
       } else {
         set({ pendingPermission: null, autoDenyAll: false })
-        void logPermission(`✓ Autorizaste \`${pendingPermission.toolName}\``, 'success')
       }
       pendingPermission.resolve({
         approved: true,
@@ -421,10 +419,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         source: 'user',
         promptKind: pendingPermission.promptReason,
       })
-      void logPermission(
-        `✓ Autorizaste \`${pendingPermission.toolName}\` e todas as ferramentas ${scope === 'core' ? 'internas' : 'MCP'} para esta sessão`,
-        'success',
-      )
       persistPermissions()
       advanceQueue(set, get)
     }
@@ -444,7 +438,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
           source: 'user',
           promptKind: pendingPermission.promptReason,
         })
-        void logPermission(`✓ Acesso permitido a \`${pendingPermission.pathAccessTarget}\` (sempre neste projeto)`, 'success')
       } else {
         const toolAllowlist = new Set(get().projectToolAllowlist)
         toolAllowlist.add(pendingPermission.toolName)
@@ -455,7 +448,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
           source: 'user',
           promptKind: pendingPermission.promptReason,
         })
-        void logPermission(`✓ Permitiste \`${pendingPermission.toolName}\` (sempre neste projeto)`, 'success')
       }
       persistPermissions()
       advanceQueue(set, get)
@@ -476,7 +468,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         source: 'user',
         promptKind: pendingPermission.promptReason,
       })
-      void logPermission(`✓ Permitiste \`${pendingPermission.toolName}\` (sempre globalmente)`, 'success')
       advanceQueue(set, get)
     }
   },
