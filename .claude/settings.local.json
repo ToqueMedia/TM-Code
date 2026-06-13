@@ -455,7 +455,8 @@
       "Bash(sed -n '315,340p' src/services/agent/contextBuilder.ts)",
       "Bash(sed -n '480,495p' src/services/agent/contextBuilder.ts)",
       "Bash(sed -n '408,420p' src/types/chat.ts)",
-      "Bash(sed -n '120,152p' src/services/agent/commands/planCommand.ts)"
+      "Bash(sed -n '120,152p' src/services/agent/commands/planCommand.ts)",
+      "Bash(echo \"=== EXIT: $? ===\")"
     ]
   }
 }

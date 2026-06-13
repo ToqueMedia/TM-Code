@@ -88,7 +88,8 @@ export async function loadTasksFromDisk(projectPath: string): Promise<AgentTask[
       // Optional fields: allow string arrays or absent — reject malformed
       && (t.dependsOn === undefined || (Array.isArray(t.dependsOn) && t.dependsOn.every(v => typeof v === 'string')))
       && (t.blockedBy === undefined || (Array.isArray(t.blockedBy) && t.blockedBy.every(v => typeof v === 'string')))
-      && (t.files === undefined || (Array.isArray(t.files) && t.files.every(v => typeof v === 'string'))),
+      && (t.files === undefined || (Array.isArray(t.files) && t.files.every(v => typeof v === 'string')))
+      && (t.evidence === undefined || typeof t.evidence === 'string'),
     )
   } catch (err) {
     console.warn('[taskPersistence] failed to parse tasks.json:', err)
