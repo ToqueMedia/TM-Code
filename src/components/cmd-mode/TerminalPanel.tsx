@@ -17,6 +17,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { tokens } from '@/theme/tokens'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
@@ -312,6 +313,25 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
     term.loadAddon(links)
 
     term.open(containerRef.current)
+
+    // GPU renderer — must be loaded AFTER term.open() (it needs the canvas).
+    // The DOM renderer (xterm's default) renders ANSI colors flat/monochrome
+    // inside Tauri's WKWebView; the WebGL renderer applies the theme palette
+    // correctly and gives the crisp, true-color, GPU-accelerated output of a
+    // native terminal (same renderer VS Code uses). Falls back to DOM if WebGL2
+    // is unavailable or the GL context is lost (disposing the addon makes xterm
+    // revert to the DOM renderer automatically).
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => {
+        logger.warn('terminal-panel', 'WebGL context lost — falling back to DOM renderer')
+        webgl.dispose()
+      })
+      term.loadAddon(webgl)
+    } catch (err) {
+      logger.warn('terminal-panel', 'WebGL renderer unavailable, using DOM fallback:', err)
+    }
+
     termRef.current = term
     fitRef.current = fit
 

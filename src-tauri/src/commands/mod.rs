@@ -11,6 +11,7 @@ pub mod file_tree;
 pub mod filesystem;
 pub mod git;
 pub mod http_client;
+pub mod installer;
 pub mod issue_reporter;
 pub mod mcp;
 pub mod memory;

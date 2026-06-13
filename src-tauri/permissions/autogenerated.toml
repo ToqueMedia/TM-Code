@@ -43,6 +43,7 @@ commands.allow = [
   "get_home_directory",
   "change_directory",
   "command_exists",
+  "install_dev_tool",
   "get_environment_variables",
   "get_completions",
   "get_command_history",

@@ -13,6 +13,7 @@ import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands
 import CmdModePromptInput, { type CmdModePromptInputRef } from './CmdModePromptInput'
 import { TerminalTitleBar } from './TerminalTitleBar'
 import { TerminalStatusLine } from './TerminalStatusLine'
+import { TerminalWorkingTips } from './TerminalWorkingTips'
 import { TerminalMessageRenderer } from './TerminalMessageRenderer'
 import { TerminalGreeting } from './TerminalGreeting'
 import { TerminalPanel } from './TerminalPanel'
@@ -898,6 +899,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
 
       {/* Task list — appears when the agent defines tasks, hides when all complete */}
       <AgentTasksPanel />
+
+      {/* Rotating tips — only while the agent is working; first at 2 min, then
+          every 2 min. Sits directly above the status bar (chrome, not scrollback). */}
+      <TerminalWorkingTips />
 
       <Box flexShrink={0} data-tauri-drag-region>
         <TerminalStatusLine />

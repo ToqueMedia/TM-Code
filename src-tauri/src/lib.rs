@@ -12,6 +12,7 @@ use commands::file_tree::*;
 use commands::filesystem::*;
 use commands::git::*;
 use commands::http_client::*;
+use commands::installer::*;
 use commands::issue_reporter::*;
 use commands::mcp::*;
 use commands::memory::*;
@@ -1235,6 +1236,7 @@ pub fn run() {
             get_home_directory,
             change_directory,
             command_exists,
+            install_dev_tool,
             get_environment_variables,
             get_completions,
             get_command_history,

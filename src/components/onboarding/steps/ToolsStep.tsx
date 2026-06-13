@@ -10,8 +10,10 @@ import {
   FiDownload,
   FiCheck,
   FiCopy,
-  FiCheckCircle
+  FiCheckCircle,
+  FiAlertTriangle
 } from 'react-icons/fi'
+import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@/utils/invokeMetrics'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
@@ -24,11 +26,32 @@ interface ToolsStepProps {
 }
 
 type ToolId = 'python' | 'node' | 'git'
-type ToolStatus = 'checking' | 'available' | 'not-installed' | 'waiting-install' | 'installed'
+type ToolStatus =
+  | 'checking'
+  | 'available'
+  | 'not-installed'
+  | 'installing'        // Windows one-click install in progress
+  | 'install-error'     // Windows install failed → show manual fallback
+  | 'waiting-install'   // macOS/Linux: installer opened in browser, awaiting user
+  | 'installed'
 
 interface ToolState {
   status: ToolStatus
   version: string
+  /** Download progress 0–100 during the Windows one-click install. */
+  percent?: number
+  /** Current install phase label (winget | downloading | installing | refreshing). */
+  phase?: string
+  /** Human-readable error when status === 'install-error'. */
+  error?: string
+}
+
+// Maps the install phase emitted by the Rust backend to a short PT label.
+const PHASE_LABELS: Record<string, string> = {
+  winget: 'A instalar via winget…',
+  downloading: 'A descarregar…',
+  installing: 'A instalar…',
+  refreshing: 'A verificar…',
 }
 
 // Links de download diretos e personalizados para Windows (substituir pelos links finais)
@@ -311,6 +334,94 @@ function ToolsStep({ onNext, onBack }: ToolsStepProps) {
     }
   }, [getDownloadUrl])
 
+  // ── Windows one-click install ──────────────────────────────────────────────
+  // Listen to the backend's live progress events and reflect them on the card.
+  // Terminal phases (done/error) are handled by the invoke() result below, so
+  // we only mirror the intermediate phases here.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    listen<{ tool: ToolId; phase: string; percent: number | null; message: string | null }>(
+      'tool-install-progress',
+      (event) => {
+        const { tool, phase, percent } = event.payload
+        setTools((prev) => {
+          if (!prev[tool]) return prev
+          if (phase === 'done' || phase === 'error') return prev
+          return {
+            ...prev,
+            [tool]: {
+              ...prev[tool],
+              status: 'installing',
+              phase,
+              percent: phase === 'downloading' ? percent ?? prev[tool].percent : undefined,
+            },
+          }
+        })
+      }
+    ).then((fn) => { unlisten = fn })
+    return () => { if (unlisten) unlisten() }
+  }, [])
+
+  // Runs the in-app installer (download + silent install + PATH refresh) in Rust,
+  // then re-detects to capture the version. On failure, falls back to the manual
+  // panel (step-by-step + terminal command) that already exists below.
+  const handleInstall = useCallback(async (toolId: ToolId) => {
+    const url = getDownloadUrl(toolId)
+    setTools((prev) => ({
+      ...prev,
+      [toolId]: { ...prev[toolId], status: 'installing', phase: 'winget', percent: undefined, error: undefined },
+    }))
+
+    try {
+      const res = await invoke<{ success: boolean; method: string; message: string }>('install_dev_tool', {
+        toolId,
+        downloadUrl: url,
+      })
+
+      if (res.success) {
+        // Backend already refreshed the process PATH and verified with `where`.
+        // Re-detect to surface the actual version on the card.
+        const detectors: Record<ToolId, () => Promise<ToolState>> = {
+          python: detectPython,
+          node: detectNode,
+          git: detectGit,
+        }
+        const fresh = await detectors[toolId]()
+        setTools((prev) => ({
+          ...prev,
+          [toolId]: fresh.status === 'available' ? fresh : { status: 'available', version: '' },
+        }))
+      } else {
+        setTools((prev) => ({
+          ...prev,
+          [toolId]: { ...prev[toolId], status: 'install-error', error: res.message },
+        }))
+      }
+    } catch (err) {
+      setTools((prev) => ({
+        ...prev,
+        [toolId]: { ...prev[toolId], status: 'install-error', error: String(err) },
+      }))
+    }
+  }, [getDownloadUrl, detectPython, detectNode, detectGit])
+
+  // Install every still-missing tool, one at a time so the UAC prompts don't stack.
+  const handleInstallAll = useCallback(async () => {
+    const missing = (Object.keys(tools) as ToolId[]).filter((id) => {
+      const s = tools[id].status
+      return s === 'not-installed' || s === 'install-error'
+    })
+    for (const id of missing) {
+      await handleInstall(id)
+    }
+  }, [tools, handleInstall])
+
+  // The primary card action: native install on Windows, browser download elsewhere.
+  const handlePrimaryAction = useCallback((toolId: ToolId) => {
+    if (IS_WINDOWS) return handleInstall(toolId)
+    return handleDownload(toolId)
+  }, [handleInstall, handleDownload])
+
   // Copy command helpers
   const handleCopyCommand = useCallback((toolId: ToolId, command: string) => {
     navigator.clipboard.writeText(command)
@@ -326,6 +437,10 @@ function ToolsStep({ onNext, onBack }: ToolsStepProps) {
   const progressPercent = (availableCount / 3) * 100
   const isReady = availableCount === 3
   const isCheckingAny = Object.values(tools).some((t) => t.status === 'checking')
+  const anyInstalling = Object.values(tools).some((t) => t.status === 'installing')
+  const hasMissing = Object.values(tools).some(
+    (t) => t.status === 'not-installed' || t.status === 'install-error'
+  )
 
   const toolDetails = [
     {
@@ -458,33 +573,63 @@ function ToolsStep({ onNext, onBack }: ToolsStepProps) {
           <Text fontSize="11px" fontWeight="700" textTransform="uppercase" letterSpacing="0.05em" color={tokens.colors.text.muted}>
             Ferramentas Requeridas
           </Text>
-          <button
-            type="button"
-            onClick={detectAllTools}
-            disabled={isCheckingAny}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              cursor: isCheckingAny ? 'not-allowed' : 'pointer',
-              fontSize: '11px',
-              fontWeight: 600,
-              color: tokens.colors.accent.primary,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              opacity: isCheckingAny ? 0.5 : 1,
-              transition: `all ${tokens.transition.normal}`,
-            }}
-          >
-            <FiZap
-              size={12}
+          <Flex align="center" gap={3}>
+            {/* One-click "install everything" — Windows only */}
+            {IS_WINDOWS && hasMissing && (
+              <button
+                type="button"
+                className="ob-option"
+                onClick={handleInstallAll}
+                disabled={anyInstalling}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '6px 12px',
+                  borderRadius: '8px',
+                  border: `1px solid ${tokens.colors.accent.primaryBorder}`,
+                  background: tokens.colors.accent.primarySubtle,
+                  cursor: anyInstalling ? 'not-allowed' : 'pointer',
+                  fontFamily: 'inherit',
+                  color: tokens.colors.accent.primary,
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  opacity: anyInstalling ? 0.5 : 1,
+                  transition: `all ${tokens.transition.normal}`,
+                }}
+              >
+                <FiZap size={12} />
+                {anyInstalling ? 'A instalar…' : 'Instalar tudo'}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={detectAllTools}
+              disabled={isCheckingAny}
               style={{
-                transform: isCheckingAny ? 'rotate(360deg)' : 'none',
-                transition: isCheckingAny ? 'transform 1s linear infinite' : 'transform 0.3s ease',
+                background: 'transparent',
+                border: 'none',
+                cursor: isCheckingAny ? 'not-allowed' : 'pointer',
+                fontSize: '11px',
+                fontWeight: 600,
+                color: tokens.colors.accent.primary,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                opacity: isCheckingAny ? 0.5 : 1,
+                transition: `all ${tokens.transition.normal}`,
               }}
-            />
-            {t('onboarding.tools.redetect')}
-          </button>
+            >
+              <FiZap
+                size={12}
+                style={{
+                  transform: isCheckingAny ? 'rotate(360deg)' : 'none',
+                  transition: isCheckingAny ? 'transform 1s linear infinite' : 'transform 0.3s ease',
+                }}
+              />
+              {t('onboarding.tools.redetect')}
+            </button>
+          </Flex>
         </Flex>
       </motion.div>
 
@@ -495,8 +640,14 @@ function ToolsStep({ onNext, onBack }: ToolsStepProps) {
             const toolState = tools[id]
             const isMissing = toolState.status === 'not-installed'
             const isWaiting = toolState.status === 'waiting-install'
+            const isInstalling = toolState.status === 'installing'
+            const isInstallError = toolState.status === 'install-error'
             const isAvailable = toolState.status === 'available' || toolState.status === 'installed'
             const manualCommand = getManualCommand(id)
+            // The step-by-step + terminal fallback panel: on macOS/Linux it appears
+            // after the browser download starts; on Windows only if the one-click
+            // install failed.
+            const showManualPanel = isWaiting || isInstallError
 
             return (
               <motion.div
@@ -697,14 +848,61 @@ function ToolsStep({ onNext, onBack }: ToolsStepProps) {
                             </Text>
                           </Flex>
                         )}
+                        {isInstalling && (
+                          <Flex
+                            align="center"
+                            gap={1.5}
+                            px={2.5}
+                            py={1}
+                            bg="rgba(247, 127, 0, 0.08)"
+                            border="1px solid rgba(247, 127, 0, 0.15)"
+                            borderRadius="full"
+                          >
+                            <Box
+                              w="6px"
+                              h="6px"
+                              borderRadius="full"
+                              bg={tokens.colors.accent.orange}
+                              css={{
+                                animation: 'pulse-waiting 1.2s ease-in-out infinite',
+                                '@keyframes pulse-waiting': {
+                                  '0%, 100%': { opacity: 1, transform: 'scale(1)' },
+                                  '50%': { opacity: 0.4, transform: 'scale(1.2)' },
+                                },
+                              }}
+                            />
+                            <Text fontSize="11.5px" color={tokens.colors.accent.orange} fontWeight="600">
+                              {toolState.phase === 'downloading' && toolState.percent != null
+                                ? `A descarregar… ${Math.round(toolState.percent)}%`
+                                : PHASE_LABELS[toolState.phase || ''] || 'A instalar…'}
+                            </Text>
+                          </Flex>
+                        )}
+                        {isInstallError && (
+                          <Flex
+                            align="center"
+                            gap={1.5}
+                            px={2.5}
+                            py={1}
+                            bg="rgba(239, 68, 68, 0.06)"
+                            border="1px solid rgba(239, 68, 68, 0.15)"
+                            borderRadius="full"
+                          >
+                            <FiAlertTriangle size={11} color={tokens.colors.accent.red} />
+                            <Text fontSize="11.5px" color={tokens.colors.accent.red} fontWeight="600">
+                              Falhou
+                            </Text>
+                          </Flex>
+                        )}
                       </Flex>
 
-                      {/* Download button */}
-                      {!isAvailable && (
+                      {/* Primary action button — native install (Windows) or
+                          browser download (macOS/Linux). Hidden while installing. */}
+                      {!isAvailable && !isInstalling && (
                         <button
                           type="button"
                           className="ob-option"
-                          onClick={() => handleDownload(id)}
+                          onClick={() => handlePrimaryAction(id)}
                           style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -732,15 +930,17 @@ function ToolsStep({ onNext, onBack }: ToolsStepProps) {
                               : '0 2px 8px rgba(254, 16, 99, 0.15)',
                           }}
                         >
-                          <FiDownload size={13} />
-                          {isWaiting ? 'Baixar Novamente' : 'Baixar'}
+                          {IS_WINDOWS ? <FiZap size={13} /> : <FiDownload size={13} />}
+                          {IS_WINDOWS
+                            ? (isInstallError ? 'Tentar de novo' : 'Instalar')
+                            : (isWaiting ? 'Baixar Novamente' : 'Baixar')}
                         </button>
                       )}
                     </Flex>
                   </Flex>
 
                   {/* Step-by-step Interactive Assistance Panel */}
-                  {isWaiting && (
+                  {showManualPanel && (
                     <motion.div
                       initial={{ opacity: 0, height: 0 }}
                       animate={{ opacity: 1, height: 'auto' }}
@@ -756,14 +956,22 @@ function ToolsStep({ onNext, onBack }: ToolsStepProps) {
                     >
                       <Flex align="flex-start" gap={3} mb={3.5}>
                         <Box mt="2px" flexShrink={0}>
-                          <FiCheckCircle size={15} color="#4ADE80" style={{ filter: 'drop-shadow(0 0 4px rgba(74, 222, 128, 0.2))' }} />
+                          {isInstallError ? (
+                            <FiAlertTriangle size={15} color={tokens.colors.accent.red} />
+                          ) : (
+                            <FiCheckCircle size={15} color="#4ADE80" style={{ filter: 'drop-shadow(0 0 4px rgba(74, 222, 128, 0.2))' }} />
+                          )}
                         </Box>
                         <Box>
                           <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary} mb={0.5}>
-                            Download Iniciado! Siga os Passos para Instalar:
+                            {isInstallError
+                              ? 'A instalação automática não foi concluída. Instale manualmente:'
+                              : 'Download Iniciado! Siga os Passos para Instalar:'}
                           </Text>
                           <Text fontSize="11px" color={tokens.colors.text.secondary} lineHeight="1.4">
-                            O assistente oficial foi descarregado. Prossiga com a instalação local e o assistente de segundo plano do TM Code irá detectar automaticamente em instantes.
+                            {isInstallError
+                              ? (toolState.error || 'Pode usar o instalador oficial ou o comando abaixo. O TM Code detecta automaticamente assim que terminar.')
+                              : 'O assistente oficial foi descarregado. Prossiga com a instalação local e o assistente de segundo plano do TM Code irá detectar automaticamente em instantes.'}
                           </Text>
                         </Box>
                       </Flex>
