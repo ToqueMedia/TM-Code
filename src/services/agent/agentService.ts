@@ -1062,6 +1062,14 @@ class AgentService {
         content: `Compactação parcial: ${oldMessages.length} mensagens resumidas, ${recentMessages.length} preservadas.`,
         timestamp: Date.now(),
       };
+      // Narrate structured content (tool_call/tool_result blocks) into
+      // readable text instead of JSON.stringify-ing it. The stringified form
+      // re-entered the next turn as literal `[{"type":"tool_call",...}]`
+      // prose — pseudo-structure the model read as data, with tool_calls and
+      // results no longer paired (context pollution audit, 2026-06-12).
+      // contentAsText renders `[tool: name(args)]` + result text, the same
+      // narration the mechanical compact fallback uses.
+      const { contentAsText } = await import("./promptValueHelpers");
       const recentChatMessages: import("@/types/chat").ChatMessage[] =
         recentMessages.map((m) => ({
           id: generateId("msg"),
@@ -1069,7 +1077,7 @@ class AgentService {
           content:
             typeof m.content === "string"
               ? m.content
-              : JSON.stringify(m.content),
+              : contentAsText(m.content),
           timestamp: Date.now(),
         }));
       chatStore.replaceMessages([

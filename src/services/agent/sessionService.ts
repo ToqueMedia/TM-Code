@@ -624,6 +624,12 @@ class SessionService {
     if (msg.providerState) {
       sanitized.providerState = msg.providerState
     }
+    // Per-internal-turn native states — required for the per-turn history
+    // rebuild (one assistant+tool_results pair per turn). Without persisting
+    // this, a reloaded session falls back to the lossy last-turn-only path.
+    if (msg.providerStates?.length) {
+      sanitized.providerStates = msg.providerStates
+    }
 
     // Don't persist isStreaming
     return sanitized

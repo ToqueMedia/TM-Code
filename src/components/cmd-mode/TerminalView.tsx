@@ -197,9 +197,20 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   useEffect(() => {
     if (!projectPath) return
     let cancelled = false
-    const promise = import('@tauri-apps/api/core').then(({ invoke }) => {
-      if (!cancelled) return invoke('open_project', { path: projectPath })
-    })
+    const promise = import('@tauri-apps/api/core')
+      .then(({ invoke }) => {
+        if (!cancelled) return invoke<import('../../types/project').ProjectInfo>('open_project', { path: projectPath })
+      })
+      .then(async info => {
+        // Rust just wrote this folder into the recents file, but the Welcome
+        // "Recents" list renders the in-memory array — mirror the returned
+        // entry so the folder shows up immediately when the user exits back
+        // to Welcome, instead of only after an app restart.
+        if (cancelled || !info) return
+        const { useProjectStore } = await import('../../stores/projectStore')
+        useProjectStore.getState().upsertRecentProject(info)
+      })
+      .catch(() => { /* recents mirror is best-effort */ })
     return () => {
       cancelled = true
       // Await the promise so the callback stays alive until Rust responds.

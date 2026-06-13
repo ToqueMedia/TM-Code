@@ -70,26 +70,39 @@ export function getCompactPrompt(customInstructions?: string): string {
 
 /**
  * Strip the <analysis> drafting scratchpad and format the <summary> block.
+ *
+ * Failure-mode guard: if the summarizer omitted/malformed the <summary>
+ * wrapper, the old code stripped <analysis> unconditionally and returned the
+ * leftovers — often near-empty — which then REPLACED the whole conversation
+ * (a silent total context loss; pollution audit, 2026-06-12). When no
+ * <summary> block parses, fall back to the full raw response (minus a
+ * correctly-closed analysis block): a verbose summary beats an empty one.
  */
 export function formatCompactSummary(summary: string): string {
-  let formatted = summary
+  const summaryMatch = summary.match(/<summary>([\s\S]*?)<\/summary>/)
 
-  // Strip analysis section
-  formatted = formatted.replace(/<analysis>[\s\S]*?<\/analysis>/, '')
-
-  // Extract and format summary section
-  const summaryMatch = formatted.match(/<summary>([\s\S]*?)<\/summary>/)
-  if (summaryMatch) {
-    const content = summaryMatch[1] || ''
-    formatted = formatted.replace(
-      /<summary>[\s\S]*?<\/summary>/,
-      `Summary:\n${content.trim()}`,
-    )
+  if (!summaryMatch) {
+    // No parseable <summary>: keep everything the model wrote. Only strip
+    // <analysis> if it closed properly — an unclosed tag means the content
+    // after it is probably the real summary text.
+    const fallback = summary.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim()
+    return (fallback.length >= 80 ? fallback : summary.trim())
+      .replace(/\n\n+/g, '\n\n')
   }
 
+  let formatted = summary
+
+  // Strip analysis sections (all of them — the model may emit several)
+  formatted = formatted.replace(/<analysis>[\s\S]*?<\/analysis>/g, '')
+
+  const content = summaryMatch[1] || ''
+  formatted = formatted.replace(
+    /<summary>[\s\S]*?<\/summary>/,
+    `Summary:\n${content.trim()}`,
+  )
+
   // Clean up extra whitespace between sections
-  const doubleNewline = new RegExp('\n\n+', 'g')
-  formatted = formatted.replace(doubleNewline, '\n\n')
+  formatted = formatted.replace(/\n\n+/g, '\n\n')
 
   return formatted.trim()
 }

@@ -87,6 +87,8 @@ interface ProjectStore {
   setCmdModeProjectPath: (path: string | null) => void;
   /** Remove a path from the CMD mode paths list (e.g. user promotes it to an IDE project). */
   removeCmdModePath: (path: string) => void;
+  /** Mirror a just-opened project into the in-memory recents list (no IPC). */
+  upsertRecentProject: (info: ProjectInfo) => void;
   setWelcomeScreen: (screen: 'hero' | 'settings' | null) => void;
   setHasHydrated: (hydrated: boolean) => void;
   setNoTmsFile: (value: boolean) => void;
@@ -207,6 +209,25 @@ export const useProjectStore = create<ProjectStore>()(
       removeCmdModePath: (path: string) => {
         set(state => ({
           cmdModeProjectPaths: state.cmdModeProjectPaths.filter(p => p !== path),
+        }))
+      },
+
+      // Rust's open_project persists the recents FILE, but the Welcome
+      // "Recents" list renders the in-memory array, which only re-reads disk
+      // on mount. Terminal Mode bypasses openProject() (it invokes
+      // open_project directly in TerminalView), so without this mirror a
+      // folder opened in CMD mode never appeared in Recents until an app
+      // restart (user report, 2026-06-12). Same no-extra-IPC pattern as the
+      // freshEntry construction inside openProject.
+      upsertRecentProject: (info: ProjectInfo) => {
+        const entry: RecentProject = {
+          id: info.id,
+          name: info.name,
+          path: info.path,
+          lastOpened: info.lastOpened,
+        }
+        set(state => ({
+          recentProjects: dedupeRecentProjects([entry, ...state.recentProjects]),
         }))
       },
 

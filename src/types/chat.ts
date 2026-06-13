@@ -303,6 +303,19 @@ export interface ChatMessage {
    * legacy reasoningContent fallback path is used instead.
    */
   providerState?: ProviderState
+  /**
+   * One ProviderState per INTERNAL turn of the agent loop, in order. A single
+   * user request can produce N assistant turns (text→tools→text→tools→final),
+   * all collapsed into one ChatMessage bubble; `providerState` alone keeps
+   * only the LAST turn, so rebuilding history from it advertises only the
+   * last turn's tool_calls while toolCalls[] holds every turn's calls — the
+   * mismatch silently dropped intermediate tool results and reasoning from
+   * the model's context (context pollution audit, 2026-06-12). When present,
+   * rebuildConversationHistory emits one assistant+tool_results pair per
+   * entry. `providerState` is kept as the last entry for back-compat with
+   * sessions persisted before this field existed.
+   */
+  providerStates?: ProviderState[]
   /** Inline card (plan approval, todo list) */
   card?: ChatMessageCard
   /** Attachments included with this message (metadata only — content is resolved into message.content at send-time) */
