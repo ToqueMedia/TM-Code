@@ -18,7 +18,7 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
     definition: {
       name: 'request_credentials',
       description:
-        'Request API keys, tokens, or other secrets from the developer via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by the agent). Never instruct the developer to create or edit .env manually, and never ask them to paste secrets into the chat.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nSKIP FOR: platform-managed credentials. The platform mints these via dedicated provision_* tools — the developer doesn\'t have the values and never will. Mapping: TM_AUTH_*/VITE_TM_*/GIP_*/GCP_* → provision_auth; TMDB_URL/TMDB_TOKEN/DATABASE_URL → provision_database; TM_FILES_URL/TM_FILES_TOKEN/TM_FILES_PUBLIC_BASE → provision_files; APP_ID → provision_deploy. Calling this form for any of those is incorrect.',
+        'Request API keys, tokens, or other secrets from the developer via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by the agent). Never instruct the developer to create or edit .env manually, and never ask them to paste secrets into the chat. When this tool returns "Credentials saved to .env", the keys ARE written — that result is the confirmation; do not read .env to verify (it is blocked) and do not call this again for the same keys.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nSKIP FOR: platform-managed credentials. The platform mints these via dedicated provision_* tools — the developer doesn\'t have the values and never will. Mapping: TM_AUTH_*/VITE_TM_*/GIP_*/GCP_* → provision_auth; TMDB_URL/TMDB_TOKEN/DATABASE_URL → provision_database; TM_FILES_URL/TM_FILES_TOKEN/TM_FILES_PUBLIC_BASE → provision_files; APP_ID → provision_deploy. Calling this form for any of those is incorrect.',
       input_schema: {
         type: 'object',
         properties: {
@@ -156,7 +156,7 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
       if (result.submitted) {
         chatStore.markCredentialRequestSubmitted(cardMessageId, result.keys ?? [])
         const keysList = (result.keys ?? []).join(', ') || '(none)'
-        return `Credentials saved to .env for ${serviceName}: ${keysList}. Values are masked from the chat history. Continue with the implementation.`
+        return `Credentials saved to .env for ${serviceName}: ${keysList}. These keys are now written to .env (values masked from the chat history). This message IS your confirmation — do NOT read .env to verify (it is sealed by design) and do NOT request these keys again. Continue with the implementation.`
       }
 
       chatStore.updateCardStatus(cardMessageId, 'cancelled')

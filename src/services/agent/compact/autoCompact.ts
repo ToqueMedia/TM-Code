@@ -11,36 +11,20 @@
 
 import type { ContentBlockAPI } from '../../../types/chat'
 import { getCompactUserSummaryMessage } from './prompt'
-import { isContextCollapseEnabled } from '../collapse'
-import { getAutoCompactThreshold as getRealAutoCompactThreshold } from '../../../utils/contextWindow'
+import {
+  getAutoCompactThreshold as getRealAutoCompactThreshold,
+  FALLBACK_CONTEXT_WINDOW,
+} from '../../../utils/contextWindow'
 
 // ── Constants ──
-
-/** Reserve this many tokens for model output during compaction. */
-const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
-
-/** Buffer below effective context window to trigger auto-compact. */
-export const AUTOCOMPACT_BUFFER_TOKENS = 13_000
-
-/** Warning threshold buffer. */
-export const WARNING_THRESHOLD_BUFFER_TOKENS = 20_000
-
-/** Error threshold buffer. */
-export const ERROR_THRESHOLD_BUFFER_TOKENS = 20_000
-
-/** Manual compact buffer — reserve space so user can still run /compact. */
-export const MANUAL_COMPACT_BUFFER_TOKENS = 3_000
 
 /** Stop trying autocompact after this many consecutive failures. */
 const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 
-// ── MiMo v2.5 Pro context window ──
-
-/** Context window for mimo-v2.5-pro-1m (1M tokens). */
-const MIMO_CONTEXT_WINDOW = 1_000_000
-
-/** Max output tokens for the model. */
-const MAX_OUTPUT_TOKENS = 32_768
+// The "unknown window" fallback (FALLBACK_CONTEXT_WINDOW = 200K) lives in
+// utils/contextWindow.ts so the pill, the status line, the admin Select and this
+// decision all share ONE value. resolveThreshold() routes it through the same
+// real math — no duplicate constants or hardcoded 1M threshold here anymore.
 
 // ── Types ──
 
@@ -83,11 +67,15 @@ function hasRealWindow(limits?: AutoCompactLimits): limits is AutoCompactLimits 
   return !!limits && typeof limits.contextWindow === 'number' && limits.contextWindow > 0
 }
 
-/** Threshold tokens that trigger compaction — real math when known, legacy otherwise. */
+/**
+ * Threshold tokens that trigger compaction. Always routed through the single
+ * source of truth (utils/contextWindow.ts): the real window when known, the
+ * conservative FALLBACK_CONTEXT_WINDOW otherwise (never a 1M assumption).
+ */
 function resolveThreshold(limits?: AutoCompactLimits): number {
   return hasRealWindow(limits)
     ? getRealAutoCompactThreshold(limits.contextWindow, limits.maxOutputTokens)
-    : getAutoCompactThreshold()
+    : getRealAutoCompactThreshold(FALLBACK_CONTEXT_WINDOW)
 }
 
 /** Best occupancy estimate: never below the provider's real reading nor the char-estimate. */
@@ -129,59 +117,24 @@ export function tokenCountWithEstimation(messages: MessageLike[]): number {
         if (block.type === 'thinking') {
           total += roughTokenEstimate(block.thinking)
         }
+        // tool_call arguments — the agent emits large write_file/edit_file
+        // payloads HERE, in the assistant's tool-call block. The old estimator
+        // ignored them entirely, so a single big-edit turn could under-count
+        // occupancy and slip past the auto-compact threshold → overflow on the
+        // next turn. Count name + serialized arguments (string or input object).
+        if (block.type === 'tool_call') {
+          const b = block as { name?: string; arguments?: string; input?: unknown }
+          const args = typeof b.arguments === 'string'
+            ? b.arguments
+            : b.input != null
+              ? JSON.stringify(b.input)
+              : ''
+          total += roughTokenEstimate((b.name ?? '') + args)
+        }
       }
     }
   }
   return total
-}
-
-// ── Context window helpers ──
-
-/** Effective context window = context window minus reserved output tokens. */
-export function getEffectiveContextWindowSize(): number {
-  const reservedForSummary = Math.min(MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS_FOR_SUMMARY)
-  return MIMO_CONTEXT_WINDOW - reservedForSummary
-}
-
-/** Token threshold that triggers auto-compact. */
-export function getAutoCompactThreshold(): number {
-  return getEffectiveContextWindowSize() - AUTOCOMPACT_BUFFER_TOKENS
-}
-
-// ── Warning state ──
-
-export function calculateTokenWarningState(tokenUsage: number): {
-  percentLeft: number
-  isAboveWarningThreshold: boolean
-  isAboveErrorThreshold: boolean
-  isAboveAutoCompactThreshold: boolean
-  isAtBlockingLimit: boolean
-} {
-  const autoCompactThreshold = getAutoCompactThreshold()
-  const threshold = autoCompactThreshold
-  const effectiveWindow = getEffectiveContextWindowSize()
-
-  const percentLeft = Math.max(
-    0,
-    Math.round(((threshold - tokenUsage) / threshold) * 100),
-  )
-
-  const warningThreshold = threshold - WARNING_THRESHOLD_BUFFER_TOKENS
-  const errorThreshold = threshold - ERROR_THRESHOLD_BUFFER_TOKENS
-
-  const isAboveWarningThreshold = tokenUsage >= warningThreshold
-  const isAboveErrorThreshold = tokenUsage >= errorThreshold
-  const isAboveAutoCompactThreshold = tokenUsage >= autoCompactThreshold
-  const blockingLimit = effectiveWindow - MANUAL_COMPACT_BUFFER_TOKENS
-  const isAtBlockingLimit = tokenUsage >= blockingLimit
-
-  return {
-    percentLeft,
-    isAboveWarningThreshold,
-    isAboveErrorThreshold,
-    isAboveAutoCompactThreshold,
-    isAtBlockingLimit,
-  }
 }
 
 // ── Core logic ──
@@ -199,7 +152,7 @@ export function shouldAutoCompact(
   if (isAboveAutoCompactThreshold) {
     const src = hasRealWindow(limits)
       ? `window=${limits.contextWindow}${limits.realOccupancyTokens ? ` real=${limits.realOccupancyTokens}` : ''}`
-      : 'window=legacy-1M(estimate)'
+      : `window=fallback-${FALLBACK_CONTEXT_WINDOW}(estimate)`
     console.debug(
       `[autoCompact] threshold exceeded: tokens=${tokenCount} threshold=${threshold} ${src}`,
     )
@@ -225,6 +178,28 @@ export interface AutoCompactResult {
 }
 
 /**
+ * Summarize the given messages into a single post-compact user message.
+ * Returns null when the summarizer produced nothing — the caller decides
+ * whether to count a failure or fall back.
+ *
+ * Shared by the PROACTIVE autoCompact path (below) and the REACTIVE
+ * prompt-too-long recovery in query.ts, so both produce the exact same
+ * post-compact shape. Kept side-effect-free (no threshold/circuit-breaker
+ * logic) so the reactive path can force a compaction it KNOWS is needed
+ * (the provider already rejected the prompt).
+ */
+export async function compactNow(
+  messages: MessageLike[],
+  systemPrompt: string,
+  compactFn: CompactFn,
+): Promise<MessageLike[] | null> {
+  const summary = await compactFn(messages, systemPrompt)
+  if (!summary) return null
+  const summaryContent = getCompactUserSummaryMessage(summary, true)
+  return [{ role: 'user', content: summaryContent }]
+}
+
+/**
  * Auto-compact if token threshold is exceeded.
  *
  * Uses a circuit breaker: after MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
@@ -244,11 +219,6 @@ export async function autoCompact(
   snipTokensFreed?: number,
   limits?: AutoCompactLimits,
 ): Promise<AutoCompactResult> {
-  // When context collapse is active, it handles context management instead of auto-compact
-  if (isContextCollapseEnabled()) {
-    return { wasCompacted: false }
-  }
-
   // Circuit breaker
   if (
     tracking?.consecutiveFailures !== undefined &&
@@ -266,21 +236,15 @@ export async function autoCompact(
   const preCompactTokenCount = resolveOccupancy(messages, snipTokensFreed ?? 0, limits)
 
   try {
-    const summary = await compactFn(messages, systemPrompt)
+    const postCompactMessages = await compactNow(messages, systemPrompt, compactFn)
 
-    if (!summary) {
+    if (!postCompactMessages) {
       const prevFailures = tracking?.consecutiveFailures ?? 0
       return {
         wasCompacted: false,
         consecutiveFailures: prevFailures + 1,
       }
     }
-
-    // Build post-compact messages: single user message with the summary
-    const summaryContent = getCompactUserSummaryMessage(summary, true)
-    const postCompactMessages: MessageLike[] = [
-      { role: 'user', content: summaryContent },
-    ]
 
     const postCompactTokenCount = tokenCountWithEstimation(postCompactMessages)
 

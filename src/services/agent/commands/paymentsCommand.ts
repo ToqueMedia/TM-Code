@@ -2,45 +2,8 @@ import { useChatStore } from '../../../stores/chatStore'
 import { t } from '../../../i18n'
 import { runAgentWithCallbacks } from '../agentRunner'
 import { logger } from '../../../utils/logger'
+import { fetchAllMomenuSkills } from '../momenuSkills'
 import type { SlashCommandMode } from '../slashCommandRegistry'
-
-const SKILLS_BASE = 'https://raw.githubusercontent.com/ithustle/momenu-skills/main/skills'
-
-const SKILL_FILES = [
-  { name: 'mom-factura-payments', files: ['SKILL.md', 'references/STATUS-POLLING.md'] },
-  { name: 'mom-factura-webhooks', files: ['SKILL.md'] },
-  { name: 'mom-factura-testing', files: ['SKILL.md'] },
-]
-
-async function fetchSkillContent(skillName: string, file: string): Promise<{ label: string; content: string } | null> {
-  try {
-    const url = `${SKILLS_BASE}/${skillName}/${file}`
-    const res = await fetch(url)
-    if (!res.ok) return null
-    const content = await res.text()
-    const label = file === 'SKILL.md' ? skillName : `${skillName}/${file}`
-    return { label, content }
-  } catch {
-    return null
-  }
-}
-
-async function fetchAllSkills(): Promise<string> {
-  // Fetch all skill files in parallel
-  const fetches = SKILL_FILES.flatMap(skill =>
-    skill.files.map(file => fetchSkillContent(skill.name, file))
-  )
-  const results = await Promise.all(fetches)
-
-  const parts: string[] = []
-  for (const result of results) {
-    if (result) {
-      parts.push(`<skill name="${result.label}">\n${result.content}\n</skill>`)
-    }
-  }
-
-  return parts.join('\n\n')
-}
 
 export async function executePayments(
   args: string,
@@ -54,10 +17,12 @@ export async function executePayments(
     return
   }
 
-  // Fetch skills from GitHub (fire-and-forget — not persisted)
+  // Fetch skills from GitHub (fire-and-forget — not persisted). Always pulls
+  // the latest `main` revision; shared with the read_skill remote fallback via
+  // momenuSkills.ts so both paths read the same source.
   let skillsContent: string
   try {
-    skillsContent = await fetchAllSkills()
+    skillsContent = await fetchAllMomenuSkills()
   } catch (err) {
     logger.error('payments', 'Failed to fetch skills:', err)
     chatStore.addSystemMessage(

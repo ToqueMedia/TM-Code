@@ -12,7 +12,6 @@ import { useChatStore } from "../../stores/chatStore";
 import { useMcpStore } from "../../stores/mcpStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { usePermissionStore } from "../../stores/permissionStore";
-import { useBillingStore } from "../../stores/billingStore";
 import { useTmSpeedStore } from "../../stores/tmSpeedStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useBackgroundCommandStore } from "../../stores/backgroundCommandStore";
@@ -23,11 +22,9 @@ import {
 } from "../../services/agent/messageQueue";
 import { usePreflightStatus } from "../../hooks/usePreflightStatus";
 import { countAvailable } from "../../services/preflightService";
+import { MODEL_PROFILES } from "../../services/agent/modelProfiles";
 import {
-  getProfileForPlan,
-  MODEL_PROFILES,
-} from "../../services/agent/modelProfiles";
-import {
+  FALLBACK_CONTEXT_WINDOW,
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
 } from "../../utils/contextWindow";
@@ -42,18 +39,18 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   const workerStatus = useAgentStore((s) => s.workerStatus);
   const isStreaming = useChatStore((s) => s.isStreaming);
   const totalTokensUsed = useChatStore((s) => s.totalTokensUsed);
-  // currentPromptTokens is the per-turn input on the wire (input +
-  // cache_read + cache_creation). Same value the ContextWindowIndicator
-  // reads — keeps the terminal ctx % in lockstep with the chat-mode pill.
-  // Also include output tokens for true context occupancy — see the fix
-  // in ContextWindowIndicator for why input-only understated pressure.
+  // Foreground-only, STABLE context size — read straight off the active
+  // session's persisted lastPromptTokens/lastResponseTokens (the real wire
+  // size of the most recent foreground turn). Keeps the terminal ctx % in
+  // lockstep with the chat-mode pill. We no longer read the global
+  // currentPrompt/currentResponse counters: those are zeroed every request and
+  // clobbered by invisible background/auto-wake runs, which made the % jump
+  // "sem razão aparente". See chatStore.addTokenUsage.
   const currentPromptTokens = useChatStore((s) => {
-    if (s.currentPromptTokens > 0) return s.currentPromptTokens;
     if (!s.activeSessionId) return 0;
     return s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0;
   });
   const currentResponseTokens = useChatStore((s) => {
-    if (s.currentResponseTokens > 0) return s.currentResponseTokens;
     if (!s.activeSessionId) return 0;
     return s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0;
   });
@@ -180,15 +177,13 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   //     plan profile only pre-handshake.
   //   • Denominator is EFFECTIVE window (raw − 20K summary headroom),
   //     matching claude-vaz's calculateContextPercentages.
-  const billingPlan = useBillingStore((s) => s.plan);
-  const activeProfile = useMemo(() => {
-    if (modelName && MODEL_PROFILES[modelName]) {
-      return MODEL_PROFILES[modelName];
-    }
-    return getProfileForPlan(billingPlan);
-  }, [modelName, billingPlan]);
+  // Window: server header → known MODEL_PROFILES entry → conservative 200K
+  // FALLBACK_CONTEXT_WINDOW (NOT the plan profile's 1M). Matches the auto-compact
+  // decision and the chat pill so all three agree.
   const rawContextWindow =
-    headerContextWindow ?? activeProfile.contextWindow ?? 0;
+    headerContextWindow ??
+    (modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName].contextWindow : undefined) ??
+    FALLBACK_CONTEXT_WINDOW;
   const effectiveWindow = getEffectiveContextWindowSize(rawContextWindow);
   const compactThreshold = getAutoCompactThreshold(rawContextWindow);
   const pressureTokens = currentPromptTokens + currentResponseTokens;
@@ -207,7 +202,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
         : tokens.colors.accent.red;
   const ctxTooltip =
     ctxPct > 0
-      ? `${t("terminalMode.status.contextUsage")}: ${pressureTokens.toLocaleString()} (${currentPromptTokens.toLocaleString()}+${currentResponseTokens.toLocaleString()}) / ${effectiveWindow.toLocaleString()} ${t("terminalMode.status.contextEffective")} (${ctxPct.toFixed(1)}%)\n${t("terminalMode.status.model")}: ${activeProfile.name}${compactImminent ? `\n${t("terminalMode.status.autoCompact")}` : ""}`
+      ? `${t("terminalMode.status.contextUsage")}: ${pressureTokens.toLocaleString()} (${currentPromptTokens.toLocaleString()}+${currentResponseTokens.toLocaleString()}) / ${effectiveWindow.toLocaleString()} ${t("terminalMode.status.contextEffective")} (${ctxPct.toFixed(1)}%)${compactImminent ? `\n${t("terminalMode.status.autoCompact")}` : ""}`
       : undefined;
 
   // Toolkit preflight. Tooltip lists missing pieces.
@@ -305,8 +300,11 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
         minH="24px"
         flexShrink={0}
       >
-        {/* Left: status dot + label + info */}
-        <Flex align="center" gap={2} overflow="hidden">
+        {/* Left: status dot + label + info. flex/minW=0 so it can shrink within
+            the space-between row; the status/error label (the one flexible child)
+            absorbs the shrink and ellipsizes, while the short info segments stay
+            nowrap on a single line instead of wrapping and bloating the bar. */}
+        <Flex align="center" gap={2} overflow="hidden" flex="1" minW={0}>
           {/* Status dot — refined-terminal: flat static marker in the semantic
               cfg.color. The breathing 'sPulse' eased animation was removed
               (terminals don't pulse); the squared 2px shape replaces the 'full'
@@ -323,10 +321,16 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
             color={tokens.colors.text.muted}
             fontFamily={tokens.fontFamily.mono}
             fontWeight="600"
-            title={workerStatus || undefined}
+            // Full text on hover — the label is the element that ellipsizes when
+            // the message is long (e.g. a verbose "429 status code (no body…)").
+            title={workerStatus || cfg.label}
             whiteSpace="nowrap"
             overflow="hidden"
             textOverflow="ellipsis"
+            // The single shrinkable child: minW=0 lets it ellipsize instead of
+            // forcing the row taller / pushing the info segments to wrap.
+            flexShrink={1}
+            minW={0}
           >
             {cfg.label}
           </Text>
@@ -352,6 +356,8 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               fontSize="13px"
               color={tokens.colors.text.disabled}
               fontFamily={tokens.fontFamily.mono}
+              whiteSpace="nowrap"
+              flexShrink={0}
             >
               {segments.join(" · ")}
             </Text>
@@ -367,6 +373,8 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               }
               fontFamily={tokens.fontFamily.mono}
               title={toolkit.title}
+              whiteSpace="nowrap"
+              flexShrink={0}
             >
               {toolkit.label}
             </Text>

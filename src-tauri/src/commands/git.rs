@@ -573,6 +573,43 @@ pub async fn git_current_branch(project_path: String) -> Result<String, String> 
     Ok(branch)
 }
 
+/// Commits the local branch is ahead/behind its upstream by.
+/// `None` when there is no upstream configured (or not a git repo) — callers
+/// treat that as "nothing useful to show". Used by the agent context builder
+/// to surface sync state without the model having to run `git status` itself.
+#[derive(Debug, Serialize, Clone)]
+pub struct GitDivergence {
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[tauri::command]
+pub async fn git_upstream_divergence(
+    project_path: String,
+) -> Result<Option<GitDivergence>, String> {
+    // `--count --left-right @{u}...HEAD` prints "<behind>\t<ahead>" where left
+    // is the upstream side. Fails (non-zero) when there's no upstream tracking
+    // branch — that's the common "local-only branch" case, not an error.
+    let output = git_cmd(&project_path)
+        .args(["rev-list", "--count", "--left-right", "@{u}...HEAD"])
+        .output()
+        .map_err(|e| format!("Failed to run git rev-list: {}", e))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts = stdout.split_whitespace();
+    let behind = parts.next().and_then(|s| s.parse::<u32>().ok());
+    let ahead = parts.next().and_then(|s| s.parse::<u32>().ok());
+
+    match (ahead, behind) {
+        (Some(ahead), Some(behind)) => Ok(Some(GitDivergence { ahead, behind })),
+        _ => Ok(None),
+    }
+}
+
 /// Push to remote
 #[tauri::command]
 pub async fn git_push(

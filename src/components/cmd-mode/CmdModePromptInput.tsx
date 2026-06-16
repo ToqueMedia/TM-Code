@@ -9,6 +9,7 @@ import CmdAttachmentBar from './CmdAttachmentBar'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import { resolveInlineArgHint } from '../prompt/slashArgHint'
 import { CMD_MODE_COMMANDS } from '../../services/agent/cmdModeCommands'
+import { useRequiredToolsStore, selectAgentBlocked, selectMissingTools } from '../../stores/requiredToolsStore'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import type { QueuedCommand } from '../../types/messageQueueTypes'
@@ -111,6 +112,12 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
     handleAttachFiles,
     preSendTransformRef,
   } = useCmdPromptLogic()
+
+  // Required-tools gate (git/node/python). When any is missing, sending is
+  // blocked in handleSend; this banner explains why Enter does nothing.
+  // Selectors return a boolean / joined string → stable refs, no re-render loop.
+  const agentBlocked = useRequiredToolsStore(selectAgentBlocked)
+  const missingTools = useRequiredToolsStore((s) => selectMissingTools(s).join(', '))
 
   // ─── Paste compacting ───
   // When the user pastes a large block of text (>5 lines), show a compact
@@ -302,6 +309,28 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
           isBuilding={quickOpenBuilding}
           limit={50}
         />
+      )}
+
+      {/* Required-tools warning — agent is blocked until git/node/python exist */}
+      {agentBlocked && (
+        <Flex
+          align="center"
+          gap={2}
+          px={3}
+          py={2}
+          borderTop="1px solid rgba(255,255,255,0.05)"
+          bg="rgba(239, 68, 68, 0.06)"
+        >
+          <Text
+            fontFamily={tokens.fontFamily.mono}
+            fontSize="12px"
+            color={tokens.colors.accent.red}
+            fontWeight="600"
+            lineHeight="1.4"
+          >
+            ⚠ {t('terminalMode.toolsRequiredBanner').replace('{missing}', missingTools)}
+          </Text>
+        </Flex>
       )}
 
       {/* Queued messages — terminal style */}

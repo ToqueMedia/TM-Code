@@ -1,7 +1,7 @@
 {
   "name": "toquemedia-studio",
   "private": true,
-  "version": "0.7.6",
+  "version": "0.7.7",
   "type": "module",
   "packageManager": "yarn@1.22.22",
   "engines": {
@@ -11,7 +11,6 @@
     "dev": "vite",
     "dev:ai-worker": "yarn --cwd workers/ai-pass-through dev",
     "build": "tsc && vite build",
-    "preview": "yarn run build && wrangler dev",
     "tauri": "tauri",
     "tauri:build:win-x64": "node scripts/build.mjs x86_64-pc-windows-msvc --require-updater-artifacts",
     "tauri:build:win-x64:unsigned": "node scripts/build.mjs x86_64-pc-windows-msvc --unsigned",
@@ -21,8 +20,7 @@
     "test": "jest",
     "test:ai-worker": "yarn --cwd workers/ai-pass-through test",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage",
-    "deploy": "yarn run build && wrangler deploy"
+    "test:coverage": "jest --coverage"
   },
   "dependencies": {
     "@chakra-ui/react": "^3.34.0",
@@ -61,7 +59,6 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.30.2",
     "@resvg/resvg-js": "^2.6.2",
     "@tauri-apps/cli": "^2",
     "@testing-library/jest-dom": "^6.9.1",
@@ -84,7 +81,6 @@
     "tsx": "^4.21.0",
     "typescript": "~5.9.3",
     "vite": "^8.0.0",
-    "vite-tsconfig-paths": "^6.1.1",
-    "wrangler": "^4.78.0"
+    "vite-tsconfig-paths": "^6.1.1"
   }
 }

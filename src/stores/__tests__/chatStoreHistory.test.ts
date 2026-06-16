@@ -273,7 +273,10 @@ describe('rebuildConversationHistory — per-turn providerStates', () => {
 
     const history = rebuildConversationHistory([userMsg('hi'), assistant])
     const results = history[2].content as Array<{ toolCallId: string; content: string }>
-    expect(results[0].content).toBe('Tool call was interrupted.')
+    // Actionable interruption marker: still flags the interruption, and now
+    // steers the model to resume (not re-explore from scratch).
+    expect(results[0].content).toContain('interrupted')
+    expect(results[0].content).toContain('do not re-explore the project from scratch')
   })
 
   it('legacy single providerState path is unchanged (old persisted sessions)', () => {

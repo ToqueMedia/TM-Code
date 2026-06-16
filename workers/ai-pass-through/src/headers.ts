@@ -48,6 +48,11 @@ export function buildCorsHeaders(request: Request): Headers {
     'X-TM-Request-Id',
     'X-TM-Provider',
     'X-TM-Model',
+    // Janela de contexto real do modelo ativo — consumida por
+    // applyStreamingResponseHeaders na IDE (agentStore.modelContextWindow).
+    // Sem este nome no expose-list, o browser não consegue LER o header
+    // cross-origin mesmo que seja enviado.
+    'X-Model-Context-Window',
     'X-TM-Speed-Applied',
     'X-TM-Upstream-Status',
     'X-TM-Config-Source',
@@ -177,6 +182,9 @@ export function buildResponseHeaders(upstream: Response, meta: {
   speedApplied: boolean
   configSource: 'kv' | 'env'
   configKey: string
+  /** Janela de contexto (tokens) do modelo ativo, vinda da config KV. Ausente
+   *  → o header não é emitido e a IDE cai no fallback de perfil local. */
+  contextWindow?: number
   /** Estado de billing pré-voo (ausente quando o lookup falhou ou billing off). */
   budget?: BudgetHeaderMeta
 }): Headers {
@@ -205,6 +213,12 @@ export function buildResponseHeaders(upstream: Response, meta: {
   headers.set('x-tm-upstream-status', String(upstream.status))
   headers.set('x-tm-config-source', meta.configSource)
   headers.set('x-tm-config-key', meta.configKey)
+  // Janela de contexto real — só quando a config a declara. A IDE usa-a como
+  // denominador autoritativo da pressão de contexto E do gatilho de
+  // auto-compactação (substitui a adivinha da tabela de perfis local).
+  if (typeof meta.contextWindow === 'number' && meta.contextWindow > 0) {
+    headers.set('x-model-context-window', String(meta.contextWindow))
+  }
 
   // Billing pré-voo — nomes exatos que billingStore.updateFromHeaders já
   // consome na IDE (estavam mortos desde a remoção do proxy worker antigo).

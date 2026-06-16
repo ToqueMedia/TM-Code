@@ -45,6 +45,19 @@
  */
 
 export const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
+
+/**
+ * Conservative context-window assumption used EVERYWHERE the real window is
+ * unknown — no server `X-Model-Context-Window` header AND no matching entry in
+ * MODEL_PROFILES (turn-1 pre-handshake, BYOK, or a renamed/new model id). The
+ * pressure pill, the terminal status line, the auto-compact decision and the
+ * admin Select default all fall back to this single value so they never
+ * disagree. 200K (not 1M): when we genuinely don't know, compacting early is
+ * safe; assuming 1M was the bug that let small-window models overflow. The
+ * admin publishes the real window via Settings → Admin to override it.
+ */
+export const FALLBACK_CONTEXT_WINDOW = 200_000
+
 export const AUTOCOMPACT_BUFFER_FLOOR = 13_000
 export const AUTOCOMPACT_BUFFER_PCT = 0.05
 export const WARNING_THRESHOLD_BUFFER_FLOOR = 20_000

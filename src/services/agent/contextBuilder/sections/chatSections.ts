@@ -242,7 +242,7 @@ ${totalTools} tools available. Key behaviors not obvious from tool schemas:
    **When to use:** commands that take >30 seconds — \`npm install\`, \`npm run build\`, \`tsc --noEmit\`, large compilations. Fire-and-forget: start the install in background, then continue reading/editing files while it runs. If there is no other work, end your turn and wait for auto-wake.
    **When NOT to use:** quick commands (<30s) — \`ls\`, \`cat\`, \`git status\`, \`curl\`, small \`npm test\` runs. Use \`${EXECUTE_COMMAND}\` for those — you need the output immediately to decide next steps.
  - \`${CHECK_BACKGROUND_COMMANDS}\`: see status and output of background commands. Use once after auto-wake or after doing other useful work. If commands are still running, do NOT call it repeatedly; end your turn and wait for auto-wake.
- - \`${UPDATE_TASKS}\`: show a task list to the developer with real-time progress. Use at the start of multi-step work (3+ steps) to communicate your plan. Update task statuses as you complete each step. **Patch semantics**: each entry is merged with the existing tracker by ID — to change only a status, send \`{ id, status }\` (description is optional when updating an existing task); new IDs are appended. You do NOT need to resend the whole list, and omitting a task does NOT delete it. Mark a task \`completed\` only when ITS acceptance criterion is verified, and include an \`evidence\` field with the signal you observed (\`"tsc --noEmit clean"\`, \`"GET /users → 200"\`, \`"14 tests pass"\`) — a completion without real evidence is reverted to in_progress, and "files exist on disk" does not count. You may complete several at once if each has its own evidence. Update sparingly: at the start, when a task completes, and at the end — not after every single tool call.
+ - \`${UPDATE_TASKS}\`: show a task list to the developer with real-time progress. This panel is the developer's main window into what you are doing, so **ALWAYS seed it at the START of any multi-step task (3+ steps: scaffolding, a multi-file feature, anything you would break into a plan) BEFORE you begin editing** — then flip statuses as you progress. Grinding silently through a multi-step task with an empty task list is a defect, not brevity: if the task is non-trivial and the panel is empty, you skipped a required step. **Patch semantics**: each entry is merged with the existing tracker by ID — to change only a status, send \`{ id, status }\` (description is optional when updating an existing task); new IDs are appended. You do NOT need to resend the whole list, and omitting a task does NOT delete it. Mark a task \`completed\` only when ITS acceptance criterion is verified, and include an \`evidence\` field with the signal you observed (\`"tsc --noEmit clean"\`, \`"GET /users → 200"\`, \`"14 tests pass"\`) — a completion without real evidence is reverted to in_progress, and "files exist on disk" does not count. You may complete several at once if each has its own evidence. Update sparingly: at the start, when a task completes, and at the end — not after every single tool call.
  - \`ask_user_question\`: structured multi-question form. Use when the task has genuine ambiguity that affects your implementation (stack choice, auth provider, scope ambiguity). Present 2-4 options with labels and descriptions, plus an "Other" option for free-text. Do NOT use for simple yes/no confirmations — just proceed. Do NOT use for sensitive credentials — use \`request_credentials\` for those.
  - \`${READ_SKILL}\`: load the full content of a skill listed in the "Skills available" section. Call ONCE per skill when its topic comes up — content stays in history. Avoids reading skills that are not relevant to the current task.
 ${ctx.modelProfile?.supportsSearch ? ` - **Native web search**: you can search the web directly as part of your generation (no tool call needed — the platform enables it server-side). Use it when you need pages about a topic you don't have a direct URL for — library docs, error messages, current events — then \`web_fetch\` the most promising URL to read it in full.
@@ -349,6 +349,11 @@ export function getEnvironmentSection(ctx: PromptContext): string {
     if (ctx.pkgSummary.scripts.length) lines.push(`scripts: ${ctx.pkgSummary.scripts.join(', ')}`)
     if (ctx.pkgSummary.dependencies.length) lines.push(`deps: ${ctx.pkgSummary.dependencies.join(', ')}`)
     if (ctx.pkgSummary.devDependencies.length) lines.push(`devDeps: ${ctx.pkgSummary.devDependencies.join(', ')}`)
+  }
+  // Import path aliases — resolve aliased imports (@/foo) without grepping the
+  // tsconfig. One line; only present when the project actually defines them.
+  if (ctx.pathAliases.length) {
+    lines.push(`import_aliases: ${ctx.pathAliases.map(a => `${a.alias}→${a.target}`).join('  ')}`)
   }
   return `# Environment\n${lines.join('\n')}`
 }
@@ -706,6 +711,42 @@ export function getProjectStructureSection(ctx: PromptContext): string {
   return `# Project structure\n(snapshot at turn start — files you create, move or delete with tools THIS turn won't show here; trust your tool results)\n${ctx.treeString}`
 }
 
+// ── Git orientation ────────────────────────────────────────────
+// Branch + sync state + changed files, so the model doesn't burn a turn on
+// `git status` / `git diff` to figure out where it is. Snapshot per turn (the
+// disclaimer mirrors the file-tree one — mid-turn writes aren't reflected).
+export function getGitStatusSection(ctx: PromptContext): string | null {
+  const git = ctx.gitContext
+  if (!git) return null // not a git repo
+
+  const sync: string[] = []
+  if (git.ahead) sync.push(`${git.ahead} ahead`)
+  if (git.behind) sync.push(`${git.behind} behind`)
+  const syncStr = sync.length ? ` (${sync.join(', ')} upstream)` : ''
+
+  const header = `# Git\n(snapshot at turn start — changes you make THIS turn won't show here)\nbranch: ${git.branch}${syncStr}`
+
+  if (!git.files.length) {
+    return `${header}\nworking tree clean`
+  }
+
+  const fileLines = git.files
+    .map(f => `  ${f.staged ? 'staged  ' : 'unstaged'} ${f.status.padEnd(9)} ${f.path}`)
+    .join('\n')
+  const more = git.truncatedFiles ? `\n  … and ${git.truncatedFiles} more` : ''
+  return `${header}\nchanged files (${git.files.length}${git.truncatedFiles ? '+' : ''}):\n${fileLines}${more}`
+}
+
+// ── Recently-modified files ────────────────────────────────────
+// Points the model at the working set (newest first) so it doesn't grep around
+// for "where the recent work is". Paths are project-relative; .gitignore'd and
+// build-output paths are already excluded by the walker.
+export function getRecentFilesSection(ctx: PromptContext): string | null {
+  if (!ctx.recentFiles.length) return null
+  const lines = ctx.recentFiles.map(f => `  ${f.path}`).join('\n')
+  return `# Recently modified files\n(most recent first — likely the active working set)\n${lines}`
+}
+
 export function getReadmeSection(ctx: PromptContext): string | null {
   if (!ctx.readme) return null
   return `# README summary\n${sanitizeProjectContent(ctx.readme.slice(0, 400))}`
@@ -830,7 +871,10 @@ export function getTaskListSection(ctx: PromptContext): string | null {
   const truncated = ctx.todoContent.length > 2000
     ? ctx.todoContent.slice(0, 2000) + '\n\n[... task list truncated — read TODO.md]'
     : ctx.todoContent
-  return `# Task list (TODO.md — static markdown)\n${sanitizeProjectContent(truncated)}`
+  return `# Task list (TODO.md — the project backlog you MUST drive to completion)
+${sanitizeProjectContent(truncated)}
+
+**This TODO.md is the agreed backlog for this project — completing it is the job, not an optional extra.** Work its items in order and mirror your progress into the live \`${UPDATE_TASKS}\` tracker; that tracker (not the checkboxes above, which can be stale) is the authoritative record of what is genuinely done. The project is NOT finished while any item is still open. So **at the end of every turn, while items remain incomplete, close by pointing to the next one** — e.g. "Next: <next unchecked task> — <one line on what it involves>". Keep doing this until every TODO.md item is verifiably done. If the developer asks for something unrelated, do that first, then still surface the next TODO.md task as a brief reminder — never silently drop the backlog.`
 }
 
 /**
@@ -1008,6 +1052,7 @@ export function getConstraintsSection(ctx: PromptContext): string {
 
 ## Safety
  - \`.env\` files are mechanically blocked — you CANNOT read, write, edit, or delete them. The developer also cannot edit \`.env\` directly through the IDE. The ONLY write path is the secure form rendered by \`request_credentials\`. (In Terminal mode, \`.env\` reads are allowed with explicit user authorization — but \`request_credentials\` is still preferred for project-integrated vars.)
+ - **A submitted \`request_credentials\` form IS the confirmation — do NOT try to verify it.** When the tool returns "Credentials saved to .env for X: KEY", that key is now in \`.env\`, full stop. The \`.env\` read-block is by design and is NEVER evidence that a key is missing — so do not attempt to read \`.env\` to "double-check", do not re-request a key already collected this session, and do not tell the developer to add it by hand. Treat a saved key exactly as if you had read it back successfully, and continue the implementation.
  - **TRIGGER — call \`request_credentials\` in the SAME turn**: whenever you write code that reads \`process.env.X\`, \`import.meta.env.X\`, \`Deno.env.get('X')\`, or any equivalent for a **third-party service the developer is integrating** (LLM provider like Mercury/OpenAI/Anthropic, payment processor, email API, analytics, webhook secrets, DB connection strings, etc.), you MUST call \`request_credentials\` for that key in the same agent turn. Do NOT generate the code first and "leave .env for the developer to fill later" — they cannot fill it without the form. Skipping this leaves the project broken at runtime even though every file looks correct.
  - \`.env.example\` is supplementary documentation, NOT a collection mechanism. Writing \`.env.example\` without also calling \`request_credentials\` for every key it documents is incomplete work — finish by collecting the values.
  - For NON-sensitive configuration (region, plan tier, project name, feature toggles) **PREFER** \`ask_user_question\` — those don't belong in \`.env\`.

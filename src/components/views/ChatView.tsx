@@ -8,8 +8,6 @@ import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useMcpStore } from '../../stores/mcpStore'
 import { activatePreview } from '../../services/previewActivation'
-import { invoke } from '@/utils/invokeMetrics'
-import { projectHasMeaningfulContent } from '../../utils/projectHasContent'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -25,6 +23,7 @@ import ModelIndicator from '../chat/ModelIndicator'
 import TmSpeedIndicator from '../chat/TmSpeedIndicator'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
+import { GoalCelebration } from '../celebration/GoalCelebration'
 const CheckpointPanel = lazy(() => import('../chat/CheckpointPanel'))
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -114,20 +113,17 @@ function ChatView() {
   const hasHiddenPreBoundary = preBoundaryCount > 0 && !revealPreBoundary
   const projectPath = currentProject?.path || ''
 
-  // Check if project directory has meaningful content (not just dot-files).
-  // Uses the same glob_files invoke that projectStore uses for the noTmsFile check.
-  const [hasContent, setHasContent] = useState<boolean | null>(null)
-  useEffect(() => {
-    if (!projectPath) { setHasContent(null); return }
-    let cancelled = false
-    invoke<string[]>('glob_files', { pattern: '*', directory: projectPath })
-      .then(entries => { if (!cancelled) setHasContent(projectHasMeaningfulContent(entries)) })
-      .catch(() => { if (!cancelled) setHasContent(true) }) // fail-open: don't show suggestions on FS error
-    return () => { cancelled = true }
-  }, [projectPath])
-
 // use-stick-to-bottom: ResizeObserver-based auto-scroll that handles
   // streaming content, expanding diffs, and dynamic height changes.
+  //
+  // `resize: 'instant'` is deliberate. 'smooth' animates a SPRING scroll every
+  // time the content grows while pinned — which on SEND is very visible and
+  // wrong: the user's message lands, then the assistant placeholder + the
+  // sticky AgentActivityIndicator mount, and the viewport visibly slides down
+  // to chase them. Instant keeps the bottom pinned imperceptibly: new content
+  // just appears, the view never animates. (If a streaming "tremble" ever
+  // resurfaces it must be fixed at the source — redundant/competing scrollers —
+  // not by turning every pin into a visible animation.)
   const { scrollRef, contentRef, scrollToBottom, isAtBottom } = useStickToBottom({
     resize: 'instant',
     initial: 'instant',
@@ -227,8 +223,10 @@ function ChatView() {
     }
   }, [messages.length, scrollToBottom])
 
-  // Force scroll during streaming — compensates for ResizeObserver race
-  // conditions caused by the 50ms buffer flush + in-place mutations.
+  // Re-assert the bottom target during streaming — compensates for
+  // ResizeObserver race conditions caused by the 50ms buffer flush + in-place
+  // mutations. 'instant' matches the hook's resize mode: a single imperceptible
+  // pin, never an animated scroll (see the resize comment above).
   useEffect(() => {
     if (isStreaming && wasAtBottomRef.current) {
       scrollToBottom('instant')
@@ -299,9 +297,14 @@ function ChatView() {
       direction="column"
       flex="1"
       overflow="hidden"
+      position="relative"
       fontSize={`${chatTextFontSize}px`}
       css={chatTextScaleStyles}
     >
+      {/* Goal celebration overlay (World Cup 2026) — absolute, pointer-events
+          none; fires when an agent run completes. */}
+      <GoalCelebration />
+
       {/* Session header bar */}
       <Flex
         align="center"
@@ -614,7 +617,12 @@ function ChatView() {
               <Box maxW="900px" mx="auto" w="100%" py={4}>
                 <ChatSkeleton />
               </Box>
-            ) : messages.length === 0 && hasContent === false ? (
+            ) : messages.length === 0 ? (
+              // Empty state for ANY chat with no messages — not just empty
+              // projects. The previous `hasContent === false` gate depended on
+              // an async glob_files invoke; when that resolved to null/true (or
+              // its callback was dropped on a dev reload) an empty session
+              // showed a blank pane instead of the suggestions.
               <ChatSuggestions />
             ) : (
               <Box

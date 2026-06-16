@@ -241,6 +241,21 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
       const skill = svc.getCachedSkillContent(name)
 
       if (!skill) {
+        // Remote fallback — the MoMenu payment skills are NOT bundled or on
+        // disk; they live in a GitHub repo and are normally injected by the
+        // /payments command. When the scaffolding-aware hint later tells the
+        // agent to read_skill('mom-factura-*') (chatSections.ts), fetch it
+        // FRESH from the same remote source so the hint actually resolves —
+        // always the latest `main`, no app-side cache.
+        const { isMomenuSkill, fetchMomenuSkill } = await import('../momenuSkills')
+        if (isMomenuSkill(name)) {
+          const remote = await fetchMomenuSkill(name)
+          if (remote) {
+            skillModule.trackInvokedSkill(remote.name, remote.content)
+            return svc.formatSkillForReading(remote)
+          }
+          return `Error: skill "${name}" is a remote MoMenu skill that could not be fetched right now (offline, or the skill moved). Retry when online, or run /payments to integrate payments.`
+        }
         const available = svc.getCachedSkillNames()
         return `Error: skill "${name}" is not loaded for the current context. Available skills: ${available.join(', ') || '(none — check the "Skills available" section of the system prompt)'}.`
       }

@@ -5,6 +5,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useProblemsStore } from '../../stores/problemsStore'
 import { useBillingStore } from '../../stores/billingStore'
+import { triggerGoalCelebration } from '../../stores/celebrationStore'
 import { t } from '../../i18n/useTranslation'
 import AgentService from './agentService'
 import type { OpenAIContentPart } from './types'
@@ -13,7 +14,8 @@ import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
 import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
-import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText } from './promptValueHelpers'
+import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText, extractDisplayFromValue } from './promptValueHelpers'
+import { dequeueAllMatching, isSlashCommand, joinPromptValues } from './messageQueue'
 import { describeImagesViaSidecar } from './visionSidecar'
 import { MODEL_PROFILES, getProfileForPlan } from './modelProfiles'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from './atMentions'
@@ -63,6 +65,12 @@ interface RunAgentOptions {
    * resolution, same scoping as before the claude-vaz parity port.
    */
   mentionText?: string
+  /**
+   * Background/automatic run (auto-wake after a sub-agent or background command
+   * finishes). Suppresses the seasonal goal celebration — only user-initiated
+   * runs "score" a goal. Default: false.
+   */
+  isBackgroundRun?: boolean
 }
 
 const APPROX_CHARS_PER_TOKEN = 4
@@ -94,6 +102,34 @@ function estimateTokensFromValue(value: unknown): number {
 let lastRun: Promise<void> = Promise.resolve()
 
 /**
+ * Serialize ANY agent dispatch through the shared `lastRun` chain — each call
+ * awaits the previous one's FULL completion (its `finally`: cleanup +
+ * `queryGuard.end()`) before starting. This is what stops two dispatchers — the
+ * message-queue drain, an auto-wake delivering sub-agent/background results, a
+ * slash command — from both clearing `tryStart()` in the reserve→tryStart
+ * window and one losing as "concurrent runAgentLoop detected".
+ *
+ * Chat-mode queued messages were starved precisely because they dispatched
+ * `runAgentLoop` DIRECTLY (off this chain) while auto-wake ran on it: the queued
+ * prompt kept colliding and being rejected until all background activity ceased
+ * ("only at session end"). Terminal mode already routes every dispatch through
+ * here (via runAgentWithCallbacks), which is why it behaved as expected.
+ * Routing the Chat queue through `enqueueSerializedRun` too restores per-turn
+ * draining.
+ */
+export function enqueueSerializedRun<T>(task: () => Promise<T>): Promise<T> {
+  const prev = lastRun
+  const run = (async () => {
+    // Swallow prior errors — one failed turn must not starve the queue.
+    try { await prev } catch { /* ignore */ }
+    return task()
+  })()
+  // Store a never-rejecting void version so the next caller's `await prev` never throws.
+  lastRun = run.then(() => {}, () => {})
+  return run
+}
+
+/**
  * Shared agent invocation — wires up all the chatStore/agentStore callbacks.
  * Used by both PromptInput.handleSend and slash command handlers.
  */
@@ -101,15 +137,7 @@ export async function runAgentWithCallbacks(
   prompt: string,
   options: RunAgentOptions = {}
 ): Promise<void> {
-  const prev = lastRun
-  const run = (async () => {
-    // Swallow prior errors — one failed turn must not starve the queue.
-    try { await prev } catch { /* ignore */ }
-    await runAgentInternal(prompt, options)
-  })()
-  // Store a never-rejecting version so the next caller's `await prev` never throws.
-  lastRun = run.catch(() => {})
-  return run
+  await enqueueSerializedRun(() => runAgentInternal(prompt, options))
 }
 
 async function runAgentInternal(
@@ -127,6 +155,7 @@ async function runAgentInternal(
     skipStartAssistantMessage = false,
     systemPromptOverride,
     mentionText,
+    isBackgroundRun = false,
   } = options
 
   const chatStore = useChatStore.getState()
@@ -523,6 +552,11 @@ async function runAgentInternal(
         agentStore.setStatus('idle')
         logger.info('agent', `✓ Agent done (total: ${Date.now() - loopStartTime}ms)`)
         useProblemsStore.getState().scanProject().catch(() => {})
+        // Seasonal flourish — a successful, user-initiated run "scores" a goal
+        // (World Cup 2026). Background auto-wakes pass isBackgroundRun so the
+        // burst only fires on work the user actually asked for. The helper
+        // itself no-ops when the seasonal feature is disabled.
+        if (!isBackgroundRun) triggerGoalCelebration('agent_run_complete')
       },
       onError: (error) => {
         flushBufferedDeltas()
@@ -537,12 +571,19 @@ async function runAgentInternal(
         }
       },
       onUsageUpdate: (inputTokens, outputTokens, billingMultiplier = 1) => {
-        logger.info('agent', `→ Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out${billingMultiplier > 1 ? ` (billed ${billingMultiplier}x — TM Speed, server-side)` : ''}`)
-        useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
+        // Defensive ?? 0: partial-usage providers can pass undefined for either
+        // counter; .toLocaleString() on undefined crashes the whole run.
+        const inTok = inputTokens ?? 0
+        const outTok = outputTokens ?? 0
+        logger.info('agent', `→ Tokens: ${inTok.toLocaleString()} in / ${outTok.toLocaleString()} out${billingMultiplier > 1 ? ` (billed ${billingMultiplier}x — TM Speed, server-side)` : ''}`)
+        // isForeground = !isBackgroundRun: invisible auto-wake / background runs
+        // still count toward billing + the activity indicator, but must NOT move
+        // the ctx pill (it tracks the FOREGROUND conversation's context size).
+        useChatStore.getState().addTokenUsage(inTok, outTok, !isBackgroundRun)
         // Display-only: alimenta a stat "último pedido" (ApiKeysSection).
         // A cobrança real (incl. multiplicador do TM Speed) acontece no
         // worker — nada de matemática de consumo no cliente.
-        useBillingStore.getState().addLastRequestTokens(inputTokens + outputTokens)
+        useBillingStore.getState().addLastRequestTokens(inTok + outTok)
       },
       onContextCompression: (event) => {
         if (event.type === 'hooks_start') {
@@ -558,6 +599,57 @@ async function runAgentInternal(
           useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized)
         }
       },
+      // ── Queued-message steering (claude-vaz parity) ──
+      // Called by the query loop at every turn boundary. Without this, a
+      // message the developer queues mid-run sits in the queue until the WHOLE
+      // run goes idle ("only sent when the session ends") — because the idle
+      // drain (useQueueProcessor) can't fire while the guard is held. Here we
+      // drain it INSIDE the live run so it rides the next turn, exactly like
+      // claude-vaz. Foreground main agent only — `isBackgroundRun` covers the
+      // invisible auto-wakes, and sub-agents never receive this callback.
+      collectSteeringMessages: isBackgroundRun
+        ? undefined
+        : async (): Promise<string | null> => {
+            // Only plain prompt-mode messages steer. Slash/bash/task-notif
+            // commands need executeInput's per-command handling, so they stay
+            // queued for the idle drain when this run ends.
+            const drained = dequeueAllMatching(
+              c => !isSlashCommand(c) && c.mode === 'prompt',
+            )
+            if (drained.length === 0) return null
+
+            // Coalesce a burst into ONE steered turn (same as the queue's
+            // batched dispatch — joinPromptValues preserves block ordering).
+            const merged =
+              drained.length > 1
+                ? joinPromptValues(drained.map(c => c.value))
+                : drained[0]!.value
+            const display = extractDisplayFromValue(merged)
+
+            // Transcript bookkeeping — keep the run continuous (no idle
+            // flicker) while showing the steered message in the right place:
+            //   [assistant so far] → [user: steered] → [fresh assistant bubble]
+            // flushBufferedDeltas first so buffered tokens land in the bubble
+            // we're about to finalize, not the new one. We intentionally do NOT
+            // touch the run-level `finalized` flag: onDone/onError still finalize
+            // the FRESH bubble opened below at the real end of the run.
+            flushBufferedDeltas()
+            const cs = useChatStore.getState()
+            cs.finalizeAssistantMessage()
+            cs.addUserMessage(display.text, display.attachments)
+            cs.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
+
+            // Model-facing text. buildAugmentedPrompt resolves file/folder
+            // attachments to XML; images degrade to <attached_image> markers
+            // (steering is text-first — the transcript still shows the real
+            // attachment, and the rare image-steer keeps its intent). @-mentions
+            // are intentionally not re-resolved here.
+            const text = await buildAugmentedPrompt(merged, {
+              resolveAttachmentXml: resolveAttachments,
+              resolveImageDataUri: resolveImageToDataUri,
+            })
+            return text && text.trim().length > 0 ? text : display.text
+          },
     })
   } finally {
     // Always restore IDE mode regardless of how the loop exited

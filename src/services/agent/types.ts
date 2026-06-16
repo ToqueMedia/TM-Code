@@ -75,6 +75,17 @@ export interface AgentCallbacks {
 
   /** Context was compressed to fit within model limits. */
   onContextCompression?: (event: import('@/types/agent').CompactProgressEvent) => void
+
+  /**
+   * Queued-message steering (claude-vaz parity). Invoked by the query loop at
+   * each turn boundary. The host drains any prompt-mode messages the developer
+   * queued WHILE this run was streaming, performs the transcript bookkeeping
+   * (finalize the in-flight assistant bubble → show the user's message → open a
+   * fresh bubble), and returns the model-facing text to inject as the next user
+   * turn. Returns null when nothing is queued. Foreground main-agent runs only;
+   * omitted for sub-agents and background auto-wakes. Must never throw.
+   */
+  collectSteeringMessages?: () => Promise<string | null>
 }
 
 // ── Turn result ──

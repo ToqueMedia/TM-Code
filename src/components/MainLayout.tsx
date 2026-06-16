@@ -35,6 +35,7 @@ import { tokens } from '@/theme/tokens'
 function MainLayout() {
   const t = useTranslation()
   const viewMode = useLayoutStore(s => s.viewMode)
+  const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
@@ -430,7 +431,9 @@ function MainLayout() {
                 ) : (
                   <Flex flex="1" overflow="hidden">
                     <Box
-                      w={viewMode === 'preview' ? `${previewChatWidth}px` : '100%'}
+                      w={viewMode === 'preview'
+                        ? (isPreviewFullscreen ? '0px' : `${previewChatWidth}px`)
+                        : '100%'}
                       h="100%"
                       flexShrink={0}
                       overflow="hidden"
@@ -459,7 +462,7 @@ function MainLayout() {
                         )
                       )}
                     </Box>
-                    {viewMode === 'preview' && (
+                    {viewMode === 'preview' && !isPreviewFullscreen && (
                       <Box
                         ref={resizeHandleRef}
                         role="separator"

@@ -21,6 +21,16 @@ export interface ActiveAIConfig {
   apiKeyEnv: string
   enabled: boolean
   /**
+   * Janela de contexto real do modelo ativo, em tokens. Publicada na config
+   * KV pelo admin. Quando presente, o worker emite-a no header
+   * `X-Model-Context-Window` para a IDE — é a ÚNICA forma de o cliente saber
+   * a janela real de um modelo que a tabela `MODEL_PROFILES` local não conhece
+   * (BYOK, snapshot novo/renomeado). Sem isto, a decisão de auto-compactação
+   * cai no fallback de perfil e, para modelos desconhecidos, assume ~1M — o
+   * que faz um modelo de janela pequena rebentar antes de compactar.
+   */
+  contextWindow?: number
+  /**
    * Campos extra de request específicos do provider, merged no corpo de
    * CADA pedido (depois do model, antes do stream_options). Config-driven
    * para o worker continuar provider-agnóstico — ex.: DashScope

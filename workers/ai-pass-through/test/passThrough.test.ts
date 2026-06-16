@@ -61,10 +61,14 @@ function firestoreUserDoc(opts: {
   extraUsageBalance?: number
   cycleEnd?: string
   tokenBudgetOverride?: number
+  blocked?: boolean
+  deleted?: boolean
 } = {}): Response {
   return Response.json({
     fields: {
       userPlan: { stringValue: opts.plan ?? 'explorer' },
+      ...(opts.blocked !== undefined ? { blocked: { booleanValue: opts.blocked } } : {}),
+      ...(opts.deleted !== undefined ? { deleted: { booleanValue: opts.deleted } } : {}),
       tokenBudget: {
         mapValue: {
           fields: {
@@ -278,6 +282,31 @@ test('worker injects active model and does not decide provider from request', as
   assert.equal(String(fetcher.calls[0].input), 'https://provider.test/v1/chat/completions')
   assert.equal(fetcher.calls[0].body.model, activeConfig.model)
   assert.equal(fetcher.calls[0].body.provider, 'client-choice-ignored')
+})
+
+test('omits X-Model-Context-Window when the active config declares no window', async () => {
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const res = await handleRequest(request('/v1/chat/completions', { stream: true }), env(), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-model-context-window'), null)
+})
+
+test('emits X-Model-Context-Window from the active config window', async () => {
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const res = await handleRequest(
+    request('/v1/chat/completions', { stream: true }),
+    env({ ACTIVE_AI_CONFIG_JSON: JSON.stringify({ ...activeConfig, contextWindow: 200_000 }) }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-model-context-window'), '200000')
+  // Exposto via CORS para o browser conseguir lê-lo cross-origin.
+  assert.match(
+    res.headers.get('access-control-expose-headers') ?? '',
+    /X-Model-Context-Window/,
+  )
 })
 
 test('X-TM-Speed + paid plan switches to speedModel; header never reaches upstream', async () => {
@@ -811,6 +840,53 @@ test('billing: enforce mode rejects an exhausted budget with 402 before the upst
   assert.equal(fetcher.calls.length, 0)
 })
 
+test('suspension: blocked user is rejected with 403 before the upstream call', async () => {
+  const fetcher = fakeFetcher(
+    Response.json({ ok: true }),
+    () => firestoreUserDoc({ plan: 'pro', blocked: true }),
+  )
+  const res = await handleRequest(request(), env(), { fetcher })
+
+  assert.equal(res.status, 403)
+  assert.match(await res.text(), /tm_account_suspended/)
+  assert.equal(fetcher.calls.length, 0) // upstream nunca foi chamado
+})
+
+test('suspension: blocked user is rejected even with billing enforcement OFF', async () => {
+  const fetcher = fakeFetcher(
+    Response.json({ ok: true }),
+    () => firestoreUserDoc({ plan: 'pro', blocked: true }),
+  )
+  const res = await handleRequest(request(), env({ BUDGET_ENFORCEMENT: 'off' }), { fetcher })
+
+  assert.equal(res.status, 403)
+  assert.match(await res.text(), /tm_account_suspended/)
+  assert.equal(fetcher.calls.length, 0)
+})
+
+test('suspension: soft-deleted user is rejected with 403', async () => {
+  const fetcher = fakeFetcher(
+    Response.json({ ok: true }),
+    () => firestoreUserDoc({ plan: 'pro', deleted: true }),
+  )
+  const res = await handleRequest(request(), env(), { fetcher })
+
+  assert.equal(res.status, 403)
+  assert.match(await res.text(), /tm_account_suspended/)
+  assert.equal(fetcher.calls.length, 0)
+})
+
+test('suspension: a non-blocked user passes the gate normally', async () => {
+  const fetcher = fakeFetcher(
+    Response.json({ ok: true }),
+    () => firestoreUserDoc({ plan: 'pro', blocked: false, deleted: false }),
+  )
+  const res = await handleRequest(request(), env(), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(fetcher.calls.length, 1)
+})
+
 test('billing: tokenBudgetOverride (gift) supersedes the plan budget in the gate', async () => {
   // Gift com override 3M num explorer (plano 1.5M), consumidos 2M:
   // sem o override o gate rejeitava; com ele, 2M/3M = 67% → allowed.
@@ -906,6 +982,10 @@ test('billing: usage from the final SSE chunk is committed as an atomic incremen
   const transforms = commits[0].body.writes[0].transform.fieldTransforms
   assert.equal(transforms[0].fieldPath, 'tokenBudget.tokensConsumed')
   assert.equal(transforms[0].increment.integerValue, '150') // 100 + 50, 1x
+  // Contador vitalício cresce a par do tokensConsumed do ciclo (mesmo valor),
+  // mas vive no topo do doc para sobreviver aos resets de ciclo.
+  assert.equal(transforms[1].fieldPath, 'lifetimeTokensConsumed')
+  assert.equal(transforms[1].increment.integerValue, '150')
 })
 
 test('billing: the streamed bytes reaching the client are identical with usage capture on', async () => {
@@ -981,12 +1061,15 @@ test('billing: overage commit decrements extraUsageBalance and floors it at 0', 
   const writes = commits[0].body.writes
   const transforms = writes[0].transform.fieldTransforms
   assert.equal(transforms[0].fieldPath, 'tokenBudget.tokensConsumed')
-  assert.equal(transforms[1].fieldPath, 'tokenBudget.extraUsageBalance')
-  assert.equal(transforms[1].increment.integerValue, '-150')
+  // Vitalício cresce SEMPRE (também em overage) — segue o tokensConsumed.
+  assert.equal(transforms[1].fieldPath, 'lifetimeTokensConsumed')
+  assert.equal(transforms[1].increment.integerValue, '150')
+  assert.equal(transforms[2].fieldPath, 'tokenBudget.extraUsageBalance')
+  assert.equal(transforms[2].increment.integerValue, '-150')
   // overageConsumed rastreia o overage pago — input do carry-over no reset
   // de ciclo (não cobrar duas vezes o excedente já pago via saldo extra).
-  assert.equal(transforms[2].fieldPath, 'tokenBudget.overageConsumed')
-  assert.equal(transforms[2].increment.integerValue, '150')
+  assert.equal(transforms[3].fieldPath, 'tokenBudget.overageConsumed')
+  assert.equal(transforms[3].increment.integerValue, '150')
   // Floor a 0 como transform separado, depois do increment.
   assert.equal(writes[1].transform.fieldTransforms[0].fieldPath, 'tokenBudget.extraUsageBalance')
   assert.equal(writes[1].transform.fieldTransforms[0].maximum.integerValue, '0')
@@ -1043,7 +1126,7 @@ test('billing: sem service account contra Firestore real → billing desliga (se
   assert.equal(resolveEnforcementMode({ AUTH_MODE: 'test_static', BUDGET_ENFORCEMENT: 'off' }), 'off')
 })
 
-test('billing: BUDGET_ENFORCEMENT=off skips the Firestore read, headers and commit', async () => {
+test('billing: BUDGET_ENFORCEMENT=off skips budget headers and commit (but still reads for the suspension gate)', async () => {
   const fetcher = fakeFetcher(sseUpstream([USAGE_CHUNK]))
   const { tasks, ctx } = collectorCtx()
 
@@ -1055,8 +1138,14 @@ test('billing: BUDGET_ENFORCEMENT=off skips the Firestore read, headers and comm
   await res.text()
   await Promise.all(tasks)
 
+  // Sem gate de orçamento nem commit em modo off…
   assert.equal(res.headers.get('x-budget-status'), null)
-  assert.equal(fetcher.firestoreCalls.length, 0)
+  const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
+  assert.equal(commits.length, 0)
+  // …mas o doc do user É lido (uma única vez, GET) para o gate de suspensão,
+  // que tem de funcionar independentemente do modo de billing.
+  const reads = fetcher.firestoreCalls.filter(c => c.method === 'GET')
+  assert.equal(reads.length, 1)
 })
 
 test('billing: client disconnect mid-stream still settles and commits the partial estimate', async () => {
@@ -1339,16 +1428,22 @@ test('sidecar: memory-* and summarize share the utility sidecar', async () => {
   }
 })
 
-test('sidecar: unpublished type falls back to the active config', async () => {
-  const fetcher = fakeFetcher(Response.json({ ok: true }))
-  const res = await handleRequest(typedRequest('fim'), kvEnv({}), { fetcher })
+test('sidecar: unpublished specialized sidecar (vision/web_search/fim) returns 503 without an upstream call', async () => {
+  // Degradar visão/pesquisa/FIM para o modelo ativo GERAL produz 404 (imagem a
+  // modelo de texto), alucinação (pesquisa sem motor) ou lixo (FIM sem template).
+  // O worker falha já com 503, sem o pedido upstream condenado.
+  for (const type of ['vision', 'web_search', 'fim']) {
+    clearActiveConfigCache()
+    const fetcher = fakeFetcher(Response.json({ ok: true }))
+    const res = await handleRequest(typedRequest(type), kvEnv({}), { fetcher })
 
-  assert.equal(res.status, 200)
-  assert.equal(String(fetcher.calls[0].input), 'https://provider.test/v1/chat/completions')
-  assert.equal(res.headers.get('x-tm-config-key'), 'active')
+    assert.equal(res.status, 503, type)
+    assert.match(await res.text(), /tm_sidecar_unavailable/, type)
+    assert.equal(fetcher.calls.length, 0, type)
+  }
 })
 
-test('sidecar: invalid or disabled sidecar degrades silently to active', async () => {
+test('sidecar: invalid or disabled specialized sidecar returns 503 (never degrades to active)', async () => {
   for (const bad of ['not-json', JSON.stringify({ ...utilitySidecarConfig, enabled: false })]) {
     clearActiveConfigCache()
     const fetcher = fakeFetcher(Response.json({ ok: true }))
@@ -1357,8 +1452,21 @@ test('sidecar: invalid or disabled sidecar degrades silently to active', async (
       kvEnv({ 'sidecar:vision': bad }),
       { fetcher },
     )
-    assert.equal(res.status, 200)
-    assert.equal(res.headers.get('x-tm-config-key'), 'active')
+    assert.equal(res.status, 503)
+    assert.equal(fetcher.calls.length, 0)
+  }
+})
+
+test('sidecar: utility/summarize WITHOUT a published sidecar still degrades to active', async () => {
+  // Ao contrário de vision/web_search/fim, o modelo ativo SABE resumir/extrair,
+  // por isso os tipos utility degradam para a config ativa em vez de 503.
+  for (const type of ['summarize', 'memory-extractor']) {
+    clearActiveConfigCache()
+    const fetcher = fakeFetcher(Response.json({ ok: true }))
+    const res = await handleRequest(typedRequest(type), kvEnv({}), { fetcher })
+    assert.equal(res.status, 200, type)
+    assert.equal(String(fetcher.calls[0].input), 'https://provider.test/v1/chat/completions', type)
+    assert.equal(res.headers.get('x-tm-config-key'), 'active', type)
   }
 })
 

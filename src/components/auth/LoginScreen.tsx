@@ -10,17 +10,30 @@ import { IS_MAC } from '@/utils/platform'
 
 const ERROR_MESSAGES: Record<string, string> = {
   'auth/invalid-email': 'Email inválido.',
-  'auth/user-disabled': 'Conta desactivada.',
+  'auth/user-disabled': 'Esta conta foi desactivada. Contacte o suporte.',
   'auth/user-not-found': 'Email ou password incorrectos.',
   'auth/wrong-password': 'Email ou password incorrectos.',
   'auth/invalid-credential': 'Email ou password incorrectos.',
-  'auth/too-many-requests': 'Muitas tentativas. Aguarde alguns minutos.',
-  'auth/network-request-failed': 'Erro de conexão. Verifique a internet.',
+  'auth/missing-password': 'Introduza a sua password.',
+  'auth/too-many-requests': 'Muitas tentativas. Aguarde alguns minutos antes de tentar novamente.',
+  'auth/network-request-failed': 'Erro de ligação. Verifique a sua conexão à internet.',
+  'auth/account-exists-with-different-credential': 'Já existe uma conta com este email criada por outro método de início de sessão. Entre com esse método.',
+  'auth/email-already-in-use': 'Este email já está registado. Inicie sessão com a conta existente.',
+  'auth/operation-not-allowed': 'Este tipo de início de sessão não está disponível. Contacte o suporte.',
+  'auth/internal-error': 'Ocorreu um erro no serviço. Tente novamente dentro de momentos.',
+  'auth/firebase-app-check-token-is-invalid': 'A verificação de segurança falhou. Verifique a sua ligação e tente novamente.',
+  // Device anti-abuse rejection surfaced by the auth service (see firebaseAuth).
+  'device/limit-exceeded': 'Este dispositivo já tem o número máximo de contas permitido. Inicie sessão com uma conta já associada a este computador.',
 }
 
 function getErrorMessage(err: unknown): string {
   const code = (err instanceof Error && 'code' in err ? (err as { code: string }).code : '') || ''
-  return ERROR_MESSAGES[code] || (err instanceof Error ? err.message : '') || 'Erro de autenticação.'
+  if (ERROR_MESSAGES[code]) return ERROR_MESSAGES[code]
+  // Never surface raw "Firebase: Error (auth/…)" technical strings.
+  const raw = err instanceof Error ? err.message : ''
+  if (raw && !/firebase|auth\//i.test(raw)) return raw
+  if (code) console.error('[auth] Unmapped login error:', code, raw)
+  return 'Não foi possível iniciar sessão. Tente novamente ou contacte o suporte.'
 }
 
 function LoginScreen() {

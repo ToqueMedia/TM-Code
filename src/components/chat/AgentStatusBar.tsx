@@ -29,7 +29,6 @@ function formatElapsedShort(ms: number): string {
 function AgentStatusBar() {
   const status = useAgentStore(s => s.status)
   const error = useAgentStore(s => s.error)
-  const modelName = useAgentStore(s => s.modelName)
   const isStreaming = useChatStore(s => s.isStreaming)
   const lastTool = useChatStore(selectLastCompletedToolName)
   const skillCount = useSkillStore(s => s.skills.length)
@@ -121,7 +120,9 @@ function AgentStatusBar() {
   const bgCmdErrored = Array.from(bgCommands.values()).filter(c => c.status === 'error').length
 
   const infoSegments: string[] = []
-  if (modelName) infoSegments.push(modelName)
+  // White-labeling: never surface the model name to users. (This component is
+  // currently unrendered dead code, but removing the leak keeps it safe if it
+  // is ever revived.)
   if (autoApproveDiffs) infoSegments.push('⚡ Auto-approve ON')
   if (queueLength > 0) infoSegments.push(`${queueLength} queued`)
   if (skillCount > 0) infoSegments.push(`${skillCount} ${t("chat.skills")}`)

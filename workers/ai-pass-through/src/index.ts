@@ -1,4 +1,4 @@
-import { getConfigForRequest, buildUpstreamUrl } from './activeConfig'
+import { getConfigForRequest, buildUpstreamUrl, sidecarKeyForRequestType } from './activeConfig'
 import { authenticateUser } from './auth'
 import {
   checkCostBudget,
@@ -15,6 +15,7 @@ import { HttpError, jsonError, methodNotAllowed } from './errors'
 import { buildResponseHeaders, buildUpstreamHeaders, corsPreflight, withCors } from './headers'
 import { createRequestId, logRequest } from './logging'
 import { injectStreamOptions, observeUsage } from './usage'
+import { ensureGeminiThoughtSummaries } from './geminiThinking'
 import type { Env, Fetcher, WaitUntilContext } from './types'
 
 export interface HandlerOptions {
@@ -66,6 +67,7 @@ async function bodyWithActiveModel(
   request: Request,
   model: string,
   extraBody?: Record<string, unknown>,
+  isGoogleOAuth = false,
 ): Promise<PreparedBody> {
   let parsed: unknown
   try {
@@ -89,6 +91,12 @@ async function bodyWithActiveModel(
     }
   }
   merged.model = model
+
+  // Gemini/Vertex: torna o thinking (sempre ativo no modelo) VISÍVEL no stream.
+  // Ao contrário do GLM/Qwen/MiMo (que emitem reasoning_content sem pedir), o
+  // Gemini só transmite os resumos com include_thoughts — sem isto o reasoning
+  // do Gemini nunca chegava à IDE enquanto os outros modelos apareciam.
+  if (isGoogleOAuth) ensureGeminiThoughtSummaries(merged)
 
   // `stream_options.include_usage` garante que providers OpenAI-compatible
   // devolvem o objeto `usage` no chunk final — é a fonte autoritativa da
@@ -114,8 +122,30 @@ async function handleChatCompletions(
   // publicados pelo admin; sem sidecar publicado, segue a config ativa.
   // O header NUNCA segue upstream (filtro em headers.ts) e a resposta leva
   // X-TM-Config-Key para o cliente saber quem serviu.
-  const active = await getConfigForRequest(env, request.headers.get('x-request-type'))
+  const requestType = request.headers.get('x-request-type')
+  const active = await getConfigForRequest(env, requestType)
   const config = active.config
+
+  // Sidecars ESPECIALIZADOS (vision/web_search/fim) NÃO podem degradar para o
+  // modelo ativo GERAL: mandar uma imagem a um modelo de texto dá 404 upstream,
+  // "pesquisar" sem motor alucina, FIM sem template devolve lixo. Sem o sidecar
+  // publicado falha já com 503, em vez de um pedido upstream condenado (2-3s +
+  // 404 + billing desperdiçado). Os clientes JÁ recusam o resultado degradado
+  // destes tipos (visão→null→texto, web_search→erro honesto, FIM→Ollama local),
+  // por isso o 503 dá o MESMO desfecho — só mais limpo, rápido e barato. O tipo
+  // `vision` só é enviado quando o modelo ativo é cego (cliente verifica o
+  // perfil antes), logo nunca há um modelo ativo com visão a ser bloqueado aqui.
+  // `utility`/`summarize` ficam de fora — o modelo ativo sabe resumir, degradam
+  // como desenhado.
+  const requestedSidecar = sidecarKeyForRequestType(requestType)
+  if (requestedSidecar && requestedSidecar !== 'sidecar:utility' && active.key !== requestedSidecar) {
+    return jsonError(
+      503,
+      'tm_sidecar_unavailable',
+      `No sidecar is published for "${requestType}" requests; the active model cannot serve this request type.`,
+    )
+  }
+
   const fetcher = options.fetcher ?? globalThis
   const waitUntil = options.ctx?.waitUntil?.bind(options.ctx) ?? ((p: Promise<unknown>) => { void p })
 
@@ -129,8 +159,24 @@ async function handleChatCompletions(
   const enforcement = resolveEnforcementMode(env)
   let budgetState: UserBudgetState | null = null
   let budgetCheck: CostBudgetCheck | null = null
+
+  // ── Gate de suspensão de conta ───────────────────────────────────────
+  // SEMPRE, independente do modo de billing (off/shadow/enforce). Uma conta
+  // bloqueada ou soft-deleted por um admin (users/{uid}.blocked|deleted) é
+  // rejeitada antes do upstream. A mesma leitura (cache 60s) alimenta o gate
+  // de orçamento e o TM Speed abaixo. Leitura falhada → null → fail-open
+  // (mesma filosofia de degradação do billing); o IDE faz o enforcement de
+  // UX em tempo-real, esta é a defesa em profundidade no servidor.
+  budgetState = await getUserBudgetState(env, user.userId, idToken, fetcher)
+  if (budgetState && (budgetState.blocked || budgetState.deleted)) {
+    return jsonError(
+      403,
+      'tm_account_suspended',
+      'This account has been suspended. Please contact support.',
+    )
+  }
+
   if (enforcement !== 'off') {
-    budgetState = await getUserBudgetState(env, user.userId, idToken, fetcher)
     if (budgetState) {
       // Budget do plano vem do subscription_plans do admin (cache 5 min em
       // billing.ts); hardcoded/PLAN_BUDGETS_JSON só como fallback — senão o
@@ -170,7 +216,7 @@ async function handleChatCompletions(
   const model = speedApplied && config.speedModel ? config.speedModel : config.model
 
   const upstreamUrl = buildUpstreamUrl(config)
-  const prepared = await bodyWithActiveModel(request, model, config.extraBody)
+  const prepared = await bodyWithActiveModel(request, model, config.extraBody, config.authScheme === 'google_oauth')
   const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
 
   // O signal do upstream é um controller próprio em vez de request.signal
@@ -279,6 +325,10 @@ async function handleChatCompletions(
       speedApplied,
       configSource: active.source,
       configKey: active.key,
+      // Janela de contexto real do modelo ativo (quando declarada na config) —
+      // emitida em X-Model-Context-Window para a IDE alinhar a pressão de
+      // contexto e o auto-compact com a janela verdadeira do modelo.
+      contextWindow: config.contextWindow,
       // Estado pré-voo — o updateFromHeaders da IDE consome exatamente estes
       // nomes (billingStore.ts). O pós-commit chega nos headers do PRÓXIMO
       // turno; a IDE cobre o intervalo com a estimativa otimista local.

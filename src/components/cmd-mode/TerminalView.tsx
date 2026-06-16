@@ -22,6 +22,7 @@ import { ErrorBoundary } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
 import { TerminalCompactionIndicator } from './TerminalCompactionIndicator'
+import { TerminalGoalCelebration } from './TerminalGoalCelebration'
 import AgentTasksPanel from '../chat/AgentTasksPanel'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useAttachments } from '../../hooks/useAttachments'
@@ -746,6 +747,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       flex="1"
       minW={0}
       minH={0}
+      position="relative"
       data-cmd-mode-root
       onDragOver={onViewDragOver}
       onDragEnter={onViewDragEnter}
@@ -838,6 +840,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           )}
         </Box>
       </Box>
+
+      {/* Goal celebration (World Cup 2026) — ASCII hard-step overlay anchored
+          to the bottom of the scrollback, above the prompt/status chrome.
+          Refined-terminal contract: mono, single purple accent. */}
+      <TerminalGoalCelebration />
       </Box>
 
       {/* Scroll-to-bottom button — appears when user scrolls away from bottom */}

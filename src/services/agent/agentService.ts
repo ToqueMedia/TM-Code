@@ -28,6 +28,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useTmSpeedStore } from "../../stores/tmSpeedStore";
 import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
+import { FALLBACK_CONTEXT_WINDOW } from "../../utils/contextWindow";
 import { getQueryGuard } from "./queryGuard";
 import type { ContentPart } from "../../types/chat";
 
@@ -470,6 +471,15 @@ class AgentService {
             const { collectChangedFileContext } = await import("./atMentions");
             return collectChangedFileContext();
           },
+      // Queued-message steering (claude-vaz parity). Main agent only: a
+      // sub-agent must never drain the developer's queued messages — those
+      // belong to the main conversation. The host (agentRunner) owns the
+      // drain + transcript bookkeeping; we just bridge it into the loop.
+      collectQueuedSteering: this.lightweightOptions
+        ? undefined
+        : callbacks.collectSteeringMessages
+          ? () => callbacks.collectSteeringMessages!()
+          : undefined,
       // Live active-model limits for auto-compact. modelContextWindow is the
       // real window learned from the response headers (X-Model-Context-Window);
       // MODEL_PROFILES is the fallback and the source of maxOutputTokens. Read
@@ -477,10 +487,18 @@ class AgentService {
       // and only known after the first response.
       getContextLimits: () => {
         const { modelContextWindow, modelName } = useAgentStore.getState();
-        const profile = modelName ? MODEL_PROFILES[modelName] : undefined;
+        // Resolve the window EXACTLY like the UI pill (ContextWindowIndicator /
+        // TerminalStatusLine): server header → known profile → conservative
+        // FALLBACK_CONTEXT_WINDOW (200K). Unknown model (no header, not in
+        // MODEL_PROFILES) assumes 200K — NOT the plan profile's 1M — so a small
+        // or unknown model compacts early instead of overflowing; the admin
+        // publishes the real window via Settings → Admin to override it.
+        const knownProfile = modelName ? MODEL_PROFILES[modelName] : undefined;
+        const plan = useBillingStore.getState().plan;
+        const profile = knownProfile ?? getProfileForPlan(plan);
         return {
-          contextWindow: modelContextWindow ?? profile?.contextWindow ?? null,
-          maxOutputTokens: profile?.maxOutputTokens ?? null,
+          contextWindow: modelContextWindow ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
+          maxOutputTokens: profile.maxOutputTokens ?? null,
         };
       },
       // Usage is reported via message_stop events — do NOT add onUsage
@@ -558,10 +576,16 @@ class AgentService {
           turnNumber++;
           this.sessionState.setLastAssistantMessageAt(Date.now());
           if (event.usage) {
-            this.sessionState.setLastPromptTokens(event.usage.prompt_tokens);
+            // Coerce to 0 — partial-usage providers (DashScope GLM-5.1,
+            // OpenRouter MiMo, …) can send `prompt_tokens` WITHOUT
+            // `completion_tokens` (or vice-versa). The TS type says both are
+            // required numbers, but at runtime either can be undefined, which
+            // crashed `outputTokens.toLocaleString()` in agentRunner's
+            // onUsageUpdate ("undefined is not an object").
+            this.sessionState.setLastPromptTokens(event.usage.prompt_tokens ?? 0);
             callbacks.onUsageUpdate(
-              event.usage.prompt_tokens,
-              event.usage.completion_tokens,
+              event.usage.prompt_tokens ?? 0,
+              event.usage.completion_tokens ?? 0,
               !this.lightweightOptions && this.lastResponseSpeedApplied
                 ? TM_SPEED_BILLING_MULTIPLIER
                 : 1,
@@ -666,6 +690,15 @@ class AgentService {
       if (activeModel) {
         useTmSpeedStore.getState().setActiveModelId(activeModel);
       }
+      // Always surface WHICH model + config actually served this response. The
+      // worker injects the model server-side, so this is the only place the
+      // client learns it. `config` = `active` for the main model, or `sidecar:*`
+      // when a sidecar served (vision/web_search/utility/fim).
+      logger.info(
+        "model",
+        `served: model=${activeModel ?? "?"} provider=${headers.get("X-TM-Provider") ?? "?"} ` +
+          `config=${headers.get("X-TM-Config-Key") ?? "?"} speed=${this.lastResponseSpeedApplied}`,
+      );
     } catch {
       /* non-critical */
     }

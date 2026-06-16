@@ -611,6 +611,8 @@ const en = {
   'terminalMode.dropToAttach': 'Drop to attach',
   'terminalMode.imageNotSupported': 'Images require a paid plan.',
   'terminalMode.imageNotSupportedBlocked': 'Images require a paid plan — remove the image(s) or upgrade before sending.',
+  'terminalMode.toolsRequiredBlocked': 'Install {missing} to use the agent — it needs these tools to run.',
+  'terminalMode.toolsRequiredBanner': 'Missing required tools: {missing}. Install them to use the agent.',
   'terminalMode.upgradeToPro': 'Upgrade to Pro',
   'terminalMode.pastedImage': 'pasted image',
   'terminalMode.removeAttachment': 'Remove',
@@ -1239,6 +1241,8 @@ const en = {
   'preview.copyUrlManually': 'Could not open URL in browser. Copy it manually from the address bar.',
   'preview.goBack': 'Go back in preview',
   'preview.goForward': 'Go forward in preview',
+  'preview.enterFullscreen': 'Expand preview (hide chat)',
+  'preview.exitFullscreen': 'Restore chat',
   'preview.back': 'Back',
   'preview.forward': 'Forward',
   'preview.toggleHttpClient': 'Toggle HTTP Client',
@@ -1617,6 +1621,11 @@ const en = {
   'tasks.taskPlural': 'tasks',
   'tasks.expand': 'Show all tasks',
   'tasks.collapse': 'Show window',
+
+  // ── Seasonal: World Cup 2026 goal celebration ──────
+  'celebration.goal': 'GOOOAL!',
+  'celebration.worldCup': 'World Cup 2026',
+  'celebration.aria': 'Goal celebration',
 
 } as const
 
@@ -2226,6 +2235,8 @@ const pt: Record<keyof typeof en, string> = {
   'terminalMode.dropToAttach': 'Largar para anexar',
   'terminalMode.imageNotSupported': 'Imagens requerem um plano pago.',
   'terminalMode.imageNotSupportedBlocked': 'Imagens requerem um plano pago — remove as imagens ou faz upgrade antes de enviar.',
+  'terminalMode.toolsRequiredBlocked': 'Instala {missing} para usar o agente — ele precisa destas ferramentas para funcionar.',
+  'terminalMode.toolsRequiredBanner': 'Faltam ferramentas obrigatórias: {missing}. Instala-as para usar o agente.',
   'terminalMode.upgradeToPro': 'Upgrade para Pro',
   'terminalMode.pastedImage': 'imagem colada',
   'terminalMode.removeAttachment': 'Remover',
@@ -2845,6 +2856,8 @@ const pt: Record<keyof typeof en, string> = {
   'preview.copyUrlManually': 'Não foi possível abrir o URL no navegador. Copie manualmente da barra de endereço.',
   'preview.goBack': 'Voltar na pré-visualização',
   'preview.goForward': 'Avançar na pré-visualização',
+  'preview.enterFullscreen': 'Expandir pré-visualização (esconder chat)',
+  'preview.exitFullscreen': 'Repor chat',
   'preview.back': 'Voltar',
   'preview.forward': 'Avançar',
   'preview.toggleHttpClient': 'Alternar HTTP Client',
@@ -3223,6 +3236,11 @@ const pt: Record<keyof typeof en, string> = {
   'tasks.taskPlural': 'tarefas',
   'tasks.expand': 'Mostrar todas',
   'tasks.collapse': 'Mostrar janela',
+
+  // ── Seasonal: World Cup 2026 goal celebration ──────
+  'celebration.goal': 'GOOOLO!',
+  'celebration.worldCup': 'Mundial 2026',
+  'celebration.aria': 'Celebração de golo',
 }
 
 export type TranslationKey = keyof typeof en

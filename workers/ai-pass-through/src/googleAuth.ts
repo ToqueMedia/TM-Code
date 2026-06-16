@@ -26,6 +26,29 @@ export const OAUTH_SCOPE_CLOUD_PLATFORM = 'https://www.googleapis.com/auth/cloud
 // é apanhado pelos callers em billing.ts, que degradam sem partir o chat.
 const OAUTH_FETCH_TIMEOUT_MS = 10_000
 
+// O mint corre síncrono no pré-voo do pedido e a perna de rede CF→Google pode
+// estabolar (redes lentas/intermitentes — ver [[gemini-via-vertex-google-oauth]]).
+// Um único timeout NÃO pode condenar o pedido (o erro é `retryable`): tentamos
+// de novo SÓ erros transitórios (timeout/rede/5xx/429), com backoff e um teto
+// total para um bloqueio DURO falhar em ~20s em vez de ~30s. Um 4xx (ex.:
+// invalid_grant — SA inválida) é permanente → falha já, sem retry.
+const OAUTH_MINT_MAX_ATTEMPTS = 3
+const OAUTH_MINT_BACKOFFS_MS = [400, 1200] as const
+const OAUTH_MINT_TOTAL_BUDGET_MS = 20_000
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** AbortSignal.timeout → DOMException 'TimeoutError'; rede → TypeError; abort
+ *  manual → 'AbortError'. Todos transitórios → vale a pena re-tentar. */
+function isTransientMintError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err.name === 'TimeoutError' || err.name === 'AbortError' || err.name === 'TypeError')
+  )
+}
+
 const tokenCache = new Map<string, { token: string; expiresAtMs: number }>()
 
 export function clearAccessTokenCache(): void {
@@ -90,25 +113,48 @@ export async function mintAccessToken(
   )
   const assertion = `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`
 
-  const res = await fetcher.fetch(OAUTH_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion,
-    }),
-    signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
+  const body = new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+    assertion,
   })
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(`OAuth2 token exchange failed (${res.status}): ${detail.slice(0, 200)}`)
+
+  const mintStart = Date.now()
+  let lastError: unknown
+  for (let attempt = 1; attempt <= OAUTH_MINT_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      // Bloqueio duro: para de tentar quando já gastámos o teto total, em vez
+      // de pendurar o caller ~30s antes do 502.
+      if (Date.now() - mintStart > OAUTH_MINT_TOTAL_BUDGET_MS) break
+      await sleep(OAUTH_MINT_BACKOFFS_MS[attempt - 2] ?? OAUTH_MINT_BACKOFFS_MS[OAUTH_MINT_BACKOFFS_MS.length - 1])
+    }
+    try {
+      const res = await fetcher.fetch(OAUTH_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body,
+        // Sinal novo por tentativa — cada uma ganha os seus 10s.
+        signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
+      })
+      if (res.ok) {
+        const data = await res.json() as { access_token: string; expires_in: number }
+        tokenCache.set(cacheKey, {
+          token: data.access_token,
+          expiresAtMs: Date.now() + (data.expires_in - 60) * 1000,
+        })
+        return data.access_token
+      }
+      const detail = await res.text().catch(() => '')
+      lastError = new Error(`OAuth2 token exchange failed (${res.status}): ${detail.slice(0, 200)}`)
+      // 5xx/429 → transitório (re-tenta); 4xx → permanente (falha já).
+      if (!(res.status >= 500 || res.status === 429)) break
+    } catch (err) {
+      lastError = err
+      if (!isTransientMintError(err)) break
+    }
   }
-  const data = await res.json() as { access_token: string; expires_in: number }
-  tokenCache.set(cacheKey, {
-    token: data.access_token,
-    expiresAtMs: now + (data.expires_in - 60) * 1000,
-  })
-  return data.access_token
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('OAuth2 token exchange failed (no response)')
 }
 
 /**

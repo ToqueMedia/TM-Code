@@ -56,6 +56,14 @@ pub type PtySessionMap = Mutex<HashMap<String, Arc<Mutex<PtySession>>>>;
 /// without holding the session mutex (which would block write/resize ops).
 pub type PtyChildMap =
     Mutex<HashMap<String, Arc<Mutex<Option<Box<dyn portable_pty::Child + Send>>>>>>;
+/// Shell PID per session, captured at spawn. Teardown (kill_pty_session + app
+/// shutdown) needs it to kill the whole process TREE — an interactive shell puts
+/// each job (e.g. `yarn dev`) in its OWN process group via job control, so
+/// killing just the shell (portable-pty `child.kill()`) or killpg by the shell's
+/// pgid orphans the dev server, which then keeps the port bound (the "servers
+/// accumulate on :3001" bug). The exit-wait thread owns the Child object, so the
+/// pid cannot be read back from PtyChildMap at teardown — hence this map.
+pub type PtyPidMap = Mutex<HashMap<String, u32>>;
 
 // Default terminal dimensions (used until first resize event from xterm.js)
 const DEFAULT_PTY_COLS: u16 = 120;
@@ -642,6 +650,57 @@ pub(crate) fn kill_process_tree(pid: u32) {
     }
 }
 
+/// Kill a PTY shell and EVERY descendant (the dev server and its children),
+/// regardless of process group.
+///
+/// Why not `kill_process_tree` (killpg)? An interactive shell uses job control:
+/// each job (`yarn dev`, `npm run dev`, …) gets its OWN process group, distinct
+/// from the shell's. So `kill -- -<shellpgid>` — and portable-pty's
+/// `child.kill()`, which targets only the shell PID — both leave the dev server
+/// running, orphaned and still bound to its port. That is the root cause of
+/// "dev servers accumulate on :3001 after I close a terminal". Here we instead
+/// walk the descendant tree from the shell pid (every job shares the shell's
+/// SESSION) and SIGTERM→SIGKILL each process, so nothing survives the teardown.
+pub(crate) fn kill_pty_process_tree(root_pid: u32) {
+    #[cfg(unix)]
+    {
+        // BFS the descendant tree: root → children → grandchildren … via pgrep -P.
+        let mut all = vec![root_pid];
+        let mut frontier = vec![root_pid];
+        while let Some(pid) = frontier.pop() {
+            if let Ok(out) = Command::new("pgrep").args(["-P", &pid.to_string()]).output() {
+                for cpid in String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(|l| l.trim().parse::<u32>().ok())
+                {
+                    if !all.contains(&cpid) {
+                        all.push(cpid);
+                        frontier.push(cpid);
+                    }
+                }
+            }
+        }
+        // SIGTERM leaves-first (reverse) for graceful shutdown, then SIGKILL any
+        // straggler after a short grace period.
+        for &pid in all.iter().rev() {
+            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).output();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        for &pid in all.iter().rev() {
+            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).output();
+        }
+    }
+    #[cfg(windows)]
+    {
+        // /T kills the whole tree by PID — children that escaped into their own
+        // process groups are still caught.
+        let mut tk = Command::new("taskkill");
+        tk.args(["/T", "/F", "/PID", &root_pid.to_string()]);
+        hide_console_window(&mut tk);
+        let _ = tk.output();
+    }
+}
+
 // ─── Tauri Commands ──────────────────────────────────────────────────────────
 
 /// Execute a one-shot command with project isolation.
@@ -1133,6 +1192,7 @@ pub async fn start_pty_shell(
     cwd: Option<String>,
     pty_map: State<'_, PtySessionMap>,
     child_map: State<'_, PtyChildMap>,
+    pid_map: State<'_, PtyPidMap>,
     active_project: State<'_, ActiveProjectState>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
@@ -1219,6 +1279,16 @@ pub async fn start_pty_shell(
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn shell in PTY: {}", e))?;
+
+    // Capture the shell PID NOW — before the Child is moved into the exit-wait
+    // thread (which take()s it). Teardown uses this to kill the whole descendant
+    // tree (shell + dev server), so closing a terminal frees the dev port instead
+    // of leaking an orphaned server.
+    if let Some(pid) = child.process_id() {
+        if let Ok(mut pids) = pid_map.lock() {
+            pids.insert(session_id.clone(), pid);
+        }
+    }
 
     // Get reader from master for output streaming
     let reader = pair
@@ -1381,8 +1451,25 @@ pub async fn kill_pty_session(
     session_id: String,
     pty_map: State<'_, PtySessionMap>,
     child_map: State<'_, PtyChildMap>,
+    pid_map: State<'_, PtyPidMap>,
 ) -> Result<(), String> {
-    // Remove and kill the child process (if still owned by the map).
+    // Kill the WHOLE process tree (shell + dev server + its children), not just
+    // the shell. Without this, the dev server (a job in its own process group)
+    // was orphaned on every close and kept the port bound — which forced manual
+    // `lsof | kill`, which in turn could SIGKILL the IDE itself (it holds the
+    // port-guard / preview sockets). Killing the tree here breaks that chain.
+    let shell_pid = pid_map
+        .lock()
+        .map_err(|_| "Failed to lock pid map")?
+        .remove(&session_id);
+    if let Some(pid) = shell_pid {
+        // kill_pty_process_tree blocks (SIGTERM grace sleep) — keep it off the
+        // async executor thread.
+        tokio::task::spawn_blocking(move || kill_pty_process_tree(pid));
+    }
+
+    // Best-effort kill of the shell Child if the map still owns it (rare — the
+    // exit-wait thread usually take()s it at spawn). Harmless belt-and-suspenders.
     if let Some(child_arc) = child_map
         .lock()
         .map_err(|_| "Failed to lock child map")?
@@ -1571,27 +1658,55 @@ fn windows_pids_on_port(port: u16) -> Vec<u32> {
     pids
 }
 
-/// Check if a port is currently held by some process. Platform-specific.
-/// This is the light-weight predicate used by kill_port to avoid spawning
-/// netstat/lsof 30 times in a polling loop when the port is already free.
-fn port_is_occupied(port: u16) -> bool {
+/// PIDs LISTENING on `port`, EXCLUDING this process (the IDE). The IDE can
+/// legitimately hold a socket on a dev port and must NEVER be a kill target:
+///   1. The port-guard (port_guard.rs) binds `127.0.0.1:<port>` for common dev
+///      ports (3000, 5173, 8080, …) to push new dev servers onto the next free
+///      port — those listeners live in THIS process.
+///   2. The preview WKWebView keeps a client connection to the running dev
+///      server's port.
+/// The old `lsof -ti:PORT | xargs kill -9` SIGKILLed the IDE in case 1 — and,
+/// without `-sTCP:LISTEN`, in case 2 — which is the "app closes the instant I
+/// press Stop" crash. SIGKILL leaves no crash report, which is why no .ips ever
+/// appeared. Two guards: `-sTCP:LISTEN` drops client sockets (case 2), and the
+/// self-PID filter is the hard guarantee we never kill ourselves (case 1).
+fn external_listener_pids(port: u16) -> Vec<u32> {
+    let self_pid = std::process::id();
     #[cfg(unix)]
     {
-        let check = format!("lsof -ti:{}", port);
         Command::new("sh")
-            .args(["-c", &check])
+            .args(["-c", &format!("lsof -t -a -iTCP:{} -sTCP:LISTEN", port)])
             .output()
-            .map(|o| !o.stdout.is_empty())
-            .unwrap_or(false)
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|l| l.trim().parse::<u32>().ok())
+                    .filter(|&pid| pid != self_pid)
+                    .collect::<Vec<u32>>()
+            })
+            .unwrap_or_default()
     }
     #[cfg(windows)]
     {
-        !windows_pids_on_port(port).is_empty()
+        // windows_pids_on_port matches by LOCAL port, so the preview webview's
+        // client connection (ephemeral local port) is already excluded; the
+        // port-guard's listener IS included, so drop self here too.
+        windows_pids_on_port(port)
+            .into_iter()
+            .filter(|&pid| pid != self_pid)
+            .collect()
     }
     #[cfg(not(any(unix, windows)))]
     {
-        false
+        let _ = self_pid;
+        Vec::new()
     }
+}
+
+/// Whether some EXTERNAL process (not the IDE itself) holds `port`. Light-weight
+/// predicate used by kill_port to skip work when there is nothing to free.
+fn port_is_occupied(port: u16) -> bool {
+    !external_listener_pids(port).is_empty()
 }
 
 /// Kill any process listening on the given port.
@@ -1610,14 +1725,17 @@ pub async fn kill_port(port: u16) -> Result<bool, String> {
         return Ok(true);
     }
 
+    // Only ever kill EXTERNAL listeners — never this process. external_listener_pids
+    // already filtered out the IDE's own PID (port-guard listener / preview
+    // connection), so what remains is a genuine foreign dev server on the port.
     let kill_once = || {
-        if cfg!(unix) {
-            let cmd = format!("lsof -ti:{} | xargs kill -9 2>/dev/null", port);
-            let _ = Command::new("sh").args(["-c", &cmd]).output();
-        }
-        #[cfg(windows)]
-        {
-            for pid in windows_pids_on_port(port) {
+        for pid in external_listener_pids(port) {
+            #[cfg(unix)]
+            {
+                let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+            }
+            #[cfg(windows)]
+            {
                 // /T kills the entire tree — orphan children (tsc-watch, etc.)
                 // that inherited the socket handle are also terminated.
                 let mut tk = Command::new("taskkill");
@@ -1647,24 +1765,10 @@ pub async fn kill_port(port: u16) -> Result<bool, String> {
     kill_once();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // Report whether we actually freed it.
-    let free = if cfg!(unix) {
-        let check = format!("lsof -ti:{}", port);
-        Command::new("sh")
-            .args(["-c", &check])
-            .output()
-            .map(|o| o.stdout.is_empty())
-            .unwrap_or(true)
-    } else {
-        #[cfg(windows)]
-        {
-            windows_pids_on_port(port).is_empty()
-        }
-        #[cfg(not(windows))]
-        {
-            true
-        }
-    };
+    // Report whether we freed it — nothing EXTERNAL still listening. Our own
+    // port-guard listener never counts (external_listener_pids excludes self),
+    // so a port the IDE intentionally reserves doesn't trap kill_port here.
+    let free = external_listener_pids(port).is_empty();
     Ok(free)
 }
 

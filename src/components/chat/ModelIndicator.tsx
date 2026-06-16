@@ -9,32 +9,31 @@ import { useLayoutStore } from '../../stores/layoutStore'
 import { tokens } from '@/theme/tokens'
 
 /**
- * Plans that surface the cloud model name in the pill. Today only the
- * future `mimo-orbit` plan (still to be created) qualifies — its whole
- * value proposition is "you're talking to a specific MiMo SKU via the
- * Orbit Program", so the developer wants the model identity visible. The
- * other plans (`explorer`, `vibe`, `pro`, `max`) route through a
- * platform-managed model that the user did not choose and does not
- * benefit from seeing in the header. Cast to `string` so this compiles
- * before `UserPlanName` is extended to include the new plan id —
- * remove the cast once `'mimo-orbit'` is part of the union.
+ * Whether to surface the CLOUD model name in the pill.
+ *
+ * White-labeling (product decision 2026-06-16): users must NOT see which
+ * platform-managed model TM Code routes to — the model identity is an
+ * implementation detail behind the product, not something the user chose.
+ * So this is always false: no cloud plan ever shows the model name. (It used
+ * to return true for the future `mimo-orbit` plan whose value prop was the
+ * SKU; flip this back if that plan ships and the model identity becomes a
+ * deliberate feature.) The BYOK pill is unaffected — it shows the user's OWN
+ * configured provider/model, which is their key, not a platform model.
  */
-function planShowsCloudModel(plan: string | null | undefined): boolean {
-  return plan === 'mimo-orbit'
+function planShowsCloudModel(_plan: string | null | undefined): boolean {
+  return false
 }
 
 // ── ModelIndicator ──
 //
-// Renders when EITHER:
-//  - the user is on the BYOK path — confirmed (server set
-//    X-BYOK-Active=true) or configured (local toggle on, awaiting confirm), OR
-//  - the plan opts in to surfacing the cloud model name (see
-//    `planShowsCloudModel`). Today that's `mimo-orbit` only.
+// Renders ONLY on the BYOK path — confirmed (server set X-BYOK-Active=true) or
+// configured (local toggle on, awaiting confirm) — i.e. when the model is the
+// user's OWN choice and they already know it.
 //
-// All other plans (`explorer`, `vibe`, `pro`, `max`) hide the pill —
-// per user feedback the cloud model name added chrome without value when
-// the routing is the platform default. The model identity is still
-// inspectable via the ContextWindowIndicator tooltip and Settings → Profile.
+// Cloud (platform-managed) plans NEVER show the model name: white-labeling
+// means users must not see which model TM Code routes to (see
+// `planShowsCloudModel`, always false). For cloud plans this pill is hidden and
+// the neighbouring CreditIndicator renders instead.
 
 function ModelIndicator() {
   // Server-confirmed state — authoritative for what the LAST response used

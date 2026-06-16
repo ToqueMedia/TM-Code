@@ -36,6 +36,7 @@ import { LoadingSpinner } from './components/ui/LoadingSpinner';
 import { RequirementsErrorScreen } from './components/ui/RequirementsErrorScreen';
 import { ToastContainer } from './components/ui/Toast';
 import UpdateBanner from './components/ui/UpdateBanner';
+import UserBlockedBanner from './components/ui/UserBlockedBanner';
 import { t } from '@/i18n';
 import { tokens } from '@/theme/tokens';
 import { invoke } from '@tauri-apps/api/core';
@@ -82,6 +83,7 @@ function App() {
 
 	const { currentProject, openProject, hasHydrated } = useProjectStore();
 	const { isAuthenticated, isLoading: authLoading, signupComplete } = useAuthStore();
+	const isBlocked = useAuthStore(state => state.user?.blocked === true);
 	const hasCompletedOnboarding = useSettingsStore(s => s.hasCompletedOnboarding);
 	const [initializing, setInitializing] = useState(true);
 	const [requirementsResult, setRequirementsResult] = useState<EnvironmentCheckResult | null>(null);
@@ -119,6 +121,21 @@ function App() {
 			invoke('app_ready').catch(() => { /* not running under Tauri */ })
 		})
 		return () => { active = false }
+	}, []);
+
+	// Detect the mandatory external tools (git/node/python) once the app is up,
+	// and re-check on window focus. Prompt sending is blocked while any is
+	// missing (see requiredToolsStore + the handleSend gates). Best-effort;
+	// covers every view (cmd + chat), not just Terminal mode.
+	useEffect(() => {
+		const refresh = () => {
+			import('./stores/requiredToolsStore').then(({ useRequiredToolsStore }) => {
+				useRequiredToolsStore.getState().refresh()
+			})
+		}
+		refresh()
+		window.addEventListener('focus', refresh)
+		return () => window.removeEventListener('focus', refresh)
 	}, []);
 
 
@@ -891,6 +908,7 @@ function App() {
 			position="relative"
 		>
 			<UpdateBanner />
+			<UserBlockedBanner />
 			{/* Global ambient gradient */}
 			<Box
 				position="fixed"
@@ -904,7 +922,13 @@ function App() {
 			/>
 
 			<Box position="relative" zIndex={1}>
-				{currentProject ? <MainLayout /> :
+				{/* Conta suspensa → só o Welcome (MainLayout, que hospeda
+				    Chat/Terminal, nunca renderiza enquanto bloqueado). */}
+				{isBlocked ? (
+					<WelcomeScreen
+						onOpenProject={handleOpenProject}
+					/>
+				) : currentProject ? <MainLayout /> :
 					standaloneFiles.length > 0 ? (
 						<FileViewer
 							filePath={standaloneFiles[0]}

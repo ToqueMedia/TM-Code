@@ -62,6 +62,10 @@ interface LayoutState {
   previewMode: PreviewMode
   /** For fullstack projects: true when the HTTP Client drawer is expanded. */
   isHttpDrawerOpen: boolean
+  /** True when the preview fills the whole pane with the chat sidebar hidden.
+   *  Toggled from the PreviewView toolbar and reset whenever preview is left,
+   *  so the chat is always back the next time the preview opens. */
+  isPreviewFullscreen: boolean
   /** Cross-component publish modal flag — both MinimalTitleBar and the
    *  PreviewView toolbar trigger the same modal so we keep a single source
    *  of truth here. The modal itself is mounted by MinimalTitleBar. */
@@ -130,6 +134,9 @@ interface LayoutActions {
   toggleConsole: () => void
   /** Toggle the HTTP Client drawer in fullstack projects. */
   toggleHttpDrawer: () => void
+  /** Toggle fullscreen preview — hide the chat sidebar so the preview fills
+   *  the pane; toggle again to bring the chat back. */
+  togglePreviewFullscreen: () => void
   /** Open / close the deploy publish modal. Single source of truth so both
    *  the title bar and the preview toolbar trigger the same dialog. */
   setPublishModalOpen: (open: boolean) => void
@@ -159,6 +166,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   devServer: null,
   previewMode: 'server',
   isHttpDrawerOpen: false,
+  isPreviewFullscreen: false,
   isPublishModalOpen: false,
   previewHtmlContent: null,
   previewSourcePath: null,
@@ -186,6 +194,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
         previousViewMode: current,
         projectsSidebarBeforePreview: state.isProjectsSidebarVisible,
         isProjectsSidebarVisible: false,
+        isPreviewFullscreen: false,
       })
       return
     }
@@ -197,6 +206,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
         viewMode: mode,
         previousViewMode: current,
         projectsSidebarBeforePreview: null,
+        isPreviewFullscreen: false,
         ...(restore ? { isProjectsSidebarVisible: true } : {}),
       })
       return
@@ -298,6 +308,10 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
 
   toggleHttpDrawer: () => {
     set(state => ({ isHttpDrawerOpen: !state.isHttpDrawerOpen }))
+  },
+
+  togglePreviewFullscreen: () => {
+    set(state => ({ isPreviewFullscreen: !state.isPreviewFullscreen }))
   },
 
   setPublishModalOpen: (open: boolean) => {

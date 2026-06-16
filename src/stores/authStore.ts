@@ -7,6 +7,11 @@ interface AuthUser {
   displayName: string | null
   photoURL: string | null
   isAdmin?: boolean
+  /** Account suspended by an admin (users/{uid}.blocked). Drives the suspended
+   *  banner + forces the Welcome screen in real time. */
+  blocked?: boolean
+  /** Human-readable reason shown in the suspended banner. */
+  blockedReason?: string
 }
 
 interface AuthState {
@@ -29,6 +34,8 @@ interface AuthActions {
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
   setSignupComplete: (complete: boolean | null) => void
+  /** Merge the admin block state into the current user (no-op if signed out). */
+  setBlocked: (blocked: boolean, reason?: string) => void
   clear: () => void
 }
 
@@ -91,6 +98,12 @@ export const useAuthStore = create<AuthState & AuthActions>()(
       },
       setLoading: (loading) => set({ isLoading: loading }),
       setError: (error) => set({ error, isLoading: false }),
+      setBlocked: (blocked, reason) => {
+        const current = useAuthStore.getState().user
+        if (!current) return
+        if (current.blocked === blocked && current.blockedReason === reason) return
+        set({ user: { ...current, blocked, blockedReason: blocked ? reason : undefined } })
+      },
       setSignupComplete: (signupComplete) => {
         set({ signupComplete })
         const state = useAuthStore.getState()

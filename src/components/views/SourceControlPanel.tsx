@@ -42,6 +42,24 @@ function stripTmCodeCommitSignature(message: string): string {
   return message.replace(/\n*^Co-Authored-By:\s*TM Code\s*<[^>]*>\s*$/gim, '').trim()
 }
 
+/**
+ * Strip chain-of-thought from the AI message. The commit-message call is
+ * non-streaming, so reasoning models (notably Gemini via the data-plane) emit
+ * their `<think>…</think>` block INLINE in `message.content` instead of in a
+ * separate streamed reasoning channel — without this it leaks straight into the
+ * commit textarea (see screenshot, 2026-06-16).
+ */
+function stripReasoningBlocks(text: string): string {
+  // 1. Remove well-formed <think>…</think> blocks.
+  let out = text.replace(/<think>[\s\S]*?<\/think>/gi, '')
+  // 2. A dangling close tag means the opener arrived as a separate field (or
+  //    was trimmed upstream) — keep only what follows the last </think>.
+  const lastClose = out.toLowerCase().lastIndexOf('</think>')
+  if (lastClose !== -1) out = out.slice(lastClose + '</think>'.length)
+  // 3. Drop any stray tag left over, but keep the surrounding text.
+  return out.replace(/<\/?think>/gi, '').trim()
+}
+
 // ── Styles (injected once) ──────────────────────────────────────────────
 
 const PANEL_STYLES = `
@@ -483,7 +501,10 @@ ${diffDetail}`,
       const aiMsg = data.choices?.[0]?.message?.content?.trim() || ''
 
       if (aiMsg) {
-        const cleaned = aiMsg.replace(/^["'`]+|["'`]+$/g, '').replace(/^(commit message:?\s*)/i, '').trim()
+        const cleaned = stripReasoningBlocks(aiMsg)
+          .replace(/^["'`]+|["'`]+$/g, '')
+          .replace(/^(commit message:?\s*)/i, '')
+          .trim()
         setCommitMsg(stripTmCodeCommitSignature(cleaned))
         requestAnimationFrame(resizeTextarea)
       } else {

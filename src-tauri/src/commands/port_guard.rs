@@ -9,36 +9,47 @@
 //! abre sempre o projeto externo. O servidor do TM Code fica "em
 //! desvantagem" permanente.
 //!
-//! Solução: enquanto a app está aberta, um varrimento periódico dos portos
-//! de dev comuns detecta o estado "meio-ocupado" (IPv6 ocupado por um
-//! servidor externo, IPv4 livre) e RESERVA o lado IPv4 com um listener
-//! próprio. Resultado: o próximo dev server IPv4 no painel falha o bind no
-//! porto e salta automaticamente para o seguinte (5174, ...), anunciando o
-//! porto certo — o comportamento que o utilizador espera de "porto ocupado".
+//! Solução: enquanto a IDE corre um dev server PRÓPRIO (gerido pelo
+//! devServerManager, que regista os portos via `set_guarded_ports`), um
+//! varrimento periódico detecta o estado "meio-ocupado" desses portos (IPv6
+//! ocupado por um servidor externo, IPv4 livre) e RESERVA o lado IPv4 com um
+//! listener próprio. Resultado: o próximo dev server IPv4 no painel falha o
+//! bind no porto e salta automaticamente para o seguinte (5174, ...).
 //!
 //! Decisões deliberadas:
+//!  - SÓ guardamos portos que a IDE está a gerir. Um `yarn dev` lançado à mão
+//!    no PTY NUNCA é guardado — antes a lista era estática (3000/3001/5173/…)
+//!    e a IDE reservava o IPv4 de qualquer porto de dev ocupado, aparecendo no
+//!    `lsof:porto`; um `kill` cego nesse porto fechava a app. Agora a IDE só
+//!    segura portos dos seus próprios servidores (que se param pelo botão Stop).
 //!  - SÓ guardamos o lado IPv4 quando o IPv6 está ocupado. Nunca o inverso:
 //!    os browsers tentam IPv6 primeiro e fazem fallback para IPv4 quando a
 //!    ligação é recusada — ocupar [::1] com a nossa página intercetaria o
 //!    tráfego destinado a um servidor IPv4-only legítimo.
 //!  - O guard responde com uma página explicativa (409) em vez de deixar
 //!    ligações penduradas — quem cair aqui percebe imediatamente o porquê.
-//!  - O guard é libertado no próximo varrimento depois de o servidor
-//!    externo desaparecer.
-//!  - Portos do próprio TM Code (1420 dev, 14300 prod, 8788 worker local)
-//!    ficam fora da lista.
+//!  - O guard é libertado quando o servidor externo desaparece OU quando o
+//!    porto deixa de ser gerido pela IDE (set_guarded_ports / dev server parado).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
-/// Portos de dev habituais (Vite, CRA/Next, Angular, Astro, genéricos).
-const GUARDED_PORTS: &[u16] = &[3000, 3001, 4200, 4321, 5173, 5174, 5175, 8000, 8080];
-
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Portos que a IDE está ATIVAMENTE a gerir (definidos pelo frontend
+/// devServerManager via `set_guarded_ports`). O guard só reserva o lado IPv4
+/// DESTES — um dev server que o utilizador lança à mão no PTY nunca está aqui,
+/// por isso a IDE nunca segura o porto dele e um `kill` nesse porto não pode
+/// fechar a app (era o bug: a app aparecia no `lsof:3001`). Vazio por defeito:
+/// sem dev server gerido, o guard não reserva nada.
+fn managed_ports() -> &'static Mutex<HashSet<u16>> {
+    static MANAGED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    MANAGED.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 struct Guard {
     handle: tokio::task::JoinHandle<()>,
@@ -100,7 +111,13 @@ async fn try_hold_ipv4(port: u16) -> Option<tokio::task::JoinHandle<()>> {
 }
 
 async fn scan_once() {
-    for &port in GUARDED_PORTS {
+    // Só os portos que a IDE está a gerir (registados pelo devServerManager).
+    // Sem dev server gerido, o conjunto está vazio e o guard não reserva nada.
+    let ports: Vec<u16> = managed_ports()
+        .lock()
+        .map(|p| p.iter().copied().collect())
+        .unwrap_or_default();
+    for port in ports {
         let held = guards().lock().map(|g| g.contains_key(&port)).unwrap_or(false);
         let v6_busy = ipv6_occupied(port).await;
 
@@ -122,6 +139,38 @@ async fn scan_once() {
                 }
             }
         }
+    }
+}
+
+/// Frontend (devServerManager) regista o conjunto de portos que a IDE está a
+/// gerir. O guard passa a reservar APENAS estes. Substitui o conjunto inteiro a
+/// cada chamada (há um dev server gerido de cada vez); portos que saíram do
+/// conjunto têm a reserva IPv4 libertada de imediato — sem esperar pelo scan.
+#[tauri::command]
+pub fn set_guarded_ports(ports: Vec<u16>) {
+    let new_set: HashSet<u16> = ports.into_iter().collect();
+
+    // Portos que deixaram de ser geridos → libertar já a reserva.
+    let dropped: Vec<u16> = managed_ports()
+        .lock()
+        .map(|m| m.difference(&new_set).copied().collect())
+        .unwrap_or_default();
+    if !dropped.is_empty() {
+        if let Ok(mut map) = guards().lock() {
+            for port in &dropped {
+                if let Some(guard) = map.remove(port) {
+                    guard.handle.abort();
+                    eprintln!(
+                        "[port-guard] libertado 127.0.0.1:{} (deixou de ser gerido pela IDE)",
+                        port
+                    );
+                }
+            }
+        }
+    }
+
+    if let Ok(mut managed) = managed_ports().lock() {
+        *managed = new_set;
     }
 }
 

@@ -27,11 +27,19 @@ import type { OpenAIContentPart } from './types'
  * Per-image cap on the data URI byte length. Individual images larger
  * than this are dropped from the multimodal payload (replaced by an
  * `<attached_image>` text fallback so the model still knows the image
- * existed). 5 MB of base64 ≈ 3.7 MB of original image bytes — matches
- * Anthropic Claude's per-image limit and is comfortably under Kimi K2.5
- * and Qwen3 Plus per-image limits.
+ * existed).
+ *
+ * UNIT — this caps the DATA-URI STRING (base64) length; the capture gate
+ * (attachmentService `MAX_IMAGE_BYTES`) caps the RAW image bytes. base64
+ * inflates raw bytes by ~4/3 (plus the `data:…;base64,` prefix), so this MUST
+ * be ≥ captureLimit × 4/3 — otherwise images the user was ALLOWED to attach
+ * get silently dropped HERE. The old 5 MB (≈ 3.7 MB raw) sat BELOW the 5 MB-RAW
+ * capture limit, so 3.7–5 MB images attached fine but never reached the model
+ * ("the image didn't reach me"). 8 MB covers a 5 MB-raw image (~6.67 MB base64)
+ * with headroom; the active providers (Gemini/Qwen/MiMo) accept it and the
+ * 20 MB total cap below still guards multi-image payloads.
  */
-export const MAX_PER_IMAGE_BYTES = 5 * 1024 * 1024
+export const MAX_PER_IMAGE_BYTES = 8 * 1024 * 1024
 
 /**
  * Hard cap on the TOTAL bytes of image data URIs in a single multimodal

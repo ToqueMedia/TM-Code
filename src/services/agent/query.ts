@@ -17,10 +17,13 @@ import {
   applyToolResultBudget,
   snipCompactIfNeeded,
   autoCompact,
+  compactNow,
+  tokenCountWithEstimation,
   getCompactPrompt,
   type AutoCompactTrackingState,
   type CompactFn,
 } from "./compact";
+import { computeMicrocompactKeepRecent } from "./contextManager";
 import {
   applyCollapsesIfNeeded,
   recoverFromOverflow,
@@ -32,6 +35,7 @@ import {
   createLoopDetectorState,
   resetLoopDetector,
 } from "./loopDetector";
+import { isAtBlockingLimit } from "../../utils/contextWindow";
 import { contentAsText } from "./promptValueHelpers";
 
 // ── Constants ──
@@ -157,10 +161,26 @@ export interface QueryParams {
    */
   collectInterTurnContext?: () => Promise<string>;
   /**
+   * Queued-message steering collector — claude-vaz parity. Called at every
+   * turn boundary (after each tool round, and again right before the loop
+   * would otherwise stop). Drains any user messages the developer queued
+   * WHILE this run was streaming and returns them as model-facing text; a
+   * non-empty return is appended as a user message and the loop CONTINUES,
+   * so the steered message is acted on at the next turn — not parked until
+   * the whole run ends ("only sent at session end"). Returning null means
+   * nothing was queued. The host also does the transcript bookkeeping
+   * (finalize the in-flight assistant bubble, show the user's message, open
+   * a fresh bubble) as a side effect, so the run stays continuous with no
+   * idle flicker. Must never throw.
+   */
+  collectQueuedSteering?: () => Promise<string | null>;
+  /**
    * Live active-model limits for the auto-compact decision. Called fresh each
    * loop iteration because the active model (and thus its context window) is
-   * injected server-side and only learned from the first response's headers.
-   * Returning { contextWindow: null } keeps the legacy 1M-estimate fallback.
+   * injected server-side and learned from the response's X-Model-Context-Window
+   * header (with a profile/plan fallback). The provided impl never returns null;
+   * if a future caller does, the decision uses a conservative fallback window
+   * (utils/contextWindow via autoCompact), never a 1M assumption.
    */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null };
 }
@@ -526,17 +546,50 @@ export function toOpenAIMessages(
           result.push(assistantMsg);
         }
       } else {
-        // user message: split into text + tool result messages
-        const textParts: string[] = [];
+        // user message: text + image_url blocks stay together as ONE multimodal
+        // user message; tool_result blocks become separate `tool` messages.
+        //
+        // ROOT CAUSE FIX: the old loop only handled `text` and `tool_result` and
+        // SILENTLY DROPPED `image_url` blocks here — so a pasted image, even
+        // though buildContentParts had correctly produced an image_url part,
+        // never reached ANY model (provider-agnostic: Gemini, Qwen, Step all
+        // replied "I don't see an image"). The image was lost at THIS OpenAI
+        // conversion step, not at build time.
+        const userParts: OpenAI.ChatCompletionContentPart[] = [];
+        const flushUser = () => {
+          if (userParts.length === 0) return;
+          // Collapse a text-only message to a plain string (some providers
+          // reject single-text content arrays); keep the array when it carries
+          // an image so the model actually receives the pixels.
+          const hasImage = userParts.some((p) => p.type === "image_url");
+          result.push({
+            role: "user",
+            // Push a COPY — `userParts.length = 0` below empties this array, and
+            // a by-reference push would zero out the message we just stored.
+            content: hasImage
+              ? userParts.slice()
+              : userParts
+                  .map((p) => (p as { type: "text"; text: string }).text)
+                  .join("\n"),
+          });
+          userParts.length = 0;
+        };
         for (const block of msg.content as ContentBlockAPI[]) {
           if (block.type === "text") {
-            textParts.push(block.text);
+            userParts.push({ type: "text", text: block.text });
+          } else if (block.type === "image_url") {
+            userParts.push({
+              type: "image_url",
+              image_url: (
+                block as {
+                  type: "image_url";
+                  image_url: { url: string; detail?: "low" | "high" | "auto" };
+                }
+              ).image_url,
+            });
           } else if (block.type === "tool_result") {
-            // Flush text first
-            if (textParts.length > 0) {
-              result.push({ role: "user", content: textParts.join("\n") });
-              textParts.length = 0;
-            }
+            // Flush any accumulated user text/images before the tool message.
+            flushUser();
             result.push({
               role: "tool",
               tool_call_id: (
@@ -547,9 +600,7 @@ export function toOpenAIMessages(
             });
           }
         }
-        if (textParts.length > 0) {
-          result.push({ role: "user", content: textParts.join("\n") });
-        }
+        flushUser();
       }
     }
   }
@@ -623,6 +674,12 @@ export async function* query(
   // Undefined until the first response is recorded.
   let lastTurnRealOccupancy: number | undefined;
 
+  // Wall-clock of the previous turn's assistant message — feeds the gap-aware
+  // microcompact (computeMicrocompactKeepRecent). Loop-local: null on the first
+  // turn, then the end-of-turn timestamp, so a long mid-run stall (e.g. a
+  // permission wait past the 60-min cache TTL) triggers aggressive eviction.
+  let lastAssistantMessageAt: number | null = null;
+
   let state: LoopState = {
     messages: [...params.messages],
     autoCompactTracking: undefined,
@@ -684,8 +741,17 @@ export async function* query(
     }
     const snipTokensFreed = snipResult.tokensFreed;
 
-    // 3. Microcompact
-    const microResult = microcompact(messagesForQuery);
+    // 3. Microcompact — keepRecent is density- AND gap-aware now (was a fixed 8
+    //    with a dead "skip time-based for now" stub). computeMicrocompactKeepRecent
+    //    keeps more recent results in dense sessions and clears more aggressively
+    //    after a long idle gap (cold prompt cache). lastAssistantMessageAt is
+    //    loop-local so the gap branch is real code, not a no-op.
+    const microKeepRecent = computeMicrocompactKeepRecent(
+      messagesForQuery as unknown as Parameters<typeof computeMicrocompactKeepRecent>[0],
+      lastAssistantMessageAt,
+      false,
+    );
+    const microResult = microcompact(messagesForQuery, { keepRecent: microKeepRecent });
     if (microResult.clearedCount > 0) {
       messagesForQuery = microResult.messages;
     }
@@ -776,6 +842,37 @@ export async function* query(
         ...(tracking ?? { compacted: false, turnId: "", turnCounter: 0 }),
         consecutiveFailures: autoResult.consecutiveFailures,
       };
+    }
+
+    // ── Pre-API blocking-limit guard ──
+    // Belt-and-suspenders: even after the whole pipeline, occupancy can still sit
+    // at the blocking limit (autoCompact's circuit breaker open, or its summarizer
+    // kept failing). Rather than ship a prompt we KNOW is over the effective
+    // ceiling and eat a guaranteed prompt_too_long, force a mechanical snip to
+    // stay under it. claude-vaz blocks the send here too; we snip instead of
+    // erroring so an autonomous run keeps going. Reactive recovery below still
+    // catches anything this can't (few-but-huge messages snip can't reduce).
+    {
+      const guardWindow = ctxLimits?.contextWindow ?? null;
+      if (guardWindow) {
+        const occupancy = Math.max(
+          tokenCountWithEstimation(messagesForQuery),
+          lastTurnRealOccupancy ?? 0,
+        );
+        if (isAtBlockingLimit(occupancy, guardWindow, ctxLimits?.maxOutputTokens ?? null)) {
+          const guardSnip = snipCompactIfNeeded(messagesForQuery, {
+            force: true,
+            keepRecentMessages: 8,
+          });
+          if (guardSnip.messagesRemoved > 0) {
+            messagesForQuery = guardSnip.messages;
+            console.warn(
+              `[query] blocking-limit guard: forced snip freed ~${guardSnip.tokensFreed} ` +
+              `tokens (${guardSnip.messagesRemoved} msgs) before send`,
+            );
+          }
+        }
+      }
     }
 
     // Filter incomplete tool calls (orphaned tool_use without tool_result)
@@ -1306,8 +1403,17 @@ export async function* query(
         continue;
       }
 
-      // ── Collapse recovery on prompt_too_long ──
-      const MAX_COLLAPSE_RECOVERY = 3;
+      // ── Reactive recovery on prompt_too_long ──
+      // The provider rejected the prompt as too long. Recover and retry instead
+      // of failing the turn (claude-vaz parity — the old code only tried the
+      // OFF-by-default collapse stub here, so it always fell straight through to
+      // the error). Three rungs, cheapest first:
+      //   (1) drain staged context collapses (no-op unless collapse is enabled);
+      //   (2) forced mechanical snip — drops the oldest turns, instant, always
+      //       makes progress, and bounds the summarizer input for rung 3;
+      //   (3) forced LLM summarization of what remains (when snip can't reduce —
+      //       few but huge messages). Only surface the error when all rungs fail.
+      const MAX_REACTIVE_RECOVERY = 3;
       const isPromptTooLong =
         /prompt_too_long|prompt is too long|context_length_exceeded/i.test(
           errMsg,
@@ -1315,14 +1421,58 @@ export async function* query(
 
       if (
         isPromptTooLong &&
-        state.collapseRecoveryAttempts < MAX_COLLAPSE_RECOVERY
+        state.collapseRecoveryAttempts < MAX_REACTIVE_RECOVERY
       ) {
+        // (1) Staged-collapse drain.
         withholdPromptTooLong();
         const recovery = recoverFromOverflow(messagesForQuery);
         if (recovery.committed > 0) {
           state = {
             ...state,
             messages: recovery.messages as QueryMessage[],
+            collapseRecoveryAttempts: state.collapseRecoveryAttempts + 1,
+          };
+          continue queryLoop;
+        }
+
+        // (2) Forced mechanical snip — drop oldest turns, keep a small tail.
+        const forcedSnip = snipCompactIfNeeded(messagesForQuery, {
+          force: true,
+          keepRecentMessages: 8,
+        });
+        if (forcedSnip.messagesRemoved > 0) {
+          console.warn(
+            `[query] reactive recovery: forced snip dropped ${forcedSnip.messagesRemoved} ` +
+            `msgs (~${forcedSnip.tokensFreed} tokens) after prompt_too_long`,
+          );
+          state = {
+            ...state,
+            messages: forcedSnip.messages as QueryMessage[],
+            collapseRecoveryAttempts: state.collapseRecoveryAttempts + 1,
+          };
+          continue queryLoop;
+        }
+
+        // (3) Forced LLM summarization of what remains. compactFn's input is
+        //     already small here (snip ran), so the summary call won't itself
+        //     overflow. resetContextCollapse clears any stale staged indices.
+        yield { type: "compact_start", beforeTokens: 0 };
+        let reactivePostCompact: QueryMessage[] | null = null;
+        try {
+          reactivePostCompact = (await compactNow(
+            messagesForQuery,
+            systemPrompt,
+            compactFn,
+          )) as QueryMessage[] | null;
+        } catch (reactiveErr) {
+          console.error("[query] reactive summarization failed:", reactiveErr);
+        }
+        yield { type: "compact_end", beforeTokens: 0, afterTokens: 0 };
+        if (reactivePostCompact) {
+          resetContextCollapse();
+          state = {
+            ...state,
+            messages: reactivePostCompact,
             collapseRecoveryAttempts: state.collapseRecoveryAttempts + 1,
           };
           continue queryLoop;
@@ -1362,6 +1512,10 @@ export async function* query(
       // (matches utils/contextWindow.ts totalContextTokens + the UI pill).
       lastTurnRealOccupancy = turnUsage.prompt_tokens + turnUsage.completion_tokens;
     }
+
+    // Stamp the assistant turn's wall-clock for the next iteration's gap-aware
+    // microcompact (set every turn, independent of whether usage was reported).
+    lastAssistantMessageAt = Date.now();
 
     // ── Build provider-native state for round-trip ──
     // Reconstruct the assistant message as the provider would have
@@ -1534,6 +1688,30 @@ export async function* query(
         continue;
       }
 
+      // The model is ready to stop — but if the developer queued a message
+      // while it was finishing, act on it in THIS run instead of ending and
+      // making them wait for a fresh dispatch. Same steering collector as the
+      // post-tool boundary; a non-empty return keeps the loop alive.
+      if (params.collectQueuedSteering) {
+        let steered: string | null = null;
+        try {
+          steered = await params.collectQueuedSteering();
+        } catch {
+          // Best-effort — never let steering break the stop path.
+        }
+        if (steered) {
+          state = {
+            ...state,
+            messages: [
+              ...updatedMessages,
+              { role: "user", content: [{ type: "text", text: steered }] },
+            ],
+            continuationCount: 0,
+          };
+          continue;
+        }
+      }
+
       // Model is done — return terminal
       state.messages = updatedMessages;
       return {
@@ -1625,10 +1803,36 @@ export async function* query(
       }
     }
 
+    // ── Queued-message steering (claude-vaz parity) ──
+    // Mid-run, the developer may have queued a follow-up ("also do X",
+    // "stop, do Y instead"). Drain it HERE so it rides the next turn instead
+    // of waiting for the whole run to finish. Appended AFTER the inter-turn
+    // sweep so the user's own words are the most recent message the model
+    // sees. The host owns the transcript bookkeeping inside the collector.
+    const steeringMessages: QueryMessage[] = [];
+    if (params.collectQueuedSteering) {
+      try {
+        const steered = await params.collectQueuedSteering();
+        if (steered) {
+          steeringMessages.push({
+            role: "user",
+            content: [{ type: "text", text: steered }],
+          });
+        }
+      } catch {
+        // Best-effort — a steering failure must never break the loop.
+      }
+    }
+
     // ── Update state for next iteration ──
 
     state = {
-      messages: [...updatedMessages, toolResultMessage, ...interTurnMessages],
+      messages: [
+        ...updatedMessages,
+        toolResultMessage,
+        ...interTurnMessages,
+        ...steeringMessages,
+      ],
       autoCompactTracking: tracking,
       maxOutputTokensRecoveryCount: 0,
       continuationCount: 0,

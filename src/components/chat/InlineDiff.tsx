@@ -220,9 +220,11 @@ function InlineDiff({
         </Flex>
       </Flex>
 
-      {/* Diff content — only changed lines (+/-) grouped into hunks */}
+      {/* Diff content — only changed lines (+/-) grouped into hunks. No
+          horizontal scroll: long lines WRAP (see the code box's pre-wrap) so
+          the whole change is readable inside the bubble width. */}
       <Box
-        overflowX="auto"
+        overflowX="hidden"
         fontSize="12px"
         fontFamily={tokens.fontFamily.mono}
         lineHeight="20px"
@@ -290,7 +292,8 @@ function InlineDiff({
                       w="38px"
                       flexShrink={0}
                       justify="flex-end"
-                      align="center"
+                      align="flex-start"
+                      pt="4px"
                       pr="8px"
                       bg={gutterBg}
                       userSelect="none"
@@ -303,7 +306,8 @@ function InlineDiff({
                       w="38px"
                       flexShrink={0}
                       justify="flex-end"
-                      align="center"
+                      align="flex-start"
+                      pt="4px"
                       pr="8px"
                       bg={gutterBg}
                       borderRight={`1px solid ${gutterBorder}`}
@@ -313,7 +317,7 @@ function InlineDiff({
                         {line.newNum ?? ''}
                       </Text>
                     </Flex>
-                    <Flex w="20px" flexShrink={0} justify="center" align="center" userSelect="none">
+                    <Flex w="20px" flexShrink={0} justify="center" align="flex-start" pt="4px" userSelect="none">
                       <Text
                         fontSize="11px"
                         color={line.type === 'added'
@@ -326,7 +330,7 @@ function InlineDiff({
                         {prefixChar}
                       </Text>
                     </Flex>
-                    <Box flex="1" pr={3} whiteSpace="pre" fontSize="12px" display="flex">
+                    <Box flex="1" minW={0} pr={3} whiteSpace="pre-wrap" overflowWrap="anywhere" fontSize="12px">
                       {lineTokens.map((token, ti) => (
                         <span key={ti} style={{ color: token.color }}>
                           {token.text}

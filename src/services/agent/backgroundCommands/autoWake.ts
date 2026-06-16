@@ -94,6 +94,7 @@ function doWake(): void {
       addUserMessage: false,
       useConversationHistory: true,
       cmdOnlyMode,
+      isBackgroundRun: true,
     })
   }).catch((err) => {
     logger.warn('agent', `Background command auto-wake failed: ${err}`)

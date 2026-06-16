@@ -79,6 +79,15 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     ? obj.extraBody as Record<string, unknown>
     : undefined
 
+  // Janela de contexto real do modelo, emitida em X-Model-Context-Window.
+  // Opcional: aceita number positivo finito; qualquer outra coisa → undefined
+  // (a IDE cai no fallback de perfil). Tolerante de propósito — uma config
+  // sem o campo nunca deve falhar o pedido.
+  const contextWindow = typeof obj.contextWindow === 'number'
+    && Number.isFinite(obj.contextWindow) && obj.contextWindow > 0
+    ? Math.floor(obj.contextWindow)
+    : undefined
+
   return {
     provider: assertString(obj.provider, 'provider'),
     model: assertString(obj.model, 'model'),
@@ -90,6 +99,7 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     apiKeyEnv: assertString(obj.apiKeyEnv, 'apiKeyEnv'),
     enabled,
     extraBody,
+    contextWindow,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   }
 }

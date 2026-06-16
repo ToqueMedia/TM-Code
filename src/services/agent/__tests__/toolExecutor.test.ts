@@ -783,6 +783,22 @@ describe('D: CMD mode', () => {
     expect(result).toContain('outside the working directory')
   })
 
+  it('out-of-scope path is ALLOWED after the user approves (prompt-then-allow parity)', async () => {
+    const exec = freshExecutor()
+    exec.enableCmdMode('/projects/test-app')
+    // User approves the path_access prompt → the read must succeed, not hard-fail.
+    mockRequestPathAccess.mockResolvedValue({ approved: true, prompted: true, source: 'user' as const })
+    mockInvoke.mockResolvedValue('external content' as never)
+
+    const result = await exec.execute('read_file', { file_path: '/other/project/file.txt' })
+    expect(result).toContain('external content')
+    expect(result).not.toContain('Access denied')
+    expect(mockRequestPathAccess).toHaveBeenCalled()
+
+    // Restore the module default (clearAllMocks keeps the mockResolvedValue impl).
+    mockRequestPathAccess.mockResolvedValue({ approved: false, prompted: true, source: 'user' as const })
+  })
+
   it('disableCmdMode returns to normal mode', async () => {
     const exec = freshExecutor()
     exec.enableCmdMode('/projects/test-app')
