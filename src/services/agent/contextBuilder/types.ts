@@ -19,6 +19,29 @@ export interface PackageSummary {
   packageManager: string
 }
 
+/** Git orientation snapshot surfaced to the agent (branch + sync + changes),
+ *  so it doesn't reflexively run `git status` / `git diff` to orient. */
+export interface GitContext {
+  branch: string
+  ahead: number
+  behind: number
+  files: Array<{ path: string; status: string; staged: boolean }>
+  /** How many changed files were dropped past the 50-file cap (0 = none). */
+  truncatedFiles: number
+}
+
+/** A recently-modified file (project-relative path + unix-seconds mtime). */
+export interface RecentFileEntry {
+  path: string
+  modified: number
+}
+
+/** An import path alias resolved from tsconfig/jsconfig (`@/*` → `src/*`). */
+export interface PathAlias {
+  alias: string
+  target: string
+}
+
 /**
  * Inputs every cmd-mode section function needs. Built once per
  * `buildCmdModeSystemPrompt` call.
@@ -67,6 +90,14 @@ export interface PromptContext {
   // Project content
   pkgSummary: PackageSummary | null
   treeString: string
+  /** Git orientation snapshot (branch, ahead/behind, changed files). Null when
+   *  the project is not a git repo. Snapshot per turn like the file tree. */
+  gitContext: GitContext | null
+  /** Most-recently-modified files (project-relative), newest first. Empty when
+   *  none / unreadable. Points the model at the working set. */
+  recentFiles: RecentFileEntry[]
+  /** Import path aliases from tsconfig/jsconfig. Empty when none. */
+  pathAliases: PathAlias[]
   readme: string | null
   tmsContent: string | null
   planContent: string | null

@@ -350,6 +350,11 @@ export function getEnvironmentSection(ctx: PromptContext): string {
     if (ctx.pkgSummary.dependencies.length) lines.push(`deps: ${ctx.pkgSummary.dependencies.join(', ')}`)
     if (ctx.pkgSummary.devDependencies.length) lines.push(`devDeps: ${ctx.pkgSummary.devDependencies.join(', ')}`)
   }
+  // Import path aliases — resolve aliased imports (@/foo) without grepping the
+  // tsconfig. One line; only present when the project actually defines them.
+  if (ctx.pathAliases.length) {
+    lines.push(`import_aliases: ${ctx.pathAliases.map(a => `${a.alias}→${a.target}`).join('  ')}`)
+  }
   return `# Environment\n${lines.join('\n')}`
 }
 
@@ -704,6 +709,42 @@ export function getProjectStructureSection(ctx: PromptContext): string {
   // Snapshot disclaimer: the tree is rendered once per user message; files
   // the agent creates/deletes mid-turn won't appear here until the next turn.
   return `# Project structure\n(snapshot at turn start — files you create, move or delete with tools THIS turn won't show here; trust your tool results)\n${ctx.treeString}`
+}
+
+// ── Git orientation ────────────────────────────────────────────
+// Branch + sync state + changed files, so the model doesn't burn a turn on
+// `git status` / `git diff` to figure out where it is. Snapshot per turn (the
+// disclaimer mirrors the file-tree one — mid-turn writes aren't reflected).
+export function getGitStatusSection(ctx: PromptContext): string | null {
+  const git = ctx.gitContext
+  if (!git) return null // not a git repo
+
+  const sync: string[] = []
+  if (git.ahead) sync.push(`${git.ahead} ahead`)
+  if (git.behind) sync.push(`${git.behind} behind`)
+  const syncStr = sync.length ? ` (${sync.join(', ')} upstream)` : ''
+
+  const header = `# Git\n(snapshot at turn start — changes you make THIS turn won't show here)\nbranch: ${git.branch}${syncStr}`
+
+  if (!git.files.length) {
+    return `${header}\nworking tree clean`
+  }
+
+  const fileLines = git.files
+    .map(f => `  ${f.staged ? 'staged  ' : 'unstaged'} ${f.status.padEnd(9)} ${f.path}`)
+    .join('\n')
+  const more = git.truncatedFiles ? `\n  … and ${git.truncatedFiles} more` : ''
+  return `${header}\nchanged files (${git.files.length}${git.truncatedFiles ? '+' : ''}):\n${fileLines}${more}`
+}
+
+// ── Recently-modified files ────────────────────────────────────
+// Points the model at the working set (newest first) so it doesn't grep around
+// for "where the recent work is". Paths are project-relative; .gitignore'd and
+// build-output paths are already excluded by the walker.
+export function getRecentFilesSection(ctx: PromptContext): string | null {
+  if (!ctx.recentFiles.length) return null
+  const lines = ctx.recentFiles.map(f => `  ${f.path}`).join('\n')
+  return `# Recently modified files\n(most recent first — likely the active working set)\n${lines}`
 }
 
 export function getReadmeSection(ctx: PromptContext): string | null {

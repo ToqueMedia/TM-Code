@@ -44,7 +44,10 @@ import {
   detectProjectType,
   detectProjectTypeFromFiles,
   extractPackageSummary,
+  gatherGitContext,
+  gatherRecentFiles,
   getLangInstruction,
+  readPathAliases,
   readTemplateManifest,
   safeReadFile,
 } from './contextBuilder/projectUtils'
@@ -69,6 +72,8 @@ import {
   getDevServerStatusSection,
   getEnvironmentSection,
   getExecutingActionsSection,
+  getGitStatusSection,
+  getRecentFilesSection,
   getMemoryGuidanceSection,
   getMemorySection,
   getMemoryToolsGuidanceSection,
@@ -371,7 +376,7 @@ class ContextBuilder {
 
     // Gather context in parallel for speed
     const { detectScaffolding } = await import('../scaffoldingDetector')
-    const [treeString, pkgSummary, readme, templateManifest, tmsContent, planContent, todoContent, toquemediaIdRaw, appliedScaffolding] = await Promise.all([
+    const [treeString, pkgSummary, readme, templateManifest, tmsContent, planContent, todoContent, toquemediaIdRaw, appliedScaffolding, gitContext, recentFiles, pathAliases] = await Promise.all([
       buildFileTree(projectPath),
       extractPackageSummary(projectPath),
       safeReadFile(`${projectPath}/README.md`),
@@ -381,6 +386,9 @@ class ContextBuilder {
       safeReadFile(`${projectPath}/TODO.md`),
       safeReadFile(`${projectPath}/.toquemedia-id`),
       detectScaffolding(projectPath),
+      gatherGitContext(projectPath),
+      gatherRecentFiles(projectPath),
+      readPathAliases(projectPath),
     ])
     // Any non-null content means the marker exists. We don't care about the ID
     // itself for prompt decisions — only whether TM Code authored the project.
@@ -477,6 +485,9 @@ class ContextBuilder {
       isVanillaWeb,
       pkgSummary,
       treeString,
+      gitContext,
+      recentFiles,
+      pathAliases,
       readme,
       tmsContent,
       planContent,
@@ -569,8 +580,17 @@ class ContextBuilder {
         'dev server status flips null→starting→running→stopped per session'),
       dynamicSection('applied_scaffolding', () => getAppliedScaffoldingSection(ctx),
         'one-shot flow markers (auth, payments) appear after scaffold writes'),
+      // Git orientation BEFORE the file tree: branch + changed files is the
+      // first thing the model wants to know ("where am I, what's dirty"),
+      // and pre-empts a reflexive `git status` / `git diff` tool call.
+      dynamicSection('git_status', () => getGitStatusSection(ctx),
+        'branch + working-tree changes shift every turn — null when not a git repo'),
       dynamicSection('project_structure', () => getProjectStructureSection(ctx),
         'file tree shifts on every write — fsVersion drives cache key'),
+      // Recently-modified files AFTER the tree: the tree says what exists, this
+      // says what was touched last — the likely working set.
+      dynamicSection('recent_files', () => getRecentFilesSection(ctx),
+        'mtime ordering changes on every save'),
       dynamicSection('readme', () => getReadmeSection(ctx),
         'README.md is developer-editable and used as primary intent signal'),
       dynamicSection('project_memory', () => getProjectMemorySection(ctx),

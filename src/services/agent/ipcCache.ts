@@ -134,7 +134,7 @@ export async function cachedSafeReadFile(path: string): Promise<string | null> {
 // type level but not by any caller.
 interface BuildFileTreeArgs {
   rootPath: string
-  filter?: { showHidden?: boolean; maxDepth?: number }
+  filter?: { showHidden?: boolean; maxDepth?: number; respectGitignore?: boolean }
   [key: string]: unknown
 }
 
@@ -145,7 +145,7 @@ interface BuildFileTreeArgs {
  */
 export async function cachedBuildFileTree<T = unknown>(args: BuildFileTreeArgs): Promise<T> {
   const fsVersion = getFsVersion()
-  const filterKey = `${args.filter?.showHidden ? '1' : '0'}|${args.filter?.maxDepth ?? -1}`
+  const filterKey = `${args.filter?.showHidden ? '1' : '0'}|${args.filter?.maxDepth ?? -1}|${args.filter?.respectGitignore ? 'gi' : ''}`
   const key = `${args.rootPath}|${filterKey}`
   const hit = fileTreeStore.get(key) as CacheEntry<T> | undefined
   if (isFresh(hit, fsVersion)) return hit.value

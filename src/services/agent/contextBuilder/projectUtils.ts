@@ -8,10 +8,11 @@
  * The orchestrator class now calls these directly.
  */
 
+import { invoke } from '@/utils/invokeMetrics'
 import { cachedBuildFileTree, cachedSafeReadFile } from '../ipcCache'
 import { detectSystemPackageManager } from '../../packageManagerDetector'
 import type { TemplateManifest } from '../../templateService'
-import type { PackageSummary } from './types'
+import type { GitContext, PackageSummary, PathAlias, RecentFileEntry } from './types'
 
 // Goes through `ipcCache.cachedSafeReadFile` so the dozen-or-so calls a
 // single context-build kicks off (README, TMS, PLAN, TODO, .toquemedia-id,
@@ -35,11 +36,19 @@ export function formatFileTree(node: Record<string, unknown>, indent: string = '
     result += `${indent}${isDir ? name + '/' : name}\n`
   }
 
+  const childIndent = name ? indent + '  ' : indent
   if (node.children && Array.isArray(node.children)) {
-    const childIndent = name ? indent + '  ' : indent
     for (const child of node.children) {
       result += formatFileTree(child, childIndent)
     }
+  }
+
+  // The Rust walker sets `truncated` when a directory's contents were cut —
+  // either capped at MAX_CHILDREN_PER_DIR or sliced off at maxDepth. Surfacing
+  // it tells the model "there's more here" so it reaches for list_directory
+  // instead of assuming the folder is empty (or, worse, that the project is).
+  if (isDir && node.truncated === true) {
+    result += `${childIndent}… (truncated — use list_directory to expand)\n`
   }
 
   return result
@@ -49,12 +58,101 @@ export async function buildFileTree(projectPath: string): Promise<string> {
   try {
     const fileTree = await cachedBuildFileTree({
       rootPath: projectPath,
-      filter: { showHidden: false, maxDepth: 2 }
+      // respectGitignore: the agent's structure snapshot should mirror what a
+      // developer considers "source" — drop generated/ignored paths the repo's
+      // .gitignore lists. UI explorer keeps them (opt-in flag, default off).
+      filter: { showHidden: false, maxDepth: 2, respectGitignore: true }
     })
     return formatFileTree(fileTree as Record<string, unknown>)
   } catch {
     return '(Could not read project structure)'
   }
+}
+
+/**
+ * Git orientation snapshot for the prompt: branch, ahead/behind vs upstream,
+ * and the changed-file set. Reuses the same Tauri commands the Source-Control
+ * UI uses (single source of truth). Returns null when the project isn't a git
+ * repo — every command rejects and we swallow it. Capped at 50 files so a
+ * massive uncommitted diff can't blow up the prompt.
+ */
+export async function gatherGitContext(projectPath: string): Promise<GitContext | null> {
+  try {
+    const [branch, files, divergence] = await Promise.all([
+      invoke<string>('git_current_branch', { projectPath }),
+      invoke<Array<{ path: string; status: string; staged: boolean }>>('git_status_files', { projectPath }),
+      // Returns null when there's no upstream — local-only branch, not an error.
+      invoke<{ ahead: number; behind: number } | null>('git_upstream_divergence', { projectPath }).catch(() => null),
+    ])
+    return {
+      branch,
+      ahead: divergence?.ahead ?? 0,
+      behind: divergence?.behind ?? 0,
+      files: files.slice(0, 50),
+      truncatedFiles: files.length > 50 ? files.length - 50 : 0,
+    }
+  } catch {
+    // Not a git repo (or git unavailable) — no orientation block.
+    return null
+  }
+}
+
+/**
+ * Most-recently-modified files (project-relative paths, newest first). Points
+ * the model at the working set so it doesn't grep around for "where the recent
+ * work is". Honours .gitignore + EXCLUDED_DIRS via the Rust walker.
+ */
+export async function gatherRecentFiles(projectPath: string, limit = 12): Promise<RecentFileEntry[]> {
+  try {
+    const rows = await invoke<Array<{ path: string; modified: number }>>('list_recent_files', {
+      rootPath: projectPath,
+      limit,
+      respectGitignore: true,
+    })
+    const prefix = projectPath.replace(/\\/g, '/').replace(/\/$/, '') + '/'
+    return rows.map(r => ({
+      path: r.path.startsWith(prefix) ? r.path.slice(prefix.length) : r.path,
+      modified: r.modified,
+    }))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Import path aliases from tsconfig.json / jsconfig.json `compilerOptions.paths`
+ * (the `@/* → src/*` style). Lets the model resolve aliased imports without
+ * grepping for the config. Tolerates JSONC (// and block comments + trailing
+ * commas) since tsconfig files commonly carry them.
+ */
+export async function readPathAliases(projectPath: string): Promise<PathAlias[]> {
+  for (const file of ['tsconfig.json', 'jsconfig.json']) {
+    const raw = await safeReadFile(`${projectPath}/${file}`)
+    if (!raw) continue
+    try {
+      const stripped = raw
+        .replace(/\/\*[\s\S]*?\*\//g, '')   // block comments
+        .replace(/(^|[^:])\/\/.*$/gm, '$1') // line comments (not URLs)
+        .replace(/,(\s*[}\]])/g, '$1')      // trailing commas
+      const json = JSON.parse(stripped)
+      const co = json?.compilerOptions ?? {}
+      const baseUrl: string = typeof co.baseUrl === 'string' ? co.baseUrl : '.'
+      const paths = co.paths
+      if (!paths || typeof paths !== 'object') return []
+      const aliases: PathAlias[] = []
+      for (const [alias, targets] of Object.entries(paths)) {
+        const target = Array.isArray(targets) ? targets[0] : undefined
+        if (typeof target === 'string') {
+          const normBase = baseUrl === '.' ? '' : baseUrl.replace(/^\.\//, '') + '/'
+          aliases.push({ alias, target: `${normBase}${target}` })
+        }
+      }
+      return aliases.slice(0, 20)
+    } catch {
+      return []
+    }
+  }
+  return []
 }
 
 export async function extractPackageSummary(projectPath: string): Promise<PackageSummary | null> {
