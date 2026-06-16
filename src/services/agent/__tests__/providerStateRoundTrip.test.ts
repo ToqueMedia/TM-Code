@@ -399,6 +399,40 @@ describe('Provider-native reasoning round-trip', () => {
     })
   })
 
+  describe('User image_url preservation (regression: pasted image never reached the model)', () => {
+    it('keeps image_url blocks as multimodal content on a user message', () => {
+      const userMsg: QueryMessage = {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'O que vês?' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+        ],
+      }
+
+      const api = toOpenAIMessages([userMsg])
+
+      expect(api).toHaveLength(1)
+      const m = api[0] as {
+        role: string
+        content: Array<{ type: string; image_url?: { url: string } }>
+      }
+      expect(m.role).toBe('user')
+      expect(Array.isArray(m.content)).toBe(true)
+      const images = m.content.filter((p) => p.type === 'image_url')
+      expect(images).toHaveLength(1)
+      expect(images[0].image_url?.url).toBe('data:image/png;base64,AAAA')
+      // Text must survive alongside the image.
+      expect(m.content.some((p) => p.type === 'text')).toBe(true)
+    })
+
+    it('collapses a text-only user array to a plain string', () => {
+      const api = toOpenAIMessages([
+        { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+      ])
+      expect(api[0].content).toBe('hello')
+    })
+  })
+
   describe('ProviderState type structure', () => {
     it('supports all three native storage fields', () => {
       const state: ProviderState = {

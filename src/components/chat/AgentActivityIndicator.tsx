@@ -296,6 +296,7 @@ function AgentActivityIndicator() {
         color={tokens.colors.text.disabled}
         fontFamily={tokens.fontFamily.mono}
         whiteSpace="nowrap"
+        css={{ fontVariantNumeric: 'tabular-nums' }}
       >
         ({formatElapsed(elapsed)}
         {inputTokens > 0 && (

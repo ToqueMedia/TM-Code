@@ -2,10 +2,10 @@ import { memo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiAlertOctagon, FiAlertTriangle, FiArchive } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
-import { useBillingStore } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { getProfileForPlan, MODEL_PROFILES } from '../../services/agent/modelProfiles'
+import { MODEL_PROFILES } from '../../services/agent/modelProfiles'
 import {
+  FALLBACK_CONTEXT_WINDOW,
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
   getWarningThreshold,
@@ -53,33 +53,34 @@ function formatTokens(n: number): string {
 
 function ContextWindowIndicator() {
   const t = useTranslation()
-  // Read the per-turn input count, but fall back to the active session's
-  // last-known prompt size when the per-turn counter is 0. `resetTokenUsage`
-  // zeroes `currentPromptTokens` at the start of every new request
-  // (agentRunner.ts:146) — without the fallback the pill collapses to 0%
-  // during the gap between user-clicks-send and the new turn's first
-  // `message_start` event, producing the visible "ended at 13% / restarted
-  // at 7%" jump the user reported. The session field is written on every
-  // `addTokenUsage` (chatStore.ts:2084), so it always reflects the most
-  // recently completed turn.
+  // Stable, foreground-only context size — read DIRECTLY off the active
+  // session's persisted `lastPromptTokens`/`lastResponseTokens`, which now hold
+  // the real wire size of the most recent FOREGROUND turn (see
+  // chatStore.addTokenUsage). We deliberately NO LONGER read the global
+  // `currentPrompt/currentResponse` counters: those are zeroed at every request
+  // start AND re-filled by invisible background / auto-wake runs, which made the
+  // pill jump "sem razão aparente". The session fields move only when the
+  // foreground conversation's context actually changes, and reset only on
+  // compaction — so the pill rises in steps and drops only for real reasons.
   const inputTokens = useChatStore((s) => {
-    if (s.currentPromptTokens > 0) return s.currentPromptTokens
     if (!s.activeSessionId) return 0
     return s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
   })
-  const outputTokens = useChatStore((s) => s.currentResponseTokens)
-  const plan = useBillingStore((s) => s.plan)
+  const outputTokens = useChatStore((s) => {
+    if (!s.activeSessionId) return 0
+    return s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0
+  })
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
   const modelName = useAgentStore((s) => s.modelName)
   const [hovered, setHovered] = useState(false)
 
-  // Profile lookup is dynamic (using the active model reported by backend)
-  // with fallback to the plan's default profile for pre-handshake state.
-  const profile = modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName] : getProfileForPlan(plan)
-  // Header is authoritative; profile is fallback ONLY for the brief
-  // window before the first response lands. This intentionally mirrors
-  // the compression heuristic so the pill and the IDE agree.
-  const rawContextWindow = headerContextWindow ?? profile?.contextWindow ?? 0
+  // Window resolution mirrors the auto-compact decision EXACTLY: server header
+  // → known MODEL_PROFILES entry → conservative 200K FALLBACK_CONTEXT_WINDOW.
+  // An unknown model (no header, not in the profile table) reads against 200K,
+  // NOT a phantom 1M plan default — so the pill never under-reports pressure and
+  // always agrees with the IDE's compaction trigger. The admin publishes the
+  // real window via Settings → Admin to override it.
+  const rawContextWindow = headerContextWindow ?? (modelName ? MODEL_PROFILES[modelName]?.contextWindow : undefined) ?? FALLBACK_CONTEXT_WINDOW
 
   // Stay hidden only until the window is known. Show 0% as soon as it is —
   // gives the user continuity across resets (compact, new message) instead

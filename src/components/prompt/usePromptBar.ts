@@ -2,6 +2,8 @@ import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from '
 import { invoke } from '@/utils/invokeMetrics'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
+import { MODEL_PROFILES, getProfileForPlan } from '../../services/agent/modelProfiles'
+import { describeImagesViaSidecar } from '../../services/agent/visionSidecar'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
 import { useBillingStore } from '../../stores/billingStore'
@@ -17,6 +19,7 @@ import ContextBuilder from '../../services/agent/contextBuilder'
 import MCPService from '../../services/mcp/mcpService'
 import { browserSession } from '../../services/browserSessionManager'
 import { isSlashCommandAllowedForPlan, slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
+import { useRequiredToolsStore, selectAgentBlocked, selectMissingTools } from '../../stores/requiredToolsStore'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
 import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
 import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
@@ -30,6 +33,8 @@ import { resolveMentionContext, collectChangedFileContext, applyMentionResolutio
 import {
   enqueue as enqueueMessage,
   clearCommandQueue as clearMessageQueue,
+  dequeueAllMatching,
+  isSlashCommand,
   joinPromptValues,
 } from '../../services/agent/messageQueue'
 import type { OpenAIContentPart } from '../../services/agent/agentService'
@@ -42,6 +47,7 @@ import {
 } from '../../services/agent/promptValueHelpers'
 // useSettingsStore removed — agentModel no longer in settings
 import { getQueryGuard } from '../../services/agent/queryGuard'
+import { enqueueSerializedRun } from '../../services/agent/agentRunner'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { classifyPendingPlanIntent } from '../../services/agent/planResumeIntent'
@@ -701,11 +707,34 @@ export function usePromptBar() {
     }
 
     if (supportsAttachments && display.attachments.some(a => a.type === 'image')) {
-      // Multimodal path — build content parts. If buildContentParts
-      // returns null (no images survived disk read / size limits / size
-      // budget), fall through to the text path.
+      // Build content parts (image_url). If buildContentParts returns null
+      // (no images survived disk read / size limits / size budget), fall
+      // through to the text path.
       const parts = await buildContentParts(content, promptResolvers)
-      if (parts) userContent = parts
+      if (parts) {
+        // CAPABILITY GATE (parity with agentRunner): only models with NATIVE
+        // vision get the raw image_url parts. Sending image_url to a BLIND
+        // active model (MiMo V2.5 Pro, GLM-5.1 → supportsAttachments=false)
+        // 404s with "no endpoints found that support image input". For those,
+        // route the image through the vision sidecar — a multimodal model
+        // (sidecar:vision, e.g. MiMo V2.5 / Qwen) describes it and the agent
+        // receives the description as text.
+        const modelName = useAgentStore.getState().modelName
+        const activeProfile = modelName && MODEL_PROFILES[modelName]
+          ? MODEL_PROFILES[modelName]
+          : getProfileForPlan(billingPlan)
+        if (activeProfile.supportsAttachments) {
+          userContent = parts
+        } else {
+          const description = await describeImagesViaSidecar(parts)
+          if (description) {
+            const textOnly = await buildAugmentedPrompt(content, promptResolvers)
+            userContent = `${textOnly}\n\n<image_description source="vision-sidecar">\n${description}\n</image_description>`
+          }
+          // description null (no sidecar published) → userContent stays null →
+          // honest XML text fallback below.
+        }
+      }
     }
 
     if (userContent === null) {
@@ -900,6 +929,57 @@ export function usePromptBar() {
             useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized)
           }
         },
+        // ── Queued-message steering (claude-vaz parity) ──
+        // The query loop calls this at every turn boundary. WITHOUT it, a
+        // message the user queues mid-run (QueuedMessagesPreview) sits in the
+        // queue until the WHOLE run goes idle — because the idle drain
+        // (useQueueProcessor) is gated on `!isQueryActive` and can't fire while
+        // the QueryGuard is held. That was the "queued messages só entram no
+        // chat depois do agente terminar" bug: the Terminal/CMD runner wired
+        // this collector (agentRunner.ts) but this Chat dispatch path never did,
+        // so `agentService` got `collectQueuedSteering: undefined` and the
+        // per-turn drain in query.ts was a no-op. Draining here rides the
+        // steered message onto the NEXT turn of the live run. This path is
+        // always foreground (runAgentForPrompt), so there's no background gate.
+        collectSteeringMessages: async (): Promise<string | null> => {
+          // Only plain prompt-mode messages steer. Slash/bash/task-notif
+          // commands need executeInput's per-command handling, so they stay
+          // queued for the idle drain when this run ends.
+          const drained = dequeueAllMatching(
+            c => !isSlashCommand(c) && c.mode === 'prompt',
+          )
+          if (drained.length === 0) return null
+
+          // Coalesce a burst into ONE steered turn (joinPromptValues preserves
+          // block ordering, same as the queue's batched dispatch).
+          const merged =
+            drained.length > 1
+              ? joinPromptValues(drained.map(c => c.value))
+              : drained[0]!.value
+          const display = extractDisplayFromValue(merged)
+
+          // Transcript bookkeeping — keep the run continuous (no idle flicker)
+          // while showing the steered message in the right place:
+          //   [assistant so far] → [user: steered] → [fresh assistant bubble]
+          // flushBufferedDeltas first so buffered tokens land in the bubble
+          // we're finalizing, not the new one. onDone/onError still finalize
+          // the FRESH bubble opened below at the real end of the run.
+          flushBufferedDeltas()
+          const cs = useChatStore.getState()
+          cs.finalizeAssistantMessage()
+          cs.addUserMessage(display.text, display.attachments)
+          cs.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
+
+          // Model-facing text. buildAugmentedPrompt resolves file/folder
+          // attachments to XML; images degrade to <attached_image> markers
+          // (steering is text-first — the transcript still shows the real
+          // attachment). @-mentions are intentionally not re-resolved here.
+          const text = await buildAugmentedPrompt(merged, {
+            resolveAttachmentXml: resolveAttachments,
+            resolveImageDataUri: resolveImageToDataUri,
+          })
+          return text && text.trim().length > 0 ? text : display.text
+        },
       })
     } catch (error) {
       // Cleanup if anything fails before or during runAgentLoop setup.
@@ -928,6 +1008,20 @@ export function usePromptBar() {
     const hasAttachments = useChatStore.getState().draftAttachments.length > 0
     if (!prompt && !hasAttachments) return
     if (usePermissionStore.getState().pendingPermission) return
+
+    // Required-tools gate (git/node/python) — the agent can't run without them.
+    // Slash commands still pass so meta actions (/help, /login…) stay usable.
+    {
+      const tools = useRequiredToolsStore.getState()
+      if (selectAgentBlocked(tools) && !prompt.startsWith('/')) {
+        useChatStore.getState().addSystemMessage(
+          t('terminalMode.toolsRequiredBlocked').replace('{missing}', selectMissingTools(tools).join(', ')),
+          'warn',
+        )
+        return
+      }
+    }
+
     const phase = useLayoutStore.getState().scaffoldPhase
     if (phase === 'installing' || phase === 'starting') return
 
@@ -1264,7 +1358,23 @@ export function usePromptBar() {
       // actually receives the message. Cancellation is owned by
       // AgentService.cancelLoop() (called from handleStop), which
       // propagates the abort down to the in-flight fetch.
-      await runAgentForPrompt(mergedValue, false)
+      // Route the dispatch through the SHARED `lastRun` serialization (same
+      // chain Terminal mode uses via runAgentWithCallbacks). This serializes the
+      // idle-drain dispatch against a pending auto-wake / background run: without
+      // it, the chat queue ran `runAgentLoop` directly while those ran on the
+      // chain, and both could clear `tryStart()` in the reserve→tryStart window,
+      // dropping the queued prompt as "concurrent". `await prev` makes us wait
+      // for any in-flight chain run instead of colliding; in the common case it
+      // resolves immediately — no added latency.
+      //
+      // NOTE: this is NOT what makes a message queued MID-RUN drain per turn —
+      // that is the query loop's steering collector (collectQueuedSteering),
+      // which drains the queue at each turn boundary INSIDE the live run. Both
+      // dispatch paths now wire it: Terminal/CMD via agentRunner's
+      // collectSteeringMessages, and Chat via runAgentForPrompt's own
+      // collectSteeringMessages callback above. This path only handles items
+      // still queued once the run has gone idle.
+      await enqueueSerializedRun(() => runAgentForPrompt(mergedValue, false))
     } finally {
       // Safety net: if runAgentForPrompt returned without ever entering
       // runAgentLoop's tryStart() (e.g. createNewSession threw, or the

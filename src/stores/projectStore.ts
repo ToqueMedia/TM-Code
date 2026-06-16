@@ -75,6 +75,13 @@ interface ProjectStore {
   createProject: (path: string, template: string) => Promise<void>;
   loadRecentProjects: () => Promise<void>;
   closeProject: () => Promise<void>;
+  /**
+   * Forced, non-interactive teardown back to the Welcome screen — no
+   * dirty-file prompt, no state save. Used when an admin blocks/deletes the
+   * account in real time: the user must be expelled from Chat/Terminal
+   * immediately, not asked whether to save.
+   */
+  expelToWelcome: () => void;
   removeFromRecent: (projectId: string) => Promise<void>;
   clearAllRecent: () => Promise<void>;
   deleteProject: (projectId: string, projectPath: string) => Promise<void>;
@@ -640,6 +647,18 @@ export const useProjectStore = create<ProjectStore>()(
         // User is now back on Welcome — remember that so a restart doesn't
         // auto-reopen the project they just closed.
         set({ welcomeScreen: 'hero', noTmsFile: false, tmsBootstrapping: false });
+      },
+
+      expelToWelcome: () => {
+        // No prompt, no save — the account was suspended; get the user out of
+        // any project (Chat/Terminal) and onto the Welcome screen at once.
+        tearDownProject();
+        set({
+          welcomeScreen: 'hero',
+          cmdModeProjectPath: null,
+          noTmsFile: false,
+          tmsBootstrapping: false,
+        });
       },
 
       saveProjectState: async () => {

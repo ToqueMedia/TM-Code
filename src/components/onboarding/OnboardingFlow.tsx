@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Box, Flex, Text } from '@chakra-ui/react'
+import { Box, Flex } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { useTranslation, getOSLanguage } from '@/i18n'
+import { useRequiredToolsStore } from '@/stores/requiredToolsStore'
+import { getOSLanguage } from '@/i18n'
 import { ONBOARDING_GLOBAL_STYLES } from './onboardingStyles'
 import WindowControls from '../ui/WindowControls'
 import { IS_MAC } from '@/utils/platform'
@@ -46,7 +47,6 @@ function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
   const completeOnboarding = useSettingsStore(s => s.completeOnboarding)
   const setAppLanguage = useSettingsStore(s => s.setAppLanguage)
   const setAgentLanguage = useSettingsStore(s => s.setAgentLanguage)
-  const t = useTranslation()
 
   // On first mount, set store language from OS locale so ConfigStep
   // shows the correct pre-selection and all text renders in the right language.
@@ -66,13 +66,11 @@ function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
     setStep(s => Math.max(s - 1, 0))
   }, [])
 
-  const handleSkip = useCallback(() => {
-    completeOnboarding()
-    onComplete()
-  }, [completeOnboarding, onComplete])
-
   const handleDone = useCallback(() => {
     completeOnboarding()
+    // Re-detect required tools so the runtime send-gate reflects anything just
+    // installed during onboarding (otherwise it'd stay blocked until refocus).
+    useRequiredToolsStore.getState().refresh()
     onComplete()
   }, [completeOnboarding, onComplete])
 
@@ -88,13 +86,11 @@ function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
       } else if (e.key === 'ArrowLeft' && s > 0) {
         setDirection(-1)
         setStep(s - 1)
-      } else if (e.key === 'Escape' && s < TOTAL_STEPS - 1) {
-        handleSkip()
       }
     }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
-  }, [handleSkip])
+  }, [])
 
   const handleDrag = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
@@ -169,30 +165,6 @@ function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
             onMaximize={handleFullToggle}
           />
         </Box>
-      )}
-
-      {/* Skip button — placed in the corner OPPOSITE to the window controls
-          so it never overlaps minimize/maximize/close. macOS has its traffic
-          lights top-left, so Skip goes top-right; Windows/Linux have their
-          controls top-right, so Skip goes top-left. */}
-      {step < TOTAL_STEPS - 1 && (
-        <Text
-          position="absolute"
-          top="14px"
-          {...(IS_MAC ? { right: '20px' } : { left: '20px' })}
-          zIndex={10}
-          fontSize="12px"
-          color={tokens.colors.text.muted}
-          cursor="pointer"
-          role="button"
-          tabIndex={0}
-          _hover={{ color: tokens.colors.text.primary }}
-          transition={`color ${tokens.transition.normal}`}
-          onClick={handleSkip}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleSkip() }}
-        >
-          {t('onboarding.skip')}
-        </Text>
       )}
 
       {/* Background gradient */}

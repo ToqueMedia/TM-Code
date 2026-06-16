@@ -766,7 +766,7 @@ class ToolExecutor {
     // .env files are ALWAYS blocked — read, write, edit, delete
     const filePath = (input.file_path || input.oldPath || '') as string
     if (this.isEnvFile(filePath) && ['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'].includes(toolName)) {
-      return 'Blocked: .env files contain secrets and cannot be read or modified by the agent. Ask the developer what environment variables are needed, or create a .env.example with placeholder values.'
+      return 'Blocked: .env is sealed (it holds secrets) — the agent cannot read or write it. This block is by design and is NOT a sign that a key is missing. To supply a credential, call request_credentials (it writes straight to .env); once it returns "Credentials saved to .env", that key IS present — trust that result, do not re-read .env to verify, and never ask the developer to edit .env by hand. A .env.example with placeholder values is fine for documentation only.'
     }
 
     // Path scope check — file tools targeting paths outside all allowed
@@ -781,8 +781,14 @@ class ToolExecutor {
     if (pathForScope && FILE_SCOPE_TOOLS.has(toolName)) {
       const scopeCheck = this.checkPathScope(pathForScope)
       if (!scopeCheck.allowed) {
+        // ── TEMP DIAGNOSTIC (remover após reproduzir o "no-prompt") ──
+        // subAgentChild=true → a chamada veio de um isolated child (sub-agente
+        // Explore/Research), a hipótese de bypass do gate.
+        console.log(`[path-scope-debug] GATE tool=${toolName} path=${pathForScope} dir=${scopeCheck.directoryToAdd} subAgentChild=${ToolExecutor.getInstance() !== this} cmdCwd=${!!this.cmdModeCwd}`)
         const decision = await usePermissionStore.getState()
           .requestPathAccess(pathForScope, scopeCheck.directoryToAdd)
+        console.log(`[path-scope-debug] GATE decision approved=${decision.approved} path=${pathForScope}`)
+        // ── fim TEMP ──
         this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
           const reason = decision.denyReason
@@ -1464,7 +1470,23 @@ ${preview}
         if (useLayoutStore.getState().devServer) return
         useLayoutStore.getState().initDevServer({ pid: 0, projectKind: 'frontend' })
         useLayoutStore.getState().setDevServerFrontendUrl(url)
-        useLayoutStore.getState().setViewMode('preview')
+        // Surface the preview only once the agent's turn has ENDED — never
+        // mid-stream. A raw `execute_command` that boots a server can match
+        // here while the agent is still mid-task (and still streaming its
+        // report); switching the view then is exactly the "preview opens too
+        // early" complaint. If still streaming, defer the switch to the moment
+        // the run finalises (isStreaming → false), mirroring devServerManager's
+        // own gate so both server-start paths behave identically.
+        if (!useChatStore.getState().isStreaming) {
+          useLayoutStore.getState().setViewMode('preview')
+        } else {
+          const unsub = useChatStore.subscribe((s, prev) => {
+            if (prev.isStreaming && !s.isStreaming) {
+              unsub()
+              useLayoutStore.getState().setViewMode('preview')
+            }
+          })
+        }
         break
       }
     }
@@ -1546,7 +1568,34 @@ ${preview}
     const scopeName = this.cmdModeCwd ? 'working directory' : 'project directory'
     return { allowed: false, directoryToAdd, scopeName }
   }
-  
+
+  /**
+   * Prompt-then-allow scope enforcement (claude-vaz parity). In-scope paths
+   * pass silently; an out-of-scope path raises the `path_access` permission
+   * prompt and only throws when the user DENIES — approving adds the directory
+   * to `additionalDirectories` so every later tool (and the Rust cwd clamp via
+   * set_agent_allowed_directories) can reach it. `requestPathAccess`
+   * short-circuits already-granted dirs, so this never double-prompts with the
+   * execute() gate; it is the universal fallback for paths that reach a handler
+   * WITHOUT having passed the gate (e.g. an isolated sub-agent executor) — the
+   * old behaviour hard-threw "Access denied" there, with no chance to approve.
+   */
+  private async requirePathAccess(filePath: string): Promise<void> {
+    const scope = this.checkPathScope(filePath)
+    if (scope.allowed) return
+    // ── TEMP DIAGNOSTIC (remover após reproduzir o "no-prompt") ──
+    // Se isto aparece SEM um "GATE" antes para o mesmo path, o gate foi
+    // saltado e este handler é o único a pedir (cenário do sub-agente).
+    console.log(`[path-scope-debug] HANDLER requirePathAccess path=${filePath} dir=${scope.directoryToAdd} subAgentChild=${ToolExecutor.getInstance() !== this} cmdCwd=${!!this.cmdModeCwd}`)
+    const decision = await usePermissionStore.getState().requestPathAccess(filePath, scope.directoryToAdd)
+    console.log(`[path-scope-debug] HANDLER decision approved=${decision.approved} path=${filePath}`)
+    // ── fim TEMP ──
+    if (!decision.approved) {
+      const reason = decision.denyReason ? ` ${decision.denyReason}` : ''
+      throw new Error(`Access denied: path "${filePath}" is outside the ${scope.scopeName}.${reason}`)
+    }
+  }
+
   /**
    * Resolve a potentially relative path to an absolute path.
    * If the path is relative (doesn't start with '/' on Unix or 'C:\\' / 'C:/' on Windows),
@@ -1751,6 +1800,7 @@ ${preview}
     if (response.headers.get('x-tm-config-key') !== 'sidecar:web_search') {
       return 'web_search error: no search sidecar is published and the active model has no native web search. Tell the user web search is currently unavailable.'
     }
+    console.info(`[web-search-sidecar] query served by sidecar model=${response.headers.get('x-tm-model') ?? '?'} (config=sidecar:web_search)`)
 
     const data = await response.json().catch(() => null) as
       { choices?: Array<{ message?: { content?: string } }> } | null
@@ -2013,7 +2063,7 @@ ${preview}
         const offset = offsetProvided ? Math.max(1, input.offset as number) : 1
         const limit = limitProvided ? Math.max(1, input.limit as number) : 0
         const sliceRequested = offsetProvided || limitProvided
-        this.validatePathWithinProject(filePath)
+        await this.requirePathAccess(filePath)
 
         // ── Dedup check ──────────────────────────────────────────────
         // If we've already read this exact file+range and no writes have
@@ -2164,7 +2214,7 @@ ${preview}
         concurrencySafe: true,
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.file_path as string)
+        await this.requirePathAccess(input.file_path as string)
         const dirPath = this.resolveToAbsolute(input.file_path as string)
         const filter = { showHidden: false, maxDepth: (input.maxDepth as number) || 3 }
         const tree = await invoke('build_file_tree', { rootPath: dirPath, filter })
@@ -2195,7 +2245,7 @@ ${preview}
         if (!query || !query.trim()) {
           return 'Error: search_files requires a non-empty "query" parameter. Provide a search pattern.'
         }
-        this.validatePathWithinProject(input.directory as string)
+        await this.requirePathAccess(input.directory as string)
         const directory = this.resolveToAbsolute(input.directory as string)
         const options = {
           case_sensitive: (input.caseSensitive as boolean) || false,
@@ -2229,7 +2279,7 @@ ${preview}
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.file_path as string)
+        await this.requirePathAccess(input.file_path as string)
         const path = this.resolveToAbsolute(input.file_path as string)
         const newContent = input.content as string
 
@@ -2331,7 +2381,7 @@ ${preview}
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.file_path as string)
+        await this.requirePathAccess(input.file_path as string)
         const path = this.resolveToAbsolute(input.file_path as string)
         const content = (input.content as string) || ''
 
@@ -2400,7 +2450,7 @@ ${preview}
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.file_path as string)
+        await this.requirePathAccess(input.file_path as string)
         const filePath = this.resolveToAbsolute(input.file_path as string)
         await invoke('create_directories_all', { path: filePath })
         this.refreshFileTree()
@@ -2422,7 +2472,7 @@ ${preview}
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.file_path as string)
+        await this.requirePathAccess(input.file_path as string)
         const filePath = this.resolveToAbsolute(input.file_path as string)
 
         // Capture checkpoint before deleting. Use injected _toolCallId so
@@ -2467,7 +2517,7 @@ ${preview}
         }
       },
       execute: async (input) => {
-        this.validatePathWithinProject(input.oldPath as string)
+        await this.requirePathAccess(input.oldPath as string)
         const oldPath = this.resolveToAbsolute(input.oldPath as string)
         // Validate newName doesn't contain path traversal
         const newName = input.newName as string
@@ -2557,7 +2607,7 @@ ${preview}
           return t('tool.emptyOldString')
         }
 
-        this.validatePathWithinProject(path)
+        await this.requirePathAccess(path)
 
         // Mechanical blocks on the new fragment — covers partial edits
         // that introduce forbidden code without rewriting the file.
@@ -2675,7 +2725,7 @@ ${preview}
         const pattern = input.pattern as string
         const directory = this.resolveToAbsolute((input.directory as string) || this.getProjectRoot())
 
-        this.validatePathWithinProject(directory)
+        await this.requirePathAccess(directory)
 
         const result = await invoke<string[]>('glob_files', {
           pattern,
@@ -2836,7 +2886,7 @@ ${preview}
         // Scope cwd to project root or dynamic terminal directory
         const projectRoot = this.getProjectRoot()
         const cwd = this.resolveToAbsolute((input.cwd as string) || (this.cmdModeCwd || projectRoot))
-        this.validatePathWithinProject(cwd)
+        await this.requirePathAccess(cwd)
 
         // Detect package-manager install commands so they get the streaming
         // execution path (real-time logs in chat + PID-based cancellation).
@@ -3315,7 +3365,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         await this.ensureAgentShellListeners()
         const projectRoot = this.getProjectRoot()
         const cwd = this.resolveToAbsolute((input.cwd as string) || (this.cmdModeCwd || projectRoot))
-        this.validatePathWithinProject(cwd)
+        await this.requirePathAccess(cwd)
 
         const sessionId = `agent-shell-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
         const session: AgentShellSession = {
@@ -3473,7 +3523,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
 
         const projectRoot = this.getProjectRoot()
         const cwd = (input.cwd as string) || (this.cmdModeCwd || projectRoot)
-        this.validatePathWithinProject(cwd)
+        await this.requirePathAccess(cwd)
 
         const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
         const bgCmdStore = useBackgroundCommandStore.getState()

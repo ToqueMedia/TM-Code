@@ -607,6 +607,8 @@ pub fn run() {
         std::sync::Mutex::new(std::collections::HashMap::new());
     let child_map: commands::terminal::PtyChildMap =
         std::sync::Mutex::new(std::collections::HashMap::new());
+    let pty_pid_map: commands::terminal::PtyPidMap =
+        std::sync::Mutex::new(std::collections::HashMap::new());
 
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
@@ -619,6 +621,7 @@ pub fn run() {
         .manage(fim_state)
         .manage(pty_map)
         .manage(child_map)
+        .manage(pty_pid_map)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -1184,6 +1187,20 @@ pub fn run() {
                             map.clear();
                         }
                     }
+                    // PTY shells + their dev-server trees. ProcessMap above only
+                    // holds execute_command children; without this, every terminal's
+                    // shell AND its dev server (node on :3000/:3001/…) leaked on quit
+                    // and kept the port bound. Synchronous on purpose — the process
+                    // is about to exit, so spawned tasks would never run.
+                    if let Some(pm) = window.try_state::<commands::terminal::PtyPidMap>() {
+                        if let Ok(mut map) = pm.lock() {
+                            for (sid, pid) in map.iter() {
+                                commands::terminal::kill_pty_process_tree(*pid);
+                                eprintln!("[shutdown] Killed PTY tree session={} pid={}", sid, pid);
+                            }
+                            map.clear();
+                        }
+                    }
                 }
                 // Notify main window when OAuth popup is closed (cancelled by user).
                 // Firebase checks oauthProxy.closed to detect popup dismissal.
@@ -1230,6 +1247,7 @@ pub fn run() {
             kill_pty_session,
             kill_process,
             kill_port,
+            commands::port_guard::set_guarded_ports,
             check_server_health,
             probe_server,
             get_current_directory,

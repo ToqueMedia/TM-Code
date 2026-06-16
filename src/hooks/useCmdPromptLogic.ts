@@ -5,6 +5,7 @@ import { useProjectStore } from '../stores/projectStore'
 import { useAuthStore } from '../stores/authStore'
 import { useBillingStore } from '../stores/billingStore'
 import { useTerminalPanelStore } from '../stores/terminalPanelStore'
+import { useRequiredToolsStore, selectAgentBlocked, selectMissingTools } from '../stores/requiredToolsStore'
 import { isSlashCommandAllowedForPlan, slashCommandRegistry, type SlashCommand } from '../services/agent/slashCommandRegistry'
 import { CMD_MODE_COMMANDS } from '../services/agent/cmdModeCommands'
 import { runAgentWithCallbacks } from '../services/agent/agentRunner'
@@ -658,6 +659,20 @@ export function useCmdPromptLogic() {
     }
     const hasAttachments = draftAttachments.length > 0
     if (!prompt && !hasAttachments) return
+
+    // Required-tools gate: the agent shells out to git/node/python constantly,
+    // so block real prompts while any is missing. Slash commands (/help, /login…)
+    // still go through so the user isn't locked out of meta actions.
+    {
+      const tools = useRequiredToolsStore.getState()
+      if (selectAgentBlocked(tools) && !prompt.startsWith('/')) {
+        useChatStore.getState().addSystemMessage(
+          t('terminalMode.toolsRequiredBlocked').replace('{missing}', selectMissingTools(tools).join(', ')),
+          'warn',
+        )
+        return
+      }
+    }
 
     // Billing gate for image attachments — the bar already shows a warning,
     // but prior behaviour silently let the send go through, which either

@@ -373,6 +373,10 @@ function MinimalTitleBar() {
               role="button"
               transition={`background ${tokens.transition.fast}`}
               _hover={{ bg: tokens.colors.bg.whiteSubtle }}
+              // Children pointer-events:none so the WHOLE padded row is the click
+              // target (matches ContextMenuOverlay). Without this, on Windows
+              // WebView2 only a click directly on the icon/text registered.
+              css={{ '& *': { pointerEvents: 'none' } }}
               onClick={() => {
                 setShowUserMenu(false)
                 setShowIssueReporter(true)
@@ -394,6 +398,7 @@ function MinimalTitleBar() {
               role="button"
               transition={`background ${tokens.transition.fast}`}
               _hover={{ bg: tokens.colors.bg.whiteSubtle }}
+              css={{ '& *': { pointerEvents: 'none' } }}
               onClick={handleSignOut}
             >
               <FiLogOut size={13} color={tokens.colors.text.secondary} />

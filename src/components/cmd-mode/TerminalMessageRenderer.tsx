@@ -392,6 +392,12 @@ function TerminalMessageRendererInner({
 
   // ── Assistant message ──
   const hasContentBlocks = message.contentBlocks && message.contentBlocks.length > 0
+  // Thinking currently on screen (new contentBlocks reasoning, or the legacy
+  // reasoningContent block rendered below). When it's showing, the waiting
+  // "dots" must give way to it — otherwise both animate at the same time.
+  const hasVisibleThinking =
+    !!message.contentBlocks?.some(b => b.type === 'reasoning')
+    || (!!message.reasoningContent && message.thinkingRequested !== false)
 
   return (
     <Box
@@ -425,10 +431,12 @@ function TerminalMessageRendererInner({
           TM Code
         </Text>
       </Flex>
-      {/* Waiting indicator — only when streaming with no visible content yet.
-          Hard-step accumulating-dots frame-swap replaces the eased `pulseDot`
-          breathing trio (refined-terminal: one sanctioned activity animation). */}
-      {isStreaming && !message.content && (!message.toolCalls || message.toolCalls.length === 0) && (
+      {/* Waiting indicator — only when streaming with no visible content yet
+          AND no thinking on screen. Once thinking + its effect appear, the dots
+          give way to them (no double animation). Hard-step accumulating-dots
+          frame-swap replaces the eased `pulseDot` breathing trio (refined-
+          terminal: one sanctioned activity animation). */}
+      {isStreaming && !message.content && (!message.toolCalls || message.toolCalls.length === 0) && !hasVisibleThinking && (
         <Flex align="center" py={1.5} color={tokens.colors.accent.purple}>
           <Text fontFamily={tokens.fontFamily.mono} fontSize="14px" lineHeight="1">
             <Spinner active frames={DOTS_FRAMES} />

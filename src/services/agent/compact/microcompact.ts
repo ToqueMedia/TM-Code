@@ -94,15 +94,14 @@ export function microcompact(
     return { messages, tokensSaved: 0, clearedCount: 0 }
   }
 
-  // Check time-based trigger
-  let keepCount = opts.keepRecent
-  const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant')
-  if (lastAssistant) {
-    // We don't have timestamps on the message shape, so skip time-based for now
-    // In the future, this could consult a passed-in timestamp
-  }
-
-  keepCount = Math.max(1, keepCount)
+  // keepRecent is computed by the caller (computeMicrocompactKeepRecent in
+  // contextManager), which folds in BOTH message density AND the idle-gap /
+  // cold-cache eviction using the real last-assistant timestamp the query loop
+  // tracks. This function just applies that count. The old in-here time-based
+  // branch was a literal no-op (no timestamp on the message shape) and is gone;
+  // gapThresholdMs/gapKeepRecent on the options remain only for standalone
+  // callers that don't pre-compute keepRecent.
+  const keepCount = Math.max(1, opts.keepRecent)
   const keepSet = new Set(compactableIds.slice(-keepCount))
   const clearSet = new Set(compactableIds.filter(id => !keepSet.has(id)))
 

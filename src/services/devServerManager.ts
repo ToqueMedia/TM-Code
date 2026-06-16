@@ -256,6 +256,10 @@ class DevServerManager {
       }
 
       slot.pid = pid
+      // Guard this server's framework-default ports now (actual ports are added
+      // once the URLs are detected). The guard reserves the IPv4 side of ONLY
+      // these IDE-managed ports.
+      this.syncGuardedPorts()
       // Update store with real PID now that we have it.
       useLayoutStore.setState(state =>
         state.devServer ? { devServer: { ...state.devServer, pid } } : {}
@@ -514,6 +518,10 @@ class DevServerManager {
       }
     }
 
+    // A URL (and thus a real bound port) was assigned — refresh the guard with
+    // the actual ports (covers a server that jumped off its default port).
+    if (actions.length > 0) this.syncGuardedPorts()
+
     slot.status = 'running'
 
     // Auto-switch to preview view once the first URL lands.
@@ -628,7 +636,33 @@ class DevServerManager {
     useLayoutStore.getState().clearDevServer()
   }
 
+  /**
+   * Tell the Rust port-guard which ports the IDE ITSELF is running a dev server
+   * on, so it reserves the IPv4 side of ONLY these (split-brain mitigation) and
+   * NEVER a dev server the user launched by hand in the PTY. Before this, the
+   * guard held every common dev port (3000/3001/5173/…) inside the IDE process,
+   * so the app showed up in `lsof:PORT` and a manual `lsof|kill` took it down.
+   */
+  private syncGuardedPorts(): void {
+    const slot = this.server
+    const ports = new Set<number>()
+    if (slot) {
+      for (const p of this.guessFrameworkPorts(slot.command)) ports.add(p)
+      for (const url of [slot.frontendUrl, slot.backendUrl]) {
+        const m = url?.match(/:(\d+)/)
+        if (m) {
+          const p = parseInt(m[1], 10)
+          if (p) ports.add(p)
+        }
+      }
+    }
+    invoke('set_guarded_ports', { ports: [...ports] }).catch(() => {})
+  }
+
   private cleanup(): void {
+    // Server is gone — stop guarding its ports (the guard no longer holds them,
+    // so they never appear under the IDE process in lsof).
+    invoke('set_guarded_ports', { ports: [] }).catch(() => {})
     this.unlistenOutput?.()
     this.unlistenOutput = null
     this.unlistenExit?.()

@@ -35,7 +35,11 @@ export async function describeImagesViaSidecar(
   const body = {
     model: 'tm-active-model', // substituído pelo worker (sidecar:vision)
     stream: false,
-    max_tokens: 2048,
+    // Teto alto (não custo fixo — o billing conta só os tokens gerados): a
+    // descrição numerada "Image 1, Image 2, …" pode crescer com lotes grandes
+    // de imagens + transcrição verbatim de código/erros. 2048 truncava as
+    // últimas imagens; 16384 dá folga para vários screenshots densos.
+    max_tokens: 16384,
     messages: [
       {
         role: 'system',
@@ -75,6 +79,10 @@ export async function describeImagesViaSidecar(
       logger.warn('vision-sidecar', 'no vision sidecar published — skipping (would hallucinate on the blind active model)')
       return null
     }
+    logger.info(
+      'vision-sidecar',
+      `image(s) described by sidecar model=${res.headers.get('x-tm-model') ?? '?'} (config=sidecar:vision)`,
+    )
 
     const data = await res.json().catch(() => null) as
       { choices?: Array<{ message?: { content?: string } }> } | null

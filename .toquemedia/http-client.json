@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-06-16T18:50:54.745Z",
+  "tabs": [
+    {
+      "id": "9b333894-4ac7-4b83-8d91-a980c78694fd",
+      "name": "Request 1",
+      "method": "GET",
+      "url": "/",
+      "headers": [
+        {
+          "id": "899c2e0f-792b-4565-81ed-7e24b32cfd77",
+          "key": "",
+          "value": "",
+          "enabled": true
+        }
+      ],
+      "params": [
+        {
+          "id": "44fa27e4-3c69-454f-8007-e2a196aab30f",
+          "key": "",
+          "value": "",
+          "enabled": true
+        }
+      ],
+      "body": "",
+      "bodyType": "json",
+      "formData": [
+        {
+          "id": "96ccdd1d-5d4a-40e2-8cc6-eef4658cede4",
+          "key": "",
+          "value": "",
+          "enabled": true
+        }
+      ],
+      "auth": {
+        "type": "none",
+        "token": "",
+        "username": "",
+        "password": ""
+      },
+      "activeRequestTab": "auth",
+      "activeResponseTab": "body"
+    }
+  ],
+  "activeTabId": "9b333894-4ac7-4b83-8d91-a980c78694fd",
+  "history": []
+}

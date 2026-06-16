@@ -387,6 +387,21 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approveAll: () => {
     const { pendingPermission, permissionQueue } = get()
     if (pendingPermission) {
+      // path_access não tem "scope" de tool para aprovar em massa — conceder a
+      // PASTA-MÃE é a aprovação em massa (cobre tudo o que está lá dentro, via
+      // isPathWithinRoots startsWith). Sem isto, "Aprovar tudo" devolvia
+      // approved:true mas NUNCA adicionava a pasta → o acesso seguinte voltava
+      // a pedir (o "aprovar duas vezes"). Espelha approve()/approveAlwaysInProject().
+      if (pendingPermission.promptReason === 'path_access' && pendingPermission.pathAccessTarget) {
+        const dirs = new Set(get().additionalDirectories)
+        dirs.add(pendingPermission.pathAccessTarget)
+        set({ pendingPermission: null, additionalDirectories: dirs, autoDenyAll: false })
+        syncAllowedDirectoriesToRust()
+        pendingPermission.resolve({ approved: true, prompted: true, source: 'user', promptKind: 'path_access' })
+        persistPermissions()
+        advanceQueue(set, get)
+        return
+      }
       const scope = getToolScope(pendingPermission.toolName)
       const scopes = new Set(get().approvedScopes)
       scopes.add(scope)
@@ -457,6 +472,23 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   approveAlwaysGlobal: () => {
     const { pendingPermission } = get()
     if (pendingPermission) {
+      // path_access: conceder a pasta-mãe (= "permitir esta pasta e tudo lá
+      // dentro"). O globalToolAllowlist é para TOOLS, não para pastas — sem
+      // este ramo, escolher "sempre (global)" no prompt de acesso devolvia
+      // approved:true mas não concedia a pasta → re-prompt. Persistência
+      // verdadeiramente global (cross-project) exigiria um store de dirs
+      // próprio; por agora persiste no permissions.json do projeto (igual ao
+      // "sempre no projeto"), o que já elimina o duplo pedido.
+      if (pendingPermission.promptReason === 'path_access' && pendingPermission.pathAccessTarget) {
+        const dirs = new Set(get().additionalDirectories)
+        dirs.add(pendingPermission.pathAccessTarget)
+        set({ pendingPermission: null, additionalDirectories: dirs, autoDenyAll: false })
+        syncAllowedDirectoriesToRust()
+        pendingPermission.resolve({ approved: true, prompted: true, source: 'user', promptKind: 'path_access' })
+        persistPermissions()
+        advanceQueue(set, get)
+        return
+      }
       const globalAllowlist = new Set(get().globalToolAllowlist)
       globalAllowlist.add(pendingPermission.toolName)
       saveGlobalToolAllowlist(globalAllowlist)

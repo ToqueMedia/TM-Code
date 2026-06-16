@@ -35,6 +35,8 @@ import { useFeaturesStore } from '../../stores/featuresStore'
 import { usePromotionsStore } from '../../stores/promotionsStore'
 import { useByokStore } from '../../stores/byokStore'
 import { useTmSpeedStore } from '../../stores/tmSpeedStore'
+import { useProjectStore } from '../../stores/projectStore'
+import { useToastStore } from '../../stores/toastStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
 import { tauriFetch, registerHeaderProvider } from '../tauriFetch'
 import { resolveWorkerUrl } from '../../utils/devUrls'
@@ -300,6 +302,11 @@ class FirebaseAuthService {
           isAdmin: currentIsAdmin,
           displayName: profile.displayName || profile.fullName || user.displayName || storeDisplayName || authData.displayName,
           photoURL: profile.photoURL || authData.photoURL,
+          // Seed the suspension flag from the profile so the banner + Welcome
+          // gate are correct on first paint; the user-doc listener keeps it in
+          // sync (and expels from Chat/Terminal) in real time afterwards.
+          blocked: profile.blocked === true,
+          blockedReason: profile.blockedReason,
         })
         // Initialize blockedSynced from Firestore so a restart doesn't
         // re-write blocked: true (the previous blockedSynced=true was lost
@@ -344,12 +351,22 @@ class FirebaseAuthService {
       // admin creates/edits/deletes promotions in the web admin.
       this.subscribeToPromotions()
 
-      // Register device fingerprint for anti-abuse tracking (fire-and-forget).
-      // Skip if already registered for this uid (prevents redundant calls on
-      // token refresh which fires ~every 50min).
+      // Register device fingerprint for anti-abuse tracking. signIn() already
+      // ran this for the interactive login path (and set lastRegisteredUid);
+      // here it covers restored sessions / token refresh. On an explicit
+      // per-device cap rejection, block the session: sign out and surface a
+      // descriptive message. Skip if already registered for this uid.
       if (this.lastRegisteredUid !== user.uid) {
         this.lastRegisteredUid = user.uid
-        this.registerDevice()
+        this.registerDevice().then(({ rejected }) => {
+          if (rejected) {
+            this.lastRegisteredUid = null
+            useAuthStore.getState().setError(
+              'Este dispositivo já tem o número máximo de contas permitido. Inicie sessão com uma conta já associada a este computador.'
+            )
+            this.signOut().catch(() => {})
+          }
+        })
       }
     })
   }
@@ -365,11 +382,37 @@ class FirebaseAuthService {
 
     let firstSnapshot = true
     let previousBillingHash = ''
+    let previousBlocked = false
     const expectedGen = this.authGeneration
     this.unsubscribeUserDoc = onSnapshot(
       doc(getFirebaseDb(), COLLECTIONS.USERS, uid),
       (snap) => {
         if (expectedGen !== this.authGeneration) return // stale listener
+
+        // ── Suspensão de conta (tempo-real) ────────────────────────────
+        // Corre em TODOS os snapshots (incluindo o primeiro) para que um
+        // bloqueio/eliminação aplicado por um admin reflita em <1s.
+        if (snap.exists()) {
+          const d = snap.data()
+          // Soft-delete → expulsa a sessão por completo (a conta foi removida;
+          // o Auth também foi desativado no servidor, mas isto é imediato).
+          if (d.deleted === true) {
+            useToastStore.getState().addToast('error', 'A sua conta foi removida. Contacte o suporte.')
+            this.signOut().catch(() => {})
+            return
+          }
+          const isBlocked = d.blocked === true
+          // Mantém a flag no authStore (banner + gate do Welcome em App.tsx).
+          useAuthStore.getState().setBlocked(isBlocked, d.blockedReason)
+          // Na transição para bloqueado (e também num restart já-bloqueado:
+          // previousBlocked arranca a false), expulsa do Chat/Terminal.
+          if (isBlocked && !previousBlocked) {
+            useProjectStore.getState().expelToWelcome()
+            useToastStore.getState().addToast('warning', 'A sua conta foi suspensa por um administrador.')
+          }
+          previousBlocked = isBlocked
+        }
+
         if (firstSnapshot) {
           firstSnapshot = false
           if (snap.exists()) {
@@ -494,21 +537,27 @@ class FirebaseAuthService {
 
   /**
    * Register this device's hardware fingerprint with the backend for
-   * anti-abuse tracking (MAX_ACCOUNTS_PER_DEVICE). Fire-and-forget —
-   * failures are non-blocking.
+   * anti-abuse tracking (MAX_ACCOUNTS_PER_DEVICE).
+   *
+   * Returns `{ rejected: true }` ONLY when the backend explicitly reports the
+   * per-device account cap was exceeded (HTTP 403 reason=limit_exceeded) — the
+   * caller then blocks the session. Every other outcome (success, network
+   * error, timeout, malformed response) returns `{ rejected: false }`: device
+   * checks must FAIL OPEN so a backend hiccup can never lock a legitimate user
+   * out of the app.
    */
-  private async registerDevice(): Promise<void> {
+  private async registerDevice(): Promise<{ rejected: boolean }> {
     try {
       const { getDeviceFingerprint } = await import('./deviceFingerprint')
       const fingerprint = await getDeviceFingerprint()
-      if (!fingerprint) return
+      if (!fingerprint) return { rejected: false }
 
       const token = await this.getIdToken()
-      if (!token) return
+      if (!token) return { rejected: false }
 
       const workerUrl = resolveWorkerUrl()
       const appCheck = await getAppCheckHeader()
-      await tauriFetch(`${workerUrl}/v1/auth/register-device`, {
+      const res = await tauriFetch(`${workerUrl}/v1/auth/register-device`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -517,8 +566,15 @@ class FirebaseAuthService {
         },
         body: JSON.stringify({ fingerprint }),
       })
+
+      if (res.status === 403) {
+        const data = await res.json().catch(() => ({})) as { reason?: string }
+        if (data.reason === 'limit_exceeded') return { rejected: true }
+      }
+      return { rejected: false }
     } catch {
       // Non-blocking — device registration failure should not prevent login
+      return { rejected: false }
     }
   }
 
@@ -539,6 +595,21 @@ class FirebaseAuthService {
 
   async signIn(email: string, password: string): Promise<User> {
     const result = await signInWithEmailAndPassword(getFirebaseAuth(), email, password)
+
+    // Anti-abuse device gate (blocking). If this machine already holds the max
+    // number of accounts and this one is new to it, reject the login: sign out
+    // and throw a coded error the LoginScreen maps to a descriptive message.
+    // Fails open on any non-limit error (see registerDevice).
+    const { rejected } = await this.registerDevice()
+    if (rejected) {
+      await signOut(getFirebaseAuth()).catch(() => {})
+      const err = new Error('device-limit-exceeded') as Error & { code?: string }
+      err.code = 'device/limit-exceeded'
+      throw err
+    }
+    // Registered (or failed open) — let the onAuthStateChanged listener skip
+    // its own registerDevice call for this uid.
+    this.lastRegisteredUid = result.user.uid
 
     // Update lastLogin (best-effort, aligned with web project)
     this.syncProfile(result.user.uid, {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test, { beforeEach } from 'node:test'
-import { clearAccessTokenCache, resolveFirestoreAuthHeaders } from '../src/googleAuth'
+import { clearAccessTokenCache, resolveFirestoreAuthHeaders, mintAccessToken, OAUTH_SCOPE_CLOUD_PLATFORM } from '../src/googleAuth'
 import type { Env } from '../src/types'
 
 /**
@@ -111,4 +111,74 @@ test('without SA secrets, falls back to the user ID token', async () => {
   }
   const headers = await resolveFirestoreAuthHeaders({}, 'user-id-token', fetcher)
   assert.equal(headers.authorization, 'Bearer user-id-token')
+})
+
+// ── Retry: o mint não pode morrer num único stall transitório do OAuth ──
+
+test('mint retries a transient timeout, then succeeds', async () => {
+  const { pem } = await generateSaKeyPem()
+  let calls = 0
+  const fetcher = {
+    async fetch() {
+      calls += 1
+      if (calls === 1) {
+        const e = new Error('aborted due to timeout')
+        e.name = 'TimeoutError'
+        throw e
+      }
+      return Response.json({ access_token: 'tok-after-retry', expires_in: 3600 })
+    },
+  }
+  const token = await mintAccessToken('sa@test.iam', pem, fetcher, OAUTH_SCOPE_CLOUD_PLATFORM)
+  assert.equal(token, 'tok-after-retry')
+  assert.equal(calls, 2)
+})
+
+test('mint retries a 5xx, then succeeds', async () => {
+  const { pem } = await generateSaKeyPem()
+  let calls = 0
+  const fetcher = {
+    async fetch() {
+      calls += 1
+      if (calls === 1) return new Response('upstream boom', { status: 503 })
+      return Response.json({ access_token: 'tok-5xx', expires_in: 3600 })
+    },
+  }
+  const token = await mintAccessToken('sa@test.iam', pem, fetcher, OAUTH_SCOPE_CLOUD_PLATFORM)
+  assert.equal(token, 'tok-5xx')
+  assert.equal(calls, 2)
+})
+
+test('mint does NOT retry a 4xx (permanent) and fails fast', async () => {
+  const { pem } = await generateSaKeyPem()
+  let calls = 0
+  const fetcher = {
+    async fetch() {
+      calls += 1
+      return new Response('invalid_grant', { status: 400 })
+    },
+  }
+  await assert.rejects(
+    () => mintAccessToken('sa@test.iam', pem, fetcher, OAUTH_SCOPE_CLOUD_PLATFORM),
+    /OAuth2 token exchange failed \(400\)/,
+  )
+  assert.equal(calls, 1)
+})
+
+test('mint gives up after exhausting attempts on a persistent timeout', async () => {
+  const { pem } = await generateSaKeyPem()
+  let calls = 0
+  const fetcher = {
+    async fetch(): Promise<Response> {
+      calls += 1
+      const e = new Error('aborted due to timeout')
+      e.name = 'TimeoutError'
+      throw e
+    },
+  }
+  await assert.rejects(
+    () => mintAccessToken('sa@test.iam', pem, fetcher, OAUTH_SCOPE_CLOUD_PLATFORM),
+    /timeout/,
+  )
+  assert.equal(calls, 3) // OAUTH_MINT_MAX_ATTEMPTS
 })

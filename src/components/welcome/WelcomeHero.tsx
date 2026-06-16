@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import {
   Box,
   Flex,
@@ -23,8 +23,16 @@ import {
 } from 'react-icons/lu'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import { GoalCelebration } from '../celebration/GoalCelebration'
+import { WorldCupBadge } from '../celebration/WorldCupBadge'
+import { FOOTBALL_MODE_ENABLED } from '@/utils/worldCup'
+import { triggerGoalCelebration } from '@/stores/celebrationStore'
 
 const MotionBox = motion.create(Box)
+
+// Module-scoped so the kick-off burst plays at most once per app launch — not
+// every time the user bounces back to the Welcome hero from a project/settings.
+let welcomeKickoffPlayed = false
 
 interface WelcomeHeroProps {
   onNewProject: () => void
@@ -61,6 +69,16 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
   const isMac = navigator.platform.toLowerCase().includes('mac')
   const mod = isMac ? '⌘' : 'Ctrl'
 
+  // Kick-off burst — a one-shot goal celebration when the hero first appears
+  // (the welcome screen has no agent run to "score" against). Guarded to once
+  // per launch and to a short delay so the hero has painted first.
+  useEffect(() => {
+    if (!FOOTBALL_MODE_ENABLED || welcomeKickoffPlayed) return
+    welcomeKickoffPlayed = true
+    const tmo = setTimeout(() => triggerGoalCelebration('welcome_kickoff'), 700)
+    return () => clearTimeout(tmo)
+  }, [])
+
   return (
     <Flex
       flex="1"
@@ -68,9 +86,12 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
       align="center"
       justify="center"
       overflowY="auto"
+      position="relative"
       px={8}
       py={6}
     >
+      {/* Goal celebration overlay (World Cup 2026) — absolute, pointer-events none. */}
+      <GoalCelebration />
       <MotionBox
         maxW="820px"
         w="full"
@@ -80,6 +101,10 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
       >
         {/* Header */}
         <MotionBox variants={fadeUp}>
+          {/* Seasonal eyebrow badge */}
+          <Box mb={3}>
+            <WorldCupBadge />
+          </Box>
           <Heading
             fontSize="28px"
             fontWeight="700"

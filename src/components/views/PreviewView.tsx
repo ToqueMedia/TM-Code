@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Flex, Box, Text, IconButton, HStack, Button } from '@chakra-ui/react'
 import { IS_MAC } from '@/utils/platform'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiZap, FiSend, FiUpload, FiCamera, FiDatabase } from 'react-icons/fi'
+import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiZap, FiSend, FiUpload, FiCamera, FiDatabase, FiMaximize2, FiMinimize2 } from 'react-icons/fi'
 import { useChatStore, generateId } from '../../stores/chatStore'
 import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
@@ -62,6 +62,7 @@ function PreviewView() {
   const devServerLogs = useLayoutStore(s => s.devServerLogs)
   const isConsoleVisible = useLayoutStore(s => s.isConsoleVisible)
   const isHttpDrawerOpen = useLayoutStore(s => s.isHttpDrawerOpen)
+  const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const previewServerTimedOut = useLayoutStore(s => s.previewServerTimedOut)
   const isPreviewServerLoading = useLayoutStore(s => s.isPreviewServerLoading)
   // PreviewView is sticky-mounted by MainLayout, so it keeps rendering even
@@ -582,6 +583,23 @@ function PreviewView() {
 
           {/* Right actions */}
           <HStack gap={0}>
+            {/* Fullscreen preview — collapse the chat sidebar so the preview
+                fills the whole pane; click again to bring the chat back.
+                Placed before the HTTP Client toggle so the layout controls
+                read left-to-right. */}
+            <IconButton
+              aria-label={isPreviewFullscreen ? t('preview.exitFullscreen') : t('preview.enterFullscreen')}
+              title={isPreviewFullscreen ? t('preview.exitFullscreen') : t('preview.enterFullscreen')}
+              size="xs"
+              variant="ghost"
+              color={isPreviewFullscreen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+              borderRadius="6px"
+              onClick={() => useLayoutStore.getState().togglePreviewFullscreen()}
+            >
+              {isPreviewFullscreen ? <FiMinimize2 size={13} /> : <FiMaximize2 size={13} />}
+            </IconButton>
+
             {/* HTTP Client drawer toggle — only visible for fullstack projects */}
             {isFullstack && (
               <IconButton

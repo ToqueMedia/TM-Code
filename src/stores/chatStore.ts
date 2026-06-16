@@ -220,7 +220,7 @@ interface ChatActions {
    *  for exact round-trip in subsequent turns. Called by agentRunner when a
    *  message_stop event carries providerState from query.ts. */
   setProviderState: (providerState: ProviderState) => void
-  addTokenUsage: (input: number, output: number) => void
+  addTokenUsage: (input: number, output: number, isForeground?: boolean) => void
   /** Reset the per-request token counter. Called at the start of each new
    *  agent request (runAgentInternal entry) so the indicator scopes to the
    *  current request, not the session-cumulative total. */
@@ -892,12 +892,25 @@ function userMessageToContentParts(msg: ChatMessage): ContentPart[] | null {
  * message but the UI entry was lost; treat it like an interrupted call.
  */
 function buildToolResultBlock(tc: ToolCallDisplay | undefined, toolCallId: string): ContentBlockAPI {
-  // Orphan tool call: agent was cancelled mid-execution
+  // Orphan tool call: the call ended without a result. The cause is NOT
+  // necessarily the user — it can be a user cancel, a network/stream error
+  // mid-tool, a reload/crash, or a lost UI entry (`!tc`). The result is gone,
+  // so we synthesize one (an OpenAI tool_call with no tool_result breaks the
+  // API). The text is intentionally ACTIONABLE: after an interruption the model
+  // used to re-explore the whole project from scratch (re-list dirs, re-read
+  // docs). Telling it the effect is unknown-but-local AND that its prior
+  // context is intact steers it to confirm just the affected target and resume,
+  // instead of restarting. Source-agnostic + generic wording (not
+  // file-specific) — the interrupted call's own args sit in the assistant
+  // message immediately above this result.
   if (!tc || tc.status === 'running' || tc.result === undefined) {
     return {
       type: 'tool_result',
       toolCallId,
-      content: 'Tool call was interrupted.',
+      content:
+        'Tool call was interrupted before it finished — its effect is unknown and may be partial. ' +
+        'Verify only what THIS call touched (e.g. re-read that one file), then resume the task. ' +
+        'Your earlier reads, edits and plan are still in context — do not re-explore the project from scratch.',
     }
   }
 
@@ -2800,7 +2813,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (sessionId) {
           const session = sessions.get(sessionId)
           if (session) {
-            sessions.set(sessionId, { ...session, lastPromptTokens: 0 })
+            sessions.set(sessionId, { ...session, lastPromptTokens: 0, lastResponseTokens: 0 })
           }
         }
         return {
@@ -2883,7 +2896,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
     },
 
-    addTokenUsage: (input: number, output: number) => {
+    addTokenUsage: (input: number, output: number, isForeground: boolean = true) => {
       // Three counters, three semantics. Get this right or the UI lies in
       // ways that take a user-reported "904k tokens sent to a 256k window"
       // to root-cause.
@@ -2929,32 +2942,39 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             ? Math.max(state.currentPromptTokens, input)
             : state.currentPromptTokens
         const nextResponse = output
-        // Persist last-known token counts onto the active session so the
-        // ctx pill restores correctly when the user reopens this session
-        // in a future app run. Without this, currentPromptTokens is global
-        // state and a freshly-loaded session shows 0% even with 50 turns
-        // of accumulated history.
+        // The ctx pill reads `lastPromptTokens`/`lastResponseTokens` off the
+        // active session DIRECTLY (no global-counter fallback anymore), so these
+        // must hold a STABLE, foreground-only snapshot of the real context size:
+        //   - SESSION PEAK, via Math.max — NOT this turn's raw wire prompt.
+        //     addTokenUsage fires once per INTERNAL agent-loop turn, and a
+        //     turn's prompt_tokens is non-monotonic: a landing tool result grows
+        //     it, then the next turn's micro-compaction / tool-result-budget snip
+        //     shrinks it again (see query.ts per-turn pipeline). Writing the raw
+        //     per-turn value made the pill sawtooth every single turn
+        //     ("34 % → 7 % → 33 %" / "sobe e desce sem razão aparente"), which
+        //     reads to the user as the context silently overflowing/degrading.
+        //     The peak rises in steps and only ever decreases at a REAL boundary
+        //     (the reset below) — monotonic growth, not noise. A peak that's
+        //     briefly stale across a micro-compaction is a far smaller lie than
+        //     per-turn oscillation.
+        //   - written ONLY by foreground runs. Invisible background / auto-wake
+        //     runs pass isForeground=false and must NOT move the pill (sub-agents
+        //     are already isolated to subAgentStore) — otherwise a small
+        //     background prompt would drag the peak around between foreground turns.
+        //   - input>0 guard: partial-usage BYOK adapters that omit prompt_tokens
+        //     must not clobber a known-good value with 0.
+        // Reset to 0 ONLY by the compaction path (resetTokenCounters) — the one
+        // place a genuine context shrink is reflected.
         let nextSessions = state.sessions
-        if (state.activeSessionId) {
+        if (isForeground && state.activeSessionId) {
           const active = state.sessions.get(state.activeSessionId)
           if (active) {
             nextSessions = new Map(state.sessions)
-            // Session-level peak: take the MAX of the new per-turn prompt
-            // and whatever was already persisted. This is the value the
-            // ctx pill falls back to when `currentPromptTokens` is 0
-            // between turns. Without the MAX guard, a new turn whose
-            // wire-input is smaller than the previous (microcompaction
-            // dropped old tool results, or a sub-agent ran with a
-            // smaller prompt) would overwrite the session peak — which
-            // produced the visible "34 % → 7 % → 33 %" regression a
-            // user reported during a #auth-* flow with a sub-agent
-            // verifier in the middle. The peak is reset explicitly
-            // ONLY by the compaction marker handler (~line 1188 above).
-            const previousPeak = active.lastPromptTokens ?? 0
-            const nextPeak = Math.max(previousPeak, nextPrompt)
             nextSessions.set(state.activeSessionId, {
               ...active,
-              lastPromptTokens: nextPeak,
+              ...(input > 0
+                ? { lastPromptTokens: Math.max(active.lastPromptTokens ?? 0, input) }
+                : {}),
               lastResponseTokens: nextResponse,
               updatedAt: Date.now(),
             })

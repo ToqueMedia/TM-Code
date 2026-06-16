@@ -134,6 +134,12 @@ export interface UserBudgetState {
    *  Sem isto, um gift com override acima do budget do plano levava 402
    *  indevido em enforce; abaixo, sub-enforçava. */
   tokenBudgetOverride?: number
+  /** Conta suspensa por um admin (`users/{uid}.blocked`, campo de topo). O
+   *  gate rejeita o pedido com 403 antes do upstream. */
+  blocked?: boolean
+  /** Soft-delete por um admin (`users/{uid}.deleted`, campo de topo). Mesmo
+   *  efeito do `blocked` no gate. */
+  deleted?: boolean
 }
 
 const STATE_CACHE_MS = 60_000
@@ -187,6 +193,8 @@ export async function getUserBudgetState(
 
   const mask = [
     'userPlan',
+    'blocked',
+    'deleted',
     'tokenBudget.tokensConsumed',
     'tokenBudget.extraUsageBalance',
     'tokenBudget.cycleEnd',
@@ -206,6 +214,8 @@ export async function getUserBudgetState(
       const doc = await response.json() as {
         fields?: {
           userPlan?: { stringValue?: string }
+          blocked?: { booleanValue?: boolean }
+          deleted?: { booleanValue?: boolean }
           tokenBudget?: { mapValue?: { fields?: Record<string, unknown> } }
         }
       }
@@ -219,6 +229,8 @@ export async function getUserBudgetState(
           extraUsageBalance: Math.max(0, intField(budget['extraUsageBalance'])),
           cycleEnd: (budget['cycleEnd'] as { stringValue?: string } | undefined)?.stringValue ?? '',
           tokenBudgetOverride: overrideRaw > 0 ? overrideRaw : undefined,
+          blocked: doc.fields?.blocked?.booleanValue === true,
+          deleted: doc.fields?.deleted?.booleanValue === true,
         }
       }
     } else {
@@ -395,6 +407,14 @@ export async function commitTokenConsumption(args: CommitArgs): Promise<boolean>
   // passar de 1.0 monotonicamente — mesma semântica do control-plane.
   const transforms: Array<Record<string, unknown>> = [{
     fieldPath: 'tokenBudget.tokensConsumed',
+    increment: { integerValue: String(rawTokens) },
+  }, {
+    // Contador vitalício ("todos os tempos") — campo de topo, DELIBERADAMENTE
+    // fora de tokenBudget para nenhum reset de ciclo / mudança de plano
+    // (control-plane firestore.ts) o zerar. Cresce em cada commit, nunca
+    // decrementa. O transform increment auto-cria o campo (a partir de
+    // rawTokens) nos docs que não o tenham — sem migração para users antigos.
+    fieldPath: 'lifetimeTokensConsumed',
     increment: { integerValue: String(rawTokens) },
   }]
   if (asOverage) {

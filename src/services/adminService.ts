@@ -72,6 +72,13 @@ export interface ActiveAIConfig {
   authScheme: 'Bearer' | 'none'
   apiKeyEnv: string
   enabled: boolean
+  /** Janela de contexto real (tokens) escolhida pelo admin no Select. Emitida
+   *  pelo data-plane em X-Model-Context-Window; alimenta a pressão de contexto
+   *  e o auto-compact na IDE. Opcional → fallback de perfil. */
+  contextWindow?: number
+  /** Extras de request do provider (ex.: DashScope enable_search, Gemini
+   *  thinking_config) merged no corpo pelo data-plane. */
+  extraBody?: Record<string, unknown>
   updatedAt?: string
   updatedBy?: string
 }
@@ -99,5 +106,72 @@ export async function fetchAdminVerify(): Promise<VerifyResponse> {
     cache: {
       activeConfigKey: data.cache?.activeConfigKey ?? 'active',
     },
+  }
+}
+
+// ─── Sidecars (vision / web_search / utility / fim) ─────────────────────────
+// The data-plane routes X-Request-Type → KV `sidecar:*`. The admin assigns a
+// catalog model to each slot; a blind active model then gets images described
+// (vision) or web results (web_search) by the sidecar instead of degrading.
+
+export type SidecarType = 'vision' | 'web_search' | 'utility' | 'fim'
+
+export interface SidecarModel {
+  id: string
+  name: string
+  providerLabel: string
+  roles: SidecarType[]
+  activeConfig: ActiveAIConfigInput
+}
+
+export interface SidecarsResponse {
+  catalog: SidecarModel[]
+  /** Keyed by full KV key, e.g. `sidecar:vision`. null when not published. */
+  current: Record<string, ActiveAIConfig | null>
+}
+
+export async function fetchSidecars(): Promise<SidecarsResponse> {
+  const res = await tauriFetch(`${resolveWorkerUrl()}/v1/admin/ai/sidecars`, {
+    headers: await authHeaders(),
+  })
+  if (!res.ok) {
+    if (res.status === 403) throw new Error('FORBIDDEN')
+    const detail = await res.text().catch(() => '')
+    throw new Error(`Failed to load sidecars (${res.status}): ${detail.slice(0, 200)}`)
+  }
+  const data = (await res.json()) as Partial<SidecarsResponse>
+  return { catalog: data.catalog ?? [], current: data.current ?? {} }
+}
+
+export async function setSidecar(type: SidecarType, modelId: string): Promise<ActiveAIConfig> {
+  const res = await tauriFetch(`${resolveWorkerUrl()}/v1/admin/ai/sidecars`, {
+    method: 'PUT',
+    headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, modelId }),
+  })
+  if (!res.ok) {
+    if (res.status === 403) throw new Error('FORBIDDEN')
+    const raw = await res.text().catch(() => '')
+    let human = raw
+    try {
+      const parsed = JSON.parse(raw) as { error?: string }
+      human = parsed.error || raw
+    } catch { /* keep raw */ }
+    throw new Error(`Failed to set sidecar (${res.status}): ${human.slice(0, 300)}`)
+  }
+  const data = (await res.json()) as { config?: ActiveAIConfig }
+  if (!data.config) throw new Error('Failed to set sidecar: missing config in response')
+  return data.config
+}
+
+export async function disableSidecar(type: SidecarType): Promise<void> {
+  const res = await tauriFetch(`${resolveWorkerUrl()}/v1/admin/ai/sidecars`, {
+    method: 'PUT',
+    headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, disable: true }),
+  })
+  if (!res.ok && res.status !== 404) {
+    if (res.status === 403) throw new Error('FORBIDDEN')
+    throw new Error(`Failed to disable sidecar (${res.status})`)
   }
 }

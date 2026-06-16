@@ -15,16 +15,15 @@ function msgOfTokens(tokens: number) {
 }
 
 describe('shouldAutoCompact — real window limits', () => {
-  it('fires well before overflow on a small (200K) window that the legacy 1M path would miss', () => {
-    // 180K tokens of history (real threshold for a 200K window ≈ 170.6K).
-    // Legacy path (1M window, ~967K threshold) would NOT compact. With a real
-    // 200K window it must.
+  it('fires well before overflow on a small (200K) window that a 1M window would tolerate', () => {
+    // 180K tokens of history (real threshold for a 200K window ≈ 167K).
     const messages = [msgOfTokens(180_000)]
     const limits: AutoCompactLimits = { contextWindow: 200_000, maxOutputTokens: 16_384 }
 
     expect(shouldAutoCompact(messages, 0, limits)).toBe(true)
-    // Sanity: the legacy (no-limits) call would NOT fire at 180K.
-    expect(shouldAutoCompact(messages, 0)).toBe(false)
+    // Sanity: a real 1M window has ample room at 180K → no compaction. (The
+    // window genuinely drives the decision; it is no longer a fixed 1M.)
+    expect(shouldAutoCompact(messages, 0, { contextWindow: 1_000_000, maxOutputTokens: 65_536 })).toBe(false)
   })
 
   it('does not fire when occupancy is comfortably under the real threshold', () => {
@@ -64,11 +63,14 @@ describe('shouldAutoCompact — real window limits', () => {
     expect(shouldAutoCompact(messages, 20_000, limits)).toBe(false)
   })
 
-  it('falls back to the legacy 1M estimate path when the window is unknown (null)', () => {
-    const messages = [msgOfTokens(170_000)]
+  it('uses the conservative fallback window when unknown (null) — no longer assumes 1M', () => {
+    // Was the legacy-1M bug: a null window assumed ~967K and never compacted.
+    // Now an unknown window assumes the conservative 200K fallback, so 170K
+    // (above the ~167K threshold for 200K) DOES compact instead of overflowing.
     const limits: AutoCompactLimits = { contextWindow: null, maxOutputTokens: null }
-    // 170K is far below the legacy ~967K threshold → no compaction.
-    expect(shouldAutoCompact(messages, 0, limits)).toBe(false)
+    expect(shouldAutoCompact([msgOfTokens(170_000)], 0, limits)).toBe(true)
+    // A comfortably small occupancy still does not compact under the fallback.
+    expect(shouldAutoCompact([msgOfTokens(50_000)], 0, limits)).toBe(false)
   })
 
   it('threshold respects the real window: a 1M model tolerates far more than a 200K one', () => {

@@ -625,21 +625,13 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
 
       {/* Content area */}
       <Box pl="34px">
-        {/* Minimal activity dots — only when streaming with no visible content at all */}
-        {isStreaming && !isUser && !message.content && (!message.toolCalls || message.toolCalls.length === 0) && (
-          <Flex gap="4px" align="center" py={2}>
-            {[0, 1, 2].map(i => (
-              <Box
-                key={i}
-                w="5px"
-                h="5px"
-                borderRadius="full"
-                bg={tokens.colors.accent.primary}
-                animation={`pulseDot 1.4s ease-in-out ${i * 0.2}s infinite`}
-              />
-            ))}
-          </Flex>
-        )}
+        {/* No bare "thinking dots" placeholder here on purpose. Whenever this
+            branch would fire (streaming, no content/tools yet) the sticky
+            AgentActivityIndicator below the transcript is ALREADY showing the
+            live state — "A raciocinar… · 9s" — so a second dots indicator
+            inside the empty bubble was redundant and read as amateurish (two
+            stacked loaders). The activity indicator is the single source of
+            "what the agent is doing right now". */}
 
         {/* Legacy reasoning fallback — older persisted messages have a flat
             `reasoningContent` string but no reasoning entry inside contentBlocks.
