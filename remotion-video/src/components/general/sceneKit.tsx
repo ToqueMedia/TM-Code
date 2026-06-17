@@ -49,6 +49,8 @@ export interface CaptionProps {
   gradient?: boolean
   /** Headline font size (default 46). */
   size?: number
+  /** Override the top/bottom edge inset in px (mobile safe areas). */
+  inset?: number
 }
 
 /**
@@ -64,6 +66,7 @@ export const Caption: React.FC<CaptionProps> = ({
   sub,
   gradient = false,
   size = 46,
+  inset,
 }) => {
   const frame = useCurrentFrame()
 
@@ -78,7 +81,7 @@ export const Caption: React.FC<CaptionProps> = ({
 
   const ty = rise + drop
   const vertical: React.CSSProperties =
-    position === 'top' ? { top: 96 } : position === 'center' ? { top: '50%' } : { bottom: 104 }
+    position === 'top' ? { top: inset ?? 96 } : position === 'center' ? { top: '50%' } : { bottom: inset ?? 104 }
   const transform =
     position === 'center' ? `translateY(calc(-50% + ${ty}px))` : `translateY(${ty}px)`
 

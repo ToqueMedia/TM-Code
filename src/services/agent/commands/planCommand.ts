@@ -1201,7 +1201,7 @@ function getModelCounterweights(modelId?: string): string {
   // Each model fine-tune drifts in some direction. Add gated paragraphs
   // here when a specific model regresses on a known-validated behaviour.
   // Currently empty — no model-specific architect-prompt regressions
-  // observed against the GLM-5.2 baseline (the IDE's default model).
+  // observed against the GLM baseline (the IDE's default model).
   //
   // When adding: name the model, the failure mode, the date, and the
   // hypothesis. Remove or un-gate after external validation. Example

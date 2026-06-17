@@ -1,78 +1,40 @@
-// The agent conversation + tool calls shown across the general promo. Single
-// source of truth so every scene tells the same "saas-demo" story.
+// Assistant messages, tool calls (build + design), plan items and small overlay
+// text for the focused Chat-Mode story.
 
 import type { ToolCallSpec } from './agentScript'
 
 export const GENERAL_MESSAGES = {
-  plan: 'Vou planear a estrutura e configurar a autenticação com Google.',
-  found: 'Encontrei o ponto de entrada. Vou criar a Hero, o dashboard e o fluxo de login.',
-  building: 'A criar os componentes e a ligar o botão de waitlist.',
-  done: 'Pronto. A tua landing já corre no preview e os testes passaram.',
+  plan: 'Vou criar a estrutura da landing page, adicionar autenticação por email/password, preparar o dashboard e ligar o formulário de espera.',
+  diffIntro: 'Aqui está a alteração ao `Hero.tsx` — revê e aprova:',
+  applied: 'Alterações aplicadas. Estou a actualizar o preview.',
+  designIntro: 'Vou polir o layout, melhorar espaçamento, contraste, CTA e secção de benefícios.',
+  designDone: 'UI/UX polida. A nova versão já está no preview.',
 } as const
 
-// Tool verbs stay in English (they are part of the real product UI).
+// Tool verbs stay English (real UI); human labels (PT) are attached per chat entry.
 export const GENERAL_TOOL_CALLS = {
-  readApp: { verbRunning: 'Reading', verbDone: 'Read', subtitle: 'src/App.tsx', summary: '64 lines' },
-  searchAuth: { verbRunning: 'Searching', verbDone: 'Searched', subtitle: 'auth', summary: '5 results' },
-  editHero: {
-    verbRunning: 'Editing',
-    verbDone: 'Edited',
-    subtitle: 'src/components/Hero.tsx',
-    summary: 'Added 16 lines',
-  },
-  editAuth: {
-    verbRunning: 'Editing',
-    verbDone: 'Edited',
-    subtitle: 'src/lib/auth.ts',
-    summary: 'Added 9 lines',
-  },
-  editLanding: {
-    verbRunning: 'Editing',
-    verbDone: 'Edited',
-    subtitle: 'src/pages/Landing.tsx',
-    summary: 'Added 22 lines',
-  },
-  runTests: { verbRunning: 'Running', verbDone: 'Ran', subtitle: 'npm test', summary: '✓ 4 passed' },
-  verifyPreview: {
-    verbRunning: 'Verifying',
-    verbDone: 'Verified',
-    subtitle: 'preview',
-    summary: '✓ preview ok',
-  },
+  createLanding: { verbRunning: 'Creating', verbDone: 'Created', subtitle: 'src/pages/Landing.tsx', summary: '' },
+  editHero: { verbRunning: 'Editing', verbDone: 'Edited', subtitle: 'src/components/Hero.tsx', summary: '' },
+  editAuth: { verbRunning: 'Editing', verbDone: 'Edited', subtitle: 'src/lib/auth.ts', summary: '' },
+  editWaitlist: { verbRunning: 'Editing', verbDone: 'Edited', subtitle: 'src/components/WaitlistForm.tsx', summary: '' },
+  editHeroDesign: { verbRunning: 'Editing', verbDone: 'Edited', subtitle: 'src/components/Hero.tsx', summary: '' },
+  editBenefits: { verbRunning: 'Editing', verbDone: 'Edited', subtitle: 'src/components/Benefits.tsx', summary: '' },
+  editTheme: { verbRunning: 'Editing', verbDone: 'Edited', subtitle: 'src/styles/theme.css', summary: '' },
+  editDashboard: { verbRunning: 'Editing', verbDone: 'Edited', subtitle: 'src/components/DashboardPreview.tsx', summary: '' },
 } as const satisfies Record<string, ToolCallSpec>
 
-export const REASONING = {
-  label: 'A pensar',
-  duration: '2.3s',
-  lines: [
-    'O utilizador quer uma landing com login Google, dashboard e waitlist.',
-    'Plano: criar Hero + DashboardPreview, configurar auth.ts e ligar a waitlist.',
-    'Depois corro os testes e abro o preview ao vivo.',
-  ],
-} as const
+/** PlanApprovalCard checklist. */
+export const PLAN_ITEMS = [
+  'Landing page',
+  'Autenticação email/password',
+  'Dashboard inicial',
+  'Formulário de espera',
+  'Preview e deploy',
+] as const
 
-export const GENERAL_TEST = {
-  command: 'npm test',
-  checks: [
-    'renders landing page',
-    'opens Google login flow',
-    'submits waitlist form',
-    'dashboard preview is visible',
-  ],
-  summary: '4 passed (3.2s)',
-} as const
-
-export const COMMIT_MESSAGE = 'feat: add SaaS landing page and auth flow'
-
-// Short overlay captions (PT). One message per scene.
-export const CAPTIONS = {
-  modes: 'Guiado ou liberdade total. Tu escolhes.',
-  prompt: 'Descreve o que queres.',
-  work: 'Planeia. Lê. Escreve.',
-  diff: 'Aprovas cada mudança.',
-  preview: 'Vê a tua app a correr. Na mesma janela.',
-  deploy: 'Publica num clique.',
-  powerTerminal: 'Terminal agêntico.',
-  powerGit: 'Git com IA.',
-  powerPerm: 'Tu autorizas tudo.',
+/** Small overlay text (badges / browser caption). */
+export const OVERLAY_TEXT = {
+  previewBadge: 'Preview actualizado em tempo real',
+  designBadge: 'UI/UX polida com #design',
+  online: 'O teu projecto online.',
 } as const

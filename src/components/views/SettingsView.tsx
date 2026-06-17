@@ -2241,7 +2241,7 @@ function trimTrailingSlashes(value: string): string {
 // ─── Sidecars panel (admin) ──────────────────────────────────────────────────
 
 const SIDECAR_SLOTS: Array<{ type: 'vision' | 'web_search'; label: string; desc: string }> = [
-  { type: 'vision', label: 'Visão (imagens)', desc: 'Descreve imagens para modelos sem visão (MiMo V2.5 Pro, GLM-5.2)' },
+  { type: 'vision', label: 'Visão (imagens)', desc: 'Descreve imagens para modelos sem visão (MiMo V2.5 Pro, GLM)' },
   { type: 'web_search', label: 'Web Search', desc: 'Pesquisa web para modelos sem busca nativa' },
 ]
 

@@ -27,10 +27,12 @@ There is no lint script; `tsc` (via `yarn build`) is the correctness gate. Relea
 
 ### Two backends, two transports (critical to understand)
 
+**Canonical system map: see [`ARCHITECTURE.md`](./ARCHITECTURE.md) — the authoritative description of the 4 components (IDE, Data-Plane, Control-Plane, Web) and who owns what. Read it before reasoning about models, billing, or streaming.**
+
 The app talks to **two separate Cloudflare Workers** over **two different transports**:
 
-1. **Control-plane** — `https://api-agents.toquemedia.net` (separate repo `~/dev/deskotp/toquemedia-studio-api`). Auth, App Check minting (`/v1/appcheck-token`), billing (`/v1/me`), deploys, per-project DB/files, admin. Called via **`tauriFetch`** (`src/services/tauriFetch.ts`) which proxies through the Rust `http_client_request` command (reqwest) — CORS-free, non-streaming only. Resolved by `resolveWorkerUrl()`.
-2. **AI data-plane** — `https://ai-pass-through-worker.geral-871.workers.dev` (source in `workers/ai-pass-through/`). Single route: `POST /v1/chat/completions`; everything else returns `tm_not_found` 404. Called via the **OpenAI SDK with native browser `fetch`** (streaming SSE) from the webview origin `http://localhost:14300` — subject to CORS. Resolved by `resolveAIWorkerUrl()`. The worker validates the Firebase JWT, injects the active provider key/model from KV, and proxies upstream.
+1. **Control-plane** — `https://api-agents.toquemedia.net` (separate repo `~/dev/deskotp/toquemedia-studio-api`). Auth, App Check minting (`/v1/appcheck-token`), deploys, per-project DB/files, the **admin model catalog** (`/v1/admin/models`, `/v1/admin/ai/active-config`, sidecars, verify), BYOK validation, and **billing read + cycle lifecycle**: `/v1/me` (via `summarizeBilling`) serves state for display **and** the same read path (`getUserData`) lazily writes a fresh `tokenBudget` on cycle expiry (reset + carry-over + anchoring, per-field `updateMask`). It does **NOT** do per-request token *metering*, streaming, or runtime model routing — those are the data-plane's. Called via **`tauriFetch`** (`src/services/tauriFetch.ts`) which proxies through the Rust `http_client_request` command (reqwest) — CORS-free, non-streaming only. Resolved by `resolveWorkerUrl()`.
+2. **AI data-plane** — `https://ai-pass-through-worker.geral-871.workers.dev` (source in `workers/ai-pass-through/`). Single route: `POST /v1/chat/completions`; everything else returns `tm_not_found` 404. Owns **runtime model routing** (model + provider + key from the KV `active` config), **streaming** (SSE), and **billing accounting** (metering/commit/enforcement — single source of truth, `billing.ts`). Provider-agnostic & **config-driven: adding/removing a model is a KV-data edit, not a code change**; the worker hardcodes no model names. Emits `X-TM-Model` / `X-Model-Context-Window`. Called via the **OpenAI SDK with native browser `fetch`** (streaming SSE) from origin `http://localhost:14300` — subject to CORS. Resolved by `resolveAIWorkerUrl()`.
 
 Consequence: `curl` tests prove nothing about the browser path, and login/billing can work while AI silently fails (or vice-versa).
 
@@ -40,7 +42,7 @@ Consequence: `curl` tests prove nothing about the browser path, and login/billin
 
 ### Auth flow
 
-`src/services/auth/firebaseAuth.ts` is the hub (singleton `FirebaseAuthService`). Firebase Auth has **App Check enforcement ON**: before sign-in the app must mint an App Check token via control-plane `POST /v1/appcheck-token` (auth-less, IP rate-limited) through a `CustomProvider`. Firebase project: `maiplayer-ac56d`. The Firebase ID token is then used as Bearer for both workers (it is the OpenAI SDK `apiKey`). Billing state comes from `/v1/me` (event-driven: launch, window focus, post-purchase — never polled) into `src/stores/billingStore.ts`; token consumption is persisted to Firestore after each agent run.
+`src/services/auth/firebaseAuth.ts` is the hub (singleton `FirebaseAuthService`). Firebase Auth has **App Check enforcement ON**: before sign-in the app must mint an App Check token via control-plane `POST /v1/appcheck-token` (auth-less, IP rate-limited) through a `CustomProvider`. Firebase project: `maiplayer-ac56d`. The Firebase ID token is then used as Bearer for both workers (it is the OpenAI SDK `apiKey`). Billing state is *read* from control-plane `/v1/me` (event-driven: launch, window focus, post-purchase — never polled) into `src/stores/billingStore.ts` for display. Billing is **split**: per-request token *metering* is owned exclusively by the **data-plane** worker (never reintroduce client-side counting); the **cycle lifecycle** (reset/carry-over/anchoring) is owned by the control-plane and written lazily on the `/v1/me` read path.
 
 ### Agent loop
 

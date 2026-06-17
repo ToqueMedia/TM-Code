@@ -1,57 +1,38 @@
-// Mock project + brand copy for the general promo. Deliberately distinct from
-// the /te2e video's PROJECT (katondo-queue) so the two videos never bleed.
+// Mock project + brand copy for the focused Chat-Mode story.
 
 export const SAAS_PROJECT = {
-  name: 'saas-demo',
-  path: '/Users/celio/projects/saas-demo',
+  name: 'startup-demo',
+  path: '/Users/celio/projects/startup-demo',
   branch: 'main',
   lastCommit: 'e2a91f0 chore: init vite + react + ts',
 } as const
 
+/** Message 1 — the /plan request (chip-highlighted). */
 export const GENERAL_PROMPT_TEXT =
-  'Cria uma landing page para o meu SaaS com login Google, dashboard e botão de waitlist.'
+  '/plan Cria uma landing page para a minha startup com login por email/password, dashboard e formulário de espera. #auth-email-password'
 
-/** Discreet syntax hints shown under the prompt bar (slash / mention / opt-in). */
-export const PROMPT_HINTS = ['/plan', '@ ficheiros', '#auth-google'] as const
+/** Message 7 — the #design iteration (chip-highlighted). */
+export const DESIGN_PROMPT_TEXT = 'Melhora a UI/UX e deixa a página mais premium. #design'
 
-export const PROJECT_FILES = [
-  'src/App.tsx',
-  'src/pages/Landing.tsx',
-  'src/components/Hero.tsx',
-  'src/components/DashboardPreview.tsx',
-  'src/lib/auth.ts',
-  'package.json',
-] as const
-
-// Files shown changed in the Source Control mock (scene 8).
-export const CHANGED_FILES = [
-  { path: 'src/components/Hero.tsx', status: 'M' as const },
-  { path: 'src/pages/Landing.tsx', status: 'M' as const },
-  { path: 'src/components/DashboardPreview.tsx', status: 'A' as const },
-  { path: 'src/lib/auth.ts', status: 'A' as const },
-] as const
-
-export const GENERAL_BRANDING = {
-  name: 'TM Code',
-  tagline: 'A IDE onde o agente escreve o código por ti.',
-  headline: 'Conversa. Vê programar. Publica.',
-  sub: 'Grátis para começar.',
-  cta: 'Descarrega o TM Code',
-  url: 'code.toquemedia.net',
+/** The 3 micro title cards (between phases). */
+export const TITLE_CARDS = {
+  prompt: '1. Pede no Chat',
+  approve: '2. Aprova e vê acontecer',
+  publish: '3. Publica online',
 } as const
 
-// Welcome-screen mode-card copy (scene 2). Mirrors the real product strings.
-export const MODE_CARDS = {
-  chat: {
-    title: 'Chat Mode',
-    badge: 'RECOMMENDED',
-    line: 'From zero to live',
-    desc: 'O agente planeia, escreve código e publica por ti.',
-  },
-  terminal: {
-    title: 'Terminal Mode',
-    badge: 'POWER USERS',
-    line: 'Power users',
-    desc: 'Qualquer stack, qualquer tarefa.',
-  },
+/** Scene 1 — hook / central message. */
+export const GENERAL_INTRO = {
+  headline: 'Do pedido ao projecto online.',
+  accent: 'Dentro do Chat.',
+  sub: 'TM Code transforma pedidos em código, preview e deploy.',
+} as const
+
+/** Final CTA copy. */
+export const GENERAL_BRANDING = {
+  name: 'TM Code',
+  headline: 'Do pedido ao projecto online. Dentro do Chat.',
+  headlineLines: ['Do pedido ao projecto online.', 'Dentro do Chat.'],
+  ctaPrefix: 'Começa grátis em',
+  url: 'code.toquemedia.net',
 } as const

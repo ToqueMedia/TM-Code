@@ -31,23 +31,23 @@ function resolveKey() {
 
 const MODEL = process.argv[2] || 'music-2.6'
 
-// Beat It-inspired, but original: 80s dance-rock with an iconic minor-key
-// guitar riff. Instrumental so it never fights the on-screen UI text.
-// Structure mirrors the video arc: synth-stab intro → riff kicks in
-// (typing/agent) → tension build (diff/E2E) → triumphant resolution
-// (tests pass) → virtuoso solo hook finale (branding CTA).
+// Inspired by the euphoric feel-good party-anthem vibe of late-2000s crossover
+// dance-pop (think "I Gotta Feeling") — but an ORIGINAL instrumental, no melody
+// copied. Instrumental so it never fights the on-screen UI text. Structure
+// mirrors the video arc: shimmering intro → groove kicks in (prompt/agent) →
+// filtered build (diff/#design) → triumphant hands-in-the-air drop (deploy) →
+// bright uplifting finale (CTA).
 const PROMPT = [
-  '1980s dance-rock instrumental in a minor key, around 138 BPM, in the style',
-  'of classic 80s pop-rock crossover hits. Opens with 3 seconds of ominous',
-  'gong-like synth stabs over silence, then an iconic tight syncopated',
-  'palm-muted electric guitar riff kicks in, doubled by a driving rock',
-  'bassline and a punchy four-on-the-floor 80s drum groove with crisp snare.',
-  'A second rhythm guitar answers with sharp power-chord accents. Tension',
-  'builds with rising guitar harmonies and a brief stripped-down breakdown,',
-  'then erupts into a blazing virtuoso electric guitar solo with whammy dives',
-  'and fast hammer-on runs, finishing on a big triumphant riff restatement.',
-  'Cinematic, punchy, polished 80s arena production, suitable as a product',
-  'promo soundtrack. No vocals.',
+  'Euphoric feel-good dance-pop instrumental, around 128 BPM, bright major key,',
+  'in the uplifting festival electro-pop spirit of late-2000s crossover party',
+  'anthems. Opens with a warm shimmering synth-pad intro and a soft plucked',
+  'arpeggio, then a punchy four-on-the-floor kick, crisp hand-claps and an',
+  'upbeat bassline drop in. Big anthemic supersaw chord progression, sparkling',
+  'synth arpeggios and a catchy whistle-style lead hook. A short filtered build',
+  'with a riser and snare roll erupts into a triumphant, joyful drop with',
+  'hands-in-the-air energy, then resolves on a bright uplifting final chorus.',
+  'Polished, radio-ready, positive and celebratory — perfect under a product',
+  'promo. No vocals.',
 ].join(' ')
 
 const key = resolveKey()

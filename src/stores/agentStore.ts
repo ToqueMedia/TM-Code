@@ -49,7 +49,7 @@ interface AgentState {
    * `X-Model-Context-Window` header. The agent's compression threshold uses
    * this exact value, so surfacing it here keeps the
    * ContextWindowIndicator's percentage in lockstep with reality — instead
-   * of reading the plan profile's static value (1M for the GLM-5.2 shape,
+   * of reading the plan profile's static value (1M for the GLM shape,
    * which is wrong for any BYOK model with a different window). Null until
    * the first response arrives.
    */

@@ -28,6 +28,8 @@ export interface PublishModalMockProps {
   url?: string
   /** Panel width in px. Default 640. */
   width?: number
+  /** Backdrop dark-overlay opacity (default 0.75). Lower it to keep the preview visible. */
+  backdropOpacity?: number
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,6 +76,7 @@ export const PublishModalMock: React.FC<PublishModalMockProps> = ({
   copyPressFrame,
   url = DEPLOY_URL,
   width = 640,
+  backdropOpacity = 0.75,
 }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
@@ -115,7 +118,7 @@ export const PublishModalMock: React.FC<PublishModalMockProps> = ({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: tokens.colors.dialog.backdrop,
+        background: `rgba(0,0,0,${backdropOpacity})`,
         opacity: fadeIn,
         fontFamily: tokens.fontFamily.ui,
       }}

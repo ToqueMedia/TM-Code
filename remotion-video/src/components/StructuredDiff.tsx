@@ -17,6 +17,10 @@ export interface StructuredDiffProps {
   highlightStartFrame?: number
   /** Frame at which the highlight state starts fading out (over 6 frames). */
   highlightEndFrame?: number
+  /** Emphasis rail color for highlighted rows (default brand pink). */
+  highlightColor?: string
+  /** Emphasis row tint for highlighted rows (default translucent pink). */
+  highlightTint?: string
 }
 
 const CLAMP = { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' } as const
@@ -34,6 +38,8 @@ export const StructuredDiff: React.FC<StructuredDiffProps> = ({
   highlightLines,
   highlightStartFrame,
   highlightEndFrame,
+  highlightColor = tokens.colors.accent.primary,
+  highlightTint = 'rgba(254,16,99,0.10)',
 }) => {
   const frame = useCurrentFrame()
 
@@ -103,8 +109,8 @@ export const StructuredDiff: React.FC<StructuredDiffProps> = ({
                   style={{
                     position: 'absolute',
                     inset: 0,
-                    background: 'rgba(254,16,99,0.10)',
-                    boxShadow: `inset 3px 0 0 ${tokens.colors.accent.primary}`,
+                    background: highlightTint,
+                    boxShadow: `inset 3px 0 0 ${highlightColor}`,
                     opacity: highlightStrength,
                     pointerEvents: 'none',
                   }}

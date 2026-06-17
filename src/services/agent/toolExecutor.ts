@@ -2745,7 +2745,7 @@ ${preview}
     //   - DeepSeek V3.2 / Qwen on DashScope: native enable_search — the provider
     //     executes internally and returns results in the stream. The frontend
     //     NEVER receives a tool_call, so execute() is not invoked for these.
-    //   - GLM-5.2 (or any non-native model): execute() runs and side-cars the
+    //   - GLM (or any non-native model): execute() runs and side-cars the
     //     query to Qwen 3.6 Plus via X-Request-Type: 'web_search'. The backend
     //     forces the model + enable_search and streams the answer back.
     this.tools.set('web_search', {

@@ -11,7 +11,7 @@
  *
  *   coder model              →  selector model
  *   mimo-v2.5-pro / -pro-1m  →  mimo-v2.5      (smaller sibling)
- *   glm-5.2                  →  qwen3.6-plus   (DashScope, fast)
+ *   glm                      →  qwen3.6-plus   (DashScope, fast)
  *   deepseek-v4-flash        →  qwen3.6-plus   (free-tier fallback)
  *   anything else            →  qwen3.6-plus   (safe default)
  *
