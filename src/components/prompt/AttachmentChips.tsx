@@ -19,7 +19,7 @@ const typeIcons = {
 
 function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
   // Model is now decided by the backend based on the user's plan.
-  // Paid plans use GLM-5.1; images are analysed by Qwen 3.6 Plus (multimodal).
+  // Paid plans use GLM-5.2; images are analysed by Qwen 3.6 Plus (multimodal).
   // Free plan (DeepSeek V3.2) does not support image attachments.
   const billingPlan = useBillingStore(s => s.plan)
   const hasImages = attachments.some(a => a.type === 'image')

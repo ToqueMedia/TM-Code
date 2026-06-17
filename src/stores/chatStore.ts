@@ -2930,7 +2930,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // Anti-overwrite guards. OpenAI streaming sends usage info in the
       // final chunk: `prompt_tokens` and `completion_tokens` are both
       // present in the last usage object. However, some BYOK adapters
-      // (such as DashScope GLM-5.1, OpenRouter Mimo) may send partial
+      // (such as DashScope GLM-5.2, OpenRouter Mimo) may send partial
       // usage data. Math.max + the `> 0` guard between them: zero never wins
       // (claude-vaz parity, services/api/claude.ts:2918-2922), and a
       // non-zero smaller value never replaces a non-zero larger one.

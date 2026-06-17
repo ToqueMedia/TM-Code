@@ -576,7 +576,7 @@ class AgentService {
           turnNumber++;
           this.sessionState.setLastAssistantMessageAt(Date.now());
           if (event.usage) {
-            // Coerce to 0 — partial-usage providers (DashScope GLM-5.1,
+            // Coerce to 0 — partial-usage providers (DashScope GLM-5.2,
             // OpenRouter MiMo, …) can send `prompt_tokens` WITHOUT
             // `completion_tokens` (or vice-versa). The TS type says both are
             // required numbers, but at runtime either can be undefined, which

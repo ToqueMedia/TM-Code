@@ -2,6 +2,7 @@ import {
   getModelProfile,
   getAllModelProfiles,
   getProfileForPlan,
+  buildThinkingParam,
   MODEL_PROFILES,
   DEFAULT_MODEL_ID,
 } from '../modelProfiles'
@@ -11,7 +12,11 @@ describe('modelProfiles', () => {
     it('contains all 6 model profiles (plus alias keys)', () => {
       const ids = Object.keys(MODEL_PROFILES)
       expect(ids).toContain('mimo-v2.5-pro-1m')
-      expect(ids).toContain('glm-5.1')
+      expect(ids).toContain('glm-5.2')
+      // DashScope (US) pode reportar o id base 'glm-5' — alias para o MESMO
+      // perfil do glm-5.2, senão o lookup cai no default ao rotear por DashScope.
+      expect(ids).toContain('glm-5')
+      expect(MODEL_PROFILES['glm-5']).toBe(MODEL_PROFILES['glm-5.2'])
       expect(ids).toContain('qwen3.7-max-2026-06-08')
       // Alias do id antigo — aponta para o MESMO perfil do snapshot datado
       // enquanto o backend não republicar a config ativa.
@@ -22,7 +27,20 @@ describe('modelProfiles', () => {
       // apontam para o MESMO perfil.
       expect(MODEL_PROFILES['google/gemini-3.5-flash']).toBe(MODEL_PROFILES['gemini-3.5-flash'])
       expect(MODEL_PROFILES['google/gemini-3.1-pro-preview']).toBe(MODEL_PROFILES['gemini-3.1-pro-preview'])
-      expect(ids.length).toBe(9)
+      expect(ids.length).toBe(10)
+    })
+
+    it('glm-5.2 has 1M context, 128K output and the thinking-object shape', () => {
+      const glm = MODEL_PROFILES['glm-5.2']
+      expect(glm.modelId).toBe('glm-5.2')
+      expect(glm.contextWindow).toBe(1_000_000)
+      expect(glm.maxOutputTokens).toBe(131_072)
+      expect(glm.thinkingMode).toBe('toggleable')
+      // z.AI usa o objeto `thinking: { type }`, não o boolean enable_thinking.
+      expect(glm.thinkingParam).toBe('thinking')
+      expect(glm.supportsThinking).toBe(true)
+      // Text-only: a visão é servida pelo sidecar, não nativamente.
+      expect(glm.supportsAttachments).toBe(false)
     })
 
     it('gemini profiles have native vision and mandatory thinking', () => {
@@ -72,6 +90,22 @@ describe('modelProfiles', () => {
       expect(all.length).toBe(6)
       expect(all.filter(p => p.id.startsWith('qwen3.7-max')).length).toBe(1)
       expect(all.filter(p => p.id.startsWith('gemini-')).length).toBe(2)
+    })
+  })
+
+  describe('buildThinkingParam', () => {
+    it('emits the `thinking: { type }` object for the GLM-5.2 shape', () => {
+      const glm = MODEL_PROFILES['glm-5.2']
+      expect(buildThinkingParam(glm, true)).toEqual({ thinking: { type: 'enabled' } })
+      expect(buildThinkingParam(glm, false)).toEqual({ thinking: { type: 'disabled' } })
+    })
+
+    it('emits enable_thinking for the MiMo/DashScope shape', () => {
+      const mimo = MODEL_PROFILES['mimo-v2.5-pro-1m']
+      expect(buildThinkingParam(mimo, true)).toEqual({
+        enable_thinking: true,
+        max_thinking_tokens: 8192,
+      })
     })
   })
 

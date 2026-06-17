@@ -1,7 +1,7 @@
 /**
  * Model profiles — per-model configuration for TM Code agent.
  *
- * Supported models: GLM 5.1, Qwen 3.7 Max, MiMo V2.5 Pro 1M, MiMo V2.5 1M.
+ * Supported models: GLM 5.2, Qwen 3.7 Max, MiMo V2.5 Pro 1M, MiMo V2.5 1M.
  *
  * The dedicated AI pass-through Worker handles auth and provider API key
  * injection. The Control Plane owns the active provider/model choice.
@@ -65,32 +65,42 @@ export function renderCounterweights(profile: ModelProfile): string {
 }
 
 // ─────────────────────────────────────────────────
-// GLM-5.1 — Alibaba China (DashScope)
+// GLM-5.2 — Zhipu, servido por DOIS provedores OpenAI-compatíveis
 //
-// Zhipu GLM-5.1 via DashScope. 200K context window.
-// Toggleable thinking via `enable_thinking` boolean.
+// O data-plane (worker ai-pass-through) roteia para z.AI oficial OU para
+// DashScope/Alibaba Cloud (US) consoante a config ativa em KV — ambos
+// expõem o mesmo glm-5.2. 1M de contexto, até 128K de saída.
+//
+// Thinking é ON por defeito no modelo. A forma do parâmetro DIFERE por
+// provedor (z.AI: `thinking: { type: 'enabled'|'disabled' }`; DashScope:
+// `enable_thinking` boolean) — mas a IDE NÃO o envia: buildThinkingConfig()
+// devolve undefined e o worker injeta a forma correta via config.extraBody.
+// thinkingParam ('thinking') fica registado como a forma canónica do modelo.
+//
+// contextWindow/maxOutputTokens aqui são apenas o fallback de display; o
+// número real chega em X-Model-Context-Window emitido pelo worker.
 // ─────────────────────────────────────────────────
 
-const GLM_5_1: ModelProfile = {
-  id: 'glm-5.1',
-  name: 'GLM-5.1',
+const GLM_5_2: ModelProfile = {
+  id: 'glm-5.2',
+  name: 'GLM-5.2',
   persona: {
     name: 'GLM',
-    tagline: 'Rastreamento de tarefas forte via DashScope',
+    tagline: 'Agentes de longo curso — 1M de contexto via z.AI / DashScope',
   },
-  modelId: 'glm-5.1',
-  contextWindow: 200_000,
-  maxOutputTokens: 16_384,
+  modelId: 'glm-5.2',
+  contextWindow: 1_000_000,
+  maxOutputTokens: 131_072,
 
-  // DashScope default sampling
-  temperature: 0.7,
+  // GLM-5.2 default sampling — não ajustar temperature e top_p em simultâneo.
+  temperature: 1.0,
   reasoningTemperature: null,
-  topP: 0.8,
+  topP: 0.95,
   topK: null,
 
   thinkingMode: 'toggleable',
   supportsThinking: true,
-  thinkingParam: 'enable_thinking',
+  thinkingParam: 'thinking',
   thinkingBudget: null,
   thinkingMandatory: false,
 
@@ -271,7 +281,12 @@ const GEMINI_3_1_PRO: ModelProfile = {
 }
 
 export const MODEL_PROFILES: Record<string, ModelProfile> = {
-  'glm-5.1': GLM_5_1,
+  'glm-5.2': GLM_5_2,
+  // DashScope/Alibaba Cloud (US) ainda pode reportar o id base 'glm-5' em
+  // X-Model-Name (a doc internacional não lista o snapshot 5.2 datado) — alias
+  // para o MESMO perfil, senão o lookup cairia no default ao rotear por
+  // DashScope em vez da z.AI. Ambos os provedores servem o glm-5.2.
+  'glm-5': GLM_5_2,
   'qwen3.7-max-2026-06-08': QWEN_3_7_MAX,
   // Alias do id antigo → mesmo perfil. O backend pode continuar a reportar
   // 'qwen3.7-max' em X-Model-Name até a config ativa ser republicada com o
@@ -319,7 +334,11 @@ export function getProfileForPlan(_plan: UserPlanName): ModelProfile {
  * Build the thinking parameter object for the API request.
  * Returns null if thinking is not supported or not requested.
  *
- * Post-refactor: only handles `enable_thinking` shape for MiMo.
+ * Note: on the managed data-plane the IDE does NOT send thinking params
+ * (buildThinkingConfig devolve undefined; o worker injeta via extraBody).
+ * Esta função existe para callers diretos/BYOK e respeita a forma de cada
+ * perfil: `thinking: { type }` (GLM-5.2/z.AI) vs `enable_thinking` (MiMo,
+ * DashScope/Qwen).
  */
 export function buildThinkingParam(
   profile: ModelProfile,
@@ -330,7 +349,12 @@ export function buildThinkingParam(
   const enabled = profile.thinkingMandatory ? true : enableThinking
   const budget = profile.thinkingBudget
 
-  // DashScope and MiMo both use `enable_thinking: boolean`.
+  // GLM-5.2 (z.AI) usa o objeto `thinking: { type: 'enabled'|'disabled' }`.
+  if (profile.thinkingParam === 'thinking') {
+    return { thinking: { type: enabled ? 'enabled' : 'disabled' } }
+  }
+
+  // MiMo e DashScope/Qwen usam `enable_thinking: boolean`.
   const result: Record<string, unknown> = { enable_thinking: enabled }
   if (enabled && budget !== null) {
     result.max_thinking_tokens = budget

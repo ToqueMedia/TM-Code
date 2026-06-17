@@ -9,7 +9,9 @@
     "typecheck": "tsc --noEmit",
     "render": "remotion render src/index.ts TMCodePromo out/tmcode-promo.mp4 --codec=h264",
     "render:mp4": "remotion render src/index.ts TMCodePromo out/tmcode-promo.mp4 --codec=h264",
-    "still": "remotion still src/index.ts TMCodePromo out/frame.png"
+    "render:general": "remotion render src/index.ts TMCodeGeneralPromo out/tmcode-general-promo.mp4 --codec=h264",
+    "still": "remotion still src/index.ts TMCodePromo out/frame.png",
+    "still:general": "remotion still src/index.ts TMCodeGeneralPromo out/general-frame.png"
   },
   "dependencies": {
     "@remotion/cli": "4.0.242",
